@@ -56,7 +56,8 @@ pub enum BinaryOp {
 	NotEq,
 }
 
-// pub struct ImportPart<'src> (&'src str, Option<Box<ImportPart<'src>>>);
+#[derive(Debug)]
+pub struct ImportPath<'src> (Vec<&'src str>, Option<Box<Self>>);
 
 // An expression node in the AST. Children are spanned so we can generate useful runtime errors.
 #[derive(Debug)]
@@ -65,7 +66,7 @@ pub enum Node<'src> {
 	Value(Value<'src>),
 	List(Vec<Spanned<Self>>),
 	Local(&'src str),
-	Import(Vec<Spanned<Vec<&'src str>>>),
+	Import(ImportPath<'src>),
 	Let(&'src str, Box<Spanned<Self>>),
 	Then(Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Binary(Box<Spanned<Self>>, BinaryOp, Box<Spanned<Self>>),
@@ -106,7 +107,7 @@ where
 			
 			let ident = select! { Token::Ident(ident) => ident }.labelled("identifier");
 			
-			// A list of expressions
+			// A comma-delimited list of expressions.
 			let items =
 				expr
 				.clone()
@@ -114,7 +115,6 @@ where
 				.allow_trailing()
 				.collect::<Vec<_>>();
 			
-			// A let expression
 			let let_ =
 				just(Token::Let)
 				.ignore_then(ident)
@@ -122,16 +122,26 @@ where
 				.then(inline_expr)
 				.map(|(name, val)| Node::Let(name, Box::new(val)));
 			
-			let import_part = recursive(|import_part|
-				ident
-				.foldl_with()
-			);
-			
 			let import =
 				just(Token::Import)
-				.ignore_then(ident)
-				.then_ignore(just(Token::Ctrl(';')))
-				.map_with(|subject, e| Node::Import(vec! [ (vec! [ subject ], e.span()) ]));
+				.ignore_then(
+					ident
+					.map(|a| ImportPath(vec![ a ], None))
+					.foldl_with(
+						just(Token::Op("::"))
+							.ignore_then(choice((
+								ident.map(|x| vec![ x ]),
+								ident
+									.separated_by(just(Token::Ctrl(',')))
+									.allow_trailing()
+									.collect::<Vec<_>>()
+									.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
+							)))
+							.repeated(),
+						|a, b, _| ImportPath(b, Some(Box::new(a)))
+					)
+				)
+				.map_with(|import_path, _| Node::Import(import_path));
 			
 			let list =
 				items

@@ -32,8 +32,8 @@ pub fn eval_expr<'src>(
 			stack.push((local, val));
 			eval_expr(&(Node::Local(local), expr.1), functions, stack)?
 		}
-		Node::Import(subjects) => {
-			println!("Found import for {subjects:#?}");
+		Node::Import(path) => {
+			println!("Found import for {path:#?}");
 			Value::Null
 		}
 		Node::Then(a, b) => {
