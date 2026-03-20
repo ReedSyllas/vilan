@@ -1,0 +1,19 @@
+import ext::"solid-js"::jsx;
+import ext::"solid-js/web"::render;
+import std::dom::{ document };
+
+fun main() {
+	let root = match document.getElementById("root") {
+		null => Err("Root element not found. Did you forget to add it? Or maybe the id attribute was misspelled?"),
+		x => Ok(x),
+	}!;
+	
+	render(|| App(), root);
+}
+
+fun App() {
+	jsx::div()
+	.children(
+		"Hello, World!"
+	)
+}

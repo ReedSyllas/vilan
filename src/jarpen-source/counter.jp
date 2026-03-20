@@ -1,0 +1,24 @@
+import ext::"solid-js"::{ createSignal, jsx, onCleanup, onMount };
+
+export fun Counter() {
+	let (count, setCount) = createSignal(0);
+	
+	onMount(|| {
+		print("Counter mounted.");
+	});
+	
+	onCleanup(|| {
+		print("Counter unmounted.");
+	});
+	
+	jsx::div()
+	.children(
+		jsx::p()
+			.children("The count is ${count()}"),
+		jsx::button()
+			.onClick(|| {
+				setCount(|x| x + 1);
+			})
+			.children("Increment"),
+	)
+}

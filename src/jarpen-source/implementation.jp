@@ -1,0 +1,18 @@
+
+export struct Vector2 {
+	mut x: f64;
+	mut y: f64;
+}
+
+export impl Vector2 {
+	fun length(self): f64 {
+		let (x, y) = self;
+		math::sqrt(math::square(x) + math::square(y))
+	}
+}
+
+export impl math {
+	fun square(n: f64) {
+		n * n
+	}
+}
