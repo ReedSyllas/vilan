@@ -63,19 +63,28 @@ pub fn eval_expr<'src>(
 			match f {
 				Value::Func(name) => {
 					let f = &functions[&name];
-					let mut stack = if f.args.len() != args.0.len() {
+					if f.args.len() != args.0.len() {
 						return Err(Error {
 							span: expr.1,
-							msg: format!("'{}' called with wrong number of arguments (expected {name}, found {})", f.args.len(), args.0.len()),
+							msg: format!("'{name}' called with wrong number of arguments (expected {}, found {})", f.args.len(), args.0.len()),
 						});
-					} else {
-						f.args
-						.iter()
-						.zip(args.0.iter())
-						.map(|(name, arg)| Ok((*name, eval_expr(arg, functions, stack)?)))
-						.collect::<Result<_, _>>()?
-					};
-					eval_expr(&f.body, functions, &mut stack)?
+					}
+					match name {
+						"print" => {
+							let val = eval_expr(args.0.get(0).unwrap(), functions, stack)?;
+							println!("{val}");
+							val
+						}
+						_ => {
+							let mut stack =
+								f.args
+								.iter()
+								.zip(args.0.iter())
+								.map(|(name, arg)| Ok((*name, eval_expr(arg, functions, stack)?)))
+								.collect::<Result<_, _>>()?;
+							eval_expr(&f.body, functions, &mut stack)?
+						}
+					}
 				}
 				f => {
 					return Err(Error {
@@ -98,10 +107,15 @@ pub fn eval_expr<'src>(
 				}
 			}
 		}
-		Node::Print(a) => {
-			let val = eval_expr(a, functions, stack)?;
-			println!("{val}");
-			val
+		Node::Func { name: (name, name_span), parameters: _, body: _ } => {
+			println!("Found function named {name}");
+			
+			functions.contains_key(name)
+			.then(|| Value::Func(name))
+			.ok_or_else(|| Error {
+				span: name_span.clone(),
+				msg: format!("No such variable '{name}' in scope"),
+			})?
 		}
 	})
 }

@@ -72,7 +72,11 @@ pub enum Node<'src> {
 	Binary(Box<Spanned<Self>>, BinaryOp, Box<Spanned<Self>>),
 	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
 	If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
-	Print(Box<Spanned<Self>>),
+	Func {
+		name: Spanned<&'src str>,
+		parameters: Spanned<Vec<(&'src str, Option<&'src str>)>>,
+		body: Box<Spanned<Self>>,
+	},
 }
 
 // A function node in the AST.
@@ -83,164 +87,190 @@ pub struct Func<'src> {
 	pub body: Spanned<Node<'src>>,
 }
 
-// // An import node in the AST.
-// #[derive(Debug)]
-// pub struct Import<'src> {
-// 	pub subject: &'src str,
-// 	pub span: Span,
-// }
-
-pub fn expr_parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
+pub fn node_parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
 where
 	I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
 	recursive(|expr| {
-		let inline_expr = recursive(|inline_expr| {
-			let val =
-				select! {
-					Token::Null => Node::Value(Value::Null),
-					Token::Bool(x) => Node::Value(Value::Bool(x)),
-					Token::Num(n) => Node::Value(Value::Num(n)),
-					Token::Str(s) => Node::Value(Value::Str(s)),
-				}
-				.labelled("value");
-			
-			let ident = select! { Token::Ident(ident) => ident }.labelled("identifier");
-			
-			// A comma-delimited list of expressions.
-			let items =
+		let val =
+			select! {
+				Token::Null => Node::Value(Value::Null),
+				Token::Bool(x) => Node::Value(Value::Bool(x)),
+				Token::Num(n) => Node::Value(Value::Num(n)),
+				Token::Str(s) => Node::Value(Value::Str(s)),
+			}
+			.labelled("value");
+		
+		let ident = select! { Token::Ident(ident) => ident }.labelled("identifier");
+		
+		// A comma-delimited list of expressions.
+		let items =
+			expr
+			.clone()
+			.separated_by(just(Token::Ctrl(',')))
+			.allow_trailing()
+			.collect::<Vec<_>>();
+		
+		let parameters =
+			ident
+			.then(
+				just(Token::Op(":"))
+				.ignore_then(ident)
+				.or_not()
+			)
+			.separated_by(just(Token::Ctrl(',')))
+			.allow_trailing()
+			.collect::<Vec<_>>()
+			.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+			.map_with(|parameters, e| (parameters, e.span()))
+			.labelled("function parameters");
+		
+		let function =
+			just(Token::Fun)
+			.ignore_then(
+				ident
+				.map_with(|name, e| (name, e.span()))
+				.labelled("function name"),
+			)
+			.then(parameters)
+			.then(
 				expr
 				.clone()
-				.separated_by(just(Token::Ctrl(',')))
-				.allow_trailing()
-				.collect::<Vec<_>>();
-			
-			let let_ =
-				just(Token::Let)
-				.ignore_then(ident)
-				.then_ignore(just(Token::Op("=")))
-				.then(inline_expr)
-				.map(|(name, val)| Node::Let(name, Box::new(val)));
-			
-			let import =
-				just(Token::Import)
-				.ignore_then(
-					ident
-					.map(|a| ImportPath(vec![ a ], None))
-					.foldl_with(
-						just(Token::Op("::"))
-							.ignore_then(choice((
-								ident.map(|x| vec![ x ]),
-								ident
-									.separated_by(just(Token::Ctrl(',')))
-									.allow_trailing()
-									.collect::<Vec<_>>()
-									.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
-							)))
-							.repeated(),
-						|a, b, _| ImportPath(b, Some(Box::new(a)))
-					)
-				)
-				.map_with(|import_path, _| Node::Import(import_path));
-			
-			let list =
-				items
-				.clone()
-				.map(Node::List)
-				.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')));
-			
-			// 'Atoms' are expressions that contain no ambiguity
-			let atom =
-				choice((
-					val,
-					ident.map(Node::Local),
-					let_,
-					import,
-					list,
-					just(Token::Print)
-						.ignore_then(
-							expr
-							.clone()
-							.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
-						)
-						.map(|expr| Node::Print(Box::new(expr))),
-				))
-				.map_with(|expr, e| (expr, e.span()))
-				// Atoms can also just be normal expressions, but surrounded with parentheses
-				.or(
-					expr
-					.clone()
-					.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-				)
-				// Attempt to recover anything that looks like a parenthesised expression but contains errors
+				.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+				// Attempt to recover anything that looks like a function body but contains errors
 				.recover_with(via_parser(nested_delimiters(
-					Token::Ctrl('('),
-					Token::Ctrl(')'),
-					[
-						(Token::Ctrl('['), Token::Ctrl(']')),
-						(Token::Ctrl('{'), Token::Ctrl('}')),
-					],
-					|span| (Node::Error, span),
-				)))
-				// Attempt to recover anything that looks like a list but contains errors
-				.recover_with(via_parser(nested_delimiters(
-					Token::Ctrl('['),
-					Token::Ctrl(']'),
+					Token::Ctrl('{'),
+					Token::Ctrl('}'),
 					[
 						(Token::Ctrl('('), Token::Ctrl(')')),
-						(Token::Ctrl('{'), Token::Ctrl('}')),
+						(Token::Ctrl('['), Token::Ctrl(']')),
 					],
 					|span| (Node::Error, span),
-				)))
-				.boxed();
-			
-			// Function calls have very high precedence so we prioritize them
-			let call = atom.foldl_with(
-				items
-					.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-					.map_with(|args, e| (args, e.span()))
-					.repeated(),
-				|f, args, e| (Node::Call(Box::new(f), args), e.span()),
-			);
-			
-			// Product ops (multiply and divide) have equal precedence
-			let op =
-				just(Token::Op("*"))
-				.to(BinaryOp::Mul)
-				.or(just(Token::Op("/")).to(BinaryOp::Div));
-			let product =
-				call
+				))),
+			)
+			.map(|((name, parameters), body)| Node::Func { name, parameters, body: Box::new(body) })
+			.labelled("function")
+			.boxed();
+		
+		let let_ =
+			just(Token::Let)
+			.ignore_then(ident)
+			.then_ignore(just(Token::Op("=")))
+			.then(expr.clone())
+			.map(|(name, val)| Node::Let(name, Box::new(val)));
+		
+		let import =
+			just(Token::Import)
+			.ignore_then(
+				ident
+				.map(|a| ImportPath(vec![ a ], None))
+				.foldl_with(
+					just(Token::Op("::"))
+						.ignore_then(choice((
+							ident.map(|x| vec![ x ]),
+							ident
+								.separated_by(just(Token::Ctrl(',')))
+								.allow_trailing()
+								.collect::<Vec<_>>()
+								.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
+						)))
+						.repeated(),
+					|a, b, _| ImportPath(b, Some(Box::new(a)))
+				)
+			)
+			.map_with(|import_path, _| Node::Import(import_path));
+		
+		let list =
+			items
+			.clone()
+			.map(Node::List)
+			.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')));
+		
+		// 'Atoms' are expressions that contain no ambiguity
+		let atom =
+			choice((
+				val,
+				ident.map(Node::Local),
+				let_,
+				function,
+				import,
+				list,
+			))
+			.map_with(|expr, e| (expr, e.span()))
+			// Atoms can also just be normal expressions, but surrounded with parentheses
+			.or(
+				expr
 				.clone()
-				.foldl_with(op.then(call).repeated(), |a, (op, b), e| {
-					(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
-				});
-			
-			// Sum ops (add and subtract) have equal precedence
-			let op =
-				just(Token::Op("+"))
-				.to(BinaryOp::Add)
-				.or(just(Token::Op("-")).to(BinaryOp::Sub));
-			let sum =
-				product
-				.clone()
-				.foldl_with(op.then(product).repeated(), |a, (op, b), e| {
-					(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
-				});
-			
-			// Comparison ops (equal, not-equal) have equal precedence
-			let op =
-				just(Token::Op("=="))
-				.to(BinaryOp::Eq)
-				.or(just(Token::Op("!=")).to(BinaryOp::NotEq));
-			let compare =
-				sum
-				.clone()
-				.foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
-					(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
-				});
-			
-			compare.labelled("expression").as_context()
-		});
+				.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+			)
+			// Attempt to recover anything that looks like a parenthesised expression but contains errors
+			.recover_with(via_parser(nested_delimiters(
+				Token::Ctrl('('),
+				Token::Ctrl(')'),
+				[
+					(Token::Ctrl('['), Token::Ctrl(']')),
+					(Token::Ctrl('{'), Token::Ctrl('}')),
+				],
+				|span| (Node::Error, span),
+			)))
+			// Attempt to recover anything that looks like a list but contains errors
+			.recover_with(via_parser(nested_delimiters(
+				Token::Ctrl('['),
+				Token::Ctrl(']'),
+				[
+					(Token::Ctrl('('), Token::Ctrl(')')),
+					(Token::Ctrl('{'), Token::Ctrl('}')),
+				],
+				|span| (Node::Error, span),
+			)))
+			.boxed();
+		
+		// Function calls have very high precedence so we prioritize them
+		let call = atom.foldl_with(
+			items
+				.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+				.map_with(|args, e| (args, e.span()))
+				.repeated(),
+			|f, args, e| (Node::Call(Box::new(f), args), e.span()),
+		);
+		
+		// Product ops (multiply and divide) have equal precedence
+		let op =
+			just(Token::Op("*"))
+			.to(BinaryOp::Mul)
+			.or(just(Token::Op("/")).to(BinaryOp::Div));
+		let product =
+			call
+			.clone()
+			.foldl_with(op.then(call).repeated(), |a, (op, b), e| {
+				(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
+			});
+		
+		// Sum ops (add and subtract) have equal precedence
+		let op =
+			just(Token::Op("+"))
+			.to(BinaryOp::Add)
+			.or(just(Token::Op("-")).to(BinaryOp::Sub));
+		let sum =
+			product
+			.clone()
+			.foldl_with(op.then(product).repeated(), |a, (op, b), e| {
+				(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
+			});
+		
+		// Comparison ops (equal, not-equal) have equal precedence
+		let op =
+			just(Token::Op("=="))
+			.to(BinaryOp::Eq)
+			.or(just(Token::Op("!=")).to(BinaryOp::NotEq));
+		let compare =
+			sum
+			.clone()
+			.foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
+				(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
+			});
+		
+		let inline_expr = compare.labelled("expression").as_context();
 		
 		// Blocks are expressions but delimited with braces
 		let block =
@@ -283,7 +313,8 @@ where
 		// Both blocks and `if` are 'block expressions' and can appear in the place of statements
 		let block_expr = block.or(if_);
 		
-		let block_chain = block_expr
+		let block_chain =
+			block_expr
 			.clone()
 			.foldl_with(block_expr.clone().repeated(), |a, b, e| {
 				(Node::Then(Box::new(a), Box::new(b)), e.span())
@@ -320,9 +351,7 @@ where
 					Node::Then(
 						Box::new(a),
 						// If there is no b expression then its span is the end of the statement/block.
-						Box::new(
-							b.unwrap_or_else(|| (Node::Value(Value::Null), span.to_end())),
-						),
+						Box::new(b.unwrap_or_else(|| (Node::Value(Value::Null), span.to_end()))),
 					),
 					span,
 				)
@@ -361,7 +390,7 @@ where
 		.then(parameters)
 		.map_with(|start, e| (start, e.span()))
 		.then(
-			expr_parser()
+			node_parser()
 			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
 			// Attempt to recover anything that looks like a function body but contains errors
 			.recover_with(via_parser(nested_delimiters(
@@ -381,6 +410,8 @@ where
 	.collect::<Vec<_>>()
 	.validate(|fs, _, emitter| {
 		let mut functions = HashMap::new();
+		let empty_span = Span::new((), 0..0);
+		functions.insert("print", Func { args: vec![ "value" ], body: (Node::Value(Value::Null), empty_span), span: empty_span });
 		for ((name, name_span), f) in fs {
 			if functions.insert(name, f).is_some() {
 				emitter.emit(Rich::custom(
