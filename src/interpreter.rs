@@ -1,6 +1,6 @@
 
 use std::{collections::HashMap};
-use crate::{parser::{BinaryOp, ExampleFunc, Func, Node, Value}, shared::{Error, Spanned}};
+use crate::{parser::{BinaryOp, Func, Node, Value}, shared::{Error, Spanned}};
 
 pub fn eval_expr<'src>(
 	expr: &Spanned<Node<'src>>,
@@ -10,6 +10,7 @@ pub fn eval_expr<'src>(
 	Ok(match &expr.0 {
 		Node::Error => unreachable!(), // Error expressions only get created by parser errors, so cannot exist in a valid AST
 		Node::Value(val) => val.clone(),
+		Node::Ret(x) => Value::RetFlag(Box::new(eval_expr(x, functions, stack)?)),
 		Node::List(items) => Value::List(
 			items
 			.iter()
@@ -36,9 +37,9 @@ pub fn eval_expr<'src>(
 			println!("Found import for {path:#?}");
 			Value::Null
 		}
-		Node::Then(a, b) => {
-			eval_expr(a, functions, stack)?;
-			eval_expr(b, functions, stack)?
+		Node::Then(a, b) => match eval_expr(a, functions, stack)? {
+			x if matches!(x, Value::RetFlag(_)) => x,
+			_ => eval_expr(b, functions, stack)?,
 		}
 		Node::Binary(BinaryOp::Add, a, b) => Value::Num(
 			eval_expr(a, functions, stack)?.num(a.1)? + eval_expr(b, functions, stack)?.num(b.1)?,
@@ -82,7 +83,10 @@ pub fn eval_expr<'src>(
 								.zip(args.0.iter())
 								.map(|(name, arg)| Ok((*name, eval_expr(arg, functions, stack)?)))
 								.collect::<Result<_, _>>()?;
-							eval_expr(&f.body, functions, &mut stack)?
+							match eval_expr(&f.body, functions, &mut stack)? {
+								Value::RetFlag(x) => *x,
+								x => x,
+							}
 						}
 					}
 				}

@@ -11,6 +11,7 @@ pub enum Value<'src> {
 	Str(&'src str),
 	List(Vec<Self>),
 	Func(&'src str),
+	RetFlag(Box<Self>),
 }
 
 impl Value<'_> {
@@ -42,6 +43,7 @@ impl std::fmt::Display for Value<'_> {
 					.join(", ")
 			),
 			Self::Func(name) => write!(f, "<function: {name}>"),
+			Self::RetFlag(x) => write!(f, "{x}"),
 		}
 	}
 }
@@ -80,6 +82,7 @@ pub enum Node<'src> {
 	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
 	If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Func(ExampleFunc<'src>),
+	Ret(Box<Spanned<Self>>),
 }
 
 // #[derive(Debug)]
@@ -133,7 +136,8 @@ where
 					|a, b, _| ImportPath(b, Some(Box::new(a)))
 				)
 			)
-			.map_with(|import_path, e| (Node::Import(import_path), e.span()));
+			.map_with(|import_path, e| (Node::Import(import_path), e.span()))
+			.boxed();
 		
 		// Blocks are expressions but delimited with braces
 		let block =
@@ -172,20 +176,6 @@ where
 			})
 		});
 		
-		let parameters =
-			ident
-			.then(
-				just(Token::Op(":"))
-				.ignore_then(ident)
-				.or_not()
-			)
-			.separated_by(just(Token::Ctrl(',')))
-			.allow_trailing()
-			.collect::<Vec<_>>()
-			.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-			.map_with(|parameters, e| (parameters, e.span()))
-			.labelled("function parameters");
-		
 		let function =
 			just(Token::Fun)
 			.ignore_then(
@@ -193,11 +183,29 @@ where
 				.map_with(|name, e| (name, e.span()))
 				.labelled("function name"),
 			)
-			.then(parameters)
+			.then(
+				ident
+				.then(
+					just(Token::Op(":"))
+					.ignore_then(ident)
+					.or_not()
+				)
+				.separated_by(just(Token::Ctrl(',')))
+				.allow_trailing()
+				.collect::<Vec<_>>()
+				.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+				.map_with(|parameters, e| (parameters, e.span()))
+				.labelled("function parameters")
+			)
 			.then(block.clone())
 			.map_with(|((name, parameters), body), e| (Node::Func(ExampleFunc { name, parameters, body: Box::new(body) }), e.span()))
 			.labelled("function")
 			.boxed();
+		
+		let return_ =
+			just(Token::Ret)
+			.ignore_then(expression.clone())
+			.map(|x| Node::Ret(Box::new(x)));
 		
 		// A comma-delimited list of expressions.
 		let items =
@@ -226,6 +234,7 @@ where
 				val,
 				local,
 				let_,
+				return_,
 				list,
 			))
 			.map_with(|expr, e| (expr, e.span()))
@@ -310,7 +319,7 @@ where
 			function.map(|_| None),
 			import.map(|_| None),
 			block.map(|x| Some(x)),
-		));
+		)).boxed();
 		
 		statement.clone()
 		.foldl_with(statement.repeated(), |a, b, e| match (a, b) {
@@ -322,9 +331,12 @@ where
 		.then(expression.or_not())
 		.map_with(|x, e| match x {
 			(Some(statement), Some(expression)) => (Node::Then(Box::new(statement), Box::new(expression)), e.span()),
-			(Some(statement), None) => {
-				let span: Span = e.span();
-				(Node::Then(Box::new(statement), Box::new((Node::Value(Value::Null), span.to_end()))), span)
+			(Some(statement), None) => match statement.0 {
+				Node::Ret(_) => statement,
+				_ => {
+					let span: Span = e.span();
+					(Node::Then(Box::new(statement), Box::new((Node::Value(Value::Null), span.to_end()))), span)
+				}
 			},
 			(None, Some(expression)) => expression,
 			(None, None) => {

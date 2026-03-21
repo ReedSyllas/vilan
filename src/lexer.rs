@@ -16,6 +16,7 @@ pub enum Token<'src> {
 	Null,
 	Num(f64),
 	Op(&'src str),
+	Ret,
 	Str(&'src str),
 }
 
@@ -34,6 +35,7 @@ impl std::fmt::Display for Token<'_> {
 			Token::Null => write!(f, "null"),
 			Token::Num(n) => write!(f, "{n}"),
 			Token::Op(s) => write!(f, "{s}"),
+			Token::Ret => write!(f, "return"),
 			Token::Str(s) => write!(f, "{s}"),
 		}
 	}
@@ -73,6 +75,7 @@ pub fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, 
 		"true" => Token::Bool(true),
 		"false" => Token::Bool(false),
 		"null" => Token::Null,
+		"ret" => Token::Ret,
 		"fun" => Token::Fun,
 		"if" => Token::If,
 		"else" => Token::Else,
