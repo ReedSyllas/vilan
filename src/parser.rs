@@ -69,7 +69,7 @@ pub enum Node<'src> {
 	Import(ImportPath<'src>),
 	Let(&'src str, Box<Spanned<Self>>),
 	Then(Box<Spanned<Self>>, Box<Spanned<Self>>),
-	Binary(Box<Spanned<Self>>, BinaryOp, Box<Spanned<Self>>),
+	Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
 	If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Func {
@@ -78,6 +78,11 @@ pub enum Node<'src> {
 		body: Box<Spanned<Self>>,
 	},
 }
+
+// #[derive(Debug)]
+// pub struct Scope<'src> {
+	
+// }
 
 // A function node in the AST.
 #[derive(Debug)]
@@ -91,7 +96,7 @@ pub fn node_parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spann
 where
 	I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
-	recursive(|expr| {
+	recursive(|scope| {
 		let val =
 			select! {
 				Token::Null => Node::Value(Value::Null),
@@ -103,13 +108,65 @@ where
 		
 		let ident = select! { Token::Ident(ident) => ident }.labelled("identifier");
 		
-		// A comma-delimited list of expressions.
-		let items =
-			expr
-			.clone()
-			.separated_by(just(Token::Ctrl(',')))
-			.allow_trailing()
-			.collect::<Vec<_>>();
+		let mut expression = Recursive::declare();
+		
+		let import =
+			just(Token::Import)
+			.ignore_then(
+				ident
+				.map(|a| ImportPath(vec![ a ], None))
+				.foldl_with(
+					just(Token::Op("::"))
+						.ignore_then(choice((
+							ident.map(|x| vec![ x ]),
+							ident
+								.separated_by(just(Token::Ctrl(',')))
+								.allow_trailing()
+								.collect::<Vec<_>>()
+								.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
+						)))
+						.repeated(),
+					|a, b, _| ImportPath(b, Some(Box::new(a)))
+				)
+			)
+			.map_with(|import_path, e| (Node::Import(import_path), e.span()));
+		
+		// Blocks are expressions but delimited with braces
+		let block =
+			scope.clone()
+			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+			// Attempt to recover anything that looks like a block but contains errors
+			.recover_with(via_parser(nested_delimiters(
+				Token::Ctrl('{'),
+				Token::Ctrl('}'),
+				[
+					(Token::Ctrl('('), Token::Ctrl(')')),
+					(Token::Ctrl('['), Token::Ctrl(']')),
+				],
+				|span| (Node::Error, span),
+			)));
+		
+		let if_ = recursive(|if_| {
+			just(Token::If)
+			.ignore_then(expression.clone())
+			.then(block.clone())
+			.then(
+				just(Token::Else)
+				.ignore_then(block.clone().or(if_))
+				.or_not(),
+			)
+			.map_with(|((cond, a), b), e| {
+				(
+					Node::If(
+						Box::new(cond),
+						Box::new(a),
+						// If an `if` expression has no trailing `else` block, we magic up one that just produces null
+						Box::new(b.unwrap_or_else(|| (Node::Value(Value::Null), e.span()))),
+					),
+					e.span(),
+				)
+			})
+		});
 		
 		let parameters =
 			ident
@@ -133,56 +190,29 @@ where
 				.labelled("function name"),
 			)
 			.then(parameters)
-			.then(
-				expr
-				.clone()
-				.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-				// Attempt to recover anything that looks like a function body but contains errors
-				.recover_with(via_parser(nested_delimiters(
-					Token::Ctrl('{'),
-					Token::Ctrl('}'),
-					[
-						(Token::Ctrl('('), Token::Ctrl(')')),
-						(Token::Ctrl('['), Token::Ctrl(']')),
-					],
-					|span| (Node::Error, span),
-				))),
-			)
-			.map(|((name, parameters), body)| Node::Func { name, parameters, body: Box::new(body) })
+			.then(block.clone())
+			.map_with(|((name, parameters), body), e| (Node::Func { name, parameters, body: Box::new(body) }, e.span()))
 			.labelled("function")
 			.boxed();
+		
+		// A comma-delimited list of expressions.
+		let items =
+			expression.clone()
+			.separated_by(just(Token::Ctrl(',')))
+			.allow_trailing()
+			.collect::<Vec<_>>();
+		
+		let local = ident.map(Node::Local);
 		
 		let let_ =
 			just(Token::Let)
 			.ignore_then(ident)
 			.then_ignore(just(Token::Op("=")))
-			.then(expr.clone())
+			.then(expression.clone())
 			.map(|(name, val)| Node::Let(name, Box::new(val)));
 		
-		let import =
-			just(Token::Import)
-			.ignore_then(
-				ident
-				.map(|a| ImportPath(vec![ a ], None))
-				.foldl_with(
-					just(Token::Op("::"))
-						.ignore_then(choice((
-							ident.map(|x| vec![ x ]),
-							ident
-								.separated_by(just(Token::Ctrl(',')))
-								.allow_trailing()
-								.collect::<Vec<_>>()
-								.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
-						)))
-						.repeated(),
-					|a, b, _| ImportPath(b, Some(Box::new(a)))
-				)
-			)
-			.map_with(|import_path, _| Node::Import(import_path));
-		
 		let list =
-			items
-			.clone()
+			items.clone()
 			.map(Node::List)
 			.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')));
 		
@@ -190,17 +220,14 @@ where
 		let atom =
 			choice((
 				val,
-				ident.map(Node::Local),
+				local,
 				let_,
-				function,
-				import,
 				list,
 			))
 			.map_with(|expr, e| (expr, e.span()))
 			// Atoms can also just be normal expressions, but surrounded with parentheses
 			.or(
-				expr
-				.clone()
+				expression.clone()
 				.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
 			)
 			// Attempt to recover anything that looks like a parenthesised expression but contains errors
@@ -240,10 +267,9 @@ where
 			.to(BinaryOp::Mul)
 			.or(just(Token::Op("/")).to(BinaryOp::Div));
 		let product =
-			call
-			.clone()
+			call.clone()
 			.foldl_with(op.then(call).repeated(), |a, (op, b), e| {
-				(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
+				(Node::Binary(op, Box::new(a), Box::new(b)), e.span())
 			});
 		
 		// Sum ops (add and subtract) have equal precedence
@@ -252,10 +278,9 @@ where
 			.to(BinaryOp::Add)
 			.or(just(Token::Op("-")).to(BinaryOp::Sub));
 		let sum =
-			product
-			.clone()
+			product.clone()
 			.foldl_with(op.then(product).repeated(), |a, (op, b), e| {
-				(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
+				(Node::Binary(op, Box::new(a), Box::new(b)), e.span())
 			});
 		
 		// Comparison ops (equal, not-equal) have equal precedence
@@ -264,21 +289,45 @@ where
 			.to(BinaryOp::Eq)
 			.or(just(Token::Op("!=")).to(BinaryOp::NotEq));
 		let compare =
-			sum
-			.clone()
+			sum.clone()
 			.foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
-				(Node::Binary(Box::new(a), op, Box::new(b)), e.span())
+				(Node::Binary(op, Box::new(a), Box::new(b)), e.span())
 			});
 		
-		let inline_expr = compare.labelled("expression").as_context();
+		expression.define(choice((
+			compare.labelled("expression").as_context(),
+			if_.clone(),
+			block.clone(),
+		)));
 		
-		// Blocks are expressions but delimited with braces
-		let block =
-			expr
-			.clone()
-			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-			// Attempt to recover anything that looks like a block but contains errors
-			.recover_with(via_parser(nested_delimiters(
+		let statement = choice((
+			if_,
+			function,
+			import,
+			block,
+			expression.clone()
+				.foldl_with(
+					just(Token::Ctrl(';')).ignore_then(expression.or_not()).repeated(),
+					|a, b, e| {
+						let span: Span = e.span();
+						(
+							Node::Then(
+								Box::new(a),
+								Box::new(b.unwrap_or_else(|| (Node::Value(Value::Null), span.to_end()))),
+							),
+							span,
+						)
+					}
+				),
+		));
+		
+		statement.clone()
+		.foldl_with(
+			statement.repeated(),
+			|a, b, e| (Node::Then(Box::new(a), Box::new(b)), e.span()),
+		)
+		.recover_with(skip_then_retry_until(
+			nested_delimiters(
 				Token::Ctrl('{'),
 				Token::Ctrl('}'),
 				[
@@ -286,56 +335,7 @@ where
 					(Token::Ctrl('['), Token::Ctrl(']')),
 				],
 				|span| (Node::Error, span),
-			)));
-		
-		let if_ = recursive(|if_| {
-			just(Token::If)
-			.ignore_then(expr.clone())
-			.then(block.clone())
-			.then(
-				just(Token::Else)
-				.ignore_then(block.clone().or(if_))
-				.or_not(),
-			)
-			.map_with(|((cond, a), b), e| {
-				(
-					Node::If(
-						Box::new(cond),
-						Box::new(a),
-						// If an `if` expression has no trailing `else` block, we magic up one that just produces null
-						Box::new(b.unwrap_or_else(|| (Node::Value(Value::Null), e.span()))),
-					),
-					e.span(),
-				)
-			})
-		});
-		
-		// Both blocks and `if` are 'block expressions' and can appear in the place of statements
-		let block_expr = block.or(if_);
-		
-		let block_chain =
-			block_expr
-			.clone()
-			.foldl_with(block_expr.clone().repeated(), |a, b, e| {
-				(Node::Then(Box::new(a), Box::new(b)), e.span())
-			});
-		
-		let block_recovery = nested_delimiters(
-			Token::Ctrl('{'),
-			Token::Ctrl('}'),
-			[
-				(Token::Ctrl('('), Token::Ctrl(')')),
-				(Token::Ctrl('['), Token::Ctrl(']')),
-			],
-			|span| (Node::Error, span),
-		);
-		
-		block_chain
-		.labelled("block")
-		// Expressions, chained by semicolons, are statements
-		.or(inline_expr.clone())
-		.recover_with(skip_then_retry_until(
-			block_recovery.ignored().or(any().ignored()),
+			).ignored().or(any().ignored()),
 			one_of([
 				Token::Ctrl(';'),
 				Token::Ctrl('}'),
@@ -343,20 +343,6 @@ where
 				Token::Ctrl(']'),
 			]).ignored(),
 		))
-		.foldl_with(
-			just(Token::Ctrl(';')).ignore_then(expr.or_not()).repeated(),
-			|a, b, e| {
-				let span: Span = e.span();
-				(
-					Node::Then(
-						Box::new(a),
-						// If there is no b expression then its span is the end of the statement/block.
-						Box::new(b.unwrap_or_else(|| (Node::Value(Value::Null), span.to_end()))),
-					),
-					span,
-				)
-			},
-		)
 	})
 }
 

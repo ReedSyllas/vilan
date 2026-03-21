@@ -1,4 +1,6 @@
 
 fun main() {
-	print(10);
+	if true {
+		true
+	}
 }

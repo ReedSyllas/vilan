@@ -27,7 +27,7 @@ fn main() {
 			)
 			.into_output_errors();
 		
-		// println!("{ast:#?}");
+		println!("{ast:#?}");
 		
 		if let Some((functions, file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
 			if let Some(main) = functions.get("main") {

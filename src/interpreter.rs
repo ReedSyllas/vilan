@@ -40,22 +40,22 @@ pub fn eval_expr<'src>(
 			eval_expr(a, functions, stack)?;
 			eval_expr(b, functions, stack)?
 		}
-		Node::Binary(a, BinaryOp::Add, b) => Value::Num(
+		Node::Binary(BinaryOp::Add, a, b) => Value::Num(
 			eval_expr(a, functions, stack)?.num(a.1)? + eval_expr(b, functions, stack)?.num(b.1)?,
 		),
-		Node::Binary(a, BinaryOp::Sub, b) => Value::Num(
+		Node::Binary(BinaryOp::Sub, a, b) => Value::Num(
 			eval_expr(a, functions, stack)?.num(a.1)? - eval_expr(b, functions, stack)?.num(b.1)?,
 		),
-		Node::Binary(a, BinaryOp::Mul, b) => Value::Num(
+		Node::Binary(BinaryOp::Mul, a, b) => Value::Num(
 			eval_expr(a, functions, stack)?.num(a.1)? * eval_expr(b, functions, stack)?.num(b.1)?,
 		),
-		Node::Binary(a, BinaryOp::Div, b) => Value::Num(
+		Node::Binary(BinaryOp::Div, a, b) => Value::Num(
 			eval_expr(a, functions, stack)?.num(a.1)? / eval_expr(b, functions, stack)?.num(b.1)?,
 		),
-		Node::Binary(a, BinaryOp::Eq, b) => {
+		Node::Binary(BinaryOp::Eq, a, b) => {
 			Value::Bool(eval_expr(a, functions, stack)? == eval_expr(b, functions, stack)?)
 		}
-		Node::Binary(a, BinaryOp::NotEq, b) => {
+		Node::Binary(BinaryOp::NotEq, a, b) => {
 			Value::Bool(eval_expr(a, functions, stack)? != eval_expr(b, functions, stack)?)
 		}
 		Node::Call(func, args) => {
