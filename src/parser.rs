@@ -59,6 +59,13 @@ pub enum BinaryOp {
 #[derive(Debug)]
 pub struct ImportPath<'src> (Vec<&'src str>, Option<Box<Self>>);
 
+#[derive(Debug)]
+pub struct ExampleFunc<'src> {
+	pub name: Spanned<&'src str>,
+	pub parameters: Spanned<Vec<(&'src str, Option<&'src str>)>>,
+	pub body: Box<Spanned<Node<'src>>>,
+}
+
 // An expression node in the AST. Children are spanned so we can generate useful runtime errors.
 #[derive(Debug)]
 pub enum Node<'src> {
@@ -72,16 +79,13 @@ pub enum Node<'src> {
 	Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
 	If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
-	Func {
-		name: Spanned<&'src str>,
-		parameters: Spanned<Vec<(&'src str, Option<&'src str>)>>,
-		body: Box<Spanned<Self>>,
-	},
+	Func(ExampleFunc<'src>),
 }
 
 // #[derive(Debug)]
 // pub struct Scope<'src> {
-	
+// 	pub functions: HashMap<&'src str, ExampleFunc<'src>>,
+// 	pub body: Spanned<Node<'src>>,
 // }
 
 // A function node in the AST.
@@ -96,7 +100,7 @@ pub fn node_parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spann
 where
 	I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
-	recursive(|scope| {
+	recursive(|statements| {
 		let val =
 			select! {
 				Token::Null => Node::Value(Value::Null),
@@ -133,7 +137,7 @@ where
 		
 		// Blocks are expressions but delimited with braces
 		let block =
-			scope.clone()
+			statements.clone()
 			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
 			// Attempt to recover anything that looks like a block but contains errors
 			.recover_with(via_parser(nested_delimiters(
@@ -191,7 +195,7 @@ where
 			)
 			.then(parameters)
 			.then(block.clone())
-			.map_with(|((name, parameters), body), e| (Node::Func { name, parameters, body: Box::new(body) }, e.span()))
+			.map_with(|((name, parameters), body), e| (Node::Func(ExampleFunc { name, parameters, body: Box::new(body) }), e.span()))
 			.labelled("function")
 			.boxed();
 		
@@ -301,31 +305,33 @@ where
 		)));
 		
 		let statement = choice((
-			if_,
-			function,
-			import,
-			block,
-			expression.clone()
-				.foldl_with(
-					just(Token::Ctrl(';')).ignore_then(expression.or_not()).repeated(),
-					|a, b, e| {
-						let span: Span = e.span();
-						(
-							Node::Then(
-								Box::new(a),
-								Box::new(b.unwrap_or_else(|| (Node::Value(Value::Null), span.to_end()))),
-							),
-							span,
-						)
-					}
-				),
+			expression.clone().then_ignore(just(Token::Ctrl(';'))).map(|x| Some(x)),
+			if_.map(|x| Some(x)),
+			function.map(|_| None),
+			import.map(|_| None),
+			block.map(|x| Some(x)),
 		));
 		
 		statement.clone()
-		.foldl_with(
-			statement.repeated(),
-			|a, b, e| (Node::Then(Box::new(a), Box::new(b)), e.span()),
-		)
+		.foldl_with(statement.repeated(), |a, b, e| match (a, b) {
+			(Some(a), Some(b)) => Some((Node::Then(Box::new(a), Box::new(b)), e.span())),
+			(a, b) => a.or(b),
+		})
+		.or_not()
+		.map(|x| x.flatten())
+		.then(expression.or_not())
+		.map_with(|x, e| match x {
+			(Some(statement), Some(expression)) => (Node::Then(Box::new(statement), Box::new(expression)), e.span()),
+			(Some(statement), None) => {
+				let span: Span = e.span();
+				(Node::Then(Box::new(statement), Box::new((Node::Value(Value::Null), span.to_end()))), span)
+			},
+			(None, Some(expression)) => expression,
+			(None, None) => {
+				let span: Span = e.span();
+				(Node::Value(Value::Null), span.to_end())
+			}
+		})
 		.recover_with(skip_then_retry_until(
 			nested_delimiters(
 				Token::Ctrl('{'),

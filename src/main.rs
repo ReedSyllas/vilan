@@ -27,8 +27,6 @@ fn main() {
 			)
 			.into_output_errors();
 		
-		println!("{ast:#?}");
-		
 		if let Some((functions, file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
 			if let Some(main) = functions.get("main") {
 				if !main.args.is_empty() {
@@ -37,7 +35,10 @@ fn main() {
 						"The main function cannot have arguments".to_string(),
 					))
 				} else {
-					match eval_expr(&main.body, &functions, &mut Vec::new()) {
+					let body = &main.body;
+					println!("{body:#?}");
+					
+					match eval_expr(body, &functions, &mut Vec::new()) {
 						Ok(val) => println!("Return value: {val}"),
 						Err(e) => errs.push(Rich::custom(e.span, e.msg)),
 					}

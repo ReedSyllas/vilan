@@ -1,6 +1,6 @@
 
 use std::{collections::HashMap};
-use crate::{parser::{BinaryOp, Node, Func, Value}, shared::{Error, Spanned}};
+use crate::{parser::{BinaryOp, ExampleFunc, Func, Node, Value}, shared::{Error, Spanned}};
 
 pub fn eval_expr<'src>(
 	expr: &Spanned<Node<'src>>,
@@ -107,9 +107,9 @@ pub fn eval_expr<'src>(
 				}
 			}
 		}
-		Node::Func { name: (name, name_span), parameters: _, body: _ } => {
-			println!("Found function named {name}");
-			
+		Node::Func(func) => {
+			let (name, name_span) = func.name;
+			println!("Found function named {}", name);
 			functions.contains_key(name)
 			.then(|| Value::Func(name))
 			.ok_or_else(|| Error {
