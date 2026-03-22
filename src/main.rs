@@ -7,6 +7,7 @@ mod analyzer;
 use ariadne::{sources, Color, Label, Report, ReportKind};
 use chumsky::prelude::*;
 use std::{env, fs};
+
 use crate::{analyzer::analyze, interpreter::interpret, lexer::lexer, parser::parser};
 
 fn main() {

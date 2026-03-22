@@ -1,4 +1,8 @@
 
 fun main() {
-	0
+	foo()
+}
+
+fun foo() {
+	200
 }

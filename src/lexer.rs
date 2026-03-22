@@ -1,5 +1,6 @@
 
 use chumsky::prelude::*;
+
 use crate::shared::{Span, Spanned};
 
 #[derive(Clone, Debug, PartialEq)]
