@@ -1,109 +1,38 @@
 
 use chumsky::{input::ValueInput, prelude::*};
-use std::{collections::HashMap};
-use crate::{lexer::Token, shared::{Error, Span, Spanned}};
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Value<'src> {
-	Null,
-	Bool(bool),
-	Num(f64),
-	Str(&'src str),
-	List(Vec<Self>),
-	Func(&'src str),
-	RetFlag(Box<Self>),
-}
-
-impl Value<'_> {
-	pub fn num(self, span: Span) -> Result<f64, Error> {
-		if let Value::Num(x) = self {
-			Ok(x)
-		} else {
-			Err(Error {
-				span,
-				msg: format!("'{self}' is not a number"),
-			})
-		}
-	}
-}
-
-impl std::fmt::Display for Value<'_> {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		match self {
-			Self::Null => write!(f, "null"),
-			Self::Bool(x) => write!(f, "{x}"),
-			Self::Num(x) => write!(f, "{x}"),
-			Self::Str(x) => write!(f, "{x}"),
-			Self::List(xs) => write!(
-				f,
-				"[{}]",
-				xs.iter()
-					.map(|x| x.to_string())
-					.collect::<Vec<_>>()
-					.join(", ")
-			),
-			Self::Func(name) => write!(f, "<function: {name}>"),
-			Self::RetFlag(x) => write!(f, "{x}"),
-		}
-	}
-}
-
-#[derive(Clone, Debug)]
-pub enum BinaryOp {
-	Add,
-	Sub,
-	Mul,
-	Div,
-	Eq,
-	NotEq,
-}
+use crate::{lexer::Token, shared::{BinaryOp, Span, Spanned, Value}};
 
 #[derive(Debug)]
 pub struct ImportPath<'src> (Vec<&'src str>, Option<Box<Self>>);
 
 #[derive(Debug)]
-pub struct ExampleFunc<'src> {
+pub struct Func<'src> {
 	pub name: Spanned<&'src str>,
 	pub parameters: Spanned<Vec<(&'src str, Option<&'src str>)>>,
 	pub body: Box<Spanned<Node<'src>>>,
 }
 
-// An expression node in the AST. Children are spanned so we can generate useful runtime errors.
 #[derive(Debug)]
 pub enum Node<'src> {
-	Error,
-	Value(Value<'src>),
-	List(Vec<Spanned<Self>>),
-	Local(&'src str),
-	Import(ImportPath<'src>),
-	Let(&'src str, Box<Spanned<Self>>),
-	Then(Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
+	Error,
+	Func(Func<'src>),
 	If(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
-	Func(ExampleFunc<'src>),
+	Import(ImportPath<'src>),
+	Let(&'src str, Box<Spanned<Self>>),
+	List(Vec<Spanned<Self>>),
+	Local(&'src str),
 	Ret(Box<Spanned<Self>>),
+	Seq(Vec<Spanned<Node<'src>>>),
+	Value(Value<'src>),
 }
 
-// #[derive(Debug)]
-// pub struct Scope<'src> {
-// 	pub functions: HashMap<&'src str, ExampleFunc<'src>>,
-// 	pub body: Spanned<Node<'src>>,
-// }
-
-// A function node in the AST.
-#[derive(Debug)]
-pub struct Func<'src> {
-	pub args: Vec<&'src str>,
-	pub span: Span,
-	pub body: Spanned<Node<'src>>,
-}
-
-pub fn node_parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
+pub fn parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
 where
 	I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
-	recursive(|statements| {
+	recursive(|sequence| {
 		let val =
 			select! {
 				Token::Null => Node::Value(Value::Null),
@@ -139,20 +68,22 @@ where
 			.map_with(|import_path, e| (Node::Import(import_path), e.span()))
 			.boxed();
 		
-		// Blocks are expressions but delimited with braces
+		// Attempt to recover anything that looks like a block but contains errors.
+		let block_recovery = via_parser(nested_delimiters(
+			Token::Ctrl('{'),
+			Token::Ctrl('}'),
+			[
+				(Token::Ctrl('('), Token::Ctrl(')')),
+				(Token::Ctrl('['), Token::Ctrl(']')),
+			],
+			|span| (Node::Error, span),
+		));
+		
+		// Blocks are a sequence delimited with braces.
 		let block =
-			statements.clone()
+			sequence.clone()
 			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-			// Attempt to recover anything that looks like a block but contains errors
-			.recover_with(via_parser(nested_delimiters(
-				Token::Ctrl('{'),
-				Token::Ctrl('}'),
-				[
-					(Token::Ctrl('('), Token::Ctrl(')')),
-					(Token::Ctrl('['), Token::Ctrl(']')),
-				],
-				|span| (Node::Error, span),
-			)));
+			.recover_with(block_recovery.clone());
 		
 		let if_ = recursive(|if_| {
 			just(Token::If)
@@ -198,7 +129,9 @@ where
 				.labelled("function parameters")
 			)
 			.then(block.clone())
-			.map_with(|((name, parameters), body), e| (Node::Func(ExampleFunc { name, parameters, body: Box::new(body) }), e.span()))
+			.map_with(|((name, parameters), body), e| {
+				(Node::Func(Func { name, parameters, body: Box::new(body) }), e.span())
+			})
 			.labelled("function")
 			.boxed();
 		
@@ -314,116 +247,27 @@ where
 		)));
 		
 		let statement = choice((
-			expression.clone().then_ignore(just(Token::Ctrl(';'))).map(|x| Some(x)),
-			if_.map(|x| Some(x)),
-			function.map(|_| None),
-			import.map(|_| None),
-			block.map(|x| Some(x)),
+			expression.clone().then_ignore(just(Token::Ctrl(';'))),
+			if_,
+			function,
+			import,
+			block,
 		)).boxed();
 		
 		statement.clone()
-		.foldl_with(statement.repeated(), |a, b, e| match (a, b) {
-			(Some(a), Some(b)) => Some((Node::Then(Box::new(a), Box::new(b)), e.span())),
-			(a, b) => a.or(b),
-		})
-		.or_not()
-		.map(|x| x.flatten())
-		.then(expression.or_not())
-		.map_with(|x, e| match x {
-			(Some(statement), Some(expression)) => (Node::Then(Box::new(statement), Box::new(expression)), e.span()),
-			(Some(statement), None) => match statement.0 {
-				Node::Ret(_) => statement,
-				_ => {
-					let span: Span = e.span();
-					(Node::Then(Box::new(statement), Box::new((Node::Value(Value::Null), span.to_end()))), span)
-				}
-			},
-			(None, Some(expression)) => expression,
-			(None, None) => {
-				let span: Span = e.span();
-				(Node::Value(Value::Null), span.to_end())
+		.repeated()
+		.collect::<Vec<_>>()
+		.then(expression.clone().or_not())
+		.map_with(|(mut nodes, expression), e| {
+			if let Some(expression) = expression {
+				nodes.push(expression);
+			}
+			
+			match nodes.len() {
+				0 => (Node::Value(Value::Null), e.span()),
+				1 => nodes.into_iter().next().unwrap(),
+				_ => (Node::Seq(nodes), e.span()),
 			}
 		})
-		.recover_with(skip_then_retry_until(
-			nested_delimiters(
-				Token::Ctrl('{'),
-				Token::Ctrl('}'),
-				[
-					(Token::Ctrl('('), Token::Ctrl(')')),
-					(Token::Ctrl('['), Token::Ctrl(']')),
-				],
-				|span| (Node::Error, span),
-			).ignored().or(any().ignored()),
-			one_of([
-				Token::Ctrl(';'),
-				Token::Ctrl('}'),
-				Token::Ctrl(')'),
-				Token::Ctrl(']'),
-			]).ignored(),
-		))
-	})
-}
-
-pub fn functions_parser<'tokens, 'src: 'tokens, I>() -> impl Parser<
-	'tokens,
-	I,
-	HashMap<&'src str, Func<'src>>,
-	extra::Err<Rich<'tokens, Token<'src>, Span>>,
-> + Clone
-where
-	I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
-{
-	let ident = select! { Token::Ident(ident) => ident };
-	
-	// Argument lists are just identifiers separated by commas, surrounded by parentheses
-	let parameters =
-		ident
-		.separated_by(just(Token::Ctrl(',')))
-		.allow_trailing()
-		.collect()
-		.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-		.labelled("function parameters");
-	
-	let function =
-		just(Token::Fun)
-		.ignore_then(
-			ident
-			.map_with(|name, e| (name, e.span()))
-			.labelled("function name"),
-		)
-		.then(parameters)
-		.map_with(|start, e| (start, e.span()))
-		.then(
-			node_parser()
-			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-			// Attempt to recover anything that looks like a function body but contains errors
-			.recover_with(via_parser(nested_delimiters(
-				Token::Ctrl('{'),
-				Token::Ctrl('}'),
-				[
-					(Token::Ctrl('('), Token::Ctrl(')')),
-					(Token::Ctrl('['), Token::Ctrl(']')),
-				],
-				|span| (Node::Error, span),
-			))),
-		)
-		.map(|(((name, args), span), body)| (name, Func { args, span, body }))
-		.labelled("function");
-	
-	function.repeated()
-	.collect::<Vec<_>>()
-	.validate(|fs, _, emitter| {
-		let mut functions = HashMap::new();
-		let empty_span = Span::new((), 0..0);
-		functions.insert("print", Func { args: vec![ "value" ], body: (Node::Value(Value::Null), empty_span), span: empty_span });
-		for ((name, name_span), f) in fs {
-			if functions.insert(name, f).is_some() {
-				emitter.emit(Rich::custom(
-					name_span,
-					format!("Function '{name}' already exists"),
-				));
-			}
-		}
-		functions
 	})
 }

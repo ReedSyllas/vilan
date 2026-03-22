@@ -2,13 +2,12 @@ mod interpreter;
 mod lexer;
 mod parser;
 mod shared;
+mod analyzer;
 
 use ariadne::{sources, Color, Label, Report, ReportKind};
 use chumsky::prelude::*;
 use std::{env, fs};
-use crate::lexer::lexer;
-use crate::interpreter::eval_expr;
-use crate::parser::functions_parser;
+use crate::{analyzer::analyze, interpreter::interpret, lexer::lexer, parser::parser};
 
 fn main() {
 	let filename = env::args().nth(1).expect("Expected file argument");
@@ -18,7 +17,7 @@ fn main() {
 	
 	let parse_errs = if let Some(tokens) = &tokens {
 		let (ast, parse_errs) =
-			functions_parser()
+			parser()
 			.map_with(|ast, e| (ast, e.span()))
 			.parse(
 				tokens
@@ -27,29 +26,47 @@ fn main() {
 			)
 			.into_output_errors();
 		
-		if let Some((functions, file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-			if let Some(main) = functions.get("main") {
-				if !main.args.is_empty() {
-					errs.push(Rich::custom(
-						main.span,
-						"The main function cannot have arguments".to_string(),
-					))
-				} else {
-					let body = &main.body;
-					println!("{body:#?}");
-					
-					match eval_expr(body, &functions, &mut Vec::new()) {
-						Ok(val) => println!("Return value: {val}"),
-						Err(e) => errs.push(Rich::custom(e.span, e.msg)),
-					}
-				}
-			} else {
-				errs.push(Rich::custom(
-					file_span,
-					"Programs need a main function but none was found".to_string(),
-				));
+		if let Some((root, _file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
+			// println!("{root:#?}");
+			
+			let program = analyze(&root);
+			
+			println!("{program:#?}");
+			
+			match interpret(program) {
+				Ok(val) => println!("Return value: {val}"),
+				Err(e) => errs.push(Rich::custom(e.span, e.msg)),
 			}
+			
+			// match eval_expr(&root, &HashMap::new(), &mut Vec::new()) {
+			// 	Ok(val) => println!("Return value: {val}"),
+			// 	Err(e) => errs.push(Rich::custom(e.span, e.msg)),
+			// }
 		}
+		
+		// if let Some((functions, file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
+		// 	if let Some(main) = functions.get("main") {
+		// 		if !main.args.is_empty() {
+		// 			errs.push(Rich::custom(
+		// 				main.span,
+		// 				"The main function cannot have arguments".to_string(),
+		// 			))
+		// 		} else {
+		// 			let body = &main.body;
+		// 			println!("{body:#?}");
+					
+		// 			// match eval_expr(body, &functions, &mut Vec::new()) {
+		// 			// 	Ok(val) => println!("Return value: {val}"),
+		// 			// 	Err(e) => errs.push(Rich::custom(e.span, e.msg)),
+		// 			// }
+		// 		}
+		// 	} else {
+		// 		errs.push(Rich::custom(
+		// 			file_span,
+		// 			"Programs need a main function but none was found".to_string(),
+		// 		));
+		// 	}
+		// }
 		
 		parse_errs
 	} else {
