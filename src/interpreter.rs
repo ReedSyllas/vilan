@@ -25,7 +25,7 @@ fn interpret_entity<'src>(entity: &Entity<'src>, scope: &Scope<'src>, program: &
 			match &**subject {
 				Entity::Local(id) => {
 					let function = program.get_function(id).unwrap();
-					return interpret_entity(&*function.body, scope, program);
+					return interpret_entity(&*function.body, &function.body_scope, program);
 				}
 				_ => {
 					return Err(Error {

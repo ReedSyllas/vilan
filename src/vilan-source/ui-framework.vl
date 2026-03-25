@@ -1,0 +1,50 @@
+
+struct Signal<T> {
+	type T;
+	
+	mut value: T;
+	
+	fun (initial: T) {
+		Self { value = initial }
+	}
+	
+	fun (self) {
+		self.get()
+	}
+	
+	fun get() {
+		
+	}
+}
+
+fun main() {
+	print(App().render());
+}
+
+fun App() {
+	let count = Signal(0);
+	
+	Box()
+	.with_element(|x|
+		x
+		.tag("main")
+		.attribute()
+	)
+	.child("Hello, World!")
+	.child("Count is: ")
+	.child(|| count())
+}
+
+trait Node {
+	fun render(): void;
+}
+
+struct Box() {
+	mut _children: List<Node> = List::new();
+	
+	fun render() {
+		_children.for_each(|x| {
+			print(x);
+		});
+	}
+}

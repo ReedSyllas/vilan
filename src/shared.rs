@@ -27,7 +27,7 @@ pub enum Value<'src> {
 	Str(&'src str),
 	List(Vec<Self>),
 	Func(&'src str),
-	RetFlag(Box<Self>),
+	Interupt(Box<Self>),
 }
 
 impl Value<'_> {
@@ -59,7 +59,7 @@ impl std::fmt::Display for Value<'_> {
 					.join(", ")
 			),
 			Self::Func(name) => write!(f, "<function: {name}>"),
-			Self::RetFlag(x) => write!(f, "{x}"),
+			Self::Interupt(x) => write!(f, "{x}"),
 		}
 	}
 }
