@@ -1,7 +1,7 @@
 
 use std::{collections::HashMap};
 
-use crate::{parser::{Node, NodeBlock}, shared::{Span, Spanned, Value}};
+use crate::{parser::{Node, NodeBlock}, shared::{BinaryOp, Span, Spanned, Value}};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntityId(u32);
@@ -36,6 +36,15 @@ struct ProgramContext<'src> {
 }
 
 impl<'src> ProgramContext<'src> {
+	fn new() -> Self {
+		Self {
+			next_id: 0,
+			spans: HashMap::new(),
+			functions: HashMap::new(),
+			variables: HashMap::new(),
+		}
+	}
+	
 	pub fn get_next_id(&mut self) -> EntityId {
 		let id = self.next_id;
 		self.next_id += 1;
@@ -50,10 +59,13 @@ pub struct Scope<'src> {
 
 #[derive(Clone, Debug)]
 pub enum Entity<'src> {
+	Binary(BinaryOp, Box<Self>, Box<Self>),
 	Call(Box<Self>, Vec<Self>),
 	Error,
 	Function(EntityId),
+	FunctionReturn(Box<Self>),
 	Local(EntityId),
+	Variable(EntityId),
 	Value(Value<'src>),
 }
 
@@ -79,7 +91,7 @@ pub struct Parameter<'src> {
 pub struct Variable<'src> {
 	pub id: EntityId,
 	pub name: &'src str,
-	pub value: Value<'src>,
+	pub value: Entity<'src>,
 }
 
 #[derive(Debug)]
@@ -90,12 +102,7 @@ pub struct Analyzer<'src> {
 impl<'src> Analyzer<'src> {
 	fn new() -> Self {
 		Self {
-			context: ProgramContext {
-				next_id: 0,
-				spans: HashMap::new(),
-				functions: HashMap::new(),
-				variables: HashMap::new(),
-			}
+			context: ProgramContext::new(),
 		}
 	}
 	
@@ -130,7 +137,7 @@ impl<'src> Analyzer<'src> {
 				let parameters = func.parameters.0.iter().map(|(name, _type)| Parameter { id: self.context.get_next_id(), name }).collect::<Vec<_>>();
 				for parameter in parameters.iter() {
 					body_scope.declarations.insert(parameter.name, parameter.id);
-					let variable = Variable { id: parameter.id, name: parameter.name, value: Value::Null };
+					let variable = Variable { id: parameter.id, name: parameter.name, value: Entity::Value(Value::Null) };
 					self.context.variables.insert(parameter.id, variable);
 				}
 				let body = self.block(&func.body, &mut body_scope);
@@ -147,6 +154,19 @@ impl<'src> Analyzer<'src> {
 				let local_id = scope.declarations.get(*name).map(|x| *x);
 				Entity::Local(local_id.expect(format!("cannot find '{}'", name).as_str()))
 			},
+			Node::FuncReturn(value) => Entity::FunctionReturn(Box::new(self.node(value, scope))),
+			Node::Binary(op, lhs, rhs) => Entity::Binary(op.clone(), Box::new(self.node(lhs, scope)), Box::new(self.node(rhs, scope))),
+			Node::Let(name, value) => {
+				let id = self.context.get_next_id();
+				let e_value = self.node(value, scope);
+				self.context.variables.insert(id, Variable {
+					id,
+					name,
+					value: e_value,
+				});
+				scope.declarations.insert(name, id);
+				Entity::Variable(id)
+			}
 			x => unimplemented!("{x:?}"),
 		}
 	}

@@ -26,7 +26,10 @@ pub enum IfElseBranch<'src> {
 }
 
 #[derive(Debug)]
-pub struct ImportPath<'src> (Vec<&'src str>, Option<Box<Self>>);
+pub enum ImportBranch<'src> {
+	Path(&'src str, Option<Box<Self>>),
+	Set(Vec<Self>),
+}
 
 #[derive(Debug)]
 pub enum Node<'src> {
@@ -35,12 +38,12 @@ pub enum Node<'src> {
 	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
 	Error,
 	Func(Func<'src>),
+	FuncReturn(Box<Spanned<Self>>),
 	If(If<'src>),
-	Import(ImportPath<'src>),
+	Import(ImportBranch<'src>),
 	Let(&'src str, Box<Spanned<Self>>),
 	List(Vec<Spanned<Self>>),
 	Local(&'src str),
-	Ret(Box<Spanned<Self>>),
 	Value(Value<'src>),
 }
 
@@ -55,35 +58,14 @@ where
 			Token::Num(n) => Node::Value(Value::Num(n)),
 			Token::Str(s) => Node::Value(Value::Str(s)),
 		}
-		.labelled("value");
+		.labelled("value")
+		.map_with(|x, e| (x, e.span()));
 	
 	let ident = select! { Token::Ident(ident) => ident }.labelled("identifier");
 	
 	let mut statement = Recursive::declare();
 	
 	let mut expression = Recursive::declare();
-	
-	let import =
-		just(Token::Import)
-		.ignore_then(
-			ident
-			.map(|a| ImportPath(vec![ a ], None))
-			.foldl_with(
-				just(Token::Op("::"))
-					.ignore_then(choice((
-						ident.map(|x| vec![ x ]),
-						ident
-							.separated_by(just(Token::Ctrl(',')))
-							.allow_trailing()
-							.collect::<Vec<_>>()
-							.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
-					)))
-					.repeated(),
-				|a, b, _| ImportPath(b, Some(Box::new(a)))
-			)
-		)
-		.map_with(|import_path, e| (Node::Import(import_path), e.span()))
-		.boxed();
 	
 	// Attempt to recover anything that looks like a block but contains errors.
 	let block_recovery = via_parser(nested_delimiters(
@@ -105,6 +87,48 @@ where
 		.map_with(|children, e| (Some(children), e.span()))
 		.recover_with(block_recovery)
 		.map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1));
+	
+	let import =
+		just(Token::Import)
+		.ignore_then(
+			recursive(|branch| {
+				let path =
+					ident
+					.then(
+						just(Token::Op("::"))
+						.ignore_then(branch)
+						.or_not()
+					)
+					.map(|(a, b)| ImportBranch::Path(a, b.map(|b| Box::new(b))));
+				
+				path.clone()
+				.or(
+					path
+					.separated_by(just(Token::Ctrl(',')))
+					.allow_trailing()
+					.collect::<Vec<_>>()
+					.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+					.map(|x| ImportBranch::Set(x))
+				)
+			})
+			// ident
+			// .map(|a| ImportBranch::Path(a, None))
+			// .foldl_with(
+			// 	just(Token::Op("::"))
+			// 		.ignore_then(choice((
+			// 			ident.map(|x| vec![ x ]),
+			// 			ident
+			// 				.separated_by(just(Token::Ctrl(',')))
+			// 				.allow_trailing()
+			// 				.collect::<Vec<_>>()
+			// 				.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
+			// 		)))
+			// 		.repeated(),
+			// 	|a, b, _| ImportPath(b, Some(Box::new(a)))
+			// )
+		)
+		.map_with(|import_path, e| (Node::Import(import_path), e.span()))
+		.boxed();
 	
 	let if_ =
 		recursive(|if_| {
@@ -131,6 +155,13 @@ where
 			(IfElseBranch::If(x), span) => (Node::If(*x), span),
 			_ => unreachable!(),
 		});
+	
+	let let_ =
+		just(Token::Let)
+		.ignore_then(ident)
+		.then_ignore(just(Token::Op("=")))
+		.then(expression.clone())
+		.map_with(|(name, val), e| (Node::Let(name, Box::new(val)), e.span()));
 	
 	let function =
 		just(Token::Fun)
@@ -163,7 +194,7 @@ where
 	let return_ =
 		just(Token::Ret)
 		.ignore_then(expression.clone())
-		.map(|x| Node::Ret(Box::new(x)));
+		.map_with(|x, e| (Node::FuncReturn(Box::new(x)), e.span()));
 	
 	// A comma-delimited list of expressions.
 	let items =
@@ -172,30 +203,23 @@ where
 		.allow_trailing()
 		.collect::<Vec<_>>();
 	
-	let local = ident.map(Node::Local);
-	
-	let let_ =
-		just(Token::Let)
-		.ignore_then(ident)
-		.then_ignore(just(Token::Op("=")))
-		.then(expression.clone())
-		.map(|(name, val)| Node::Let(name, Box::new(val)));
+	let local = ident.map_with(|x, e| (Node::Local(x), e.span()));
 	
 	let list =
 		items.clone()
 		.map(Node::List)
-		.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')));
+		.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+		.map_with(|x, e| (x, e.span()));
 	
 	// 'Atoms' are expressions that contain no ambiguity
 	let atom =
 		choice((
 			val,
 			local,
-			let_,
-			return_,
 			list,
+			if_.clone(),
+			block.clone().map(|(x, span)| (Node::Block(x), span)),
 		))
-		.map_with(|expr, e| (expr, e.span()))
 		// Atoms can also just be normal expressions, but surrounded with parentheses
 		.or(
 			expression.clone()
@@ -267,15 +291,15 @@ where
 	
 	expression.define(choice((
 		compare.labelled("expression").as_context(),
-		if_.clone(),
-		block.clone().map(|(x, span)| (Node::Block(x), span)),
+		let_,
+		return_,
 	)));
 	
 	statement.define(choice((
 		expression.clone().then_ignore(just(Token::Ctrl(';'))),
 		if_,
 		function,
-		import,
+		import.then_ignore(just(Token::Ctrl(';'))),
 		block.map(|(x, span)| (Node::Block(x), span)),
 	)));
 	

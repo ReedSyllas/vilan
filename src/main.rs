@@ -28,7 +28,7 @@ fn main() {
 			.into_output_errors();
 		
 		if let Some((root, _file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-			println!("{root:#?}");
+			println!("{root:?}");
 			
 			let program = analyze(&root);
 			

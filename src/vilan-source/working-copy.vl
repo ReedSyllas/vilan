@@ -1,12 +1,11 @@
 
 fun main() {
-	foo(500);
+	let x = 500;
+	let y = x * x * x;
+	let z = y + 5;
+	sq(z);
 }
 
-fun foo(a) {
-	bar(a);
-}
-
-fun bar(a) {
-	a;
+fun sq(a) {
+	ret a * a;
 }

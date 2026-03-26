@@ -35,8 +35,8 @@ impl<'src> Transformer<'src> {
 			span: Span::new((), 0..0),
 		})?;
 		
-		let body = self.block(entry).iter().map(|x| js::format(&x)).collect::<Vec<_>>().join("");
-		let functions = self.required_functions.values().map(|x| js::format(x)).collect::<Vec<_>>().join("");
+		let body = self.block(entry).iter().map(|x| js::format(&x, ";")).collect::<Vec<_>>().join("");
+		let functions = self.required_functions.values().map(|x| js::format(x, ";")).collect::<Vec<_>>().join("");
 		
 		Ok(format!("{}{}", functions, body))
 	}
@@ -72,6 +72,17 @@ impl<'src> Transformer<'src> {
 					_ => unreachable!(),
 				}
 			},
+			Entity::FunctionReturn(value) => js::Node::Return(Box::new(self.entity(value).unwrap_or(js::Node::Void))),
+			Entity::Binary(op, lhs, rhs) => js::Node::Binary(op.clone(), Box::new(self.entity(lhs).unwrap_or(js::Node::Void)), Box::new(self.entity(rhs).unwrap_or(js::Node::Void))),
+			Entity::Variable(id) => {
+				let name = self.ng.name_for(*id);
+				let variable = self.program.get_variable(id).unwrap();
+				let value = self.entity(&variable.value).unwrap_or(js::Node::Void);
+				js::Node::Variable(js::Variable {
+					name,
+					value: Box::new(value),
+				})
+			}
 		})
 	}
 	
@@ -84,15 +95,18 @@ impl<'src> Transformer<'src> {
 }
 
 pub mod js {
-	use crate::shared::Value;
+	use crate::shared::{BinaryOp, Value};
 	
 	#[derive(Clone, Debug)]
 	pub enum Node<'src> {
-		Value(Value<'src>),
+		Binary(BinaryOp, Box<Node<'src>>, Box<Node<'src>>),
+		Call(Box<Node<'src>>, Vec<Node<'src>>),
 		Function(Function<'src>),
 		Local(String),
-		Call(Box<Node<'src>>, Vec<Node<'src>>),
 		Return(Box<Node<'src>>),
+		Value(Value<'src>),
+		Variable(Variable<'src>),
+		Void,
 	}
 	
 	#[derive(Clone, Debug)]
@@ -107,21 +121,46 @@ pub mod js {
 		pub name: String,
 	}
 	
-	pub fn format(node: &Node) -> String {
+	#[derive(Clone, Debug)]
+	pub struct Variable<'src> {
+		pub name: String,
+		pub value: Box<Node<'src>>,
+	}
+	
+	pub fn format(node: &Node, terminator: &'static str) -> String {
 		match node {
-			Node::Value(x) => x.to_string(),
+			Node::Void => "".to_string(),
+			Node::Value(x) => format!("{}{}", x.to_string(), terminator),
 			Node::Function(function) => {
 				let name = function.name.clone();
 				let parameters = function.parameters.iter().map(|x| x.name.clone()).collect::<Vec<_>>().join(",");
-				let body = function.body.iter().map(|x| format(x)).collect::<Vec<_>>().join("");
+				let body = function.body.iter().map(|x| format(x, ";")).collect::<Vec<_>>().join("");
 				format!("function {}({}){{{}}}", name, parameters, body)
 			}
-			Node::Local(name) => name.to_string(),
-			Node::Return(value) => format!("return {};", format(value)),
+			Node::Local(name) => format!("{}{}", name, terminator),
+			Node::Return(value) => match &**value {
+				Node::Void => format!("return{}", terminator),
+				x => format!("return {}{}", format(x, ""), terminator),
+			},
 			Node::Call(subject, args) => {
-				let s_subject = format(subject);
-				let s_args = args.iter().map(|x| format(x)).collect::<Vec<_>>().join(",");
-				format!("{}({})", s_subject, s_args)
+				let s_subject = format(subject, "");
+				let s_args = args.iter().map(|x| format(x, "")).collect::<Vec<_>>().join(",");
+				format!("{}({}){}", s_subject, s_args, terminator)
+			}
+			Node::Binary(op, lhs, rhs) => {
+				let s_op = match op {
+					BinaryOp::Add => "+",
+					BinaryOp::Sub => "+",
+					BinaryOp::Mul => "*",
+					BinaryOp::Div => "/",
+					BinaryOp::Eq => "===",
+					BinaryOp::NotEq => "!==",
+				};
+				format!("{}{}{}{}", format(lhs, ""), s_op, format(rhs, ""), terminator)
+			}
+			Node::Variable(variable) => {
+				let value = format(&variable.value, "");
+				format!("const {}={}{}", variable.name, value, terminator)
 			}
 		}
 	}
