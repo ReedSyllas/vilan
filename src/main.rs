@@ -1,4 +1,3 @@
-mod interpreter;
 mod lexer;
 mod parser;
 mod shared;
@@ -9,7 +8,7 @@ use ariadne::{sources, Color, Label, Report, ReportKind};
 use chumsky::prelude::*;
 use std::{env, fs, path::Path};
 
-use crate::{analyzer::analyze, interpreter::interpret, lexer::lexer, parser::parser, transformer::transform};
+use crate::{analyzer::analyze, lexer::lexer, parser::parser, transformer::transform};
 
 fn main() {
 	let filename = env::args().nth(1).expect("Expected file argument");
@@ -29,7 +28,7 @@ fn main() {
 			.into_output_errors();
 		
 		if let Some((root, _file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-			// println!("{root:#?}");
+			println!("{root:#?}");
 			
 			let program = analyze(&root);
 			

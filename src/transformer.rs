@@ -1,19 +1,17 @@
-use std::{collections::{HashMap, HashSet}, slice::SliceIndex};
 
-use chumsky::{input::Input, span::Span};
+use std::collections::{HashMap};
+use chumsky::span::Span;
 
-use crate::{analyzer::{Entity, EntityId, Function, Program, Scope}, shared::Error};
+use crate::{analyzer::{Entity, EntityId, Function, Program}, shared::Error};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
-	let mut transformer = Transformer::new(program, true);
-	transformer.entry()
+	Transformer::new(program, true).entry()
 }
 
 struct Transformer<'src> {
 	program: &'src Program<'src>,
 	ng: NameGenerator,
-	global_header: String,
-	required_functions: HashSet<EntityId>,
+	required_functions: HashMap<EntityId, js::Node<'src>>,
 	fmt_line_break: &'static str,
 	fmt_indentation: &'static str,
 	fmt_space: &'static str,
@@ -24,16 +22,11 @@ impl<'src> Transformer<'src> {
 		Self {
 			program,
 			ng: NameGenerator::new("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"),
-			global_header: String::new(),
-			required_functions: HashSet::new(),
+			required_functions: HashMap::new(),
 			fmt_line_break: if should_pretty_print { "\n" } else { "" },
 			fmt_indentation: if should_pretty_print { "\t" } else { "" },
 			fmt_space: if should_pretty_print { " " } else { "" },
 		}
-	}
-	
-	fn ind(&self, depth: usize) -> String {
-		self.fmt_indentation.repeat(depth)
 	}
 	
 	fn entry(&mut self) -> Result<String, Error> {
@@ -41,51 +34,95 @@ impl<'src> Transformer<'src> {
 			msg: "Cannot execute program without a main function".to_string(),
 			span: Span::new((), 0..0),
 		})?;
-		let body = self.entity(entry, ";", 0).unwrap_or_else(|| String::new());
-		let head = self.global_header.as_str();
-		Ok(self.fmt_line_break.to_string() + head + self.fmt_line_break.repeat(2).as_str() + body.as_str() + self.fmt_line_break)
+		
+		let body = self.block(entry).iter().map(|x| js::format(&x)).collect::<Vec<_>>().join("");
+		let functions = self.required_functions.values().map(|x| js::format(x)).collect::<Vec<_>>().join("");
+		
+		Ok(format!("{}{}", functions, body))
 	}
 	
-	fn entity(&mut self, entity: &Entity<'src>, terminator: &'static str, depth: usize) -> Option<String> {
+	fn block(&mut self, block: &Vec<Entity<'src>>) -> Vec<js::Node<'src>> {
+		block.iter().filter_map(|x| self.entity(x)).collect::<Vec<_>>()
+	}
+	
+	fn entity(&mut self, entity: &Entity<'src>) -> Option<js::Node<'src>> {
 		Some(match entity {
 			Entity::Error => unreachable!(),
-			Entity::Value(val) => val.clone().to_string() + terminator,
+			Entity::Value(x) => js::Node::Value(x.clone()),
 			Entity::Function(id) => {
 				let function = self.program.get_function(id).unwrap();
-				self.function(function, terminator, depth)
-			}
+				self.function(function)
+			},
 			Entity::Local(id) => {
-				let variable = self.program.get_variable(id).unwrap();
-				self.ind(depth) + format!("{}", self.ng.name_for(*id)).as_str() + terminator
-			}
+				js::Node::Local(self.ng.name_for(*id))
+			},
 			Entity::Call(subject, args) => {
 				match &**subject {
 					Entity::Local(id) => {
-						if !self.required_functions.contains(id) {
-							self.required_functions.insert(*id);
-							let function = self.program.get_function(id).unwrap();
-							let function_string = self.function(function, terminator, 0);
-							self.global_header += function_string.as_str();
+						if !self.required_functions.contains_key(id) {
+							if let Some(function) = self.program.get_function(id) {
+								let js_function = self.function(function);
+								self.required_functions.insert(*id, js_function);
+							}
 						}
-						let args_string = args.iter().filter_map(|arg| self.entity(arg, "", depth)).collect::<Vec<_>>().join(",");
-						self.ind(depth) + format!("{}({})", self.ng.name_for(*id), args_string).as_str() + terminator
+						let subject = self.ng.name_for(*id);
+						let args = args.iter().filter_map(|arg| self.entity(arg)).collect::<Vec<_>>();
+						js::Node::Call(Box::new(js::Node::Local(subject)), args)
 					}
 					_ => unreachable!(),
 				}
-			}
-			Entity::Seq(children) => {
-				children.iter().filter_map(|child| self.entity(child, terminator, depth)).collect::<Vec<_>>().join(self.fmt_line_break)
-			}
+			},
 		})
 	}
 	
-	fn function(&mut self, function: &Function<'src>, terminator: &'static str, depth: usize) -> String {
+	fn function(&mut self, function: &Function<'src>) -> js::Node<'src> {
 		let name = self.ng.name_for(function.id);
-		let parameters_string = function.parameters.iter().map(|parameter| self.ng.name_for(parameter.id)).collect::<Vec<_>>().join(",");
-		let body_string = self.entity(&function.body, ";", depth + 1).unwrap_or_else(|| String::new());
-		self.ind(depth) + format!("function {}({}){}{{{}{}{}}}", name, parameters_string, self.fmt_space, self.fmt_line_break, body_string, self.fmt_line_break).as_str() + match terminator {
-			";" => "",
-			x => x,
+		let parameters = function.parameters.iter().map(|parameter| js::Parameter { name: self.ng.name_for(parameter.id) }).collect::<Vec<_>>();
+		let body = self.block(&function.body);
+		js::Node::Function(js::Function { name, parameters, body })
+	}
+}
+
+pub mod js {
+	use crate::shared::Value;
+	
+	#[derive(Clone, Debug)]
+	pub enum Node<'src> {
+		Value(Value<'src>),
+		Function(Function<'src>),
+		Local(String),
+		Call(Box<Node<'src>>, Vec<Node<'src>>),
+		Return(Box<Node<'src>>),
+	}
+	
+	#[derive(Clone, Debug)]
+	pub struct Function<'src> {
+		pub name: String,
+		pub parameters: Vec<Parameter>,
+		pub body: Vec<Node<'src>>,
+	}
+	
+	#[derive(Clone, Debug)]
+	pub struct Parameter {
+		pub name: String,
+	}
+	
+	pub fn format(node: &Node) -> String {
+		match node {
+			Node::Value(x) => x.to_string(),
+			Node::Function(function) => {
+				let name = function.name.clone();
+				let parameters = function.parameters.iter().map(|x| x.name.clone()).collect::<Vec<_>>().join(",");
+				let body = function.body.iter().map(|x| format(x)).collect::<Vec<_>>().join("");
+				format!("function {}({}){{{}}}", name, parameters, body)
+			}
+			Node::Local(name) => name.to_string(),
+			Node::Return(value) => format!("return {};", format(value)),
+			Node::Call(subject, args) => {
+				let s_subject = format(subject);
+				let s_args = args.iter().map(|x| format(x)).collect::<Vec<_>>().join(",");
+				format!("{}({})", s_subject, s_args)
+			}
 		}
 	}
 }

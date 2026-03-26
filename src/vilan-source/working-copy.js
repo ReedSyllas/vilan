@@ -1,5 +1,1 @@
-function a(b) {
-	b;
-}
-
-a(100);
+function a(b){c(b)}function c(d){d}a(500)

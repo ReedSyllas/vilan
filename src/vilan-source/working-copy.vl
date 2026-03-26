@@ -1,8 +1,12 @@
 
 fun main() {
-	foo(100)
+	foo(500);
 }
 
 fun foo(a) {
-	a
+	bar(a);
+}
+
+fun bar(a) {
+	a;
 }
