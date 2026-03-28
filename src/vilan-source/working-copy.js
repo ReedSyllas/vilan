@@ -1,1 +1,1 @@
-function d(e){return e*e;}const a=500;const b=a*a*a;const c=b+5;d(c);
+function d(e){return e*e;}const a=500;const b=a*a*a;const c=b+5;console.log(d(c));

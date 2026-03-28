@@ -59,15 +59,25 @@ impl<'src> Transformer<'src> {
 			Entity::Call(subject, args) => {
 				match &**subject {
 					Entity::Local(id) => {
-						if !self.required_functions.contains_key(id) {
-							if let Some(function) = self.program.get_function(id) {
-								let js_function = self.function(function);
-								self.required_functions.insert(*id, js_function);
-							}
-						}
-						let subject = self.ng.name_for(*id);
 						let args = args.iter().filter_map(|arg| self.entity(arg)).collect::<Vec<_>>();
-						js::Node::Call(Box::new(js::Node::Local(subject)), args)
+						if self.program.is_print_fn_id(*id) {
+							js::Node::Call(
+								Box::new(js::Node::Property(
+									Box::new(js::Node::Local("console".to_string())),
+									"log".to_string(),
+								)),
+								args,
+							)
+						} else {
+							if !self.required_functions.contains_key(id) {
+								if let Some(function) = self.program.get_function(id) {
+									let js_function = self.function(function);
+									self.required_functions.insert(*id, js_function);
+								}
+							}
+							let subject = self.ng.name_for(*id);
+							js::Node::Call(Box::new(js::Node::Local(subject)), args)
+						}
 					}
 					_ => unreachable!(),
 				}
@@ -99,11 +109,12 @@ pub mod js {
 	
 	#[derive(Clone, Debug)]
 	pub enum Node<'src> {
-		Binary(BinaryOp, Box<Node<'src>>, Box<Node<'src>>),
-		Call(Box<Node<'src>>, Vec<Node<'src>>),
+		Binary(BinaryOp, Box<Self>, Box<Self>),
+		Call(Box<Self>, Vec<Self>),
 		Function(Function<'src>),
 		Local(String),
-		Return(Box<Node<'src>>),
+		Property(Box<Self>, String),
+		Return(Box<Self>),
 		Value(Value<'src>),
 		Variable(Variable<'src>),
 		Void,
@@ -161,6 +172,10 @@ pub mod js {
 			Node::Variable(variable) => {
 				let value = format(&variable.value, "");
 				format!("const {}={}{}", variable.name, value, terminator)
+			}
+			Node::Property(subject, member) => {
+				let s_subject = format(subject, "");
+				format!("{}.{}{}", s_subject, member, terminator)
 			}
 		}
 	}

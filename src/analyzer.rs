@@ -25,6 +25,10 @@ impl<'src> Program<'src> {
 	pub fn get_variable(&self, id: &EntityId) -> Option<&Variable<'src>> {
 		self.context.variables.get(id)
 	}
+	
+	pub fn is_print_fn_id(&self, id: EntityId) -> bool {
+		self.context.print_fn_id == id
+	}
 }
 
 #[derive(Debug)]
@@ -33,15 +37,17 @@ struct ProgramContext<'src> {
 	spans: HashMap<EntityId, Span>,
 	functions: HashMap<EntityId, Function<'src>>,
 	variables: HashMap<EntityId, Variable<'src>>,
+	print_fn_id: EntityId,
 }
 
 impl<'src> ProgramContext<'src> {
 	fn new() -> Self {
 		Self {
-			next_id: 0,
+			next_id: 1,
 			spans: HashMap::new(),
 			functions: HashMap::new(),
 			variables: HashMap::new(),
+			print_fn_id: EntityId(0),
 		}
 	}
 	
@@ -110,6 +116,7 @@ impl<'src> Analyzer<'src> {
 		let mut root_scope = Scope {
 			declarations: HashMap::new(),
 		};
+		root_scope.declarations.insert("print", self.context.print_fn_id);
 		let root = self.block(block, &mut root_scope);
 		Program {
 			root,
