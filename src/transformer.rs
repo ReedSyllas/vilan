@@ -2,7 +2,7 @@
 use std::collections::{HashMap};
 use chumsky::span::Span;
 
-use crate::{analyzer::{Entity, EntityId, Function, Program}, shared::Error};
+use crate::{analyzer::{Entity, Id, Function, Program}, shared::Error};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
 	Transformer::new(program, true).entry()
@@ -11,7 +11,7 @@ pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
 struct Transformer<'src> {
 	program: &'src Program<'src>,
 	ng: NameGenerator,
-	required_functions: HashMap<EntityId, js::Node<'src>>,
+	required_functions: HashMap<Id, js::Node<'src>>,
 	fmt_line_break: &'static str,
 	fmt_indentation: &'static str,
 	fmt_space: &'static str,
@@ -184,7 +184,7 @@ pub mod js {
 struct NameGenerator {
 	chars: Vec<char>,
 	counter: u64,
-	names: HashMap<EntityId, String>,
+	names: HashMap<Id, String>,
 }
 
 impl NameGenerator {
@@ -196,7 +196,7 @@ impl NameGenerator {
 		}
 	}
 	
-	pub fn name_for(&mut self, id: EntityId) -> String {
+	pub fn name_for(&mut self, id: Id) -> String {
 		self.names
 		.get(&id)
 		.map(|x| x.clone())

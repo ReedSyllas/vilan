@@ -1,13 +1,5 @@
 
-struct Vec2(f32, f32);
-
 fun main() {
-	let x = 500;
-	let y = x * x * x;
-	let z = y + 5;
-	print(sq(z));
-}
-
-fun sq(a) {
-	ret a * a;
+	let a = 100;
+	print(a);
 }

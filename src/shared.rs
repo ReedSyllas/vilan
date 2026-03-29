@@ -27,7 +27,7 @@ pub enum Value<'src> {
 	Str(&'src str),
 	List(Vec<Self>),
 	Func(&'src str),
-	Interupt(Box<Self>),
+	Interrupt(Box<Self>),
 }
 
 impl Value<'_> {
@@ -59,7 +59,26 @@ impl std::fmt::Display for Value<'_> {
 					.join(", ")
 			),
 			Self::Func(name) => write!(f, "<function: {name}>"),
-			Self::Interupt(x) => write!(f, "{x}"),
+			Self::Interrupt(x) => write!(f, "{x}"),
 		}
 	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Type {
+	Void,
+	Unknown,
+	Interrupt,
+	Primitive(PrimitiveType),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimitiveType {
+	I32,
+	U32,
+	F64,
+	Bool,
+	Null,
+	String,
+	List(Box<Type>),
 }

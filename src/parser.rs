@@ -3,26 +3,24 @@ use chumsky::{input::ValueInput, prelude::*};
 
 use crate::{lexer::Token, shared::{BinaryOp, Span, Spanned, Value}};
 
-pub type NodeBlock<'src> = Vec<Spanned<Node<'src>>>;
-
 #[derive(Debug)]
 pub struct Func<'src> {
 	pub name: Spanned<&'src str>,
 	pub parameters: Spanned<Vec<(&'src str, Option<&'src str>)>>,
-	pub body: Spanned<NodeBlock<'src>>,
+	pub body: Spanned<NodeList<'src>>,
 }
 
 #[derive(Debug)]
 pub struct If<'src> {
 	pub condition: Box<Spanned<Node<'src>>>,
-	pub then: Spanned<NodeBlock<'src>>,
+	pub then: Spanned<NodeList<'src>>,
 	pub else_: Option<Spanned<IfElseBranch<'src>>>,
 }
 
 #[derive(Debug)]
 pub enum IfElseBranch<'src> {
 	If(Box<If<'src>>),
-	Else(NodeBlock<'src>),
+	Else(NodeList<'src>),
 }
 
 #[derive(Debug)]
@@ -31,23 +29,25 @@ pub enum ImportBranch<'src> {
 	Set(Vec<Self>),
 }
 
+pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
+
 #[derive(Debug)]
 pub enum Node<'src> {
 	Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
-	Block(NodeBlock<'src>),
-	Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
+	Block(Spanned<NodeList<'src>>),
+	Call(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
 	Error,
 	Func(Func<'src>),
 	FuncReturn(Box<Spanned<Self>>),
 	If(If<'src>),
 	Import(ImportBranch<'src>),
 	Let(&'src str, Box<Spanned<Self>>),
-	List(Vec<Spanned<Self>>),
+	List(NodeList<'src>),
 	Local(&'src str),
 	Value(Value<'src>),
 }
 
-pub fn parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<NodeBlock<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
+pub fn parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<NodeList<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
 where
 	I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
@@ -111,21 +111,6 @@ where
 					.map(|x| ImportBranch::Set(x))
 				)
 			})
-			// ident
-			// .map(|a| ImportBranch::Path(a, None))
-			// .foldl_with(
-			// 	just(Token::Op("::"))
-			// 		.ignore_then(choice((
-			// 			ident.map(|x| vec![ x ]),
-			// 			ident
-			// 				.separated_by(just(Token::Ctrl(',')))
-			// 				.allow_trailing()
-			// 				.collect::<Vec<_>>()
-			// 				.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}'))),
-			// 		)))
-			// 		.repeated(),
-			// 	|a, b, _| ImportPath(b, Some(Box::new(a)))
-			// )
 		)
 		.map_with(|import_path, e| (Node::Import(import_path), e.span()))
 		.boxed();
@@ -207,9 +192,8 @@ where
 	
 	let list =
 		items.clone()
-		.map(Node::List)
 		.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
-		.map_with(|x, e| (x, e.span()));
+		.map_with(|x, e| (Node::List(x), e.span()));
 	
 	// 'Atoms' are expressions that contain no ambiguity
 	let atom =
@@ -218,7 +202,7 @@ where
 			local,
 			list,
 			if_.clone(),
-			block.clone().map(|(x, span)| (Node::Block(x), span)),
+			block.clone().map(|(x, span)| (Node::Block((x, span)), span)),
 		))
 		// Atoms can also just be normal expressions, but surrounded with parentheses
 		.or(
@@ -300,7 +284,7 @@ where
 		if_,
 		function,
 		import.then_ignore(just(Token::Ctrl(';'))),
-		block.map(|(x, span)| (Node::Block(x), span)),
+		block.map(|(x, span)| (Node::Block((x, span)), span)),
 	)));
 	
 	statement.clone()

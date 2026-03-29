@@ -1,196 +1,245 @@
 
-use std::{collections::HashMap};
+use std::{collections::HashMap, hash::Hash};
 
-use crate::{parser::{Node, NodeBlock}, shared::{BinaryOp, Span, Spanned, Value}};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct EntityId(u32);
-
-#[derive(Debug)]
-pub struct Program<'src> {
-	pub root: Vec<Entity<'src>>,
-	pub root_scope: Scope<'src>,
-	context: ProgramContext<'src>,
-}
-
-impl<'src> Program<'src> {
-	pub fn get_main_entry(&self) -> Option<&Vec<Entity<'src>>> {
-		self.context.functions.values().find(|x| x.name == "main").map(|x| &x.body)
-	}
-	
-	pub fn get_function(&self, id: &EntityId) -> Option<&Function<'src>> {
-		self.context.functions.get(id)
-	}
-	
-	pub fn get_variable(&self, id: &EntityId) -> Option<&Variable<'src>> {
-		self.context.variables.get(id)
-	}
-	
-	pub fn is_print_fn_id(&self, id: EntityId) -> bool {
-		self.context.print_fn_id == id
-	}
-}
-
-#[derive(Debug)]
-struct ProgramContext<'src> {
-	next_id: u32,
-	spans: HashMap<EntityId, Span>,
-	functions: HashMap<EntityId, Function<'src>>,
-	variables: HashMap<EntityId, Variable<'src>>,
-	print_fn_id: EntityId,
-}
-
-impl<'src> ProgramContext<'src> {
-	fn new() -> Self {
-		Self {
-			next_id: 1,
-			spans: HashMap::new(),
-			functions: HashMap::new(),
-			variables: HashMap::new(),
-			print_fn_id: EntityId(0),
-		}
-	}
-	
-	pub fn get_next_id(&mut self) -> EntityId {
-		let id = self.next_id;
-		self.next_id += 1;
-		EntityId(id)
-	}
-}
-
-#[derive(Debug)]
-pub struct Scope<'src> {
-	pub declarations: HashMap<&'src str, EntityId>,
-}
+use crate::{parser::{Node, NodeList}, shared::{BinaryOp, PrimitiveType, Span, Spanned, Type, Value}};
 
 #[derive(Clone, Debug)]
 pub enum Entity<'src> {
-	Binary(BinaryOp, Box<Self>, Box<Self>),
-	Call(Box<Self>, Vec<Self>),
+	Binary(BinaryOp, Id, Id),
+	If(Id, Vec<Id>, Option<Vec<Id>>),
+	Call(Id, Vec<Id>),
 	Error,
-	Function(EntityId),
-	FunctionReturn(Box<Self>),
-	Local(EntityId),
-	Variable(EntityId),
+	Function(Vec<Id>),
+	FunctionReturn(Id),
+	Local(Id),
+	Variable(Id),
 	Value(Value<'src>),
+	List(Vec<Id>),
+	Block(Vec<Id>),
 }
 
 #[derive(Debug)]
 pub struct Function<'src> {
-	pub id: EntityId,
+	pub id: Id,
 	pub name: &'src str,
 	pub parameters: Vec<Parameter<'src>>,
-	pub body: Vec<Entity<'src>>,
-	pub body_scope: Scope<'src>,
+	pub body: (Vec<Id>, usize),
 	pub call_count: u32,
 }
 
 #[derive(Debug)]
 pub struct Parameter<'src> {
-	pub id: EntityId,
+	pub id: Id,
 	pub name: &'src str,
 	// TODO: Add type support
-	// type_: ,
 }
 
 #[derive(Debug)]
 pub struct Variable<'src> {
-	pub id: EntityId,
+	pub id: Id,
 	pub name: &'src str,
-	pub value: Entity<'src>,
+	pub value: Id,
+	// pub mutable: bool,
+	// TODO: Add type support
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Id(u32);
+
+#[derive(Debug)]
+pub struct Scope<'src> {
+	pub name_id_map: HashMap<&'src str, Id>,
+}
+
+impl<'src> Scope<'src> {
+	fn create_child(&self) -> Scope<'src> {
+		Scope {
+			name_id_map: self.name_id_map.clone()
+		}
+	}
 }
 
 #[derive(Debug)]
 pub struct Analyzer<'src> {
-	context: ProgramContext<'src>,
+	span_map: HashMap<Id, &'src Span>,
+	entity_map: HashMap<Id, Entity<'src>>,
+	scope_map: HashMap<Id, usize>,
+	scopes: Vec<Scope<'src>>,
+	next_id: u32,
+	reference_count: HashMap<Id, u32>,
+	locals: Vec<(Id, &'src str)>,
 }
 
 impl<'src> Analyzer<'src> {
 	fn new() -> Self {
 		Self {
-			context: ProgramContext::new(),
+			span_map: HashMap::new(),
+			entity_map: HashMap::new(),
+			scope_map: HashMap::new(),
+			scopes: Vec::new(),
+			next_id: 0,
+			reference_count: HashMap::new(),
+			locals: Vec::new(),
 		}
 	}
 	
-	fn file(mut self, block: &Spanned<NodeBlock<'src>>) -> Program<'src> {
-		let mut root_scope = Scope {
-			declarations: HashMap::new(),
+	fn get_next_id(&mut self) -> Id {
+		let id = self.next_id;
+		self.next_id += 1;
+		Id(id)
+	}
+	
+	fn get_entity_by_id(&self, id: Id) -> &Entity<'src> {
+		self.entity_map.get(&id).expect("failed to get entity for id")
+	}
+	
+	fn get_scope_for_node(&mut self, id: Id) -> &mut Scope<'src> {
+		self.scope_map.get(&id).map(|idx| *idx).map(|idx| self.get_scope_by_idx(idx)).expect("failed to get scope for node")
+	}
+	
+	fn get_scope_by_idx(&mut self, idx: usize) -> &mut Scope<'src> {
+		self.scopes.get_mut(idx).expect("failed to get scope for idx")
+	}
+	
+	fn push_scope(&mut self, scope: Scope<'src>) -> usize {
+		self.scopes.push(scope);
+		self.scopes.len() - 1
+	}
+	
+	fn walk_list(&mut self, list: &'src NodeList<'src>, scope_idx: usize) -> Vec<Id> {
+		list.iter().map(|child| self.walk_node(child, scope_idx)).collect::<Vec<_>>()
+	}
+	
+	fn walk_node(&mut self, node: &'src Spanned<Node<'src>>, scope_idx: usize) -> Id {
+		let id = self.get_next_id();
+		
+		let entity = match &node.0 {
+			Node::Local(name) => {
+				self.locals.push((id, name));
+				None
+			},
+			Node::Import(_) => None,
+			Node::Error => Some(Entity::Error),
+			Node::Value(x) => Some(Entity::Value(x.clone())),
+			Node::List(items) => {
+				let ids = self.walk_list(items, scope_idx);
+				Some(Entity::List(ids))
+			}
+			Node::Block(children) => {
+				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
+				let body_scope_idx = self.push_scope(body_scope);
+				let ids = self.walk_list(&children.0, body_scope_idx);
+				Some(Entity::Block(ids))
+			}
+			Node::If(if_) => {
+				let condition_id = self.walk_node(&if_.condition, scope_idx);
+				let then_ids = self.walk_list(&if_.then.0, scope_idx);
+				Some(Entity::If(condition_id, then_ids, None))
+			}
+			Node::Func(function) => {
+				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
+				let body_scope_idx = self.push_scope(body_scope);
+				let ids = self.walk_list(&function.body.0, body_scope_idx);
+				Some(Entity::Function(ids))
+			}
+			Node::Call(subject, arguments) => {
+				let subject_id = self.walk_node(subject, scope_idx);
+				let argument_ids = self.walk_list(&arguments.0, scope_idx);
+				Some(Entity::Call(subject_id, argument_ids))
+			}
+			Node::FuncReturn(value) => {
+				let id = self.walk_node(value, scope_idx);
+				Some(Entity::FunctionReturn(id))
+			}
+			Node::Binary(op, lhs, rhs) => {
+				let lhs_id = self.walk_node(lhs, scope_idx);
+				let rhs_id = self.walk_node(rhs, scope_idx);
+				Some(Entity::Binary(op.clone(), lhs_id, rhs_id))
+			}
+			Node::Let(name, value) => {
+				let scope = self.get_scope_by_idx(scope_idx);
+				scope.name_id_map.insert(name, id);
+				let value_id = self.walk_node(value, scope_idx);
+				Some(Entity::Variable(value_id))
+			}
 		};
-		root_scope.declarations.insert("print", self.context.print_fn_id);
-		let root = self.block(block, &mut root_scope);
-		Program {
-			root,
-			root_scope,
-			context: self.context,
-		}
-	}
-	
-	fn block(&mut self, block: &Spanned<NodeBlock<'src>>, scope: &mut Scope<'src>) -> Vec<Entity<'src>> {
-		for child in block.0.iter() {
-			self.node_discovery(&child, scope);
+		
+		if let Some(entity) = entity {
+			self.entity_map.insert(id, entity);
 		}
 		
-		block.0.iter().map(|child| self.node(child, scope)).collect::<Vec<_>>()
+		self.span_map.insert(id, &node.1);
+		self.scope_map.insert(id, scope_idx);
+		
+		id
 	}
 	
-	fn node(&mut self, node: &Spanned<Node<'src>>, scope: &mut Scope<'src>) -> Entity<'src> {
-		match &node.0 {
-			Node::Value(x) => Entity::Value(x.clone()),
-			Node::Func(func) => {
-				let name = func.name.0;
-				let mut body_scope = Scope {
-					declarations: scope.declarations.clone(),
-				};
-				let parameters = func.parameters.0.iter().map(|(name, _type)| Parameter { id: self.context.get_next_id(), name }).collect::<Vec<_>>();
-				for parameter in parameters.iter() {
-					body_scope.declarations.insert(parameter.name, parameter.id);
-					let variable = Variable { id: parameter.id, name: parameter.name, value: Entity::Value(Value::Null) };
-					self.context.variables.insert(parameter.id, variable);
-				}
-				let body = self.block(&func.body, &mut body_scope);
-				let id = scope.declarations.get(name).expect("cannot find id for function '{name}'").clone();
-				let function = Function { id, name, parameters, body_scope, body, call_count: 0 };
-				self.context.functions.insert(id, function);
-				Entity::Function(id)
-			},
-			Node::Call(subject, args) => Entity::Call(
-				Box::new(self.node(subject, scope)),
-				args.0.iter().map(|x| self.node(x, scope)).collect(),
-			),
-			Node::Local(name) => {
-				let local_id = scope.declarations.get(*name).map(|x| *x);
-				Entity::Local(local_id.expect(format!("cannot find '{}'", name).as_str()))
-			},
-			Node::FuncReturn(value) => Entity::FunctionReturn(Box::new(self.node(value, scope))),
-			Node::Binary(op, lhs, rhs) => Entity::Binary(op.clone(), Box::new(self.node(lhs, scope)), Box::new(self.node(rhs, scope))),
-			Node::Let(name, value) => {
-				let id = self.context.get_next_id();
-				let e_value = self.node(value, scope);
-				self.context.variables.insert(id, Variable {
-					id,
-					name,
-					value: e_value,
-				});
-				scope.declarations.insert(name, id);
-				Entity::Variable(id)
-			}
-			x => unimplemented!("{x:?}"),
+	fn compute_node_type(&self, id: Id) -> Type {
+		match self.get_entity_by_id(id) {
+			Entity::Value(value) => self.compute_value_type(value),
+			_ => Type::Void,
 		}
 	}
 	
-	fn node_discovery(&mut self, node: &Spanned<Node<'src>>, scope: &mut Scope<'src>) {
-		match &node.0 {
-			Node::Func(func) => {
-				let id = self.context.get_next_id();
-				self.context.spans.insert(id, node.1);
-				let name = func.name.0;
-				scope.declarations.insert(name, id);
+	fn compute_value_type(&self, value: &Value) -> Type {
+		match value {
+			Value::Bool(_) => Type::Primitive(PrimitiveType::Bool),
+			Value::Func(_) => Type::Void,
+			Value::Interrupt(_) => Type::Interrupt,
+			Value::List(_) => Type::Primitive(PrimitiveType::List(Box::new(Type::Void))),
+			Value::Null => Type::Primitive(PrimitiveType::Null),
+			Value::Num(_) => Type::Primitive(PrimitiveType::F64),
+			Value::Str(_) => Type::Primitive(PrimitiveType::String),
+		}
+	}
+	
+	fn reconcile_type<'a>(a: &'a Type, b: &'a Type) -> &'a Type {
+		match (a, b) {
+			(Type::Unknown, x) => x,
+			(x, Type::Unknown) => x,
+			(a, b) if a == b => a,
+			(a, _) => a,
+		}
+	}
+	
+	fn build(&mut self) {
+		for (id, name) in self.locals.clone() {
+			let scope = self.get_scope_for_node(id);
+			let subject_id = *scope.name_id_map.get(name).expect(format!("cannot find '{}'", name).as_ref());
+			if let Some(rc) = self.reference_count.get_mut(&subject_id) {
+				*rc += 1;
 			}
-			_ => {}
+			self.entity_map.insert(id, Entity::Local(subject_id));
 		}
 	}
 }
 
-pub fn analyze<'src>(block: &Spanned<NodeBlock<'src>>) -> Program<'src> {
-	Analyzer::new().file(block)
+#[derive(Debug)]
+pub struct Program<'src> {
+	span_map: HashMap<Id, &'src Span>,
+	entity_map: HashMap<Id, Entity<'src>>,
+	scope_map: HashMap<Id, usize>,
+	scopes: Vec<Scope<'src>>,
+	reference_count: HashMap<Id, u32>,
+	print_fn_id: Id,
+}
+
+pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
+	let mut analyzer = Analyzer::new();
+	let mut root_scope = Scope {
+		name_id_map: HashMap::new(),
+	};
+	let print_fn_id = analyzer.get_next_id();
+	root_scope.name_id_map.insert("print", print_fn_id);
+	let root_scope_idx = analyzer.push_scope(root_scope);
+	analyzer.walk_list(&nodes.0, root_scope_idx);
+	analyzer.build();
+	Program {
+		span_map: analyzer.span_map,
+		entity_map: analyzer.entity_map,
+		scope_map: analyzer.scope_map,
+		scopes: analyzer.scopes,
+		reference_count: analyzer.reference_count,
+		print_fn_id,
+	}
 }

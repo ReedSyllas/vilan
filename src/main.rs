@@ -2,13 +2,12 @@ mod lexer;
 mod parser;
 mod shared;
 mod analyzer;
-mod transformer;
 
 use ariadne::{sources, Color, Label, Report, ReportKind};
 use chumsky::prelude::*;
 use std::{env, fs, path::Path};
 
-use crate::{analyzer::analyze, lexer::lexer, parser::parser, transformer::transform};
+use crate::{analyzer::analyze, lexer::lexer, parser::parser};
 
 fn main() {
 	let filename = env::args().nth(1).expect("Expected file argument");
@@ -32,17 +31,17 @@ fn main() {
 			
 			let program = analyze(&root);
 			
-			// println!("{program:#?}");
+			println!("{program:?}");
 			
-			match transform(&program) {
-				Ok(output) => {
-					println!("Output: {output}");
-					fs::write(Path::new(&filename).with_extension("js"), output).unwrap_or_else(|_| {
-						println!("failed to write file");
-					});
-				},
-				Err(e) => errs.push(Rich::custom(e.span, e.msg)),
-			}
+			// match transform(&program) {
+			// 	Ok(output) => {
+			// 		println!("Output: {output}");
+			// 		fs::write(Path::new(&filename).with_extension("js"), output).unwrap_or_else(|_| {
+			// 			println!("failed to write file");
+			// 		});
+			// 	},
+			// 	Err(e) => errs.push(Rich::custom(e.span, e.msg)),
+			// }
 			
 			// match interpret(program) {
 			// 	Ok(val) => println!("Return value: {val}"),
