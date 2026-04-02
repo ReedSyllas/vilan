@@ -1,5 +1,5 @@
 
 fun main() {
-	let a = 100;
+	let a: f64 = 100;
 	print(a);
 }

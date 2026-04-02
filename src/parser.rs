@@ -41,10 +41,11 @@ pub enum Node<'src> {
 	FuncReturn(Box<Spanned<Self>>),
 	If(If<'src>),
 	Import(ImportBranch<'src>),
-	Let(&'src str, Box<Spanned<Self>>),
+	Let(&'src str, Option<Box<Spanned<Self>>>, Option<Box<Spanned<Self>>>),
 	List(NodeList<'src>),
 	Local(&'src str),
 	Value(Value<'src>),
+	Void,
 }
 
 pub fn parser<'tokens, 'src: 'tokens, I>() -> impl Parser<'tokens, I, Spanned<NodeList<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
@@ -67,6 +68,8 @@ where
 	
 	let mut expression = Recursive::declare();
 	
+	let mut type_ = Recursive::declare();
+	
 	// Attempt to recover anything that looks like a block but contains errors.
 	let block_recovery = via_parser(nested_delimiters(
 		Token::Ctrl('{'),
@@ -83,8 +86,16 @@ where
 		statement.clone()
 		.repeated()
 		.collect::<Vec<_>>()
+		.then(
+			expression.clone()
+			.or_not()
+		)
 		.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-		.map_with(|children, e| (Some(children), e.span()))
+		.map_with(|(mut statements, expression), e| {
+			let span: Span = e.span();
+			statements.push(expression.unwrap_or_else(|| (Node::Void, span.to_end())));
+			(Some(statements), span)
+		})
 		.recover_with(block_recovery)
 		.map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1));
 	
@@ -144,9 +155,19 @@ where
 	let let_ =
 		just(Token::Let)
 		.ignore_then(ident)
-		.then_ignore(just(Token::Op("=")))
-		.then(expression.clone())
-		.map_with(|(name, val), e| (Node::Let(name, Box::new(val)), e.span()));
+		.then(
+			just(Token::Op(":"))
+			.ignore_then(type_.clone())
+			.labelled("variable type")
+			.or_not()
+		)
+		.then(
+			just(Token::Op("="))
+			.ignore_then(expression.clone())
+			.labelled("variable value")
+			.or_not()
+		)
+		.map_with(|((name, type_), val), e| (Node::Let(name, type_.map(|x| Box::new(x)), val.map(|x| Box::new(x))), e.span()));
 	
 	let function =
 		just(Token::Fun)
@@ -286,6 +307,8 @@ where
 		import.then_ignore(just(Token::Ctrl(';'))),
 		block.map(|(x, span)| (Node::Block((x, span)), span)),
 	)));
+	
+	type_.define(local);
 	
 	statement.clone()
 		.repeated()

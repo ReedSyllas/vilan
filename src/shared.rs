@@ -9,7 +9,7 @@ pub struct Error {
 	pub msg: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum BinaryOp {
 	Add,
 	Sub,
@@ -28,19 +28,6 @@ pub enum Value<'src> {
 	List(Vec<Self>),
 	Func(&'src str),
 	Interrupt(Box<Self>),
-}
-
-impl Value<'_> {
-	pub fn num(self, span: Span) -> Result<f64, Error> {
-		if let Value::Num(x) = self {
-			Ok(x)
-		} else {
-			Err(Error {
-				span,
-				msg: format!("'{self}' is not a number"),
-			})
-		}
-	}
 }
 
 impl std::fmt::Display for Value<'_> {
@@ -70,6 +57,17 @@ pub enum Type {
 	Unknown,
 	Interrupt,
 	Primitive(PrimitiveType),
+}
+
+impl Type {
+	pub fn reconcile(self, peer: Type) -> Type {
+		match (self, peer) {
+			(Type::Unknown, x) => x,
+			(x, Type::Unknown) => x,
+			(a, b) if a == b => a,
+			(a, _) => a,
+		}
+	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -12,10 +12,10 @@ pub enum Entity<'src> {
 	Function(Vec<Id>),
 	FunctionReturn(Id),
 	Local(Id),
-	Variable(Id),
 	Value(Value<'src>),
 	List(Vec<Id>),
 	Block(Vec<Id>),
+	Void,
 }
 
 #[derive(Debug)]
@@ -38,13 +38,19 @@ pub struct Parameter<'src> {
 pub struct Variable<'src> {
 	pub id: Id,
 	pub name: &'src str,
-	pub value: Id,
+	pub initial: Option<Id>,
+	pub type_: Type,
 	// pub mutable: bool,
-	// TODO: Add type support
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(u32);
+
+impl std::fmt::Debug for Id {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "Id({})", self.0)
+	}
+}
 
 #[derive(Debug)]
 pub struct Scope<'src> {
@@ -61,25 +67,29 @@ impl<'src> Scope<'src> {
 
 #[derive(Debug)]
 pub struct Analyzer<'src> {
-	span_map: HashMap<Id, &'src Span>,
+	assignment_values: HashMap<Id, Vec<Id>>,
 	entity_map: HashMap<Id, Entity<'src>>,
-	scope_map: HashMap<Id, usize>,
-	scopes: Vec<Scope<'src>>,
+	locals: Vec<(Id, &'src str)>,
 	next_id: u32,
 	reference_count: HashMap<Id, u32>,
-	locals: Vec<(Id, &'src str)>,
+	scope_map: HashMap<Id, usize>,
+	scopes: Vec<Scope<'src>>,
+	span_map: HashMap<Id, &'src Span>,
+	variables: HashMap<Id, Variable<'src>>,
 }
 
 impl<'src> Analyzer<'src> {
 	fn new() -> Self {
 		Self {
-			span_map: HashMap::new(),
+			assignment_values: HashMap::new(),
 			entity_map: HashMap::new(),
-			scope_map: HashMap::new(),
-			scopes: Vec::new(),
+			locals: Vec::new(),
 			next_id: 0,
 			reference_count: HashMap::new(),
-			locals: Vec::new(),
+			scope_map: HashMap::new(),
+			scopes: Vec::new(),
+			span_map: HashMap::new(),
+			variables: HashMap::new(),
 		}
 	}
 	
@@ -114,54 +124,63 @@ impl<'src> Analyzer<'src> {
 		let id = self.get_next_id();
 		
 		let entity = match &node.0 {
+			Node::Error => Some(Entity::Error),
+			Node::Void => Some(Entity::Void),
 			Node::Local(name) => {
 				self.locals.push((id, name));
 				None
 			},
 			Node::Import(_) => None,
-			Node::Error => Some(Entity::Error),
 			Node::Value(x) => Some(Entity::Value(x.clone())),
 			Node::List(items) => {
 				let ids = self.walk_list(items, scope_idx);
 				Some(Entity::List(ids))
-			}
+			},
 			Node::Block(children) => {
 				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
 				let body_scope_idx = self.push_scope(body_scope);
 				let ids = self.walk_list(&children.0, body_scope_idx);
 				Some(Entity::Block(ids))
-			}
+			},
 			Node::If(if_) => {
 				let condition_id = self.walk_node(&if_.condition, scope_idx);
 				let then_ids = self.walk_list(&if_.then.0, scope_idx);
 				Some(Entity::If(condition_id, then_ids, None))
-			}
+			},
 			Node::Func(function) => {
 				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
 				let body_scope_idx = self.push_scope(body_scope);
 				let ids = self.walk_list(&function.body.0, body_scope_idx);
 				Some(Entity::Function(ids))
-			}
+			},
 			Node::Call(subject, arguments) => {
 				let subject_id = self.walk_node(subject, scope_idx);
 				let argument_ids = self.walk_list(&arguments.0, scope_idx);
 				Some(Entity::Call(subject_id, argument_ids))
-			}
+			},
 			Node::FuncReturn(value) => {
 				let id = self.walk_node(value, scope_idx);
 				Some(Entity::FunctionReturn(id))
-			}
+			},
 			Node::Binary(op, lhs, rhs) => {
 				let lhs_id = self.walk_node(lhs, scope_idx);
 				let rhs_id = self.walk_node(rhs, scope_idx);
-				Some(Entity::Binary(op.clone(), lhs_id, rhs_id))
-			}
-			Node::Let(name, value) => {
+				Some(Entity::Binary(*op, lhs_id, rhs_id))
+			},
+			Node::Let(name, type_, value) => {
 				let scope = self.get_scope_by_idx(scope_idx);
 				scope.name_id_map.insert(name, id);
-				let value_id = self.walk_node(value, scope_idx);
-				Some(Entity::Variable(value_id))
-			}
+				self.reference_count.entry(id).or_insert(0);
+				let initial = value.as_ref().map(|value| {
+					let value_id = self.walk_node(value, scope_idx);
+					let assignments = self.assignment_values.entry(id).or_insert_with(|| Vec::new());
+					assignments.push(value_id);
+					value_id
+				});
+				let type_ = type_.as_ref().map(|x| self.walk_type(x)).unwrap_or(Type::Unknown);
+				self.variables.insert(id, Variable { id, name, initial, type_ });
+				Some(Entity::Local(id))
+			},
 		};
 		
 		if let Some(entity) = entity {
@@ -174,32 +193,38 @@ impl<'src> Analyzer<'src> {
 		id
 	}
 	
-	fn compute_node_type(&self, id: Id) -> Type {
-		match self.get_entity_by_id(id) {
-			Entity::Value(value) => self.compute_value_type(value),
+	fn walk_type(&mut self, node: &'src Spanned<Node<'src>>) -> Type {
+		match node.0 {
+			Node::Local(name) => match name {
+				"f64" => Type::Primitive(PrimitiveType::F64),
+				"i32" => Type::Primitive(PrimitiveType::I32),
+				"u32" => Type::Primitive(PrimitiveType::U32),
+				"bool" => Type::Primitive(PrimitiveType::Bool),
+				"null" => Type::Primitive(PrimitiveType::Null),
+				"str" => Type::Primitive(PrimitiveType::String),
+				_ => Type::Unknown,
+			},
+			_ => Type::Unknown,
+		}
+	}
+	
+	fn resolve_type(&self, id: Id, constraint: Type) -> Type {
+		constraint.clone().reconcile(match self.get_entity_by_id(id) {
+			Entity::Value(value) => match value {
+				Value::Bool(_) => Type::Primitive(PrimitiveType::Bool),
+				Value::Func(_) => Type::Void,
+				Value::Interrupt(_) => Type::Interrupt,
+				Value::List(_) => Type::Primitive(PrimitiveType::List(Box::new(Type::Void))),
+				Value::Null => Type::Primitive(PrimitiveType::Null),
+				Value::Num(_) => Type::Primitive(match constraint {
+					Type::Primitive(PrimitiveType::F64) => PrimitiveType::F64,
+					Type::Primitive(PrimitiveType::U32) => PrimitiveType::U32,
+					_ => PrimitiveType::I32,
+				}),
+				Value::Str(_) => Type::Primitive(PrimitiveType::String),
+			},
 			_ => Type::Void,
-		}
-	}
-	
-	fn compute_value_type(&self, value: &Value) -> Type {
-		match value {
-			Value::Bool(_) => Type::Primitive(PrimitiveType::Bool),
-			Value::Func(_) => Type::Void,
-			Value::Interrupt(_) => Type::Interrupt,
-			Value::List(_) => Type::Primitive(PrimitiveType::List(Box::new(Type::Void))),
-			Value::Null => Type::Primitive(PrimitiveType::Null),
-			Value::Num(_) => Type::Primitive(PrimitiveType::F64),
-			Value::Str(_) => Type::Primitive(PrimitiveType::String),
-		}
-	}
-	
-	fn reconcile_type<'a>(a: &'a Type, b: &'a Type) -> &'a Type {
-		match (a, b) {
-			(Type::Unknown, x) => x,
-			(x, Type::Unknown) => x,
-			(a, b) if a == b => a,
-			(a, _) => a,
-		}
+		})
 	}
 	
 	fn build(&mut self) {
@@ -210,6 +235,18 @@ impl<'src> Analyzer<'src> {
 				*rc += 1;
 			}
 			self.entity_map.insert(id, Entity::Local(subject_id));
+		}
+		
+		for (variable_id, value_ids) in self.assignment_values.clone() {
+			if let Some(variable) = self.variables.get(&variable_id) {
+				let mut type_ = variable.type_.clone();
+				
+				for value_id in value_ids {
+					type_ = self.resolve_type(value_id, type_);
+				}
+				
+				self.variables.get_mut(&variable_id).unwrap().type_ = type_;
+			}
 		}
 	}
 }
@@ -222,6 +259,7 @@ pub struct Program<'src> {
 	scopes: Vec<Scope<'src>>,
 	reference_count: HashMap<Id, u32>,
 	print_fn_id: Id,
+	variables: HashMap<Id, Variable<'src>>,
 }
 
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
@@ -241,5 +279,6 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
 		scopes: analyzer.scopes,
 		reference_count: analyzer.reference_count,
 		print_fn_id,
+		variables: analyzer.variables,
 	}
 }

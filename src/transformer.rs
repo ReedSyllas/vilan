@@ -35,17 +35,17 @@ impl<'src> Transformer<'src> {
 			span: Span::new((), 0..0),
 		})?;
 		
-		let body = self.block(entry).iter().map(|x| js::format(&x, ";")).collect::<Vec<_>>().join("");
+		let body = self.walk_list(entry).iter().map(|x| js::format(&x, ";")).collect::<Vec<_>>().join("");
 		let functions = self.required_functions.values().map(|x| js::format(x, ";")).collect::<Vec<_>>().join("");
 		
 		Ok(format!("{}{}", functions, body))
 	}
 	
-	fn block(&mut self, block: &Vec<Entity<'src>>) -> Vec<js::Node<'src>> {
-		block.iter().filter_map(|x| self.entity(x)).collect::<Vec<_>>()
+	fn walk_list(&mut self, list: &Vec<Entity<'src>>) -> Vec<js::Node<'src>> {
+		list.iter().filter_map(|x| self.walk_entity(x)).collect::<Vec<_>>()
 	}
 	
-	fn entity(&mut self, entity: &Entity<'src>) -> Option<js::Node<'src>> {
+	fn walk_entity(&mut self, entity: &Entity<'src>) -> Option<js::Node<'src>> {
 		Some(match entity {
 			Entity::Error => unreachable!(),
 			Entity::Value(x) => js::Node::Value(x.clone()),
@@ -59,7 +59,7 @@ impl<'src> Transformer<'src> {
 			Entity::Call(subject, args) => {
 				match &**subject {
 					Entity::Local(id) => {
-						let args = args.iter().filter_map(|arg| self.entity(arg)).collect::<Vec<_>>();
+						let args = args.iter().filter_map(|arg| self.walk_entity(arg)).collect::<Vec<_>>();
 						if self.program.is_print_fn_id(*id) {
 							js::Node::Call(
 								Box::new(js::Node::Property(
@@ -82,12 +82,12 @@ impl<'src> Transformer<'src> {
 					_ => unreachable!(),
 				}
 			},
-			Entity::FunctionReturn(value) => js::Node::Return(Box::new(self.entity(value).unwrap_or(js::Node::Void))),
-			Entity::Binary(op, lhs, rhs) => js::Node::Binary(op.clone(), Box::new(self.entity(lhs).unwrap_or(js::Node::Void)), Box::new(self.entity(rhs).unwrap_or(js::Node::Void))),
+			Entity::FunctionReturn(value) => js::Node::Return(Box::new(self.walk_entity(value).unwrap_or(js::Node::Void))),
+			Entity::Binary(op, lhs, rhs) => js::Node::Binary(*op, Box::new(self.walk_entity(lhs).unwrap_or(js::Node::Void)), Box::new(self.walk_entity(rhs).unwrap_or(js::Node::Void))),
 			Entity::Variable(id) => {
 				let name = self.ng.name_for(*id);
 				let variable = self.program.get_variable(id).unwrap();
-				let value = self.entity(&variable.value).unwrap_or(js::Node::Void);
+				let value = self.walk_entity(&variable.value).unwrap_or(js::Node::Void);
 				js::Node::Variable(js::Variable {
 					name,
 					value: Box::new(value),
@@ -99,7 +99,7 @@ impl<'src> Transformer<'src> {
 	fn function(&mut self, function: &Function<'src>) -> js::Node<'src> {
 		let name = self.ng.name_for(function.id);
 		let parameters = function.parameters.iter().map(|parameter| js::Parameter { name: self.ng.name_for(parameter.id) }).collect::<Vec<_>>();
-		let body = self.block(&function.body);
+		let body = self.walk_list(&function.body);
 		js::Node::Function(js::Function { name, parameters, body })
 	}
 }

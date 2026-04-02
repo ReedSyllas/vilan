@@ -1,0 +1,79 @@
+Program {
+    span_map: {
+        Id(5): 34..39,
+        Id(2): 15..31,
+        Id(3): 28..31,
+        Id(7): 45..45,
+        Id(4): 34..42,
+        Id(6): 40..41,
+        Id(1): 1..45,
+    },
+    entity_map: {
+        Id(7): Void,
+        Id(5): Local(
+            Id(0),
+        ),
+        Id(6): Local(
+            Id(2),
+        ),
+        Id(4): Call(
+            Id(5),
+            [
+                Id(6),
+            ],
+        ),
+        Id(1): Function(
+            [
+                Id(2),
+                Id(4),
+                Id(7),
+            ],
+        ),
+        Id(3): Value(
+            Num(
+                100.0,
+            ),
+        ),
+        Id(2): Local(
+            Id(2),
+        ),
+    },
+    scope_map: {
+        Id(3): 1,
+        Id(5): 1,
+        Id(6): 1,
+        Id(2): 1,
+        Id(4): 1,
+        Id(7): 1,
+        Id(1): 0,
+    },
+    scopes: [
+        Scope {
+            name_id_map: {
+                "print": Id(0),
+            },
+        },
+        Scope {
+            name_id_map: {
+                "a": Id(2),
+                "print": Id(0),
+            },
+        },
+    ],
+    reference_count: {
+        Id(2): 1,
+    },
+    print_fn_id: Id(0),
+    variables: {
+        Id(2): Variable {
+            id: Id(2),
+            name: "a",
+            initial: Some(
+                Id(3),
+            ),
+            type_: Primitive(
+                F64,
+            ),
+        },
+    },
+}
