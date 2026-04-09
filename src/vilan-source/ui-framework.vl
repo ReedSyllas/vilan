@@ -1,7 +1,5 @@
 
 struct Signal<T> {
-	type T;
-	
 	mut value: T;
 	
 	fun (initial: T) {
@@ -23,28 +21,71 @@ fun main() {
 
 fun App() {
 	let count = Signal(0);
+	let double = count.derive(|x| x * 2);
+	let text = Signal("");
+	
+	count.then(text).sub(|count, text| {
+		print(i"count is {count}");
+		print(i"text is {text}");
+	});
 	
 	Box()
-	.with_element(|x|
-		x
-		.tag("main")
-		.attribute()
-	)
+	.tag("main")
+	.attribute("id", Some("root"))
 	.child("Hello, World!")
 	.child("Count is: ")
 	.child(|| count())
+	.child(
+		Button()
+		.child("Increment")
+		.on_click("click", || {
+			count.map(|x| x + 1);
+		})
+		.build()
+	)
+	.build()
 }
 
 trait Node {
 	fun render(): void;
 }
 
-struct Box() {
-	mut _children: List<Node> = List::new();
+struct Box : Node {
+	mut _children: List<Node>;
 	
-	fun render() {
-		_children.for_each(|x| {
+	fun () {
+		Self {
+			_children = List::new(),
+		}
+	}
+	
+	fun render(self) {
+		self._children.for_each(|x| {
 			print(x);
 		});
+	}
+}
+
+struct Button {
+	mut _box: Box;
+	
+	fun () {
+		Self {
+			_box = Box().tag("button").attribute("type", Some("button")),
+		}
+	}
+	
+	fun child(self, node: Node) {
+		self._box.child(node);
+		self
+	}
+	
+	fun on_click(self, fn: || void) {
+		self._box.on("click", fn);
+		self
+	}
+	
+	fun build(): Node {
+		self._box.build()
 	}
 }

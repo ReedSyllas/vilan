@@ -6,15 +6,15 @@ use crate::{parser::{Node, NodeList}, shared::{BinaryOp, PrimitiveType, Span, Sp
 #[derive(Clone, Debug)]
 pub enum Entity<'src> {
 	Binary(BinaryOp, Id, Id),
-	If(Id, Vec<Id>, Option<Vec<Id>>),
+	If(Id, (Vec<Id>, Id), Option<(Vec<Id>, Id)>),
 	Call(Id, Vec<Id>),
 	Error,
-	Function(Vec<Id>),
+	Function(Id),
 	FunctionReturn(Id),
 	Local(Id),
 	Value(Value<'src>),
 	List(Vec<Id>),
-	Block(Vec<Id>),
+	Block((Vec<Id>, Id)),
 	Void,
 }
 
@@ -23,14 +23,14 @@ pub struct Function<'src> {
 	pub id: Id,
 	pub name: &'src str,
 	pub parameters: Vec<Parameter<'src>>,
-	pub body: (Vec<Id>, usize),
+	pub body: (Vec<Id>, Id, usize),
 	pub call_count: u32,
 }
 
 #[derive(Debug)]
 pub struct Parameter<'src> {
-	pub id: Id,
 	pub name: &'src str,
+	pub type_: Type,
 	// TODO: Add type support
 }
 
@@ -76,6 +76,7 @@ pub struct Analyzer<'src> {
 	scopes: Vec<Scope<'src>>,
 	span_map: HashMap<Id, &'src Span>,
 	variables: HashMap<Id, Variable<'src>>,
+	functions: HashMap<Id, Function<'src>>,
 }
 
 impl<'src> Analyzer<'src> {
@@ -90,6 +91,7 @@ impl<'src> Analyzer<'src> {
 			scopes: Vec::new(),
 			span_map: HashMap::new(),
 			variables: HashMap::new(),
+			functions: HashMap::new(),
 		}
 	}
 	
@@ -139,19 +141,27 @@ impl<'src> Analyzer<'src> {
 			Node::Block(children) => {
 				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
 				let body_scope_idx = self.push_scope(body_scope);
-				let ids = self.walk_list(&children.0, body_scope_idx);
-				Some(Entity::Block(ids))
+				let ids = self.walk_list(&children.0.0, body_scope_idx);
+				let expr_id = self.walk_node(&children.0.1, body_scope_idx);
+				Some(Entity::Block((ids, expr_id)))
 			},
 			Node::If(if_) => {
-				let condition_id = self.walk_node(&if_.condition, scope_idx);
-				let then_ids = self.walk_list(&if_.then.0, scope_idx);
-				Some(Entity::If(condition_id, then_ids, None))
-			},
-			Node::Func(function) => {
 				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
 				let body_scope_idx = self.push_scope(body_scope);
-				let ids = self.walk_list(&function.body.0, body_scope_idx);
-				Some(Entity::Function(ids))
+				let condition_id = self.walk_node(&if_.condition, body_scope_idx);
+				let then_ids = self.walk_list(&if_.then.0.0, body_scope_idx);
+				let then_expr_id = self.walk_node(&if_.then.0.1, body_scope_idx);
+				Some(Entity::If(condition_id, (then_ids, then_expr_id), None))
+			},
+			Node::Func(function) => {
+				let name = function.name.0;
+				let parameters = function.parameters.0.iter().map(|x| Parameter { name: x.0, type_: x.1.as_ref().map(|x| self.walk_type(x)).unwrap_or(Type::Unknown) }).collect::<Vec<_>>();
+				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
+				let body_scope_idx = self.push_scope(body_scope);
+				let ids = self.walk_list(&function.body.0.0, body_scope_idx);
+				let expr_id = self.walk_node(&function.body.0.1, body_scope_idx);
+				self.functions.insert(id, Function { id, name, parameters, body: (ids, expr_id, body_scope_idx), call_count: 0 });
+				Some(Entity::Function(id))
 			},
 			Node::Call(subject, arguments) => {
 				let subject_id = self.walk_node(subject, scope_idx);
@@ -260,6 +270,7 @@ pub struct Program<'src> {
 	reference_count: HashMap<Id, u32>,
 	print_fn_id: Id,
 	variables: HashMap<Id, Variable<'src>>,
+	functions: HashMap<Id, Function<'src>>,
 }
 
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
@@ -280,5 +291,6 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
 		reference_count: analyzer.reference_count,
 		print_fn_id,
 		variables: analyzer.variables,
+		functions: analyzer.functions,
 	}
 }

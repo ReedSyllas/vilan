@@ -1,0 +1,63 @@
+
+trait Subscribable<T> {
+	fun sub(self, fn: |T| void): || void;
+}
+
+struct Signal<T> : Subscribable<T> {
+	[hide]
+	mut value: T;
+	[hide]
+	mut observers: List<|T| void>;
+	
+	fun get(self): T {
+		self.value
+	}
+	
+	/// Set the signal to a new value.
+	fun set(self, next: T) {
+		self.value = next;
+	}
+	
+	/// Map the signal to a new value.
+	fun map(self, fn: |T| T) {
+		self.value = fn(self.value);
+	}
+	
+	fun sub(self, fn: |T| void) {
+		self.observers.push(fn);
+		|| { self.observers.pop(fn); }
+	}
+	
+	fun as<U>(self, fn: |T| U): DerivedSignal<U> {
+		
+	}
+	
+	/// Create a signal with an initial value.
+	fun new(initial: T): Signal<T> {
+		Signal<T> (
+			value = initial,
+		)
+	}
+}
+
+struct DerivedSignal<T> : Subscribable<T> {
+	[hide]
+	mut observers: List<|T| void>;
+	
+	fun get(self): T {
+		self.value
+	}
+	
+	fun sub(self, fn: |T| void) {
+		self.observers.push(fn);
+		|| { self.observers.pop(fn); }
+	}
+}
+
+let count = Signal::new(100);
+let double = count.as(|x| x * 2);
+
+count.set(50);
+count.map(|x| x + 5);
+
+print(t"{count} {double}"); // "55 110"

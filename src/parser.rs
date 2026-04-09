@@ -6,21 +6,21 @@ use crate::{lexer::Token, shared::{BinaryOp, Span, Spanned, Value}};
 #[derive(Debug)]
 pub struct Func<'src> {
 	pub name: Spanned<&'src str>,
-	pub parameters: Spanned<Vec<(&'src str, Option<&'src str>)>>,
-	pub body: Spanned<NodeList<'src>>,
+	pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
+	pub body: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
 }
 
 #[derive(Debug)]
 pub struct If<'src> {
 	pub condition: Box<Spanned<Node<'src>>>,
-	pub then: Spanned<NodeList<'src>>,
+	pub then: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
 	pub else_: Option<Spanned<IfElseBranch<'src>>>,
 }
 
 #[derive(Debug)]
 pub enum IfElseBranch<'src> {
 	If(Box<If<'src>>),
-	Else(NodeList<'src>),
+	Else(Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>),
 }
 
 #[derive(Debug)]
@@ -34,7 +34,7 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 #[derive(Debug)]
 pub enum Node<'src> {
 	Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
-	Block(Spanned<NodeList<'src>>),
+	Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
 	Call(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
 	Error,
 	Func(Func<'src>),
@@ -88,16 +88,19 @@ where
 		.collect::<Vec<_>>()
 		.then(
 			expression.clone()
+			.map(|x| Box::new(x))
 			.or_not()
 		)
 		.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-		.map_with(|(mut statements, expression), e| {
+		.map_with(|(statements, expression), e| {
 			let span: Span = e.span();
-			statements.push(expression.unwrap_or_else(|| (Node::Void, span.to_end())));
-			(Some(statements), span)
+			(Some((statements, expression.unwrap_or_else(|| Box::new((Node::Void, span.to_end()))))), span)
 		})
 		.recover_with(block_recovery)
-		.map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1));
+		.map_with(|x, e| {
+			let span: Span = e.span();
+			(x.0.unwrap_or_else(|| (Vec::new(), Box::new((Node::Void, span.to_end())))), x.1)
+		});
 	
 	let import =
 		just(Token::Import)
@@ -133,7 +136,7 @@ where
 			.then(block.clone())
 			.then(
 				just(Token::Else)
-				.ignore_then(block.clone().map(|x| (IfElseBranch::Else(x.0), x.1)).or(if_))
+				.ignore_then(block.clone().map_with(|x, e| (IfElseBranch::Else(x), e.span())).or(if_))
 				.or_not(),
 			)
 			.map_with(|((cond, a), b), e| {
@@ -178,11 +181,14 @@ where
 		)
 		.then(
 			ident
+			.labelled("parameter name")
 			.then(
 				just(Token::Op(":"))
-				.ignore_then(ident)
+				.ignore_then(type_.clone().map(|x| Box::new(x)))
+				.labelled("parameter type")
 				.or_not()
 			)
+			.labelled("parameter")
 			.separated_by(just(Token::Ctrl(',')))
 			.allow_trailing()
 			.collect::<Vec<_>>()

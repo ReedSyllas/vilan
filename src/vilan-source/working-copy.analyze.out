@@ -1,17 +1,28 @@
 Program {
     span_map: {
         Id(5): 34..39,
-        Id(2): 15..31,
-        Id(3): 28..31,
-        Id(7): 45..45,
         Id(4): 34..42,
-        Id(6): 40..41,
+        Id(7): 45..45,
         Id(1): 1..45,
+        Id(3): 28..31,
+        Id(6): 40..41,
+        Id(2): 15..31,
     },
     entity_map: {
-        Id(7): Void,
+        Id(1): Function(
+            Id(1),
+        ),
         Id(5): Local(
             Id(0),
+        ),
+        Id(3): Value(
+            Num(
+                100.0,
+            ),
+        ),
+        Id(7): Void,
+        Id(2): Local(
+            Id(2),
         ),
         Id(6): Local(
             Id(2),
@@ -22,30 +33,15 @@ Program {
                 Id(6),
             ],
         ),
-        Id(1): Function(
-            [
-                Id(2),
-                Id(4),
-                Id(7),
-            ],
-        ),
-        Id(3): Value(
-            Num(
-                100.0,
-            ),
-        ),
-        Id(2): Local(
-            Id(2),
-        ),
     },
     scope_map: {
-        Id(3): 1,
-        Id(5): 1,
-        Id(6): 1,
         Id(2): 1,
+        Id(6): 1,
         Id(4): 1,
-        Id(7): 1,
         Id(1): 0,
+        Id(3): 1,
+        Id(7): 1,
+        Id(5): 1,
     },
     scopes: [
         Scope {
@@ -74,6 +70,22 @@ Program {
             type_: Primitive(
                 F64,
             ),
+        },
+    },
+    functions: {
+        Id(1): Function {
+            id: Id(1),
+            name: "main",
+            parameters: [],
+            body: (
+                [
+                    Id(2),
+                    Id(4),
+                ],
+                Id(7),
+                1,
+            ),
+            call_count: 0,
         },
     },
 }
