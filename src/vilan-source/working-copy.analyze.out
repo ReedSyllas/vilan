@@ -1,71 +1,203 @@
 Program {
     span_map: {
-        Id(5): 34..39,
-        Id(4): 34..42,
-        Id(7): 45..45,
-        Id(1): 1..45,
-        Id(3): 28..31,
-        Id(6): 40..41,
-        Id(2): 15..31,
+        Id(26): 111..119,
+        Id(19): 90..108,
+        Id(5): 22..27,
+        Id(24): 101..103,
+        Id(28): 117..118,
+        Id(8): 30..30,
+        Id(25): 106..107,
+        Id(21): 94..104,
+        Id(14): 53..54,
+        Id(29): 122..122,
+        Id(6): 22..23,
+        Id(1): 1..30,
+        Id(23): 98..99,
+        Id(13): 53..58,
+        Id(9): 32..61,
+        Id(17): 63..122,
+        Id(15): 57..58,
+        Id(4): 18..27,
+        Id(22): 94..97,
+        Id(7): 26..27,
+        Id(12): 49..58,
+        Id(16): 61..61,
+        Id(20): 90..93,
+        Id(18): 77..108,
+        Id(27): 111..116,
     },
     entity_map: {
+        Id(29): Void,
+        Id(12): FunctionReturn(
+            Id(13),
+        ),
+        Id(24): Value(
+            Num(
+                10.0,
+            ),
+        ),
+        Id(16): Void,
+        Id(18): Variable(
+            Id(18),
+        ),
+        Id(25): Value(
+            Num(
+                7.0,
+            ),
+        ),
         Id(1): Function(
             Id(1),
         ),
-        Id(5): Local(
-            Id(0),
+        Id(26): Call(
+            Id(27),
+            [
+                Id(28),
+            ],
         ),
-        Id(3): Value(
-            Num(
-                100.0,
-            ),
+        Id(7): Local(
+            Id(3),
         ),
-        Id(7): Void,
-        Id(2): Local(
-            Id(2),
+        Id(15): Local(
+            Id(11),
+        ),
+        Id(20): Local(
+            Id(9),
         ),
         Id(6): Local(
             Id(2),
         ),
-        Id(4): Call(
+        Id(14): Local(
+            Id(10),
+        ),
+        Id(22): Local(
+            Id(1),
+        ),
+        Id(27): Local(
+            Id(0),
+        ),
+        Id(28): Local(
+            Id(18),
+        ),
+        Id(17): Function(
+            Id(17),
+        ),
+        Id(4): FunctionReturn(
             Id(5),
+        ),
+        Id(23): Value(
+            Num(
+                5.0,
+            ),
+        ),
+        Id(19): Call(
+            Id(20),
             [
-                Id(6),
+                Id(21),
+                Id(25),
             ],
+        ),
+        Id(5): Binary(
+            Add,
+            Id(6),
+            Id(7),
+        ),
+        Id(21): Call(
+            Id(22),
+            [
+                Id(23),
+                Id(24),
+            ],
+        ),
+        Id(13): Binary(
+            Sub,
+            Id(14),
+            Id(15),
+        ),
+        Id(8): Void,
+        Id(9): Function(
+            Id(9),
         ),
     },
     scope_map: {
-        Id(2): 1,
-        Id(6): 1,
+        Id(13): 2,
+        Id(20): 3,
+        Id(8): 1,
+        Id(22): 3,
+        Id(25): 3,
+        Id(29): 3,
+        Id(18): 3,
+        Id(7): 1,
+        Id(17): 0,
+        Id(15): 2,
+        Id(9): 0,
+        Id(5): 1,
+        Id(12): 2,
+        Id(21): 3,
+        Id(27): 3,
         Id(4): 1,
         Id(1): 0,
-        Id(3): 1,
-        Id(7): 1,
-        Id(5): 1,
+        Id(14): 2,
+        Id(24): 3,
+        Id(6): 1,
+        Id(23): 3,
+        Id(16): 2,
+        Id(28): 3,
+        Id(26): 3,
+        Id(19): 3,
     },
     scopes: [
         Scope {
             name_id_map: {
+                "sub": Id(9),
                 "print": Id(0),
+                "add": Id(1),
+                "main": Id(17),
             },
         },
         Scope {
             name_id_map: {
-                "a": Id(2),
                 "print": Id(0),
+                "a": Id(2),
+                "b": Id(3),
+                "add": Id(1),
+            },
+        },
+        Scope {
+            name_id_map: {
+                "sub": Id(9),
+                "print": Id(0),
+                "a": Id(10),
+                "b": Id(11),
+                "add": Id(1),
+            },
+        },
+        Scope {
+            name_id_map: {
+                "sub": Id(9),
+                "print": Id(0),
+                "a": Id(18),
+                "add": Id(1),
+                "main": Id(17),
             },
         },
     ],
     reference_count: {
+        Id(10): 1,
+        Id(9): 1,
+        Id(1): 1,
         Id(2): 1,
+        Id(18): 1,
+        Id(0): 1,
+        Id(11): 1,
+        Id(3): 1,
     },
     print_fn_id: Id(0),
     variables: {
-        Id(2): Variable {
-            id: Id(2),
+        Id(18): Variable {
+            id: Id(18),
             name: "a",
             initial: Some(
-                Id(3),
+                Id(19),
             ),
             type_: Primitive(
                 F64,
@@ -73,16 +205,48 @@ Program {
         },
     },
     functions: {
-        Id(1): Function {
-            id: Id(1),
+        Id(9): Function {
+            id: Id(9),
+            name: "sub",
+            parameters: [
+                Id(10),
+                Id(11),
+            ],
+            body: (
+                [
+                    Id(12),
+                ],
+                Id(16),
+                2,
+            ),
+            call_count: 0,
+        },
+        Id(17): Function {
+            id: Id(17),
             name: "main",
             parameters: [],
             body: (
                 [
-                    Id(2),
+                    Id(18),
+                    Id(26),
+                ],
+                Id(29),
+                3,
+            ),
+            call_count: 0,
+        },
+        Id(1): Function {
+            id: Id(1),
+            name: "add",
+            parameters: [
+                Id(2),
+                Id(3),
+            ],
+            body: (
+                [
                     Id(4),
                 ],
-                Id(7),
+                Id(8),
                 1,
             ),
             call_count: 0,

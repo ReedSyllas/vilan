@@ -1,5 +1,13 @@
 
+fun add(a, b) {
+	ret a + b;
+}
+
+fun sub(a, b) {
+	ret a - b;
+}
+
 fun main() {
-	let a: f64 = 100;
+	let a: f64 = sub(add(5, 10), 7);
 	print(a);
 }

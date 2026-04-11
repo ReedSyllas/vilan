@@ -6,15 +6,16 @@ use crate::{parser::{Node, NodeList}, shared::{BinaryOp, PrimitiveType, Span, Sp
 #[derive(Clone, Debug)]
 pub enum Entity<'src> {
 	Binary(BinaryOp, Id, Id),
-	If(Id, (Vec<Id>, Id), Option<(Vec<Id>, Id)>),
+	Block((Vec<Id>, Id)),
 	Call(Id, Vec<Id>),
 	Error,
 	Function(Id),
 	FunctionReturn(Id),
+	If(Id, (Vec<Id>, Id), Option<(Vec<Id>, Id)>),
+	List(Vec<Id>),
 	Local(Id),
 	Value(Value<'src>),
-	List(Vec<Id>),
-	Block((Vec<Id>, Id)),
+	Variable(Id),
 	Void,
 }
 
@@ -22,13 +23,15 @@ pub enum Entity<'src> {
 pub struct Function<'src> {
 	pub id: Id,
 	pub name: &'src str,
-	pub parameters: Vec<Parameter<'src>>,
+	pub parameters: Vec<Id>,
 	pub body: (Vec<Id>, Id, usize),
 	pub call_count: u32,
 }
 
 #[derive(Debug)]
 pub struct Parameter<'src> {
+	pub id: Id,
+	pub function_id: Id,
 	pub name: &'src str,
 	pub type_: Type,
 	// TODO: Add type support
@@ -77,6 +80,7 @@ pub struct Analyzer<'src> {
 	span_map: HashMap<Id, &'src Span>,
 	variables: HashMap<Id, Variable<'src>>,
 	functions: HashMap<Id, Function<'src>>,
+	parameters: HashMap<Id, Parameter<'src>>,
 }
 
 impl<'src> Analyzer<'src> {
@@ -92,6 +96,7 @@ impl<'src> Analyzer<'src> {
 			span_map: HashMap::new(),
 			variables: HashMap::new(),
 			functions: HashMap::new(),
+			parameters: HashMap::new(),
 		}
 	}
 	
@@ -155,8 +160,21 @@ impl<'src> Analyzer<'src> {
 			},
 			Node::Func(function) => {
 				let name = function.name.0;
-				let parameters = function.parameters.0.iter().map(|x| Parameter { name: x.0, type_: x.1.as_ref().map(|x| self.walk_type(x)).unwrap_or(Type::Unknown) }).collect::<Vec<_>>();
-				let body_scope = self.get_scope_by_idx(scope_idx).create_child();
+				let scope = self.get_scope_by_idx(scope_idx);
+				scope.name_id_map.insert(name, id);
+				let mut body_scope = self.get_scope_by_idx(scope_idx).create_child();
+				let parameters = function.parameters.0.iter().map(|x| {
+					let parameter_id = self.get_next_id();
+					let parameter = Parameter {
+						id: parameter_id,
+						function_id: id,
+						name: x.0,
+						type_: x.1.as_ref().map(|x| self.walk_type(x)).unwrap_or(Type::Unknown),
+					};
+					body_scope.name_id_map.insert(parameter.name, parameter_id);
+					self.parameters.insert(parameter_id, parameter);
+					parameter_id
+				}).collect::<Vec<_>>();
 				let body_scope_idx = self.push_scope(body_scope);
 				let ids = self.walk_list(&function.body.0.0, body_scope_idx);
 				let expr_id = self.walk_node(&function.body.0.1, body_scope_idx);
@@ -189,7 +207,7 @@ impl<'src> Analyzer<'src> {
 				});
 				let type_ = type_.as_ref().map(|x| self.walk_type(x)).unwrap_or(Type::Unknown);
 				self.variables.insert(id, Variable { id, name, initial, type_ });
-				Some(Entity::Local(id))
+				Some(Entity::Variable(id))
 			},
 		};
 		
@@ -241,9 +259,8 @@ impl<'src> Analyzer<'src> {
 		for (id, name) in self.locals.clone() {
 			let scope = self.get_scope_for_node(id);
 			let subject_id = *scope.name_id_map.get(name).expect(format!("cannot find '{}'", name).as_ref());
-			if let Some(rc) = self.reference_count.get_mut(&subject_id) {
-				*rc += 1;
-			}
+			let rc = self.reference_count.entry(subject_id).or_insert(0);
+			*rc += 1;
 			self.entity_map.insert(id, Entity::Local(subject_id));
 		}
 		
@@ -263,14 +280,14 @@ impl<'src> Analyzer<'src> {
 
 #[derive(Debug)]
 pub struct Program<'src> {
-	span_map: HashMap<Id, &'src Span>,
-	entity_map: HashMap<Id, Entity<'src>>,
-	scope_map: HashMap<Id, usize>,
-	scopes: Vec<Scope<'src>>,
-	reference_count: HashMap<Id, u32>,
-	print_fn_id: Id,
-	variables: HashMap<Id, Variable<'src>>,
-	functions: HashMap<Id, Function<'src>>,
+	pub span_map: HashMap<Id, &'src Span>,
+	pub entity_map: HashMap<Id, Entity<'src>>,
+	pub scope_map: HashMap<Id, usize>,
+	pub scopes: Vec<Scope<'src>>,
+	pub reference_count: HashMap<Id, u32>,
+	pub print_fn_id: Id,
+	pub variables: HashMap<Id, Variable<'src>>,
+	pub functions: HashMap<Id, Function<'src>>,
 }
 
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
