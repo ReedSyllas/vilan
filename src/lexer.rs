@@ -15,10 +15,11 @@ pub enum Token<'src> {
 	Import,
 	Let,
 	Null,
-	Num(f64),
+	Num(&'src str),
 	Op(&'src str),
 	Ret,
-	Str(&'src str),
+	String(&'src str),
+	Struct,
 }
 
 impl std::fmt::Display for Token<'_> {
@@ -36,8 +37,9 @@ impl std::fmt::Display for Token<'_> {
 			Token::Null => write!(f, "null"),
 			Token::Num(n) => write!(f, "{n}"),
 			Token::Op(s) => write!(f, "{s}"),
-			Token::Ret => write!(f, "return"),
-			Token::Str(s) => write!(f, "{s}"),
+			Token::Ret => write!(f, "ret"),
+			Token::String(s) => write!(f, "{s}"),
+			Token::Struct => write!(f, "struct"),
 		}
 	}
 }
@@ -48,8 +50,6 @@ pub fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, 
 		text::int(10)
 		.then(just('.').then(text::digits(10)).or_not())
 		.to_slice()
-		.from_str()
-		.unwrapped()
 		.map(Token::Num);
 	
 	// A parser for strings
@@ -57,7 +57,7 @@ pub fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, 
 		just('"')
 		.ignore_then(none_of('"').repeated().to_slice())
 		.then_ignore(just('"'))
-		.map(Token::Str);
+		.map(Token::String);
 	
 	// A parser for operators
 	let op =
@@ -72,14 +72,15 @@ pub fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, 
 	
 	// A parser for identifiers and keywords
 	let ident = text::ascii::ident().map(|ident: &str| match ident {
-		"let" => Token::Let,
 		"true" => Token::Bool(true),
 		"false" => Token::Bool(false),
 		"null" => Token::Null,
-		"ret" => Token::Ret,
+		"let" => Token::Let,
 		"fun" => Token::Fun,
+		"ret" => Token::Ret,
 		"if" => Token::If,
 		"else" => Token::Else,
+		"struct" => Token::Struct,
 		"import" => Token::Import,
 		"export" => Token::Export,
 		_ => Token::Ident(ident),

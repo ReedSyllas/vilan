@@ -5,7 +5,7 @@ use chumsky::span::Span;
 use crate::{analyzer::{Entity, Function, Id, Program}, shared::{BinaryOp, Error}};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
-	Transformer::new(program, true).entry()
+	Transformer::new(program, true).transform_entry()
 }
 
 struct Transformer<'src> {
@@ -31,16 +31,16 @@ impl<'src> Transformer<'src> {
 		}
 	}
 	
-	fn entry(&mut self) -> Result<String, Error> {
+	fn transform_entry(mut self) -> Result<String, Error> {
 		let main_fn_body = self.program.functions.values().find_map(|f| (f.name == "main").then_some(&f.body.0)).ok_or_else(|| Error {
 			msg: "Cannot execute program without a main function".to_string(),
 			span: Span::new((), 0..0),
 		})?;
 		
-		let body = self.walk_list(main_fn_body);
-		let functions = self.required_functions.values().collect::<Vec<_>>();
+		let body = self.walk_list(main_fn_body).into_iter();
+		let functions = self.required_functions.into_values();
 		
-		Ok(format!("{}{}{}{}", self.formatter.file(&functions), self.formatter.line_break, self.formatter.file(&body.iter().map(|x| x).collect::<Vec<_>>()), self.formatter.line_break))
+		Ok(format!("{}{}", self.formatter.file(&functions.chain(body).collect::<Vec<_>>()), self.formatter.line_break))
 	}
 	
 	fn walk_list(&mut self, list: &Vec<Id>) -> Vec<js::Node<'src>> {
@@ -53,7 +53,13 @@ impl<'src> Transformer<'src> {
 		Some(match entity {
 			Entity::Error => unreachable!(),
 			Entity::Void => js::Node::Void,
-			Entity::Value(x) => js::Node::Value(x.clone()),
+			Entity::Null => js::Node::Null,
+			Entity::Bool(x) => js::Node::Bool(*x),
+			Entity::Number(x) => js::Node::Number(x),
+			Entity::String(x) => js::Node::String(x),
+			Entity::Struct(_) => {
+				return None;
+			},
 			Entity::Function(id) => {
 				let function = self.program.functions.get(id).unwrap();
 				self.function(function)
@@ -61,11 +67,12 @@ impl<'src> Transformer<'src> {
 			Entity::Local(id) => {
 				js::Node::Local(self.ng.name_for(*id))
 			},
-			Entity::Call(subject_id, args) => {
-				let subject = self.program.entity_map.get(subject_id).unwrap();
+			Entity::Call(id) => {
+				let function_call = self.program.function_calls.get(id).unwrap();
+				let subject = self.program.entity_map.get(&function_call.subject).unwrap();
 				match subject {
 					Entity::Local(id) => {
-						let args = args.iter().filter_map(|arg| self.walk_entity(*arg)).collect::<Vec<_>>();
+						let args = function_call.arguments.iter().filter_map(|arg| self.walk_entity(*arg)).collect::<Vec<_>>();
 						if *id == self.program.print_fn_id {
 							js::Node::Call(
 								Box::new(js::Node::Property(
@@ -98,23 +105,35 @@ impl<'src> Transformer<'src> {
 					name,
 					value: Box::new(value),
 				})
-			}
+			},
 			Entity::Block(body) => {
 				js::Node::Void
-			}
+			},
 			Entity::If(condition, then_body, else_arm) => {
 				js::Node::Void
-			}
+			},
 			Entity::List(items) => {
 				js::Node::Void
-			}
+			},
+			Entity::Tuple(ids) => {
+				let items = ids.iter().filter_map(|id| self.walk_entity(*id)).collect();
+				js::Node::Array(items)
+			},
+			Entity::StructInitializer(struct_id, initial_fields) => {
+				let struct_ = self.program.structs.get(struct_id).unwrap();
+				
+				js::Node::Void
+			},
 		})
 	}
 	
 	fn function(&mut self, function: &Function<'src>) -> js::Node<'src> {
 		let name = self.ng.name_for(function.id);
 		let parameters = function.parameters.iter().map(|parameter_id| js::Parameter { name: self.ng.name_for(*parameter_id) }).collect::<Vec<_>>();
-		let body = self.walk_list(&function.body.0);
+		let mut body = self.walk_list(&function.body.0);
+		if let Some(return_expr) = self.walk_entity(function.body.1) {
+			body.push(js::Node::Return(Box::new(return_expr)));
+		}
 		js::Node::Function(js::Function { name, parameters, body })
 	}
 }
@@ -123,6 +142,8 @@ struct Formatter {
 	line_break: &'static str,
 	indentation: &'static str,
 	space: &'static str,
+	array_surround: &'static str,
+	object_surround: &'static str,
 }
 
 impl Formatter {
@@ -131,6 +152,8 @@ impl Formatter {
 			line_break: "\n",
 			indentation: "\t",
 			space: " ",
+			array_surround: " ",
+			object_surround: " ",
 		}
 	}
 	
@@ -139,21 +162,34 @@ impl Formatter {
 			line_break: "",
 			indentation: "",
 			space: "",
+			array_surround: "",
+			object_surround: "",
 		}
 	}
 	
-	fn file(&self, list: &Vec<&js::Node>) -> String {
+	fn file(&self, list: &Vec<js::Node>) -> String {
 		self.sequence(list, ";", 0)
 	}
 	
-	fn sequence(&self, list: &Vec<&js::Node>, terminator: &'static str, indentation: usize) -> String {
+	fn sequence(&self, list: &Vec<js::Node>, terminator: &'static str, indentation: usize) -> String {
 		list.iter().map(|node| self.node(node, terminator, indentation)).collect::<Vec<_>>().join(self.line_break)
 	}
 	
 	fn node(&self, node: &js::Node, terminator: &'static str, indentation: usize) -> String {
 		let text = match node {
-			js::Node::Void => "undefined".to_string(),
-			js::Node::Value(x) => format!("{}{}", x.to_string(), terminator),
+			js::Node::Void => format!("undefined{}", terminator),
+			js::Node::Null => format!("null{}", terminator),
+			js::Node::String(x) => format!("\"{}\"{}", x.escape_default(), terminator),
+			js::Node::Number(x) => format!("{}{}", x, terminator),
+			js::Node::Bool(x) => format!("{}{}", x, terminator),
+			js::Node::Array(items) => {
+				let s_items = items.iter().map(|x| self.node(x, "", 0)).collect::<Vec<_>>().join(format!(",{}", self.space).as_str());
+				format!("[{}{}{}]{}", self.array_surround, s_items, self.array_surround, terminator)
+			},
+			js::Node::Object(members) => {
+				let s_members = members.iter().map(|(key, value)| format!("{}:{}{}", key, self.space, self.node(value, "", 0))).collect::<Vec<_>>().join(format!(",{}", self.space).as_str());
+				format!("{{{}{}{}}}{}", self.object_surround, s_members, self.object_surround, terminator)
+			},
 			js::Node::Function(function) => {
 				let name = function.name.as_str();
 				let parameters = function.parameters.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(format!(",{}", self.space).as_str());
@@ -173,7 +209,7 @@ impl Formatter {
 			js::Node::Binary(op, lhs, rhs) => {
 				let s_op = match op {
 					BinaryOp::Add => "+",
-					BinaryOp::Sub => "+",
+					BinaryOp::Sub => "-",
 					BinaryOp::Mul => "*",
 					BinaryOp::Div => "/",
 					BinaryOp::Eq => "===",
@@ -196,17 +232,22 @@ impl Formatter {
 }
 
 pub mod js {
-    use crate::shared::{BinaryOp, Value};
+    use crate::shared::BinaryOp;
 
 	#[derive(Clone, Debug)]
 	pub enum Node<'src> {
+		Array(Vec<Self>),
+		Object(Vec<(&'src str, Self)>),
 		Binary(BinaryOp, Box<Self>, Box<Self>),
+		Bool(bool),
 		Call(Box<Self>, Vec<Self>),
 		Function(Function<'src>),
 		Local(String),
+		Null,
+		Number(&'src str),
 		Property(Box<Self>, String),
 		Return(Box<Self>),
-		Value(Value<'src>),
+		String(&'src str),
 		Variable(Variable<'src>),
 		Void,
 	}

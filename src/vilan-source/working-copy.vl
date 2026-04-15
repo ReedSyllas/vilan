@@ -1,13 +1,19 @@
 
-fun add(a, b) {
-	ret a + b;
+struct V {
+	let x: i32;
+	let y: i32;
 }
 
-fun sub(a, b) {
-	ret a - b;
+fun sum(a, b) {
+	a + b
+}
+
+fun f() {
+	(sum(4, 6), "Hello, World!")
 }
 
 fun main() {
-	let a: f64 = sub(add(5, 10), 7);
-	print(a);
+	let v = V(1, 2);
+	print(v);
+	print(f());
 }

@@ -1,11 +1,12 @@
 
 use chumsky::{input::ValueInput, prelude::*};
 
-use crate::{lexer::Token, shared::{BinaryOp, Span, Spanned, Value}};
+use crate::{lexer::Token, shared::{BinaryOp, Span, Spanned}};
 
 #[derive(Debug)]
 pub struct Func<'src> {
 	pub name: Spanned<&'src str>,
+	pub return_type: Option<Box<Spanned<Node<'src>>>>,
 	pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
 	pub body: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
 }
@@ -35,6 +36,7 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 pub enum Node<'src> {
 	Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
 	Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
+	Bool(bool),
 	Call(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
 	Error,
 	Func(Func<'src>),
@@ -44,7 +46,11 @@ pub enum Node<'src> {
 	Let(&'src str, Option<Box<Spanned<Self>>>, Option<Box<Spanned<Self>>>),
 	List(NodeList<'src>),
 	Local(&'src str),
-	Value(Value<'src>),
+	Null,
+	Number(&'src str),
+	String(&'src str),
+	Struct(&'src str, Spanned<NodeList<'src>>),
+	Tuple(NodeList<'src>),
 	Void,
 }
 
@@ -54,10 +60,10 @@ where
 {
 	let val =
 		select! {
-			Token::Null => Node::Value(Value::Null),
-			Token::Bool(x) => Node::Value(Value::Bool(x)),
-			Token::Num(n) => Node::Value(Value::Num(n)),
-			Token::Str(s) => Node::Value(Value::Str(s)),
+			Token::Null => Node::Null,
+			Token::Bool(x) => Node::Bool(x),
+			Token::Num(n) => Node::Number(n),
+			Token::String(s) => Node::String(s),
 		}
 		.labelled("value")
 		.map_with(|x, e| (x, e.span()));
@@ -69,17 +75,6 @@ where
 	let mut expression = Recursive::declare();
 	
 	let mut type_ = Recursive::declare();
-	
-	// Attempt to recover anything that looks like a block but contains errors.
-	let block_recovery = via_parser(nested_delimiters(
-		Token::Ctrl('{'),
-		Token::Ctrl('}'),
-		[
-			(Token::Ctrl('('), Token::Ctrl(')')),
-			(Token::Ctrl('['), Token::Ctrl(']')),
-		],
-		|span| (None, span),
-	));
 	
 	// Blocks are a sequence of statements delimited with braces.
 	let block =
@@ -96,7 +91,15 @@ where
 			let span: Span = e.span();
 			(Some((statements, expression.unwrap_or_else(|| Box::new((Node::Void, span.to_end()))))), span)
 		})
-		.recover_with(block_recovery)
+		.recover_with(via_parser(nested_delimiters(
+			Token::Ctrl('{'),
+			Token::Ctrl('}'),
+			[
+				(Token::Ctrl('('), Token::Ctrl(')')),
+				(Token::Ctrl('['), Token::Ctrl(']')),
+			],
+			|span| (None, span),
+		)))
 		.map_with(|x, e| {
 			let span: Span = e.span();
 			(x.0.unwrap_or_else(|| (Vec::new(), Box::new((Node::Void, span.to_end())))), x.1)
@@ -161,13 +164,13 @@ where
 		.then(
 			just(Token::Op(":"))
 			.ignore_then(type_.clone())
-			.labelled("variable type")
+			.labelled("type")
 			.or_not()
 		)
 		.then(
 			just(Token::Op("="))
 			.ignore_then(expression.clone())
-			.labelled("variable value")
+			.labelled("value")
 			.or_not()
 		)
 		.map_with(|((name, type_), val), e| (Node::Let(name, type_.map(|x| Box::new(x)), val.map(|x| Box::new(x))), e.span()));
@@ -196,9 +199,15 @@ where
 			.map_with(|parameters, e| (parameters, e.span()))
 			.labelled("function parameters")
 		)
+		.then(
+			just(Token::Op(":"))
+			.ignore_then(type_.clone().map(|x| Box::new(x)))
+			.labelled("return type")
+			.or_not()
+		)
 		.then(block.clone())
-		.map_with(|((name, parameters), body), e| {
-			(Node::Func(Func { name, parameters, body }), e.span())
+		.map_with(|(((name, parameters), return_type), body), e| {
+			(Node::Func(Func { name, return_type, parameters, body }), e.span())
 		})
 		.labelled("function")
 		.boxed();
@@ -207,6 +216,33 @@ where
 		just(Token::Ret)
 		.ignore_then(expression.clone())
 		.map_with(|x, e| (Node::FuncReturn(Box::new(x)), e.span()));
+	
+	let struct_ =
+		just(Token::Struct)
+		.ignore_then(
+			ident
+			.labelled("struct name"),
+		)
+		.then(
+			statement.clone()
+			.repeated()
+			.collect::<Vec<_>>()
+			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+			.map_with(|statements, e| (Some(statements), e.span()))
+			.recover_with(via_parser(nested_delimiters(
+				Token::Ctrl('{'),
+				Token::Ctrl('}'),
+				[
+					(Token::Ctrl('('), Token::Ctrl(')')),
+					(Token::Ctrl('['), Token::Ctrl(']')),
+				],
+				|span| (None, span),
+			)))
+			.map_with(|x, e| (x.0.unwrap_or_else(|| Vec::new()), x.1))
+		)
+		.map_with(|(name, body), e| (Node::Struct(name, body), e.span()))
+		.labelled("struct")
+		.boxed();
 	
 	// A comma-delimited list of expressions.
 	let items =
@@ -222,20 +258,26 @@ where
 		.delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
 		.map_with(|x, e| (Node::List(x), e.span()));
 	
+	let tuple =
+		expression.clone()
+		.separated_by(just(Token::Ctrl(',')))
+		.allow_trailing()
+		.collect::<Vec<_>>()
+		.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+		.map_with(|x, e| (Node::Tuple(x), e.span()));
+	
 	// 'Atoms' are expressions that contain no ambiguity
 	let atom =
 		choice((
 			val,
 			local,
 			list,
+			tuple,
 			if_.clone(),
 			block.clone().map(|(x, span)| (Node::Block((x, span)), span)),
-		))
-		// Atoms can also just be normal expressions, but surrounded with parentheses
-		.or(
 			expression.clone()
-			.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-		)
+				.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+		))
 		// Attempt to recover anything that looks like a parenthesised expression but contains errors
 		.recover_with(via_parser(nested_delimiters(
 			Token::Ctrl('('),
@@ -310,11 +352,23 @@ where
 		expression.clone().then_ignore(just(Token::Ctrl(';'))),
 		if_,
 		function,
+		struct_,
 		import.then_ignore(just(Token::Ctrl(';'))),
 		block.map(|(x, span)| (Node::Block((x, span)), span)),
 	)));
 	
-	type_.define(local);
+	let tuple_type =
+		type_.clone()
+		.separated_by(just(Token::Ctrl(',')))
+		.allow_trailing()
+		.collect::<Vec<_>>()
+		.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+		.map_with(|x, e| (Node::Tuple(x), e.span()));
+	
+	type_.define(choice((
+		local,
+		tuple_type,
+	)));
 	
 	statement.clone()
 		.repeated()
