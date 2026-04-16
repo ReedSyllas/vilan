@@ -1,9 +1,3 @@
-function sum_d(e, f) {
-	return e + f;
-}
-function f_c() {
-	return [ sum_d(4, 6), "Hello, World!" ];
-}
-const v_a = b(1, 2);
-console.log(v_a);
-console.log(f_c());
+const RECTANGLE_a = 0;
+const shape_d = { width: 70, top: 20, height: 30, type: RECTANGLE_a, name: "Rectangle", left: 10 };
+console.log(shape_d);

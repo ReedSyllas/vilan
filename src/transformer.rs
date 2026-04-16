@@ -2,7 +2,7 @@
 use std::{collections::HashMap};
 use chumsky::span::Span;
 
-use crate::{analyzer::{Entity, Function, Id, Program}, shared::{BinaryOp, Error}};
+use crate::{analyzer::{Entity, Function, Program}, shared::{BinaryOp, Error, Id}};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
 	Transformer::new(program, true).transform_entry()
@@ -25,7 +25,7 @@ impl<'src> Transformer<'src> {
 		
 		Self {
 			program,
-			ng: NameGenerator::new("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", debug_names),
+			ng: NameGenerator::simple(debug_names),
 			required_functions: HashMap::new(),
 			formatter: if should_pretty_print { Formatter::new_pretty() } else { Formatter::new_compact() },
 		}
@@ -67,6 +67,10 @@ impl<'src> Transformer<'src> {
 			Entity::Local(id) => {
 				js::Node::Local(self.ng.name_for(*id))
 			},
+			Entity::Member(subject_id, name) => {
+				let subject = self.walk_entity(*subject_id).unwrap_or(js::Node::Void);
+				js::Node::Property(Box::new(subject), name.to_string())
+			},
 			Entity::Call(id) => {
 				let function_call = self.program.function_calls.get(id).unwrap();
 				let subject = self.program.entity_map.get(&function_call.subject).unwrap();
@@ -91,14 +95,17 @@ impl<'src> Transformer<'src> {
 							let subject = self.ng.name_for(*id);
 							js::Node::Call(Box::new(js::Node::Local(subject)), args)
 						}
-					}
-					_ => unreachable!(),
+					},
+					_ => unimplemented!(),
 				}
 			},
 			Entity::FunctionReturn(value) => js::Node::Return(Box::new(self.walk_entity(*value).unwrap_or(js::Node::Void))),
 			Entity::Binary(op, lhs, rhs) => js::Node::Binary(*op, Box::new(self.walk_entity(*lhs).unwrap_or(js::Node::Void)), Box::new(self.walk_entity(*rhs).unwrap_or(js::Node::Void))),
 			Entity::Variable(id) => {
 				let name = self.ng.name_for(*id);
+				if self.program.reference_count.get(id).map(|x| *x < 1).unwrap_or(true) {
+					return None;
+				}
 				let variable = self.program.variables.get(id).unwrap();
 				let value = variable.initial.and_then(|id| self.walk_entity(id)).unwrap_or(js::Node::Void);
 				js::Node::Variable(js::Variable {
@@ -119,10 +126,15 @@ impl<'src> Transformer<'src> {
 				let items = ids.iter().filter_map(|id| self.walk_entity(*id)).collect();
 				js::Node::Array(items)
 			},
-			Entity::StructInitializer(struct_id, initial_fields) => {
+			Entity::StructInitializer(struct_id, assignments) => {
 				let struct_ = self.program.structs.get(struct_id).unwrap();
-				
-				js::Node::Void
+				// let mut properties_ng = NameGenerator::simple(debug_names);
+				let properties = assignments.iter().filter_map(|(i, id)| {
+					let field = struct_.fields.get(*i).unwrap();
+					let value = self.walk_entity(*id);
+					value.map(|x| (field.name, x))
+				}).collect::<Vec<_>>();
+				js::Node::Object(properties)
 			},
 		})
 	}
@@ -242,6 +254,7 @@ pub mod js {
 		Bool(bool),
 		Call(Box<Self>, Vec<Self>),
 		Function(Function<'src>),
+		// TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
 		Local(String),
 		Null,
 		Number(&'src str),
@@ -279,7 +292,7 @@ struct NameGenerator {
 }
 
 impl NameGenerator {
-	pub fn new(chars: &str, debug_names: HashMap<Id, String>) -> Self {
+	fn new(chars: &str, debug_names: HashMap<Id, String>) -> Self {
 		Self {
 			chars: chars.chars().collect(),
 			counter: 0,
@@ -288,7 +301,11 @@ impl NameGenerator {
 		}
 	}
 	
-	pub fn name_for(&mut self, id: Id) -> String {
+	fn simple(debug_names: HashMap<Id, String>) -> Self {
+		Self::new("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", debug_names)
+	}
+	
+	fn name_for(&mut self, id: Id) -> String {
 		self.names
 		.get(&id)
 		.map(|x| x.clone())

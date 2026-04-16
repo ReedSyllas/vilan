@@ -68,7 +68,7 @@ pub fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, 
 		.map(Token::Op);
 	
 	// A parser for control characters (delimiters, semicolons, etc.)
-	let ctrl = one_of("()[]{};,").map(Token::Ctrl);
+	let ctrl = one_of("()[]{};,.").map(Token::Ctrl);
 	
 	// A parser for identifiers and keywords
 	let ident = text::ascii::ident().map(|ident: &str| match ident {

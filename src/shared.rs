@@ -9,6 +9,15 @@ pub struct Error {
 	pub msg: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Id(pub u32);
+
+impl std::fmt::Debug for Id {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "Id({})", self.0)
+	}
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum BinaryOp {
 	Add,
@@ -54,11 +63,13 @@ pub enum BinaryOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
-	Void,
-	Unknown,
-	Tuple(Vec<Self>),
-	Primitive(PrimitiveType),
+	Any,
 	Function(Vec<Self>, Box<Self>),
+	Primitive(PrimitiveType),
+	Struct(Id),
+	Tuple(Vec<Self>),
+	Unknown,
+	Void,
 }
 
 impl Type {

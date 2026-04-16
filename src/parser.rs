@@ -46,10 +46,12 @@ pub enum Node<'src> {
 	Let(&'src str, Option<Box<Spanned<Self>>>, Option<Box<Spanned<Self>>>),
 	List(NodeList<'src>),
 	Local(&'src str),
+	Member(Box<Spanned<Self>>, &'src str),
 	Null,
 	Number(&'src str),
 	String(&'src str),
-	Struct(&'src str, Spanned<NodeList<'src>>),
+	Struct(&'src str, Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>),
+	StructInitializer(&'src str, Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>),
 	Tuple(NodeList<'src>),
 	Void,
 }
@@ -217,6 +219,15 @@ where
 		.ignore_then(expression.clone())
 		.map_with(|x, e| (Node::FuncReturn(Box::new(x)), e.span()));
 	
+	let struct_field =
+		ident
+		.then(
+			just(Token::Op(":"))
+			.ignore_then(type_.clone())
+			.or_not()
+		)
+		.map_with(|(name, type_), e| ((name, type_), e.span()));
+	
 	let struct_ =
 		just(Token::Struct)
 		.ignore_then(
@@ -224,11 +235,12 @@ where
 			.labelled("struct name"),
 		)
 		.then(
-			statement.clone()
-			.repeated()
+			struct_field
+			.separated_by(just(Token::Ctrl(',')))
+			.allow_trailing()
 			.collect::<Vec<_>>()
 			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-			.map_with(|statements, e| (Some(statements), e.span()))
+			.map_with(|fields, e| (Some(fields), e.span()))
 			.recover_with(via_parser(nested_delimiters(
 				Token::Ctrl('{'),
 				Token::Ctrl('}'),
@@ -242,6 +254,39 @@ where
 		)
 		.map_with(|(name, body), e| (Node::Struct(name, body), e.span()))
 		.labelled("struct")
+		.boxed();
+	
+	let struct_initializer_field =
+		ident
+		.then(
+			just(Token::Op("="))
+			.ignore_then(expression.clone())
+			.or_not()
+		)
+		.map_with(|(name, value), e| ((name, value), e.span()));
+	
+	let struct_initializer =
+		ident
+		.then(
+			struct_initializer_field
+			.separated_by(just(Token::Ctrl(',')))
+			.allow_trailing()
+			.collect::<Vec<_>>()
+			.delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+			.map_with(|fields, e| (Some(fields), e.span()))
+			.recover_with(via_parser(nested_delimiters(
+				Token::Ctrl('{'),
+				Token::Ctrl('}'),
+				[
+					(Token::Ctrl('('), Token::Ctrl(')')),
+					(Token::Ctrl('['), Token::Ctrl(']')),
+				],
+				|span| (None, span),
+			)))
+			.map_with(|x, e| (x.0.unwrap_or_else(|| Vec::new()), x.1))
+		)
+		.map_with(|(name, fields), e| (Node::StructInitializer(name, fields), e.span()))
+		.labelled("struct initializer")
 		.boxed();
 	
 	// A comma-delimited list of expressions.
@@ -269,6 +314,7 @@ where
 	// 'Atoms' are expressions that contain no ambiguity
 	let atom =
 		choice((
+			struct_initializer,
 			val,
 			local,
 			list,
@@ -309,14 +355,19 @@ where
 		|f, args, e| (Node::Call(Box::new(f), args), e.span()),
 	);
 	
+	let property = call.foldl_with(
+		just(Token::Ctrl('.')).ignore_then(ident).repeated(),
+		|subject, property, e| (Node::Member(Box::new(subject), property), e.span())
+	);
+	
 	// Product ops (multiply and divide) have equal precedence
 	let op =
 		just(Token::Op("*"))
 		.to(BinaryOp::Mul)
 		.or(just(Token::Op("/")).to(BinaryOp::Div));
 	let product =
-		call.clone()
-		.foldl_with(op.then(call).repeated(), |a, (op, b), e| {
+		property.clone()
+		.foldl_with(op.then(property).repeated(), |a, (op, b), e| {
 			(Node::Binary(op, Box::new(a), Box::new(b)), e.span())
 		});
 	
