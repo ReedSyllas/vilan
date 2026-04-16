@@ -2,7 +2,7 @@
 use std::{collections::HashMap};
 use chumsky::span::Span;
 
-use crate::{analyzer::{Entity, Function, Program}, shared::{BinaryOp, Error, Id}};
+use crate::{analyzer::{Entity, EntityIfBranch, Function, Program}, shared::{BinaryOp, Error, Id}, transformer::js::IfBranch};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
 	Transformer::new(program, true).transform_entry()
@@ -44,10 +44,16 @@ impl<'src> Transformer<'src> {
 	}
 	
 	fn walk_list(&mut self, list: &Vec<Id>) -> Vec<js::Node<'src>> {
-		list.iter().filter_map(|x| self.walk_entity(*x)).collect::<Vec<_>>()
+		let mut block = Vec::new();
+		for item in list {
+			if let Some(node) = self.walk_entity(*item, &mut block) {
+				block.push(node);
+			}
+		}
+		block
 	}
 	
-	fn walk_entity(&mut self, id: Id) -> Option<js::Node<'src>> {
+	fn walk_entity(&mut self, id: Id, block: &mut Vec<js::Node<'src>>) -> Option<js::Node<'src>> {
 		let entity = self.program.entity_map.get(&id).unwrap();
 		
 		Some(match entity {
@@ -68,7 +74,7 @@ impl<'src> Transformer<'src> {
 				js::Node::Local(self.ng.name_for(*id))
 			},
 			Entity::Member(subject_id, name) => {
-				let subject = self.walk_entity(*subject_id).unwrap_or(js::Node::Void);
+				let subject = self.walk_entity(*subject_id, block).unwrap_or(js::Node::Void);
 				js::Node::Property(Box::new(subject), name.to_string())
 			},
 			Entity::Call(id) => {
@@ -76,7 +82,7 @@ impl<'src> Transformer<'src> {
 				let subject = self.program.entity_map.get(&function_call.subject).unwrap();
 				match subject {
 					Entity::Local(id) => {
-						let args = function_call.arguments.iter().filter_map(|arg| self.walk_entity(*arg)).collect::<Vec<_>>();
+						let args = function_call.arguments.iter().filter_map(|arg| self.walk_entity(*arg, block)).collect::<Vec<_>>();
 						if *id == self.program.print_fn_id {
 							js::Node::Call(
 								Box::new(js::Node::Property(
@@ -99,31 +105,46 @@ impl<'src> Transformer<'src> {
 					_ => unimplemented!(),
 				}
 			},
-			Entity::FunctionReturn(value) => js::Node::Return(Box::new(self.walk_entity(*value).unwrap_or(js::Node::Void))),
-			Entity::Binary(op, lhs, rhs) => js::Node::Binary(*op, Box::new(self.walk_entity(*lhs).unwrap_or(js::Node::Void)), Box::new(self.walk_entity(*rhs).unwrap_or(js::Node::Void))),
+			Entity::FunctionReturn(value) => js::Node::Return(Box::new(self.walk_entity(*value, block).unwrap_or(js::Node::Void))),
+			Entity::Binary(op, lhs, rhs) => js::Node::Binary(*op, Box::new(self.walk_entity(*lhs, block).unwrap_or(js::Node::Void)), Box::new(self.walk_entity(*rhs, block).unwrap_or(js::Node::Void))),
 			Entity::Variable(id) => {
 				let name = self.ng.name_for(*id);
 				if self.program.reference_count.get(id).map(|x| *x < 1).unwrap_or(true) {
 					return None;
 				}
 				let variable = self.program.variables.get(id).unwrap();
-				let value = variable.initial.and_then(|id| self.walk_entity(id)).unwrap_or(js::Node::Void);
+				let value = variable.initial.and_then(|id| self.walk_entity(id, block)).unwrap_or(js::Node::Void);
 				js::Node::Variable(js::Variable {
 					name,
 					value: Box::new(value),
 				})
 			},
 			Entity::Block(body) => {
-				js::Node::Void
+				for statement in &body.0 {
+					if let Some(node) = self.walk_entity(*statement, block) {
+						block.push(node);
+					}
+				}
+				return self.walk_entity(body.1, block);
 			},
-			Entity::If(condition, then_body, else_arm) => {
-				js::Node::Void
+			Entity::If(branch) => {
+				fn walk_branch<'src>(t: &mut Transformer, branch: &EntityIfBranch, block: &mut Vec<js::Node<'src>>) -> js::IfBranch<'src> {
+					match branch {
+						EntityIfBranch::If(condition, body, else_) => {
+							js::IfBranch::If(t.walk_entity(*condition, block), t.walk_list(body), else_.map(|x| walk_branch(t, x, block)))
+						},
+						EntityIfBranch::Else(body) => {
+							js::IfBranch::Else(t.walk_list(list))
+						},
+					}
+				}
+				js::Node::If(walk_branch(self, branch, block))
 			},
 			Entity::List(items) => {
 				js::Node::Void
 			},
 			Entity::Tuple(ids) => {
-				let items = ids.iter().filter_map(|id| self.walk_entity(*id)).collect();
+				let items = ids.iter().filter_map(|id| self.walk_entity(*id, block)).collect();
 				js::Node::Array(items)
 			},
 			Entity::StructInitializer(struct_id, assignments) => {
@@ -131,7 +152,7 @@ impl<'src> Transformer<'src> {
 				// let mut properties_ng = NameGenerator::simple(debug_names);
 				let properties = assignments.iter().filter_map(|(i, id)| {
 					let field = struct_.fields.get(*i).unwrap();
-					let value = self.walk_entity(*id);
+					let value = self.walk_entity(*id, block);
 					value.map(|x| (field.name, x))
 				}).collect::<Vec<_>>();
 				js::Node::Object(properties)
@@ -143,7 +164,7 @@ impl<'src> Transformer<'src> {
 		let name = self.ng.name_for(function.id);
 		let parameters = function.parameters.iter().map(|parameter_id| js::Parameter { name: self.ng.name_for(*parameter_id) }).collect::<Vec<_>>();
 		let mut body = self.walk_list(&function.body.0);
-		if let Some(return_expr) = self.walk_entity(function.body.1) {
+		if let Some(return_expr) = self.walk_entity(function.body.1, &mut body) {
 			body.push(js::Node::Return(Box::new(return_expr)));
 		}
 		js::Node::Function(js::Function { name, parameters, body })
@@ -237,6 +258,23 @@ impl Formatter {
 				let s_subject = self.node(subject, "", 0);
 				format!("{}.{}{}", s_subject, member, terminator)
 			}
+			js::Node::If(branch) => {
+				fn walk_branch(f: &Formatter, branch: &IfBranch, indentation: usize) -> String {
+					match branch {
+						js::IfBranch::If(condition, body, else_) => {
+							let s_condition = f.node(condition, "", 0);
+							let s_body = body.iter().map(|x| f.node(x, ";", indentation + 1)).collect::<Vec<_>>().join("");
+							let s_else = else_.as_ref().map(|x| format!("{}{}", f.space, walk_branch(f, x, indentation))).unwrap_or("".to_string());
+							format!("if{}({}){}{{{}}}{}", f.space, s_condition, f.space, s_body, s_else)
+						},
+						js::IfBranch::Else(body) => {
+							let s_body = body.iter().map(|x| f.node(x, ";", indentation + 1)).collect::<Vec<_>>().join("");
+							format!("else{}{{{}}}", f.space, s_body)
+						},
+					}
+				}
+				walk_branch(self, branch, indentation)
+			}
 		};
 		
 		format!("{}{}", self.indentation.repeat(indentation), text)
@@ -262,7 +300,14 @@ pub mod js {
 		Return(Box<Self>),
 		String(&'src str),
 		Variable(Variable<'src>),
+		If(IfBranch<'src>),
 		Void,
+	}
+	
+	#[derive(Clone, Debug)]
+	pub enum IfBranch<'src> {
+		If(Box<Node<'src>>, Vec<Node<'src>>, Option<Box<Self>>),
+		Else(Vec<Node<'src>>),
 	}
 	
 	#[derive(Clone, Debug)]

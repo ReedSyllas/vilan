@@ -12,7 +12,7 @@ pub enum Entity<'src> {
 	Error,
 	Function(Id),
 	FunctionReturn(Id),
-	If(Id, (Vec<Id>, Id), Option<(Vec<Id>, Id)>),
+	If(EntityIfBranch),
 	List(Vec<Id>),
 	Local(Id),
 	Member(Id, &'src str),
@@ -24,6 +24,12 @@ pub enum Entity<'src> {
 	Tuple(Vec<Id>),
 	Variable(Id),
 	Void,
+}
+
+#[derive(Clone, Debug)]
+pub enum EntityIfBranch {
+	If(Id, (Vec<Id>, Id), Option<Box<EntityIfBranch>>),
+	Else((Vec<Id>, Id)),
 }
 
 #[derive(Debug)]
@@ -224,7 +230,7 @@ impl<'src> Analyzer<'src> {
 				let condition_id = self.walk_node(&if_.condition, body_scope_id);
 				let then_ids = self.walk_list(&if_.then.0.0, body_scope_id);
 				let then_expr_id = self.walk_node(&if_.then.0.1, body_scope_id);
-				Some(Entity::If(condition_id, (then_ids, then_expr_id), None))
+				Some(Entity::If(EntityIfBranch::If(condition_id, (then_ids, then_expr_id), None)))
 			},
 			Node::Func(function) => {
 				let name = function.name.0;
