@@ -131,7 +131,7 @@ impl<'src> Transformer<'src> {
 				fn walk_branch<'src>(t: &mut Transformer, branch: &EntityIfBranch, block: &mut Vec<js::Node<'src>>) -> js::IfBranch<'src> {
 					match branch {
 						EntityIfBranch::If(condition, body, else_) => {
-							js::IfBranch::If(t.walk_entity(*condition, block), t.walk_list(body), else_.map(|x| walk_branch(t, x, block)))
+							js::IfBranch::If(Box::new(t.walk_entity(*condition, block).unwrap_or(js::Node::Bool(false))), t.walk_list(body), else_.map(|x| walk_branch(t, x, block)))
 						},
 						EntityIfBranch::Else(body) => {
 							js::IfBranch::Else(t.walk_list(list))
