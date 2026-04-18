@@ -131,6 +131,9 @@ impl<'src> Transformer<'src> {
 				fn walk_branch<'src>(t: &mut Transformer, branch: &EntityIfBranch, block: &mut Vec<js::Node<'src>>) -> js::IfBranch<'src> {
 					match branch {
 						EntityIfBranch::If(condition, body, else_) => {
+							if t.program.entity_map.get(&body.1).map(|x| !matches!(x, Entity::Void)).unwrap_or(false) {
+								block.push(js::Node::Variable(js::Variable { name: "temp".to_string(), value: Box::new(js::Node::Null) }));
+							}
 							js::IfBranch::If(Box::new(t.walk_entity(*condition, block).unwrap_or(js::Node::Bool(false))), t.walk_list(body), else_.map(|x| walk_branch(t, x, block)))
 						},
 						EntityIfBranch::Else(body) => {
@@ -259,13 +262,14 @@ impl Formatter {
 				format!("{}.{}{}", s_subject, member, terminator)
 			}
 			js::Node::If(branch) => {
-				fn walk_branch(f: &Formatter, branch: &IfBranch, indentation: usize) -> String {
+				fn walk_branch(f: &Formatter, branch: &IfBranch, indentation: usize, level: u32) -> String {
 					match branch {
 						js::IfBranch::If(condition, body, else_) => {
+							let s_prefix = if level > 0 { "else " } else { "" };
 							let s_condition = f.node(condition, "", 0);
 							let s_body = body.iter().map(|x| f.node(x, ";", indentation + 1)).collect::<Vec<_>>().join("");
-							let s_else = else_.as_ref().map(|x| format!("{}{}", f.space, walk_branch(f, x, indentation))).unwrap_or("".to_string());
-							format!("if{}({}){}{{{}}}{}", f.space, s_condition, f.space, s_body, s_else)
+							let s_else = else_.as_ref().map(|x| format!("{}{}", f.space, walk_branch(f, x, indentation, level + 1))).unwrap_or("".to_string());
+							format!("{}if{}({}){}{{{}}}{}", s_prefix, f.space, s_condition, f.space, s_body, s_else)
 						},
 						js::IfBranch::Else(body) => {
 							let s_body = body.iter().map(|x| f.node(x, ";", indentation + 1)).collect::<Vec<_>>().join("");
@@ -273,7 +277,7 @@ impl Formatter {
 						},
 					}
 				}
-				walk_branch(self, branch, indentation)
+				walk_branch(self, branch, indentation, 0)
 			}
 		};
 		
