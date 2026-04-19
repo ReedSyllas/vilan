@@ -1,0 +1,30 @@
+
+{
+	print("a"); // "a"
+	jump out;
+	print("b"); // never
+}
+
+for item in 0..3 {
+	print(item); // 0
+	jump break;
+	print("next"); // never
+}
+
+for item in 0..3 {
+	print(item); // 0, 1, 2
+	jump next;
+	print("next"); // never
+}
+
+for i in 0..3 'a {
+	for j in 0..3 'b {
+		print(f"{i} {j}"); // 0 0
+		'a jump break;
+	}
+}
+
+let value = 'a {
+	'a jump out 100;
+};
+print(value); // 100
