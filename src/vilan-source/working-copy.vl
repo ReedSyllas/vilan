@@ -1,4 +1,8 @@
 
+let RECTANGLE = 0;
+let CIRCLE = 1;
+let TRIANGLE = 2;
+
 struct Shape {
 	type: i32,
 	name: str,
@@ -8,31 +12,39 @@ struct Shape {
 	height: str,
 }
 
+impl Shape {
+	fun new() {
+		Shape {
+			type = RECTANGLE,
+			name = "Rectangle",
+			left = 10,
+			top = 20,
+			width = 70,
+			height = 30,
+		}
+	}
+}
+
 fun main() {
-	let RECTANGLE = 0;
-	let CIRCLE = 1;
-	let TRIANGLE = 2;
+	let shape = Shape::new();
 	
-	let shape = Shape {
-		type = RECTANGLE,
-		name = "Rectangle",
-		left = 10,
-		top = 20,
-		width = 70,
-		height = 30,
-	};
+	if shape.type == RECTANGLE {
+		print("shape is a rectangle");
+	}
+	else if shape.type == CIRCLE {
+		print("shape is a circle");
+	}
+	else {
+		print("shape is not a rectangle or circle");
+	}
 	
 	print(shape);
 	
 	let sum = {
 		let a = 10;
 		let b = 5;
-		a * b
+		a + b
 	};
-	
-	if shape.type == RECTANGLE {
-		print("shape is a rectangle");
-	}
 	
 	print(sum);
 }

@@ -1,4 +1,4 @@
-use crate::analyzer::{Entity, EntityIfBranch, Function, Program};
+use crate::analyzer::{Expr, ExprIfBranch, Function, Program};
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::BinaryOp;
@@ -47,23 +47,59 @@ impl<'src> Transformer<'src> {
     }
 
     fn transform_entry(mut self) -> Result<String, Error> {
-        let main_fn_body = self
+        let global_scope = self
             .program
-            .functions
-            .values()
-            .find_map(|f| (f.name == "main").then_some(&f.body.0))
+            .scopes
+            .get(&self.program.global_scope_id)
+            .unwrap();
+
+        let global_variables = global_scope
+            .name_id_map
+            .iter()
+            .filter_map(|x| self.program.variables.contains_key(x.1).then_some(*x.1))
+            .collect::<Vec<_>>();
+
+        let main_fn = global_scope
+            .name_id_map
+            .get("main")
+            .and_then(|id| self.program.functions.get(&id))
             .ok_or_else(|| Error {
                 msg: "Cannot execute program without a main function".to_string(),
                 span: Span::new((), 0..0),
             })?;
 
-        let body = self.walk_list(main_fn_body).into_iter();
-        let functions = self.required_functions.into_values();
+        let t_global_variables = self.walk_list(&global_variables);
+
+        let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
+
+        if let Some(x) = self.program.entity_map.get(&main_fn.body.1) {
+            match x {
+                Expr::Void => {}
+                _ => {
+                    let t_exit = js::Node::Call(
+                        Box::new(js::Node::Property(
+                            Box::new(js::Node::Local("process".to_string())),
+                            "exit".to_string(),
+                        )),
+                        self.walk_entity(main_fn.body.1, &mut t_main_fn_body)
+                            .map(|x| vec![x])
+                            .unwrap_or_else(|| Vec::new()),
+                    );
+                    t_main_fn_body.push(t_exit)
+                }
+            }
+        }
+
+        let t_functions = self.required_functions.into_values();
 
         Ok(format!(
             "{}{}",
-            self.formatter
-                .file(&functions.chain(body).collect::<Vec<_>>()),
+            self.formatter.file(
+                &t_functions
+                    .chain(t_global_variables.into_iter())
+                    .chain(t_main_fn_body.into_iter())
+                    .collect::<Vec<_>>()
+            ),
             self.formatter.line_break
         ))
     }
@@ -82,31 +118,31 @@ impl<'src> Transformer<'src> {
         let entity = self.program.entity_map.get(&id).unwrap();
 
         Some(match entity {
-            Entity::Error => unreachable!(),
-            Entity::Void => js::Node::Void,
-            Entity::Null => js::Node::Null,
-            Entity::Bool(x) => js::Node::Bool(*x),
-            Entity::Number(whole, fraction) => js::Node::Number(whole, *fraction),
-            Entity::String(x) => js::Node::String(x),
-            Entity::Struct(_) => {
+            Expr::Error => unreachable!(),
+            Expr::Void => js::Node::Void,
+            Expr::Null => js::Node::Null,
+            Expr::Bool(x) => js::Node::Bool(*x),
+            Expr::Number(whole, fraction) => js::Node::Number(whole, *fraction),
+            Expr::String(x) => js::Node::String(x),
+            Expr::Struct(_) => {
                 return None;
             }
-            Entity::Function(id) => {
+            Expr::Function(id) => {
                 let function = self.program.functions.get(id).unwrap();
                 self.function(function)
             }
-            Entity::Local(id) => js::Node::Local(self.ng.name_for(*id)),
-            Entity::Member(subject_id, name) => {
+            Expr::Local(id) => js::Node::Local(self.ng.name_for(*id)),
+            Expr::Field(subject_id, name) => {
                 let subject = self
                     .walk_entity(*subject_id, block)
                     .unwrap_or(js::Node::Void);
                 js::Node::Property(Box::new(subject), name.to_string())
             }
-            Entity::Call(id) => {
+            Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap();
                 let subject = self.program.entity_map.get(&function_call.subject).unwrap();
                 match subject {
-                    Entity::Local(id) => {
+                    Expr::Local(id) => {
                         let args = function_call
                             .arguments
                             .iter()
@@ -134,15 +170,15 @@ impl<'src> Transformer<'src> {
                     _ => unimplemented!(),
                 }
             }
-            Entity::FunctionReturn(value) => js::Node::Return(Box::new(
+            Expr::FunctionReturn(value) => js::Node::Return(Box::new(
                 self.walk_entity(*value, block).unwrap_or(js::Node::Void),
             )),
-            Entity::Binary(op, lhs, rhs) => js::Node::Binary(
+            Expr::Binary(op, lhs, rhs) => js::Node::Binary(
                 *op,
                 Box::new(self.walk_entity(*lhs, block).unwrap_or(js::Node::Void)),
                 Box::new(self.walk_entity(*rhs, block).unwrap_or(js::Node::Void)),
             ),
-            Entity::Variable(id) => {
+            Expr::Variable(id) => {
                 let name = self.ng.name_for(*id);
                 if self
                     .program
@@ -163,7 +199,7 @@ impl<'src> Transformer<'src> {
                     value: Box::new(value),
                 })
             }
-            Entity::Block(body) => {
+            Expr::Block(body) => {
                 for statement in &body.0 {
                     if let Some(node) = self.walk_entity(*statement, block) {
                         block.push(node);
@@ -171,18 +207,18 @@ impl<'src> Transformer<'src> {
                 }
                 return self.walk_entity(body.1, block);
             }
-            Entity::If(branch) => {
+            Expr::If(branch) => {
                 fn walk_branch<'src>(
                     t: &mut Transformer<'src>,
-                    branch: &EntityIfBranch,
+                    branch: &ExprIfBranch,
                     block: &mut Vec<js::Node<'src>>,
                 ) -> js::IfBranch<'src> {
                     match branch {
-                        EntityIfBranch::If(condition, body, else_) => {
+                        ExprIfBranch::If(condition, body, else_) => {
                             if t.program
                                 .entity_map
                                 .get(&body.1)
-                                .map(|x| !matches!(x, Entity::Void))
+                                .map(|x| !matches!(x, Expr::Void))
                                 .unwrap_or(false)
                             {
                                 block.push(js::Node::Variable(js::Variable {
@@ -199,20 +235,20 @@ impl<'src> Transformer<'src> {
                                 else_.as_ref().map(|x| Box::new(walk_branch(t, x, block))),
                             )
                         }
-                        EntityIfBranch::Else(body) => js::IfBranch::Else(t.walk_list(&body.0)),
+                        ExprIfBranch::Else(body) => js::IfBranch::Else(t.walk_list(&body.0)),
                     }
                 }
                 js::Node::If(walk_branch(self, branch, block))
             }
-            Entity::List(items) => js::Node::Void,
-            Entity::Tuple(ids) => {
+            Expr::List(items) => js::Node::Void,
+            Expr::Tuple(ids) => {
                 let items = ids
                     .iter()
                     .filter_map(|id| self.walk_entity(*id, block))
                     .collect();
                 js::Node::Array(items)
             }
-            Entity::StructInitializer(struct_id, assignments) => {
+            Expr::StructInitializer(struct_id, assignments) => {
                 let struct_ = self.program.structs.get(struct_id).unwrap();
                 // let mut properties_ng = NameGenerator::simple(debug_names);
                 let properties = assignments
@@ -345,8 +381,17 @@ impl Formatter {
                     .collect::<Vec<_>>()
                     .join("");
                 format!(
-                    "function {}({}){}{{{}{}{}}}",
-                    name, parameters, self.space, self.line_break, body, self.line_break
+                    "function {}({}){}{{{}{}{}}}{}",
+                    name,
+                    parameters,
+                    self.space,
+                    self.line_break,
+                    body,
+                    self.line_break,
+                    match terminator {
+                        ";" => "",
+                        x => x,
+                    }
                 )
             }
             js::Node::Local(name) => format!("{}{}", name, terminator),
@@ -420,8 +465,15 @@ impl Formatter {
                                 })
                                 .unwrap_or("".to_string());
                             format!(
-                                "{}if{}({}){}{{{}}}{}",
-                                s_prefix, f.space, s_condition, f.space, s_body, s_else
+                                "{}if{}({}){}{{{}{}{}}}{}",
+                                s_prefix,
+                                f.space,
+                                s_condition,
+                                f.space,
+                                f.line_break,
+                                s_body,
+                                f.line_break,
+                                s_else
                             )
                         }
                         js::IfBranch::Else(body) => {
@@ -430,7 +482,10 @@ impl Formatter {
                                 .map(|x| f.node(x, ";", indentation + 1))
                                 .collect::<Vec<_>>()
                                 .join("");
-                            format!("else{}{{{}}}", f.space, s_body)
+                            format!(
+                                "else{}{{{}{}{}}}",
+                                f.space, f.line_break, s_body, f.line_break
+                            )
                         }
                     }
                 }

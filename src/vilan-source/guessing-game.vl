@@ -1,0 +1,68 @@
+import std::random;
+
+enum Signal {
+	Quit,
+	Normal,
+}
+
+fun main() {
+	print("Welcome to the number guessing game!");
+	print("Type `quit` at any time to quit.");
+	print("Are you ready to play? Y/n");
+	for {
+		match scan().trim() {
+			"quit" => {},
+			"",
+			"Y" => {
+				match play() {
+					Signal::Quit => {},
+					Signal::Normal => {
+						print("Play again? Y/n");
+						jump continue;
+					},
+				}
+			},
+			_ => {
+				print("Another time then. Goodbye!");
+			},
+		}
+		jump break;
+	}
+}
+
+fun play(): Signal {
+	let range = (1..=100).ascending();
+	let secret = random::int(range);
+	print("I have chosen a secret number from {range.start()} to {range.end()}.");
+	print("Take a guess!");
+	for {
+		match scan().trim() {
+			"quit" => {
+				ret Signal::Quit;
+			},
+			n => match n.parse_int() {
+				Some(n) => {
+					if n != secret {
+						let temperature_hint = match secret.diff(n) {
+							..2 => "You're very hot!",
+							..5 => "You're hot!",
+							..10 => "You're very warm.",
+							..25 => "You're warm",
+							_ => "Not quite."
+						};
+						let direction_hint = if n > secret { "Try lower." } else { "Try higher." };
+						print(f"{temperature_hint} {direction_hint}");
+						jump continue;
+					}
+					print("That's correct!");
+				},
+				None => {
+					print("I don't understand that guess. Please type a number (like '45').");
+					jump continue;
+				}
+			}
+		}
+		jump break;
+	}
+	ret Signal::Normal;
+}

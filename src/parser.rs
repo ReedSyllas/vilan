@@ -1,4 +1,4 @@
-use crate::node::{BinaryOp, Func, If, IfElseBranch, ImportBranch, Node, NodeList};
+use crate::node::{BinaryOp, Func, If, ImportBranch, Node, NodeIfBranch, NodeList};
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 use chumsky::{input::ValueInput, prelude::*};
@@ -11,6 +11,8 @@ where
     let mut statement = Recursive::declare();
 
     let mut expression = Recursive::declare();
+
+    let mut secondary_expression = Recursive::declare();
 
     // A comma-delimited list of expressions.
     let expression_list = expression
@@ -67,7 +69,7 @@ where
         .labelled("struct initializer")
         .boxed();
 
-    let local = identifier.map_with(|x, e| (Node::Local(x), e.span()));
+    let local = identifier.map_with(|x, e| (Node::Accessor(x), e.span()));
 
     let list = expression_list
         .clone()
@@ -84,15 +86,10 @@ where
 
     // 'Atoms' are expressions that contain no ambiguity
     let atom = choice((
-        struct_initializer,
         literal,
         local,
         list,
         tuple,
-        if_.clone(),
-        block
-            .clone()
-            .map(|(x, span)| (Node::Block((x, span)), span)),
         expression
             .clone()
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
@@ -118,50 +115,6 @@ where
         |span| (Node::Error, span),
     )))
     .boxed();
-
-    // Function calls have very high precedence so we prioritize them
-    let call = atom.foldl_with(
-        expression_list
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-            .map_with(|args, e| (args, e.span()))
-            .repeated(),
-        |f, args, e| (Node::Call(Box::new(f), args), e.span()),
-    );
-
-    let property = call.foldl_with(
-        just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
-        |subject, property, e| (Node::Member(Box::new(subject), property), e.span()),
-    );
-
-    // Product ops (multiply and divide) have equal precedence
-    let op = just(Token::Op("*"))
-        .to(BinaryOp::Mul)
-        .or(just(Token::Op("/")).to(BinaryOp::Div));
-    let product = property
-        .clone()
-        .foldl_with(op.then(property).repeated(), |a, (op, b), e| {
-            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
-        });
-
-    // Sum ops (add and subtract) have equal precedence
-    let op = just(Token::Op("+"))
-        .to(BinaryOp::Add)
-        .or(just(Token::Op("-")).to(BinaryOp::Sub));
-    let sum = product
-        .clone()
-        .foldl_with(op.then(product).repeated(), |a, (op, b), e| {
-            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
-        });
-
-    // Comparison ops (equal, not-equal) have equal precedence
-    let op = just(Token::Op("=="))
-        .to(BinaryOp::Eq)
-        .or(just(Token::Op("!=")).to(BinaryOp::NotEq));
-    let compare = sum
-        .clone()
-        .foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
-            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
-        });
 
     // Blocks are a sequence of statements delimited with braces.
     block.define(
@@ -218,21 +171,21 @@ where
     if_.define(
         recursive(|if_| {
             just(Token::If)
-                .ignore_then(expression.clone())
+                .ignore_then(secondary_expression.clone().labelled("condition"))
                 .then(block.clone())
                 .then(
                     just(Token::Else)
                         .ignore_then(
                             block
                                 .clone()
-                                .map_with(|x, e| (IfElseBranch::Else(x), e.span()))
+                                .map_with(|x, e| (NodeIfBranch::Else(x), e.span()))
                                 .or(if_),
                         )
                         .or_not(),
                 )
                 .map_with(|((cond, a), b), e| {
                     (
-                        IfElseBranch::If(Box::new(If {
+                        NodeIfBranch::If(Box::new(If {
                             condition: Box::new(cond),
                             then: a,
                             else_: b,
@@ -242,7 +195,7 @@ where
                 })
         })
         .map(|x| match x {
-            (IfElseBranch::If(x), span) => (Node::If(*x), span),
+            (NodeIfBranch::If(x), span) => (Node::If(NodeIfBranch::If(Box::new(*x))), span),
             _ => unreachable!(),
         })
         .labelled("if block"),
@@ -347,17 +300,49 @@ where
         .labelled("struct")
         .boxed();
 
-    expression.define(choice((
-        compare.labelled("expression").as_context(),
+    let impl_ = just(Token::Impl)
+        .ignore_then(type_.clone().labelled("implementation subject"))
+        .then(
+            statement
+                .clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+                .map_with(|statements, e| (statements, e.span()))
+                .recover_with(via_parser(nested_delimiters(
+                    Token::Ctrl('{'),
+                    Token::Ctrl('}'),
+                    [
+                        (Token::Ctrl('('), Token::Ctrl(')')),
+                        (Token::Ctrl('['), Token::Ctrl(']')),
+                    ],
+                    |span| (Vec::new(), span),
+                ))),
+        )
+        .map_with(|(subject, body), e| (Node::Impl(Box::new(subject), body), e.span()));
+
+    secondary_expression.define(choice((
+        block
+            .clone()
+            .map(|(x, span)| (Node::Block((x, span)), span)),
+        if_.clone(),
         let_,
         return_,
+        chain_expr_parser(identifier, expression_list, atom),
     )));
+
+    expression.define(
+        choice((struct_initializer.clone(), secondary_expression))
+            .labelled("expression")
+            .as_context(),
+    );
 
     statement.define(choice((
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_,
         function,
         struct_,
+        impl_,
         import.then_ignore(just(Token::Ctrl(';'))),
         block.map(|(x, span)| (Node::Block((x, span)), span)),
     )));
@@ -377,4 +362,69 @@ where
         .repeated()
         .collect::<Vec<_>>()
         .map_with(|children, e| (children, e.span()))
+}
+
+fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
+    identifier: impl Parser<'tokens, I, &'src str, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Copy,
+    expression_list: impl Parser<
+        'tokens,
+        I,
+        NodeList<'src>,
+        extra::Err<Rich<'tokens, Token<'src>, Span>>,
+    > + Clone,
+    atom: impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>>
+    + Clone,
+) -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
+{
+    let static_access = atom.foldl_with(
+        just(Token::Op("::")).ignore_then(identifier).repeated(),
+        |subject, member, e| (Node::StaticAccessor(Box::new(subject), member), e.span()),
+    );
+
+    let member_access = static_access.foldl_with(
+        just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
+        |subject, member, e| (Node::MemberAccessor(Box::new(subject), member), e.span()),
+    );
+
+    let call = member_access.foldl_with(
+        expression_list
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .map_with(|args, e| (args, e.span()))
+            .repeated(),
+        |f, args, e| (Node::Call(Box::new(f), args), e.span()),
+    );
+
+    // Product ops (multiply and divide) have equal precedence
+    let op = just(Token::Op("*"))
+        .to(BinaryOp::Mul)
+        .or(just(Token::Op("/")).to(BinaryOp::Div));
+    let product = call
+        .clone()
+        .foldl_with(op.then(call).repeated(), |a, (op, b), e| {
+            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
+        });
+
+    // Sum ops (add and subtract) have equal precedence
+    let op = just(Token::Op("+"))
+        .to(BinaryOp::Add)
+        .or(just(Token::Op("-")).to(BinaryOp::Sub));
+    let sum = product
+        .clone()
+        .foldl_with(op.then(product).repeated(), |a, (op, b), e| {
+            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
+        });
+
+    // Comparison ops (equal, not-equal) have equal precedence
+    let op = just(Token::Op("=="))
+        .to(BinaryOp::Eq)
+        .or(just(Token::Op("!=")).to(BinaryOp::NotEq));
+    let compare = sum
+        .clone()
+        .foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
+            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
+        });
+
+    compare
 }

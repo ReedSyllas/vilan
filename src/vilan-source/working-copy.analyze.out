@@ -1,218 +1,438 @@
 Program {
     entity_map: {
-        Id(15): Number(
-            "70",
+        Id(27): String(
+            "shape is a rectangle",
         ),
-        Id(21): Block(
-            (
-                [
-                    Id(22),
-                    Id(24),
-                ],
-                Id(26),
-            ),
+        Id(34): Local(
+            Id(0),
         ),
-        Id(2): Function(
-            Id(2),
+        Id(50): Binary(
+            Add,
+            Id(51),
+            Id(52),
         ),
-        Id(26): Binary(
-            Mul,
-            Id(27),
-            Id(28),
+        Id(54): Local(
+            Id(0),
         ),
-        Id(10): StructInitializer(
+        Id(9): StructInitializer(
             Id(1),
             {
-                2: Id(13),
-                0: Id(11),
-                1: Id(12),
-                3: Id(14),
-                4: Id(15),
-                5: Id(16),
+                5: Id(15),
+                1: Id(11),
+                3: Id(13),
+                2: Id(12),
+                0: Id(10),
+                4: Id(14),
             },
         ),
-        Id(5): Variable(
-            Id(5),
+        Id(5): Number(
+            "1",
+            None,
         ),
-        Id(23): Number(
-            "10",
-        ),
-        Id(25): Number(
-            "5",
-        ),
-        Id(13): Number(
-            "10",
-        ),
-        Id(4): Number(
+        Id(3): Number(
             "0",
-        ),
-        Id(20): Variable(
-            Id(20),
-        ),
-        Id(32): Void,
-        Id(7): Variable(
-            Id(7),
-        ),
-        Id(17): Call(
-            Id(17),
-        ),
-        Id(31): Local(
-            Id(20),
-        ),
-        Id(12): String(
-            "Rectangle",
+            None,
         ),
         Id(1): Struct(
             Id(1),
         ),
-        Id(3): Variable(
-            Id(3),
-        ),
-        Id(6): Number(
-            "1",
-        ),
-        Id(30): Local(
-            Id(0),
-        ),
-        Id(22): Variable(
-            Id(22),
-        ),
-        Id(16): Number(
-            "30",
+        Id(2): Variable(
+            Id(2),
         ),
         Id(14): Number(
-            "20",
+            "70",
+            None,
         ),
-        Id(24): Variable(
-            Id(24),
+        Id(56): Void,
+        Id(10): Local(
+            Id(2),
         ),
-        Id(9): Variable(
-            Id(9),
+        Id(32): Local(
+            Id(4),
         ),
-        Id(18): Local(
+        Id(26): Local(
             Id(0),
         ),
-        Id(27): Local(
-            Id(22),
+        Id(13): Number(
+            "20",
+            None,
         ),
-        Id(28): Local(
+        Id(6): Variable(
+            Id(6),
+        ),
+        Id(15): Number(
+            "30",
+            None,
+        ),
+        Id(18): Call(
+            Id(18),
+        ),
+        Id(44): Variable(
+            Id(44),
+        ),
+        Id(43): Local(
+            Id(17),
+        ),
+        Id(55): Local(
+            Id(44),
+        ),
+        Id(7): Number(
+            "2",
+            None,
+        ),
+        Id(16): Function(
+            Id(16),
+        ),
+        Id(48): Variable(
+            Id(48),
+        ),
+        Id(23): Local(
+            Id(17),
+        ),
+        Id(37): Call(
+            Id(37),
+        ),
+        Id(4): Variable(
+            Id(4),
+        ),
+        Id(11): String(
+            "Rectangle",
+        ),
+        Id(33): Call(
+            Id(33),
+        ),
+        Id(36): Void,
+        Id(20): If(
+            If(
+                Id(21),
+                (
+                    [
+                        Id(25),
+                    ],
+                    Id(28),
+                ),
+                Some(
+                    If(
+                        Id(29),
+                        (
+                            [
+                                Id(33),
+                            ],
+                            Id(36),
+                        ),
+                        Some(
+                            Else(
+                                (
+                                    [
+                                        Id(37),
+                                    ],
+                                    Id(40),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        Id(42): Local(
+            Id(0),
+        ),
+        Id(52): Local(
+            Id(48),
+        ),
+        Id(17): Variable(
+            Id(17),
+        ),
+        Id(8): Function(
+            Id(8),
+        ),
+        Id(21): Binary(
+            Eq,
+            Id(22),
             Id(24),
         ),
-        Id(29): Call(
-            Id(29),
+        Id(30): Member(
+            Id(31),
+            "type",
         ),
-        Id(11): Local(
-            Id(3),
+        Id(35): String(
+            "shape is a circle",
+        ),
+        Id(39): String(
+            "shape is not a rectangle or circle",
+        ),
+        Id(28): Void,
+        Id(25): Call(
+            Id(25),
+        ),
+        Id(49): Number(
+            "5",
+            None,
+        ),
+        Id(24): Local(
+            Id(2),
+        ),
+        Id(41): Call(
+            Id(41),
+        ),
+        Id(47): Number(
+            "10",
+            None,
+        ),
+        Id(51): Local(
+            Id(46),
+        ),
+        Id(40): Void,
+        Id(38): Local(
+            Id(0),
+        ),
+        Id(22): Member(
+            Id(23),
+            "type",
+        ),
+        Id(53): Call(
+            Id(53),
+        ),
+        Id(46): Variable(
+            Id(46),
+        ),
+        Id(31): Local(
+            Id(17),
+        ),
+        Id(12): Number(
+            "10",
+            None,
+        ),
+        Id(29): Binary(
+            Eq,
+            Id(30),
+            Id(32),
+        ),
+        Id(45): Block(
+            (
+                [
+                    Id(46),
+                    Id(48),
+                ],
+                Id(50),
+            ),
         ),
         Id(19): Local(
-            Id(9),
-        ),
-        Id(8): Number(
-            "2",
+            Id(8),
         ),
     },
     entity_scope_map: {
-        Id(6): Id(1),
-        Id(2): Id(0),
-        Id(31): Id(1),
-        Id(10): Id(1),
-        Id(8): Id(1),
-        Id(4): Id(1),
+        Id(20): Id(2),
+        Id(46): Id(6),
         Id(9): Id(1),
-        Id(23): Id(2),
-        Id(5): Id(1),
-        Id(30): Id(1),
-        Id(1): Id(0),
-        Id(12): Id(1),
-        Id(3): Id(1),
-        Id(7): Id(1),
-        Id(26): Id(2),
-        Id(32): Id(1),
-        Id(25): Id(2),
-        Id(21): Id(1),
-        Id(27): Id(2),
-        Id(11): Id(1),
-        Id(16): Id(1),
+        Id(39): Id(5),
+        Id(32): Id(4),
+        Id(2): Id(0),
+        Id(10): Id(1),
+        Id(27): Id(3),
+        Id(19): Id(2),
+        Id(34): Id(4),
+        Id(43): Id(2),
+        Id(47): Id(6),
+        Id(51): Id(6),
+        Id(52): Id(6),
+        Id(23): Id(3),
+        Id(50): Id(6),
+        Id(45): Id(2),
+        Id(44): Id(2),
+        Id(35): Id(4),
+        Id(7): Id(0),
         Id(13): Id(1),
-        Id(29): Id(1),
-        Id(18): Id(1),
-        Id(24): Id(2),
-        Id(20): Id(1),
-        Id(14): Id(1),
-        Id(22): Id(2),
-        Id(28): Id(2),
-        Id(17): Id(1),
+        Id(40): Id(5),
+        Id(16): Id(0),
+        Id(21): Id(3),
+        Id(55): Id(2),
+        Id(5): Id(0),
+        Id(28): Id(3),
+        Id(53): Id(2),
+        Id(49): Id(6),
+        Id(18): Id(2),
+        Id(4): Id(0),
+        Id(11): Id(1),
+        Id(26): Id(3),
+        Id(25): Id(3),
+        Id(1): Id(0),
+        Id(30): Id(4),
+        Id(8): Id(0),
+        Id(29): Id(4),
+        Id(17): Id(2),
+        Id(22): Id(3),
+        Id(24): Id(3),
+        Id(6): Id(0),
+        Id(31): Id(4),
+        Id(33): Id(4),
         Id(15): Id(1),
-        Id(19): Id(1),
+        Id(42): Id(2),
+        Id(36): Id(4),
+        Id(48): Id(6),
+        Id(54): Id(2),
+        Id(41): Id(2),
+        Id(56): Id(2),
+        Id(14): Id(1),
+        Id(38): Id(5),
+        Id(3): Id(0),
+        Id(12): Id(1),
+        Id(37): Id(5),
     },
     function_calls: {
-        Id(29): FunctionCall {
-            id: Id(29),
-            subject: Id(30),
+        Id(25): FunctionCall {
+            id: Id(25),
+            subject: Id(26),
             arguments: [
-                Id(31),
+                Id(27),
             ],
         },
-        Id(17): FunctionCall {
-            id: Id(17),
-            subject: Id(18),
+        Id(41): FunctionCall {
+            id: Id(41),
+            subject: Id(42),
             arguments: [
-                Id(19),
+                Id(43),
+            ],
+        },
+        Id(53): FunctionCall {
+            id: Id(53),
+            subject: Id(54),
+            arguments: [
+                Id(55),
+            ],
+        },
+        Id(37): FunctionCall {
+            id: Id(37),
+            subject: Id(38),
+            arguments: [
+                Id(39),
+            ],
+        },
+        Id(18): FunctionCall {
+            id: Id(18),
+            subject: Id(19),
+            arguments: [],
+        },
+        Id(33): FunctionCall {
+            id: Id(33),
+            subject: Id(34),
+            arguments: [
+                Id(35),
             ],
         },
     },
     functions: {
-        Id(2): Function {
-            id: Id(2),
-            name: "main",
+        Id(8): Function {
+            id: Id(8),
+            name: "create_shape",
             parameters: [],
             body: (
-                [
-                    Id(3),
-                    Id(5),
-                    Id(7),
-                    Id(9),
-                    Id(17),
-                    Id(20),
-                    Id(29),
-                ],
-                Id(32),
+                [],
+                Id(9),
                 Id(1),
             ),
             call_count: 0,
         },
+        Id(16): Function {
+            id: Id(16),
+            name: "main",
+            parameters: [],
+            body: (
+                [
+                    Id(17),
+                    Id(20),
+                    Id(41),
+                    Id(44),
+                    Id(53),
+                ],
+                Id(56),
+                Id(2),
+            ),
+            call_count: 0,
+        },
     },
+    global_scope_id: Id(0),
     print_fn_id: Id(0),
     reference_count: {
-        Id(3): 1,
-        Id(9): 1,
-        Id(22): 1,
-        Id(0): 2,
-        Id(5): 0,
-        Id(20): 1,
-        Id(24): 1,
-        Id(2): 0,
+        Id(4): 1,
         Id(1): 0,
-        Id(7): 0,
+        Id(44): 1,
+        Id(17): 3,
+        Id(8): 1,
+        Id(16): 0,
+        Id(6): 0,
+        Id(46): 1,
+        Id(48): 1,
+        Id(2): 2,
+        Id(0): 5,
     },
     scopes: {
-        Id(2): Scope {
-            id: Id(2),
+        Id(5): Scope {
+            id: Id(5),
             parent_id: Some(
-                Id(1),
+                Id(2),
             ),
             name_id_map: {
-                "b": Id(24),
-                "a": Id(22),
+                "print": Id(0),
             },
         },
         Id(0): Scope {
             id: Id(0),
             parent_id: None,
             name_id_map: {
+                "CIRCLE": Id(4),
+                "RECTANGLE": Id(2),
+                "TRIANGLE": Id(6),
+                "create_shape": Id(8),
+                "main": Id(16),
                 "print": Id(0),
                 "Shape": Id(1),
-                "main": Id(2),
+            },
+        },
+        Id(2): Scope {
+            id: Id(2),
+            parent_id: Some(
+                Id(0),
+            ),
+            name_id_map: {
+                "shape": Id(17),
+                "CIRCLE": Id(4),
+                "print": Id(0),
+                "sum": Id(44),
+                "RECTANGLE": Id(2),
+                "create_shape": Id(8),
+            },
+        },
+        Id(4): Scope {
+            id: Id(4),
+            parent_id: Some(
+                Id(2),
+            ),
+            name_id_map: {
+                "print": Id(0),
+                "CIRCLE": Id(4),
+                "shape": Id(17),
+            },
+        },
+        Id(6): Scope {
+            id: Id(6),
+            parent_id: Some(
+                Id(2),
+            ),
+            name_id_map: {
+                "b": Id(48),
+                "a": Id(46),
+            },
+        },
+        Id(3): Scope {
+            id: Id(3),
+            parent_id: Some(
+                Id(2),
+            ),
+            name_id_map: {
+                "RECTANGLE": Id(2),
+                "shape": Id(17),
+                "print": Id(0),
             },
         },
         Id(1): Scope {
@@ -222,48 +442,67 @@ Program {
             ),
             name_id_map: {
                 "Shape": Id(1),
-                "shape": Id(9),
-                "CIRCLE": Id(5),
-                "sum": Id(20),
-                "TRIANGLE": Id(7),
-                "print": Id(0),
-                "RECTANGLE": Id(3),
+                "RECTANGLE": Id(2),
             },
         },
     },
     span_map: {
-        Id(6): 140..141,
-        Id(15): 262..264,
+        Id(45): 542..581,
+        Id(26): 355..360,
+        Id(42): 515..520,
+        Id(44): 532..581,
+        Id(14): 254..256,
+        Id(13): 240..242,
+        Id(7): 143..144,
+        Id(31): 398..403,
+        Id(27): 361..383,
+        Id(38): 464..469,
+        Id(40): 511..511,
+        Id(50): 573..578,
+        Id(10): 186..195,
+        Id(35): 429..448,
+        Id(41): 515..527,
+        Id(49): 568..569,
+        Id(6): 128..144,
+        Id(52): 577..578,
+        Id(2): 93..110,
+        Id(9): 169..275,
+        Id(11): 206..217,
+        Id(5): 125..126,
+        Id(19): 305..317,
+        Id(18): 305..319,
+        Id(21): 327..350,
+        Id(46): 546..556,
+        Id(30): 398..408,
         Id(1): 1..91,
-        Id(28): 350..351,
-        Id(30): 359..364,
-        Id(32): 372..372,
-        Id(24): 333..342,
-        Id(4): 123..124,
-        Id(13): 236..238,
-        Id(9): 165..283,
-        Id(20): 305..354,
-        Id(12): 214..225,
-        Id(19): 294..299,
-        Id(25): 341..342,
-        Id(11): 194..203,
-        Id(22): 319..329,
-        Id(2): 93..372,
-        Id(17): 288..300,
-        Id(7): 144..160,
-        Id(10): 177..283,
-        Id(29): 359..369,
-        Id(27): 346..347,
-        Id(14): 248..250,
-        Id(26): 346..351,
-        Id(18): 288..293,
-        Id(21): 315..354,
-        Id(16): 277..279,
-        Id(5): 127..141,
-        Id(8): 159..160,
-        Id(3): 107..124,
-        Id(31): 365..368,
-        Id(23): 327..329,
+        Id(4): 112..126,
+        Id(22): 327..337,
+        Id(32): 412..418,
+        Id(28): 388..388,
+        Id(39): 470..506,
+        Id(15): 269..271,
+        Id(3): 109..110,
+        Id(8): 147..277,
+        Id(47): 554..556,
+        Id(23): 327..332,
+        Id(25): 355..384,
+        Id(48): 560..569,
+        Id(51): 573..574,
+        Id(17): 293..319,
+        Id(54): 586..591,
+        Id(55): 592..595,
+        Id(53): 586..596,
+        Id(24): 341..350,
+        Id(56): 599..599,
+        Id(16): 279..599,
+        Id(33): 423..449,
+        Id(12): 228..230,
+        Id(36): 453..453,
+        Id(43): 521..526,
+        Id(37): 464..507,
+        Id(29): 398..418,
+        Id(20): 324..511,
+        Id(34): 423..428,
     },
     structs: {
         Id(1): Struct {
@@ -309,59 +548,59 @@ Program {
         },
     },
     variables: {
-        Id(24): Variable {
-            id: Id(24),
-            name: "b",
-            initial: Some(
-                Id(25),
-            ),
-            type_: Unknown,
-        },
-        Id(20): Variable {
-            id: Id(20),
-            name: "sum",
-            initial: Some(
-                Id(21),
-            ),
-            type_: Unknown,
-        },
-        Id(3): Variable {
-            id: Id(3),
-            name: "RECTANGLE",
-            initial: Some(
-                Id(4),
-            ),
-            type_: Unknown,
-        },
-        Id(22): Variable {
-            id: Id(22),
-            name: "a",
-            initial: Some(
-                Id(23),
-            ),
-            type_: Unknown,
-        },
-        Id(9): Variable {
-            id: Id(9),
-            name: "shape",
-            initial: Some(
-                Id(10),
-            ),
-            type_: Unknown,
-        },
-        Id(7): Variable {
-            id: Id(7),
-            name: "TRIANGLE",
-            initial: Some(
-                Id(8),
-            ),
-            type_: Unknown,
-        },
-        Id(5): Variable {
-            id: Id(5),
+        Id(4): Variable {
+            id: Id(4),
             name: "CIRCLE",
             initial: Some(
-                Id(6),
+                Id(5),
+            ),
+            type_: Unknown,
+        },
+        Id(2): Variable {
+            id: Id(2),
+            name: "RECTANGLE",
+            initial: Some(
+                Id(3),
+            ),
+            type_: Unknown,
+        },
+        Id(6): Variable {
+            id: Id(6),
+            name: "TRIANGLE",
+            initial: Some(
+                Id(7),
+            ),
+            type_: Unknown,
+        },
+        Id(46): Variable {
+            id: Id(46),
+            name: "a",
+            initial: Some(
+                Id(47),
+            ),
+            type_: Unknown,
+        },
+        Id(17): Variable {
+            id: Id(17),
+            name: "shape",
+            initial: Some(
+                Id(18),
+            ),
+            type_: Unknown,
+        },
+        Id(48): Variable {
+            id: Id(48),
+            name: "b",
+            initial: Some(
+                Id(49),
+            ),
+            type_: Unknown,
+        },
+        Id(44): Variable {
+            id: Id(44),
+            name: "sum",
+            initial: Some(
+                Id(45),
             ),
             type_: Unknown,
         },

@@ -3,36 +3,12 @@ use crate::id::Id;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Any,
-    Function(Vec<Self>, Box<Self>),
+    Function(Vec<TypeId>, Box<TypeId>),
     Primitive(PrimitiveType),
     Struct(Id),
-    Tuple(Vec<Self>),
+    Tuple(Vec<TypeId>),
     Unknown,
     Void,
-}
-
-impl Type {
-    pub fn reconcile(self, peer: Type) -> Type {
-        match (self, peer) {
-            (a, Type::Unknown) => a,
-            (Type::Unknown, b) => b,
-            (Type::Primitive(a), Type::Primitive(b)) => match (a, b) {
-                (PrimitiveType::List(a), PrimitiveType::List(b)) => {
-                    Type::Primitive(PrimitiveType::List(Box::new(a.reconcile(*b))))
-                }
-                (a, b) if a == b => Type::Primitive(a),
-                (a, b) => panic!("types {:#?} and {:#?} are mismatched", a, b),
-            },
-            (Type::Tuple(aa), Type::Tuple(bb)) => Type::Tuple(
-                aa.iter()
-                    .zip(bb.iter())
-                    .map(|(a, b)| a.clone().reconcile(b.clone()))
-                    .collect(),
-            ),
-            (a, b) if a == b => a,
-            (a, b) => panic!("types {:#?} and {:#?} are mismatched", a, b),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,4 +20,13 @@ pub enum PrimitiveType {
     Bool,
     Null,
     List(Box<Type>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeId(pub u32);
+
+impl std::fmt::Debug for TypeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "TypeId({})", self.0)
+    }
 }

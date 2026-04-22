@@ -28,16 +28,17 @@ pub fn lexer<'src>()
 
     // A parser for identifiers and keywords
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
-        "true" => Token::Bool(true),
-        "false" => Token::Bool(false),
-        "null" => Token::Null,
-        "let" => Token::Let,
-        "fun" => Token::Fun,
-        "ret" => Token::Ret,
-        "if" => Token::If,
         "else" => Token::Else,
-        "struct" => Token::Struct,
+        "false" => Token::Bool(false),
+        "fun" => Token::Fun,
+        "if" => Token::If,
+        "impl" => Token::Impl,
         "import" => Token::Import,
+        "let" => Token::Let,
+        "null" => Token::Null,
+        "ret" => Token::Ret,
+        "struct" => Token::Struct,
+        "true" => Token::Bool(true),
         _ => Token::Ident(ident),
     });
 

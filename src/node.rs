@@ -12,11 +12,11 @@ pub struct Func<'src> {
 pub struct If<'src> {
     pub condition: Box<Spanned<Node<'src>>>,
     pub then: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
-    pub else_: Option<Spanned<IfElseBranch<'src>>>,
+    pub else_: Option<Spanned<NodeIfBranch<'src>>>,
 }
 
 #[derive(Debug)]
-pub enum IfElseBranch<'src> {
+pub enum NodeIfBranch<'src> {
     If(Box<If<'src>>),
     Else(Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>),
 }
@@ -38,7 +38,8 @@ pub enum Node<'src> {
     Error,
     Func(Func<'src>),
     FuncReturn(Box<Spanned<Self>>),
-    If(If<'src>),
+    If(NodeIfBranch<'src>),
+    Impl(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
     Import(ImportBranch<'src>),
     Let(
         &'src str,
@@ -46,8 +47,9 @@ pub enum Node<'src> {
         Option<Box<Spanned<Self>>>,
     ),
     List(NodeList<'src>),
-    Local(&'src str),
-    Member(Box<Spanned<Self>>, &'src str),
+    Accessor(&'src str),
+    MemberAccessor(Box<Spanned<Self>>, &'src str),
+    StaticAccessor(Box<Spanned<Self>>, &'src str),
     Null,
     Number(&'src str, Option<&'src str>),
     String(&'src str),
