@@ -54,13 +54,13 @@ impl<'src> Transformer<'src> {
             .unwrap();
 
         let global_variables = global_scope
-            .name_id_map
+            .name_to_id_map
             .iter()
             .filter_map(|x| self.program.variables.contains_key(x.1).then_some(*x.1))
             .collect::<Vec<_>>();
 
         let main_fn = global_scope
-            .name_id_map
+            .name_to_id_map
             .get("main")
             .and_then(|id| self.program.functions.get(&id))
             .ok_or_else(|| Error {
@@ -125,6 +125,9 @@ impl<'src> Transformer<'src> {
             Expr::Number(whole, fraction) => js::Node::Number(whole, *fraction),
             Expr::String(x) => js::Node::String(x),
             Expr::Struct(_) => {
+                return None;
+            }
+            Expr::Impl(_) => {
                 return None;
             }
             Expr::Function(id) => {

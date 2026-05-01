@@ -3,7 +3,7 @@ use crate::id::Id;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Any,
-    Function(Vec<TypeId>, Box<TypeId>),
+    Function(Vec<TypeId>, TypeId),
     Primitive(PrimitiveType),
     Struct(Id),
     Tuple(Vec<TypeId>),
@@ -19,7 +19,7 @@ pub enum PrimitiveType {
     String,
     Bool,
     Null,
-    List(Box<Type>),
+    List(TypeId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
