@@ -22,7 +22,7 @@ pub enum Expr<'src> {
     Number(&'src str, Option<&'src str>),
     String(&'src str),
     Struct(Id),
-    StructInitializer(TypeId, HashMap<usize, Id>),
+    StructInitializer(Id, HashMap<usize, Id>),
     Tuple(Vec<Id>),
     Variable(Id),
     Void,
@@ -69,7 +69,7 @@ pub struct Variable<'src> {
 
 #[derive(Debug)]
 pub struct Struct<'src> {
-    pub id: TypeId,
+    pub id: Id,
     pub name: &'src str,
     pub fields: Vec<Field<'src>>,
 }
@@ -91,7 +91,7 @@ pub struct Scope<'src> {
     pub id: Id,
     pub parent_id: Option<Id>,
     pub name_to_id_map: HashMap<&'src str, Id>,
-    pub name_to_type_id_map: HashMap<&'src str, TypeId>,
+    // pub name_to_type_id_map: HashMap<&'src str, TypeId>,
 }
 
 #[derive(Debug)]
@@ -112,10 +112,10 @@ pub struct Analyzer<'src> {
     span_map: HashMap<Id, &'src Span>,
     static_accessors: Vec<(Id, TypeId, &'src str)>,
     struct_initializers: Vec<(Id, &'src str, Vec<(&'src str, Id)>)>,
-    structs: HashMap<TypeId, Struct<'src>>,
+    structs: HashMap<Id, Struct<'src>>,
     type_id_to_type_map: HashMap<TypeId, Type>,
     type_id: u32,
-    type_locals: Vec<(TypeId, &'src str)>,
+    type_locals: Vec<(TypeId, &'src str, Id)>,
     variables: HashMap<Id, Variable<'src>>,
 }
 
@@ -192,7 +192,7 @@ impl<'src> Analyzer<'src> {
             id,
             parent_id,
             name_to_id_map: HashMap::new(),
-            name_to_type_id_map: HashMap::new(),
+            // name_to_type_id_map: HashMap::new(),
         }
     }
 
@@ -215,33 +215,33 @@ impl<'src> Analyzer<'src> {
         type_id
     }
 
-    fn type_for_type_id(&mut self, type_id: TypeId) -> Type {
+    fn get_type_by_type_id(&self, type_id: TypeId) -> Type {
         self.type_id_to_type_map.get(&type_id).unwrap().clone()
     }
 
-    fn resolve_type_by_name(&mut self, name: &'src str, scope_id: Id) -> TypeId {
-        fn resolve<'src>(
-            analyzer: &mut Analyzer<'src>,
-            name: &'src str,
-            scope_id: Id,
-        ) -> Option<TypeId> {
-            let scope = analyzer.mut_scope_for_scope_id(scope_id);
-            let parent_id = scope.parent_id;
-            // println!("scanning {} in {:?} {:#?}", name, scope_id, scope.name_id_map);
-            scope.name_to_type_id_map.get(name).map(|x| *x).or_else(|| {
-                let subject_id = parent_id
-                    .map(|parent_scope_id| resolve(analyzer, name, parent_scope_id))
-                    .flatten()?;
-                let scope = analyzer.mut_scope_for_scope_id(scope_id);
-                scope.name_to_type_id_map.insert(name, subject_id);
-                Some(subject_id)
-            })
-        }
+    // fn resolve_type_by_name(&mut self, name: &'src str, scope_id: Id) -> TypeId {
+    //     fn resolve<'src>(
+    //         analyzer: &mut Analyzer<'src>,
+    //         name: &'src str,
+    //         scope_id: Id,
+    //     ) -> Option<TypeId> {
+    //         let scope = analyzer.mut_scope_for_scope_id(scope_id);
+    //         let parent_id = scope.parent_id;
+    //         // println!("scanning {} in {:?} {:#?}", name, scope_id, scope.name_id_map);
+    //         scope.name_to_type_id_map.get(name).map(|x| *x).or_else(|| {
+    //             let subject_id = parent_id
+    //                 .map(|parent_scope_id| resolve(analyzer, name, parent_scope_id))
+    //                 .flatten()?;
+    //             let scope = analyzer.mut_scope_for_scope_id(scope_id);
+    //             scope.name_to_type_id_map.insert(name, subject_id);
+    //             Some(subject_id)
+    //         })
+    //     }
 
-        resolve(self, name, scope_id).expect(format!("cannot find: {}", name).as_str())
-    }
+    //     resolve(self, name, scope_id).expect(format!("cannot find: {}", name).as_str())
+    // }
 
-    fn resolve_expr_by_name(&mut self, name: &'src str, scope_id: Id) -> Id {
+    fn get_expr_id_by_name(&mut self, name: &'src str, scope_id: Id) -> Id {
         fn resolve<'src>(
             analyzer: &mut Analyzer<'src>,
             name: &'src str,
@@ -263,13 +263,13 @@ impl<'src> Analyzer<'src> {
         resolve(self, name, scope_id).expect(format!("cannot find: {}", name).as_str())
     }
 
-    fn walk_expr_list(&mut self, list: &'src NodeList<'src>, scope_id: Id) -> Vec<Id> {
+    fn walk_expr_nodes(&mut self, list: &'src NodeList<'src>, scope_id: Id) -> Vec<Id> {
         list.iter()
-            .map(|child| self.walk_expr(child, scope_id))
+            .map(|child| self.walk_expr_node(child, scope_id))
             .collect::<Vec<_>>()
     }
 
-    fn walk_expr(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) -> Id {
+    fn walk_expr_node(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) -> Id {
         let id = self.new_entity_id();
 
         let entity = match &node.0 {
@@ -284,28 +284,28 @@ impl<'src> Analyzer<'src> {
                 None
             }
             Node::MemberAccessor(subject, name) => {
-                let subject_id = self.walk_expr(subject, scope_id);
+                let subject_id = self.walk_expr_node(subject, scope_id);
                 Some(Expr::Field(subject_id, name))
             }
             Node::StaticAccessor(subject, name) => {
-                let subject_type_id = self.walk_type(subject, scope_id);
+                let subject_type_id = self.walk_type_node(subject, scope_id);
                 self.static_accessors.push((id, subject_type_id, name));
                 None
             }
             Node::Import(_) => None,
             Node::List(items) => {
-                let ids = self.walk_expr_list(items, scope_id);
+                let ids = self.walk_expr_nodes(items, scope_id);
                 Some(Expr::List(ids))
             }
             Node::Tuple(items) => {
-                let ids = self.walk_expr_list(items, scope_id);
+                let ids = self.walk_expr_nodes(items, scope_id);
                 Some(Expr::Tuple(ids))
             }
             Node::Block(children) => {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
-                let ids = self.walk_expr_list(&children.0.0, body_scope_id);
-                let expr_id = self.walk_expr(&children.0.1, body_scope_id);
+                let ids = self.walk_expr_nodes(&children.0.0, body_scope_id);
+                let expr_id = self.walk_expr_node(&children.0.1, body_scope_id);
                 Some(Expr::Block((ids, expr_id)))
             }
             Node::If(if_) => {
@@ -318,9 +318,9 @@ impl<'src> Analyzer<'src> {
                         NodeIfBranch::If(if_) => {
                             let body_scope = s.create_scope(Some(scope_id));
                             let body_scope_id = s.push_scope(body_scope);
-                            let condition_id = s.walk_expr(&if_.condition, body_scope_id);
-                            let then_ids = s.walk_expr_list(&if_.then.0.0, body_scope_id);
-                            let then_expr_id = s.walk_expr(&if_.then.0.1, body_scope_id);
+                            let condition_id = s.walk_expr_node(&if_.condition, body_scope_id);
+                            let then_ids = s.walk_expr_nodes(&if_.then.0.0, body_scope_id);
+                            let then_expr_id = s.walk_expr_node(&if_.then.0.1, body_scope_id);
                             ExprIfBranch::If(
                                 condition_id,
                                 (then_ids, then_expr_id),
@@ -332,8 +332,8 @@ impl<'src> Analyzer<'src> {
                         NodeIfBranch::Else(body) => {
                             let body_scope = s.create_scope(Some(scope_id));
                             let body_scope_id = s.push_scope(body_scope);
-                            let else_ids = s.walk_expr_list(&body.0.0, body_scope_id);
-                            let else_expr_id = s.walk_expr(&body.0.1, body_scope_id);
+                            let else_ids = s.walk_expr_nodes(&body.0.0, body_scope_id);
+                            let else_expr_id = s.walk_expr_node(&body.0.1, body_scope_id);
                             ExprIfBranch::Else((else_ids, else_expr_id))
                         }
                     }
@@ -359,7 +359,7 @@ impl<'src> Analyzer<'src> {
                             type_id: x
                                 .1
                                 .as_ref()
-                                .map(|x| self.walk_type(x, scope_id))
+                                .map(|x| self.walk_type_node(x, scope_id))
                                 .unwrap_or(self.type_id_for_type(Type::Unknown)),
                         };
                         body_scope
@@ -370,8 +370,8 @@ impl<'src> Analyzer<'src> {
                     })
                     .collect::<Vec<_>>();
                 let body_scope_id = self.push_scope(body_scope);
-                let ids = self.walk_expr_list(&function.body.0.0, body_scope_id);
-                let expr_id = self.walk_expr(&function.body.0.1, body_scope_id);
+                let ids = self.walk_expr_nodes(&function.body.0.0, body_scope_id);
+                let expr_id = self.walk_expr_node(&function.body.0.1, body_scope_id);
                 self.functions.insert(
                     id,
                     Function {
@@ -385,8 +385,8 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Function(id))
             }
             Node::Call(subject, arguments) => {
-                let subject_id = self.walk_expr(subject, scope_id);
-                let argument_ids = self.walk_expr_list(&arguments.0, scope_id);
+                let subject_id = self.walk_expr_node(subject, scope_id);
+                let argument_ids = self.walk_expr_nodes(&arguments.0, scope_id);
                 self.function_calls.insert(
                     id,
                     FunctionCall {
@@ -398,12 +398,12 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Call(id))
             }
             Node::FuncReturn(value) => {
-                let id = self.walk_expr(value, scope_id);
+                let id = self.walk_expr_node(value, scope_id);
                 Some(Expr::FunctionReturn(id))
             }
             Node::Binary(op, lhs, rhs) => {
-                let lhs_id = self.walk_expr(lhs, scope_id);
-                let rhs_id = self.walk_expr(rhs, scope_id);
+                let lhs_id = self.walk_expr_node(lhs, scope_id);
+                let rhs_id = self.walk_expr_node(rhs, scope_id);
                 Some(Expr::Binary(*op, lhs_id, rhs_id))
             }
             Node::Let(name, type_, value) => {
@@ -411,7 +411,7 @@ impl<'src> Analyzer<'src> {
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
                 let initial = value.as_ref().map(|value| {
-                    let value_id = self.walk_expr(value, scope_id);
+                    let value_id = self.walk_expr_node(value, scope_id);
                     let assignments = self
                         .assignment_values
                         .entry(id)
@@ -421,7 +421,7 @@ impl<'src> Analyzer<'src> {
                 });
                 let type_id = type_
                     .as_ref()
-                    .map(|x| self.walk_type(x, scope_id))
+                    .map(|x| self.walk_type_node(x, scope_id))
                     .unwrap_or(self.type_id_for_type(Type::Unknown));
                 self.variables.insert(
                     id,
@@ -435,9 +435,8 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Variable(id))
             }
             Node::Struct(name, body) => {
-                let type_id = self.new_type_id();
                 let scope = self.mut_scope_for_scope_id(scope_id);
-                scope.name_to_type_id_map.insert(name, type_id);
+                scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
                 let mut fields = Vec::new();
                 for child in &body.0 {
@@ -446,18 +445,11 @@ impl<'src> Analyzer<'src> {
                         .0
                         .1
                         .as_ref()
-                        .map(|x| self.walk_type(x, scope_id))
+                        .map(|x| self.walk_type_node(x, scope_id))
                         .unwrap_or(self.type_id_for_type(Type::Unknown));
                     fields.push(Field { name, type_id });
                 }
-                self.structs.insert(
-                    type_id,
-                    Struct {
-                        id: type_id,
-                        name,
-                        fields,
-                    },
-                );
+                self.structs.insert(id, Struct { id, name, fields });
                 Some(Expr::Struct(id))
             }
             Node::StructInitializer(name, fields) => {
@@ -469,7 +461,7 @@ impl<'src> Analyzer<'src> {
                             x.0.0,
                             x.0.1
                                 .as_ref()
-                                .map(|x| self.walk_expr(x, scope_id))
+                                .map(|x| self.walk_expr_node(x, scope_id))
                                 .unwrap_or_else(|| {
                                     let local_id = self.new_entity_id();
                                     self.locals.push((local_id, name));
@@ -482,10 +474,10 @@ impl<'src> Analyzer<'src> {
                 None
             }
             Node::Impl(subject, body) => {
-                let subject = self.walk_type(subject, scope_id);
+                let subject = self.walk_type_node(subject, scope_id);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
-                self.walk_expr_list(&body.0, body_scope_id);
+                self.walk_expr_nodes(&body.0, body_scope_id);
                 let body_scope = self.scopes.get(&body_scope_id).unwrap();
                 self.implementations.push(Implementation {
                     subject,
@@ -506,7 +498,7 @@ impl<'src> Analyzer<'src> {
         id
     }
 
-    fn walk_type(&mut self, node: &Spanned<Node<'src>>, scope_id: Id) -> TypeId {
+    fn walk_type_node(&mut self, node: &Spanned<Node<'src>>, scope_id: Id) -> TypeId {
         let type_id = self.new_type_id();
 
         let type_: Option<Type> = match &node.0 {
@@ -518,14 +510,14 @@ impl<'src> Analyzer<'src> {
                 "bool" => Some(Type::Primitive(PrimitiveType::Bool)),
                 "null" => Some(Type::Primitive(PrimitiveType::Null)),
                 x => {
-                    self.type_locals.push((type_id, name));
+                    self.type_locals.push((type_id, name, scope_id));
                     None
                 }
             },
             Node::Tuple(types) => Some(Type::Tuple(
                 types
                     .iter()
-                    .map(|type_| self.walk_type(type_, scope_id))
+                    .map(|type_| self.walk_type_node(type_, scope_id))
                     .collect(),
             )),
             x => unimplemented!("unhandled type node: {:?}", x),
@@ -560,7 +552,7 @@ impl<'src> Analyzer<'src> {
             return *type_id;
         }
 
-        let constraint = self.type_for_type_id(constraint_type_id);
+        let constraint = self.get_type_by_type_id(constraint_type_id);
 
         let expr = self.get_entity_by_id(expr_id);
 
@@ -605,22 +597,17 @@ impl<'src> Analyzer<'src> {
             Expr::Local(subject_id) => {
                 self.resolve_type(*subject_id, constraint_type_id, exprs_seen)
             }
-            Expr::Function(function_id) => {
-                let function = self.functions.get(function_id).unwrap();
-                // let parameter_types = function.parameters.iter().map(|parameter_id| self.parameters.get(parameter_id).unwrap().type_.clone()).collect::<Vec<_>>();
-                // Type::Function(parameter_types, Box::new(Type::Void))
-                let return_type = self.type_id_for_type(Type::Void);
-                self.type_id_for_type(Type::Function(Vec::new(), return_type))
-            }
+            Expr::Function(function_id) => self.type_id_for_type(Type::Function(*function_id)),
+            Expr::Struct(struct_id) => self.type_id_for_type(Type::Struct(*struct_id)),
             Expr::Call(id) => {
                 let id = *id;
                 let against_type = self.type_id_for_type(Type::Unknown);
                 let function_call = self.function_calls.get(&id).unwrap();
                 let subject_type_id =
                     self.resolve_type(function_call.subject, against_type, exprs_seen);
-                let subject_type = self.type_for_type_id(subject_type_id);
+                let subject_type = self.get_type_by_type_id(subject_type_id);
                 match subject_type {
-                    Type::Function(parameter_types, return_type) => return_type,
+                    Type::Function(function_id) => self.type_id_for_type(Type::Void),
                     x => panic!("type is not callable: {:?}", x),
                 }
             }
@@ -631,8 +618,8 @@ impl<'src> Analyzer<'src> {
     }
 
     fn reconcile_type(&mut self, a_id: TypeId, b_id: TypeId) -> TypeId {
-        let a = self.type_for_type_id(a_id);
-        let b = self.type_for_type_id(b_id);
+        let a = self.get_type_by_type_id(a_id);
+        let b = self.get_type_by_type_id(b_id);
         match (a, b) {
             (a, Type::Unknown) => a_id,
             (Type::Unknown, b) => b_id,
@@ -658,35 +645,67 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    fn compare_type(&self, a_id: TypeId, b_id: TypeId) -> bool {
+        let a = self.get_type_by_type_id(a_id);
+        let b = self.get_type_by_type_id(b_id);
+        match (a, b) {
+            (a, Type::Unknown) => true,
+            (Type::Unknown, b) => true,
+            (Type::Primitive(a), Type::Primitive(b)) => match (a, b) {
+                (PrimitiveType::List(a_id), PrimitiveType::List(b_id)) => {
+                    self.compare_type(a_id, b_id)
+                }
+                (a, b) if a == b => true,
+                _ => false,
+            },
+            (Type::Tuple(aa), Type::Tuple(bb)) => aa
+                .iter()
+                .zip(bb.iter())
+                .all(|(a_id, b_id)| self.compare_type(*a_id, *b_id)),
+            (a, b) if a == b => true,
+            _ => false,
+        }
+    }
+
     fn build(&mut self) {
         for (id, name) in self.locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
-            let subject_id = self.resolve_expr_by_name(name, scope_id);
+            let subject_id = self.get_expr_id_by_name(name, scope_id);
             self.expr_map.insert(id, Expr::Local(subject_id));
 
             let rc = self.reference_count.entry(subject_id).or_insert(0);
             *rc += 1;
         }
 
-        // for (type_id, name) in self.type_locals.clone() {
-        //     let scope_id = self.get_scope_id_for_entity(id);
-        //     let subject_id = self.resolve_type_by_name(name, scope_id);
-        //     self.expr_map.insert(id, Expr::Local(subject_id));
-        // }
+        for (type_id, name, scope_id) in self.type_locals.clone() {
+            let subject_id = self.get_expr_id_by_name(name, scope_id);
+            let constraint_type_id = self.type_id_for_type(Type::Unknown);
+            let subject_type_id = self.resolve_type_start(subject_id, constraint_type_id);
+            let subject_type = self.get_type_by_type_id(subject_type_id);
+            self.type_id_to_type_map.insert(type_id, subject_type);
+        }
 
-        // for (id, subject_type_id, name) in self.static_accessors.clone() {
-        //     match self.expr_map {
-
-        //     }
-        //     if let Some(impl_) = self.implementations.get(&subject_type_id) {
-        //         impl_.declarations.get(name);
-        //     }
-        // }
+        for (id, subject_type_id, name) in self.static_accessors.clone() {
+            let subject_type = self.get_type_by_type_id(subject_type_id);
+            match subject_type {
+                Type::Struct(struct_id) => {
+                    let struct_name = self.structs.get(&struct_id).unwrap().name;
+                    let member_id = *self
+                        .implementations
+                        .iter()
+                        .filter(|x| self.compare_type(subject_type_id, x.subject))
+                        .find_map(|x| x.declarations.get(name))
+                        .expect(format!("cannot find {} in {}", name, struct_name).as_str());
+                    self.expr_map.insert(id, Expr::Local(member_id));
+                }
+                _ => {}
+            }
+        }
 
         for (id, name, fields) in self.struct_initializers.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             let scope = self.mut_scope_for_scope_id(scope_id);
-            let struct_id = self.resolve_type_by_name(name, scope_id);
+            let struct_id = self.get_expr_id_by_name(name, scope_id);
             let struct_ = self
                 .structs
                 .get(&struct_id)
@@ -753,7 +772,7 @@ pub struct Program<'src> {
     pub reference_count: HashMap<Id, u32>,
     pub scopes: HashMap<Id, Scope<'src>>,
     pub span_map: HashMap<Id, &'src Span>,
-    pub structs: HashMap<TypeId, Struct<'src>>,
+    pub structs: HashMap<Id, Struct<'src>>,
     pub variables: HashMap<Id, Variable<'src>>,
 }
 
@@ -763,17 +782,14 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let print_fn_id = analyzer.new_entity_id();
     let print_fn_type_id = analyzer.new_type_id();
     global_scope.name_to_id_map.insert("print", print_fn_id);
-    let print_fn_parameter_type = analyzer.type_id_for_type(Type::Any);
-    let print_fn_return_type = analyzer.type_id_for_type(Type::Void);
-    analyzer.type_id_to_type_map.insert(
-        print_fn_type_id,
-        Type::Function(vec![print_fn_parameter_type], print_fn_return_type),
-    );
+    analyzer
+        .type_id_to_type_map
+        .insert(print_fn_type_id, Type::Function(print_fn_id));
     analyzer
         .expr_id_to_type_id_map
         .insert(print_fn_id, print_fn_type_id);
     let global_scope_id = analyzer.push_scope(global_scope);
-    analyzer.walk_expr_list(&nodes.0, global_scope_id);
+    analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
     Program {
         entity_map: analyzer.expr_map,

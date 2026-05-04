@@ -36,7 +36,7 @@ impl<'src> Transformer<'src> {
 
         Self {
             program,
-            ng: NameGenerator::simple(debug_names),
+            ng: NameGenerator::new_simple(debug_names),
             required_functions: HashMap::new(),
             formatter: if should_pretty_print {
                 Formatter::new_pretty()
@@ -197,7 +197,7 @@ impl<'src> Transformer<'src> {
                     .initial
                     .and_then(|id| self.walk_entity(id, block))
                     .unwrap_or(js::Node::Void);
-                js::Node::Variable(js::Variable {
+                js::Node::ConstVariable(js::Variable {
                     name,
                     value: Box::new(value),
                 })
@@ -215,33 +215,70 @@ impl<'src> Transformer<'src> {
                     t: &mut Transformer<'src>,
                     branch: &ExprIfBranch,
                     block: &mut Vec<js::Node<'src>>,
+                    expr_variable_name: &mut Option<String>,
                 ) -> js::IfBranch<'src> {
                     match branch {
                         ExprIfBranch::If(condition, body, else_) => {
-                            if t.program
-                                .entity_map
-                                .get(&body.1)
-                                .map(|x| !matches!(x, Expr::Void))
-                                .unwrap_or(false)
-                            {
-                                block.push(js::Node::Variable(js::Variable {
-                                    name: "temp".to_string(),
-                                    value: Box::new(js::Node::Null),
-                                }));
+                            let t_condition = t
+                                .walk_entity(*condition, block)
+                                .unwrap_or(js::Node::Bool(false));
+                            let mut t_body = t.walk_list(&body.0);
+                            let body_expr = t.program.entity_map.get(&body.1);
+                            match body_expr {
+                                None => {}
+                                Some(Expr::Void) => {}
+                                Some(x) => {
+                                    let t_block_expr = t.walk_entity(body.1, &mut t_body);
+                                    let variable_name =
+                                        expr_variable_name.get_or_insert_with(|| t.ng.next_name());
+                                    t_body.push(js::Node::Assignment(
+                                        Box::new(js::Node::Local(variable_name.clone())),
+                                        Box::new(t_block_expr.unwrap_or(js::Node::Null)),
+                                    ));
+                                }
                             }
                             js::IfBranch::If(
-                                Box::new(
-                                    t.walk_entity(*condition, block)
-                                        .unwrap_or(js::Node::Bool(false)),
-                                ),
-                                t.walk_list(&body.0),
-                                else_.as_ref().map(|x| Box::new(walk_branch(t, x, block))),
+                                Box::new(t_condition),
+                                t_body,
+                                else_.as_ref().map(|x| {
+                                    Box::new(walk_branch(t, x, block, expr_variable_name))
+                                }),
                             )
                         }
-                        ExprIfBranch::Else(body) => js::IfBranch::Else(t.walk_list(&body.0)),
+                        ExprIfBranch::Else(body) => {
+                            let mut t_body = t.walk_list(&body.0);
+                            let body_expr = t.program.entity_map.get(&body.1);
+                            match body_expr {
+                                None => {}
+                                Some(Expr::Void) => {}
+                                Some(x) => {
+                                    let t_block_expr = t.walk_entity(body.1, &mut t_body);
+                                    let variable_name =
+                                        expr_variable_name.get_or_insert_with(|| t.ng.next_name());
+                                    t_body.push(js::Node::Assignment(
+                                        Box::new(js::Node::Local(variable_name.clone())),
+                                        Box::new(t_block_expr.unwrap_or(js::Node::Null)),
+                                    ));
+                                }
+                            }
+                            js::IfBranch::Else(t_body)
+                        }
                     }
                 }
-                js::Node::If(walk_branch(self, branch, block))
+                let mut expr_variable_name = None;
+                let branch = walk_branch(self, branch, block, &mut expr_variable_name);
+                match expr_variable_name {
+                    Some(variable_name) => {
+                        let expr_variable = js::Node::LetVariable(js::Variable {
+                            name: variable_name.clone(),
+                            value: Box::new(js::Node::Null),
+                        });
+                        block.push(expr_variable);
+                        block.push(js::Node::If(branch));
+                        js::Node::Local(variable_name)
+                    }
+                    None => js::Node::If(branch),
+                }
             }
             Expr::List(items) => js::Node::Void,
             Expr::Tuple(ids) => {
@@ -398,6 +435,14 @@ impl Formatter {
                 )
             }
             js::Node::Local(name) => format!("{}{}", name, terminator),
+            js::Node::Assignment(subject, value) => format!(
+                "{}{}={}{}{}",
+                self.node(subject, "", 0),
+                self.space,
+                self.space,
+                self.node(value, "", 0),
+                terminator
+            ),
             js::Node::Return(value) => match &**value {
                 js::Node::Void => format!("return{}", terminator),
                 x => format!("return {}{}", self.node(x, "", 0), terminator),
@@ -430,7 +475,14 @@ impl Formatter {
                     terminator
                 )
             }
-            js::Node::Variable(variable) => {
+            js::Node::LetVariable(variable) => {
+                let value = self.node(&variable.value, "", 0);
+                format!(
+                    "let {}{}={}{}{}",
+                    variable.name, self.space, self.space, value, terminator
+                )
+            }
+            js::Node::ConstVariable(variable) => {
                 let value = self.node(&variable.value, "", 0);
                 format!(
                     "const {}{}={}{}{}",
@@ -506,20 +558,21 @@ pub mod js {
     #[derive(Clone, Debug)]
     pub enum Node<'src> {
         Array(Vec<Self>),
-        Object(Vec<(&'src str, Self)>),
+        Assignment(Box<Self>, Box<Self>),
         Binary(BinaryOp, Box<Self>, Box<Self>),
         Bool(bool),
         Call(Box<Self>, Vec<Self>),
+        ConstVariable(Variable<'src>),
         Function(Function<'src>),
-        // TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
-        Local(String),
+        If(IfBranch<'src>),
+        LetVariable(Variable<'src>),
+        Local(String), // TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
         Null,
         Number(&'src str, Option<&'src str>),
+        Object(Vec<(&'src str, Self)>),
         Property(Box<Self>, String),
         Return(Box<Self>),
         String(&'src str),
-        Variable(Variable<'src>),
-        If(IfBranch<'src>),
         Void,
     }
 
@@ -565,7 +618,7 @@ impl NameGenerator {
         }
     }
 
-    fn simple(debug_names: HashMap<Id, String>) -> Self {
+    fn new_simple(debug_names: HashMap<Id, String>) -> Self {
         Self::new(
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
             debug_names,
@@ -576,7 +629,7 @@ impl NameGenerator {
         self.names.get(&id).map(|x| x.clone()).unwrap_or_else(|| {
             let debug_name = self.debug_names.get(&id).map(|x| x.clone());
             let name = debug_name
-                .map(|x| format!("{}_{}", x, self.next_name()))
+                .map(|x| format!("/* {} */ {}", x, self.next_name()))
                 .unwrap_or_else(|| self.next_name());
             self.names.insert(id, name.clone());
             name

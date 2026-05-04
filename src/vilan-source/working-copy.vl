@@ -40,11 +40,11 @@ fun main() {
 	
 	print(shape);
 	
-	let sum = {
-		let a = 10;
-		let b = 5;
-		a + b
+	let test = if shape.type == RECTANGLE {
+		1
+	} else {
+		2
 	};
 	
-	print(sum);
+	print(test);
 }
