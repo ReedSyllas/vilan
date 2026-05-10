@@ -90,7 +90,9 @@ impl<'src> Transformer<'src> {
             }
         }
 
-        let t_functions = self.required_functions.into_values();
+        let mut t_functions = self.required_functions.into_iter().collect::<Vec<_>>();
+        t_functions.sort_by(|a, b| (a.0.0).cmp(&b.0.0));
+        let t_functions = t_functions.into_iter().map(|x| x.1);
 
         Ok(format!(
             "{}{}",
@@ -122,7 +124,7 @@ impl<'src> Transformer<'src> {
             Expr::Void => js::Node::Void,
             Expr::Null => js::Node::Null,
             Expr::Bool(x) => js::Node::Bool(*x),
-            Expr::Number(whole, fraction) => js::Node::Number(whole, *fraction),
+            Expr::Number(whole, fraction) => js::Node::Number(whole.to_string(), fraction.map(|x| x.to_string())),
             Expr::String(x) => js::Node::String(x),
             Expr::Struct(_) => {
                 return None;
@@ -135,11 +137,11 @@ impl<'src> Transformer<'src> {
                 self.function(function)
             }
             Expr::Local(id) => js::Node::Local(self.ng.name_for(*id)),
-            Expr::Field(subject_id, name) => {
+            Expr::Field(subject_id, struct_id, field_index) => {
                 let subject = self
                     .walk_entity(*subject_id, block)
                     .unwrap_or(js::Node::Void);
-                js::Node::Property(Box::new(subject), name.to_string())
+                js::Node::PropertyIndex(Box::new(subject), Box::new(js::Node::Number(field_index.to_string(), None)))
             }
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap();
@@ -182,7 +184,6 @@ impl<'src> Transformer<'src> {
                 Box::new(self.walk_entity(*rhs, block).unwrap_or(js::Node::Void)),
             ),
             Expr::Variable(id) => {
-                let name = self.ng.name_for(*id);
                 if self
                     .program
                     .reference_count
@@ -192,6 +193,7 @@ impl<'src> Transformer<'src> {
                 {
                     return None;
                 }
+                let name = self.ng.name_for(*id);
                 let variable = self.program.variables.get(id).unwrap();
                 let value = variable
                     .initial
@@ -201,6 +203,9 @@ impl<'src> Transformer<'src> {
                     name,
                     value: Box::new(value),
                 })
+            }
+            Expr::Parameter(_) => {
+                return None;
             }
             Expr::Block(body) => {
                 for statement in &body.0 {
@@ -291,15 +296,19 @@ impl<'src> Transformer<'src> {
             Expr::StructInitializer(struct_id, assignments) => {
                 let struct_ = self.program.structs.get(struct_id).unwrap();
                 // let mut properties_ng = NameGenerator::simple(debug_names);
-                let properties = assignments
+                let mut properties = assignments
                     .iter()
                     .filter_map(|(i, id)| {
                         let field = struct_.fields.get(*i).unwrap();
                         let value = self.walk_entity(*id, block);
-                        value.map(|x| (field.name, x))
+                        value.map(|x| (i, x))
                     })
                     .collect::<Vec<_>>();
-                js::Node::Object(properties)
+                properties.sort_by(|a, b| a.0.cmp(b.0));
+                let items = properties.into_iter()
+                    .map(|x| x.1)
+                    .collect::<Vec<_>>();
+                js::Node::Array(items)
             }
         })
     }
@@ -378,7 +387,7 @@ impl Formatter {
             js::Node::Number(whole, fraction) => format!(
                 "{}{}{}",
                 whole,
-                fraction.map(|x| format!(".{x}")).unwrap_or("".to_string()),
+                fraction.clone().map(|x| format!(".{x}")).unwrap_or("".to_string()),
                 terminator
             ),
             js::Node::Bool(x) => format!("{}{}", x, terminator),
@@ -419,7 +428,7 @@ impl Formatter {
                     .iter()
                     .map(|x| self.node(x, ";", indentation + 1))
                     .collect::<Vec<_>>()
-                    .join("");
+                    .join(self.line_break);
                 format!(
                     "function {}({}){}{{{}{}{}}}{}",
                     name,
@@ -492,6 +501,11 @@ impl Formatter {
             js::Node::Property(subject, member) => {
                 let s_subject = self.node(subject, "", 0);
                 format!("{}.{}{}", s_subject, member, terminator)
+            }
+            js::Node::PropertyIndex(subject, member) => {
+                let s_subject = self.node(subject, "", 0);
+                let s_member = self.node(member, "", 0);
+                format!("{}[{}]{}", s_subject, s_member, terminator)
             }
             js::Node::If(branch) => {
                 fn walk_branch(
@@ -568,9 +582,10 @@ pub mod js {
         LetVariable(Variable<'src>),
         Local(String), // TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
         Null,
-        Number(&'src str, Option<&'src str>),
+        Number(String, Option<String>),
         Object(Vec<(&'src str, Self)>),
         Property(Box<Self>, String),
+        PropertyIndex(Box<Self>, Box<Self>),
         Return(Box<Self>),
         String(&'src str),
         Void,
@@ -629,7 +644,7 @@ impl NameGenerator {
         self.names.get(&id).map(|x| x.clone()).unwrap_or_else(|| {
             let debug_name = self.debug_names.get(&id).map(|x| x.clone());
             let name = debug_name
-                .map(|x| format!("/* {} */ {}", x, self.next_name()))
+                .map(|x| format!("{} /* {} */", self.next_name(), x))
                 .unwrap_or_else(|| self.next_name());
             self.names.insert(id, name.clone());
             name

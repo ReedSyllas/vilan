@@ -1,7 +1,7 @@
 
-let RECTANGLE = 0;
-let CIRCLE = 1;
-let TRIANGLE = 2;
+let RECTANGLE: i32 = 0;
+let CIRCLE: i32 = 1;
+let TRIANGLE: i32 = 2;
 
 struct Shape {
 	type: i32,
@@ -13,7 +13,7 @@ struct Shape {
 }
 
 impl Shape {
-	fun new() {
+	fun new_rect(): Shape {
 		Shape {
 			type = RECTANGLE,
 			name = "Rectangle",
@@ -23,28 +23,15 @@ impl Shape {
 			height = 30,
 		}
 	}
+	
+	fun f(self: Shape): void {
+		print("hello from shape method `f`");
+		print(self.name);
+	}
 }
 
-fun main() {
-	let shape = Shape::new();
+fun main(): void {
+	let shape: Shape = Shape::new_rect();
 	
-	if shape.type == RECTANGLE {
-		print("shape is a rectangle");
-	}
-	else if shape.type == CIRCLE {
-		print("shape is a circle");
-	}
-	else {
-		print("shape is not a rectangle or circle");
-	}
-	
-	print(shape);
-	
-	let test = if shape.type == RECTANGLE {
-		1
-	} else {
-		2
-	};
-	
-	print(test);
+	print(shape.f());
 }

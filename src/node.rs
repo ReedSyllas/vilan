@@ -48,7 +48,7 @@ pub enum Node<'src> {
     ),
     List(NodeList<'src>),
     Accessor(&'src str),
-    MemberAccessor(Box<Spanned<Self>>, &'src str),
+    MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
     StaticAccessor(Box<Spanned<Self>>, &'src str),
     Null,
     Number(&'src str, Option<&'src str>),

@@ -378,17 +378,12 @@ fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
-    let static_access = atom.foldl_with(
+    let static_accessor = atom.clone().foldl_with(
         just(Token::Op("::")).ignore_then(identifier).repeated(),
-        |subject, member, e| (Node::StaticAccessor(Box::new(subject), member), e.span()),
+        |subject, member_name, e| (Node::StaticAccessor(Box::new(subject), member_name), e.span()),
     );
-
-    let member_access = static_access.foldl_with(
-        just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
-        |subject, member, e| (Node::MemberAccessor(Box::new(subject), member), e.span()),
-    );
-
-    let call = member_access.foldl_with(
+    
+    let call = static_accessor.foldl_with(
         expression_list
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
             .map_with(|args, e| (args, e.span()))
@@ -396,13 +391,18 @@ where
         |f, args, e| (Node::Call(Box::new(f), args), e.span()),
     );
 
+    let member_accessor = call.clone().foldl_with(
+        just(Token::Ctrl('.')).ignore_then(call).repeated(),
+        |subject, member, e| (Node::MemberAccessor(Box::new(subject), Box::new(member)), e.span()),
+    );
+
     // Product ops (multiply and divide) have equal precedence
     let op = just(Token::Op("*"))
         .to(BinaryOp::Mul)
         .or(just(Token::Op("/")).to(BinaryOp::Div));
-    let product = call
+    let product = member_accessor
         .clone()
-        .foldl_with(op.then(call).repeated(), |a, (op, b), e| {
+        .foldl_with(op.then(member_accessor).repeated(), |a, (op, b), e| {
             (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
         });
 

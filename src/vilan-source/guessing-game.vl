@@ -31,8 +31,8 @@ fun main() {
 }
 
 fun play(): Signal {
-	let range = (1..=100).ascending();
-	let secret = random::int(range);
+	let range = Range::new_between_inclusive(1, 100).ascending();
+	let secret = random::i32(range);
 	print("I have chosen a secret number from {range.start()} to {range.end()}.");
 	print("Take a guess!");
 	for {
@@ -40,7 +40,7 @@ fun play(): Signal {
 			"quit" => {
 				ret Signal::Quit;
 			},
-			n => match n.parse_int() {
+			n => match n.parse_i32() {
 				Some(n) => {
 					if n != secret {
 						let temperature_hint = match secret.diff(n) {

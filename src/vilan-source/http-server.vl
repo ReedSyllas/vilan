@@ -1,0 +1,48 @@
+import std::http::Request;
+import std::http::Response;
+import std::http::Server;
+
+impl Response {
+	fun text(text: str): Self {
+		Self::builder()
+			.code(200)
+			.content_type_plain()
+			.body("{text}\n")
+			.build()
+	}
+}
+
+impl Server {
+	fun create(request_handler: |Request| Response, with_logging: bool): Self {
+		let builder = Self::builder();
+		
+		if with_logging {
+			builder
+			.on_start(|server| {
+				print(i"server: Server running at http://{server.host()}:{server.port()}/");
+			})
+			.on_stop(|_| {
+				print("server: Server stopped");
+			})
+			.on_request(|req| {
+				print("server: Request received");
+				request_handler(req);
+			});
+		} else {
+			builder.on_request(request_handler);
+		}
+		
+		builder.port(3000).build()
+	}
+}
+
+fun main() {
+	let server = Server::create(
+		request_handler = |_| {
+			Response::text("Hello, World!")
+		},
+		with_logging = true,
+	);
+	
+	server.start();
+}
