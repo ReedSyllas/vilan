@@ -124,7 +124,9 @@ impl<'src> Transformer<'src> {
             Expr::Void => js::Node::Void,
             Expr::Null => js::Node::Null,
             Expr::Bool(x) => js::Node::Bool(*x),
-            Expr::Number(whole, fraction) => js::Node::Number(whole.to_string(), fraction.map(|x| x.to_string())),
+            Expr::Number(whole, fraction) => {
+                js::Node::Number(whole.to_string(), fraction.map(|x| x.to_string()))
+            }
             Expr::String(x) => js::Node::String(x),
             Expr::Struct(_) => {
                 return None;
@@ -141,7 +143,10 @@ impl<'src> Transformer<'src> {
                 let subject = self
                     .walk_entity(*subject_id, block)
                     .unwrap_or(js::Node::Void);
-                js::Node::PropertyIndex(Box::new(subject), Box::new(js::Node::Number(field_index.to_string(), None)))
+                js::Node::PropertyIndex(
+                    Box::new(subject),
+                    Box::new(js::Node::Number(field_index.to_string(), None)),
+                )
             }
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap();
@@ -174,6 +179,22 @@ impl<'src> Transformer<'src> {
                     }
                     _ => unimplemented!(),
                 }
+            }
+            Expr::Closure(closure_id) => {
+                let closure = self.program.closures.get(&closure_id).unwrap();
+                let parameters = closure
+                    .parameters
+                    .iter()
+                    .map(|parameter_id| js::Parameter {
+                        name: self.ng.name_for(*parameter_id),
+                    })
+                    .collect::<Vec<_>>();
+                let mut body = Vec::new();
+                let value = self.walk_entity(closure.return_, &mut body);
+                if let Some(value) = value {
+                    body.push(js::Node::Return(Box::new(value)));
+                }
+                js::Node::Closure(js::Closure { parameters, body })
             }
             Expr::FunctionReturn(value) => js::Node::Return(Box::new(
                 self.walk_entity(*value, block).unwrap_or(js::Node::Void),
@@ -305,9 +326,7 @@ impl<'src> Transformer<'src> {
                     })
                     .collect::<Vec<_>>();
                 properties.sort_by(|a, b| a.0.cmp(b.0));
-                let items = properties.into_iter()
-                    .map(|x| x.1)
-                    .collect::<Vec<_>>();
+                let items = properties.into_iter().map(|x| x.1).collect::<Vec<_>>();
                 js::Node::Array(items)
             }
         })
@@ -387,7 +406,10 @@ impl Formatter {
             js::Node::Number(whole, fraction) => format!(
                 "{}{}{}",
                 whole,
-                fraction.clone().map(|x| format!(".{x}")).unwrap_or("".to_string()),
+                fraction
+                    .clone()
+                    .map(|x| format!(".{x}"))
+                    .unwrap_or("".to_string()),
                 terminator
             ),
             js::Node::Bool(x) => format!("{}{}", x, terminator),
@@ -560,6 +582,30 @@ impl Formatter {
                 }
                 walk_branch(self, branch, indentation, 0)
             }
+            js::Node::Closure(closure) => {
+                let s_parameters = closure
+                    .parameters
+                    .iter()
+                    .map(|x| x.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(format!(",{}", self.space).as_str());
+                let s_body = closure
+                    .body
+                    .iter()
+                    .map(|x| self.node(x, ";", indentation + 1))
+                    .collect::<Vec<_>>()
+                    .join(self.line_break);
+                format!(
+                    "({}){}=>{}{{{}{}{}}}{}",
+                    s_parameters,
+                    self.space,
+                    self.space,
+                    self.line_break,
+                    s_body,
+                    self.line_break,
+                    terminator
+                )
+            }
         };
 
         format!("{}{}", self.indentation.repeat(indentation), text)
@@ -576,6 +622,7 @@ pub mod js {
         Binary(BinaryOp, Box<Self>, Box<Self>),
         Bool(bool),
         Call(Box<Self>, Vec<Self>),
+        Closure(Closure<'src>),
         ConstVariable(Variable<'src>),
         Function(Function<'src>),
         If(IfBranch<'src>),
@@ -614,6 +661,12 @@ pub mod js {
         pub name: String,
         pub value: Box<Node<'src>>,
     }
+
+    #[derive(Clone, Debug)]
+    pub struct Closure<'src> {
+        pub parameters: Vec<Parameter>,
+        pub body: Vec<Node<'src>>,
+    }
 }
 
 struct NameGenerator {
@@ -644,7 +697,7 @@ impl NameGenerator {
         self.names.get(&id).map(|x| x.clone()).unwrap_or_else(|| {
             let debug_name = self.debug_names.get(&id).map(|x| x.clone());
             let name = debug_name
-                .map(|x| format!("{} /* {} */", self.next_name(), x))
+                .map(|x| format!("{}/*{}*/", self.next_name(), x))
                 .unwrap_or_else(|| self.next_name());
             self.names.insert(id, name.clone());
             name

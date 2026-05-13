@@ -1,4 +1,4 @@
-use crate::node::{BinaryOp, Func, If, ImportBranch, Node, NodeIfBranch, NodeList};
+use crate::node::{BinaryOp, Closure, Func, If, ImportBranch, Node, NodeIfBranch, NodeList};
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 use chumsky::{input::ValueInput, prelude::*};
@@ -115,6 +115,42 @@ where
         |span| (Node::Error, span),
     )))
     .boxed();
+
+    let closure = identifier
+        .labelled("parameter name")
+        .then(
+            just(Token::Op(":"))
+                .ignore_then(type_.clone().map(|x| Box::new(x)))
+                .labelled("parameter type")
+                .or_not(),
+        )
+        .labelled("parameter")
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Op("|")), just(Token::Op("|")))
+        .or(just(Token::Op("||")).map(|_| Vec::new()))
+        .map_with(|parameters, e| (parameters, e.span()))
+        .labelled("closure parameters")
+        .then(
+            just(Token::Op(":"))
+                .ignore_then(type_.clone().map(|x| Box::new(x)))
+                .labelled("return type")
+                .or_not(),
+        )
+        .then(expression.clone())
+        .map_with(|((parameters, return_type), return_value), e| {
+            (
+                Node::Closure(Closure {
+                    parameters,
+                    return_type,
+                    return_value: Box::new(return_value),
+                }),
+                e.span(),
+            )
+        })
+        .labelled("closure")
+        .boxed();
 
     // Blocks are a sequence of statements delimited with braces.
     block.define(
@@ -322,6 +358,7 @@ where
         .map_with(|(subject, body), e| (Node::Impl(Box::new(subject), body), e.span()));
 
     secondary_expression.define(choice((
+        closure,
         block
             .clone()
             .map(|(x, span)| (Node::Block((x, span)), span)),
@@ -355,7 +392,38 @@ where
         .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
         .map_with(|x, e| (Node::Tuple(x), e.span()));
 
-    type_.define(choice((local, tuple_type)));
+    let closure_type = identifier
+        .labelled("closure type parameter name")
+        .then_ignore(just(Token::Op(":")))
+        .or_not()
+        .then(
+            type_
+                .clone()
+                .map(|x| Box::new(x))
+                .labelled("closure type parameter type"),
+        )
+        .labelled("closure type parameter")
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Op("|")), just(Token::Op("|")))
+        .or(just(Token::Op("||")).map(|_| Vec::new()))
+        .map_with(|parameters, e| (parameters, e.span()))
+        .labelled("closure type parameters")
+        .then(
+            type_
+                .clone()
+                .map(|x| Box::new(x))
+                .labelled("closure type return type")
+                .or_not(),
+        )
+        .map_with(|(parameters, return_type), e| {
+            (Node::ClosureType(parameters, return_type), e.span())
+        })
+        .labelled("closure type")
+        .boxed();
+
+    type_.define(choice((closure_type, local, tuple_type)));
 
     statement
         .clone()
@@ -380,9 +448,14 @@ where
 {
     let static_accessor = atom.clone().foldl_with(
         just(Token::Op("::")).ignore_then(identifier).repeated(),
-        |subject, member_name, e| (Node::StaticAccessor(Box::new(subject), member_name), e.span()),
+        |subject, member_name, e| {
+            (
+                Node::StaticAccessor(Box::new(subject), member_name),
+                e.span(),
+            )
+        },
     );
-    
+
     let call = static_accessor.foldl_with(
         expression_list
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
@@ -393,7 +466,12 @@ where
 
     let member_accessor = call.clone().foldl_with(
         just(Token::Ctrl('.')).ignore_then(call).repeated(),
-        |subject, member, e| (Node::MemberAccessor(Box::new(subject), Box::new(member)), e.span()),
+        |subject, member, e| {
+            (
+                Node::MemberAccessor(Box::new(subject), Box::new(member)),
+                e.span(),
+            )
+        },
     );
 
     // Product ops (multiply and divide) have equal precedence

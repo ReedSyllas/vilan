@@ -17,7 +17,7 @@ pub fn lexer<'src>()
         .map(Token::String);
 
     // A parser for operators
-    let op = one_of("-:!*/+=")
+    let op = one_of("-:!*/+=|")
         .repeated()
         .at_least(1)
         .to_slice()

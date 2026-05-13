@@ -1,46 +1,55 @@
 
-[ ] String expression
+String expression
 	[x] Parse basic
 	[ ] Parse tags
 	[ ] Parse escape sequences
 	[ ] Parse interpolation
 	[x] Analyze
 	[x] Transform
-[ ] Number expression
+
+Number expression
 	[x] Parse digits
 	[ ] Parse format modifiers
 	[ ] Parse tags
 	[x] Analyze
 	[x] Transform
-[ ] Boolean
+
+Boolean
 	[x] Parse
 	[x] Analyze
 	[x] Transform
-[ ] Binary expression
+
+Binary expression
 	[x] Parse
 	[x] Analyze
 	[x] Transform
-[ ] Unary expression
+
+Unary expression
 	[ ] Parse
 	[ ] Analyze
 	[ ] Transform
-[ ] If/else expression
-	[x] Parse
-	[ ] Analyze
-	[ ] Transform
-[ ] Block expression
-	[x] Parse
-	[ ] Analyze
-	[ ] Transform
-[ ] Tuple expression
+
+If/else expression
 	[x] Parse
 	[x] Analyze
 	[x] Transform
-[ ] Match expression
+
+Block expression
+	[x] Parse
+	[ ] Analyze
+	[ ] Transform
+
+Tuple expression
+	[x] Parse
+	[x] Analyze
+	[x] Transform
+
+Match expression
 	[ ] Parse
 	[ ] Analyze
 	[ ] Transform
-[ ] Variables
+
+Variables
 	[x] Parse
 		[x] Parse basic
 		[x] Parse type
@@ -51,8 +60,9 @@
 		[x] Count references
 	[ ] Transform
 		[x] Basic 1:1 transform
-		[ ] Drop unreferenced variables
-[ ] Functions
+		[x] Drop unreferenced variables
+
+Functions
 	[ ] Declaration
 		[x] Name
 		[ ] Generics
@@ -68,27 +78,36 @@
 		[ ] Drop unreferenced functions
 	[ ] Nested functions with enclosed values
 		[ ] Transform
-[ ] Function call
+
+Function call
 	[x] Expression
 	[x] Analyze
 	[ ] Transform
 		[x] Basic 1:1 transform
-[ ] Closures
+
+Closures
 	[ ] Parse
 	[ ] Analyze
 	[ ] Transform
-[ ] Structs
-	[ ] Declaration
-	[ ] Fields
-	[ ] Methods (with static-dispatch)
-[ ] Implementations
-	[ ] Parse
-	[ ] Analyze
-	[ ] Transform
-[ ] Context provider / system
-[ ] Memory / object disposal
-[ ] References
-[ ] Importing
-[ ] Standard library
+
+Structs
+	[x] Declaration
+	[x] Fields
+	[x] Methods (with static-dispatch)
+
+Implementations
+	[x] Parse
+	[x] Analyze
+	[x] Transform
+
+Context provider / system
+
+Memory / object disposal
+
+References
+
+Importing
+
+Standard library
 	[ ] std::io
 	[ ] std::fs

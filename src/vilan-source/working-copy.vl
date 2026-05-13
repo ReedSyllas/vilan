@@ -24,8 +24,9 @@ impl Shape {
 		}
 	}
 	
-	fun f(self: Shape): void {
-		print("hello from shape method `f`");
+	fun f(self: Shape, message: |str| str): void {
+		print("hello from shape method `f` with message:");
+		print(message("hi"));
 		print(self.name);
 	}
 }
@@ -33,5 +34,5 @@ impl Shape {
 fun main(): void {
 	let shape: Shape = Shape::new_rect();
 	
-	print(shape.f());
+	shape.f(|x: str| x);
 }

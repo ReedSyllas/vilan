@@ -19,7 +19,7 @@ impl Server {
 		if with_logging {
 			builder
 			.on_start(|server| {
-				print(i"server: Server running at http://{server.host()}:{server.port()}/");
+				print(i"server: Server running at {server.url()}");
 			})
 			.on_stop(|_| {
 				print("server: Server stopped");

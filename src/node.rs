@@ -3,9 +3,16 @@ use crate::span::Spanned;
 #[derive(Debug)]
 pub struct Func<'src> {
     pub name: Spanned<&'src str>,
-    pub return_type: Option<Box<Spanned<Node<'src>>>>,
     pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
+    pub return_type: Option<Box<Spanned<Node<'src>>>>,
     pub body: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
+}
+
+#[derive(Debug)]
+pub struct Closure<'src> {
+    pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
+    pub return_type: Option<Box<Spanned<Node<'src>>>>,
+    pub return_value: Box<Spanned<Node<'src>>>,
 }
 
 #[derive(Debug)]
@@ -35,6 +42,11 @@ pub enum Node<'src> {
     Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     Bool(bool),
     Call(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
+    Closure(Closure<'src>),
+    ClosureType(
+        Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
+        Option<Box<Spanned<Node<'src>>>>,
+    ),
     Error,
     Func(Func<'src>),
     FuncReturn(Box<Spanned<Self>>),
