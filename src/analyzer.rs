@@ -130,7 +130,7 @@ pub struct Analyzer<'src> {
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers: Vec<(Id, &'src str, Vec<(&'src str, Id)>)>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
-    prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Id)>,
+    prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str)>,
     reference_count: HashMap<Id, u32>,
     scope_id: u32,
     scopes: HashMap<Id, Scope<'src>>,
@@ -620,19 +620,15 @@ impl<'src> Analyzer<'src> {
                 "str" => Some(Type::Primitive(PrimitiveType::String)),
                 "bool" => Some(Type::Primitive(PrimitiveType::Bool)),
                 "null" => Some(Type::Primitive(PrimitiveType::Null)),
-                x => {
+                _ => {
                     self.prepped_type_locals.push((type_id, name, scope_id));
                     None
                 }
             },
             Node::StaticAccessor(subject, member_name) => {
                 let subject_type_id = self.walk_type_node(subject, scope_id);
-                self.prepped_type_static_accessors.push((
-                    type_id,
-                    subject_type_id,
-                    member_name,
-                    scope_id,
-                ));
+                self.prepped_type_static_accessors
+                    .push((type_id, subject_type_id, member_name));
                 None
             }
             Node::Tuple(types) => Some(Type::Tuple(
@@ -720,7 +716,7 @@ impl<'src> Analyzer<'src> {
                                 *id,
                                 constraint_items
                                     .get(i)
-                                    .map(|x| x.clone())
+                                    .map(|x| *x)
                                     .unwrap_or(fallback_type_id),
                                 exprs_seen,
                             )
@@ -743,7 +739,7 @@ impl<'src> Analyzer<'src> {
                     self.resolve_type(function_call.subject, against_type, exprs_seen);
                 let subject_type = self.get_type_by_type_id(subject_type_id);
                 match subject_type {
-                    Type::Function(function_id) => self.type_id_for_type(Type::Void),
+                    Type::Function(_) => self.type_id_for_type(Type::Void),
                     x => panic!("type is not callable: {:?}", x),
                 }
             }
@@ -770,8 +766,8 @@ impl<'src> Analyzer<'src> {
         let a = self.get_type_by_type_id(a_id);
         let b = self.get_type_by_type_id(b_id);
         match (a, b) {
-            (a, Type::Unknown) => a_id,
-            (Type::Unknown, b) => b_id,
+            (_, Type::Unknown) => a_id,
+            (Type::Unknown, _) => b_id,
             (Type::Primitive(a), Type::Primitive(b)) => match (a, b) {
                 (PrimitiveType::List(a), PrimitiveType::List(b)) => {
                     let type_ = Type::Primitive(PrimitiveType::List(self.reconcile_type(a, b)));
@@ -798,8 +794,8 @@ impl<'src> Analyzer<'src> {
         let a = self.get_type_by_type_id(a_id);
         let b = self.get_type_by_type_id(b_id);
         match (a, b) {
-            (a, Type::Unknown) => true,
-            (Type::Unknown, b) => true,
+            (_, Type::Unknown) => true,
+            (Type::Unknown, _) => true,
             (Type::Primitive(a), Type::Primitive(b)) => match (a, b) {
                 (PrimitiveType::List(a_id), PrimitiveType::List(b_id)) => {
                     self.compare_type(a_id, b_id)
@@ -838,9 +834,7 @@ impl<'src> Analyzer<'src> {
             self.type_id_to_type_map.insert(type_id, subject_type);
         }
 
-        for (type_id, subject_type_id, member_name, scope_id) in
-            self.prepped_type_static_accessors.clone()
-        {
+        for (type_id, subject_type_id, member_name) in self.prepped_type_static_accessors.clone() {
             let subject_type = self.get_type_by_type_id(subject_type_id);
             match subject_type {
                 Type::Module(module_id) => {
@@ -867,11 +861,11 @@ impl<'src> Analyzer<'src> {
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
-                    let (field_index, _) = struct_
+                    let field_index = struct_
                         .fields
                         .iter()
                         .enumerate()
-                        .find(|(i, x)| x.name == member_name)
+                        .find_map(|(i, x)| (x.name == member_name).then_some(i))
                         .unwrap();
                     self.expr_id_to_expr_map
                         .insert(id, Expr::Field(subject_id, struct_id, field_index));
@@ -958,7 +952,6 @@ impl<'src> Analyzer<'src> {
 
         for (id, name, fields) in self.prepped_struct_initializers.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
-            let scope = self.mut_scope_for_scope_id(scope_id);
             let struct_id = self.get_expr_id_by_name(name, scope_id);
             let struct_ = self
                 .structs

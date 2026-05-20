@@ -63,7 +63,7 @@ where
                     ],
                     |span| (None, span),
                 )))
-                .map_with(|x, e| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
+                .map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
         )
         .map_with(|(name, fields), e| (Node::StructInitializer(name, fields), e.span()))
         .labelled("struct initializer")
@@ -330,7 +330,7 @@ where
                     ],
                     |span| (None, span),
                 )))
-                .map_with(|x, e| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
+                .map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
         )
         .map_with(|(name, body), e| (Node::Struct(name, body), e.span()))
         .labelled("struct")

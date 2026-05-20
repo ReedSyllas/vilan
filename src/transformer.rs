@@ -163,7 +163,7 @@ impl<'src> Transformer<'src> {
                 self.function(function)
             }
             Expr::Local(id) => js::Node::Local(self.ng.name_for(*id)),
-            Expr::Field(subject_id, struct_id, field_index) => {
+            Expr::Field(subject_id, _struct_id, field_index) => {
                 let subject = self
                     .walk_entity(*subject_id, block)
                     .unwrap_or(js::Node::Void);
@@ -202,10 +202,13 @@ impl<'src> Transformer<'src> {
                         }
                     }
                     _ => {
-                        println!("Transformer.walk_entity -> Expr::Call -> call subject {:#?}", subject);
+                        println!(
+                            "Transformer.walk_entity -> Expr::Call -> call subject {:#?}",
+                            subject
+                        );
                         let t_subject = self.walk_entity(function_call.subject, block).unwrap();
                         js::Node::Call(Box::new(t_subject), args)
-                    },
+                    }
                 }
             }
             Expr::Closure(closure_id) => {
@@ -281,7 +284,7 @@ impl<'src> Transformer<'src> {
                             match body_expr {
                                 None => {}
                                 Some(Expr::Void) => {}
-                                Some(x) => {
+                                Some(_) => {
                                     let t_block_expr = t.walk_entity(body.1, &mut t_body);
                                     let variable_name =
                                         expr_variable_name.get_or_insert_with(|| t.ng.next_name());
@@ -305,7 +308,7 @@ impl<'src> Transformer<'src> {
                             match body_expr {
                                 None => {}
                                 Some(Expr::Void) => {}
-                                Some(x) => {
+                                Some(_) => {
                                     let t_block_expr = t.walk_entity(body.1, &mut t_body);
                                     let variable_name =
                                         expr_variable_name.get_or_insert_with(|| t.ng.next_name());
@@ -334,7 +337,13 @@ impl<'src> Transformer<'src> {
                     None => js::Node::If(branch),
                 }
             }
-            Expr::List(items) => js::Node::Void,
+            Expr::List(ids) => {
+                let items = ids
+                    .iter()
+                    .filter_map(|id| self.walk_entity(*id, block))
+                    .collect();
+                js::Node::Array(items)
+            }
             Expr::Tuple(ids) => {
                 let items = ids
                     .iter()
@@ -342,13 +351,13 @@ impl<'src> Transformer<'src> {
                     .collect();
                 js::Node::Array(items)
             }
-            Expr::StructInitializer(struct_id, assignments) => {
-                let struct_ = self.program.structs.get(struct_id).unwrap();
+            Expr::StructInitializer(_struct_id, assignments) => {
+                // let struct_ = self.program.structs.get(struct_id).unwrap();
                 // let mut properties_ng = NameGenerator::simple(debug_names);
                 let mut properties = assignments
                     .iter()
                     .filter_map(|(i, id)| {
-                        let field = struct_.fields.get(*i).unwrap();
+                        // let field = struct_.fields.get(*i).unwrap();
                         let value = self.walk_entity(*id, block);
                         value.map(|x| (i, x))
                     })
@@ -357,7 +366,7 @@ impl<'src> Transformer<'src> {
                 let items = properties.into_iter().map(|x| x.1).collect::<Vec<_>>();
                 js::Node::Array(items)
             }
-            Expr::Module(module_id) => {
+            Expr::Module(_module_id) => {
                 // println!("SEEN MODULE");
                 // let module = self.program.modules.get(module_id).expect("failed to find module by id");
                 // self.walk_entities(&module.body.0, block);
@@ -378,7 +387,7 @@ impl<'src> Transformer<'src> {
         let mut body = self.walk_list(&function.body.0);
         if let Some(return_expr) = self.walk_entity(function.body.1, &mut body) {
             match return_expr {
-                js::Node::Void => {},
+                js::Node::Void => {}
                 _ => {
                     body.push(js::Node::Return(Box::new(return_expr)));
                 }
@@ -397,7 +406,7 @@ struct Formatter {
     indentation: &'static str,
     space: &'static str,
     array_surround: &'static str,
-    object_surround: &'static str,
+    // object_surround: &'static str,
 }
 
 impl Formatter {
@@ -407,7 +416,7 @@ impl Formatter {
             indentation: "\t",
             space: " ",
             array_surround: " ",
-            object_surround: " ",
+            // object_surround: " ",
         }
     }
 
@@ -417,7 +426,7 @@ impl Formatter {
             indentation: "",
             space: "",
             array_surround: "",
-            object_surround: "",
+            // object_surround: "",
         }
     }
 
@@ -463,19 +472,19 @@ impl Formatter {
                     self.array_surround, s_items, self.array_surround, terminator
                 )
             }
-            js::Node::Object(members) => {
-                let s_members = members
-                    .iter()
-                    .map(|(key, value)| {
-                        format!("{}:{}{}", key, self.space, self.node(value, "", 0))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(format!(",{}", self.space).as_str());
-                format!(
-                    "{{{}{}{}}}{}",
-                    self.object_surround, s_members, self.object_surround, terminator
-                )
-            }
+            // js::Node::Object(members) => {
+            //     let s_members = members
+            //         .iter()
+            //         .map(|(key, value)| {
+            //             format!("{}:{}{}", key, self.space, self.node(value, "", 0))
+            //         })
+            //         .collect::<Vec<_>>()
+            //         .join(format!(",{}", self.space).as_str());
+            //     format!(
+            //         "{{{}{}{}}}{}",
+            //         self.object_surround, s_members, self.object_surround, terminator
+            //     )
+            // }
             js::Node::Function(function) => {
                 let name = function.name.as_str();
                 let parameters = function
@@ -669,7 +678,7 @@ pub mod js {
         Local(String), // TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
         Null,
         Number(String, Option<String>),
-        Object(Vec<(&'src str, Self)>),
+        // Object(Vec<(&'src str, Self)>),
         Property(Box<Self>, String),
         PropertyIndex(Box<Self>, Box<Self>),
         Return(Box<Self>),
