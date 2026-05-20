@@ -9,6 +9,7 @@ pub enum Token<'src> {
     Impl,
     Import,
     Let,
+    Mod,
     Null,
     Number(&'src str, Option<&'src str>),
     Op(&'src str),
@@ -29,6 +30,7 @@ impl std::fmt::Display for Token<'_> {
             Token::Impl => write!(f, "impl"),
             Token::Import => write!(f, "import"),
             Token::Let => write!(f, "let"),
+            Token::Mod => write!(f, "mod"),
             Token::Null => write!(f, "null"),
             Token::Number(whole, fraction) => write!(
                 f,

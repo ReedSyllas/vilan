@@ -357,6 +357,27 @@ where
         )
         .map_with(|(subject, body), e| (Node::Impl(Box::new(subject), body), e.span()));
 
+    let module = just(Token::Mod)
+        .ignore_then(identifier.labelled("module name"))
+        .then(
+            statement
+                .clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+                .map_with(|statements, e| (statements, e.span()))
+                .recover_with(via_parser(nested_delimiters(
+                    Token::Ctrl('{'),
+                    Token::Ctrl('}'),
+                    [
+                        (Token::Ctrl('('), Token::Ctrl(')')),
+                        (Token::Ctrl('['), Token::Ctrl(']')),
+                    ],
+                    |span| (Vec::new(), span),
+                ))),
+        )
+        .map_with(|(name, body), e| (Node::Module(name, body), e.span()));
+
     secondary_expression.define(choice((
         closure,
         block
@@ -380,6 +401,7 @@ where
         function,
         struct_,
         impl_,
+        module,
         import.then_ignore(just(Token::Ctrl(';'))),
         block.map(|(x, span)| (Node::Block((x, span)), span)),
     )));

@@ -38,6 +38,7 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 
 #[derive(Debug)]
 pub enum Node<'src> {
+    Accessor(&'src str),
     Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
     Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     Bool(bool),
@@ -59,11 +60,11 @@ pub enum Node<'src> {
         Option<Box<Spanned<Self>>>,
     ),
     List(NodeList<'src>),
-    Accessor(&'src str),
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
-    StaticAccessor(Box<Spanned<Self>>, &'src str),
+    Module(&'src str, Spanned<NodeList<'src>>),
     Null,
     Number(&'src str, Option<&'src str>),
+    StaticAccessor(Box<Spanned<Self>>, &'src str),
     String(&'src str),
     Struct(
         &'src str,

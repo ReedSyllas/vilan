@@ -1,474 +1,84 @@
 Program {
-    closures: {
-        Id(39): Closure {
-            id: Id(39),
-            parameters: [
-                Id(40),
-            ],
-            return_: Id(41),
-        },
-    },
+    closures: {},
     entity_map: {
-        Id(25): Call(
-            Id(25),
+        Id(3): Local(
+            Id(0),
         ),
-        Id(13): Number(
-            "10",
-            None,
-        ),
-        Id(15): Number(
-            "70",
-            None,
-        ),
-        Id(11): Local(
+        Id(5): Void,
+        Id(1): Function(
             Id(1),
         ),
-        Id(10): StructInitializer(
-            Id(7),
-            {
-                0: Id(11),
-                1: Id(12),
-                2: Id(13),
-                4: Id(15),
-                3: Id(14),
-                5: Id(16),
-            },
+        Id(4): String(
+            "Hello, World!",
         ),
-        Id(2): Number(
-            "0",
-            None,
-        ),
-        Id(33): Function(
-            Id(33),
-        ),
-        Id(37): Call(
-            Id(37),
-        ),
-        Id(22): String(
-            "hello from shape method `f` with message:",
-        ),
-        Id(12): String(
-            "Rectangle",
-        ),
-        Id(7): Struct(
-            Id(7),
-        ),
-        Id(16): Number(
-            "30",
-            None,
-        ),
-        Id(32): Void,
-        Id(24): Local(
-            Id(0),
-        ),
-        Id(29): Local(
-            Id(0),
-        ),
-        Id(28): Call(
-            Id(28),
-        ),
-        Id(39): Closure(
-            Id(39),
-        ),
-        Id(6): Number(
-            "2",
-            None,
-        ),
-        Id(14): Number(
-            "20",
-            None,
-        ),
-        Id(42): Void,
-        Id(34): Variable(
-            Id(34),
-        ),
-        Id(41): Local(
-            Id(40),
-        ),
-        Id(20): Call(
-            Id(20),
-        ),
-        Id(17): Function(
-            Id(17),
-        ),
-        Id(43): Local(
-            Id(17),
-        ),
-        Id(26): Local(
-            Id(19),
-        ),
-        Id(31): Local(
-            Id(18),
-        ),
-        Id(38): Local(
-            Id(34),
-        ),
-        Id(18): Parameter(
-            Id(18),
-        ),
-        Id(19): Parameter(
-            Id(19),
-        ),
-        Id(30): Field(
-            Id(31),
-            Id(7),
-            1,
-        ),
-        Id(23): Call(
-            Id(23),
-        ),
-        Id(5): Variable(
-            Id(5),
-        ),
-        Id(9): Function(
-            Id(9),
-        ),
-        Id(40): Parameter(
-            Id(40),
-        ),
-        Id(3): Variable(
-            Id(3),
-        ),
-        Id(1): Variable(
-            Id(1),
-        ),
-        Id(27): String(
-            "hi",
-        ),
-        Id(35): Call(
-            Id(35),
-        ),
-        Id(21): Local(
-            Id(0),
-        ),
-        Id(4): Number(
-            "1",
-            None,
-        ),
-        Id(36): Local(
-            Id(9),
-        ),
-        Id(8): Impl(
-            Id(8),
+        Id(2): Call(
+            Id(2),
         ),
     },
     entity_scope_map: {
-        Id(28): Id(3),
-        Id(21): Id(3),
-        Id(12): Id(2),
-        Id(17): Id(1),
-        Id(20): Id(3),
-        Id(37): Id(4),
-        Id(10): Id(2),
-        Id(13): Id(2),
-        Id(32): Id(3),
-        Id(27): Id(3),
-        Id(33): Id(0),
-        Id(6): Id(0),
-        Id(16): Id(2),
-        Id(30): Id(3),
-        Id(35): Id(4),
-        Id(23): Id(3),
-        Id(26): Id(3),
-        Id(15): Id(2),
-        Id(2): Id(0),
-        Id(11): Id(2),
-        Id(24): Id(3),
-        Id(25): Id(3),
-        Id(5): Id(0),
-        Id(34): Id(4),
-        Id(38): Id(4),
-        Id(41): Id(5),
-        Id(39): Id(4),
-        Id(42): Id(4),
-        Id(36): Id(4),
-        Id(9): Id(1),
+        Id(4): Id(1),
+        Id(5): Id(1),
+        Id(3): Id(1),
+        Id(2): Id(1),
         Id(1): Id(0),
-        Id(8): Id(0),
-        Id(7): Id(0),
-        Id(14): Id(2),
-        Id(29): Id(3),
-        Id(31): Id(3),
-        Id(22): Id(3),
-        Id(4): Id(0),
-        Id(3): Id(0),
     },
     function_calls: {
-        Id(20): FunctionCall {
-            id: Id(20),
-            subject: Id(21),
+        Id(2): FunctionCall {
+            id: Id(2),
+            subject: Id(3),
             arguments: [
-                Id(22),
-            ],
-        },
-        Id(23): FunctionCall {
-            id: Id(23),
-            subject: Id(24),
-            arguments: [
-                Id(25),
-            ],
-        },
-        Id(25): FunctionCall {
-            id: Id(25),
-            subject: Id(26),
-            arguments: [
-                Id(27),
-            ],
-        },
-        Id(35): FunctionCall {
-            id: Id(35),
-            subject: Id(36),
-            arguments: [],
-        },
-        Id(37): FunctionCall {
-            id: Id(37),
-            subject: Id(43),
-            arguments: [
-                Id(38),
-                Id(39),
-            ],
-        },
-        Id(28): FunctionCall {
-            id: Id(28),
-            subject: Id(29),
-            arguments: [
-                Id(30),
+                Id(4),
             ],
         },
     },
     functions: {
-        Id(17): Function {
-            id: Id(17),
-            name: "f",
-            parameters: [
-                Id(18),
-                Id(19),
-            ],
-            body: (
-                [
-                    Id(20),
-                    Id(23),
-                    Id(28),
-                ],
-                Id(32),
-                Id(3),
-            ),
-            call_count: 0,
-        },
-        Id(33): Function {
-            id: Id(33),
+        Id(1): Function {
+            id: Id(1),
             name: "main",
             parameters: [],
             body: (
                 [
-                    Id(34),
-                    Id(37),
+                    Id(2),
                 ],
-                Id(42),
-                Id(4),
-            ),
-            call_count: 0,
-        },
-        Id(9): Function {
-            id: Id(9),
-            name: "new_rect",
-            parameters: [],
-            body: (
-                [],
-                Id(10),
-                Id(2),
+                Id(5),
+                Id(1),
             ),
             call_count: 0,
         },
     },
     global_scope_id: Id(0),
+    modules: {},
     print_fn_id: Id(0),
     reference_count: {
-        Id(40): 1,
-        Id(9): 0,
-        Id(0): 3,
-        Id(7): 0,
-        Id(3): 0,
-        Id(1): 1,
-        Id(17): 0,
-        Id(34): 1,
-        Id(33): 0,
-        Id(5): 0,
-        Id(19): 1,
-        Id(18): 1,
+        Id(1): 0,
+        Id(0): 1,
     },
     scopes: {
-        Id(0): Scope {
-            id: Id(0),
-            parent_id: None,
-            name_to_id_map: {
-                "print": Id(0),
-                "TRIANGLE": Id(5),
-                "Shape": Id(7),
-                "CIRCLE": Id(3),
-                "main": Id(33),
-                "RECTANGLE": Id(1),
-            },
-        },
-        Id(2): Scope {
-            id: Id(2),
-            parent_id: Some(
-                Id(1),
-            ),
-            name_to_id_map: {
-                "RECTANGLE": Id(1),
-                "Shape": Id(7),
-            },
-        },
-        Id(4): Scope {
-            id: Id(4),
-            parent_id: Some(
-                Id(0),
-            ),
-            name_to_id_map: {
-                "Shape": Id(7),
-                "shape": Id(34),
-            },
-        },
         Id(1): Scope {
             id: Id(1),
             parent_id: Some(
                 Id(0),
             ),
             name_to_id_map: {
-                "new_rect": Id(9),
                 "print": Id(0),
-                "Shape": Id(7),
-                "RECTANGLE": Id(1),
-                "f": Id(17),
             },
         },
-        Id(5): Scope {
-            id: Id(5),
-            parent_id: Some(
-                Id(4),
-            ),
+        Id(0): Scope {
+            id: Id(0),
+            parent_id: None,
             name_to_id_map: {
-                "x": Id(40),
-            },
-        },
-        Id(3): Scope {
-            id: Id(3),
-            parent_id: Some(
-                Id(1),
-            ),
-            name_to_id_map: {
-                "self": Id(18),
-                "message": Id(19),
                 "print": Id(0),
+                "main": Id(1),
             },
         },
     },
     span_map: {
-        Id(8): 162..471,
-        Id(42): 556..556,
-        Id(16): 308..310,
-        Id(2): 22..23,
-        Id(24): 425..430,
-        Id(20): 371..421,
-        Id(25): 431..444,
-        Id(1): 1..23,
-        Id(41): 551..552,
-        Id(39): 542..552,
-        Id(7): 70..160,
-        Id(11): 220..229,
-        Id(3): 25..44,
-        Id(12): 241..252,
-        Id(15): 292..294,
-        Id(9): 176..318,
-        Id(22): 377..420,
-        Id(17): 322..469,
-        Id(35): 512..529,
-        Id(37): 534..553,
-        Id(33): 473..556,
-        Id(29): 449..454,
-        Id(23): 425..445,
-        Id(26): 431..438,
-        Id(5): 46..67,
-        Id(21): 371..376,
-        Id(13): 264..266,
-        Id(36): 512..527,
-        Id(10): 202..315,
-        Id(14): 277..279,
-        Id(28): 449..465,
-        Id(4): 43..44,
-        Id(32): 469..469,
-        Id(31): 455..459,
-        Id(34): 493..529,
-        Id(27): 439..443,
-        Id(30): 455..464,
-        Id(6): 66..67,
-        Id(38): 534..539,
+        Id(1): 1..46,
+        Id(3): 21..26,
+        Id(4): 27..42,
+        Id(5): 46..46,
+        Id(2): 21..43,
     },
-    structs: {
-        Id(7): Struct {
-            id: Id(7),
-            name: "Shape",
-            fields: [
-                Field {
-                    name: "type",
-                    type_id: TypeId(7),
-                },
-                Field {
-                    name: "name",
-                    type_id: TypeId(9),
-                },
-                Field {
-                    name: "left",
-                    type_id: TypeId(11),
-                },
-                Field {
-                    name: "top",
-                    type_id: TypeId(13),
-                },
-                Field {
-                    name: "width",
-                    type_id: TypeId(15),
-                },
-                Field {
-                    name: "height",
-                    type_id: TypeId(17),
-                },
-            ],
-        },
-    },
-    variables: {
-        Id(3): Variable {
-            id: Id(3),
-            name: "CIRCLE",
-            initial: Some(
-                Id(4),
-            ),
-            type_id: TypeId(3),
-        },
-        Id(5): Variable {
-            id: Id(5),
-            name: "TRIANGLE",
-            initial: Some(
-                Id(6),
-            ),
-            type_id: TypeId(5),
-        },
-        Id(34): Variable {
-            id: Id(34),
-            name: "shape",
-            initial: Some(
-                Id(35),
-            ),
-            type_id: TypeId(27),
-        },
-        Id(1): Variable {
-            id: Id(1),
-            name: "RECTANGLE",
-            initial: Some(
-                Id(2),
-            ),
-            type_id: TypeId(1),
-        },
-    },
+    structs: {},
+    variables: {},
 }

@@ -5,6 +5,7 @@ pub enum Type {
     Any,
     Closure(Vec<TypeId>, TypeId),
     Function(Id),
+    Module(Id),
     Primitive(PrimitiveType),
     Struct(Id),
     Tuple(Vec<TypeId>),

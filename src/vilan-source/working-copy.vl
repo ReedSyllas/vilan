@@ -1,38 +1,4 @@
 
-let RECTANGLE: i32 = 0;
-let CIRCLE: i32 = 1;
-let TRIANGLE: i32 = 2;
-
-struct Shape {
-	type: i32,
-	name: str,
-	left: str,
-	top: str,
-	width: str,
-	height: str,
-}
-
-impl Shape {
-	fun new_rect(): Shape {
-		Shape {
-			type = RECTANGLE,
-			name = "Rectangle",
-			left = 10,
-			top = 20,
-			width = 70,
-			height = 30,
-		}
-	}
-	
-	fun f(self: Shape, message: |str| str): void {
-		print("hello from shape method `f` with message:");
-		print(message("hi"));
-		print(self.name);
-	}
-}
-
 fun main(): void {
-	let shape: Shape = Shape::new_rect();
-	
-	shape.f(|x: str| x);
+	print("Hello, World!");
 }

@@ -19,6 +19,7 @@ pub enum Expr<'src> {
     Impl(Id),
     List(Vec<Id>),
     Local(Id),
+    Module(Id),
     Null,
     Number(&'src str, Option<&'src str>),
     Parameter(Id),
@@ -89,6 +90,13 @@ pub struct Implementation<'src> {
 }
 
 #[derive(Debug)]
+pub struct Module<'src> {
+    pub id: Id,
+    pub name: &'src str,
+    pub body: (Vec<Id>, Id),
+}
+
+#[derive(Debug)]
 pub struct Closure {
     pub id: Id,
     pub parameters: Vec<Id>,
@@ -114,6 +122,7 @@ pub struct Analyzer<'src> {
     function_calls: HashMap<Id, FunctionCall>,
     functions: HashMap<Id, Function<'src>>,
     implementations: Vec<Implementation<'src>>,
+    modules: HashMap<Id, Module<'src>>,
     parameters: HashMap<Id, Parameter<'src>>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_locals: Vec<(Id, &'src str)>,
@@ -121,6 +130,7 @@ pub struct Analyzer<'src> {
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers: Vec<(Id, &'src str, Vec<(&'src str, Id)>)>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
+    prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Id)>,
     reference_count: HashMap<Id, u32>,
     scope_id: u32,
     scopes: HashMap<Id, Scope<'src>>,
@@ -143,6 +153,7 @@ impl<'src> Analyzer<'src> {
             function_calls: HashMap::new(),
             functions: HashMap::new(),
             implementations: Vec::new(),
+            modules: HashMap::new(),
             parameters: HashMap::new(),
             prepped_field_accessors: Vec::new(),
             prepped_locals: Vec::new(),
@@ -150,6 +161,7 @@ impl<'src> Analyzer<'src> {
             prepped_static_accessors: Vec::new(),
             prepped_struct_initializers: Vec::new(),
             prepped_type_locals: Vec::new(),
+            prepped_type_static_accessors: Vec::new(),
             reference_count: HashMap::new(),
             scope_id: 0,
             scopes: HashMap::new(),
@@ -569,6 +581,22 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Closure(id))
             }
             Node::ClosureType(_, _) => panic!("found a type in the expression context"),
+            Node::Module(name, body) => {
+                let scope = self.mut_scope_for_scope_id(scope_id);
+                scope.name_to_id_map.insert(name, id);
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                let body = self.walk_expr_nodes(&body.0, body_scope_id);
+                self.modules.insert(
+                    id,
+                    Module {
+                        id,
+                        name,
+                        body: (body, body_scope_id),
+                    },
+                );
+                Some(Expr::Module(id))
+            }
         };
 
         if let Some(entity) = entity {
@@ -597,6 +625,16 @@ impl<'src> Analyzer<'src> {
                     None
                 }
             },
+            Node::StaticAccessor(subject, member_name) => {
+                let subject_type_id = self.walk_type_node(subject, scope_id);
+                self.prepped_type_static_accessors.push((
+                    type_id,
+                    subject_type_id,
+                    member_name,
+                    scope_id,
+                ));
+                None
+            }
             Node::Tuple(types) => Some(Type::Tuple(
                 types
                     .iter()
@@ -651,7 +689,7 @@ impl<'src> Analyzer<'src> {
 
         let expr = self.get_entity_by_id(expr_id);
 
-        // println!("resolve_type.input {:#?}", expr);
+        println!("resolve_type.input {:#?}", expr);
 
         let inferred_type_id: TypeId = match expr {
             Expr::Null => self.type_id_for_type(Type::Primitive(PrimitiveType::Null)),
@@ -696,6 +734,7 @@ impl<'src> Analyzer<'src> {
             }
             Expr::Function(function_id) => self.type_id_for_type(Type::Function(*function_id)),
             Expr::Struct(struct_id) => self.type_id_for_type(Type::Struct(*struct_id)),
+            Expr::Module(module_id) => self.type_id_for_type(Type::Module(*module_id)),
             Expr::Call(id) => {
                 let id = *id;
                 let against_type = self.type_id_for_type(Type::Unknown);
@@ -719,7 +758,10 @@ impl<'src> Analyzer<'src> {
             _ => self.type_id_for_type(Type::Void),
         };
 
-        // println!("resolve_type.output {:#?}", self.get_type_by_type_id(inferred_type_id));
+        println!(
+            "resolve_type.output {:#?}",
+            self.get_type_by_type_id(inferred_type_id)
+        );
 
         self.reconcile_type(constraint_type_id, inferred_type_id)
     }
@@ -777,19 +819,45 @@ impl<'src> Analyzer<'src> {
     fn build(&mut self) {
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
-            let subject_id = self.get_expr_id_by_name(name, scope_id);
-            self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
 
+            let subject_id = self.get_expr_id_by_name(name, scope_id);
             let rc = self.reference_count.entry(subject_id).or_insert(0);
             *rc += 1;
+
+            self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
         }
 
         for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
+            // let rc = self.reference_count.entry(subject_id).or_insert(0);
+            // *rc += 1;
+
             let constraint_type_id = self.type_id_for_type(Type::Unknown);
             let subject_type_id = self.resolve_type_start(subject_id, constraint_type_id);
             let subject_type = self.get_type_by_type_id(subject_type_id);
             self.type_id_to_type_map.insert(type_id, subject_type);
+        }
+
+        for (type_id, subject_type_id, member_name, scope_id) in
+            self.prepped_type_static_accessors.clone()
+        {
+            let subject_type = self.get_type_by_type_id(subject_type_id);
+            match subject_type {
+                Type::Module(module_id) => {
+                    let module = self.modules.get(&module_id).unwrap();
+
+                    let member_id = self.get_expr_id_by_name(member_name, module.body.1);
+                    // let rc = self.reference_count.entry(member_id).or_insert(0);
+                    // *rc += 1;
+
+                    let constraint_type_id = self.type_id_for_type(Type::Unknown);
+                    let member_type_id = self.resolve_type_start(member_id, constraint_type_id);
+                    let member_type = self.get_type_by_type_id(member_type_id);
+
+                    self.type_id_to_type_map.insert(type_id, member_type);
+                }
+                _ => {}
+            }
         }
 
         for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
@@ -863,6 +931,7 @@ impl<'src> Analyzer<'src> {
 
         for (id, subject_type_id, member_name) in self.prepped_static_accessors.clone() {
             let subject_type = self.get_type_by_type_id(subject_type_id);
+            println!("prepped_static_accessors {member_name} {subject_type:#?}");
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_name = self.structs.get(&struct_id).unwrap().name;
@@ -872,6 +941,15 @@ impl<'src> Analyzer<'src> {
                         .filter(|x| self.compare_type(subject_type_id, x.subject))
                         .find_map(|x| x.declarations.get(member_name))
                         .expect(format!("cannot find {} in {}", member_name, struct_name).as_str());
+                    self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                }
+                Type::Module(module_id) => {
+                    let module = self.modules.get(&module_id).unwrap();
+
+                    let member_id = self.get_expr_id_by_name(member_name, module.body.1);
+                    let rc = self.reference_count.entry(member_id).or_insert(0);
+                    *rc += 1;
+
                     self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
                 }
                 _ => {}
@@ -945,6 +1023,7 @@ pub struct Program<'src> {
     pub function_calls: HashMap<Id, FunctionCall>,
     pub functions: HashMap<Id, Function<'src>>,
     pub global_scope_id: Id,
+    pub modules: HashMap<Id, Module<'src>>,
     pub print_fn_id: Id,
     pub reference_count: HashMap<Id, u32>,
     pub scopes: HashMap<Id, Scope<'src>>,
@@ -975,6 +1054,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         function_calls: analyzer.function_calls,
         functions: analyzer.functions,
         global_scope_id,
+        modules: analyzer.modules,
         print_fn_id,
         reference_count: analyzer.reference_count,
         scopes: analyzer.scopes,

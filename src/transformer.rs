@@ -53,11 +53,13 @@ impl<'src> Transformer<'src> {
             .get(&self.program.global_scope_id)
             .unwrap();
 
-        let global_variables = global_scope
-            .name_to_id_map
-            .iter()
-            .filter_map(|x| self.program.variables.contains_key(x.1).then_some(*x.1))
-            .collect::<Vec<_>>();
+        let global_variables = self.find_global_variables(
+            &global_scope
+                .name_to_id_map
+                .iter()
+                .map(|(_, x)| *x)
+                .collect(),
+        );
 
         let main_fn = global_scope
             .name_to_id_map
@@ -106,14 +108,36 @@ impl<'src> Transformer<'src> {
         ))
     }
 
+    fn find_global_variables(&self, globals: &Vec<Id>) -> Vec<Id> {
+        let mut global_variables = Vec::new();
+
+        for id in globals {
+            if self.program.variables.contains_key(&id) {
+                global_variables.push(*id);
+            } else if self.program.modules.contains_key(&id) {
+                let module = self.program.modules.get(&id).unwrap();
+                let mut children = self.find_global_variables(&module.body.0);
+                println!("x1 {} {:#?} {:#?}", module.name, children, global_variables);
+                global_variables.append(&mut children);
+                println!("x2 {:#?}", global_variables);
+            }
+        }
+
+        global_variables
+    }
+
     fn walk_list(&mut self, list: &Vec<Id>) -> Vec<js::Node<'src>> {
         let mut block = Vec::new();
-        for item in list {
-            if let Some(node) = self.walk_entity(*item, &mut block) {
+        self.walk_entities(list, &mut block);
+        block
+    }
+
+    fn walk_entities(&mut self, ids: &Vec<Id>, mut block: &mut Vec<js::Node<'src>>) {
+        for id in ids {
+            if let Some(node) = self.walk_entity(*id, &mut block) {
                 block.push(node);
             }
         }
-        block
     }
 
     fn walk_entity(&mut self, id: Id, block: &mut Vec<js::Node<'src>>) -> Option<js::Node<'src>> {
@@ -329,6 +353,12 @@ impl<'src> Transformer<'src> {
                 let items = properties.into_iter().map(|x| x.1).collect::<Vec<_>>();
                 js::Node::Array(items)
             }
+            Expr::Module(module_id) => {
+                // println!("SEEN MODULE");
+                // let module = self.program.modules.get(module_id).expect("failed to find module by id");
+                // self.walk_entities(&module.body.0, block);
+                return None;
+            }
         })
     }
 
@@ -343,7 +373,12 @@ impl<'src> Transformer<'src> {
             .collect::<Vec<_>>();
         let mut body = self.walk_list(&function.body.0);
         if let Some(return_expr) = self.walk_entity(function.body.1, &mut body) {
-            body.push(js::Node::Return(Box::new(return_expr)));
+            match return_expr {
+                js::Node::Void => {},
+                _ => {
+                    body.push(js::Node::Return(Box::new(return_expr)));
+                }
+            }
         }
         js::Node::Function(js::Function {
             name,
