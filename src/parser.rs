@@ -79,7 +79,7 @@ where
     let tuple = expression
         .clone()
         .separated_by(just(Token::Ctrl(',')))
-        .allow_trailing()
+        .at_least(2)
         .collect::<Vec<_>>()
         .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
         .map_with(|x, e| (Node::Tuple(x), e.span()));

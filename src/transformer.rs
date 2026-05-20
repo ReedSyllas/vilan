@@ -175,13 +175,13 @@ impl<'src> Transformer<'src> {
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap();
                 let subject = self.program.entity_map.get(&function_call.subject).unwrap();
+                let args = function_call
+                    .arguments
+                    .iter()
+                    .filter_map(|arg| self.walk_entity(*arg, block))
+                    .collect::<Vec<_>>();
                 match subject {
                     Expr::Local(id) => {
-                        let args = function_call
-                            .arguments
-                            .iter()
-                            .filter_map(|arg| self.walk_entity(*arg, block))
-                            .collect::<Vec<_>>();
                         if *id == self.program.print_fn_id {
                             js::Node::Call(
                                 Box::new(js::Node::Property(
@@ -201,7 +201,11 @@ impl<'src> Transformer<'src> {
                             js::Node::Call(Box::new(js::Node::Local(subject)), args)
                         }
                     }
-                    _ => unimplemented!(),
+                    _ => {
+                        println!("Transformer.walk_entity -> Expr::Call -> call subject {:#?}", subject);
+                        let t_subject = self.walk_entity(function_call.subject, block).unwrap();
+                        js::Node::Call(Box::new(t_subject), args)
+                    },
                 }
             }
             Expr::Closure(closure_id) => {
