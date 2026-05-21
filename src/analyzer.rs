@@ -1,8 +1,13 @@
+use std::collections::{HashMap, HashSet};
+
+use indexmap::IndexMap;
+
+use crate::error::Error;
 use crate::id::Id;
 use crate::node::{BinaryOp, Node, NodeIfBranch, NodeList};
 use crate::span::{Span, Spanned};
 use crate::type_::{PrimitiveType, Type, TypeId};
-use std::collections::{HashMap, HashSet};
+use crate::util::plural;
 
 #[derive(Clone, Debug)]
 pub enum Expr<'src> {
@@ -12,6 +17,7 @@ pub enum Expr<'src> {
     Call(Id),
     Closure(Id),
     Error,
+    ExternalFunction(Id),
     Field(Id, Id, usize),
     Function(Id),
     FunctionReturn(Id),
@@ -25,7 +31,7 @@ pub enum Expr<'src> {
     Parameter(Id),
     String(&'src str),
     Struct(Id),
-    StructInitializer(Id, HashMap<usize, Id>),
+    StructInitializer(Id, IndexMap<usize, Id>),
     Tuple(Vec<Id>),
     Variable(Id),
     Void,
@@ -47,10 +53,20 @@ pub struct Function<'src> {
 }
 
 #[derive(Debug)]
+pub struct ExternalFunction<'src> {
+    pub id: Id,
+    pub name: &'src str,
+    pub parameters: Vec<Id>,
+    pub return_type_id: TypeId,
+    pub call_count: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct FunctionCall {
     pub id: Id,
     pub subject_id: Id,
     pub argument_ids: Vec<Id>,
+    pub arguments_span: Span,
 }
 
 #[derive(Debug)]
@@ -86,7 +102,7 @@ pub struct Field<'src> {
 #[derive(Debug)]
 pub struct Implementation<'src> {
     pub subject: TypeId,
-    pub declarations: HashMap<&'src str, Id>,
+    pub declarations: IndexMap<&'src str, Id>,
 }
 
 #[derive(Debug)]
@@ -107,54 +123,57 @@ pub struct Closure {
 pub struct Scope<'src> {
     pub id: Id,
     pub parent_id: Option<Id>,
-    pub name_to_id_map: HashMap<&'src str, Id>,
-    // pub name_to_type_id_map: HashMap<&'src str, TypeId>,
+    pub name_to_id_map: IndexMap<&'src str, Id>,
 }
 
 #[derive(Debug)]
 pub struct Analyzer<'src> {
-    assignment_values: HashMap<Id, Vec<Id>>,
-    closures: HashMap<Id, Closure>,
+    assignment_values: IndexMap<Id, Vec<Id>>,
+    closures: IndexMap<Id, Closure>,
+    diagnostics: Vec<Error>,
     entity_id: u32,
     expr_id_to_expr_map: HashMap<Id, Expr<'src>>,
     expr_id_to_scope_id_map: HashMap<Id, Id>,
     expr_id_to_type_id_map: HashMap<Id, TypeId>,
-    function_calls: HashMap<Id, FunctionCall>,
-    functions: HashMap<Id, Function<'src>>,
+    external_functions: IndexMap<Id, ExternalFunction<'src>>,
+    function_calls: IndexMap<Id, FunctionCall>,
+    functions: IndexMap<Id, Function<'src>>,
     implementations: Vec<Implementation<'src>>,
-    modules: HashMap<Id, Module<'src>>,
-    parameters: HashMap<Id, Parameter<'src>>,
+    modules: IndexMap<Id, Module<'src>>,
+    parameters: IndexMap<Id, Parameter<'src>>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_locals: Vec<(Id, &'src str)>,
-    prepped_method_calls: Vec<(Id, Id, &'src str, Vec<Id>)>,
+    prepped_method_calls: Vec<(Id, Id, &'src str, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers: Vec<(Id, &'src str, Vec<(&'src str, Id)>)>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str)>,
     reference_count: HashMap<Id, u32>,
     scope_id: u32,
-    scopes: HashMap<Id, Scope<'src>>,
+    scopes: IndexMap<Id, Scope<'src>>,
     span_map: HashMap<Id, &'src Span>,
-    structs: HashMap<Id, Struct<'src>>,
+    structs: IndexMap<Id, Struct<'src>>,
     type_id_to_type_map: HashMap<TypeId, Type>,
     type_id: u32,
-    variables: HashMap<Id, Variable<'src>>,
+    variables: IndexMap<Id, Variable<'src>>,
 }
 
 impl<'src> Analyzer<'src> {
     fn new() -> Self {
         Self {
-            assignment_values: HashMap::new(),
-            closures: HashMap::new(),
+            assignment_values: IndexMap::new(),
+            closures: IndexMap::new(),
+            diagnostics: Vec::new(),
             entity_id: 0,
             expr_id_to_expr_map: HashMap::new(),
             expr_id_to_scope_id_map: HashMap::new(),
             expr_id_to_type_id_map: HashMap::new(),
-            function_calls: HashMap::new(),
-            functions: HashMap::new(),
+            external_functions: IndexMap::new(),
+            function_calls: IndexMap::new(),
+            functions: IndexMap::new(),
             implementations: Vec::new(),
-            modules: HashMap::new(),
-            parameters: HashMap::new(),
+            modules: IndexMap::new(),
+            parameters: IndexMap::new(),
             prepped_field_accessors: Vec::new(),
             prepped_locals: Vec::new(),
             prepped_method_calls: Vec::new(),
@@ -164,12 +183,12 @@ impl<'src> Analyzer<'src> {
             prepped_type_static_accessors: Vec::new(),
             reference_count: HashMap::new(),
             scope_id: 0,
-            scopes: HashMap::new(),
+            scopes: IndexMap::new(),
             span_map: HashMap::new(),
-            structs: HashMap::new(),
+            structs: IndexMap::new(),
             type_id_to_type_map: HashMap::new(),
             type_id: 0,
-            variables: HashMap::new(),
+            variables: IndexMap::new(),
         }
     }
 
@@ -218,8 +237,7 @@ impl<'src> Analyzer<'src> {
         Scope {
             id,
             parent_id,
-            name_to_id_map: HashMap::new(),
-            // name_to_type_id_map: HashMap::new(),
+            name_to_id_map: IndexMap::new(),
         }
     }
 
@@ -234,7 +252,7 @@ impl<'src> Analyzer<'src> {
         let scope = Scope {
             id,
             parent_id,
-            name_to_id_map: HashMap::new(),
+            name_to_id_map: IndexMap::new(),
         };
         self.scopes.insert(id, scope);
         self.scopes.get_mut(&id).unwrap()
@@ -333,8 +351,13 @@ impl<'src> Analyzer<'src> {
                     Node::Call(call_subject, call_arguments) => match &call_subject.0 {
                         Node::Accessor(name) => {
                             let argument_ids = self.walk_expr_nodes(&call_arguments.0, scope_id);
-                            self.prepped_method_calls
-                                .push((id, subject_id, *name, argument_ids));
+                            self.prepped_method_calls.push((
+                                id,
+                                subject_id,
+                                *name,
+                                argument_ids,
+                                call_arguments.1,
+                            ));
                         }
                         _ => panic!("expected identifier"),
                     },
@@ -448,6 +471,7 @@ impl<'src> Analyzer<'src> {
                         id,
                         subject_id,
                         argument_ids,
+                        arguments_span: arguments.1,
                     },
                 );
                 Some(Expr::Call(id))
@@ -823,8 +847,6 @@ impl<'src> Analyzer<'src> {
 
         for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
-            // let rc = self.reference_count.entry(subject_id).or_insert(0);
-            // *rc += 1;
             let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
             self.type_id_to_type_map.insert(type_id, subject_type);
         }
@@ -834,8 +856,6 @@ impl<'src> Analyzer<'src> {
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
                     let member_id = self.get_expr_id_by_name(member_name, module.body.1);
-                    // let rc = self.reference_count.entry(member_id).or_insert(0);
-                    // *rc += 1;
                     let member_type = self.resolve_type_start(member_id, Type::Unknown);
                     self.type_id_to_type_map.insert(type_id, member_type);
                 }
@@ -863,7 +883,9 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (id, subject_id, member_name, mut argument_ids) in self.prepped_method_calls.clone() {
+        for (id, subject_id, member_name, mut argument_ids, arguments_span) in
+            self.prepped_method_calls.clone()
+        {
             let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
             match subject_type {
                 Type::Struct(struct_id) => {
@@ -900,6 +922,7 @@ impl<'src> Analyzer<'src> {
                             id,
                             subject_id: member_local_id,
                             argument_ids,
+                            arguments_span,
                         },
                     );
                     self.expr_id_to_expr_map.insert(id, Expr::Call(id));
@@ -946,7 +969,7 @@ impl<'src> Analyzer<'src> {
                 .structs
                 .get(&struct_id)
                 .expect("cannot initialize a non-struct");
-            let mut initializer_fields = HashMap::new();
+            let mut initializer_fields = IndexMap::new();
             for field in fields {
                 let index = struct_
                     .fields
@@ -958,30 +981,63 @@ impl<'src> Analyzer<'src> {
             self.expr_id_to_expr_map
                 .insert(id, Expr::StructInitializer(struct_id, initializer_fields));
         }
-
-        // for function_call in self.function_calls.values() {
-        //     match self.get_entity_by_id(function_call.subject) {
-        //         Entity::Local(subject_id) => {
-        //             if let Some(struct_) = self.structs.get(subject_id) {
-        //                 let mut initializer_fields = HashMap::new();
-        //                 for (id, value) in function_call.arguments.iter().enumerate() {
-        //                     initializer_fields.insert(id, *value);
-        //                 }
-        //                 self.entity_map.insert(
-        //                     function_call.id,
-        //                     Entity::StructInitializer(*subject_id, initializer_fields),
-        //                 );
-        //             }
-        //         }
-        //         _ => {}
-        //     }
-        // }
-
-        // TODO: Type check all entities.
-        //       Requires caching to prevent extra work.
-        // for entity_id in self.entity_map.keys() {
-        // 	self.resolve_type_start(entity_id, Type::Unknown);
-        // }
+        
+        let function_call_ids = self.function_calls.keys().copied().collect::<Vec<_>>();
+        
+        for function_call_id in function_call_ids {
+            let function_call = self.function_calls.get(&function_call_id).unwrap().clone();
+            let subject = self.get_entity_by_id(function_call.subject_id);
+            match subject {
+                Expr::Local(target_id) => {
+                    let target = self.get_entity_by_id(*target_id);
+                    let parameters = match target {
+                        Expr::Function(function_id) => {
+                            let function = self.functions.get(function_id).unwrap();
+                            Some(function.parameters.clone())
+                        }
+                        Expr::ExternalFunction(external_function_id) => {
+                            let function =
+                                self.external_functions.get(external_function_id).unwrap();
+                            Some(function.parameters.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(parameters) = parameters {
+                        if function_call.argument_ids.len() != parameters.len() {
+                            self.diagnostics.push(Error {
+                                span: function_call.arguments_span,
+                                msg: format!(
+                                    "Expected {} {}, but got {} instead.",
+                                    parameters.len(),
+                                    plural(parameters.len(), "argument", "arguments"),
+                                    function_call.argument_ids.len()
+                                ),
+                            });
+                        } else {
+                            for (i, parameter_id) in parameters.iter().enumerate() {
+                                let parameter = self.parameters.get(parameter_id).unwrap();
+                                let parameter_type = parameter.type_id.get_type(self);
+                                let argument_id = *function_call.argument_ids.get(i).unwrap();
+                                let argument_type = self.resolve_type_start(argument_id, Type::Unknown);
+                                if !self.compare_type(parameter_type, argument_type) {
+                                    self.diagnostics.push(Error {
+                                        span: **self.span_map.get(&argument_id).unwrap(),
+                                        msg: format!(
+                                            "Expected type {}, but got type {} instead.",
+                                            "{todo}",
+                                            "{todo}",
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    println!("cannot type check call to value with indirect function call yet")
+                }
+            }
+        }
 
         // for (subject_id, value_ids) in self.assignment_values.clone() {
         // 	if let Some(variable) = self.variables.get(&subject_id) {
@@ -1011,19 +1067,20 @@ impl Type {
 
 #[derive(Debug)]
 pub struct Program<'src> {
-    pub closures: HashMap<Id, Closure>,
+    pub closures: IndexMap<Id, Closure>,
+    pub diagnostics: Vec<Error>,
     pub entity_map: HashMap<Id, Expr<'src>>,
     pub entity_scope_map: HashMap<Id, Id>,
-    pub function_calls: HashMap<Id, FunctionCall>,
-    pub functions: HashMap<Id, Function<'src>>,
+    pub function_calls: IndexMap<Id, FunctionCall>,
+    pub functions: IndexMap<Id, Function<'src>>,
     pub global_scope_id: Id,
-    pub modules: HashMap<Id, Module<'src>>,
+    pub modules: IndexMap<Id, Module<'src>>,
     pub print_fn_id: Id,
     pub reference_count: HashMap<Id, u32>,
-    pub scopes: HashMap<Id, Scope<'src>>,
+    pub scopes: IndexMap<Id, Scope<'src>>,
     pub span_map: HashMap<Id, &'src Span>,
-    pub structs: HashMap<Id, Struct<'src>>,
-    pub variables: HashMap<Id, Variable<'src>>,
+    pub structs: IndexMap<Id, Struct<'src>>,
+    pub variables: IndexMap<Id, Variable<'src>>,
 }
 
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
@@ -1031,7 +1088,29 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let mut global_scope = analyzer.create_scope(None);
     let print_fn_id = analyzer.new_entity_id();
     let print_fn_type_id = analyzer.new_type_id();
-    global_scope.name_to_id_map.insert("print", print_fn_id);
+    let print_fn_parameter_0_id = analyzer.new_entity_id();
+    let print_fn_parameter_0 = Parameter {
+        id: print_fn_parameter_0_id,
+        function_id: print_fn_id,
+        name: "message",
+        type_id: analyzer.new_type_id(),
+    };
+    analyzer.parameters.insert(print_fn_parameter_0_id, print_fn_parameter_0);
+    let print_fn_name = "print";
+    let print_fn = ExternalFunction {
+        id: print_fn_id,
+        name: print_fn_name,
+        parameters: vec![print_fn_parameter_0_id],
+        return_type_id: Type::Void.get_type_id(&mut analyzer),
+        call_count: 0,
+    };
+    analyzer.external_functions.insert(print_fn_id, print_fn);
+    analyzer
+        .expr_id_to_expr_map
+        .insert(print_fn_id, Expr::ExternalFunction(print_fn_id));
+    global_scope
+        .name_to_id_map
+        .insert(print_fn_name, print_fn_id);
     analyzer
         .type_id_to_type_map
         .insert(print_fn_type_id, Type::Function(print_fn_id));
@@ -1043,6 +1122,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     analyzer.build();
     Program {
         closures: analyzer.closures,
+        diagnostics: analyzer.diagnostics,
         entity_map: analyzer.expr_id_to_expr_map,
         entity_scope_map: analyzer.expr_id_to_scope_id_map,
         function_calls: analyzer.function_calls,

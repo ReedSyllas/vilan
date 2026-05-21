@@ -3,6 +3,7 @@ use crate::error::Error;
 use crate::id::Id;
 use crate::node::BinaryOp;
 use chumsky::span::Span;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
@@ -12,7 +13,7 @@ pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
 struct Transformer<'src> {
     program: &'src Program<'src>,
     ng: NameGenerator,
-    required_functions: HashMap<Id, js::Node<'src>>,
+    required_functions: IndexMap<Id, js::Node<'src>>,
     formatter: Formatter,
 }
 
@@ -37,7 +38,7 @@ impl<'src> Transformer<'src> {
         Self {
             program,
             ng: NameGenerator::new_simple(debug_names),
-            required_functions: HashMap::new(),
+            required_functions: IndexMap::new(),
             formatter: if should_pretty_print {
                 Formatter::new_pretty()
             } else {
@@ -64,7 +65,7 @@ impl<'src> Transformer<'src> {
         let main_fn = global_scope
             .name_to_id_map
             .get("main")
-            .and_then(|id| self.program.functions.get(&id))
+            .and_then(|id| self.program.functions.get(id))
             .ok_or_else(|| Error {
                 msg: "Cannot execute program without a main function".to_string(),
                 span: Span::new((), 0..0),
@@ -112,10 +113,10 @@ impl<'src> Transformer<'src> {
         let mut global_variables = Vec::new();
 
         for id in globals {
-            if self.program.variables.contains_key(&id) {
+            if self.program.variables.contains_key(id) {
                 global_variables.push(*id);
-            } else if self.program.modules.contains_key(&id) {
-                let module = self.program.modules.get(&id).unwrap();
+            } else if self.program.modules.contains_key(id) {
+                let module = self.program.modules.get(id).unwrap();
                 let mut children = self.find_global_variables(&module.body.0);
                 println!("x1 {} {:#?} {:#?}", module.name, children, global_variables);
                 global_variables.append(&mut children);
@@ -158,6 +159,9 @@ impl<'src> Transformer<'src> {
             Expr::Impl(_) => {
                 return None;
             }
+            Expr::ExternalFunction(_) => {
+                return None;
+            }
             Expr::Function(id) => {
                 let function = self.program.functions.get(id).unwrap();
                 self.function(function)
@@ -174,7 +178,11 @@ impl<'src> Transformer<'src> {
             }
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap();
-                let subject = self.program.entity_map.get(&function_call.subject_id).unwrap();
+                let subject = self
+                    .program
+                    .entity_map
+                    .get(&function_call.subject_id)
+                    .unwrap();
                 let args = function_call
                     .argument_ids
                     .iter()
@@ -212,7 +220,7 @@ impl<'src> Transformer<'src> {
                 }
             }
             Expr::Closure(closure_id) => {
-                let closure = self.program.closures.get(&closure_id).unwrap();
+                let closure = self.program.closures.get(closure_id).unwrap();
                 let parameters = closure
                     .parameters
                     .iter()

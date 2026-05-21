@@ -8,6 +8,7 @@ mod span;
 mod token;
 mod transformer;
 mod type_;
+mod util;
 
 use crate::analyzer::analyze;
 use crate::lexer::lexer;
@@ -44,6 +45,10 @@ fn main() {
 
             let program = analyze(&root);
 
+            for error in &program.diagnostics {
+                errs.push(Rich::custom(error.span, error.msg.as_str()));
+            }
+
             fs::write(
                 Path::new(&filename).with_extension("analyze.out"),
                 format!("{program:#?}"),
@@ -52,17 +57,19 @@ fn main() {
                 println!("failed to write analyze.out");
             });
 
-            match transform(&program) {
-                Ok(output) => {
-                    // println!("Output: {output}");
-                    fs::write(Path::new(&filename).with_extension("js"), output).unwrap_or_else(
-                        |_| {
-                            println!("failed to write file");
-                        },
-                    );
-                    println!("Package has built successfully");
+            if errs.len() == 0 {
+                match transform(&program) {
+                    Ok(output) => {
+                        // println!("Output: {output}");
+                        fs::write(Path::new(&filename).with_extension("js"), output).unwrap_or_else(
+                            |_| {
+                                println!("failed to write file");
+                            },
+                        );
+                        println!("Package has built successfully");
+                    }
+                    Err(e) => errs.push(Rich::custom(e.span, e.msg)),
                 }
-                Err(e) => errs.push(Rich::custom(e.span, e.msg)),
             }
 
             // match interpret(program) {
@@ -70,7 +77,7 @@ fn main() {
             // 	Err(e) => errs.push(Rich::custom(e.span, e.msg)),
             // }
 
-            // match eval_expr(&root, &HashMap::new(), &mut Vec::new()) {
+            // match eval_expr(&root, &IndexMap::new(), &mut Vec::new()) {
             // 	Ok(val) => println!("Return value: {val}"),
             // 	Err(e) => errs.push(Rich::custom(e.span, e.msg)),
             // }

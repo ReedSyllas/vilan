@@ -1,26 +1,9 @@
 
-fun sum(foo: Foo): (i32, i32) {
-	(5, foo.bar())
-}
-
-struct Foo {
-	value: i32,
-	fn: |i32| i32,
-}
-
-impl Foo {
-	fun new(value: i32, fn: |i32| i32) {
-		Foo {
-			value = value,
-			fn = fn,
-		}
-	}
-	
-	fun bar(self: Foo) {
-		(self.fn)(self.value)
-	}
+fun f(a: i32, b: i32) {
+	a + b
 }
 
 fun main() {
-	print(sum(Foo::new(3, |x| x * x)));
+	let v = f(10, 20);
+	print(v);
 }

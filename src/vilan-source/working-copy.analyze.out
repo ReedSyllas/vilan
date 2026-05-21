@@ -1,257 +1,122 @@
 Program {
-    closures: {
-        Id(30): Closure {
-            id: Id(30),
-            parameters: [
-                Id(31),
-            ],
-            return_: Id(32),
-        },
-    },
+    closures: {},
+    diagnostics: [],
     entity_map: {
-        Id(1): Function(
-            Id(1),
+        Id(14): Call(
+            Id(14),
         ),
-        Id(30): Closure(
-            Id(30),
+        Id(7): Local(
+            Id(4),
         ),
-        Id(9): Function(
-            Id(9),
+        Id(3): Parameter(
+            Id(3),
         ),
-        Id(31): Parameter(
-            Id(31),
-        ),
-        Id(34): Local(
-            Id(31),
-        ),
-        Id(32): Binary(
-            Mul,
-            Id(33),
-            Id(34),
-        ),
-        Id(29): Number(
-            "3",
-            None,
-        ),
-        Id(5): Call(
-            Id(5),
-        ),
-        Id(35): Void,
-        Id(12): StructInitializer(
-            Id(7),
-            {
-                0: Id(13),
-                1: Id(14),
-            },
-        ),
-        Id(19): Local(
-            Id(16),
-        ),
-        Id(2): Parameter(
-            Id(2),
-        ),
-        Id(26): Local(
-            Id(1),
-        ),
-        Id(18): Field(
-            Id(19),
-            Id(7),
-            1,
-        ),
-        Id(22): Function(
-            Id(22),
-        ),
-        Id(14): Local(
-            Id(11),
-        ),
-        Id(4): Number(
-            "5",
-            None,
-        ),
-        Id(27): Call(
-            Id(27),
-        ),
-        Id(20): Field(
-            Id(21),
-            Id(7),
-            0,
-        ),
-        Id(16): Parameter(
-            Id(16),
-        ),
-        Id(3): Tuple(
-            [
-                Id(4),
-                Id(5),
-            ],
-        ),
-        Id(33): Local(
-            Id(31),
-        ),
-        Id(15): Function(
-            Id(15),
-        ),
-        Id(7): Struct(
-            Id(7),
-        ),
-        Id(23): Call(
-            Id(23),
-        ),
-        Id(8): Impl(
-            Id(8),
-        ),
-        Id(6): Local(
-            Id(2),
-        ),
-        Id(13): Local(
-            Id(10),
-        ),
-        Id(36): Local(
-            Id(15),
-        ),
-        Id(28): Local(
-            Id(9),
-        ),
-        Id(10): Parameter(
-            Id(10),
-        ),
-        Id(11): Parameter(
-            Id(11),
-        ),
-        Id(24): Local(
+        Id(15): Local(
             Id(0),
         ),
-        Id(25): Call(
-            Id(25),
+        Id(4): Parameter(
+            Id(4),
         ),
-        Id(17): Call(
-            Id(17),
+        Id(6): Local(
+            Id(3),
         ),
-        Id(21): Local(
-            Id(16),
+        Id(16): Local(
+            Id(9),
+        ),
+        Id(5): Binary(
+            Add,
+            Id(6),
+            Id(7),
+        ),
+        Id(10): Call(
+            Id(10),
+        ),
+        Id(2): Function(
+            Id(2),
+        ),
+        Id(12): Number(
+            "10",
+            None,
+        ),
+        Id(8): Function(
+            Id(8),
+        ),
+        Id(11): Local(
+            Id(2),
+        ),
+        Id(13): Number(
+            "20",
+            None,
+        ),
+        Id(17): Void,
+        Id(9): Variable(
+            Id(9),
+        ),
+        Id(0): ExternalFunction(
+            Id(0),
         ),
     },
     entity_scope_map: {
-        Id(24): Id(5),
-        Id(29): Id(5),
-        Id(13): Id(3),
-        Id(4): Id(1),
-        Id(19): Id(4),
+        Id(17): Id(2),
         Id(8): Id(0),
-        Id(18): Id(4),
-        Id(9): Id(2),
-        Id(6): Id(1),
-        Id(17): Id(4),
-        Id(30): Id(5),
-        Id(32): Id(6),
-        Id(28): Id(5),
-        Id(7): Id(0),
-        Id(5): Id(1),
-        Id(14): Id(3),
-        Id(26): Id(5),
-        Id(23): Id(5),
-        Id(1): Id(0),
-        Id(21): Id(4),
-        Id(33): Id(6),
-        Id(35): Id(5),
-        Id(27): Id(5),
-        Id(3): Id(1),
-        Id(34): Id(6),
-        Id(22): Id(0),
-        Id(25): Id(5),
-        Id(12): Id(3),
+        Id(12): Id(2),
+        Id(7): Id(1),
         Id(15): Id(2),
-        Id(20): Id(4),
+        Id(11): Id(2),
+        Id(14): Id(2),
+        Id(9): Id(2),
+        Id(13): Id(2),
+        Id(5): Id(1),
+        Id(6): Id(1),
+        Id(2): Id(0),
+        Id(16): Id(2),
+        Id(10): Id(2),
     },
     function_calls: {
-        Id(27): FunctionCall {
-            id: Id(27),
-            subject_id: Id(28),
+        Id(10): FunctionCall {
+            id: Id(10),
+            subject_id: Id(11),
             argument_ids: [
-                Id(29),
-                Id(30),
+                Id(12),
+                Id(13),
             ],
+            arguments_span: 58..66,
         },
-        Id(5): FunctionCall {
-            id: Id(5),
-            subject_id: Id(36),
+        Id(14): FunctionCall {
+            id: Id(14),
+            subject_id: Id(15),
             argument_ids: [
-                Id(6),
+                Id(16),
             ],
-        },
-        Id(25): FunctionCall {
-            id: Id(25),
-            subject_id: Id(26),
-            argument_ids: [
-                Id(27),
-            ],
-        },
-        Id(17): FunctionCall {
-            id: Id(17),
-            subject_id: Id(18),
-            argument_ids: [
-                Id(20),
-            ],
-        },
-        Id(23): FunctionCall {
-            id: Id(23),
-            subject_id: Id(24),
-            argument_ids: [
-                Id(25),
-            ],
+            arguments_span: 74..77,
         },
     },
     functions: {
-        Id(15): Function {
-            id: Id(15),
-            name: "bar",
+        Id(2): Function {
+            id: Id(2),
+            name: "f",
             parameters: [
-                Id(16),
-            ],
-            body: (
-                [],
-                Id(17),
-                Id(4),
-            ),
-            call_count: 0,
-        },
-        Id(22): Function {
-            id: Id(22),
-            name: "main",
-            parameters: [],
-            body: (
-                [
-                    Id(23),
-                ],
-                Id(35),
-                Id(5),
-            ),
-            call_count: 0,
-        },
-        Id(1): Function {
-            id: Id(1),
-            name: "sum",
-            parameters: [
-                Id(2),
-            ],
-            body: (
-                [],
                 Id(3),
+                Id(4),
+            ],
+            body: (
+                [],
+                Id(5),
                 Id(1),
             ),
             call_count: 0,
         },
-        Id(9): Function {
-            id: Id(9),
-            name: "new",
-            parameters: [
-                Id(10),
-                Id(11),
-            ],
+        Id(8): Function {
+            id: Id(8),
+            name: "main",
+            parameters: [],
             body: (
-                [],
-                Id(12),
-                Id(3),
+                [
+                    Id(9),
+                    Id(14),
+                ],
+                Id(17),
+                Id(2),
             ),
             call_count: 0,
         },
@@ -260,36 +125,21 @@ Program {
     modules: {},
     print_fn_id: Id(0),
     reference_count: {
-        Id(11): 1,
+        Id(3): 1,
+        Id(4): 1,
         Id(0): 1,
-        Id(31): 2,
-        Id(9): 0,
-        Id(10): 1,
         Id(2): 1,
-        Id(22): 0,
-        Id(16): 2,
-        Id(7): 0,
-        Id(15): 0,
-        Id(1): 1,
+        Id(8): 0,
+        Id(9): 1,
     },
     scopes: {
-        Id(6): Scope {
-            id: Id(6),
-            parent_id: Some(
-                Id(5),
-            ),
-            name_to_id_map: {
-                "x": Id(31),
-            },
-        },
         Id(0): Scope {
             id: Id(0),
             parent_id: None,
             name_to_id_map: {
-                "sum": Id(1),
                 "print": Id(0),
-                "main": Id(22),
-                "Foo": Id(7),
+                "f": Id(2),
+                "main": Id(8),
             },
         },
         Id(1): Scope {
@@ -298,16 +148,8 @@ Program {
                 Id(0),
             ),
             name_to_id_map: {
-                "foo": Id(2),
-            },
-        },
-        Id(4): Scope {
-            id: Id(4),
-            parent_id: Some(
-                Id(2),
-            ),
-            name_to_id_map: {
-                "self": Id(16),
+                "a": Id(3),
+                "b": Id(4),
             },
         },
         Id(2): Scope {
@@ -316,81 +158,37 @@ Program {
                 Id(0),
             ),
             name_to_id_map: {
-                "bar": Id(15),
-                "new": Id(9),
-                "Foo": Id(7),
-            },
-        },
-        Id(3): Scope {
-            id: Id(3),
-            parent_id: Some(
-                Id(2),
-            ),
-            name_to_id_map: {
-                "fn": Id(11),
-                "value": Id(10),
-                "Foo": Id(7),
-            },
-        },
-        Id(5): Scope {
-            id: Id(5),
-            parent_id: Some(
-                Id(0),
-            ),
-            name_to_id_map: {
-                "sum": Id(1),
-                "Foo": Id(7),
+                "v": Id(9),
+                "f": Id(2),
                 "print": Id(0),
             },
         },
     },
     span_map: {
-        Id(17): 217..238,
-        Id(8): 97..243,
-        Id(7): 52..95,
-        Id(1): 1..50,
-        Id(12): 148..187,
-        Id(18): 218..225,
-        Id(14): 180..182,
-        Id(24): 259..264,
-        Id(26): 265..268,
-        Id(32): 285..290,
-        Id(4): 35..36,
-        Id(13): 165..170,
-        Id(5): 38..47,
-        Id(6): 38..41,
-        Id(35): 296..296,
-        Id(22): 245..296,
-        Id(3): 34..48,
-        Id(20): 227..237,
-        Id(28): 269..277,
-        Id(9): 109..190,
-        Id(21): 227..231,
-        Id(23): 259..293,
-        Id(29): 278..279,
-        Id(27): 269..291,
-        Id(34): 289..290,
-        Id(30): 281..290,
-        Id(19): 218..222,
-        Id(33): 285..286,
-        Id(15): 194..241,
-        Id(25): 265..292,
+        Id(10): 57..66,
+        Id(17): 80..80,
+        Id(13): 63..65,
+        Id(12): 59..61,
+        Id(16): 75..76,
+        Id(11): 57..58,
+        Id(6): 26..27,
+        Id(8): 35..80,
+        Id(2): 1..33,
+        Id(5): 26..31,
+        Id(9): 49..66,
+        Id(15): 69..74,
+        Id(14): 69..77,
+        Id(7): 30..31,
     },
-    structs: {
-        Id(7): Struct {
-            id: Id(7),
-            name: "Foo",
-            fields: [
-                Field {
-                    name: "value",
-                    type_id: TypeId(3),
-                },
-                Field {
-                    name: "fn",
-                    type_id: TypeId(5),
-                },
-            ],
+    structs: {},
+    variables: {
+        Id(9): Variable {
+            id: Id(9),
+            name: "v",
+            initial: Some(
+                Id(10),
+            ),
+            type_id: TypeId(7),
         },
     },
-    variables: {},
 }
