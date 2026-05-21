@@ -49,8 +49,8 @@ pub struct Function<'src> {
 #[derive(Debug)]
 pub struct FunctionCall {
     pub id: Id,
-    pub subject: Id,
-    pub arguments: Vec<Id>,
+    pub subject_id: Id,
+    pub argument_ids: Vec<Id>,
 }
 
 #[derive(Debug)]
@@ -413,7 +413,7 @@ impl<'src> Analyzer<'src> {
                                 .1
                                 .as_ref()
                                 .map(|x| self.walk_type_node(x, scope_id))
-                                .unwrap_or(self.type_id_for_type(Type::Unknown)),
+                                .unwrap_or(Type::Unknown.get_type_id(self)),
                         };
                         body_scope
                             .name_to_id_map
@@ -446,8 +446,8 @@ impl<'src> Analyzer<'src> {
                     id,
                     FunctionCall {
                         id,
-                        subject: subject_id,
-                        arguments: argument_ids,
+                        subject_id,
+                        argument_ids,
                     },
                 );
                 Some(Expr::Call(id))
@@ -477,7 +477,7 @@ impl<'src> Analyzer<'src> {
                 let type_id = type_
                     .as_ref()
                     .map(|x| self.walk_type_node(x, scope_id))
-                    .unwrap_or(self.type_id_for_type(Type::Unknown));
+                    .unwrap_or(Type::Unknown.get_type_id(self));
                 self.variables.insert(
                     id,
                     Variable {
@@ -501,7 +501,7 @@ impl<'src> Analyzer<'src> {
                         .1
                         .as_ref()
                         .map(|x| self.walk_type_node(x, scope_id))
-                        .unwrap_or(self.type_id_for_type(Type::Unknown));
+                        .unwrap_or(Type::Unknown.get_type_id(self));
                     fields.push(Field { name, type_id });
                 }
                 self.structs.insert(id, Struct { id, name, fields });
@@ -557,7 +557,7 @@ impl<'src> Analyzer<'src> {
                                 .1
                                 .as_ref()
                                 .map(|x| self.walk_type_node(x, scope_id))
-                                .unwrap_or(self.type_id_for_type(Type::Unknown)),
+                                .unwrap_or(Type::Unknown.get_type_id(self)),
                         };
                         body_scope
                             .name_to_id_map
@@ -638,16 +638,16 @@ impl<'src> Analyzer<'src> {
                     .collect(),
             )),
             Node::ClosureType(parameters, return_type) => {
-                let t_parameters = parameters
+                let t_parameter_type_ids = parameters
                     .0
                     .iter()
                     .map(|x| self.walk_type_node(&*x.1, scope_id))
                     .collect::<Vec<_>>();
-                let t_return_type = return_type
+                let t_return_type_id = return_type
                     .as_ref()
                     .map(|return_type| self.walk_type_node(&*return_type, scope_id))
-                    .unwrap_or_else(|| self.type_id_for_type(Type::Unknown));
-                Some(Type::Closure(t_parameters, t_return_type))
+                    .unwrap_or_else(|| Type::Unknown.get_type_id(self));
+                Some(Type::Closure(t_parameter_type_ids, t_return_type_id))
             }
             x => unimplemented!("unhandled type node: {:?}", x),
         };
@@ -659,16 +659,16 @@ impl<'src> Analyzer<'src> {
         type_id
     }
 
-    fn resolve_type_start(&mut self, expr_id: Id, constraint_type_id: TypeId) -> TypeId {
-        self.resolve_type(expr_id, constraint_type_id, &mut HashSet::new())
+    fn resolve_type_start(&mut self, expr_id: Id, constraint: Type) -> Type {
+        self.resolve_type(expr_id, constraint, &mut HashSet::new())
     }
 
     fn resolve_type(
         &mut self,
         expr_id: Id,
-        constraint_type_id: TypeId,
+        constraint: Type,
         exprs_seen: &mut HashSet<Id>,
-    ) -> TypeId {
+    ) -> Type {
         if exprs_seen.contains(&expr_id) {
             panic!(
                 "recursive type found for {:?} in {:#?}",
@@ -678,135 +678,135 @@ impl<'src> Analyzer<'src> {
         exprs_seen.insert(expr_id);
 
         if let Some(type_id) = self.expr_id_to_type_id_map.get(&expr_id) {
-            return *type_id;
+            return type_id.get_type(self);
         }
-
-        let constraint = self.get_type_by_type_id(constraint_type_id);
 
         let expr = self.get_entity_by_id(expr_id);
 
-        println!("resolve_type.input {:#?}", expr);
+        println!("resolve_type.input {expr:#?} {constraint:#?}");
 
-        let inferred_type_id: TypeId = match expr {
-            Expr::Null => self.type_id_for_type(Type::Primitive(PrimitiveType::Null)),
-            Expr::Bool(_) => self.type_id_for_type(Type::Primitive(PrimitiveType::Bool)),
-            Expr::String(_) => self.type_id_for_type(Type::Primitive(PrimitiveType::String)),
-            Expr::Number(_, _) => self.type_id_for_type(Type::Primitive(match constraint {
+        let inferred_type: Type = match expr {
+            Expr::Null => Type::Primitive(PrimitiveType::Null),
+            Expr::Bool(_) => Type::Primitive(PrimitiveType::Bool),
+            Expr::String(_) => Type::Primitive(PrimitiveType::String),
+            Expr::Number(_, _) => Type::Primitive(match constraint {
                 Type::Primitive(PrimitiveType::F64) => PrimitiveType::F64,
                 Type::Primitive(PrimitiveType::U32) => PrimitiveType::U32,
                 _ => PrimitiveType::I32,
-            })),
-            Expr::List(_) => {
-                let list_type_id = self.type_id_for_type(Type::Void);
-                self.type_id_for_type(Type::Primitive(PrimitiveType::List(list_type_id)))
-            }
+            }),
+            Expr::List(_) => Type::Primitive(PrimitiveType::List(Type::Void.get_type_id(self))),
             Expr::Tuple(item_ids) => {
                 let constraint_items = match constraint.clone() {
                     Type::Tuple(items) => items,
                     _ => Vec::new(),
                 };
-                let type_ = Type::Tuple(
+                Type::Tuple(
                     item_ids
                         .clone()
                         .iter()
                         .enumerate()
                         .map(|(i, id)| {
-                            let fallback_type_id = self.type_id_for_type(Type::Unknown);
-                            self.resolve_type(
-                                *id,
-                                constraint_items
-                                    .get(i)
-                                    .map(|x| *x)
-                                    .unwrap_or(fallback_type_id),
-                                exprs_seen,
-                            )
+                            let constraint_item = constraint_items
+                                .get(i)
+                                .map(|x| x.get_type(self))
+                                .unwrap_or(Type::Unknown);
+                            self.resolve_type(*id, constraint_item, exprs_seen)
+                                .get_type_id(self)
                         })
                         .collect(),
-                );
-                self.type_id_for_type(type_)
+                )
             }
             Expr::Local(subject_id) => {
-                self.resolve_type(*subject_id, constraint_type_id, exprs_seen)
+                self.resolve_type(*subject_id, constraint.clone(), exprs_seen)
             }
-            Expr::Function(function_id) => self.type_id_for_type(Type::Function(*function_id)),
-            Expr::Struct(struct_id) => self.type_id_for_type(Type::Struct(*struct_id)),
-            Expr::Module(module_id) => self.type_id_for_type(Type::Module(*module_id)),
+            Expr::Function(function_id) => Type::Function(*function_id),
+            Expr::Struct(struct_id) => Type::Struct(*struct_id),
+            Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
                 let id = *id;
-                let against_type = self.type_id_for_type(Type::Unknown);
                 let function_call = self.function_calls.get(&id).unwrap();
-                let subject_type_id =
-                    self.resolve_type(function_call.subject, against_type, exprs_seen);
-                let subject_type = self.get_type_by_type_id(subject_type_id);
+                let subject_type =
+                    self.resolve_type(function_call.subject_id, Type::Unknown, exprs_seen);
                 match subject_type {
-                    Type::Function(_) => self.type_id_for_type(Type::Void),
+                    Type::Function(_) => Type::Void,
                     x => panic!("type is not callable: {:?}", x),
                 }
             }
             Expr::Variable(variable_id) => {
                 let variable = self.variables.get(variable_id).unwrap();
-                variable.type_id
+                variable.type_id.get_type(self)
             }
             Expr::Parameter(parameter_id) => {
                 let parameter = self.parameters.get(parameter_id).unwrap();
-                parameter.type_id
+                parameter.type_id.get_type(self)
             }
-            _ => self.type_id_for_type(Type::Void),
+            _ => Type::Void,
         };
 
-        println!(
-            "resolve_type.output {:#?}",
-            self.get_type_by_type_id(inferred_type_id)
-        );
+        println!("resolve_type.output {:#?}", inferred_type);
 
-        self.reconcile_type(constraint_type_id, inferred_type_id)
+        self.reconcile_type(constraint.clone(), inferred_type)
+            .unwrap_or(constraint)
     }
 
-    fn reconcile_type(&mut self, a_id: TypeId, b_id: TypeId) -> TypeId {
-        let a = self.get_type_by_type_id(a_id);
-        let b = self.get_type_by_type_id(b_id);
-        match (a, b) {
-            (_, Type::Unknown) => a_id,
-            (Type::Unknown, _) => b_id,
-            (Type::Primitive(a), Type::Primitive(b)) => match (a, b) {
-                (PrimitiveType::List(a), PrimitiveType::List(b)) => {
-                    let type_ = Type::Primitive(PrimitiveType::List(self.reconcile_type(a, b)));
-                    self.type_id_for_type(type_)
+    fn reconcile_type(&mut self, a: Type, b: Type) -> Option<Type> {
+        match (&a, &b) {
+            (_, Type::Unknown) => Some(a),
+            (Type::Unknown, _) => Some(b),
+            (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
+                (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
+                    let l = l_id.get_type(self);
+                    let r = r_id.get_type(self);
+                    let item_type_id = self
+                        .reconcile_type(l.clone(), r)
+                        .unwrap_or(l)
+                        .get_type_id(self);
+                    Some(Type::Primitive(PrimitiveType::List(item_type_id)))
                 }
-                (a, b) if a == b => a_id,
-                (a, b) => panic!("types {:#?} and {:#?} are mismatched", a, b),
+                (l, r) if l == r => Some(a),
+                _ => None,
             },
-            (Type::Tuple(aa), Type::Tuple(bb)) => {
-                let type_ = Type::Tuple(
-                    aa.iter()
-                        .zip(bb.iter())
-                        .map(|(a, b)| self.reconcile_type(*a, *b))
-                        .collect(),
-                );
-                self.type_id_for_type(type_)
-            }
-            (a, b) if a == b => a_id,
-            (a, b) => panic!("types {:#?} and {:#?} are mismatched", a, b),
+            (Type::Tuple(l_items), Type::Tuple(r_items)) => Some(Type::Tuple(
+                l_items
+                    .iter()
+                    .zip(r_items.iter())
+                    .map(|(l_item_id, r_item_id)| {
+                        let l = l_item_id.get_type(self);
+                        let r = r_item_id.get_type(self);
+                        self.reconcile_type(l.clone(), r)
+                            .unwrap_or(l)
+                            .get_type_id(self)
+                    })
+                    .collect(),
+            )),
+            (l, r) if l == r => Some(a),
+            _ => None,
         }
     }
 
-    fn compare_type(&self, a_id: TypeId, b_id: TypeId) -> bool {
-        let a = self.get_type_by_type_id(a_id);
-        let b = self.get_type_by_type_id(b_id);
-        match (a, b) {
+    fn compare_type(&self, a: Type, b: Type) -> bool {
+        match (&a, &b) {
             (_, Type::Unknown) => true,
             (Type::Unknown, _) => true,
-            (Type::Primitive(a), Type::Primitive(b)) => match (a, b) {
-                (PrimitiveType::List(a_id), PrimitiveType::List(b_id)) => {
-                    self.compare_type(a_id, b_id)
+            (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
+                (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
+                    let l = l_id.get_type(self);
+                    let r = r_id.get_type(self);
+                    self.compare_type(l, r)
                 }
                 (a, b) if a == b => true,
                 _ => false,
             },
-            (Type::Tuple(aa), Type::Tuple(bb)) => aa
-                .iter()
-                .zip(bb.iter())
-                .all(|(a_id, b_id)| self.compare_type(*a_id, *b_id)),
+            (Type::Tuple(l_items), Type::Tuple(r_items)) => {
+                l_items
+                    .iter()
+                    .zip(r_items.iter())
+                    .all(|(l_item_id, r_item_id)| {
+                        let l = l_item_id.get_type(self);
+                        let r = r_item_id.get_type(self);
+                        self.compare_type(l, r)
+                    })
+            }
             (a, b) if a == b => true,
             _ => false,
         }
@@ -815,11 +815,9 @@ impl<'src> Analyzer<'src> {
     fn build(&mut self) {
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
-
             let subject_id = self.get_expr_id_by_name(name, scope_id);
             let rc = self.reference_count.entry(subject_id).or_insert(0);
             *rc += 1;
-
             self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
         }
 
@@ -827,27 +825,18 @@ impl<'src> Analyzer<'src> {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
             // let rc = self.reference_count.entry(subject_id).or_insert(0);
             // *rc += 1;
-
-            let constraint_type_id = self.type_id_for_type(Type::Unknown);
-            let subject_type_id = self.resolve_type_start(subject_id, constraint_type_id);
-            let subject_type = self.get_type_by_type_id(subject_type_id);
+            let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
             self.type_id_to_type_map.insert(type_id, subject_type);
         }
 
         for (type_id, subject_type_id, member_name) in self.prepped_type_static_accessors.clone() {
-            let subject_type = self.get_type_by_type_id(subject_type_id);
-            match subject_type {
+            match subject_type_id.get_type(self) {
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
-
                     let member_id = self.get_expr_id_by_name(member_name, module.body.1);
                     // let rc = self.reference_count.entry(member_id).or_insert(0);
                     // *rc += 1;
-
-                    let constraint_type_id = self.type_id_for_type(Type::Unknown);
-                    let member_type_id = self.resolve_type_start(member_id, constraint_type_id);
-                    let member_type = self.get_type_by_type_id(member_type_id);
-
+                    let member_type = self.resolve_type_start(member_id, Type::Unknown);
                     self.type_id_to_type_map.insert(type_id, member_type);
                 }
                 _ => {}
@@ -855,9 +844,7 @@ impl<'src> Analyzer<'src> {
         }
 
         for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
-            let constraint_type_id = self.type_id_for_type(Type::Unknown);
-            let subject_type_id = self.resolve_type_start(subject_id, constraint_type_id);
-            let subject_type = self.get_type_by_type_id(subject_type_id);
+            let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
@@ -877,16 +864,16 @@ impl<'src> Analyzer<'src> {
         }
 
         for (id, subject_id, member_name, mut argument_ids) in self.prepped_method_calls.clone() {
-            let constraint_type_id = self.type_id_for_type(Type::Unknown);
-            let subject_type_id = self.resolve_type_start(subject_id, constraint_type_id);
-            let subject_type = self.get_type_by_type_id(subject_type_id);
+            let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_name = self.structs.get(&struct_id).unwrap().name;
                     let member_id = self
                         .implementations
                         .iter()
-                        .filter(|x| self.compare_type(subject_type_id, x.subject))
+                        .filter(|x| {
+                            self.compare_type(subject_type.clone(), x.subject.get_type(self))
+                        })
                         .find_map(|x| {
                             x.declarations.get(member_name).and_then(|member_id| {
                                 match self.get_entity_by_id(*member_id) {
@@ -911,8 +898,8 @@ impl<'src> Analyzer<'src> {
                         id,
                         FunctionCall {
                             id,
-                            subject: member_local_id,
-                            arguments: argument_ids,
+                            subject_id: member_local_id,
+                            argument_ids,
                         },
                     );
                     self.expr_id_to_expr_map.insert(id, Expr::Call(id));
@@ -924,7 +911,7 @@ impl<'src> Analyzer<'src> {
         }
 
         for (id, subject_type_id, member_name) in self.prepped_static_accessors.clone() {
-            let subject_type = self.get_type_by_type_id(subject_type_id);
+            let subject_type = subject_type_id.get_type(self);
             println!("prepped_static_accessors {member_name} {subject_type:#?}");
             match subject_type {
                 Type::Struct(struct_id) => {
@@ -932,7 +919,9 @@ impl<'src> Analyzer<'src> {
                     let member_id = *self
                         .implementations
                         .iter()
-                        .filter(|x| self.compare_type(subject_type_id, x.subject))
+                        .filter(|x| {
+                            self.compare_type(subject_type.clone(), x.subject.get_type(self))
+                        })
                         .find_map(|x| x.declarations.get(member_name))
                         .expect(format!("cannot find {} in {}", member_name, struct_name).as_str());
                     self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
@@ -1005,6 +994,18 @@ impl<'src> Analyzer<'src> {
         // 		self.variables.get_mut(&subject_id).unwrap().type_ = type_;
         // 	}
         // }
+    }
+}
+
+impl TypeId {
+    fn get_type(self, analyzer: &Analyzer) -> Type {
+        analyzer.get_type_by_type_id(self)
+    }
+}
+
+impl Type {
+    fn get_type_id(self, analyzer: &mut Analyzer) -> TypeId {
+        analyzer.type_id_for_type(self)
     }
 }
 

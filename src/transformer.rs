@@ -174,9 +174,9 @@ impl<'src> Transformer<'src> {
             }
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap();
-                let subject = self.program.entity_map.get(&function_call.subject).unwrap();
+                let subject = self.program.entity_map.get(&function_call.subject_id).unwrap();
                 let args = function_call
-                    .arguments
+                    .argument_ids
                     .iter()
                     .filter_map(|arg| self.walk_entity(*arg, block))
                     .collect::<Vec<_>>();
@@ -206,7 +206,7 @@ impl<'src> Transformer<'src> {
                             "Transformer.walk_entity -> Expr::Call -> call subject {:#?}",
                             subject
                         );
-                        let t_subject = self.walk_entity(function_call.subject, block).unwrap();
+                        let t_subject = self.walk_entity(function_call.subject_id, block).unwrap();
                         js::Node::Call(Box::new(t_subject), args)
                     }
                 }
