@@ -1089,13 +1089,15 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let print_fn_id = analyzer.new_entity_id();
     let print_fn_type_id = analyzer.new_type_id();
     let print_fn_parameter_0_id = analyzer.new_entity_id();
+    let print_fn_parameter_0_type_id = analyzer.new_type_id();
     let print_fn_parameter_0 = Parameter {
         id: print_fn_parameter_0_id,
         function_id: print_fn_id,
         name: "message",
-        type_id: analyzer.new_type_id(),
+        type_id: print_fn_parameter_0_type_id,
     };
     analyzer.parameters.insert(print_fn_parameter_0_id, print_fn_parameter_0);
+    analyzer.type_id_to_type_map.insert(print_fn_parameter_0_type_id, Type::Unknown);
     let print_fn_name = "print";
     let print_fn = ExternalFunction {
         id: print_fn_id,
