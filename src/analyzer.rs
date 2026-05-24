@@ -981,9 +981,9 @@ impl<'src> Analyzer<'src> {
             self.expr_id_to_expr_map
                 .insert(id, Expr::StructInitializer(struct_id, initializer_fields));
         }
-        
+
         let function_call_ids = self.function_calls.keys().copied().collect::<Vec<_>>();
-        
+
         for function_call_id in function_call_ids {
             let function_call = self.function_calls.get(&function_call_id).unwrap().clone();
             let subject = self.get_entity_by_id(function_call.subject_id);
@@ -1018,14 +1018,14 @@ impl<'src> Analyzer<'src> {
                                 let parameter = self.parameters.get(parameter_id).unwrap();
                                 let parameter_type = parameter.type_id.get_type(self);
                                 let argument_id = *function_call.argument_ids.get(i).unwrap();
-                                let argument_type = self.resolve_type_start(argument_id, Type::Unknown);
+                                let argument_type =
+                                    self.resolve_type_start(argument_id, Type::Unknown);
                                 if !self.compare_type(parameter_type, argument_type) {
                                     self.diagnostics.push(Error {
                                         span: **self.span_map.get(&argument_id).unwrap(),
                                         msg: format!(
                                             "Expected type {}, but got type {} instead.",
-                                            "{todo}",
-                                            "{todo}",
+                                            "{todo}", "{todo}",
                                         ),
                                     });
                                 }
@@ -1096,8 +1096,12 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         name: "message",
         type_id: print_fn_parameter_0_type_id,
     };
-    analyzer.parameters.insert(print_fn_parameter_0_id, print_fn_parameter_0);
-    analyzer.type_id_to_type_map.insert(print_fn_parameter_0_type_id, Type::Unknown);
+    analyzer
+        .parameters
+        .insert(print_fn_parameter_0_id, print_fn_parameter_0);
+    analyzer
+        .type_id_to_type_map
+        .insert(print_fn_parameter_0_type_id, Type::Unknown);
     let print_fn_name = "print";
     let print_fn = ExternalFunction {
         id: print_fn_id,
