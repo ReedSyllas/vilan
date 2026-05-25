@@ -1,0 +1,17 @@
+
+fun main() {
+	let i: i32 = :MAX;             // let i: i32 = i32::MAX;
+	let list: List<bool> = :new(); // let list: List<bool> = List::new();
+	
+	enum Example {
+		A,
+		B,
+		C,
+	}
+	let example: Example = :A;     // let example: Example = Example::A;
+	match example {
+		Example::A => {}
+		:B => {}                   // Example::B => {}
+		_ => {}
+	}
+}
