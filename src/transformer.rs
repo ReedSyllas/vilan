@@ -11,10 +11,11 @@ pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
 }
 
 struct Transformer<'src> {
-    program: &'src Program<'src>,
-    ng: NameGenerator,
-    required_functions: IndexMap<Id, js::Node<'src>>,
     formatter: Formatter,
+    ng: NameGenerator,
+    print_fn_id: Id,
+    program: &'src Program<'src>,
+    required_functions: IndexMap<Id, js::Node<'src>>,
 }
 
 impl<'src> Transformer<'src> {
@@ -34,16 +35,26 @@ impl<'src> Transformer<'src> {
         } else {
             HashMap::new()
         };
+        
+        let print_fn_id = {
+            let std_module_id = *program.module_id_by_name.get("std").expect("missing std module");
+            let std_module = program.modules.get(&std_module_id).unwrap();
+            let std_module_scope_id = std_module.body.1;
+            let std_module_scope = program.scopes.get(&std_module_scope_id).unwrap();
+            let print_fn_id = *std_module_scope.name_to_id_map.get("print").expect("missing print function in the std module");
+            print_fn_id
+        };
 
         Self {
-            program,
-            ng: NameGenerator::new_simple(debug_names),
-            required_functions: IndexMap::new(),
             formatter: if should_pretty_print {
                 Formatter::new_pretty()
             } else {
                 Formatter::new_compact()
             },
+            ng: NameGenerator::new_simple(debug_names),
+            print_fn_id,
+            program,
+            required_functions: IndexMap::new(),
         }
     }
 
@@ -190,7 +201,7 @@ impl<'src> Transformer<'src> {
                     .collect::<Vec<_>>();
                 match subject {
                     Expr::Local(id) => {
-                        if *id == self.program.print_fn_id {
+                        if *id == self.print_fn_id {
                             js::Node::Call(
                                 Box::new(js::Node::Property(
                                     Box::new(js::Node::Local("console".to_string())),

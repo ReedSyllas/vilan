@@ -2,79 +2,79 @@ Program {
     closures: {},
     diagnostics: [],
     entity_map: {
-        Id(8): Local(
+        Id(5): Parameter(
             Id(5),
-        ),
-        Id(6): Parameter(
-            Id(6),
-        ),
-        Id(14): Number(
-            "10",
-            None,
-        ),
-        Id(0): ExternalFunction(
-            Id(0),
-        ),
-        Id(9): Local(
-            Id(6),
-        ),
-        Id(4): Function(
-            Id(4),
-        ),
-        Id(19): Void,
-        Id(11): Variable(
-            Id(11),
-        ),
-        Id(16): Call(
-            Id(16),
         ),
         Id(13): Local(
             Id(4),
+        ),
+        Id(17): Local(
+            Id(0),
+        ),
+        Id(15): Number(
+            "20",
+            None,
         ),
         Id(7): Binary(
             Add,
             Id(8),
             Id(9),
         ),
-        Id(5): Parameter(
-            Id(5),
-        ),
-        Id(12): Call(
-            Id(12),
-        ),
-        Id(2): Module(
-            Id(2),
+        Id(14): Number(
+            "10",
+            None,
         ),
         Id(10): Function(
             Id(10),
         ),
-        Id(15): Number(
-            "20",
-            None,
-        ),
-        Id(17): Local(
+        Id(0): ExternalFunction(
             Id(0),
+        ),
+        Id(2): Module(
+            Id(2),
+        ),
+        Id(8): Local(
+            Id(5),
+        ),
+        Id(6): Parameter(
+            Id(6),
+        ),
+        Id(19): Void,
+        Id(16): Call(
+            Id(16),
+        ),
+        Id(11): Variable(
+            Id(11),
+        ),
+        Id(4): Function(
+            Id(4),
+        ),
+        Id(9): Local(
+            Id(6),
+        ),
+        Id(12): Call(
+            Id(12),
         ),
         Id(18): Local(
             Id(11),
         ),
     },
     entity_scope_map: {
-        Id(8): Id(2),
+        Id(7): Id(2),
         Id(13): Id(3),
-        Id(10): Id(1),
-        Id(16): Id(3),
-        Id(4): Id(1),
+        Id(12): Id(3),
         Id(11): Id(3),
+        Id(18): Id(3),
+        Id(4): Id(1),
         Id(15): Id(3),
         Id(17): Id(3),
+        Id(16): Id(3),
         Id(9): Id(2),
         Id(14): Id(3),
-        Id(7): Id(2),
-        Id(12): Id(3),
-        Id(19): Id(3),
         Id(3): Id(1),
-        Id(18): Id(3),
+        Id(8): Id(2),
+        Id(19): Id(3),
+        Id(10): Id(1),
     },
     function_calls: {
         Id(12): FunctionCall {
@@ -126,6 +126,9 @@ Program {
         },
     },
     global_scope_id: Id(1),
+    module_id_by_name: {
+        "std": Id(2),
+    },
     modules: {
         Id(2): Module {
             id: Id(2),
@@ -136,14 +139,13 @@ Program {
             ),
         },
     },
-    print_fn_id: Id(0),
     reference_count: {
         Id(10): 0,
         Id(5): 1,
         Id(4): 1,
         Id(11): 1,
-        Id(6): 1,
         Id(0): 1,
+        Id(6): 1,
     },
     scopes: {
         Id(0): Scope {
@@ -185,21 +187,21 @@ Program {
         },
     },
     span_map: {
-        Id(15): 75..77,
-        Id(13): 69..70,
-        Id(10): 47..97,
-        Id(14): 71..73,
-        Id(7): 38..43,
-        Id(16): 81..94,
-        Id(9): 42..43,
-        Id(12): 69..78,
-        Id(11): 61..78,
-        Id(19): 97..97,
-        Id(17): 81..91,
         Id(4): 13..45,
-        Id(3): 0..10,
-        Id(8): 38..39,
+        Id(16): 81..94,
         Id(18): 92..93,
+        Id(10): 47..97,
+        Id(13): 69..70,
+        Id(15): 75..77,
+        Id(11): 61..78,
+        Id(3): 0..10,
+        Id(7): 38..43,
+        Id(14): 71..73,
+        Id(17): 81..91,
+        Id(19): 97..97,
+        Id(9): 42..43,
+        Id(8): 38..39,
+        Id(12): 69..78,
     },
     structs: {},
     variables: {
