@@ -50,45 +50,39 @@ Match expression
 	[ ] Transform
 
 Variables
-	[x] Parse
-		[x] Parse basic
-		[x] Parse type
-	[ ] Analyze
-		[x] Analyze value type
-		[x] Analyze type annotation
-		[x] Reconcile value vs annotation type
-		[x] Count references
-	[ ] Transform
-		[x] Basic 1:1 transform
-		[x] Drop unreferenced variables
+	[x] Parse basic
+	[x] Parse type
+	[x] Analyze value type
+	[x] Analyze type annotation
+	[x] Reconcile value vs annotation type
+	[x] Count references
+	[x] Basic 1:1 transform
+	[x] Drop unreferenced variables
 
 Functions
 	[ ] Declaration
 		[x] Name
 		[ ] Generics
-		[x] Parameters
-			[x] Name
-			[x] Type
+		[x] Parameter name
+		[x] Parameter type
 		[x] Body
-		[ ] Return type
-	[ ] Analyze
-		[x] Simple analyze
-	[ ] Transform
-		[x] Basic 1:1 transform
-		[ ] Drop unreferenced functions
+		[x] Return type
+	[x] Simple analyze
+	[x] Basic 1:1 transform
+	[x] Drop unreferenced functions
 	[ ] Nested functions with enclosed values
-		[ ] Transform
 
 Function call
 	[x] Expression
 	[x] Analyze
-	[ ] Transform
-		[x] Basic 1:1 transform
+	[x] Parameter count checking
+	[x] Parameter type checking
+	[x] Basic 1:1 transform
 
 Closures
-	[ ] Parse
-	[ ] Analyze
-	[ ] Transform
+	[x] Parse
+	[x] Analyze
+	[x] Transform
 
 Structs
 	[x] Declaration
