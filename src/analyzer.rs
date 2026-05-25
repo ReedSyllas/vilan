@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 
 use crate::error::Error;
 use crate::id::Id;
-use crate::node::{BinaryOp, Node, NodeIfBranch, NodeList};
+use crate::node::{BinaryOp, ImportBranch, Node, NodeIfBranch, NodeList};
 use crate::span::{Span, Spanned};
 use crate::type_::{PrimitiveType, Type, TypeId};
 use crate::util::plural;
@@ -139,9 +139,11 @@ pub struct Analyzer<'src> {
     function_calls: IndexMap<Id, FunctionCall>,
     functions: IndexMap<Id, Function<'src>>,
     implementations: Vec<Implementation<'src>>,
+    module_id_by_name: HashMap<&'src str, Id>,
     modules: IndexMap<Id, Module<'src>>,
     parameters: IndexMap<Id, Parameter<'src>>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
+    prepped_imports: Vec<(Vec<&'src str>, &'src str, Id)>,
     prepped_locals: Vec<(Id, &'src str)>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
@@ -172,9 +174,11 @@ impl<'src> Analyzer<'src> {
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
             implementations: Vec::new(),
+            module_id_by_name: HashMap::new(),
             modules: IndexMap::new(),
             parameters: IndexMap::new(),
             prepped_field_accessors: Vec::new(),
+            prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
             prepped_method_calls: Vec::new(),
             prepped_static_accessors: Vec::new(),
@@ -371,7 +375,33 @@ impl<'src> Analyzer<'src> {
                     .push((id, subject_type_id, member_name));
                 None
             }
-            Node::Import(_) => None,
+            Node::Import(root_branch) => {
+                fn walk_branch<'src>(
+                    s: &mut Analyzer<'src>,
+                    branch: &ImportBranch<'src>,
+                    mut path: Vec<&'src str>,
+                    scope_id: Id,
+                ) {
+                    match branch {
+                        ImportBranch::Path(name, child_branch) => match child_branch {
+                            None => {
+                                s.prepped_imports.push((path, name, scope_id));
+                            }
+                            Some(branch) => {
+                                path.push(name);
+                                walk_branch(s, branch, path, scope_id);
+                            }
+                        },
+                        ImportBranch::Set(branches) => {
+                            for branch in branches {
+                                walk_branch(s, branch, path.clone(), scope_id);
+                            }
+                        }
+                    }
+                }
+                walk_branch(self, root_branch, Vec::new(), scope_id);
+                None
+            }
             Node::List(items) => {
                 let ids = self.walk_expr_nodes(items, scope_id);
                 Some(Expr::List(ids))
@@ -837,6 +867,22 @@ impl<'src> Analyzer<'src> {
     }
 
     fn build(&mut self) {
+        for (path, name, scope_id) in self.prepped_imports.clone() {
+            let mut path = path.iter().map(|x| *x).chain(std::iter::once(name));
+            let root = path.next().unwrap();
+            let module_id = self
+                .module_id_by_name
+                .get(root)
+                .expect(format!("failed to import module {root}").as_str());
+            let mut target_id = *module_id;
+            let module_scope_id = self.modules.get(module_id).unwrap().body.1;
+            for part in path {
+                target_id = self.get_expr_id_by_name(part, module_scope_id);
+            }
+            let scope = self.mut_scope_for_scope_id(scope_id);
+            scope.name_to_id_map.insert(name, target_id);
+        }
+
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             let subject_id = self.get_expr_id_by_name(name, scope_id);
@@ -1085,28 +1131,24 @@ pub struct Program<'src> {
 
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let mut analyzer = Analyzer::new();
-    let mut global_scope = analyzer.create_scope(None);
+    let mut std_module_scope = analyzer.create_scope(None);
     let print_fn_id = analyzer.new_entity_id();
-    let print_fn_type_id = analyzer.new_type_id();
-    let print_fn_parameter_0_id = analyzer.new_entity_id();
-    let print_fn_parameter_0_type_id = analyzer.new_type_id();
-    let print_fn_parameter_0 = Parameter {
-        id: print_fn_parameter_0_id,
-        function_id: print_fn_id,
-        name: "message",
-        type_id: print_fn_parameter_0_type_id,
+    let print_fn_message_parameter_id = {
+        let parameter_id = analyzer.new_entity_id();
+        let parameter = Parameter {
+            id: parameter_id,
+            function_id: print_fn_id,
+            name: "message",
+            type_id: Type::Unknown.get_type_id(&mut analyzer),
+        };
+        analyzer.parameters.insert(parameter_id, parameter);
+        parameter_id
     };
-    analyzer
-        .parameters
-        .insert(print_fn_parameter_0_id, print_fn_parameter_0);
-    analyzer
-        .type_id_to_type_map
-        .insert(print_fn_parameter_0_type_id, Type::Unknown);
     let print_fn_name = "print";
     let print_fn = ExternalFunction {
         id: print_fn_id,
         name: print_fn_name,
-        parameters: vec![print_fn_parameter_0_id],
+        parameters: vec![print_fn_message_parameter_id],
         return_type_id: Type::Void.get_type_id(&mut analyzer),
         call_count: 0,
     };
@@ -1114,15 +1156,33 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     analyzer
         .expr_id_to_expr_map
         .insert(print_fn_id, Expr::ExternalFunction(print_fn_id));
-    global_scope
+    std_module_scope
         .name_to_id_map
         .insert(print_fn_name, print_fn_id);
+    {
+        let print_fn_type_id = analyzer.new_type_id();
+        analyzer
+            .type_id_to_type_map
+            .insert(print_fn_type_id, Type::Function(print_fn_id));
+        analyzer
+            .expr_id_to_type_id_map
+            .insert(print_fn_id, print_fn_type_id);
+    }
+    let std_module_scope_id = analyzer.push_scope(std_module_scope);
+    let std_module_id = analyzer.new_entity_id();
+    let std_module = Module {
+        id: std_module_id,
+        name: "std",
+        body: (Vec::new(), std_module_scope_id),
+    };
     analyzer
-        .type_id_to_type_map
-        .insert(print_fn_type_id, Type::Function(print_fn_id));
+        .module_id_by_name
+        .insert(std_module.name, std_module_id);
+    analyzer.modules.insert(std_module_id, std_module);
     analyzer
-        .expr_id_to_type_id_map
-        .insert(print_fn_id, print_fn_type_id);
+        .expr_id_to_expr_map
+        .insert(std_module_id, Expr::Module(std_module_id));
+    let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();

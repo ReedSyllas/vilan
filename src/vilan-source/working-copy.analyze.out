@@ -2,134 +2,147 @@ Program {
     closures: {},
     diagnostics: [],
     entity_map: {
-        Id(9): Variable(
-            Id(9),
+        Id(8): Local(
+            Id(5),
         ),
-        Id(7): Local(
-            Id(4),
+        Id(6): Parameter(
+            Id(6),
         ),
-        Id(8): Function(
-            Id(8),
-        ),
-        Id(4): Parameter(
-            Id(4),
-        ),
-        Id(10): Call(
-            Id(10),
-        ),
-        Id(14): Call(
-            Id(14),
-        ),
-        Id(16): Local(
-            Id(9),
-        ),
-        Id(17): Void,
-        Id(11): Local(
-            Id(2),
-        ),
-        Id(15): Local(
-            Id(0),
-        ),
-        Id(12): Number(
+        Id(14): Number(
             "10",
             None,
-        ),
-        Id(3): Parameter(
-            Id(3),
-        ),
-        Id(5): Binary(
-            Add,
-            Id(6),
-            Id(7),
         ),
         Id(0): ExternalFunction(
             Id(0),
         ),
-        Id(2): Function(
+        Id(9): Local(
+            Id(6),
+        ),
+        Id(4): Function(
+            Id(4),
+        ),
+        Id(19): Void,
+        Id(11): Variable(
+            Id(11),
+        ),
+        Id(16): Call(
+            Id(16),
+        ),
+        Id(13): Local(
+            Id(4),
+        ),
+        Id(7): Binary(
+            Add,
+            Id(8),
+            Id(9),
+        ),
+        Id(5): Parameter(
+            Id(5),
+        ),
+        Id(12): Call(
+            Id(12),
+        ),
+        Id(2): Module(
             Id(2),
         ),
-        Id(13): Number(
+        Id(10): Function(
+            Id(10),
+        ),
+        Id(15): Number(
             "20",
             None,
         ),
-        Id(6): Local(
-            Id(3),
+        Id(17): Local(
+            Id(0),
+        ),
+        Id(18): Local(
+            Id(11),
         ),
     },
     entity_scope_map: {
-        Id(13): Id(2),
-        Id(6): Id(1),
-        Id(12): Id(2),
-        Id(8): Id(0),
-        Id(7): Id(1),
-        Id(11): Id(2),
+        Id(8): Id(2),
+        Id(13): Id(3),
+        Id(10): Id(1),
+        Id(16): Id(3),
+        Id(4): Id(1),
+        Id(11): Id(3),
+        Id(15): Id(3),
+        Id(17): Id(3),
         Id(9): Id(2),
-        Id(16): Id(2),
-        Id(15): Id(2),
-        Id(5): Id(1),
-        Id(2): Id(0),
-        Id(17): Id(2),
-        Id(10): Id(2),
-        Id(14): Id(2),
+        Id(14): Id(3),
+        Id(7): Id(2),
+        Id(12): Id(3),
+        Id(19): Id(3),
+        Id(3): Id(1),
+        Id(18): Id(3),
     },
     function_calls: {
-        Id(10): FunctionCall {
-            id: Id(10),
-            subject_id: Id(11),
+        Id(12): FunctionCall {
+            id: Id(12),
+            subject_id: Id(13),
             argument_ids: [
-                Id(12),
-                Id(13),
+                Id(14),
+                Id(15),
             ],
-            arguments_span: 58..66,
+            arguments_span: 70..78,
         },
-        Id(14): FunctionCall {
-            id: Id(14),
-            subject_id: Id(15),
+        Id(16): FunctionCall {
+            id: Id(16),
+            subject_id: Id(17),
             argument_ids: [
-                Id(16),
+                Id(18),
             ],
-            arguments_span: 74..77,
+            arguments_span: 91..94,
         },
     },
     functions: {
-        Id(2): Function {
-            id: Id(2),
+        Id(4): Function {
+            id: Id(4),
             name: "f",
             parameters: [
-                Id(3),
-                Id(4),
+                Id(5),
+                Id(6),
             ],
             body: (
                 [],
-                Id(5),
-                Id(1),
-            ),
-            call_count: 0,
-        },
-        Id(8): Function {
-            id: Id(8),
-            name: "main",
-            parameters: [],
-            body: (
-                [
-                    Id(9),
-                    Id(14),
-                ],
-                Id(17),
+                Id(7),
                 Id(2),
             ),
             call_count: 0,
         },
+        Id(10): Function {
+            id: Id(10),
+            name: "main",
+            parameters: [],
+            body: (
+                [
+                    Id(11),
+                    Id(16),
+                ],
+                Id(19),
+                Id(3),
+            ),
+            call_count: 0,
+        },
     },
-    global_scope_id: Id(0),
-    modules: {},
+    global_scope_id: Id(1),
+    modules: {
+        Id(2): Module {
+            id: Id(2),
+            name: "std",
+            body: (
+                [],
+                Id(0),
+            ),
+        },
+    },
     print_fn_id: Id(0),
     reference_count: {
-        Id(2): 1,
-        Id(3): 1,
-        Id(9): 1,
-        Id(8): 0,
+        Id(10): 0,
+        Id(5): 1,
         Id(4): 1,
+        Id(11): 1,
+        Id(6): 1,
         Id(0): 1,
     },
     scopes: {
@@ -138,55 +151,63 @@ Program {
             parent_id: None,
             name_to_id_map: {
                 "print": Id(0),
-                "f": Id(2),
-                "main": Id(8),
             },
         },
         Id(1): Scope {
             id: Id(1),
-            parent_id: Some(
-                Id(0),
-            ),
+            parent_id: None,
             name_to_id_map: {
-                "a": Id(3),
-                "b": Id(4),
+                "f": Id(4),
+                "main": Id(10),
+                "std": Id(2),
             },
         },
         Id(2): Scope {
             id: Id(2),
             parent_id: Some(
-                Id(0),
+                Id(1),
             ),
             name_to_id_map: {
-                "v": Id(9),
-                "f": Id(2),
-                "print": Id(0),
+                "a": Id(5),
+                "b": Id(6),
+            },
+        },
+        Id(3): Scope {
+            id: Id(3),
+            parent_id: Some(
+                Id(1),
+            ),
+            name_to_id_map: {
+                "v": Id(11),
+                "f": Id(4),
+                "std": Id(2),
             },
         },
     },
     span_map: {
-        Id(12): 59..61,
-        Id(9): 49..66,
-        Id(5): 26..31,
-        Id(16): 75..76,
-        Id(14): 69..77,
-        Id(8): 35..80,
-        Id(15): 69..74,
-        Id(11): 57..58,
-        Id(17): 80..80,
-        Id(6): 26..27,
-        Id(2): 1..33,
-        Id(13): 63..65,
-        Id(10): 57..66,
-        Id(7): 30..31,
+        Id(15): 75..77,
+        Id(13): 69..70,
+        Id(10): 47..97,
+        Id(14): 71..73,
+        Id(7): 38..43,
+        Id(16): 81..94,
+        Id(9): 42..43,
+        Id(12): 69..78,
+        Id(11): 61..78,
+        Id(19): 97..97,
+        Id(17): 81..91,
+        Id(4): 13..45,
+        Id(3): 0..10,
+        Id(8): 38..39,
+        Id(18): 92..93,
     },
     structs: {},
     variables: {
-        Id(9): Variable {
-            id: Id(9),
+        Id(11): Variable {
+            id: Id(11),
             name: "v",
             initial: Some(
-                Id(10),
+                Id(12),
             ),
             type_id: TypeId(7),
         },
