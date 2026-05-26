@@ -1,10 +1,10 @@
 import std;
 
-fun f(a: i32, b: i32) {
-	a + b
+fun f<T>(x: T, y: T): T {
+	x + y
 }
 
 fun main() {
-	let v = f(10, 20);
+	let v = f<i32>(1, 2);
 	std::print(v);
 }

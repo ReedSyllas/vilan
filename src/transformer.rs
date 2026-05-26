@@ -173,6 +173,9 @@ impl<'src> Transformer<'src> {
             Expr::ExternalFunction(_) => {
                 return None;
             }
+            Expr::Generic(_) => {
+                return None;
+            }
             Expr::Function(id) => {
                 let function = self.program.functions.get(id).unwrap();
                 self.function(function)

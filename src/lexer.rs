@@ -24,7 +24,7 @@ pub fn lexer<'src>()
         .map(Token::Op);
 
     // A parser for control characters (delimiters, semicolons, etc.)
-    let ctrl = one_of("()[]{};,.").map(Token::Ctrl);
+    let ctrl = one_of("()[]{}<>;,.").map(Token::Ctrl);
 
     // A parser for identifiers and keywords
     let identifier = text::ascii::ident().map(|ident: &str| match ident {

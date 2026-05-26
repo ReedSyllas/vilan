@@ -21,6 +21,7 @@ pub enum Expr<'src> {
     Field(Id, Id, usize),
     Function(Id),
     FunctionReturn(Id),
+    Generic(TypeId),
     If(ExprIfBranch),
     Impl(Id),
     List(Vec<Id>),
@@ -352,19 +353,22 @@ impl<'src> Analyzer<'src> {
                     Node::Number(name, _) => {
                         self.prepped_field_accessors.push((id, subject_id, *name));
                     }
-                    Node::Call(call_subject, call_arguments) => match &call_subject.0 {
-                        Node::Accessor(name) => {
-                            let argument_ids = self.walk_expr_nodes(&call_arguments.0, scope_id);
-                            self.prepped_method_calls.push((
-                                id,
-                                subject_id,
-                                *name,
-                                argument_ids,
-                                call_arguments.1,
-                            ));
+                    Node::Call(call_subject, call_generic_arguments, call_arguments) => {
+                        match &call_subject.0 {
+                            Node::Accessor(name) => {
+                                let argument_ids =
+                                    self.walk_expr_nodes(&call_arguments.0, scope_id);
+                                self.prepped_method_calls.push((
+                                    id,
+                                    subject_id,
+                                    *name,
+                                    argument_ids,
+                                    call_arguments.1,
+                                ));
+                            }
+                            _ => panic!("expected identifier"),
                         }
-                        _ => panic!("expected identifier"),
-                    },
+                    }
                     _ => panic!("expected identifier"),
                 }
                 None
@@ -465,7 +469,7 @@ impl<'src> Analyzer<'src> {
                             type_id: x
                                 .1
                                 .as_ref()
-                                .map(|x| self.walk_type_node(x, scope_id))
+                                .map(|x| self.walk_type_node(x, body_scope.id))
                                 .unwrap_or(Type::Unknown.get_type_id(self)),
                         };
                         body_scope
@@ -478,6 +482,22 @@ impl<'src> Analyzer<'src> {
                     })
                     .collect::<Vec<_>>();
                 let body_scope_id = self.push_scope(body_scope);
+                if let Some(generic_parameters) = &function.generic_parameters {
+                    for (name, type_) in &generic_parameters.0 {
+                        let constraint_type_id = type_
+                            .as_ref()
+                            .map(|x| self.walk_type_node(x, body_scope_id))
+                            .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        let expr_id = self.new_entity_id();
+                        self.expr_id_to_expr_map
+                            .insert(expr_id, Expr::Generic(constraint_type_id));
+                        self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
+                        self.expr_id_to_type_id_map
+                            .insert(expr_id, constraint_type_id);
+                        let body_scope = self.mut_scope_for_scope_id(body_scope_id);
+                        body_scope.name_to_id_map.insert(name, expr_id);
+                    }
+                }
                 let ids = self.walk_expr_nodes(&function.body.0.0, body_scope_id);
                 let expr_id = self.walk_expr_node(&function.body.0.1, body_scope_id);
                 self.functions.insert(
@@ -492,7 +512,7 @@ impl<'src> Analyzer<'src> {
                 );
                 Some(Expr::Function(id))
             }
-            Node::Call(subject, arguments) => {
+            Node::Call(subject, generic_arguments, arguments) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 let argument_ids = self.walk_expr_nodes(&arguments.0, scope_id);
                 self.function_calls.insert(
@@ -543,10 +563,27 @@ impl<'src> Analyzer<'src> {
                 );
                 Some(Expr::Variable(id))
             }
-            Node::Struct(name, body) => {
+            Node::Struct(name, generic_parameters, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                if let Some(generic_parameters) = generic_parameters {
+                    for (name, type_) in &generic_parameters.0 {
+                        let type_id = type_
+                            .as_ref()
+                            .map(|x| self.walk_type_node(x, body_scope_id))
+                            .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        let expr_id = self.new_entity_id();
+                        self.expr_id_to_expr_map
+                            .insert(expr_id, Expr::Generic(type_id));
+                        self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
+                        self.expr_id_to_type_id_map.insert(expr_id, type_id);
+                        let body_scope = self.mut_scope_for_scope_id(body_scope_id);
+                        body_scope.name_to_id_map.insert(name, expr_id);
+                    }
+                }
                 let mut fields = Vec::new();
                 for child in &body.0 {
                     let name = child.0.0;
@@ -554,14 +591,14 @@ impl<'src> Analyzer<'src> {
                         .0
                         .1
                         .as_ref()
-                        .map(|x| self.walk_type_node(x, scope_id))
+                        .map(|x| self.walk_type_node(x, body_scope_id))
                         .unwrap_or(Type::Unknown.get_type_id(self));
                     fields.push(Field { name, type_id });
                 }
                 self.structs.insert(id, Struct { id, name, fields });
                 Some(Expr::Struct(id))
             }
-            Node::StructInitializer(name, fields) => {
+            Node::StructInitializer(name, generic_arguments, fields) => {
                 let e_fields = fields
                     .0
                     .iter()
@@ -582,10 +619,26 @@ impl<'src> Analyzer<'src> {
                 self.prepped_struct_initializers.push((id, name, e_fields));
                 None
             }
-            Node::Impl(subject, body) => {
+            Node::Impl(subject, generic_parameters, body) => {
                 let subject = self.walk_type_node(subject, scope_id);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
+                if let Some(generic_parameters) = generic_parameters {
+                    for (name, type_) in &generic_parameters.0 {
+                        let constraint_type_id = type_
+                            .as_ref()
+                            .map(|x| self.walk_type_node(x, body_scope_id))
+                            .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        let expr_id = self.new_entity_id();
+                        self.expr_id_to_expr_map
+                            .insert(expr_id, Expr::Generic(constraint_type_id));
+                        self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
+                        self.expr_id_to_type_id_map
+                            .insert(expr_id, constraint_type_id);
+                        let body_scope = self.mut_scope_for_scope_id(body_scope_id);
+                        body_scope.name_to_id_map.insert(name, expr_id);
+                    }
+                }
                 self.walk_expr_nodes(&body.0, body_scope_id);
                 let body_scope = self.scopes.get(&body_scope_id).unwrap();
                 self.implementations.push(Implementation {
@@ -794,6 +847,7 @@ impl<'src> Analyzer<'src> {
                 let parameter = self.parameters.get(parameter_id).unwrap();
                 parameter.type_id.get_type(self)
             }
+            Expr::Generic(type_id) => type_id.get_type(self),
             _ => Type::Void,
         };
 
@@ -804,9 +858,9 @@ impl<'src> Analyzer<'src> {
     }
 
     fn reconcile_type(&mut self, a: Type, b: Type) -> Option<Type> {
-        match (&a, &b) {
-            (_, Type::Unknown) => Some(a),
-            (Type::Unknown, _) => Some(b),
+        Some(match (&a, &b) {
+            (_, Type::Unknown) => a,
+            (Type::Unknown, _) => b,
             (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
                 (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
                     let l = l_id.get_type(self);
@@ -815,12 +869,14 @@ impl<'src> Analyzer<'src> {
                         .reconcile_type(l.clone(), r)
                         .unwrap_or(l)
                         .get_type_id(self);
-                    Some(Type::Primitive(PrimitiveType::List(item_type_id)))
+                    Type::Primitive(PrimitiveType::List(item_type_id))
                 }
-                (l, r) if l == r => Some(a),
-                _ => None,
+                (l, r) if l == r => a,
+                _ => {
+                    return None;
+                }
             },
-            (Type::Tuple(l_items), Type::Tuple(r_items)) => Some(Type::Tuple(
+            (Type::Tuple(l_items), Type::Tuple(r_items)) => Type::Tuple(
                 l_items
                     .iter()
                     .zip(r_items.iter())
@@ -832,10 +888,12 @@ impl<'src> Analyzer<'src> {
                             .get_type_id(self)
                     })
                     .collect(),
-            )),
-            (l, r) if l == r => Some(a),
-            _ => None,
-        }
+            ),
+            (l, r) if l == r => a,
+            _ => {
+                return None;
+            }
+        })
     }
 
     fn compare_type(&self, a: Type, b: Type) -> bool {

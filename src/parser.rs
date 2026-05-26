@@ -1,4 +1,6 @@
-use crate::node::{BinaryOp, Closure, Func, If, ImportBranch, Node, NodeIfBranch, NodeList};
+use crate::node::{
+    BinaryOp, Closure, Func, GenericArguments, If, ImportBranch, Node, NodeIfBranch, NodeList,
+};
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 use chumsky::{input::ValueInput, prelude::*};
@@ -38,6 +40,54 @@ where
     .labelled("value")
     .map_with(|x, e| (x, e.span()));
 
+    let generic_parameters = identifier
+        .labelled("generic parameter name")
+        .then(
+            just(Token::Op(":"))
+                .ignore_then(type_.clone())
+                .labelled("generic parameter type")
+                .or_not(),
+        )
+        .labelled("generic parameter")
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Ctrl('<')), just(Token::Ctrl('>')))
+        .map_with(|generic_parameters, e| (generic_parameters, e.span()))
+        .recover_with(via_parser(nested_delimiters(
+            Token::Ctrl('<'),
+            Token::Ctrl('>'),
+            [
+                (Token::Ctrl('('), Token::Ctrl(')')),
+                (Token::Ctrl('['), Token::Ctrl(']')),
+                (Token::Ctrl('{'), Token::Ctrl('}')),
+            ],
+            |span| (Vec::new(), span),
+        )))
+        .labelled("generic parameters")
+        .boxed();
+
+    let generic_arguments = type_
+        .clone()
+        .labelled("generic argument")
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::Ctrl('<')), just(Token::Ctrl('>')))
+        .map_with(|generic_arguments, e| (generic_arguments, e.span()))
+        .recover_with(via_parser(nested_delimiters(
+            Token::Ctrl('<'),
+            Token::Ctrl('>'),
+            [
+                (Token::Ctrl('('), Token::Ctrl(')')),
+                (Token::Ctrl('['), Token::Ctrl(']')),
+                (Token::Ctrl('{'), Token::Ctrl('}')),
+            ],
+            |span| (Vec::new(), span),
+        )))
+        .labelled("generic arguments")
+        .boxed();
+
     let struct_initializer_field = identifier
         .then(
             just(Token::Op("="))
@@ -47,6 +97,7 @@ where
         .map_with(|(name, value), e| ((name, value), e.span()));
 
     let struct_initializer = identifier
+        .then(generic_arguments.clone().or_not())
         .then(
             struct_initializer_field
                 .separated_by(just(Token::Ctrl(',')))
@@ -65,7 +116,12 @@ where
                 )))
                 .map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
         )
-        .map_with(|(name, fields), e| (Node::StructInitializer(name, fields), e.span()))
+        .map_with(|((name, generic_arguments), fields), e| {
+            (
+                Node::StructInitializer(name, generic_arguments, fields),
+                e.span(),
+            )
+        })
         .labelled("struct initializer")
         .boxed();
 
@@ -266,6 +322,7 @@ where
                 .map_with(|name, e| (name, e.span()))
                 .labelled("function name"),
         )
+        .then(generic_parameters.clone().or_not())
         .then(
             identifier
                 .labelled("parameter name")
@@ -290,17 +347,20 @@ where
                 .or_not(),
         )
         .then(block.clone())
-        .map_with(|(((name, parameters), return_type), body), e| {
-            (
-                Node::Func(Func {
-                    name,
-                    return_type,
-                    parameters,
-                    body,
-                }),
-                e.span(),
-            )
-        })
+        .map_with(
+            |((((name, generic_parameters), parameters), return_type), body), e| {
+                (
+                    Node::Func(Func {
+                        name,
+                        generic_parameters,
+                        parameters,
+                        return_type,
+                        body,
+                    }),
+                    e.span(),
+                )
+            },
+        )
         .labelled("function")
         .boxed();
 
@@ -314,6 +374,7 @@ where
 
     let struct_ = just(Token::Struct)
         .ignore_then(identifier.labelled("struct name"))
+        .then(generic_parameters.clone().or_not())
         .then(
             struct_field
                 .separated_by(just(Token::Ctrl(',')))
@@ -332,12 +393,15 @@ where
                 )))
                 .map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
         )
-        .map_with(|(name, body), e| (Node::Struct(name, body), e.span()))
+        .map_with(|((name, generic_parameters), body), e| {
+            (Node::Struct(name, generic_parameters, body), e.span())
+        })
         .labelled("struct")
         .boxed();
 
     let impl_ = just(Token::Impl)
         .ignore_then(type_.clone().labelled("implementation subject"))
+        .then(generic_parameters.or_not())
         .then(
             statement
                 .clone()
@@ -355,7 +419,13 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(|(subject, body), e| (Node::Impl(Box::new(subject), body), e.span()));
+        .map_with(|((subject, generic_parameters), body), e| {
+            (
+                Node::Impl(Box::new(subject), generic_parameters, body),
+                e.span(),
+            )
+        })
+        .boxed();
 
     let module = just(Token::Mod)
         .ignore_then(identifier.labelled("module name"))
@@ -376,7 +446,8 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(|(name, body), e| (Node::Module(name, body), e.span()));
+        .map_with(|(name, body), e| (Node::Module(name, body), e.span()))
+        .boxed();
 
     secondary_expression.define(choice((
         closure,
@@ -386,7 +457,7 @@ where
         if_.clone(),
         let_,
         return_,
-        chain_expr_parser(identifier, expression_list, atom),
+        chain_expr_parser(identifier, generic_arguments, expression_list, atom),
     )));
 
     expression.define(
@@ -455,46 +526,71 @@ where
 }
 
 fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
-    identifier: impl Parser<'tokens, I, &'src str, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Copy,
+    identifier: impl Parser<'tokens, I, &'src str, extra::Err<Rich<'tokens, Token<'src>, Span>>>
+    + Copy
+    + 'tokens,
+    generic_arguments: impl Parser<
+        'tokens,
+        I,
+        GenericArguments<'src>,
+        extra::Err<Rich<'tokens, Token<'src>, Span>>,
+    > + Clone
+    + 'tokens,
     expression_list: impl Parser<
         'tokens,
         I,
         NodeList<'src>,
         extra::Err<Rich<'tokens, Token<'src>, Span>>,
-    > + Clone,
+    > + Clone
+    + 'tokens,
     atom: impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>>
-    + Clone,
+    + Clone
+    + 'tokens,
 ) -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
-    let static_accessor = atom.clone().foldl_with(
-        just(Token::Op("::")).ignore_then(identifier).repeated(),
-        |subject, member_name, e| {
-            (
-                Node::StaticAccessor(Box::new(subject), member_name),
-                e.span(),
-            )
-        },
-    );
+    let static_accessor = atom
+        .clone()
+        .foldl_with(
+            just(Token::Op("::")).ignore_then(identifier).repeated(),
+            |subject, member_name, e| {
+                (
+                    Node::StaticAccessor(Box::new(subject), member_name),
+                    e.span(),
+                )
+            },
+        )
+        .boxed();
 
-    let call = static_accessor.foldl_with(
-        expression_list
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-            .map_with(|args, e| (args, e.span()))
-            .repeated(),
-        |f, args, e| (Node::Call(Box::new(f), args), e.span()),
-    );
+    let call = static_accessor
+        .foldl_with(
+            generic_arguments
+                .or_not()
+                .then(
+                    expression_list
+                        .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                        .map_with(|args, e| (args, e.span())),
+                )
+                .repeated(),
+            |f, (generic_arguments, args), e| {
+                (Node::Call(Box::new(f), generic_arguments, args), e.span())
+            },
+        )
+        .boxed();
 
-    let member_accessor = call.clone().foldl_with(
-        just(Token::Ctrl('.')).ignore_then(call).repeated(),
-        |subject, member, e| {
-            (
-                Node::MemberAccessor(Box::new(subject), Box::new(member)),
-                e.span(),
-            )
-        },
-    );
+    let member_accessor = call
+        .clone()
+        .foldl_with(
+            just(Token::Ctrl('.')).ignore_then(call).repeated(),
+            |subject, member, e| {
+                (
+                    Node::MemberAccessor(Box::new(subject), Box::new(member)),
+                    e.span(),
+                )
+            },
+        )
+        .boxed();
 
     // Product ops (multiply and divide) have equal precedence
     let op = just(Token::Op("*"))
@@ -504,7 +600,8 @@ where
         .clone()
         .foldl_with(op.then(member_accessor).repeated(), |a, (op, b), e| {
             (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
-        });
+        })
+        .boxed();
 
     // Sum ops (add and subtract) have equal precedence
     let op = just(Token::Op("+"))
@@ -514,7 +611,8 @@ where
         .clone()
         .foldl_with(op.then(product).repeated(), |a, (op, b), e| {
             (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
-        });
+        })
+        .boxed();
 
     // Comparison ops (equal, not-equal) have equal precedence
     let op = just(Token::Op("=="))
@@ -524,7 +622,8 @@ where
         .clone()
         .foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
             (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
-        });
+        })
+        .boxed();
 
     compare
 }

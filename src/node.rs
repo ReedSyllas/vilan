@@ -1,8 +1,13 @@
 use crate::span::Spanned;
 
+pub type GenericParameters<'src> = Spanned<Vec<(&'src str, Option<Spanned<Node<'src>>>)>>;
+
+pub type GenericArguments<'src> = Spanned<Vec<Spanned<Node<'src>>>>;
+
 #[derive(Debug)]
 pub struct Func<'src> {
     pub name: Spanned<&'src str>,
+    pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
     pub body: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
@@ -42,7 +47,11 @@ pub enum Node<'src> {
     Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
     Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     Bool(bool),
-    Call(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
+    Call(
+        Box<Spanned<Self>>,
+        Option<GenericArguments<'src>>,
+        Spanned<NodeList<'src>>,
+    ),
     Closure(Closure<'src>),
     ClosureType(
         Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
@@ -52,7 +61,11 @@ pub enum Node<'src> {
     Func(Func<'src>),
     FuncReturn(Box<Spanned<Self>>),
     If(NodeIfBranch<'src>),
-    Impl(Box<Spanned<Self>>, Spanned<NodeList<'src>>),
+    Impl(
+        Box<Spanned<Self>>,
+        Option<GenericParameters<'src>>,
+        Spanned<NodeList<'src>>,
+    ),
     Import(ImportBranch<'src>),
     Let(
         &'src str,
@@ -68,10 +81,12 @@ pub enum Node<'src> {
     String(&'src str),
     Struct(
         &'src str,
+        Option<GenericParameters<'src>>,
         Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>,
     ),
     StructInitializer(
         &'src str,
+        Option<GenericArguments<'src>>,
         Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>,
     ),
     Tuple(NodeList<'src>),

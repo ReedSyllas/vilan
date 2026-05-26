@@ -2,6 +2,7 @@ use crate::id::Id;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
+    Any,
     Closure(Vec<TypeId>, TypeId),
     Function(Id),
     Module(Id),
