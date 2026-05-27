@@ -35,13 +35,19 @@ impl<'src> Transformer<'src> {
         } else {
             HashMap::new()
         };
-        
+
         let print_fn_id = {
-            let std_module_id = *program.module_id_by_name.get("std").expect("missing std module");
+            let std_module_id = *program
+                .module_id_by_name
+                .get("std")
+                .expect("missing std module");
             let std_module = program.modules.get(&std_module_id).unwrap();
             let std_module_scope_id = std_module.body.1;
             let std_module_scope = program.scopes.get(&std_module_scope_id).unwrap();
-            let print_fn_id = *std_module_scope.name_to_id_map.get("print").expect("missing print function in the std module");
+            let print_fn_id = *std_module_scope
+                .name_to_id_map
+                .get("print")
+                .expect("missing print function in the std module");
             print_fn_id
         };
 
@@ -129,9 +135,9 @@ impl<'src> Transformer<'src> {
             } else if self.program.modules.contains_key(id) {
                 let module = self.program.modules.get(id).unwrap();
                 let mut children = self.find_global_variables(&module.body.0);
-                println!("x1 {} {:#?} {:#?}", module.name, children, global_variables);
+                // println!("x1 {} {:#?} {:#?}", module.name, children, global_variables);
                 global_variables.append(&mut children);
-                println!("x2 {:#?}", global_variables);
+                // println!("x2 {:#?}", global_variables);
             }
         }
 

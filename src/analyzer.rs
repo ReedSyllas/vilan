@@ -6,7 +6,7 @@ use crate::error::Error;
 use crate::id::Id;
 use crate::node::{BinaryOp, ImportBranch, Node, NodeIfBranch, NodeList};
 use crate::span::{Span, Spanned};
-use crate::type_::{PrimitiveType, Type, TypeId};
+use crate::type_::{PrimitiveType, SubstitutionContext, Type, TypeId};
 use crate::util::plural;
 
 #[derive(Clone, Debug)]
@@ -48,6 +48,7 @@ pub enum ExprIfBranch {
 pub struct Function<'src> {
     pub id: Id,
     pub name: &'src str,
+    pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
     pub body: (Vec<Id>, Id, Id),
     pub call_count: u32,
@@ -57,6 +58,7 @@ pub struct Function<'src> {
 pub struct ExternalFunction<'src> {
     pub id: Id,
     pub name: &'src str,
+    pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
     pub return_type_id: TypeId,
     pub call_count: u32,
@@ -66,6 +68,7 @@ pub struct ExternalFunction<'src> {
 pub struct FunctionCall {
     pub id: Id,
     pub subject_id: Id,
+    pub generic_argument_ids: Vec<TypeId>,
     pub argument_ids: Vec<Id>,
     pub arguments_span: Span,
 }
@@ -146,7 +149,7 @@ pub struct Analyzer<'src> {
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<&'src str>, &'src str, Id)>,
     prepped_locals: Vec<(Id, &'src str)>,
-    prepped_method_calls: Vec<(Id, Id, &'src str, Vec<Id>, Span)>,
+    prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers: Vec<(Id, &'src str, Vec<(&'src str, Id)>)>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
@@ -358,10 +361,19 @@ impl<'src> Analyzer<'src> {
                             Node::Accessor(name) => {
                                 let argument_ids =
                                     self.walk_expr_nodes(&call_arguments.0, scope_id);
+                                let generic_argument_ids = call_generic_arguments
+                                    .as_ref()
+                                    .map(|x| {
+                                        x.0.iter()
+                                            .map(|y| self.walk_type_node(y, scope_id))
+                                            .collect()
+                                    })
+                                    .unwrap_or_else(Vec::new);
                                 self.prepped_method_calls.push((
                                     id,
                                     subject_id,
                                     *name,
+                                    generic_argument_ids,
                                     argument_ids,
                                     call_arguments.1,
                                 ));
@@ -482,18 +494,20 @@ impl<'src> Analyzer<'src> {
                     })
                     .collect::<Vec<_>>();
                 let body_scope_id = self.push_scope(body_scope);
+                let mut generic_parameter_constraint_ids = Vec::new();
                 if let Some(generic_parameters) = &function.generic_parameters {
                     for (name, type_) in &generic_parameters.0 {
                         let constraint_type_id = type_
                             .as_ref()
                             .map(|x| self.walk_type_node(x, body_scope_id))
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        generic_parameter_constraint_ids.push(constraint_type_id);
+                        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
                         self.expr_id_to_expr_map
                             .insert(expr_id, Expr::Generic(constraint_type_id));
                         self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
-                        self.expr_id_to_type_id_map
-                            .insert(expr_id, constraint_type_id);
+                        self.expr_id_to_type_id_map.insert(expr_id, type_id);
                         let body_scope = self.mut_scope_for_scope_id(body_scope_id);
                         body_scope.name_to_id_map.insert(name, expr_id);
                     }
@@ -505,6 +519,7 @@ impl<'src> Analyzer<'src> {
                     Function {
                         id,
                         name,
+                        generic_parameter_constraint_ids,
                         parameters,
                         body: (ids, expr_id, body_scope_id),
                         call_count: 0,
@@ -515,11 +530,20 @@ impl<'src> Analyzer<'src> {
             Node::Call(subject, generic_arguments, arguments) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 let argument_ids = self.walk_expr_nodes(&arguments.0, scope_id);
+                let generic_argument_ids = generic_arguments
+                    .as_ref()
+                    .map(|x| {
+                        x.0.iter()
+                            .map(|y| self.walk_type_node(y, scope_id))
+                            .collect()
+                    })
+                    .unwrap_or_else(Vec::new);
                 self.function_calls.insert(
                     id,
                     FunctionCall {
                         id,
                         subject_id,
+                        generic_argument_ids,
                         argument_ids,
                         arguments_span: arguments.1,
                     },
@@ -571,13 +595,14 @@ impl<'src> Analyzer<'src> {
                 let body_scope_id = self.push_scope(body_scope);
                 if let Some(generic_parameters) = generic_parameters {
                     for (name, type_) in &generic_parameters.0 {
-                        let type_id = type_
+                        let constraint_type_id = type_
                             .as_ref()
                             .map(|x| self.walk_type_node(x, body_scope_id))
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
                         self.expr_id_to_expr_map
-                            .insert(expr_id, Expr::Generic(type_id));
+                            .insert(expr_id, Expr::Generic(constraint_type_id));
                         self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
                         self.expr_id_to_type_id_map.insert(expr_id, type_id);
                         let body_scope = self.mut_scope_for_scope_id(body_scope_id);
@@ -629,12 +654,12 @@ impl<'src> Analyzer<'src> {
                             .as_ref()
                             .map(|x| self.walk_type_node(x, body_scope_id))
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
                         self.expr_id_to_expr_map
                             .insert(expr_id, Expr::Generic(constraint_type_id));
                         self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
-                        self.expr_id_to_type_id_map
-                            .insert(expr_id, constraint_type_id);
+                        self.expr_id_to_type_id_map.insert(expr_id, type_id);
                         let body_scope = self.mut_scope_for_scope_id(body_scope_id);
                         body_scope.name_to_id_map.insert(name, expr_id);
                     }
@@ -721,6 +746,7 @@ impl<'src> Analyzer<'src> {
 
         let type_: Option<Type> = match &node.0 {
             Node::Accessor(name) => match *name {
+                "any" => Some(Type::Any),
                 "f64" => Some(Type::Primitive(PrimitiveType::F64)),
                 "i32" => Some(Type::Primitive(PrimitiveType::I32)),
                 "u32" => Some(Type::Primitive(PrimitiveType::U32)),
@@ -766,14 +792,25 @@ impl<'src> Analyzer<'src> {
         type_id
     }
 
-    fn resolve_type_start(&mut self, expr_id: Id, constraint: Type) -> Type {
-        self.resolve_type(expr_id, constraint, &mut HashSet::new())
-    }
-
-    fn resolve_type(
+    fn infer_type_start(
         &mut self,
         expr_id: Id,
         constraint: Type,
+        substitution_context: &SubstitutionContext,
+    ) -> Type {
+        self.infer_type(
+            expr_id,
+            constraint,
+            substitution_context,
+            &mut HashSet::new(),
+        )
+    }
+
+    fn infer_type(
+        &mut self,
+        expr_id: Id,
+        constraint: Type,
+        substitution_context: &SubstitutionContext,
         exprs_seen: &mut HashSet<Id>,
     ) -> Type {
         if exprs_seen.contains(&expr_id) {
@@ -790,7 +827,7 @@ impl<'src> Analyzer<'src> {
 
         let expr = self.get_entity_by_id(expr_id);
 
-        println!("resolve_type.input {expr:#?} {constraint:#?}");
+        println!("resolve_type/input {expr:?} {constraint:?}");
 
         let inferred_type: Type = match expr {
             Expr::Null => Type::Primitive(PrimitiveType::Null),
@@ -817,23 +854,30 @@ impl<'src> Analyzer<'src> {
                                 .get(i)
                                 .map(|x| x.get_type(self))
                                 .unwrap_or(Type::Unknown);
-                            self.resolve_type(*id, constraint_item, exprs_seen)
+                            self.infer_type(*id, constraint_item, substitution_context, exprs_seen)
                                 .get_type_id(self)
                         })
                         .collect(),
                 )
             }
-            Expr::Local(subject_id) => {
-                self.resolve_type(*subject_id, constraint.clone(), exprs_seen)
-            }
+            Expr::Local(subject_id) => self.infer_type(
+                *subject_id,
+                constraint.clone(),
+                substitution_context,
+                exprs_seen,
+            ),
             Expr::Function(function_id) => Type::Function(*function_id),
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
                 let id = *id;
                 let function_call = self.function_calls.get(&id).unwrap();
-                let subject_type =
-                    self.resolve_type(function_call.subject_id, Type::Unknown, exprs_seen);
+                let subject_type = self.infer_type(
+                    function_call.subject_id,
+                    Type::Unknown,
+                    substitution_context,
+                    exprs_seen,
+                );
                 match subject_type {
                     Type::Function(_) => Type::Void,
                     x => panic!("type is not callable: {:?}", x),
@@ -851,22 +895,46 @@ impl<'src> Analyzer<'src> {
             _ => Type::Void,
         };
 
-        println!("resolve_type.output {:#?}", inferred_type);
+        println!("resolve_type/inference {:?}", inferred_type);
 
-        self.reconcile_type(constraint.clone(), inferred_type)
+        self.reconcile_type(constraint.clone(), inferred_type, substitution_context)
             .unwrap_or(constraint)
     }
 
-    fn reconcile_type(&mut self, a: Type, b: Type) -> Option<Type> {
+    fn reconcile_type(
+        &mut self,
+        a: Type,
+        b: Type,
+        substitution_context: &SubstitutionContext,
+    ) -> Option<Type> {
+        println!(
+            "reconcile_type a={:?} b={:?} substitution_context={:?}",
+            a, b, substitution_context
+        );
+
         Some(match (&a, &b) {
-            (_, Type::Unknown) => a,
-            (Type::Unknown, _) => b,
+            (Type::Any, _) | (_, Type::Unknown) => a,
+            (_, Type::Any) | (Type::Unknown, _) => b,
+            (Type::Generic(constraint_id), _) => {
+                let l = substitution_context
+                    .get(&constraint_id)
+                    .map(|x| x.get_type(self))
+                    .unwrap_or_else(|| constraint_id.get_type(self));
+                return self.reconcile_type(l, b, substitution_context);
+            }
+            (_, Type::Generic(constraint_id)) => {
+                let r = substitution_context
+                    .get(&constraint_id)
+                    .map(|x| x.get_type(self))
+                    .unwrap_or_else(|| constraint_id.get_type(self));
+                return self.reconcile_type(a, r, substitution_context);
+            }
             (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
                 (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
                     let l = l_id.get_type(self);
                     let r = r_id.get_type(self);
                     let item_type_id = self
-                        .reconcile_type(l.clone(), r)
+                        .reconcile_type(l.clone(), r, substitution_context)
                         .unwrap_or(l)
                         .get_type_id(self);
                     Type::Primitive(PrimitiveType::List(item_type_id))
@@ -883,7 +951,7 @@ impl<'src> Analyzer<'src> {
                     .map(|(l_item_id, r_item_id)| {
                         let l = l_item_id.get_type(self);
                         let r = r_item_id.get_type(self);
-                        self.reconcile_type(l.clone(), r)
+                        self.reconcile_type(l.clone(), r, substitution_context)
                             .unwrap_or(l)
                             .get_type_id(self)
                     })
@@ -896,15 +964,33 @@ impl<'src> Analyzer<'src> {
         })
     }
 
-    fn compare_type(&self, a: Type, b: Type) -> bool {
+    fn compare_type(&self, a: Type, b: Type, substitution_context: &SubstitutionContext) -> bool {
+        println!(
+            "compare_type a={:?} b={:?} substitution_context={:?}",
+            a, b, substitution_context
+        );
+
         match (&a, &b) {
-            (_, Type::Unknown) => true,
-            (Type::Unknown, _) => true,
+            (Type::Unknown, _) | (_, Type::Unknown) | (Type::Any, _) | (_, Type::Any) => true,
+            (Type::Generic(constraint_id), _) => {
+                let l = substitution_context
+                    .get(&constraint_id)
+                    .map(|x| x.get_type(self))
+                    .unwrap_or_else(|| constraint_id.get_type(self));
+                return self.compare_type(l, b, substitution_context);
+            }
+            (_, Type::Generic(constraint_id)) => {
+                let r = substitution_context
+                    .get(&constraint_id)
+                    .map(|x| x.get_type(self))
+                    .unwrap_or_else(|| constraint_id.get_type(self));
+                return self.compare_type(a, r, substitution_context);
+            }
             (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
                 (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
                     let l = l_id.get_type(self);
                     let r = r_id.get_type(self);
-                    self.compare_type(l, r)
+                    self.compare_type(l, r, substitution_context)
                 }
                 (a, b) if a == b => true,
                 _ => false,
@@ -916,7 +1002,7 @@ impl<'src> Analyzer<'src> {
                     .all(|(l_item_id, r_item_id)| {
                         let l = l_item_id.get_type(self);
                         let r = r_item_id.get_type(self);
-                        self.compare_type(l, r)
+                        self.compare_type(l, r, substitution_context)
                     })
             }
             (a, b) if a == b => true,
@@ -951,7 +1037,7 @@ impl<'src> Analyzer<'src> {
 
         for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
-            let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
+            let subject_type = self.infer_type_start(subject_id, Type::Unknown, &HashMap::new());
             self.type_id_to_type_map.insert(type_id, subject_type);
         }
 
@@ -960,7 +1046,8 @@ impl<'src> Analyzer<'src> {
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
                     let member_id = self.get_expr_id_by_name(member_name, module.body.1);
-                    let member_type = self.resolve_type_start(member_id, Type::Unknown);
+                    let member_type =
+                        self.infer_type_start(member_id, Type::Unknown, &HashMap::new());
                     self.type_id_to_type_map.insert(type_id, member_type);
                 }
                 _ => {}
@@ -968,7 +1055,7 @@ impl<'src> Analyzer<'src> {
         }
 
         for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
-            let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
+            let subject_type = self.infer_type_start(subject_id, Type::Unknown, &HashMap::new());
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
@@ -987,10 +1074,10 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (id, subject_id, member_name, mut argument_ids, arguments_span) in
+        for (id, subject_id, member_name, generic_argument_ids, mut argument_ids, arguments_span) in
             self.prepped_method_calls.clone()
         {
-            let subject_type = self.resolve_type_start(subject_id, Type::Unknown);
+            let subject_type = self.infer_type_start(subject_id, Type::Unknown, &HashMap::new());
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_name = self.structs.get(&struct_id).unwrap().name;
@@ -998,7 +1085,11 @@ impl<'src> Analyzer<'src> {
                         .implementations
                         .iter()
                         .filter(|x| {
-                            self.compare_type(subject_type.clone(), x.subject.get_type(self))
+                            self.compare_type(
+                                subject_type.clone(),
+                                x.subject.get_type(self),
+                                &HashMap::new(),
+                            )
                         })
                         .find_map(|x| {
                             x.declarations.get(member_name).and_then(|member_id| {
@@ -1025,6 +1116,7 @@ impl<'src> Analyzer<'src> {
                         FunctionCall {
                             id,
                             subject_id: member_local_id,
+                            generic_argument_ids,
                             argument_ids,
                             arguments_span,
                         },
@@ -1047,7 +1139,11 @@ impl<'src> Analyzer<'src> {
                         .implementations
                         .iter()
                         .filter(|x| {
-                            self.compare_type(subject_type.clone(), x.subject.get_type(self))
+                            self.compare_type(
+                                subject_type.clone(),
+                                x.subject.get_type(self),
+                                &HashMap::new(),
+                            )
                         })
                         .find_map(|x| x.declarations.get(member_name))
                         .expect(format!("cannot find {} in {}", member_name, struct_name).as_str());
@@ -1087,26 +1183,33 @@ impl<'src> Analyzer<'src> {
         }
 
         let function_call_ids = self.function_calls.keys().copied().collect::<Vec<_>>();
-
         for function_call_id in function_call_ids {
             let function_call = self.function_calls.get(&function_call_id).unwrap().clone();
             let subject = self.get_entity_by_id(function_call.subject_id);
             match subject {
                 Expr::Local(target_id) => {
                     let target = self.get_entity_by_id(*target_id);
-                    let parameters = match target {
+                    let function_data = match target {
                         Expr::Function(function_id) => {
                             let function = self.functions.get(function_id).unwrap();
-                            Some(function.parameters.clone())
+                            println!("NORMAL FUNCTION CALLED {}", function.name);
+                            Some((
+                                function.parameters.clone(),
+                                function.generic_parameter_constraint_ids.clone(),
+                            ))
                         }
                         Expr::ExternalFunction(external_function_id) => {
                             let function =
                                 self.external_functions.get(external_function_id).unwrap();
-                            Some(function.parameters.clone())
+                            println!("EXTERNAL FUNCTION CALLED {}", function.name);
+                            Some((
+                                function.parameters.clone(),
+                                function.generic_parameter_constraint_ids.clone(),
+                            ))
                         }
                         _ => None,
                     };
-                    if let Some(parameters) = parameters {
+                    if let Some((parameters, generic_parameter_constraint_ids)) = function_data {
                         if function_call.argument_ids.len() != parameters.len() {
                             self.diagnostics.push(Error {
                                 span: function_call.arguments_span,
@@ -1118,18 +1221,51 @@ impl<'src> Analyzer<'src> {
                                 ),
                             });
                         } else {
+                            let mut substitution_context = HashMap::new();
                             for (i, parameter_id) in parameters.iter().enumerate() {
                                 let parameter = self.parameters.get(parameter_id).unwrap();
                                 let parameter_type = parameter.type_id.get_type(self);
+                                for (i, generic_argument_id) in
+                                    function_call.generic_argument_ids.iter().enumerate()
+                                {
+                                    let generic_parameter_constraint_id =
+                                        generic_parameter_constraint_ids.get(i);
+                                    if let Some(generic_parameter_constraint_id) =
+                                        generic_parameter_constraint_id
+                                    {
+                                        substitution_context.insert(
+                                            *generic_parameter_constraint_id,
+                                            *generic_argument_id,
+                                        );
+                                    }
+                                }
+                                println!(
+                                    "FUNCTION CALL (1) {:?} (2) {:?} (3) {:?}",
+                                    function_call.generic_argument_ids,
+                                    generic_parameter_constraint_ids,
+                                    substitution_context
+                                );
                                 let argument_id = *function_call.argument_ids.get(i).unwrap();
-                                let argument_type =
-                                    self.resolve_type_start(argument_id, Type::Unknown);
-                                if !self.compare_type(parameter_type, argument_type) {
+                                let argument_type = self.infer_type_start(
+                                    argument_id,
+                                    Type::Unknown,
+                                    &substitution_context,
+                                );
+                                if self.compare_type(
+                                    parameter_type.clone(),
+                                    argument_type.clone(),
+                                    &substitution_context,
+                                ) {
+                                    if let Type::Generic(constraint_id) = parameter_type {
+                                        substitution_context
+                                            .insert(constraint_id, argument_type.get_type_id(self));
+                                    }
+                                } else {
                                     self.diagnostics.push(Error {
                                         span: **self.span_map.get(&argument_id).unwrap(),
                                         msg: format!(
-                                            "Expected type {}, but got type {} instead.",
-                                            "{todo}", "{todo}",
+                                            "Expected type {:?}, but got type {:?} instead.",
+                                            parameter_type, argument_type,
                                         ),
                                     });
                                 }
@@ -1197,7 +1333,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             id: parameter_id,
             function_id: print_fn_id,
             name: "message",
-            type_id: Type::Unknown.get_type_id(&mut analyzer),
+            type_id: Type::Any.get_type_id(&mut analyzer),
         };
         analyzer.parameters.insert(parameter_id, parameter);
         parameter_id
@@ -1206,6 +1342,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let print_fn = ExternalFunction {
         id: print_fn_id,
         name: print_fn_name,
+        generic_parameter_constraint_ids: Vec::new(),
         parameters: vec![print_fn_message_parameter_id],
         return_type_id: Type::Void.get_type_id(&mut analyzer),
         call_count: 0,

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::id::Id;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5,6 +7,7 @@ pub enum Type {
     Any,
     Closure(Vec<TypeId>, TypeId),
     Function(Id),
+    Generic(TypeId),
     Module(Id),
     Primitive(PrimitiveType),
     Struct(Id),
@@ -32,3 +35,5 @@ impl std::fmt::Debug for TypeId {
         write!(f, "TypeId({})", self.0)
     }
 }
+
+pub type SubstitutionContext = HashMap<TypeId, TypeId>;
