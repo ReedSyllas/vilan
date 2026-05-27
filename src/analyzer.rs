@@ -1045,7 +1045,10 @@ impl<'src> Analyzer<'src> {
                 let arg_ret_type = arg_ret.get_type(self);
                 self.bind_collect(*param_ret, &arg_ret_type, substitution, bindings);
             }
-            (Type::Primitive(PrimitiveType::List(item_id)), Type::Primitive(PrimitiveType::List(arg_item_id))) => {
+            (
+                Type::Primitive(PrimitiveType::List(item_id)),
+                Type::Primitive(PrimitiveType::List(arg_item_id)),
+            ) => {
                 let arg_item_type = arg_item_id.get_type(self);
                 self.bind_collect(*item_id, &arg_item_type, substitution, bindings);
             }
