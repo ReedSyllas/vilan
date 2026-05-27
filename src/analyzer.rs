@@ -964,33 +964,33 @@ impl<'src> Analyzer<'src> {
         })
     }
 
-    fn compare_type(&self, a: Type, b: Type, substitution_context: &SubstitutionContext) -> bool {
+    fn compare_type(&self, a: &Type, b: &Type, substitution_context: &SubstitutionContext) -> bool {
         println!(
             "compare_type a={:?} b={:?} substitution_context={:?}",
             a, b, substitution_context
         );
 
-        match (&a, &b) {
+        match (a, b) {
             (Type::Unknown, _) | (_, Type::Unknown) | (Type::Any, _) | (_, Type::Any) => true,
             (Type::Generic(constraint_id), _) => {
                 let l = substitution_context
-                    .get(&constraint_id)
+                    .get(constraint_id)
                     .map(|x| x.get_type(self))
                     .unwrap_or_else(|| constraint_id.get_type(self));
-                return self.compare_type(l, b, substitution_context);
+                return self.compare_type(&l, b, substitution_context);
             }
             (_, Type::Generic(constraint_id)) => {
                 let r = substitution_context
-                    .get(&constraint_id)
+                    .get(constraint_id)
                     .map(|x| x.get_type(self))
                     .unwrap_or_else(|| constraint_id.get_type(self));
-                return self.compare_type(a, r, substitution_context);
+                return self.compare_type(a, &r, substitution_context);
             }
             (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
                 (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
                     let l = l_id.get_type(self);
                     let r = r_id.get_type(self);
-                    self.compare_type(l, r, substitution_context)
+                    self.compare_type(&l, &r, substitution_context)
                 }
                 (a, b) if a == b => true,
                 _ => false,
@@ -1002,7 +1002,7 @@ impl<'src> Analyzer<'src> {
                     .all(|(l_item_id, r_item_id)| {
                         let l = l_item_id.get_type(self);
                         let r = r_item_id.get_type(self);
-                        self.compare_type(l, r, substitution_context)
+                        self.compare_type(&l, &r, substitution_context)
                     })
             }
             (a, b) if a == b => true,
@@ -1135,8 +1135,8 @@ impl<'src> Analyzer<'src> {
                         .iter()
                         .filter(|x| {
                             self.compare_type(
-                                subject_type.clone(),
-                                x.subject.get_type(self),
+                                &subject_type,
+                                &x.subject.get_type(self),
                                 &HashMap::new(),
                             )
                         })
@@ -1189,8 +1189,8 @@ impl<'src> Analyzer<'src> {
                         .iter()
                         .filter(|x| {
                             self.compare_type(
-                                subject_type.clone(),
-                                x.subject.get_type(self),
+                                &subject_type,
+                                &x.subject.get_type(self),
                                 &HashMap::new(),
                             )
                         })
@@ -1302,8 +1302,8 @@ impl<'src> Analyzer<'src> {
                                     &substitution_context,
                                 );
                                 if self.compare_type(
-                                    parameter_type.clone(),
-                                    argument_type.clone(),
+                                    &parameter_type,
+                                    &argument_type,
                                     &substitution_context,
                                 ) {
                                     let bindings = self.collect_type_bindings(
