@@ -795,7 +795,7 @@ impl<'src> Analyzer<'src> {
     fn infer_type_start(
         &mut self,
         expr_id: Id,
-        constraint: Type,
+        constraint: &Type,
         substitution_context: &SubstitutionContext,
     ) -> Type {
         self.infer_type(
@@ -809,7 +809,7 @@ impl<'src> Analyzer<'src> {
     fn infer_type(
         &mut self,
         expr_id: Id,
-        constraint: Type,
+        constraint: &Type,
         substitution_context: &SubstitutionContext,
         exprs_seen: &mut HashSet<Id>,
     ) -> Type {
@@ -840,8 +840,8 @@ impl<'src> Analyzer<'src> {
             }),
             Expr::List(_) => Type::Primitive(PrimitiveType::List(Type::Void.get_type_id(self))),
             Expr::Tuple(item_ids) => {
-                let constraint_items = match constraint.clone() {
-                    Type::Tuple(items) => items,
+                let constraint_items = match constraint {
+                    Type::Tuple(items) => items.clone(),
                     _ => Vec::new(),
                 };
                 Type::Tuple(
@@ -854,18 +854,20 @@ impl<'src> Analyzer<'src> {
                                 .get(i)
                                 .map(|x| x.get_type(self))
                                 .unwrap_or(Type::Unknown);
-                            self.infer_type(*id, constraint_item, substitution_context, exprs_seen)
-                                .get_type_id(self)
+                            let inferred = self.infer_type(
+                                *id,
+                                &constraint_item,
+                                substitution_context,
+                                exprs_seen,
+                            );
+                            inferred.get_type_id(self)
                         })
                         .collect(),
                 )
             }
-            Expr::Local(subject_id) => self.infer_type(
-                *subject_id,
-                constraint.clone(),
-                substitution_context,
-                exprs_seen,
-            ),
+            Expr::Local(subject_id) => {
+                self.infer_type(*subject_id, constraint, substitution_context, exprs_seen)
+            }
             Expr::Function(function_id) => Type::Function(*function_id),
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
             Expr::Module(module_id) => Type::Module(*module_id),
@@ -874,7 +876,7 @@ impl<'src> Analyzer<'src> {
                 let function_call = self.function_calls.get(&id).unwrap();
                 let subject_type = self.infer_type(
                     function_call.subject_id,
-                    Type::Unknown,
+                    &Type::Unknown,
                     substitution_context,
                     exprs_seen,
                 );
@@ -897,14 +899,14 @@ impl<'src> Analyzer<'src> {
 
         println!("resolve_type/inference {:?}", inferred_type);
 
-        self.reconcile_type(constraint.clone(), inferred_type, substitution_context)
-            .unwrap_or(constraint)
+        self.reconcile_type(constraint, &inferred_type, substitution_context)
+            .unwrap_or_else(|| constraint.clone())
     }
 
     fn reconcile_type(
         &mut self,
-        a: Type,
-        b: Type,
+        a: &Type,
+        b: &Type,
         substitution_context: &SubstitutionContext,
     ) -> Option<Type> {
         println!(
@@ -912,52 +914,56 @@ impl<'src> Analyzer<'src> {
             a, b, substitution_context
         );
 
-        Some(match (&a, &b) {
-            (Type::Any, _) | (_, Type::Unknown) => a,
-            (_, Type::Any) | (Type::Unknown, _) => b,
+        Some(match (a, b) {
+            (Type::Any, _) | (_, Type::Unknown) => a.clone(),
+            (_, Type::Any) | (Type::Unknown, _) => b.clone(),
             (Type::Generic(constraint_id), _) => {
                 let l = substitution_context
-                    .get(&constraint_id)
+                    .get(constraint_id)
                     .map(|x| x.get_type(self))
                     .unwrap_or_else(|| constraint_id.get_type(self));
-                return self.reconcile_type(l, b, substitution_context);
+                return self.reconcile_type(&l, b, substitution_context);
             }
             (_, Type::Generic(constraint_id)) => {
                 let r = substitution_context
-                    .get(&constraint_id)
+                    .get(constraint_id)
                     .map(|x| x.get_type(self))
                     .unwrap_or_else(|| constraint_id.get_type(self));
-                return self.reconcile_type(a, r, substitution_context);
+                return self.reconcile_type(a, &r, substitution_context);
             }
             (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
                 (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
                     let l = l_id.get_type(self);
                     let r = r_id.get_type(self);
                     let item_type_id = self
-                        .reconcile_type(l.clone(), r, substitution_context)
-                        .unwrap_or(l)
+                        .reconcile_type(&l, &r, substitution_context)
+                        .unwrap_or_else(|| l.clone())
                         .get_type_id(self);
                     Type::Primitive(PrimitiveType::List(item_type_id))
                 }
-                (l, r) if l == r => a,
+                (l, r) if l == r => a.clone(),
                 _ => {
                     return None;
                 }
             },
-            (Type::Tuple(l_items), Type::Tuple(r_items)) => Type::Tuple(
-                l_items
-                    .iter()
-                    .zip(r_items.iter())
-                    .map(|(l_item_id, r_item_id)| {
-                        let l = l_item_id.get_type(self);
-                        let r = r_item_id.get_type(self);
-                        self.reconcile_type(l.clone(), r, substitution_context)
-                            .unwrap_or(l)
-                            .get_type_id(self)
-                    })
-                    .collect(),
-            ),
-            (l, r) if l == r => a,
+            (Type::Tuple(l_items), Type::Tuple(r_items)) => {
+                let l_items_cloned = l_items.clone();
+                let r_items_cloned = r_items.clone();
+                Type::Tuple(
+                    l_items_cloned
+                        .iter()
+                        .zip(r_items_cloned.iter())
+                        .map(|(l_item_id, r_item_id)| {
+                            let l = l_item_id.get_type(self);
+                            let r = r_item_id.get_type(self);
+                            self.reconcile_type(&l, &r, substitution_context)
+                                .unwrap_or_else(|| l.clone())
+                                .get_type_id(self)
+                        })
+                        .collect(),
+                )
+            }
+            (l, r) if l == r => a.clone(),
             _ => {
                 return None;
             }
@@ -1089,7 +1095,7 @@ impl<'src> Analyzer<'src> {
 
         for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
-            let subject_type = self.infer_type_start(subject_id, Type::Unknown, &HashMap::new());
+            let subject_type = self.infer_type_start(subject_id, &Type::Unknown, &HashMap::new());
             self.type_id_to_type_map.insert(type_id, subject_type);
         }
 
@@ -1099,7 +1105,7 @@ impl<'src> Analyzer<'src> {
                     let module = self.modules.get(&module_id).unwrap();
                     let member_id = self.get_expr_id_by_name(member_name, module.body.1);
                     let member_type =
-                        self.infer_type_start(member_id, Type::Unknown, &HashMap::new());
+                        self.infer_type_start(member_id, &Type::Unknown, &HashMap::new());
                     self.type_id_to_type_map.insert(type_id, member_type);
                 }
                 _ => {}
@@ -1107,7 +1113,7 @@ impl<'src> Analyzer<'src> {
         }
 
         for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
-            let subject_type = self.infer_type_start(subject_id, Type::Unknown, &HashMap::new());
+            let subject_type = self.infer_type_start(subject_id, &Type::Unknown, &HashMap::new());
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
@@ -1129,7 +1135,7 @@ impl<'src> Analyzer<'src> {
         for (id, subject_id, member_name, generic_argument_ids, mut argument_ids, arguments_span) in
             self.prepped_method_calls.clone()
         {
-            let subject_type = self.infer_type_start(subject_id, Type::Unknown, &HashMap::new());
+            let subject_type = self.infer_type_start(subject_id, &Type::Unknown, &HashMap::new());
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_name = self.structs.get(&struct_id).unwrap().name;
@@ -1301,7 +1307,7 @@ impl<'src> Analyzer<'src> {
                                 let argument_id = *function_call.argument_ids.get(i).unwrap();
                                 let argument_type = self.infer_type_start(
                                     argument_id,
-                                    Type::Unknown,
+                                    &Type::Unknown,
                                     &substitution_context,
                                 );
                                 if self.compare_type(
