@@ -1010,6 +1010,55 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Walk both type trees in parallel, collecting (constraint_id, concrete_type_id) pairs
+    /// for any unbound generics found at corresponding positions.
+    fn collect_type_bindings(
+        &mut self,
+        param_type_id: TypeId,
+        argument_type: &Type,
+        substitution: &SubstitutionContext,
+    ) -> Vec<(TypeId, TypeId)> {
+        let mut bindings = Vec::new();
+        self.bind_collect(param_type_id, argument_type, substitution, &mut bindings);
+        bindings
+    }
+
+    fn bind_collect(
+        &mut self,
+        param_type_id: TypeId,
+        argument_type: &Type,
+        substitution: &SubstitutionContext,
+        bindings: &mut Vec<(TypeId, TypeId)>,
+    ) {
+        let param_type = param_type_id.get_type(self);
+        match (&param_type, argument_type) {
+            (Type::Generic(constraint_id), _) => {
+                if !substitution.contains_key(constraint_id) {
+                    bindings.push((*constraint_id, argument_type.clone().get_type_id(self)));
+                }
+            }
+            (Type::Closure(param_params, param_ret), Type::Closure(arg_params, arg_ret)) => {
+                for (pp_id, ap_id) in param_params.iter().zip(arg_params.iter()) {
+                    let ap_type = ap_id.get_type(self);
+                    self.bind_collect(*pp_id, &ap_type, substitution, bindings);
+                }
+                let arg_ret_type = arg_ret.get_type(self);
+                self.bind_collect(*param_ret, &arg_ret_type, substitution, bindings);
+            }
+            (Type::Primitive(PrimitiveType::List(item_id)), Type::Primitive(PrimitiveType::List(arg_item_id))) => {
+                let arg_item_type = arg_item_id.get_type(self);
+                self.bind_collect(*item_id, &arg_item_type, substitution, bindings);
+            }
+            (Type::Tuple(param_items), Type::Tuple(arg_items)) => {
+                for (pp_id, ap) in param_items.iter().zip(arg_items.iter()) {
+                    let ap_type = ap.get_type(self);
+                    self.bind_collect(*pp_id, &ap_type, substitution, bindings);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn build(&mut self) {
         for (path, name, scope_id) in self.prepped_imports.clone() {
             let mut path = path.iter().map(|x| *x).chain(std::iter::once(name));
@@ -1224,6 +1273,7 @@ impl<'src> Analyzer<'src> {
                             let mut substitution_context = HashMap::new();
                             for (i, parameter_id) in parameters.iter().enumerate() {
                                 let parameter = self.parameters.get(parameter_id).unwrap();
+                                let param_type_id = parameter.type_id;
                                 let parameter_type = parameter.type_id.get_type(self);
                                 for (i, generic_argument_id) in
                                     function_call.generic_argument_ids.iter().enumerate()
@@ -1256,9 +1306,13 @@ impl<'src> Analyzer<'src> {
                                     argument_type.clone(),
                                     &substitution_context,
                                 ) {
-                                    if let Type::Generic(constraint_id) = parameter_type {
-                                        substitution_context
-                                            .insert(constraint_id, argument_type.get_type_id(self));
+                                    let bindings = self.collect_type_bindings(
+                                        param_type_id,
+                                        &argument_type,
+                                        &substitution_context,
+                                    );
+                                    for (constraint_id, type_id) in bindings {
+                                        substitution_context.insert(constraint_id, type_id);
                                     }
                                 } else {
                                     self.diagnostics.push(Error {
