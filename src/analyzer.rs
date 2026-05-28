@@ -283,28 +283,6 @@ impl<'src> Analyzer<'src> {
         self.type_id_to_type_map.get(&type_id).unwrap().clone()
     }
 
-    // fn resolve_type_by_name(&mut self, name: &'src str, scope_id: Id) -> TypeId {
-    //     fn resolve<'src>(
-    //         analyzer: &mut Analyzer<'src>,
-    //         name: &'src str,
-    //         scope_id: Id,
-    //     ) -> Option<TypeId> {
-    //         let scope = analyzer.mut_scope_for_scope_id(scope_id);
-    //         let parent_id = scope.parent_id;
-    //         // println!("scanning {} in {:?} {:#?}", name, scope_id, scope.name_id_map);
-    //         scope.name_to_type_id_map.get(name).map(|x| *x).or_else(|| {
-    //             let subject_id = parent_id
-    //                 .map(|parent_scope_id| resolve(analyzer, name, parent_scope_id))
-    //                 .flatten()?;
-    //             let scope = analyzer.mut_scope_for_scope_id(scope_id);
-    //             scope.name_to_type_id_map.insert(name, subject_id);
-    //             Some(subject_id)
-    //         })
-    //     }
-
-    //     resolve(self, name, scope_id).expect(format!("cannot find: {}", name).as_str())
-    // }
-
     fn get_expr_id_by_name(&mut self, name: &'src str, scope_id: Id) -> Id {
         fn resolve<'src>(
             analyzer: &mut Analyzer<'src>,
@@ -899,8 +877,10 @@ impl<'src> Analyzer<'src> {
 
         println!("resolve_type/inference {:?}", inferred_type);
 
-        self.reconcile_type(constraint, &inferred_type, substitution_context)
-            .unwrap_or_else(|| constraint.clone())
+        let (result, _bindings) = self
+            .reconcile_type(constraint, &inferred_type, substitution_context)
+            .unwrap_or_else(|| (constraint.clone(), Vec::new()));
+        result
     }
 
     fn reconcile_type(
@@ -908,62 +888,68 @@ impl<'src> Analyzer<'src> {
         a: &Type,
         b: &Type,
         substitution_context: &SubstitutionContext,
-    ) -> Option<Type> {
+    ) -> Option<(Type, Vec<(TypeId, TypeId)>)> {
         println!(
             "reconcile_type a={:?} b={:?} substitution_context={:?}",
             a, b, substitution_context
         );
 
         Some(match (a, b) {
-            (Type::Any, _) | (_, Type::Unknown) => a.clone(),
-            (_, Type::Any) | (Type::Unknown, _) => b.clone(),
-            (Type::Generic(constraint_id), _) => {
-                let l = substitution_context
-                    .get(constraint_id)
-                    .map(|x| x.get_type(self))
-                    .unwrap_or_else(|| constraint_id.get_type(self));
-                return self.reconcile_type(&l, b, substitution_context);
-            }
-            (_, Type::Generic(constraint_id)) => {
-                let r = substitution_context
-                    .get(constraint_id)
-                    .map(|x| x.get_type(self))
-                    .unwrap_or_else(|| constraint_id.get_type(self));
-                return self.reconcile_type(a, &r, substitution_context);
-            }
+            (Type::Any, _) | (_, Type::Unknown) => (a.clone(), Vec::new()),
+            (_, Type::Any) | (Type::Unknown, _) => (b.clone(), Vec::new()),
+            (Type::Generic(constraint_id), _) => match substitution_context.get(constraint_id) {
+                Some(resolved_id) => {
+                    let resolved = resolved_id.get_type(self);
+                    let (unified, mut bindings) =
+                        self.reconcile_type(&resolved, b, substitution_context)?;
+                    bindings.push((*constraint_id, b.clone().get_type_id(self)));
+                    (unified, bindings)
+                }
+                None => {
+                    let bindings = vec![(*constraint_id, b.clone().get_type_id(self))];
+                    (a.clone(), bindings)
+                }
+            },
+            (_, Type::Generic(constraint_id)) => match substitution_context.get(constraint_id) {
+                Some(resolved_id) => {
+                    let resolved = resolved_id.get_type(self);
+                    let (unified, mut bindings) =
+                        self.reconcile_type(a, &resolved, substitution_context)?;
+                    bindings.push((*constraint_id, a.clone().get_type_id(self)));
+                    (unified, bindings)
+                }
+                None => {
+                    let bindings = vec![(*constraint_id, a.clone().get_type_id(self))];
+                    (b.clone(), bindings)
+                }
+            },
             (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
                 (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
                     let l = l_id.get_type(self);
                     let r = r_id.get_type(self);
-                    let item_type_id = self
-                        .reconcile_type(&l, &r, substitution_context)
-                        .unwrap_or_else(|| l.clone())
-                        .get_type_id(self);
-                    Type::Primitive(PrimitiveType::List(item_type_id))
+                    let (item_type, bindings) =
+                        self.reconcile_type(&l, &r, substitution_context)?;
+                    let item_type_id = item_type.get_type_id(self);
+                    (Type::Primitive(PrimitiveType::List(item_type_id)), bindings)
                 }
-                (l, r) if l == r => a.clone(),
+                (l, r) if l == r => (a.clone(), Vec::new()),
                 _ => {
                     return None;
                 }
             },
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
-                let l_items_cloned = l_items.clone();
-                let r_items_cloned = r_items.clone();
-                Type::Tuple(
-                    l_items_cloned
-                        .iter()
-                        .zip(r_items_cloned.iter())
-                        .map(|(l_item_id, r_item_id)| {
-                            let l = l_item_id.get_type(self);
-                            let r = r_item_id.get_type(self);
-                            self.reconcile_type(&l, &r, substitution_context)
-                                .unwrap_or_else(|| l.clone())
-                                .get_type_id(self)
-                        })
-                        .collect(),
-                )
+                let mut result_items = Vec::with_capacity(l_items.len());
+                let mut all_bindings = Vec::new();
+                for (l_item_id, r_item_id) in l_items.iter().zip(r_items.iter()) {
+                    let l = l_item_id.get_type(self);
+                    let r = r_item_id.get_type(self);
+                    let (item, bindings) = self.reconcile_type(&l, &r, substitution_context)?;
+                    all_bindings.extend(bindings);
+                    result_items.push(item.get_type_id(self));
+                }
+                (Type::Tuple(result_items), all_bindings)
             }
-            (l, r) if l == r => a.clone(),
+            (l, r) if l == r => (a.clone(), Vec::new()),
             _ => {
                 return None;
             }
@@ -1013,58 +999,6 @@ impl<'src> Analyzer<'src> {
             }
             (a, b) if a == b => true,
             _ => false,
-        }
-    }
-
-    /// Walk both type trees in parallel, collecting (constraint_id, concrete_type_id) pairs
-    /// for any unbound generics found at corresponding positions.
-    fn collect_type_bindings(
-        &mut self,
-        param_type_id: TypeId,
-        argument_type: &Type,
-        substitution: &SubstitutionContext,
-    ) -> Vec<(TypeId, TypeId)> {
-        let mut bindings = Vec::new();
-        self.bind_collect(param_type_id, argument_type, substitution, &mut bindings);
-        bindings
-    }
-
-    fn bind_collect(
-        &mut self,
-        param_type_id: TypeId,
-        argument_type: &Type,
-        substitution: &SubstitutionContext,
-        bindings: &mut Vec<(TypeId, TypeId)>,
-    ) {
-        let param_type = param_type_id.get_type(self);
-        match (&param_type, argument_type) {
-            (Type::Generic(constraint_id), _) => {
-                if !substitution.contains_key(constraint_id) {
-                    bindings.push((*constraint_id, argument_type.clone().get_type_id(self)));
-                }
-            }
-            (Type::Closure(param_params, param_ret), Type::Closure(arg_params, arg_ret)) => {
-                for (pp_id, ap_id) in param_params.iter().zip(arg_params.iter()) {
-                    let ap_type = ap_id.get_type(self);
-                    self.bind_collect(*pp_id, &ap_type, substitution, bindings);
-                }
-                let arg_ret_type = arg_ret.get_type(self);
-                self.bind_collect(*param_ret, &arg_ret_type, substitution, bindings);
-            }
-            (
-                Type::Primitive(PrimitiveType::List(item_id)),
-                Type::Primitive(PrimitiveType::List(arg_item_id)),
-            ) => {
-                let arg_item_type = arg_item_id.get_type(self);
-                self.bind_collect(*item_id, &arg_item_type, substitution, bindings);
-            }
-            (Type::Tuple(param_items), Type::Tuple(arg_items)) => {
-                for (pp_id, ap) in param_items.iter().zip(arg_items.iter()) {
-                    let ap_type = ap.get_type(self);
-                    self.bind_collect(*pp_id, &ap_type, substitution, bindings);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -1282,7 +1216,6 @@ impl<'src> Analyzer<'src> {
                             let mut substitution_context = HashMap::new();
                             for (i, parameter_id) in parameters.iter().enumerate() {
                                 let parameter = self.parameters.get(parameter_id).unwrap();
-                                let param_type_id = parameter.type_id;
                                 let parameter_type = parameter.type_id.get_type(self);
                                 for (i, generic_argument_id) in
                                     function_call.generic_argument_ids.iter().enumerate()
@@ -1310,20 +1243,20 @@ impl<'src> Analyzer<'src> {
                                     &Type::Unknown,
                                     &substitution_context,
                                 );
-                                if self.compare_type(
-                                    &parameter_type,
-                                    &argument_type,
-                                    &substitution_context,
-                                ) {
-                                    let bindings = self.collect_type_bindings(
-                                        param_type_id,
+                                if !self
+                                    .reconcile_type(
+                                        &parameter_type,
                                         &argument_type,
                                         &substitution_context,
-                                    );
-                                    for (constraint_id, type_id) in bindings {
-                                        substitution_context.insert(constraint_id, type_id);
-                                    }
-                                } else {
+                                    )
+                                    .map(|(_unified, bindings)| {
+                                        for (constraint_id, type_id) in bindings {
+                                            substitution_context.insert(constraint_id, type_id);
+                                        }
+                                        true
+                                    })
+                                    .unwrap_or(false)
+                                {
                                     self.diagnostics.push(Error {
                                         span: **self.span_map.get(&argument_id).unwrap(),
                                         msg: format!(
