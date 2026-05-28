@@ -162,6 +162,7 @@ pub struct Analyzer<'src> {
     type_id_to_type_map: HashMap<TypeId, Type>,
     type_id: u32,
     variables: IndexMap<Id, Variable<'src>>,
+    generic_constraint_names: HashMap<TypeId, &'src str>,
 }
 
 impl<'src> Analyzer<'src> {
@@ -197,6 +198,7 @@ impl<'src> Analyzer<'src> {
             type_id_to_type_map: HashMap::new(),
             type_id: 0,
             variables: IndexMap::new(),
+            generic_constraint_names: HashMap::new(),
         }
     }
 
@@ -479,6 +481,8 @@ impl<'src> Analyzer<'src> {
                             .as_ref()
                             .map(|x| self.walk_type_node(x, body_scope_id))
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        self.generic_constraint_names
+                            .insert(constraint_type_id, name);
                         generic_parameter_constraint_ids.push(constraint_type_id);
                         let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
@@ -577,6 +581,8 @@ impl<'src> Analyzer<'src> {
                             .as_ref()
                             .map(|x| self.walk_type_node(x, body_scope_id))
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        self.generic_constraint_names
+                            .insert(constraint_type_id, name);
                         let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
                         self.expr_id_to_expr_map
@@ -632,6 +638,8 @@ impl<'src> Analyzer<'src> {
                             .as_ref()
                             .map(|x| self.walk_type_node(x, body_scope_id))
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
+                        self.generic_constraint_names
+                            .insert(constraint_type_id, name);
                         let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
                         self.expr_id_to_expr_map
@@ -1257,11 +1265,15 @@ impl<'src> Analyzer<'src> {
                                     })
                                     .unwrap_or(false)
                                 {
+                                    let expected = self
+                                        .pretty_print_type(&parameter_type, &substitution_context);
+                                    let got = self
+                                        .pretty_print_type(&argument_type, &substitution_context);
                                     self.diagnostics.push(Error {
                                         span: **self.span_map.get(&argument_id).unwrap(),
                                         msg: format!(
-                                            "Expected type {:?}, but got type {:?} instead.",
-                                            parameter_type, argument_type,
+                                            "Expected type {}, but got type {} instead.",
+                                            expected, got,
                                         ),
                                     });
                                 }
@@ -1286,6 +1298,112 @@ impl<'src> Analyzer<'src> {
         // 		self.variables.get_mut(&subject_id).unwrap().type_ = type_;
         // 	}
         // }
+    }
+
+    /// Pretty-prints a type for diagnostics, resolving generic names
+    /// with their substitution context when available.
+    fn pretty_print_type(&self, type_: &Type, substitution: &SubstitutionContext) -> String {
+        let mut buf = String::new();
+        self.pretty_print_type_inner(type_, substitution, &mut buf, 0);
+        buf
+    }
+
+    fn pretty_print_type_inner(
+        &self,
+        type_: &Type,
+        substitution: &SubstitutionContext,
+        buf: &mut String,
+        _depth: usize,
+    ) {
+        match type_ {
+            Type::Any => buf.push_str("any"),
+            Type::Unknown => buf.push_str("unknown"),
+            Type::Void => buf.push_str("void"),
+
+            Type::Generic(constraint_id) => {
+                let constraint = substitution
+                    .get(constraint_id)
+                    .map(|x| x.get_type(self))
+                    .unwrap_or_else(|| constraint_id.get_type(self));
+
+                if let Some(name) = self.generic_constraint_names.get(constraint_id) {
+                    let concrete_str = self.pretty_print_type(&constraint, substitution);
+                    buf.push_str(&format!("{} ({})", name, concrete_str));
+                } else {
+                    buf.push_str("T");
+                }
+            }
+
+            Type::Function(id) => {
+                let func = self.functions.get(id).unwrap();
+                buf.push_str(&format!("fn {}(", func.name));
+                let mut first = true;
+                for param_id in &func.parameters {
+                    let param = self.parameters.get(param_id).unwrap();
+                    if !first {
+                        buf.push_str(", ");
+                    }
+                    let ptype = param.type_id.get_type(self);
+                    let ptype_str = self.pretty_print_type(&ptype, substitution);
+                    buf.push_str(&ptype_str);
+                    first = false;
+                }
+                buf.push(')');
+            }
+
+            Type::Struct(id) => {
+                let struct_ = self.structs.get(id).unwrap();
+                buf.push_str(&format!("struct {}", struct_.name));
+            }
+
+            Type::Module(id) => {
+                let module = self.modules.get(id).unwrap();
+                buf.push_str(&format!("module {}", module.name));
+            }
+
+            Type::Closure(params, ret) => {
+                buf.push_str("fn(");
+                for (i, param_id) in params.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    let ptype = param_id.get_type(self);
+                    buf.push_str(&self.pretty_print_type(&ptype, substitution));
+                }
+                buf.push_str(") -> ");
+                let ret_str = ret.get_type(self);
+                buf.push_str(&self.pretty_print_type(&ret_str, substitution));
+            }
+
+            Type::Primitive(prim) => match prim {
+                PrimitiveType::List(item_id) => {
+                    buf.push_str("list<");
+                    let item_type = item_id.get_type(self);
+                    let item_str = self.pretty_print_type(&item_type, substitution);
+                    buf.push_str(&item_str);
+                    buf.push('>');
+                }
+                PrimitiveType::I32 => buf.push_str("i32"),
+                PrimitiveType::U32 => buf.push_str("u32"),
+                PrimitiveType::F64 => buf.push_str("f64"),
+                PrimitiveType::String => buf.push_str("str"),
+                PrimitiveType::Bool => buf.push_str("bool"),
+                PrimitiveType::Null => buf.push_str("null"),
+            },
+
+            Type::Tuple(items) => {
+                buf.push('(');
+                for (i, item_id) in items.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(", ");
+                    }
+                    let item_type = item_id.get_type(self);
+                    let item_str = self.pretty_print_type(&item_type, substitution);
+                    buf.push_str(&item_str);
+                }
+                buf.push(')');
+            }
+        }
     }
 }
 
