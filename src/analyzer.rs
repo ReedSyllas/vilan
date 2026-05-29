@@ -327,6 +327,10 @@ impl<'src> Analyzer<'src> {
                 self.prepped_locals.push((id, name));
                 None
             }
+            Node::AccessorWithGenerics(name, generic_arguments) => {
+                self.prepped_locals.push((id, name));
+                None
+            }
             Node::MemberAccessor(subject, member) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 match &member.0 {

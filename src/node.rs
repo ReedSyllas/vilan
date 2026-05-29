@@ -44,6 +44,7 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 #[derive(Debug)]
 pub enum Node<'src> {
     Accessor(&'src str),
+    AccessorWithGenerics(&'src str, GenericArguments<'src>),
     Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
     Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     Bool(bool),
