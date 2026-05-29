@@ -811,9 +811,19 @@ impl<'src> Analyzer<'src> {
             return type_id.get_type(self);
         }
 
+        let constraint = match constraint {
+            Type::Generic(type_id) => substitution_context
+                .get(type_id)
+                .map(|x| x.get_type(self))
+                .unwrap_or_else(|| constraint.clone()),
+            x => x.clone(),
+        };
+
         let expr = self.get_entity_by_id(expr_id);
 
-        println!("resolve_type/input {expr:?} {constraint:?}");
+        println!(
+            "infer_type_inner/input expr = {expr:?}, constraint = {constraint:?}, substitution_context = {substitution_context:?}"
+        );
 
         let inferred_type: Type = match expr {
             Expr::Null => Type::Primitive(PrimitiveType::Null),
@@ -830,36 +840,30 @@ impl<'src> Analyzer<'src> {
                     Type::Tuple(items) => items.clone(),
                     _ => Vec::new(),
                 };
-                Type::Tuple(
-                    item_ids
-                        .clone()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, id)| {
-                            let constraint_item = constraint_items
-                                .get(i)
-                                .map(|x| x.get_type(self))
-                                .unwrap_or(Type::Unknown);
-                            let inferred = self.infer_type_inner(
-                                *id,
-                                &constraint_item,
-                                substitution_context,
-                                exprs_seen,
-                            );
-                            inferred.get_type_id(self)
-                        })
-                        .collect(),
-                )
+                let mut items = Vec::with_capacity(item_ids.len());
+                for (i, id) in item_ids.clone().iter().enumerate() {
+                    let constraint_item = constraint_items
+                        .get(i)
+                        .map(|x| x.get_type(self))
+                        .unwrap_or(Type::Unknown);
+                    let inferred = self.infer_type_inner(
+                        *id,
+                        &constraint_item,
+                        substitution_context,
+                        exprs_seen,
+                    );
+                    items.push(inferred.get_type_id(self));
+                }
+                Type::Tuple(items)
             }
             Expr::Local(subject_id) => {
-                self.infer_type_inner(*subject_id, constraint, substitution_context, exprs_seen)
+                self.infer_type_inner(*subject_id, &constraint, substitution_context, exprs_seen)
             }
             Expr::Function(function_id) => Type::Function(*function_id),
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
-                let id = *id;
-                let function_call = self.function_calls.get(&id).unwrap();
+                let function_call = self.function_calls.get(id).unwrap();
                 let subject_type = self.infer_type_inner(
                     function_call.subject_id,
                     &Type::Unknown,
@@ -883,12 +887,9 @@ impl<'src> Analyzer<'src> {
             _ => Type::Void,
         };
 
-        println!("resolve_type/inference {:?}", inferred_type);
+        println!("infer_type_inner/inference {:?}", inferred_type);
 
-        let (result, _bindings) = self
-            .reconcile_type(constraint, &inferred_type, substitution_context)
-            .unwrap_or_else(|| (constraint.clone(), Vec::new()));
-        result
+        inferred_type
     }
 
     fn reconcile_type(
@@ -1247,13 +1248,13 @@ impl<'src> Analyzer<'src> {
                                 let argument_id = *function_call.argument_ids.get(i).unwrap();
                                 let argument_type = self.infer_type(
                                     argument_id,
-                                    &Type::Unknown,
+                                    &parameter_type,
                                     &substitution_context,
                                 );
                                 if !self
                                     .reconcile_type(
-                                        &parameter_type,
                                         &argument_type,
+                                        &parameter_type,
                                         &substitution_context,
                                     )
                                     .map(|(_unified, bindings)| {
