@@ -778,13 +778,13 @@ impl<'src> Analyzer<'src> {
         type_id
     }
 
-    fn infer_type_start(
+    fn infer_type(
         &mut self,
         expr_id: Id,
         constraint: &Type,
         substitution_context: &SubstitutionContext,
     ) -> Type {
-        self.infer_type(
+        self.infer_type_inner(
             expr_id,
             constraint,
             substitution_context,
@@ -792,7 +792,7 @@ impl<'src> Analyzer<'src> {
         )
     }
 
-    fn infer_type(
+    fn infer_type_inner(
         &mut self,
         expr_id: Id,
         constraint: &Type,
@@ -840,7 +840,7 @@ impl<'src> Analyzer<'src> {
                                 .get(i)
                                 .map(|x| x.get_type(self))
                                 .unwrap_or(Type::Unknown);
-                            let inferred = self.infer_type(
+                            let inferred = self.infer_type_inner(
                                 *id,
                                 &constraint_item,
                                 substitution_context,
@@ -852,7 +852,7 @@ impl<'src> Analyzer<'src> {
                 )
             }
             Expr::Local(subject_id) => {
-                self.infer_type(*subject_id, constraint, substitution_context, exprs_seen)
+                self.infer_type_inner(*subject_id, constraint, substitution_context, exprs_seen)
             }
             Expr::Function(function_id) => Type::Function(*function_id),
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
@@ -860,7 +860,7 @@ impl<'src> Analyzer<'src> {
             Expr::Call(id) => {
                 let id = *id;
                 let function_call = self.function_calls.get(&id).unwrap();
-                let subject_type = self.infer_type(
+                let subject_type = self.infer_type_inner(
                     function_call.subject_id,
                     &Type::Unknown,
                     substitution_context,
@@ -1037,7 +1037,7 @@ impl<'src> Analyzer<'src> {
 
         for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
-            let subject_type = self.infer_type_start(subject_id, &Type::Unknown, &HashMap::new());
+            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             self.type_id_to_type_map.insert(type_id, subject_type);
         }
 
@@ -1046,8 +1046,7 @@ impl<'src> Analyzer<'src> {
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
                     let member_id = self.get_expr_id_by_name(member_name, module.body.1);
-                    let member_type =
-                        self.infer_type_start(member_id, &Type::Unknown, &HashMap::new());
+                    let member_type = self.infer_type(member_id, &Type::Unknown, &HashMap::new());
                     self.type_id_to_type_map.insert(type_id, member_type);
                 }
                 _ => {}
@@ -1055,7 +1054,7 @@ impl<'src> Analyzer<'src> {
         }
 
         for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
-            let subject_type = self.infer_type_start(subject_id, &Type::Unknown, &HashMap::new());
+            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
@@ -1077,7 +1076,7 @@ impl<'src> Analyzer<'src> {
         for (id, subject_id, member_name, generic_argument_ids, mut argument_ids, arguments_span) in
             self.prepped_method_calls.clone()
         {
-            let subject_type = self.infer_type_start(subject_id, &Type::Unknown, &HashMap::new());
+            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_name = self.structs.get(&struct_id).unwrap().name;
@@ -1246,7 +1245,7 @@ impl<'src> Analyzer<'src> {
                                     substitution_context
                                 );
                                 let argument_id = *function_call.argument_ids.get(i).unwrap();
-                                let argument_type = self.infer_type_start(
+                                let argument_type = self.infer_type(
                                     argument_id,
                                     &Type::Unknown,
                                     &substitution_context,
@@ -1338,14 +1337,14 @@ impl<'src> Analyzer<'src> {
                 let func = self.functions.get(id).unwrap();
                 buf.push_str(&format!("fn {}(", func.name));
                 let mut first = true;
-                for param_id in &func.parameters {
-                    let param = self.parameters.get(param_id).unwrap();
+                for parameter_id in &func.parameters {
+                    let parameter = self.parameters.get(parameter_id).unwrap();
                     if !first {
                         buf.push_str(", ");
                     }
-                    let ptype = param.type_id.get_type(self);
-                    let ptype_str = self.pretty_print_type(&ptype, substitution);
-                    buf.push_str(&ptype_str);
+                    let parameter_type = parameter.type_id.get_type(self);
+                    let parameter_type_str = self.pretty_print_type(&parameter_type, substitution);
+                    buf.push_str(&parameter_type_str);
                     first = false;
                 }
                 buf.push(')');
@@ -1361,23 +1360,23 @@ impl<'src> Analyzer<'src> {
                 buf.push_str(&format!("module {}", module.name));
             }
 
-            Type::Closure(params, ret) => {
+            Type::Closure(parameters, return_id) => {
                 buf.push_str("fn(");
-                for (i, param_id) in params.iter().enumerate() {
+                for (i, parameter_id) in parameters.iter().enumerate() {
                     if i > 0 {
                         buf.push_str(", ");
                     }
-                    let ptype = param_id.get_type(self);
-                    buf.push_str(&self.pretty_print_type(&ptype, substitution));
+                    let parameter_type = parameter_id.get_type(self);
+                    buf.push_str(&self.pretty_print_type(&parameter_type, substitution));
                 }
                 buf.push_str(") -> ");
-                let ret_str = ret.get_type(self);
-                buf.push_str(&self.pretty_print_type(&ret_str, substitution));
+                let return_type = return_id.get_type(self);
+                buf.push_str(&self.pretty_print_type(&return_type, substitution));
             }
 
             Type::Primitive(prim) => match prim {
                 PrimitiveType::List(item_id) => {
-                    buf.push_str("list<");
+                    buf.push_str("List<");
                     let item_type = item_id.get_type(self);
                     let item_str = self.pretty_print_type(&item_type, substitution);
                     buf.push_str(&item_str);
