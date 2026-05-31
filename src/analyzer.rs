@@ -152,7 +152,8 @@ pub struct Analyzer<'src> {
     prepped_locals: Vec<(Id, &'src str)>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
-    prepped_struct_initializers: Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
+    prepped_struct_initializers:
+        Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str)>,
     reference_count: HashMap<Id, u32>,
@@ -611,7 +612,15 @@ impl<'src> Analyzer<'src> {
                         .unwrap_or(Type::Unknown.get_type_id(self));
                     fields.push(Field { name, type_id });
                 }
-                self.structs.insert(id, Struct { id, name, generic_parameter_constraint_ids, fields });
+                self.structs.insert(
+                    id,
+                    Struct {
+                        id,
+                        name,
+                        generic_parameter_constraint_ids,
+                        fields,
+                    },
+                );
                 Some(Expr::Struct(id))
             }
             Node::StructInitializer(name, generic_arguments, fields) => {
@@ -641,8 +650,13 @@ impl<'src> Analyzer<'src> {
                         )
                     })
                     .collect::<Vec<_>>();
-                self.prepped_struct_initializers
-                    .push((id, name, generic_argument_ids, e_fields, fields.1));
+                self.prepped_struct_initializers.push((
+                    id,
+                    name,
+                    generic_argument_ids,
+                    e_fields,
+                    fields.1,
+                ));
                 None
             }
             Node::Impl(subject, generic_parameters, body) => {
@@ -1179,7 +1193,9 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (id, name, generic_argument_ids, fields, fields_span) in self.prepped_struct_initializers.clone() {
+        for (id, name, generic_argument_ids, fields, fields_span) in
+            self.prepped_struct_initializers.clone()
+        {
             let scope_id = self.get_scope_id_for_entity(id);
             let struct_id = self.get_expr_id_by_name(name, scope_id);
             let struct_ = self
@@ -1201,18 +1217,11 @@ impl<'src> Analyzer<'src> {
             } else {
                 let mut initializer_fields = IndexMap::new();
                 let mut substitution_context = HashMap::new();
-                for (i, generic_argument_id) in
-                    generic_argument_ids.iter().enumerate()
-                {
-                    let generic_parameter_constraint_id =
-                        generic_parameter_constraint_ids.get(i);
-                    if let Some(generic_parameter_constraint_id) =
-                        generic_parameter_constraint_id
-                    {
-                        substitution_context.insert(
-                            *generic_parameter_constraint_id,
-                            *generic_argument_id,
-                        );
+                for (i, generic_argument_id) in generic_argument_ids.iter().enumerate() {
+                    let generic_parameter_constraint_id = generic_parameter_constraint_ids.get(i);
+                    if let Some(generic_parameter_constraint_id) = generic_parameter_constraint_id {
+                        substitution_context
+                            .insert(*generic_parameter_constraint_id, *generic_argument_id);
                     }
                 }
                 for (field_name, field_value, field_value_span) in fields {
