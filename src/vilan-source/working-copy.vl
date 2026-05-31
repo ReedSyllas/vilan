@@ -1,10 +1,10 @@
 import std;
 
-fun f<T>(x: T, y: T): T {
-	x + y
+struct S<T> {
+	inner: T
 }
 
 fun main() {
-	let v = f<f64>(1, 2);
+	let v = S<f64> { inner = "10" };
 	std::print(v);
 }

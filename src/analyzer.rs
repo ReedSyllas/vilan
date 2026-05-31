@@ -94,10 +94,11 @@ pub struct Variable<'src> {
 pub struct Struct<'src> {
     pub id: Id,
     pub name: &'src str,
+    pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub fields: Vec<Field<'src>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Field<'src> {
     pub name: &'src str,
     pub type_id: TypeId,
@@ -151,7 +152,7 @@ pub struct Analyzer<'src> {
     prepped_locals: Vec<(Id, &'src str)>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
-    prepped_struct_initializers: Vec<(Id, &'src str, Vec<(&'src str, Id)>)>,
+    prepped_struct_initializers: Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str)>,
     reference_count: HashMap<Id, u32>,
@@ -579,6 +580,7 @@ impl<'src> Analyzer<'src> {
                 self.reference_count.entry(id).or_insert(0);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
+                let mut generic_parameter_constraint_ids = Vec::new();
                 if let Some(generic_parameters) = generic_parameters {
                     for (name, type_) in &generic_parameters.0 {
                         let constraint_type_id = type_
@@ -587,6 +589,7 @@ impl<'src> Analyzer<'src> {
                             .unwrap_or_else(|| Type::Any.get_type_id(self));
                         self.generic_constraint_names
                             .insert(constraint_type_id, name);
+                        generic_parameter_constraint_ids.push(constraint_type_id);
                         let type_id = Type::Generic(constraint_type_id).get_type_id(self);
                         let expr_id = self.new_entity_id();
                         self.expr_id_to_expr_map
@@ -608,10 +611,18 @@ impl<'src> Analyzer<'src> {
                         .unwrap_or(Type::Unknown.get_type_id(self));
                     fields.push(Field { name, type_id });
                 }
-                self.structs.insert(id, Struct { id, name, fields });
+                self.structs.insert(id, Struct { id, name, generic_parameter_constraint_ids, fields });
                 Some(Expr::Struct(id))
             }
             Node::StructInitializer(name, generic_arguments, fields) => {
+                let generic_argument_ids = generic_arguments
+                    .as_ref()
+                    .map(|x| {
+                        x.0.iter()
+                            .map(|y| self.walk_type_node(y, scope_id))
+                            .collect()
+                    })
+                    .unwrap_or_else(Vec::new);
                 let e_fields = fields
                     .0
                     .iter()
@@ -626,10 +637,12 @@ impl<'src> Analyzer<'src> {
                                     self.prepped_locals.push((local_id, name));
                                     local_id
                                 }),
+                            x.0.1.as_ref().map(|y| y.1).unwrap_or(x.1),
                         )
                     })
                     .collect::<Vec<_>>();
-                self.prepped_struct_initializers.push((id, name, e_fields));
+                self.prepped_struct_initializers
+                    .push((id, name, generic_argument_ids, e_fields, fields.1));
                 None
             }
             Node::Impl(subject, generic_parameters, body) => {
@@ -1166,24 +1179,82 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (id, name, fields) in self.prepped_struct_initializers.clone() {
+        for (id, name, generic_argument_ids, fields, fields_span) in self.prepped_struct_initializers.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             let struct_id = self.get_expr_id_by_name(name, scope_id);
             let struct_ = self
                 .structs
                 .get(&struct_id)
                 .expect("cannot initialize a non-struct");
-            let mut initializer_fields = IndexMap::new();
-            for field in fields {
-                let index = struct_
-                    .fields
-                    .iter()
-                    .position(|x| x.name == field.0)
-                    .expect(format!("unknown field: {}", field.0).as_str());
-                initializer_fields.insert(index, field.1);
+            let struct_fields = struct_.fields.clone();
+            let generic_parameter_constraint_ids = struct_.generic_parameter_constraint_ids.clone();
+            if fields.len() != struct_fields.len() {
+                self.diagnostics.push(Error {
+                    span: fields_span,
+                    msg: format!(
+                        "Expected {} {}, but got {} instead.",
+                        struct_fields.len(),
+                        plural(struct_fields.len(), "field", "fields"),
+                        fields.len()
+                    ),
+                });
+            } else {
+                let mut initializer_fields = IndexMap::new();
+                let mut substitution_context = HashMap::new();
+                for (i, generic_argument_id) in
+                    generic_argument_ids.iter().enumerate()
+                {
+                    let generic_parameter_constraint_id =
+                        generic_parameter_constraint_ids.get(i);
+                    if let Some(generic_parameter_constraint_id) =
+                        generic_parameter_constraint_id
+                    {
+                        substitution_context.insert(
+                            *generic_parameter_constraint_id,
+                            *generic_argument_id,
+                        );
+                    }
+                }
+                for (field_name, field_value, field_value_span) in fields {
+                    let (struct_field_index, struct_field) = struct_fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, x)| x.name == field_name)
+                        .expect(format!("unknown field: {}", field_name).as_str());
+                    initializer_fields.insert(struct_field_index, field_value);
+                    let struct_field_type = struct_field.type_id.get_type(self);
+                    let initializer_field_type =
+                        self.infer_type(field_value, &struct_field_type, &substitution_context);
+                    if !self
+                        .reconcile_type(
+                            &initializer_field_type,
+                            &struct_field_type,
+                            &substitution_context,
+                        )
+                        .map(|(_unified, bindings)| {
+                            for (constraint_id, type_id) in bindings {
+                                substitution_context.insert(constraint_id, type_id);
+                            }
+                            true
+                        })
+                        .unwrap_or(false)
+                    {
+                        let expected_type_str =
+                            self.pretty_print_type(&struct_field_type, &substitution_context);
+                        let got_type_str =
+                            self.pretty_print_type(&initializer_field_type, &substitution_context);
+                        self.diagnostics.push(Error {
+                            span: field_value_span,
+                            msg: format!(
+                                "Expected type {}, but got type {} instead.",
+                                expected_type_str, got_type_str,
+                            ),
+                        });
+                    }
+                }
+                self.expr_id_to_expr_map
+                    .insert(id, Expr::StructInitializer(struct_id, initializer_fields));
             }
-            self.expr_id_to_expr_map
-                .insert(id, Expr::StructInitializer(struct_id, initializer_fields));
         }
 
         let function_call_ids = self.function_calls.keys().copied().collect::<Vec<_>>();
@@ -1226,23 +1297,23 @@ impl<'src> Analyzer<'src> {
                             });
                         } else {
                             let mut substitution_context = HashMap::new();
+                            for (i, generic_argument_id) in
+                                function_call.generic_argument_ids.iter().enumerate()
+                            {
+                                let generic_parameter_constraint_id =
+                                    generic_parameter_constraint_ids.get(i);
+                                if let Some(generic_parameter_constraint_id) =
+                                    generic_parameter_constraint_id
+                                {
+                                    substitution_context.insert(
+                                        *generic_parameter_constraint_id,
+                                        *generic_argument_id,
+                                    );
+                                }
+                            }
                             for (i, parameter_id) in parameters.iter().enumerate() {
                                 let parameter = self.parameters.get(parameter_id).unwrap();
                                 let parameter_type = parameter.type_id.get_type(self);
-                                for (i, generic_argument_id) in
-                                    function_call.generic_argument_ids.iter().enumerate()
-                                {
-                                    let generic_parameter_constraint_id =
-                                        generic_parameter_constraint_ids.get(i);
-                                    if let Some(generic_parameter_constraint_id) =
-                                        generic_parameter_constraint_id
-                                    {
-                                        substitution_context.insert(
-                                            *generic_parameter_constraint_id,
-                                            *generic_argument_id,
-                                        );
-                                    }
-                                }
                                 println!(
                                     "FUNCTION CALL (1) {:?} (2) {:?} (3) {:?}",
                                     function_call.generic_argument_ids,
