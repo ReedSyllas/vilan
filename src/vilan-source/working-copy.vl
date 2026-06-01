@@ -1,11 +1,6 @@
 import std;
 
-struct S<T, U> {
-	first: T,
-	second: U,
-}
-
 fun main() {
-	let v = S<f64, i32> { first = 10, second = "20" };
+	let v: str = "a" + "b";
 	std::print(v);
 }

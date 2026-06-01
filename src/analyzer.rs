@@ -915,6 +915,9 @@ impl<'src> Analyzer<'src> {
                 parameter.type_id.get_type(self)
             }
             Expr::Generic(type_id) => type_id.get_type(self),
+            Expr::Binary(_, lhs_id, _rhs_id) => {
+                self.infer_type_inner(*lhs_id, &constraint, substitution_context, exprs_seen)
+            }
             _ => Type::Void,
         };
 
@@ -1371,17 +1374,47 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        // for (subject_id, value_ids) in self.assignment_values.clone() {
-        // 	if let Some(variable) = self.variables.get(&subject_id) {
-        // 		let mut type_ = variable.type_.clone();
+        for (subject_id, value_ids) in self.assignment_values.clone() {
+            if let Some(variable) = self.variables.get(&subject_id) {
+                let mut substitution_context = HashMap::new();
 
-        // 		for value_id in value_ids {
-        // 			type_ = self.resolve_type_start(value_id, type_);
-        // 		}
+                let mut variable_type = variable.type_id.get_type(self);
 
-        // 		self.variables.get_mut(&subject_id).unwrap().type_ = type_;
-        // 	}
-        // }
+                for value_id in value_ids {
+                    let value_type =
+                        self.infer_type(value_id, &variable_type, &substitution_context);
+                    let has_matched_type = self
+                        .reconcile_type(&value_type, &variable_type, &substitution_context)
+                        .map(|(_unified, bindings)| {
+                            for (constraint_id, type_id) in bindings {
+                                substitution_context.insert(constraint_id, type_id);
+                            }
+                            true
+                        })
+                        .unwrap_or(false);
+                    if has_matched_type {
+                        if let Type::Unknown = variable_type {
+                            variable_type = value_type;
+                        }
+                    } else {
+                        let expected_type_str =
+                            self.pretty_print_type(&variable_type, &substitution_context);
+                        let got_type_str =
+                            self.pretty_print_type(&value_type, &substitution_context);
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&value_id).unwrap(),
+                            msg: format!(
+                                "Expected {}, but got {} instead.",
+                                expected_type_str, got_type_str,
+                            ),
+                        });
+                    }
+                }
+
+                self.variables.get_mut(&subject_id).unwrap().type_id =
+                    variable_type.get_type_id(self);
+            }
+        }
     }
 
     /// Pretty-prints a type for diagnostics, resolving generic names
@@ -1409,7 +1442,10 @@ impl<'src> Analyzer<'src> {
                     .get(constraint_id)
                     .map(|x| x.get_type(self))
                     .unwrap_or_else(|| constraint_id.get_type(self));
-                let generic_name = self.generic_constraint_names.get(constraint_id).expect("failed to find generic name");
+                let generic_name = self
+                    .generic_constraint_names
+                    .get(constraint_id)
+                    .expect("failed to find generic name");
                 let concrete_str = self.pretty_print_type(&constraint, substitution);
                 buf.push_str(&format!("generic {} of {}", generic_name, concrete_str));
             }
@@ -1514,6 +1550,7 @@ pub struct Program<'src> {
     pub scopes: IndexMap<Id, Scope<'src>>,
     pub span_map: HashMap<Id, &'src Span>,
     pub structs: IndexMap<Id, Struct<'src>>,
+    pub type_id_to_type_map: HashMap<TypeId, Type>,
     pub variables: IndexMap<Id, Variable<'src>>,
 }
 
@@ -1589,6 +1626,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         scopes: analyzer.scopes,
         span_map: analyzer.span_map,
         structs: analyzer.structs,
+        type_id_to_type_map: analyzer.type_id_to_type_map,
         variables: analyzer.variables,
     }
 }

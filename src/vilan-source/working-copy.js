@@ -1,2 +1,2 @@
-const a/*v*/ = [ 10, "20" ];
+const a/*v*/ = "a" + "b";
 console.log(a/*v*/);
