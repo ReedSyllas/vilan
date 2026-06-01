@@ -1,10 +1,11 @@
 import std;
 
-struct S<T> {
-	inner: T
+struct S<T, U> {
+	first: T,
+	second: U,
 }
 
 fun main() {
-	let v = S<f64> { inner = "10" };
+	let v = S<f64, i32> { first = 10, second = "20" };
 	std::print(v);
 }

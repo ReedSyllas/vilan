@@ -1255,7 +1255,7 @@ impl<'src> Analyzer<'src> {
                         self.diagnostics.push(Error {
                             span: field_value_span,
                             msg: format!(
-                                "Expected type {}, but got type {} instead.",
+                                "Expected {}, but got {} instead.",
                                 expected_type_str, got_type_str,
                             ),
                         });
@@ -1349,15 +1349,15 @@ impl<'src> Analyzer<'src> {
                                     })
                                     .unwrap_or(false)
                                 {
-                                    let expected = self
+                                    let expected_type_str = self
                                         .pretty_print_type(&parameter_type, &substitution_context);
-                                    let got = self
+                                    let got_type_str = self
                                         .pretty_print_type(&argument_type, &substitution_context);
                                     self.diagnostics.push(Error {
                                         span: **self.span_map.get(&argument_id).unwrap(),
                                         msg: format!(
-                                            "Expected type {}, but got type {} instead.",
-                                            expected, got,
+                                            "Expected {}, but got {} instead.",
+                                            expected_type_str, got_type_str,
                                         ),
                                     });
                                 }
@@ -1400,22 +1400,18 @@ impl<'src> Analyzer<'src> {
         _depth: usize,
     ) {
         match type_ {
-            Type::Any => buf.push_str("any"),
-            Type::Unknown => buf.push_str("unknown"),
-            Type::Void => buf.push_str("void"),
+            Type::Any => buf.push_str("type any"),
+            Type::Unknown => buf.push_str("type unknown"),
+            Type::Void => buf.push_str("type void"),
 
             Type::Generic(constraint_id) => {
                 let constraint = substitution
                     .get(constraint_id)
                     .map(|x| x.get_type(self))
                     .unwrap_or_else(|| constraint_id.get_type(self));
-
-                if let Some(name) = self.generic_constraint_names.get(constraint_id) {
-                    let concrete_str = self.pretty_print_type(&constraint, substitution);
-                    buf.push_str(&format!("{} ({})", name, concrete_str));
-                } else {
-                    buf.push_str("T");
-                }
+                let generic_name = self.generic_constraint_names.get(constraint_id).expect("failed to find generic name");
+                let concrete_str = self.pretty_print_type(&constraint, substitution);
+                buf.push_str(&format!("generic {} of {}", generic_name, concrete_str));
             }
 
             Type::Function(id) => {
@@ -1446,7 +1442,7 @@ impl<'src> Analyzer<'src> {
             }
 
             Type::Closure(parameters, return_id) => {
-                buf.push_str("fn(");
+                buf.push_str("|");
                 for (i, parameter_id) in parameters.iter().enumerate() {
                     if i > 0 {
                         buf.push_str(", ");
@@ -1454,29 +1450,29 @@ impl<'src> Analyzer<'src> {
                     let parameter_type = parameter_id.get_type(self);
                     buf.push_str(&self.pretty_print_type(&parameter_type, substitution));
                 }
-                buf.push_str(") -> ");
+                buf.push_str("| ");
                 let return_type = return_id.get_type(self);
                 buf.push_str(&self.pretty_print_type(&return_type, substitution));
             }
 
             Type::Primitive(prim) => match prim {
                 PrimitiveType::List(item_id) => {
-                    buf.push_str("List<");
+                    buf.push_str("type List<");
                     let item_type = item_id.get_type(self);
                     let item_str = self.pretty_print_type(&item_type, substitution);
                     buf.push_str(&item_str);
                     buf.push('>');
                 }
-                PrimitiveType::I32 => buf.push_str("i32"),
-                PrimitiveType::U32 => buf.push_str("u32"),
-                PrimitiveType::F64 => buf.push_str("f64"),
-                PrimitiveType::String => buf.push_str("str"),
-                PrimitiveType::Bool => buf.push_str("bool"),
-                PrimitiveType::Null => buf.push_str("null"),
+                PrimitiveType::I32 => buf.push_str("type i32"),
+                PrimitiveType::U32 => buf.push_str("type u32"),
+                PrimitiveType::F64 => buf.push_str("type f64"),
+                PrimitiveType::String => buf.push_str("type str"),
+                PrimitiveType::Bool => buf.push_str("type bool"),
+                PrimitiveType::Null => buf.push_str("type null"),
             },
 
             Type::Tuple(items) => {
-                buf.push('(');
+                buf.push_str("type (");
                 for (i, item_id) in items.iter().enumerate() {
                     if i > 0 {
                         buf.push_str(", ");
