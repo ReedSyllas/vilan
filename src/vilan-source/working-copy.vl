@@ -1,6 +1,17 @@
 import std;
 
+struct S {
+	inner: f64,
+}
+
+impl S {
+	fun add(self: S, value: f64): f64 {
+		self.inner + value
+	}
+}
+
 fun main() {
-	let v: str = "a" + "b";
-	std::print(v);
+	let v: S = S { inner = 10 };
+	let u = v.add(20);
+	std::print(u);
 }

@@ -914,6 +914,7 @@ impl<'src> Analyzer<'src> {
                 let parameter = self.parameters.get(parameter_id).unwrap();
                 parameter.type_id.get_type(self)
             }
+            Expr::StructInitializer(struct_id, _initializer_fields) => Type::Struct(*struct_id),
             Expr::Generic(type_id) => type_id.get_type(self),
             Expr::Binary(_, lhs_id, _rhs_id) => {
                 self.infer_type_inner(*lhs_id, &constraint, substitution_context, exprs_seen)
