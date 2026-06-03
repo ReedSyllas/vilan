@@ -13,6 +13,7 @@ pub enum Type {
     Struct(Id),
     Tuple(Vec<TypeId>),
     Unknown,
+    Unresolved,
     Void,
 }
 
