@@ -128,6 +128,7 @@ pub struct Closure {
 /// match the corresponding struct field type.
 #[derive(Debug, Clone)]
 pub struct StructInitializerConstraint<'src> {
+    pub initializer_id: Id,
     pub struct_id: Id,
     pub struct_name: &'src str,
     pub struct_fields: Vec<Field<'src>>,
@@ -169,13 +170,14 @@ pub struct FieldAccessorConstraint<'src> {
 
 impl<'src> StructInitializerConstraint<'src> {
     fn from_walk(
-        _id: Id,
+        initializer_id: Id,
         name: &'src str,
         generic_argument_ids: Vec<TypeId>,
         e_fields: Vec<(&'src str, Id, Span)>,
         fields_span: Span,
     ) -> Self {
         Self {
+            initializer_id,
             struct_id: Id(0),
             struct_name: name,
             struct_fields: Vec::new(),
@@ -256,6 +258,7 @@ pub struct Analyzer<'src> {
     scopes: IndexMap<Id, Scope<'src>>,
     span_map: HashMap<Id, &'src Span>,
     struct_initializer_constraints: Vec<StructInitializerConstraint<'src>>,
+    struct_initializer_to_def: HashMap<Id, Id>, // initializer_id -> struct definition id
     structs: IndexMap<Id, Struct<'src>>,
     type_id_to_type_map: HashMap<TypeId, Type>,
     type_id: u32,
@@ -303,6 +306,7 @@ impl<'src> Analyzer<'src> {
             scopes: IndexMap::new(),
             span_map: HashMap::new(),
             struct_initializer_constraints: Vec::new(),
+            struct_initializer_to_def: HashMap::new(),
             structs: IndexMap::new(),
             type_id_to_type_map: HashMap::new(),
             type_id: 0,
@@ -959,6 +963,10 @@ impl<'src> Analyzer<'src> {
         if let Some(type_id) = self.expr_id_to_type_id_map.get(&expr_id) {
             return type_id.get_type(self);
         }
+        // Also check resolved_types for types resolved during constraint solving.
+        if let Some(&type_id) = self.resolved_types.get(&expr_id) {
+            return type_id.get_type(self);
+        }
 
         let constraint = match constraint {
             Type::Generic(type_id) => substitution_context
@@ -1046,7 +1054,15 @@ impl<'src> Analyzer<'src> {
                 let parameter = self.parameters.get(parameter_id).unwrap();
                 parameter.type_id.get_type(self)
             }
-            Expr::StructInitializer(struct_id, _initializer_fields) => Type::Struct(*struct_id),
+            Expr::StructInitializer(initializer_id, _initializer_fields) => {
+                // Look up the actual struct definition ID from the mapping.
+                // If not found, defer and let downstream constraints handle it.
+                if let Some(&struct_def_id) = self.struct_initializer_to_def.get(initializer_id) {
+                    Type::Struct(struct_def_id)
+                } else {
+                    Type::Struct(*initializer_id)
+                }
+            }
             Expr::Generic(type_id) => type_id.get_type(self),
             Expr::Binary(_, lhs_id, _rhs_id) => {
                 let lhs =
@@ -1251,62 +1267,6 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        // Method call prepass: resolve method subjects (struct method lookups)
-        for (id, subject_id, member_name, generic_argument_ids, mut argument_ids, arguments_span) in
-            self.prepped_method_calls.clone()
-        {
-            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-            match subject_type {
-                Type::Struct(struct_id) => {
-                    let struct_name = self.structs.get(&struct_id).unwrap().name;
-                    let member_id = self
-                        .implementations
-                        .iter()
-                        .filter(|x| {
-                            self.compare_type(
-                                &subject_type,
-                                &x.subject.get_type(self),
-                                &HashMap::new(),
-                            )
-                        })
-                        .find_map(|x| {
-                            x.declarations.get(member_name).and_then(|member_id| {
-                                match self.get_entity_by_id(*member_id) {
-                                    Expr::Function(function_id) => {
-                                        let function = self.functions.get(function_id).unwrap();
-                                        function.parameters.get(0).and_then(|parameter_id| {
-                                            let parameter =
-                                                self.parameters.get(parameter_id).unwrap();
-                                            (parameter.name == "self").then_some(*member_id)
-                                        })
-                                    }
-                                    _ => panic!("method subject is not a function"),
-                                }
-                            })
-                        })
-                        .expect(format!("cannot find {} in {}", member_name, struct_name).as_str());
-                    let member_local_id = self.new_entity_id();
-                    self.expr_id_to_expr_map
-                        .insert(member_local_id, Expr::Local(member_id));
-                    argument_ids.insert(0, subject_id);
-                    self.function_calls.insert(
-                        id,
-                        FunctionCall {
-                            id,
-                            subject_id: member_local_id,
-                            generic_argument_ids,
-                            argument_ids,
-                            arguments_span,
-                        },
-                    );
-                    self.expr_id_to_expr_map.insert(id, Expr::Call(id));
-                }
-                _ => unimplemented!(
-                    "Unhandled subject type for method call. In other words, the type of `subject` in `subject.method()` was not handled. This is a compiler bug, not one with your code."
-                ),
-            }
-        }
-
         for (id, subject_type_id, member_name) in self.prepped_static_accessors.clone() {
             let subject_type = subject_type_id.get_type(self);
             match subject_type {
@@ -1354,8 +1314,29 @@ impl<'src> Analyzer<'src> {
             // --- Resolve struct initializer constraints ---
             let mut unresolved_constraints = Vec::new();
             for mut constraint in std::mem::take(&mut self.struct_initializer_constraints) {
-                let scope_id = self.get_scope_id_for_entity(constraint.struct_id);
-                let struct_expr_id = self.get_expr_id_by_name(constraint.struct_name, scope_id);
+                // struct_id is Id(0) as placeholder; resolve by name across all scopes.
+                let struct_expr_id = if constraint.struct_id == Id(0) {
+                    let mut found_id = None;
+                    for scope in self.scopes.values() {
+                        if let Some(expr_id) = scope.name_to_id_map.get(constraint.struct_name) {
+                            found_id = Some(*expr_id);
+                            break;
+                        }
+                    }
+                    match found_id {
+                        Some(expr_id) => expr_id,
+                        None => {
+                            self.diagnostics.push(Error {
+                                span: constraint.fields_span.clone(),
+                                msg: format!("unknown struct: {}", constraint.struct_name),
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    let scope_id = self.get_scope_id_for_entity(constraint.struct_id);
+                    self.get_expr_id_by_name(constraint.struct_name, scope_id)
+                };
                 constraint.struct_id = struct_expr_id;
                 let struct_ = match self.structs.get(&constraint.struct_id) {
                     Some(s) => s,
@@ -1392,7 +1373,7 @@ impl<'src> Analyzer<'src> {
                         substitution_context.insert(*gc, *generic_argument_id);
                     }
                 }
-                let mut all_fields_ok = true;
+                let initializer_id = constraint.initializer_id;
                 let mut defer = None;
                 let fields = constraint.fields.clone();
                 let struct_id = constraint.struct_id;
@@ -1402,46 +1383,49 @@ impl<'src> Analyzer<'src> {
                         .enumerate()
                         .find(|(_, x)| *x.name == **field_name)
                         .expect(format!("unknown field: {}", field_name).as_str());
-                    if !self.expr_id_to_type_id_map.contains_key(field_value)
-                        && !self.resolved_types.contains_key(field_value)
-                    {
-                        defer = Some(constraint);
-                        break;
-                    }
+                    let struct_field_type = struct_field.type_id.get_type(self);
                     let value_type =
                         self.infer_type(*field_value, &Type::Unknown, &substitution_context);
-                    let struct_field_type = struct_field.type_id.get_type(self);
                     if let Type::Unresolved = value_type {
                         defer = Some(constraint);
                         break;
                     }
-                    if let Some((_, bindings)) =
+                    if let Some((_unified, bindings)) =
                         self.reconcile_type(&value_type, &struct_field_type, &substitution_context)
                     {
                         for (cid, tid) in bindings {
                             substitution_context.insert(cid, tid);
                         }
+                        initializer_fields.insert(struct_field_index, *field_value);
                     } else {
-                        all_fields_ok = false;
+                        // Type mismatch: emit diagnostic but still record the type for downstream consumers.
+                        self.diagnostics.push(Error {
+                            span: constraint.fields_span.clone(),
+                            msg: format!(
+                                "Expected {}, but got {} instead.",
+                                self.pretty_print_type(&struct_field_type, &substitution_context),
+                                self.pretty_print_type(&value_type, &substitution_context),
+                            ),
+                        });
+                        let type_id = Type::Struct(struct_id).get_type_id(self);
+                        self.resolved_types.insert(initializer_id, type_id);
+                        self.struct_initializer_to_def
+                            .insert(initializer_id, struct_id);
                     }
-                    initializer_fields.insert(struct_field_index, *field_value);
                 }
                 if let Some(deferred) = defer {
-                    all_fields_ok = false;
                     unresolved_constraints.push(deferred);
                 }
-                if all_fields_ok {
-                    self.expr_id_to_expr_map.insert(
-                        struct_id,
-                        Expr::StructInitializer(struct_id, initializer_fields),
-                    );
-                    for (_, v, _) in &fields {
-                        if let Some(t) = self.expr_id_to_type_id_map.get(v) {
-                            self.resolved_types.insert(struct_id, *t);
-                        }
-                    }
-                    progress = true;
-                }
+                // Always store the struct initializer expression so infer_type can handle it.
+                self.expr_id_to_expr_map.insert(
+                    initializer_id,
+                    Expr::StructInitializer(initializer_id, initializer_fields),
+                );
+                // Store the mapping from initializer to struct definition.
+                self.struct_initializer_to_def
+                    .insert(initializer_id, struct_id);
+                let type_id = Type::Struct(struct_id).get_type_id(self);
+                self.resolved_types.insert(initializer_id, type_id);
             }
             self.struct_initializer_constraints = unresolved_constraints;
             if !self.struct_initializer_constraints.is_empty() {
@@ -1507,6 +1491,102 @@ impl<'src> Analyzer<'src> {
             self.field_accessor_constraints = remaining_accessors;
             if !self.field_accessor_constraints.is_empty() {
                 progress = true;
+            }
+
+            // --- Resolve deferred method calls ---
+            if !self.prepped_method_calls.is_empty() {
+                let mut remaining_methods = Vec::new();
+                let method_calls: Vec<_> = std::mem::take(&mut self.prepped_method_calls)
+                    .into_iter()
+                    .collect();
+                for (
+                    id,
+                    subject_id,
+                    member_name,
+                    generic_argument_ids,
+                    mut argument_ids,
+                    arguments_span,
+                ) in method_calls
+                {
+                    let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                    match subject_type {
+                        Type::Struct(struct_id) => {
+                            let struct_name = self.structs.get(&struct_id).unwrap().name;
+                            let member_id =
+                                self.implementations
+                                    .iter()
+                                    .filter(|x| {
+                                        self.compare_type(
+                                            &subject_type,
+                                            &x.subject.get_type(self),
+                                            &HashMap::new(),
+                                        )
+                                    })
+                                    .find_map(|x| {
+                                        x.declarations.get(member_name).and_then(|member_id| {
+                                            match self.get_entity_by_id(*member_id) {
+                                                Expr::Function(function_id) => {
+                                                    let function =
+                                                        self.functions.get(function_id).unwrap();
+                                                    function.parameters.get(0).and_then(
+                                                        |parameter_id| {
+                                                            let parameter = self
+                                                                .parameters
+                                                                .get(parameter_id)
+                                                                .unwrap();
+                                                            (parameter.name == "self")
+                                                                .then_some(*member_id)
+                                                        },
+                                                    )
+                                                }
+                                                _ => panic!("method subject is not a function"),
+                                            }
+                                        })
+                                    })
+                                    .expect(
+                                        format!("cannot find {} in {}", member_name, struct_name)
+                                            .as_str(),
+                                    );
+                            let member_local_id = self.new_entity_id();
+                            self.expr_id_to_expr_map
+                                .insert(member_local_id, Expr::Local(member_id));
+                            argument_ids.insert(0, subject_id);
+                            self.function_calls.insert(
+                                id,
+                                FunctionCall {
+                                    id,
+                                    subject_id: member_local_id,
+                                    generic_argument_ids,
+                                    argument_ids,
+                                    arguments_span,
+                                },
+                            );
+                            self.expr_id_to_expr_map.insert(id, Expr::Call(id));
+                            progress = true;
+                        }
+                        Type::Unresolved => {
+                            remaining_methods.push((
+                                id,
+                                subject_id,
+                                member_name,
+                                generic_argument_ids,
+                                argument_ids,
+                                arguments_span,
+                            ));
+                        }
+                        _ => {
+                            self.diagnostics.push(Error {
+                                span: arguments_span.clone(),
+                                msg: format!("cannot call method on non-struct type"),
+                            });
+                            progress = true;
+                        }
+                    }
+                }
+                self.prepped_method_calls = remaining_methods;
+                if !self.prepped_method_calls.is_empty() {
+                    progress = true;
+                }
             }
 
             // --- Resolve variable constraints ---
