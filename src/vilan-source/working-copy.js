@@ -1,8 +1,11 @@
-function c/*new*/(d) {
-	return [ d ];
+function d/*new*/(e) {
+	return [ e ];
 }
-function b/*default*/() {
-	return c/*new*/(0);
+function c/*default*/() {
+	return d/*new*/(0);
 }
-const a/*my_id*/ = b/*default*/();
+function b() {
+	return c/*default*/();
+}
+const a/*my_id*/ = b();
 console.log(a/*my_id*/);

@@ -20,8 +20,12 @@ impl Id with Default {
 	}
 }
 
+fun default<T: Default>(): T {
+	T::default()
+}
+
 fun main() {
-	let my_id = Id::default();
+	let my_id = default<Id>();
 	
 	std::print(my_id);
 }

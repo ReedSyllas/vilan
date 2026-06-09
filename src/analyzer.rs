@@ -51,6 +51,9 @@ pub struct Function<'src> {
     pub name: &'src str,
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
+    /// The declared return type, if annotated. Used in preference to inferring
+    /// the body's type, which matters for generic returns like `(): T`.
+    pub return_type_id: Option<TypeId>,
     pub body: (Vec<Id>, Id, Id),
     pub call_count: u32,
 }
@@ -260,6 +263,10 @@ pub struct Analyzer<'src> {
     function_calls: IndexMap<Id, FunctionCall>,
     functions: IndexMap<Id, Function<'src>>,
     generic_constraint_names: HashMap<TypeId, &'src str>,
+    // Static accessors whose subject is a generic parameter (e.g. `T::default`),
+    // recorded as `accessor_id -> (constraint_id, member_name)` so the
+    // transformer can re-resolve them per monomorphized instantiation.
+    generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
     implementations: Vec<Implementation<'src>>,
     module_id_by_name: HashMap<&'src str, Id>,
     modules: IndexMap<Id, Module<'src>>,
@@ -311,6 +318,7 @@ impl<'src> Analyzer<'src> {
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
+            generic_static_accessors: HashMap::new(),
             implementations: Vec::new(),
             module_id_by_name: HashMap::new(),
             modules: IndexMap::new(),
@@ -682,6 +690,12 @@ impl<'src> Analyzer<'src> {
                 let body_scope_id = self.push_scope(body_scope);
                 let generic_parameter_constraint_ids =
                     self.register_generic_parameters(&function.generic_parameters, body_scope_id);
+                // The return type is resolved in the body scope so it can refer
+                // to the function's own generic parameters (e.g. `(): T`).
+                let return_type_id = function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| self.walk_type_node(return_type, body_scope_id));
                 let (ids, expr_id) = match &function.body {
                     Some(body) => {
                         let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
@@ -705,6 +719,7 @@ impl<'src> Analyzer<'src> {
                         name,
                         generic_parameter_constraint_ids,
                         parameters,
+                        return_type_id,
                         body: (ids, expr_id, body_scope_id),
                         call_count: 0,
                     },
@@ -1125,12 +1140,16 @@ impl<'src> Analyzer<'src> {
             }
             Expr::Function(function_id) => Type::Function(*function_id),
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
+            Expr::Trait(trait_id) => Type::Trait(*trait_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
                 // The call may not have been wired up yet (its `FunctionCall`
                 // is recorded once the subject resolves). Defer until it is.
-                let subject_id = match self.function_calls.get(id) {
-                    Some(function_call) => function_call.subject_id,
+                let (subject_id, generic_argument_ids) = match self.function_calls.get(id) {
+                    Some(function_call) => (
+                        function_call.subject_id,
+                        function_call.generic_argument_ids.clone(),
+                    ),
                     None => return Type::Unresolved,
                 };
                 let subject_type = self.infer_type_inner(
@@ -1141,27 +1160,45 @@ impl<'src> Analyzer<'src> {
                 );
                 match subject_type {
                     Type::Unresolved => Type::Unresolved,
-                    // A call's type is the callee's return type: the type of a
-                    // user function's body expression, or an external
-                    // function's declared return type.
+                    // A call's type is the callee's return type: its declared
+                    // return type if annotated, otherwise the inferred type of
+                    // its body — with the call's generic arguments substituted
+                    // for the function's generic parameters.
                     Type::Function(function_id) => {
-                        let return_expr_id = self.functions.get(&function_id).map(|f| f.body.1);
-                        if let Some(return_expr_id) = return_expr_id {
-                            self.infer_type_inner(
-                                return_expr_id,
-                                &Type::Unknown,
-                                substitution_context,
-                                exprs_seen,
+                        let function = self.functions.get(&function_id).map(|f| {
+                            (
+                                f.generic_parameter_constraint_ids.clone(),
+                                f.return_type_id,
+                                f.body.1,
                             )
-                        } else {
-                            let return_type_id = self
+                        });
+                        let Some((generic_constraint_ids, return_type_id, body_return_id)) =
+                            function
+                        else {
+                            // An external function: use its declared return type.
+                            return self
                                 .external_functions
                                 .get(&function_id)
-                                .map(|f| f.return_type_id);
-                            match return_type_id {
-                                Some(return_type_id) => return_type_id.get_type(self),
-                                None => Type::Void,
+                                .map(|f| f.return_type_id.get_type(self))
+                                .unwrap_or(Type::Void);
+                        };
+                        let mut substitution_context = substitution_context.clone();
+                        for (i, constraint_id) in generic_constraint_ids.iter().enumerate() {
+                            if let Some(argument_id) = generic_argument_ids.get(i) {
+                                substitution_context.insert(*constraint_id, *argument_id);
                             }
+                        }
+                        match return_type_id {
+                            Some(return_type_id) => {
+                                let return_type = return_type_id.get_type(self);
+                                self.substitute_type(&return_type, &substitution_context)
+                            }
+                            None => self.infer_type_inner(
+                                body_return_id,
+                                &Type::Unknown,
+                                &substitution_context,
+                                exprs_seen,
+                            ),
                         }
                     }
                     x => panic!("type is not callable: {:?}", x),
@@ -1317,6 +1354,22 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Resolves any generic type parameters in `type_` using the substitution
+    /// context, e.g. turning the return type `T` of `default<T>` into `Id` for
+    /// a call `default<Id>()`.
+    fn substitute_type(&self, type_: &Type, substitution_context: &SubstitutionContext) -> Type {
+        match type_ {
+            Type::Generic(constraint_id) => substitution_context
+                .get(constraint_id)
+                .map(|type_id| {
+                    let resolved = type_id.get_type(self);
+                    self.substitute_type(&resolved, substitution_context)
+                })
+                .unwrap_or_else(|| type_.clone()),
+            _ => type_.clone(),
+        }
+    }
+
     /// Get the resolved type for an expression, checking both maps.
     fn expr_type_for_id(&self, expr_id: Id) -> Type {
         self.expr_id_to_type_id_map
@@ -1421,6 +1474,47 @@ impl<'src> Analyzer<'src> {
 
                     self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
                 }
+                // `T::member` where `T` is a generic parameter: resolve through
+                // the trait the parameter is bound by (e.g. `T: Default`).
+                Type::Generic(constraint_id) => match constraint_id.get_type(self) {
+                    Type::Trait(trait_id) => {
+                        // Record the accessor so codegen can monomorphize it to
+                        // the concrete type's member at each call site.
+                        self.generic_static_accessors
+                            .insert(id, (constraint_id, member_name));
+                        let member_id = self
+                            .traits
+                            .get(&trait_id)
+                            .and_then(|trait_| trait_.declarations.get(member_name).copied());
+                        match member_id {
+                            Some(member_id) => {
+                                let rc = self.reference_count.entry(member_id).or_insert(0);
+                                *rc += 1;
+                                self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                            }
+                            None => {
+                                let trait_name = self.traits.get(&trait_id).map(|t| t.name);
+                                self.diagnostics.push(Error {
+                                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                                    msg: format!(
+                                        "trait '{}' has no member '{}'",
+                                        trait_name.unwrap_or("?"),
+                                        member_name
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "cannot access '{}' on an unconstrained type parameter",
+                                member_name
+                            ),
+                        });
+                    }
+                },
                 _ => {}
             }
         }
@@ -2117,6 +2211,11 @@ impl<'src> Analyzer<'src> {
                 buf.push_str(&format!("struct {}", struct_.name));
             }
 
+            Type::Trait(id) => {
+                let trait_ = self.traits.get(id).unwrap();
+                buf.push_str(&format!("trait {}", trait_.name));
+            }
+
             Type::Module(id) => {
                 let module = self.modules.get(id).unwrap();
                 buf.push_str(&format!("module {}", module.name));
@@ -2188,7 +2287,9 @@ pub struct Program<'src> {
     pub entity_scope_map: HashMap<Id, Id>,
     pub function_calls: IndexMap<Id, FunctionCall>,
     pub functions: IndexMap<Id, Function<'src>>,
+    pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
     pub global_scope_id: Id,
+    pub implementations: Vec<Implementation<'src>>,
     pub module_id_by_name: HashMap<&'src str, Id>,
     pub modules: IndexMap<Id, Module<'src>>,
     pub reference_count: HashMap<Id, u32>,
@@ -2264,7 +2365,9 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         entity_scope_map: analyzer.expr_id_to_scope_id_map,
         function_calls: analyzer.function_calls,
         functions: analyzer.functions,
+        generic_static_accessors: analyzer.generic_static_accessors,
         global_scope_id,
+        implementations: analyzer.implementations,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,
         reference_count: analyzer.reference_count,

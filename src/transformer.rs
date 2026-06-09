@@ -2,6 +2,7 @@ use crate::analyzer::{Expr, ExprIfBranch, Function, Program};
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::BinaryOp;
+use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -16,6 +17,13 @@ struct Transformer<'src> {
     print_fn_id: Id,
     program: &'src Program<'src>,
     required_functions: IndexMap<Id, js::Node<'src>>,
+    // The active generic-parameter substitution while emitting a monomorphized
+    // function body (constraint id -> concrete type id).
+    current_substitution: HashMap<TypeId, TypeId>,
+    // Monomorphized function variants, keyed by (generic function, concrete
+    // type arguments) so each distinct instantiation is emitted exactly once.
+    instances: HashMap<(Id, Vec<String>), String>,
+    monomorphized: Vec<js::Node<'src>>,
 }
 
 impl<'src> Transformer<'src> {
@@ -61,6 +69,9 @@ impl<'src> Transformer<'src> {
             print_fn_id,
             program,
             required_functions: IndexMap::new(),
+            current_substitution: HashMap::new(),
+            instances: HashMap::new(),
+            monomorphized: Vec::new(),
         }
     }
 
@@ -114,10 +125,15 @@ impl<'src> Transformer<'src> {
         t_functions.sort_by(|a, b| (a.0.0).cmp(&b.0.0));
         let t_functions = t_functions.into_iter().map(|x| x.1);
 
+        // Monomorphized variants are plain function declarations too; ordering
+        // among declarations is irrelevant since JS hoists them.
+        let t_instances = self.monomorphized.into_iter();
+
         Ok(format!(
             "{}{}",
             self.formatter.file(
                 &t_functions
+                    .chain(t_instances)
                     .chain(t_global_variables.into_iter())
                     .chain(t_main_fn_body.into_iter())
                     .collect::<Vec<_>>()
@@ -200,43 +216,69 @@ impl<'src> Transformer<'src> {
                 )
             }
             Expr::Call(id) => {
-                let function_call = self.program.function_calls.get(id).unwrap();
-                let subject = self
-                    .program
-                    .entity_map
-                    .get(&function_call.subject_id)
-                    .unwrap();
+                let function_call = self.program.function_calls.get(id).unwrap().clone();
                 let args = function_call
                     .argument_ids
                     .iter()
                     .filter_map(|arg| self.walk_entity(*arg, block))
                     .collect::<Vec<_>>();
+
+                // `T::member()` inside a monomorphized body: dispatch directly
+                // to the concrete type's member that `T` is bound to here.
+                if let Some(&(constraint_id, member_name)) = self
+                    .program
+                    .generic_static_accessors
+                    .get(&function_call.subject_id)
+                {
+                    if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
+                        if let Some(target_id) =
+                            self.resolve_member_on_type(concrete_type_id, member_name)
+                        {
+                            self.ensure_function_emitted(target_id);
+                            let name = self.ng.name_for(target_id);
+                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                        }
+                    }
+                }
+
+                let subject = self
+                    .program
+                    .entity_map
+                    .get(&function_call.subject_id)
+                    .unwrap();
                 match subject {
-                    Expr::Local(id) => {
-                        if *id == self.print_fn_id {
-                            js::Node::Call(
+                    Expr::Local(target_id) => {
+                        let target_id = *target_id;
+                        if target_id == self.print_fn_id {
+                            return Some(js::Node::Call(
                                 Box::new(js::Node::Property(
                                     Box::new(js::Node::Local("console".to_string())),
                                     "log".to_string(),
                                 )),
                                 args,
-                            )
-                        } else {
-                            if !self.required_functions.contains_key(id) {
-                                if let Some(function) = self.program.functions.get(id) {
-                                    let js_function = self.function(function);
-                                    self.required_functions.insert(*id, js_function);
-                                }
-                            }
-                            let subject = self.ng.name_for(*id);
-                            js::Node::Call(Box::new(js::Node::Local(subject)), args)
+                            ));
                         }
+                        // A call to a generic function is compiled to a
+                        // specialized variant chosen by its concrete type
+                        // arguments — no runtime dispatch.
+                        let is_generic = self
+                            .program
+                            .functions
+                            .get(&target_id)
+                            .map(|f| !f.generic_parameter_constraint_ids.is_empty())
+                            .unwrap_or(false);
+                        if is_generic && !function_call.generic_argument_ids.is_empty() {
+                            let name = self.get_or_create_instance(
+                                target_id,
+                                &function_call.generic_argument_ids,
+                            );
+                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                        }
+                        self.ensure_function_emitted(target_id);
+                        let name = self.ng.name_for(target_id);
+                        js::Node::Call(Box::new(js::Node::Local(name)), args)
                     }
                     _ => {
-                        println!(
-                            "Transformer.walk_entity -> Expr::Call -> call subject {:#?}",
-                            subject
-                        );
                         let t_subject = self.walk_entity(function_call.subject_id, block).unwrap();
                         js::Node::Call(Box::new(t_subject), args)
                     }
@@ -408,6 +450,10 @@ impl<'src> Transformer<'src> {
 
     fn function(&mut self, function: &Function<'src>) -> js::Node<'src> {
         let name = self.ng.name_for(function.id);
+        self.function_with_name(function, name)
+    }
+
+    fn function_with_name(&mut self, function: &Function<'src>, name: String) -> js::Node<'src> {
         let parameters = function
             .parameters
             .iter()
@@ -429,6 +475,108 @@ impl<'src> Transformer<'src> {
             parameters,
             body,
         })
+    }
+
+    /// Emits a concrete (non-generic) function once, keyed by its id. Any
+    /// active substitution is cleared while walking it, since its body has no
+    /// generic parameters of its own.
+    fn ensure_function_emitted(&mut self, function_id: Id) {
+        if self.required_functions.contains_key(&function_id) {
+            return;
+        }
+        if let Some(function) = self.program.functions.get(&function_id) {
+            let saved = std::mem::take(&mut self.current_substitution);
+            let js_function = self.function(function);
+            self.current_substitution = saved;
+            self.required_functions.insert(function_id, js_function);
+        }
+    }
+
+    /// Returns the JS name of the monomorphized variant of `function_id` for
+    /// the given concrete type arguments, generating it on first use.
+    fn get_or_create_instance(
+        &mut self,
+        function_id: Id,
+        generic_argument_ids: &[TypeId],
+    ) -> String {
+        let concrete_arguments: Vec<TypeId> = generic_argument_ids
+            .iter()
+            .map(|type_id| self.resolve_type_id(*type_id))
+            .collect();
+        let key = (
+            function_id,
+            concrete_arguments
+                .iter()
+                .map(|type_id| self.type_key(*type_id))
+                .collect::<Vec<_>>(),
+        );
+        if let Some(name) = self.instances.get(&key) {
+            return name.clone();
+        }
+
+        let constraint_ids = self
+            .program
+            .functions
+            .get(&function_id)
+            .map(|function| function.generic_parameter_constraint_ids.clone())
+            .unwrap_or_default();
+        let mut substitution = HashMap::new();
+        for (constraint_id, concrete_argument) in
+            constraint_ids.iter().zip(concrete_arguments.iter())
+        {
+            substitution.insert(*constraint_id, *concrete_argument);
+        }
+
+        let name = self.ng.next_name();
+        self.instances.insert(key, name.clone());
+        if let Some(function) = self.program.functions.get(&function_id) {
+            let saved = std::mem::replace(&mut self.current_substitution, substitution);
+            let js_function = self.function_with_name(function, name.clone());
+            self.current_substitution = saved;
+            self.monomorphized.push(js_function);
+        }
+        name
+    }
+
+    /// Resolves a type id to its concrete form under the active substitution,
+    /// following generic parameters to the type they're currently bound to.
+    fn resolve_type_id(&self, type_id: TypeId) -> TypeId {
+        match self.program.type_id_to_type_map.get(&type_id) {
+            Some(Type::Generic(constraint_id)) => self
+                .current_substitution
+                .get(constraint_id)
+                .map(|type_id| self.resolve_type_id(*type_id))
+                .unwrap_or(type_id),
+            _ => type_id,
+        }
+    }
+
+    /// A stable key identifying a concrete type, used to deduplicate instances.
+    fn type_key(&self, type_id: TypeId) -> String {
+        match self.program.type_id_to_type_map.get(&type_id) {
+            Some(type_) => format!("{:?}", type_),
+            None => format!("?{}", type_id.0),
+        }
+    }
+
+    /// Finds the function implementing `member` for a concrete type, searching
+    /// the implementations whose subject matches that type.
+    fn resolve_member_on_type(&self, type_id: TypeId, member: &str) -> Option<Id> {
+        let type_ = self.program.type_id_to_type_map.get(&type_id)?;
+        match type_ {
+            Type::Struct(_) => self
+                .program
+                .implementations
+                .iter()
+                .filter(|implementation| {
+                    self.program
+                        .type_id_to_type_map
+                        .get(&implementation.subject)
+                        == Some(type_)
+                })
+                .find_map(|implementation| implementation.declarations.get(member).copied()),
+            _ => None,
+        }
     }
 }
 

@@ -11,6 +11,7 @@ pub enum Type {
     Module(Id),
     Primitive(PrimitiveType),
     Struct(Id),
+    Trait(Id),
     Tuple(Vec<TypeId>),
     Unknown,
     Unresolved,
