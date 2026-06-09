@@ -61,11 +61,10 @@ fn main() {
                 match transform(&program) {
                     Ok(output) => {
                         // println!("Output: {output}");
-                        fs::write(Path::new(&filename).with_extension("js"), output).unwrap_or_else(
-                            |_| {
+                        fs::write(Path::new(&filename).with_extension("js"), output)
+                            .unwrap_or_else(|_| {
                                 println!("failed to write file");
-                            },
-                        );
+                            });
                         println!("Package has built successfully");
                     }
                     Err(e) => errs.push(Rich::custom(e.span, e.msg)),

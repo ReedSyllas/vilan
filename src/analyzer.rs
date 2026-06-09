@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 
 use crate::error::Error;
 use crate::id::Id;
-use crate::node::{BinaryOp, ImportBranch, Node, NodeIfBranch, NodeList};
+use crate::node::{BinaryOp, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList};
 use crate::span::{Span, Spanned};
 use crate::type_::{PrimitiveType, SubstitutionContext, Type, TypeId};
 use crate::util::plural;
@@ -33,6 +33,7 @@ pub enum Expr<'src> {
     String(&'src str),
     Struct(Id),
     StructInitializer(Id, IndexMap<usize, Id>),
+    Trait(Id),
     Tuple(Vec<Id>),
     Variable(Id),
     Void,
@@ -108,6 +109,26 @@ pub struct Field<'src> {
 pub struct Implementation<'src> {
     pub subject: TypeId,
     pub declarations: IndexMap<&'src str, Id>,
+}
+
+#[derive(Debug)]
+pub struct Trait<'src> {
+    pub id: Id,
+    pub name: &'src str,
+    /// The members the trait declares, keyed by name. For a required method
+    /// without a default body these point at signature-only functions.
+    pub declarations: IndexMap<&'src str, Id>,
+}
+
+/// A pending `impl Subject with Trait` conformance check: the subject type
+/// must provide every member the named trait requires.
+#[derive(Debug)]
+pub struct TraitImplCheck<'src> {
+    pub subject_type_id: TypeId,
+    pub trait_name: &'src str,
+    pub scope_id: Id,
+    pub declarations: IndexMap<&'src str, Id>,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -250,6 +271,7 @@ pub struct Analyzer<'src> {
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers:
         Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
+    prepped_trait_impls: Vec<TraitImplCheck<'src>>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str)>,
     reference_count: HashMap<Id, u32>,
@@ -260,6 +282,7 @@ pub struct Analyzer<'src> {
     struct_initializer_constraints: Vec<StructInitializerConstraint<'src>>,
     struct_initializer_to_def: HashMap<Id, Id>, // initializer_id -> struct definition id
     structs: IndexMap<Id, Struct<'src>>,
+    traits: IndexMap<Id, Trait<'src>>,
     type_id_to_type_map: HashMap<TypeId, Type>,
     type_id: u32,
     variable_constraints: Vec<VariableConstraint>,
@@ -298,6 +321,7 @@ impl<'src> Analyzer<'src> {
             prepped_method_calls: Vec::new(),
             prepped_static_accessors: Vec::new(),
             prepped_struct_initializers: Vec::new(),
+            prepped_trait_impls: Vec::new(),
             prepped_type_locals: Vec::new(),
             prepped_type_static_accessors: Vec::new(),
             reference_count: HashMap::new(),
@@ -308,6 +332,7 @@ impl<'src> Analyzer<'src> {
             struct_initializer_constraints: Vec::new(),
             struct_initializer_to_def: HashMap::new(),
             structs: IndexMap::new(),
+            traits: IndexMap::new(),
             type_id_to_type_map: HashMap::new(),
             type_id: 0,
             variable_constraints: Vec::new(),
@@ -417,6 +442,64 @@ impl<'src> Analyzer<'src> {
         }
 
         resolve(self, name, scope_id).expect(format!("cannot find: {}", name).as_str())
+    }
+
+    /// Like [`Self::get_expr_id_by_name`], but returns `None` instead of
+    /// panicking when the name cannot be resolved.
+    fn try_get_expr_id_by_name(&mut self, name: &'src str, scope_id: Id) -> Option<Id> {
+        let scope = self.mut_scope_for_scope_id(scope_id);
+        let parent_id = scope.parent_id;
+        scope.name_to_id_map.get(name).map(|x| *x).or_else(|| {
+            let subject_id = parent_id
+                .map(|parent_scope_id| self.try_get_expr_id_by_name(name, parent_scope_id))
+                .flatten()?;
+            let scope = self.mut_scope_for_scope_id(scope_id);
+            scope.name_to_id_map.insert(name, subject_id);
+            Some(subject_id)
+        })
+    }
+
+    /// Walks the optional generic parameters of a declaration into `scope_id`,
+    /// registering each as a `Generic` type bound by its constraint, and
+    /// returns the constraint type ids in declaration order.
+    fn register_generic_parameters(
+        &mut self,
+        generic_parameters: &Option<GenericParameters<'src>>,
+        scope_id: Id,
+    ) -> Vec<TypeId> {
+        let mut generic_parameter_constraint_ids = Vec::new();
+        if let Some(generic_parameters) = generic_parameters {
+            for (name, type_) in &generic_parameters.0 {
+                let constraint_type_id = type_
+                    .as_ref()
+                    .map(|x| self.walk_type_node(x, scope_id))
+                    .unwrap_or_else(|| Type::Any.get_type_id(self));
+                self.generic_constraint_names
+                    .insert(constraint_type_id, name);
+                generic_parameter_constraint_ids.push(constraint_type_id);
+                let type_id = Type::Generic(constraint_type_id).get_type_id(self);
+                let expr_id = self.new_entity_id();
+                self.expr_id_to_expr_map
+                    .insert(expr_id, Expr::Generic(constraint_type_id));
+                self.expr_id_to_scope_id_map.insert(expr_id, scope_id);
+                self.expr_id_to_type_id_map.insert(expr_id, type_id);
+                let scope = self.mut_scope_for_scope_id(scope_id);
+                scope.name_to_id_map.insert(name, expr_id);
+            }
+        }
+        generic_parameter_constraint_ids
+    }
+
+    /// Registers the `Self` type within a trait/impl body scope. `self_type_id`
+    /// is the concrete subject type for an `impl`, or an abstract placeholder
+    /// (e.g. `any`) for a `trait`.
+    fn register_self_type(&mut self, scope_id: Id, self_type_id: TypeId) {
+        let self_id = self.new_entity_id();
+        self.expr_id_to_type_id_map.insert(self_id, self_type_id);
+        self.expr_id_to_scope_id_map.insert(self_id, scope_id);
+        self.span_map.insert(self_id, &EMPTY_SPAN);
+        let scope = self.mut_scope_for_scope_id(scope_id);
+        scope.name_to_id_map.insert("Self", self_id);
     }
 
     fn walk_expr_nodes(&mut self, list: &'src NodeList<'src>, scope_id: Id) -> Vec<Id> {
@@ -597,26 +680,8 @@ impl<'src> Analyzer<'src> {
                     })
                     .collect::<Vec<_>>();
                 let body_scope_id = self.push_scope(body_scope);
-                let mut generic_parameter_constraint_ids = Vec::new();
-                if let Some(generic_parameters) = &function.generic_parameters {
-                    for (name, type_) in &generic_parameters.0 {
-                        let constraint_type_id = type_
-                            .as_ref()
-                            .map(|x| self.walk_type_node(x, body_scope_id))
-                            .unwrap_or_else(|| Type::Any.get_type_id(self));
-                        self.generic_constraint_names
-                            .insert(constraint_type_id, name);
-                        generic_parameter_constraint_ids.push(constraint_type_id);
-                        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
-                        let expr_id = self.new_entity_id();
-                        self.expr_id_to_expr_map
-                            .insert(expr_id, Expr::Generic(constraint_type_id));
-                        self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
-                        self.expr_id_to_type_id_map.insert(expr_id, type_id);
-                        let body_scope = self.mut_scope_for_scope_id(body_scope_id);
-                        body_scope.name_to_id_map.insert(name, expr_id);
-                    }
-                }
+                let generic_parameter_constraint_ids =
+                    self.register_generic_parameters(&function.generic_parameters, body_scope_id);
                 let (ids, expr_id) = match &function.body {
                     Some(body) => {
                         let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
@@ -719,26 +784,8 @@ impl<'src> Analyzer<'src> {
                 self.reference_count.entry(id).or_insert(0);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
-                let mut generic_parameter_constraint_ids = Vec::new();
-                if let Some(generic_parameters) = generic_parameters {
-                    for (name, type_) in &generic_parameters.0 {
-                        let constraint_type_id = type_
-                            .as_ref()
-                            .map(|x| self.walk_type_node(x, body_scope_id))
-                            .unwrap_or_else(|| Type::Any.get_type_id(self));
-                        self.generic_constraint_names
-                            .insert(constraint_type_id, name);
-                        generic_parameter_constraint_ids.push(constraint_type_id);
-                        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
-                        let expr_id = self.new_entity_id();
-                        self.expr_id_to_expr_map
-                            .insert(expr_id, Expr::Generic(constraint_type_id));
-                        self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
-                        self.expr_id_to_type_id_map.insert(expr_id, type_id);
-                        let body_scope = self.mut_scope_for_scope_id(body_scope_id);
-                        body_scope.name_to_id_map.insert(name, expr_id);
-                    }
-                }
+                let generic_parameter_constraint_ids =
+                    self.register_generic_parameters(generic_parameters, body_scope_id);
                 let mut fields = Vec::new();
                 for child in &body.0 {
                     let name = child.0.0;
@@ -778,10 +825,15 @@ impl<'src> Analyzer<'src> {
                             x.0.0,
                             x.0.1
                                 .as_ref()
-                                .map(|x| self.walk_expr_node(x, scope_id))
+                                .map(|value| self.walk_expr_node(value, scope_id))
                                 .unwrap_or_else(|| {
+                                    // Field shorthand `S { field }` means
+                                    // `S { field: field }`: the value is the
+                                    // local named after the field itself.
                                     let local_id = self.new_entity_id();
-                                    self.prepped_locals.push((local_id, name));
+                                    self.prepped_locals.push((local_id, x.0.0));
+                                    self.expr_id_to_scope_id_map.insert(local_id, scope_id);
+                                    self.span_map.insert(local_id, &x.1);
                                     local_id
                                 }),
                             x.0.1.as_ref().map(|y| y.1).unwrap_or(x.1),
@@ -798,43 +850,69 @@ impl<'src> Analyzer<'src> {
                     ));
                 None
             }
-            Node::Impl(subject, generic_parameters, _trait, body) => {
-                // `_trait` (the `with T` clause) is parsed but not yet
-                // analyzed; trait conformance checking is a later step.
+            Node::Impl(subject, generic_parameters, trait_, body) => {
                 let subject = self.walk_type_node(subject, scope_id);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
-                if let Some(generic_parameters) = generic_parameters {
-                    for (name, type_) in &generic_parameters.0 {
-                        let constraint_type_id = type_
-                            .as_ref()
-                            .map(|x| self.walk_type_node(x, body_scope_id))
-                            .unwrap_or_else(|| Type::Any.get_type_id(self));
-                        self.generic_constraint_names
-                            .insert(constraint_type_id, name);
-                        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
-                        let expr_id = self.new_entity_id();
-                        self.expr_id_to_expr_map
-                            .insert(expr_id, Expr::Generic(constraint_type_id));
-                        self.expr_id_to_scope_id_map.insert(expr_id, body_scope_id);
-                        self.expr_id_to_type_id_map.insert(expr_id, type_id);
-                        let body_scope = self.mut_scope_for_scope_id(body_scope_id);
-                        body_scope.name_to_id_map.insert(name, expr_id);
+                self.register_generic_parameters(generic_parameters, body_scope_id);
+                // Within an `impl`, `Self` refers to the subject type.
+                self.register_self_type(body_scope_id, subject);
+                self.walk_expr_nodes(&body.0, body_scope_id);
+                let mut declarations = self
+                    .scopes
+                    .get(&body_scope_id)
+                    .unwrap()
+                    .name_to_id_map
+                    .clone();
+                // `Self` is an implicit binding, not a declared member.
+                declarations.shift_remove("Self");
+                // `impl Subject with Trait` must satisfy the trait; record a
+                // conformance check to run once all declarations are known.
+                if let Some(trait_) = trait_ {
+                    if let Node::Accessor(trait_name) = &trait_.0 {
+                        self.prepped_trait_impls.push(TraitImplCheck {
+                            subject_type_id: subject,
+                            trait_name,
+                            scope_id,
+                            declarations: declarations.clone(),
+                            span: trait_.1,
+                        });
                     }
                 }
-                self.walk_expr_nodes(&body.0, body_scope_id);
-                let body_scope = self.scopes.get(&body_scope_id).unwrap();
                 self.implementations.push(Implementation {
                     subject,
-                    declarations: body_scope.name_to_id_map.clone(),
+                    declarations,
                 });
 
                 Some(Expr::Impl(id))
             }
-            Node::Trait(..) => {
-                // Traits are parsed but not yet analyzed; trait semantics
-                // (declaration, conformance, `Self`) are a later step.
-                None
+            Node::Trait(name, generic_parameters, body) => {
+                let scope = self.mut_scope_for_scope_id(scope_id);
+                scope.name_to_id_map.insert(name, id);
+                self.reference_count.entry(id).or_insert(0);
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                self.register_generic_parameters(generic_parameters, body_scope_id);
+                // Inside a trait, `Self` is the (abstract) implementing type.
+                let any_type_id = Type::Any.get_type_id(self);
+                self.register_self_type(body_scope_id, any_type_id);
+                self.walk_expr_nodes(&body.0, body_scope_id);
+                let mut declarations = self
+                    .scopes
+                    .get(&body_scope_id)
+                    .unwrap()
+                    .name_to_id_map
+                    .clone();
+                declarations.shift_remove("Self");
+                self.traits.insert(
+                    id,
+                    Trait {
+                        id,
+                        name,
+                        declarations,
+                    },
+                );
+                Some(Expr::Trait(id))
             }
             Node::Closure(closure) => {
                 let mut body_scope = self.create_scope(Some(scope_id));
@@ -1344,6 +1422,49 @@ impl<'src> Analyzer<'src> {
                     self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
                 }
                 _ => {}
+            }
+        }
+
+        // --- Check trait conformance for `impl Subject with Trait` ---
+        for check in std::mem::take(&mut self.prepped_trait_impls) {
+            let trait_id = match self.try_get_expr_id_by_name(check.trait_name, check.scope_id) {
+                Some(trait_id) => trait_id,
+                None => {
+                    self.diagnostics.push(Error {
+                        span: check.span,
+                        msg: format!("cannot find trait '{}'", check.trait_name),
+                    });
+                    continue;
+                }
+            };
+            let required: Vec<&'src str> = match self.traits.get(&trait_id) {
+                Some(trait_) => trait_.declarations.keys().copied().collect(),
+                None => {
+                    self.diagnostics.push(Error {
+                        span: check.span,
+                        msg: format!("'{}' is not a trait", check.trait_name),
+                    });
+                    continue;
+                }
+            };
+            let subject_name = match check.subject_type_id.get_type(self) {
+                Type::Struct(struct_id) => self
+                    .structs
+                    .get(&struct_id)
+                    .map(|s| s.name)
+                    .unwrap_or("type"),
+                _ => "type",
+            };
+            for member_name in required {
+                if !check.declarations.contains_key(member_name) {
+                    self.diagnostics.push(Error {
+                        span: check.span,
+                        msg: format!(
+                            "'{}' does not implement trait '{}': missing '{}'",
+                            subject_name, check.trait_name, member_name
+                        ),
+                    });
+                }
             }
         }
 

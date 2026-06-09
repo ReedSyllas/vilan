@@ -1,6 +1,8 @@
-function c/*add*/(d, e) {
-	return d[0] + e;
+function c/*new*/(d) {
+	return [ d ];
 }
-const a/*v*/ = [ 10 ];
-const b/*u*/ = c/*add*/(a/*v*/, 20);
-console.log(b/*u*/);
+function b/*default*/() {
+	return c/*new*/(0);
+}
+const a/*my_id*/ = b/*default*/();
+console.log(a/*my_id*/);

@@ -127,14 +127,15 @@ where
 
     let local = identifier.map_with(|x, e| (Node::Accessor(x), e.span()));
 
-    let local_type = identifier
-        .then(generic_arguments.clone())
-        .map_with(|(name, generic_arguments), e| {
-            (
-                Node::AccessorWithGenerics(name, generic_arguments),
-                e.span(),
-            )
-        });
+    let local_type =
+        identifier
+            .then(generic_arguments.clone())
+            .map_with(|(name, generic_arguments), e| {
+                (
+                    Node::AccessorWithGenerics(name, generic_arguments),
+                    e.span(),
+                )
+            });
 
     let list = expression_list
         .clone()

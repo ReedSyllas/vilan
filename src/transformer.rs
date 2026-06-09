@@ -173,6 +173,9 @@ impl<'src> Transformer<'src> {
             Expr::Struct(_) => {
                 return None;
             }
+            Expr::Trait(_) => {
+                return None;
+            }
             Expr::Impl(_) => {
                 return None;
             }
