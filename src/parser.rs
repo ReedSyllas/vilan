@@ -356,7 +356,15 @@ where
                 .labelled("return type")
                 .or_not(),
         )
-        .then(block.clone())
+        .then(
+            // A function either has a block body or, for a signature-only
+            // declaration (e.g. a required trait method), ends with `;`.
+            block
+                .clone()
+                .map(Some)
+                .or(just(Token::Ctrl(';')).map(|_| None))
+                .labelled("function body"),
+        )
         .map_with(
             |((((name, generic_parameters), parameters), return_type), body), e| {
                 (
@@ -411,7 +419,12 @@ where
 
     let impl_ = just(Token::Impl)
         .ignore_then(type_.clone().labelled("implementation subject"))
-        .then(generic_parameters.or_not())
+        .then(generic_parameters.clone().or_not())
+        .then(
+            just(Token::With)
+                .ignore_then(type_.clone().labelled("implemented trait"))
+                .or_not(),
+        )
         .then(
             statement
                 .clone()
@@ -429,12 +442,43 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(|((subject, generic_parameters), body), e| {
+        .map_with(|(((subject, generic_parameters), trait_), body), e| {
             (
-                Node::Impl(Box::new(subject), generic_parameters, body),
+                Node::Impl(
+                    Box::new(subject),
+                    generic_parameters,
+                    trait_.map(|x| Box::new(x)),
+                    body,
+                ),
                 e.span(),
             )
         })
+        .boxed();
+
+    let trait_ = just(Token::Trait)
+        .ignore_then(identifier.labelled("trait name"))
+        .then(generic_parameters.clone().or_not())
+        .then(
+            function
+                .clone()
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+                .map_with(|items, e| (items, e.span()))
+                .recover_with(via_parser(nested_delimiters(
+                    Token::Ctrl('{'),
+                    Token::Ctrl('}'),
+                    [
+                        (Token::Ctrl('('), Token::Ctrl(')')),
+                        (Token::Ctrl('['), Token::Ctrl(']')),
+                    ],
+                    |span| (Vec::new(), span),
+                ))),
+        )
+        .map_with(|((name, generic_parameters), body), e| {
+            (Node::Trait(name, generic_parameters, body), e.span())
+        })
+        .labelled("trait")
         .boxed();
 
     let module = just(Token::Mod)
@@ -482,6 +526,7 @@ where
         function,
         struct_,
         impl_,
+        trait_,
         module,
         import.then_ignore(just(Token::Ctrl(';'))),
         block.map(|(x, span)| (Node::Block((x, span)), span)),

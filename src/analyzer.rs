@@ -617,8 +617,22 @@ impl<'src> Analyzer<'src> {
                         body_scope.name_to_id_map.insert(name, expr_id);
                     }
                 }
-                let ids = self.walk_expr_nodes(&function.body.0.0, body_scope_id);
-                let expr_id = self.walk_expr_node(&function.body.0.1, body_scope_id);
+                let (ids, expr_id) = match &function.body {
+                    Some(body) => {
+                        let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
+                        let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
+                        (ids, expr_id)
+                    }
+                    None => {
+                        // A signature without a body (e.g. a required trait
+                        // method). Model it as an empty body yielding void.
+                        let void_id = self.new_entity_id();
+                        self.expr_id_to_expr_map.insert(void_id, Expr::Void);
+                        self.expr_id_to_scope_id_map.insert(void_id, body_scope_id);
+                        self.span_map.insert(void_id, &EMPTY_SPAN);
+                        (Vec::new(), void_id)
+                    }
+                };
                 self.functions.insert(
                     id,
                     Function {
@@ -784,7 +798,9 @@ impl<'src> Analyzer<'src> {
                     ));
                 None
             }
-            Node::Impl(subject, generic_parameters, body) => {
+            Node::Impl(subject, generic_parameters, _trait, body) => {
+                // `_trait` (the `with T` clause) is parsed but not yet
+                // analyzed; trait conformance checking is a later step.
                 let subject = self.walk_type_node(subject, scope_id);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
@@ -814,6 +830,11 @@ impl<'src> Analyzer<'src> {
                 });
 
                 Some(Expr::Impl(id))
+            }
+            Node::Trait(..) => {
+                // Traits are parsed but not yet analyzed; trait semantics
+                // (declaration, conformance, `Self`) are a later step.
+                None
             }
             Node::Closure(closure) => {
                 let mut body_scope = self.create_scope(Some(scope_id));

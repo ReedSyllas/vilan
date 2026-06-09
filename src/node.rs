@@ -10,7 +10,9 @@ pub struct Func<'src> {
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
-    pub body: Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>,
+    // `None` for a function signature without a body, e.g. a required trait
+    // method declaration like `fun default(): Self;`.
+    pub body: Option<Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>>,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,8 @@ pub enum Node<'src> {
     Impl(
         Box<Spanned<Self>>,
         Option<GenericParameters<'src>>,
+        // The trait being implemented, i.e. the `T` in `impl Subject with T`.
+        Option<Box<Spanned<Self>>>,
         Spanned<NodeList<'src>>,
     ),
     Import(ImportBranch<'src>),
@@ -89,6 +93,11 @@ pub enum Node<'src> {
         &'src str,
         Option<GenericArguments<'src>>,
         Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>,
+    ),
+    Trait(
+        &'src str,
+        Option<GenericParameters<'src>>,
+        Spanned<NodeList<'src>>,
     ),
     Tuple(NodeList<'src>),
     Void,

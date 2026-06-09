@@ -1,17 +1,27 @@
 import std;
 
-struct S {
-	inner: f64,
+trait Default {
+	fun default(): Self;
 }
 
-impl S {
-	fun add(self: S, value: f64): f64 {
-		self.inner + value
+struct Id {
+	n: u32,
+}
+
+impl Id {
+	fun new(n: u32) {
+		Id { n }
+	}
+}
+
+impl Id with Default {
+	fun default() {
+		Id::new(0)
 	}
 }
 
 fun main() {
-	let v = S { inner = 10 };
-	let u = v.add(20);
-	std::print(u);
+	let my_id = Id::default();
+	
+	std::print(my_id);
 }

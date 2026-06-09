@@ -16,6 +16,8 @@ pub enum Token<'src> {
     Ret,
     String(&'src str),
     Struct,
+    Trait,
+    With,
 }
 
 impl std::fmt::Display for Token<'_> {
@@ -44,6 +46,8 @@ impl std::fmt::Display for Token<'_> {
             Token::Ret => write!(f, "ret"),
             Token::String(s) => write!(f, "{s}"),
             Token::Struct => write!(f, "struct"),
+            Token::Trait => write!(f, "trait"),
+            Token::With => write!(f, "with"),
         }
     }
 }

@@ -39,7 +39,9 @@ pub fn lexer<'src>()
         "null" => Token::Null,
         "ret" => Token::Ret,
         "struct" => Token::Struct,
+        "trait" => Token::Trait,
         "true" => Token::Bool(true),
+        "with" => Token::With,
         _ => Token::Ident(ident),
     });
 
