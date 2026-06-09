@@ -1028,16 +1028,43 @@ impl<'src> Analyzer<'src> {
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
-                let function_call = self.function_calls.get(id).unwrap();
+                // The call may not have been wired up yet (its `FunctionCall`
+                // is recorded once the subject resolves). Defer until it is.
+                let subject_id = match self.function_calls.get(id) {
+                    Some(function_call) => function_call.subject_id,
+                    None => return Type::Unresolved,
+                };
                 let subject_type = self.infer_type_inner(
-                    function_call.subject_id,
+                    subject_id,
                     &Type::Unknown,
                     substitution_context,
                     exprs_seen,
                 );
                 match subject_type {
                     Type::Unresolved => Type::Unresolved,
-                    Type::Function(_) => Type::Void,
+                    // A call's type is the callee's return type: the type of a
+                    // user function's body expression, or an external
+                    // function's declared return type.
+                    Type::Function(function_id) => {
+                        let return_expr_id = self.functions.get(&function_id).map(|f| f.body.1);
+                        if let Some(return_expr_id) = return_expr_id {
+                            self.infer_type_inner(
+                                return_expr_id,
+                                &Type::Unknown,
+                                substitution_context,
+                                exprs_seen,
+                            )
+                        } else {
+                            let return_type_id = self
+                                .external_functions
+                                .get(&function_id)
+                                .map(|f| f.return_type_id);
+                            match return_type_id {
+                                Some(return_type_id) => return_type_id.get_type(self),
+                                None => Type::Void,
+                            }
+                        }
+                    }
                     x => panic!("type is not callable: {:?}", x),
                 }
             }
@@ -1384,8 +1411,11 @@ impl<'src> Analyzer<'src> {
                         .find(|(_, x)| *x.name == **field_name)
                         .expect(format!("unknown field: {}", field_name).as_str());
                     let struct_field_type = struct_field.type_id.get_type(self);
+                    // Infer the value against the declared field type so that,
+                    // e.g., an integer literal is treated as `f64` when the
+                    // field is `f64`.
                     let value_type =
-                        self.infer_type(*field_value, &Type::Unknown, &substitution_context);
+                        self.infer_type(*field_value, &struct_field_type, &substitution_context);
                     if let Type::Unresolved = value_type {
                         defer = Some(constraint);
                         break;
@@ -1438,21 +1468,24 @@ impl<'src> Analyzer<'src> {
                 .into_iter()
                 .collect();
             for (id, constraint) in accessor_constraints {
-                let FieldAccessorConstraint {
-                    subject_id,
-                    member_name,
-                    ..
-                } = &constraint;
+                let subject_id = constraint.subject_id;
+                let member_name = constraint.member_name;
 
-                if !self.expr_id_to_type_id_map.contains_key(subject_id)
-                    && !self.resolved_types.contains_key(subject_id)
-                {
+                // Defer until the subject's entity has been resolved (e.g. a
+                // method-call receiver wired up in a later iteration), then
+                // resolve its type by inference rather than relying on it
+                // having been cached in the type maps — parameters, locals and
+                // calls compute their types through `infer_type`.
+                if !self.expr_id_to_expr_map.contains_key(&subject_id) {
                     remaining_accessors.insert(id, constraint);
                     continue;
                 }
-
-                let subject_type = self.expr_type_for_id(*subject_id);
+                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
                 match subject_type {
+                    Type::Unresolved => {
+                        remaining_accessors.insert(id, constraint);
+                        continue;
+                    }
                     Type::Struct(struct_id) => {
                         let struct_ = match self.structs.get(&struct_id) {
                             Some(s) => s,
@@ -1468,11 +1501,11 @@ impl<'src> Analyzer<'src> {
                             .fields
                             .iter()
                             .enumerate()
-                            .find_map(|(i, x)| (x.name == *member_name).then_some(i))
+                            .find_map(|(i, x)| (x.name == member_name).then_some(i))
                             .unwrap();
-                        self.expr_id_to_expr_map
-                            .insert(id, Expr::Field(*subject_id, struct_id, field_index));
                         let field_type = struct_.fields[field_index].type_id;
+                        self.expr_id_to_expr_map
+                            .insert(id, Expr::Field(subject_id, struct_id, field_index));
                         self.expr_id_to_type_id_map.insert(id, field_type);
                         self.resolved_types.insert(id, field_type);
                     }
@@ -1603,9 +1636,15 @@ impl<'src> Analyzer<'src> {
 
                 let mut all_resolved = true;
                 for &value_id in value_ids.iter() {
-                    if !self.expr_id_to_type_id_map.contains_key(&value_id)
-                        && !self.resolved_types.contains_key(&value_id)
-                    {
+                    // A value is ready once its entity exists and its type
+                    // infers to something concrete. Call/local/parameter
+                    // values resolve through inference, not the type maps.
+                    let resolved = self.expr_id_to_expr_map.contains_key(&value_id)
+                        && !matches!(
+                            self.infer_type(value_id, &Type::Unknown, &HashMap::new()),
+                            Type::Unresolved
+                        );
+                    if !resolved {
                         all_resolved = false;
                         break;
                     }
@@ -1670,9 +1709,15 @@ impl<'src> Analyzer<'src> {
                     arguments_span,
                 } = constraint;
 
-                if !self.expr_id_to_type_id_map.contains_key(&subject_id)
-                    && !self.resolved_types.contains_key(&subject_id)
-                {
+                // Defer until the subject's entity is resolved and its type
+                // can be inferred (a local pointing at a function, a static
+                // accessor resolved to a module member, etc.).
+                let subject_ready = self.expr_id_to_expr_map.contains_key(&subject_id)
+                    && !matches!(
+                        self.infer_type(subject_id, &Type::Unknown, &HashMap::new()),
+                        Type::Unresolved
+                    );
+                if !subject_ready {
                     remaining_calls.push(constraint);
                     continue;
                 }
@@ -1774,6 +1819,16 @@ impl<'src> Analyzer<'src> {
                                 }
 
                                 if all_args_ok {
+                                    self.function_calls.insert(
+                                        call_id,
+                                        FunctionCall {
+                                            id: call_id,
+                                            subject_id,
+                                            generic_argument_ids: generic_argument_ids.clone(),
+                                            argument_ids: argument_ids.clone(),
+                                            arguments_span,
+                                        },
+                                    );
                                     self.expr_id_to_expr_map
                                         .insert(call_id, Expr::Call(call_id));
                                 }
@@ -1784,6 +1839,16 @@ impl<'src> Analyzer<'src> {
                         // Direct function reference
                         match subject_expr {
                             Expr::Function(_) | Expr::ExternalFunction(_) => {
+                                self.function_calls.insert(
+                                    call_id,
+                                    FunctionCall {
+                                        id: call_id,
+                                        subject_id,
+                                        generic_argument_ids: generic_argument_ids.clone(),
+                                        argument_ids: argument_ids.clone(),
+                                        arguments_span,
+                                    },
+                                );
                                 self.expr_id_to_expr_map
                                     .insert(call_id, Expr::Call(call_id));
                                 progress = true;

@@ -11,7 +11,7 @@ impl S {
 }
 
 fun main() {
-	let v: S = S { inner = 10 };
+	let v = S { inner = 10 };
 	let u = v.add(20);
 	std::print(u);
 }
