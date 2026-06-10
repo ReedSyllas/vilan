@@ -47,6 +47,9 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 pub enum Node<'src> {
     Accessor(&'src str),
     AccessorWithGenerics(&'src str, GenericArguments<'src>),
+    // `x = v` or a compound assignment like `x += v` (the operator is the
+    // binary op the assignment applies, e.g. `Add` for `+=`).
+    Assign(&'src str, Option<BinaryOp>, Box<Spanned<Self>>),
     Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
     Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     Bool(bool),
@@ -72,10 +75,12 @@ pub enum Node<'src> {
         Spanned<NodeList<'src>>,
     ),
     Import(ImportBranch<'src>),
+    // `let`/`mut` binding: name, type annotation, value, mutability.
     Let(
         &'src str,
         Option<Box<Spanned<Self>>>,
         Option<Box<Spanned<Self>>>,
+        bool,
     ),
     List(NodeList<'src>),
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),

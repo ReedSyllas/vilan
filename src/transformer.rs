@@ -324,10 +324,22 @@ impl<'src> Transformer<'src> {
                     .initial
                     .and_then(|id| self.walk_entity(id, block))
                     .unwrap_or(js::Node::Void);
-                js::Node::ConstVariable(js::Variable {
+                let js_variable = js::Variable {
                     name,
                     value: Box::new(value),
-                })
+                };
+                if variable.mutable {
+                    js::Node::LetVariable(js_variable)
+                } else {
+                    js::Node::ConstVariable(js_variable)
+                }
+            }
+            Expr::Assignment(target_id, value_id) => {
+                let target = self
+                    .walk_entity(*target_id, block)
+                    .unwrap_or(js::Node::Void);
+                let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
+                js::Node::Assignment(Box::new(target), Box::new(value))
             }
             Expr::Parameter(_) => {
                 return None;

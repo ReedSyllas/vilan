@@ -36,6 +36,7 @@ pub fn lexer<'src>()
         "import" => Token::Import,
         "let" => Token::Let,
         "mod" => Token::Mod,
+        "mut" => Token::Mut,
         "null" => Token::Null,
         "ret" => Token::Ret,
         "struct" => Token::Struct,

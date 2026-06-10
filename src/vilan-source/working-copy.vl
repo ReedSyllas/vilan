@@ -1,31 +1,33 @@
 import std;
 
-trait Default {
-	fun default(): Self;
+trait Iterator<T> {
+	fun next(self): T;
 }
 
-struct Id {
-	n: u32,
+struct FromFn<T> {
+	fn: || T,
 }
 
-impl Id {
-	fun new(n: u32) {
-		Id { n }
+impl FromFn<T> with Iterator<T> {
+	fun next(self) {
+		(self.fn)()
 	}
 }
 
-impl Id with Default {
-	fun default() {
-		Id::new(0)
+impl Iterator<T> {
+	fun from_fn(fn: || T): FromFn<T> {
+		FromFn { fn }
 	}
-}
-
-fun default<T: Default>(): T {
-	T::default()
 }
 
 fun main() {
-	let my_id = default<Id>();
+	mut i = 0;
+	let naturals = Iterator::from_fn(|| {
+		i += 1;
+		i
+	});
 	
-	std::print(my_id);
+	std::print(naturals.next());
+	std::print(naturals.next());
+	std::print(naturals.next());
 }

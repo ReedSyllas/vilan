@@ -154,7 +154,7 @@ where
     let atom = choice((
         literal,
         local,
-        local_type,
+        local_type.clone(),
         list,
         tuple,
         expression
@@ -304,8 +304,8 @@ where
         .labelled("if block"),
     );
 
-    let let_ = just(Token::Let)
-        .ignore_then(identifier)
+    let let_ = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
+        .then(identifier)
         .then(
             just(Token::Op(":"))
                 .ignore_then(type_.clone())
@@ -318,13 +318,31 @@ where
                 .labelled("value")
                 .or_not(),
         )
-        .map_with(|((name, type_), val), e| {
+        .map_with(|(((mutable, name), type_), val), e| {
             (
-                Node::Let(name, type_.map(|x| Box::new(x)), val.map(|x| Box::new(x))),
+                Node::Let(
+                    name,
+                    type_.map(|x| Box::new(x)),
+                    val.map(|x| Box::new(x)),
+                    mutable,
+                ),
                 e.span(),
             )
         })
         .labelled("let binding")
+        .boxed();
+
+    let assignment = identifier
+        .then(choice((
+            just(Token::Op("=")).to(None),
+            just(Token::Op("+=")).to(Some(BinaryOp::Add)),
+            just(Token::Op("-=")).to(Some(BinaryOp::Sub)),
+            just(Token::Op("*=")).to(Some(BinaryOp::Mul)),
+            just(Token::Op("/=")).to(Some(BinaryOp::Div)),
+        )))
+        .then(expression.clone())
+        .map_with(|((name, op), value), e| (Node::Assign(name, op, Box::new(value)), e.span()))
+        .labelled("assignment")
         .boxed();
 
     let function = just(Token::Fun)
@@ -512,6 +530,7 @@ where
         if_.clone(),
         let_,
         return_,
+        assignment,
         chain_expr_parser(identifier, generic_arguments, expression_list, atom),
     )));
 
@@ -572,7 +591,9 @@ where
         .labelled("closure type")
         .boxed();
 
-    type_.define(choice((closure_type, local, tuple_type)));
+    // `local_type` (e.g. `FromFn<T>`) must come before the plain identifier so
+    // generic arguments are consumed as part of the type.
+    type_.define(choice((closure_type, local_type, local, tuple_type)));
 
     statement
         .clone()

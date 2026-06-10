@@ -11,6 +11,9 @@ use crate::util::plural;
 
 #[derive(Clone, Debug)]
 pub enum Expr<'src> {
+    // An assignment to a local: target accessor and the (possibly desugared,
+    // e.g. `x + v` for `x += v`) value expression.
+    Assignment(Id, Id),
     Binary(BinaryOp, Id, Id),
     Block((Vec<Id>, Id)),
     Bool(bool),
@@ -91,7 +94,7 @@ pub struct Variable<'src> {
     pub name: &'src str,
     pub initial: Option<Id>,
     pub type_id: TypeId,
-    // pub mutable: bool,
+    pub mutable: bool,
 }
 
 #[derive(Debug)]
@@ -271,6 +274,8 @@ pub struct Analyzer<'src> {
     module_id_by_name: HashMap<&'src str, Id>,
     modules: IndexMap<Id, Module<'src>>,
     parameters: IndexMap<Id, Parameter<'src>>,
+    // Assignments awaiting local resolution: (target accessor id, value id).
+    prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<&'src str>, &'src str, Id)>,
     prepped_locals: Vec<(Id, &'src str)>,
@@ -302,6 +307,26 @@ static EMPTY_SPAN: Span = Span {
     context: (),
 };
 
+/// Type names that resolve to built-in primitives in type position.
+const PRIMITIVE_TYPE_NAMES: [&str; 7] = ["any", "f64", "i32", "u32", "str", "bool", "null"];
+
+/// The plain-identifier generic arguments of a type node, e.g. `["T"]` for
+/// `FromFn<T>`. These are candidates for implicit generic-parameter
+/// declarations on an `impl`.
+fn implicit_generic_argument_names<'src>(node: &Spanned<Node<'src>>) -> Vec<&'src str> {
+    match &node.0 {
+        Node::AccessorWithGenerics(_, generic_arguments) => generic_arguments
+            .0
+            .iter()
+            .filter_map(|argument| match &argument.0 {
+                Node::Accessor(name) => Some(*name),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 impl<'src> Analyzer<'src> {
     fn new() -> Self {
         Self {
@@ -323,6 +348,7 @@ impl<'src> Analyzer<'src> {
             module_id_by_name: HashMap::new(),
             modules: IndexMap::new(),
             parameters: IndexMap::new(),
+            prepped_assignments: Vec::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
@@ -482,20 +508,50 @@ impl<'src> Analyzer<'src> {
                     .as_ref()
                     .map(|x| self.walk_type_node(x, scope_id))
                     .unwrap_or_else(|| Type::Any.get_type_id(self));
-                self.generic_constraint_names
-                    .insert(constraint_type_id, name);
+                self.register_generic_parameter(name, constraint_type_id, scope_id);
                 generic_parameter_constraint_ids.push(constraint_type_id);
-                let type_id = Type::Generic(constraint_type_id).get_type_id(self);
-                let expr_id = self.new_entity_id();
-                self.expr_id_to_expr_map
-                    .insert(expr_id, Expr::Generic(constraint_type_id));
-                self.expr_id_to_scope_id_map.insert(expr_id, scope_id);
-                self.expr_id_to_type_id_map.insert(expr_id, type_id);
-                let scope = self.mut_scope_for_scope_id(scope_id);
-                scope.name_to_id_map.insert(name, expr_id);
             }
         }
         generic_parameter_constraint_ids
+    }
+
+    /// Registers a single generic parameter named `name` (bound by the
+    /// constraint type) into `scope_id`.
+    fn register_generic_parameter(
+        &mut self,
+        name: &'src str,
+        constraint_type_id: TypeId,
+        scope_id: Id,
+    ) {
+        self.generic_constraint_names
+            .insert(constraint_type_id, name);
+        let type_id = Type::Generic(constraint_type_id).get_type_id(self);
+        let expr_id = self.new_entity_id();
+        self.expr_id_to_expr_map
+            .insert(expr_id, Expr::Generic(constraint_type_id));
+        self.expr_id_to_scope_id_map.insert(expr_id, scope_id);
+        self.expr_id_to_type_id_map.insert(expr_id, type_id);
+        let scope = self.mut_scope_for_scope_id(scope_id);
+        scope.name_to_id_map.insert(name, expr_id);
+    }
+
+    /// Collects the named members declared in a trait/impl body scope,
+    /// excluding the implicit `Self` binding and generic parameters.
+    fn collect_declarations(&self, scope_id: Id) -> IndexMap<&'src str, Id> {
+        self.scopes
+            .get(&scope_id)
+            .unwrap()
+            .name_to_id_map
+            .iter()
+            .filter(|(name, expr_id)| {
+                **name != "Self"
+                    && !matches!(
+                        self.expr_id_to_expr_map.get(*expr_id),
+                        Some(Expr::Generic(_))
+                    )
+            })
+            .map(|(name, expr_id)| (*name, *expr_id))
+            .collect()
     }
 
     /// Registers the `Self` type within a trait/impl body scope. `self_type_id`
@@ -672,11 +728,18 @@ impl<'src> Analyzer<'src> {
                             id: parameter_id,
                             function_id: id,
                             name: x.0,
-                            type_id: x
-                                .1
-                                .as_ref()
-                                .map(|x| self.walk_type_node(x, body_scope.id))
-                                .unwrap_or(Type::Unknown.get_type_id(self)),
+                            type_id: match &x.1 {
+                                Some(type_node) => self.walk_type_node(type_node, body_scope.id),
+                                // A bare `self` parameter takes the enclosing
+                                // `Self` type (the impl/trait subject).
+                                None if x.0 == "self" => self
+                                    .try_get_expr_id_by_name("Self", scope_id)
+                                    .and_then(|self_id| {
+                                        self.expr_id_to_type_id_map.get(&self_id).copied()
+                                    })
+                                    .unwrap_or_else(|| Type::Unknown.get_type_id(self)),
+                                None => Type::Unknown.get_type_id(self),
+                            },
                         };
                         body_scope
                             .name_to_id_map
@@ -757,7 +820,7 @@ impl<'src> Analyzer<'src> {
                 let rhs_id = self.walk_expr_node(rhs, scope_id);
                 Some(Expr::Binary(*op, lhs_id, rhs_id))
             }
-            Node::Let(name, type_, value) => {
+            Node::Let(name, type_, value, mutable) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -781,6 +844,7 @@ impl<'src> Analyzer<'src> {
                         name,
                         initial,
                         type_id,
+                        mutable: *mutable,
                     },
                 );
                 // Collect a variable constraint for type inference.
@@ -792,6 +856,31 @@ impl<'src> Analyzer<'src> {
                 self.variable_constraints
                     .push(VariableConstraint::from_walk(id, type_id, value_ids));
                 Some(Expr::Variable(id))
+            }
+            Node::Assign(name, op, value) => {
+                let value_id = self.walk_expr_node(value, scope_id);
+                let target_id = self.new_entity_id();
+                self.prepped_locals.push((target_id, name));
+                self.expr_id_to_scope_id_map.insert(target_id, scope_id);
+                self.span_map.insert(target_id, &node.1);
+                // A compound assignment like `x += v` desugars to `x = x + v`.
+                let stored_value_id = match op {
+                    Some(op) => {
+                        let lhs_id = self.new_entity_id();
+                        self.prepped_locals.push((lhs_id, name));
+                        self.expr_id_to_scope_id_map.insert(lhs_id, scope_id);
+                        self.span_map.insert(lhs_id, &node.1);
+                        let binary_id = self.new_entity_id();
+                        self.expr_id_to_expr_map
+                            .insert(binary_id, Expr::Binary(*op, lhs_id, value_id));
+                        self.expr_id_to_scope_id_map.insert(binary_id, scope_id);
+                        self.span_map.insert(binary_id, &node.1);
+                        binary_id
+                    }
+                    None => value_id,
+                };
+                self.prepped_assignments.push((target_id, stored_value_id));
+                Some(Expr::Assignment(target_id, stored_value_id))
             }
             Node::Struct(name, generic_parameters, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
@@ -866,25 +955,45 @@ impl<'src> Analyzer<'src> {
                 None
             }
             Node::Impl(subject, generic_parameters, trait_, body) => {
-                let subject = self.walk_type_node(subject, scope_id);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
                 self.register_generic_parameters(generic_parameters, body_scope_id);
+                // `impl FromFn<T> with Iterator<T>` implicitly declares `T`:
+                // any plain-identifier generic argument on the subject or the
+                // trait that names nothing in scope is a generic parameter of
+                // this implementation.
+                let implicit_names = implicit_generic_argument_names(subject)
+                    .into_iter()
+                    .chain(
+                        trait_
+                            .iter()
+                            .flat_map(|x| implicit_generic_argument_names(x)),
+                    )
+                    .collect::<Vec<_>>();
+                for name in implicit_names {
+                    if PRIMITIVE_TYPE_NAMES.contains(&name)
+                        || self.try_get_expr_id_by_name(name, body_scope_id).is_some()
+                    {
+                        continue;
+                    }
+                    let constraint_type_id = Type::Any.get_type_id(self);
+                    self.register_generic_parameter(name, constraint_type_id, body_scope_id);
+                }
+                // The subject is walked in the body scope so its generic
+                // arguments resolve to the implicit parameters above.
+                let subject = self.walk_type_node(subject, body_scope_id);
                 // Within an `impl`, `Self` refers to the subject type.
                 self.register_self_type(body_scope_id, subject);
                 self.walk_expr_nodes(&body.0, body_scope_id);
-                let mut declarations = self
-                    .scopes
-                    .get(&body_scope_id)
-                    .unwrap()
-                    .name_to_id_map
-                    .clone();
-                // `Self` is an implicit binding, not a declared member.
-                declarations.shift_remove("Self");
+                let declarations = self.collect_declarations(body_scope_id);
                 // `impl Subject with Trait` must satisfy the trait; record a
                 // conformance check to run once all declarations are known.
                 if let Some(trait_) = trait_ {
-                    if let Node::Accessor(trait_name) = &trait_.0 {
+                    let trait_name = match &trait_.0 {
+                        Node::Accessor(name) | Node::AccessorWithGenerics(name, _) => Some(*name),
+                        _ => None,
+                    };
+                    if let Some(trait_name) = trait_name {
                         self.prepped_trait_impls.push(TraitImplCheck {
                             subject_type_id: subject,
                             trait_name,
@@ -912,13 +1021,7 @@ impl<'src> Analyzer<'src> {
                 let any_type_id = Type::Any.get_type_id(self);
                 self.register_self_type(body_scope_id, any_type_id);
                 self.walk_expr_nodes(&body.0, body_scope_id);
-                let mut declarations = self
-                    .scopes
-                    .get(&body_scope_id)
-                    .unwrap()
-                    .name_to_id_map
-                    .clone();
-                declarations.shift_remove("Self");
+                let declarations = self.collect_declarations(body_scope_id);
                 self.traits.insert(
                     id,
                     Trait {
@@ -1014,6 +1117,14 @@ impl<'src> Analyzer<'src> {
                     None
                 }
             },
+            // Generic arguments are currently erased from the nominal type:
+            // `FromFn<T>` resolves to the same type as `FromFn`. The
+            // arguments still matter where they declare implicit impl
+            // generics or drive monomorphization at call sites.
+            Node::AccessorWithGenerics(name, _generic_arguments) => {
+                self.prepped_type_locals.push((type_id, name, scope_id));
+                None
+            }
             Node::StaticAccessor(subject, member_name) => {
                 let subject_type_id = self.walk_type_node(subject, scope_id);
                 self.prepped_type_static_accessors
@@ -1167,6 +1278,12 @@ impl<'src> Analyzer<'src> {
                 );
                 match subject_type {
                     Type::Unresolved => Type::Unresolved,
+                    // Calling a closure-typed value (e.g. `(self.fn)()`)
+                    // yields the closure's return type.
+                    Type::Closure(_, return_type_id) => {
+                        let return_type = return_type_id.get_type(self);
+                        self.substitute_type(&return_type, substitution_context)
+                    }
                     // A call's type is the callee's return type: its declared
                     // return type if annotated, otherwise the inferred type of
                     // its body — with the call's generic arguments substituted
@@ -1242,6 +1359,35 @@ impl<'src> Analyzer<'src> {
                     _ => lhs,
                 }
             }
+            // A block's type is the type of its trailing expression.
+            Expr::Block((_, trailing_expr_id)) => {
+                let trailing_expr_id = *trailing_expr_id;
+                self.infer_type_inner(
+                    trailing_expr_id,
+                    &constraint,
+                    substitution_context,
+                    exprs_seen,
+                )
+            }
+            Expr::Closure(closure_id) => {
+                let closure = self.closures.get(closure_id).unwrap();
+                let parameter_ids = closure.parameters.clone();
+                let return_expr_id = closure.return_;
+                let parameter_type_ids = parameter_ids
+                    .iter()
+                    .map(|parameter_id| self.parameters.get(parameter_id).unwrap().type_id)
+                    .collect::<Vec<_>>();
+                let return_type = self.infer_type_inner(
+                    return_expr_id,
+                    &Type::Unknown,
+                    substitution_context,
+                    exprs_seen,
+                );
+                match return_type {
+                    Type::Unresolved => Type::Unresolved,
+                    _ => Type::Closure(parameter_type_ids, return_type.get_type_id(self)),
+                }
+            }
             _ => Type::Void,
         };
 
@@ -1312,6 +1458,36 @@ impl<'src> Analyzer<'src> {
                 }
                 (Type::Tuple(result_items), all_bindings)
             }
+            (
+                Type::Closure(l_parameter_ids, l_return_id),
+                Type::Closure(r_parameter_ids, r_return_id),
+            ) => {
+                if l_parameter_ids.len() != r_parameter_ids.len() {
+                    return None;
+                }
+                let mut result_parameter_ids = Vec::with_capacity(l_parameter_ids.len());
+                let mut all_bindings = Vec::new();
+                for (l_parameter_id, r_parameter_id) in
+                    l_parameter_ids.iter().zip(r_parameter_ids.iter())
+                {
+                    let l = l_parameter_id.get_type(self);
+                    let r = r_parameter_id.get_type(self);
+                    let (parameter, bindings) =
+                        self.reconcile_type(&l, &r, substitution_context)?;
+                    all_bindings.extend(bindings);
+                    result_parameter_ids.push(parameter.get_type_id(self));
+                }
+                let l_return = l_return_id.get_type(self);
+                let r_return = r_return_id.get_type(self);
+                let (return_type, bindings) =
+                    self.reconcile_type(&l_return, &r_return, substitution_context)?;
+                all_bindings.extend(bindings);
+                let return_type_id = return_type.get_type_id(self);
+                (
+                    Type::Closure(result_parameter_ids, return_type_id),
+                    all_bindings,
+                )
+            }
             (l, r) if l == r => (a.clone(), Vec::new()),
             _ => {
                 return None;
@@ -1355,6 +1531,24 @@ impl<'src> Analyzer<'src> {
                         let r = r_item_id.get_type(self);
                         self.compare_type(&l, &r, substitution_context)
                     })
+            }
+            (
+                Type::Closure(l_parameter_ids, l_return_id),
+                Type::Closure(r_parameter_ids, r_return_id),
+            ) => {
+                l_parameter_ids.len() == r_parameter_ids.len()
+                    && l_parameter_ids.iter().zip(r_parameter_ids.iter()).all(
+                        |(l_parameter_id, r_parameter_id)| {
+                            let l = l_parameter_id.get_type(self);
+                            let r = r_parameter_id.get_type(self);
+                            self.compare_type(&l, &r, substitution_context)
+                        },
+                    )
+                    && {
+                        let l = l_return_id.get_type(self);
+                        let r = r_return_id.get_type(self);
+                        self.compare_type(&l, &r, substitution_context)
+                    }
             }
             (a, b) if a == b => true,
             _ => false,
@@ -1415,6 +1609,45 @@ impl<'src> Analyzer<'src> {
             self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
         }
 
+        // --- Wire assignments to their variables ---
+        // Each assignment targets a (now resolved) local. The assigned value
+        // joins the variable's constraint so reassignments are type checked
+        // against the variable's type, and assigning to an immutable binding
+        // is rejected.
+        for (target_id, value_id) in std::mem::take(&mut self.prepped_assignments) {
+            let variable_id = match self.expr_id_to_expr_map.get(&target_id) {
+                Some(Expr::Local(variable_id)) => *variable_id,
+                _ => continue,
+            };
+            match self.variables.get(&variable_id) {
+                Some(variable) if !variable.mutable => {
+                    let name = variable.name;
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "cannot assign to immutable variable '{}'. Declare it with `mut` instead.",
+                            name
+                        ),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: "cannot assign to this expression".to_string(),
+                    });
+                    continue;
+                }
+            }
+            if let Some(constraint) = self
+                .variable_constraints
+                .iter_mut()
+                .find(|constraint| constraint.variable_id == variable_id)
+            {
+                constraint.value_ids.push(value_id);
+            }
+        }
+
         for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
             let subject_id = self.get_expr_id_by_name(name, scope_id);
             let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
@@ -1456,9 +1689,11 @@ impl<'src> Analyzer<'src> {
         for (id, subject_type_id, member_name) in self.prepped_static_accessors.clone() {
             let subject_type = subject_type_id.get_type(self);
             match subject_type {
-                Type::Struct(struct_id) => {
-                    let struct_name = self.structs.get(&struct_id).unwrap().name;
-                    let member_id = *self
+                // Static access on a nominal type (`Id::new`) or a trait
+                // (`Iterator::from_fn`): look the member up in the matching
+                // implementations.
+                Type::Struct(_) | Type::Trait(_) => {
+                    let member_id = self
                         .implementations
                         .iter()
                         .filter(|x| {
@@ -1469,8 +1704,22 @@ impl<'src> Analyzer<'src> {
                             )
                         })
                         .find_map(|x| x.declarations.get(member_name))
-                        .expect(format!("cannot find {} in {}", member_name, struct_name).as_str());
-                    self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                        .copied();
+                    match member_id {
+                        Some(member_id) => {
+                            let rc = self.reference_count.entry(member_id).or_insert(0);
+                            *rc += 1;
+                            self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                        }
+                        None => {
+                            let subject_str =
+                                self.pretty_print_type(&subject_type, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!("cannot find '{}' in {}", member_name, subject_str),
+                            });
+                        }
+                    }
                 }
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
@@ -1877,22 +2126,21 @@ impl<'src> Analyzer<'src> {
                     ref value_ids,
                 } = constraint;
 
-                let mut all_resolved = true;
-                for &value_id in value_ids.iter() {
-                    // A value is ready once its entity exists and its type
-                    // infers to something concrete. Call/local/parameter
-                    // values resolve through inference, not the type maps.
-                    let resolved = self.expr_id_to_expr_map.contains_key(&value_id)
-                        && !matches!(
-                            self.infer_type(value_id, &Type::Unknown, &HashMap::new()),
-                            Type::Unresolved
-                        );
-                    if !resolved {
-                        all_resolved = false;
-                        break;
-                    }
-                }
-                if !all_resolved {
+                // The first value (with the annotation) grounds the variable's
+                // type and must be ready. Later values — reassignments — may
+                // refer to the variable itself (e.g. `i += 1`), so they are
+                // checked only after the type has been grounded below.
+                let first_ready = value_ids
+                    .first()
+                    .map(|&value_id| {
+                        self.expr_id_to_expr_map.contains_key(&value_id)
+                            && !matches!(
+                                self.infer_type(value_id, &Type::Unknown, &HashMap::new()),
+                                Type::Unresolved
+                            )
+                    })
+                    .unwrap_or(true);
+                if !first_ready {
                     remaining_vars.push(constraint);
                     continue;
                 }
@@ -1900,9 +2148,9 @@ impl<'src> Analyzer<'src> {
                 let mut substitution_context = HashMap::new();
                 let mut variable_type = initial_type_id.get_type(self);
 
-                for &value_id in value_ids {
+                if let Some(&first_value_id) = value_ids.first() {
                     let value_type =
-                        self.infer_type(value_id, &variable_type, &substitution_context);
+                        self.infer_type(first_value_id, &variable_type, &substitution_context);
                     match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
                         Some((unified, bindings)) => {
                             for (cid, tid) in bindings {
@@ -1910,6 +2158,46 @@ impl<'src> Analyzer<'src> {
                             }
                             if let Type::Unknown = variable_type {
                                 variable_type = unified;
+                            }
+                        }
+                        None => {
+                            let expected_str =
+                                self.pretty_print_type(&variable_type, &substitution_context);
+                            let got_str =
+                                self.pretty_print_type(&value_type, &substitution_context);
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&first_value_id).unwrap(),
+                                msg: format!(
+                                    "Expected {}, but got {} instead.",
+                                    expected_str, got_str
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                // Ground the variable's type before checking reassignments so
+                // self-referential values like `i + 1` can resolve.
+                let var_type_id = variable_type.clone().get_type_id(self);
+                self.variables.get_mut(&variable_id).unwrap().type_id = var_type_id;
+                self.resolved_types.insert(variable_id, var_type_id);
+
+                let mut deferred_value_ids = Vec::new();
+                for &value_id in value_ids.iter().skip(1) {
+                    if !self.expr_id_to_expr_map.contains_key(&value_id) {
+                        deferred_value_ids.push(value_id);
+                        continue;
+                    }
+                    let value_type =
+                        self.infer_type(value_id, &variable_type, &substitution_context);
+                    if matches!(value_type, Type::Unresolved) {
+                        deferred_value_ids.push(value_id);
+                        continue;
+                    }
+                    match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
+                        Some((_, bindings)) => {
+                            for (cid, tid) in bindings {
+                                substitution_context.insert(cid, tid);
                             }
                         }
                         None => {
@@ -1927,10 +2215,13 @@ impl<'src> Analyzer<'src> {
                         }
                     }
                 }
-
-                let var_type_id = variable_type.get_type_id(self);
-                self.variables.get_mut(&variable_id).unwrap().type_id = var_type_id;
-                self.resolved_types.insert(variable_id, var_type_id);
+                if !deferred_value_ids.is_empty() {
+                    remaining_vars.push(VariableConstraint {
+                        variable_id,
+                        initial_type_id: var_type_id,
+                        value_ids: deferred_value_ids,
+                    });
+                }
                 progress = true;
             }
             self.variable_constraints = remaining_vars;
@@ -1955,13 +2246,78 @@ impl<'src> Analyzer<'src> {
                 // Defer until the subject's entity is resolved and its type
                 // can be inferred (a local pointing at a function, a static
                 // accessor resolved to a module member, etc.).
-                let subject_ready = self.expr_id_to_expr_map.contains_key(&subject_id)
-                    && !matches!(
-                        self.infer_type(subject_id, &Type::Unknown, &HashMap::new()),
-                        Type::Unresolved
-                    );
-                if !subject_ready {
+                if !self.expr_id_to_expr_map.contains_key(&subject_id) {
                     remaining_calls.push(constraint);
+                    continue;
+                }
+                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                if matches!(subject_type, Type::Unresolved) {
+                    remaining_calls.push(constraint);
+                    continue;
+                }
+
+                // Calling a closure-typed value, e.g. `(self.fn)()` or a
+                // closure stored in a variable: type check the arguments
+                // against the closure's parameter types.
+                if let Type::Closure(parameter_type_ids, _) = subject_type {
+                    if argument_ids.len() != parameter_type_ids.len() {
+                        self.diagnostics.push(Error {
+                            span: arguments_span,
+                            msg: format!(
+                                "Expected {} {}, but got {} instead.",
+                                parameter_type_ids.len(),
+                                plural(parameter_type_ids.len(), "argument", "arguments"),
+                                argument_ids.len()
+                            ),
+                        });
+                        continue;
+                    }
+                    let substitution_context = HashMap::new();
+                    let mut deferred = false;
+                    for (i, parameter_type_id) in parameter_type_ids.iter().enumerate() {
+                        let parameter_type = parameter_type_id.get_type(self);
+                        let argument_id = *argument_ids.get(i).unwrap();
+                        let argument_type =
+                            self.infer_type(argument_id, &parameter_type, &substitution_context);
+                        if matches!(argument_type, Type::Unresolved) {
+                            remaining_calls.push(CallSubjectConstraint {
+                                call_id,
+                                subject_id,
+                                generic_argument_ids: generic_argument_ids.clone(),
+                                argument_ids: argument_ids.clone(),
+                                arguments_span,
+                            });
+                            deferred = true;
+                            break;
+                        }
+                        if self
+                            .reconcile_type(&argument_type, &parameter_type, &substitution_context)
+                            .is_none()
+                        {
+                            let expected =
+                                self.pretty_print_type(&parameter_type, &substitution_context);
+                            let got = self.pretty_print_type(&argument_type, &substitution_context);
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&argument_id).unwrap(),
+                                msg: format!("Expected {}, but got {} instead.", expected, got),
+                            });
+                        }
+                    }
+                    if !deferred {
+                        self.function_calls.insert(
+                            call_id,
+                            FunctionCall {
+                                id: call_id,
+                                subject_id,
+                                generic_argument_ids: generic_argument_ids.clone(),
+                                argument_ids: argument_ids.clone(),
+                                arguments_span,
+                            },
+                        );
+                        self.expr_id_to_expr_map
+                            .insert(call_id, Expr::Call(call_id));
+                        progress = true;
+                    }
                     continue;
                 }
 
