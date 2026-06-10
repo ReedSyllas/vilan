@@ -8,4 +8,4 @@ function b() {
 	return c/*default*/();
 }
 const a/*my_id*/ = b();
-console.log(a/*my_id*/);
+console.log(a/*my_id*/[0]);

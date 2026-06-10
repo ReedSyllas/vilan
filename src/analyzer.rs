@@ -1090,7 +1090,14 @@ impl<'src> Analyzer<'src> {
             x => x.clone(),
         };
 
-        let expr = self.get_entity_by_id(expr_id);
+        // The entity may not exist yet (e.g. a deferred field accessor whose
+        // subject type is still unknown, like `my_id.n` before `my_id` is
+        // inferred). Treat it as unresolved so the constraint solver defers and
+        // retries, rather than panicking.
+        let expr = match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(expr) => expr,
+            None => return Type::Unresolved,
+        };
 
         let inferred_type: Type = match expr {
             Expr::Null => Type::Primitive(PrimitiveType::Null),
