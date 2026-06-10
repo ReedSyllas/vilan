@@ -307,26 +307,6 @@ static EMPTY_SPAN: Span = Span {
     context: (),
 };
 
-/// Type names that resolve to built-in primitives in type position.
-const PRIMITIVE_TYPE_NAMES: [&str; 7] = ["any", "f64", "i32", "u32", "str", "bool", "null"];
-
-/// The plain-identifier generic arguments of a type node, e.g. `["T"]` for
-/// `FromFn<T>`. These are candidates for implicit generic-parameter
-/// declarations on an `impl`.
-fn implicit_generic_argument_names<'src>(node: &Spanned<Node<'src>>) -> Vec<&'src str> {
-    match &node.0 {
-        Node::AccessorWithGenerics(_, generic_arguments) => generic_arguments
-            .0
-            .iter()
-            .filter_map(|argument| match &argument.0 {
-                Node::Accessor(name) => Some(*name),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 impl<'src> Analyzer<'src> {
     fn new() -> Self {
         Self {
@@ -957,30 +937,11 @@ impl<'src> Analyzer<'src> {
             Node::Impl(subject, generic_parameters, trait_, body) => {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
+                // The impl's generic parameters are declared by the `<...>` on
+                // the subject (`impl List<T: str>`), each optionally bounded by
+                // a constraint. The trait clause (`with Iterator<T>`) only uses
+                // these parameters, so it does not declare any.
                 self.register_generic_parameters(generic_parameters, body_scope_id);
-                // `impl FromFn<T> with Iterator<T>` implicitly declares `T`:
-                // any plain-identifier generic argument on the subject or the
-                // trait that names nothing in scope is a generic parameter of
-                // this implementation.
-                let implicit_names = implicit_generic_argument_names(subject)
-                    .into_iter()
-                    .chain(
-                        trait_
-                            .iter()
-                            .flat_map(|x| implicit_generic_argument_names(x)),
-                    )
-                    .collect::<Vec<_>>();
-                for name in implicit_names {
-                    if PRIMITIVE_TYPE_NAMES.contains(&name)
-                        || self.try_get_expr_id_by_name(name, body_scope_id).is_some()
-                    {
-                        continue;
-                    }
-                    let constraint_type_id = Type::Any.get_type_id(self);
-                    self.register_generic_parameter(name, constraint_type_id, body_scope_id);
-                }
-                // The subject is walked in the body scope so its generic
-                // arguments resolve to the implicit parameters above.
                 let subject = self.walk_type_node(subject, body_scope_id);
                 // Within an `impl`, `Self` refers to the subject type.
                 self.register_self_type(body_scope_id, subject);

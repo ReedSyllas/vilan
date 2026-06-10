@@ -437,7 +437,14 @@ where
         .boxed();
 
     let impl_ = just(Token::Impl)
-        .ignore_then(type_.clone().labelled("implementation subject"))
+        // The subject is a plain type name; any `<...>` after it declares the
+        // impl's generic parameters (`impl List<T: str>`), so it must not be
+        // parsed as a generic type usage here.
+        .ignore_then(
+            identifier
+                .map_with(|name, e| (Node::Accessor(name), e.span()))
+                .labelled("implementation subject"),
+        )
         .then(generic_parameters.clone().or_not())
         .then(
             just(Token::With)
