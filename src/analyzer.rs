@@ -278,6 +278,9 @@ pub struct Analyzer<'src> {
     module_id_by_name: HashMap<&'src str, Id>,
     modules: IndexMap<Id, Module<'src>>,
     parameters: IndexMap<Id, Parameter<'src>>,
+    // The built-in `std` structs that back scalar primitives, keyed by name
+    // (`i32`, `str`, ...). Used to type literals and resolve primitive names.
+    primitive_struct_ids: HashMap<&'static str, Id>,
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
@@ -332,6 +335,7 @@ impl<'src> Analyzer<'src> {
             module_id_by_name: HashMap::new(),
             modules: IndexMap::new(),
             parameters: IndexMap::new(),
+            primitive_struct_ids: HashMap::new(),
             prepped_assignments: Vec::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
@@ -393,11 +397,6 @@ impl<'src> Analyzer<'src> {
             .expect(format!("failed to get scope of entity: {:?}", entity_id.0).as_str())
     }
 
-    fn get_scope_for_entity(&mut self, entity_id: Id) -> &mut Scope<'src> {
-        let scope_id = self.get_scope_id_for_entity(entity_id);
-        self.mut_scope_for_scope_id(scope_id)
-    }
-
     fn create_scope(&mut self, parent_id: Option<Id>) -> Scope<'src> {
         let id = self.new_scope_id();
         Scope {
@@ -439,6 +438,32 @@ impl<'src> Analyzer<'src> {
 
     fn get_type_by_type_id(&self, type_id: TypeId) -> Type {
         self.type_id_to_type_map.get(&type_id).unwrap().clone()
+    }
+
+    /// The type of a built-in scalar primitive (`i32`, `str`, ...), which is
+    /// the `std` struct that now backs it.
+    fn primitive_struct_type(&self, name: &str) -> Type {
+        Type::Struct(self.primitive_struct_ids[name])
+    }
+
+    /// Registers a built-in scalar primitive as an empty `std` struct, recording
+    /// its id so literals and primitive names can resolve to it. Like `print`,
+    /// it is an externally-provided declaration with no user-written source.
+    fn register_primitive_struct(&mut self, name: &'static str) -> Id {
+        let id = self.new_entity_id();
+        self.structs.insert(
+            id,
+            Struct {
+                id,
+                name,
+                generic_parameter_constraint_ids: Vec::new(),
+                fields: Vec::new(),
+            },
+        );
+        self.expr_id_to_expr_map.insert(id, Expr::Struct(id));
+        self.reference_count.entry(id).or_insert(0);
+        self.primitive_struct_ids.insert(name, id);
+        id
     }
 
     fn get_expr_id_by_name(&mut self, name: &'src str, scope_id: Id) -> Id {
@@ -1080,13 +1105,10 @@ impl<'src> Analyzer<'src> {
 
         let type_: Option<Type> = match &node.0 {
             Node::Accessor(name) => match *name {
+                // `any` is the top type, not a struct, so it stays built in.
+                // Scalar primitives are `std` structs resolved by name (they're
+                // registered in the prelude/global scope), like any other type.
                 "any" => Some(Type::Any),
-                "f64" => Some(Type::Primitive(PrimitiveType::F64)),
-                "i32" => Some(Type::Primitive(PrimitiveType::I32)),
-                "u32" => Some(Type::Primitive(PrimitiveType::U32)),
-                "str" => Some(Type::Primitive(PrimitiveType::String)),
-                "bool" => Some(Type::Primitive(PrimitiveType::Bool)),
-                "null" => Some(Type::Primitive(PrimitiveType::Null)),
                 _ => {
                     self.prepped_type_locals.push((type_id, name, scope_id));
                     None
@@ -1186,14 +1208,19 @@ impl<'src> Analyzer<'src> {
         };
 
         let inferred_type: Type = match expr {
-            Expr::Null => Type::Primitive(PrimitiveType::Null),
-            Expr::Bool(_) => Type::Primitive(PrimitiveType::Bool),
-            Expr::String(_) => Type::Primitive(PrimitiveType::String),
-            Expr::Number(_, _) => Type::Primitive(match constraint {
-                Type::Primitive(PrimitiveType::F64) => PrimitiveType::F64,
-                Type::Primitive(PrimitiveType::U32) => PrimitiveType::U32,
-                _ => PrimitiveType::I32,
-            }),
+            Expr::Null => self.primitive_struct_type("null"),
+            Expr::Bool(_) => self.primitive_struct_type("bool"),
+            Expr::String(_) => self.primitive_struct_type("str"),
+            // A numeric literal takes its width from the expected type, like
+            // `f64` for a field of that type, defaulting to `i32`.
+            Expr::Number(_, _) => {
+                let name = match &constraint {
+                    Type::Struct(id) if *id == self.primitive_struct_ids["f64"] => "f64",
+                    Type::Struct(id) if *id == self.primitive_struct_ids["u32"] => "u32",
+                    _ => "i32",
+                };
+                self.primitive_struct_type(name)
+            }
             Expr::List(_) => Type::Primitive(PrimitiveType::List(Type::Void.get_type_id(self))),
             Expr::Tuple(item_ids) => {
                 let constraint_items = match constraint {
@@ -1337,7 +1364,7 @@ impl<'src> Analyzer<'src> {
                 | BinaryOp::GtEq,
                 _,
                 _,
-            ) => Type::Primitive(PrimitiveType::Bool),
+            ) => self.primitive_struct_type("bool"),
             Expr::Binary(_, lhs_id, _rhs_id) => {
                 let lhs =
                     self.infer_type_inner(*lhs_id, &constraint, substitution_context, exprs_seen);
@@ -1419,20 +1446,16 @@ impl<'src> Analyzer<'src> {
                     (b.clone(), bindings)
                 }
             },
-            (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
-                (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
-                    let l = l_id.get_type(self);
-                    let r = r_id.get_type(self);
-                    let (item_type, bindings) =
-                        self.reconcile_type(&l, &r, substitution_context)?;
-                    let item_type_id = item_type.get_type_id(self);
-                    (Type::Primitive(PrimitiveType::List(item_type_id)), bindings)
-                }
-                (l, r) if l == r => (a.clone(), Vec::new()),
-                _ => {
-                    return None;
-                }
-            },
+            (
+                Type::Primitive(PrimitiveType::List(l_id)),
+                Type::Primitive(PrimitiveType::List(r_id)),
+            ) => {
+                let l = l_id.get_type(self);
+                let r = r_id.get_type(self);
+                let (item_type, bindings) = self.reconcile_type(&l, &r, substitution_context)?;
+                let item_type_id = item_type.get_type_id(self);
+                (Type::Primitive(PrimitiveType::List(item_type_id)), bindings)
+            }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 let mut result_items = Vec::with_capacity(l_items.len());
                 let mut all_bindings = Vec::new();
@@ -1500,15 +1523,14 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or_else(|| constraint_id.get_type(self));
                 return self.compare_type(a, &r, substitution_context);
             }
-            (Type::Primitive(l), Type::Primitive(r)) => match (l, r) {
-                (PrimitiveType::List(l_id), PrimitiveType::List(r_id)) => {
-                    let l = l_id.get_type(self);
-                    let r = r_id.get_type(self);
-                    self.compare_type(&l, &r, substitution_context)
-                }
-                (a, b) if a == b => true,
-                _ => false,
-            },
+            (
+                Type::Primitive(PrimitiveType::List(l_id)),
+                Type::Primitive(PrimitiveType::List(r_id)),
+            ) => {
+                let l = l_id.get_type(self);
+                let r = r_id.get_type(self);
+                self.compare_type(&l, &r, substitution_context)
+            }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 l_items
                     .iter()
@@ -1556,19 +1578,6 @@ impl<'src> Analyzer<'src> {
                 .unwrap_or_else(|| type_.clone()),
             _ => type_.clone(),
         }
-    }
-
-    /// Get the resolved type for an expression, checking both maps.
-    fn expr_type_for_id(&self, expr_id: Id) -> Type {
-        self.expr_id_to_type_id_map
-            .get(&expr_id)
-            .map(|tid| tid.get_type(self))
-            .or_else(|| {
-                self.resolved_types
-                    .get(&expr_id)
-                    .map(|tid| tid.get_type(self))
-            })
-            .unwrap_or(Type::Unknown)
     }
 
     fn build(&mut self) {
@@ -2558,7 +2567,17 @@ impl<'src> Analyzer<'src> {
 
             Type::Struct(id) => {
                 let struct_ = self.structs.get(id).unwrap();
-                buf.push_str(&format!("struct {}", struct_.name));
+                // Built-in primitive structs read as plain types (`i32`), not
+                // `struct i32`, in diagnostics.
+                if self
+                    .primitive_struct_ids
+                    .values()
+                    .any(|prim_id| prim_id == id)
+                {
+                    buf.push_str(&format!("type {}", struct_.name));
+                } else {
+                    buf.push_str(&format!("struct {}", struct_.name));
+                }
             }
 
             Type::Trait(id) => {
@@ -2585,21 +2604,13 @@ impl<'src> Analyzer<'src> {
                 buf.push_str(&self.pretty_print_type(&return_type, substitution));
             }
 
-            Type::Primitive(prim) => match prim {
-                PrimitiveType::List(item_id) => {
-                    buf.push_str("type List<");
-                    let item_type = item_id.get_type(self);
-                    let item_str = self.pretty_print_type(&item_type, substitution);
-                    buf.push_str(&item_str);
-                    buf.push('>');
-                }
-                PrimitiveType::I32 => buf.push_str("type i32"),
-                PrimitiveType::U32 => buf.push_str("type u32"),
-                PrimitiveType::F64 => buf.push_str("type f64"),
-                PrimitiveType::String => buf.push_str("type str"),
-                PrimitiveType::Bool => buf.push_str("type bool"),
-                PrimitiveType::Null => buf.push_str("type null"),
-            },
+            Type::Primitive(PrimitiveType::List(item_id)) => {
+                buf.push_str("type List<");
+                let item_type = item_id.get_type(self);
+                let item_str = self.pretty_print_type(&item_type, substitution);
+                buf.push_str(&item_str);
+                buf.push('>');
+            }
 
             Type::Tuple(items) => {
                 buf.push_str("type (");
@@ -2706,6 +2717,16 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         .insert(std_module_id, Expr::Module(std_module_id));
     let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
+    // Scalar primitives are built-in `std` structs. They are reachable both as
+    // `std::i32` (via the module) and as the bare `i32` (the prelude, here the
+    // global scope), so existing unqualified annotations keep working.
+    for name in ["i32", "u32", "f64", "str", "bool", "null"] {
+        let id = analyzer.register_primitive_struct(name);
+        analyzer
+            .mut_scope_for_scope_id(std_module_scope_id)
+            .name_to_id_map
+            .insert(name, id);
+    }
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
     Program {

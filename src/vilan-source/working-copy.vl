@@ -1,43 +1,13 @@
 import std;
 
+impl std::i32 {
+	fun my_i32() {
+		500
+	}
+}
+
 fun main() {
-	{
-		std::print("Basic loop with break");
-		
-		mut i = 0;
-		for {
-			if i >= 10 {
-				jump break;
-			}
-			
-			std::print(i);
-			i += 1;
-		}
-	}
+	let v = std::i32::my_i32();
 	
-	{
-		std::print("While loop with condition");
-		
-		mut i = 0;
-		for i < 10 {
-			std::print(i);
-			i += 1;
-		}
-	}
-	
-	{
-		std::print("Basic loop with continue and break");
-		
-		mut i = 0;
-		for {
-			std::print(i);
-			i += 1;
-			
-			if i < 10 {
-				jump continue;
-			}
-			
-			jump break;
-		}
-	}
+	std::print(v);
 }

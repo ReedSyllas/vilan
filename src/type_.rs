@@ -20,12 +20,8 @@ pub enum Type {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrimitiveType {
-    I32,
-    U32,
-    F64,
-    String,
-    Bool,
-    Null,
+    // The scalar primitives (`i32`, `str`, ...) are now built-in structs of
+    // the `std` package; `List` is the remaining parameterized container.
     List(TypeId),
 }
 

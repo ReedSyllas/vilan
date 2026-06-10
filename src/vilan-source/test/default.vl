@@ -1,4 +1,4 @@
-import std;
+import std::{ print, u32 };
 
 trait Default {
 	fun default(): Self;
@@ -26,5 +26,5 @@ fun default<T: Default>(): T {
 
 fun main() {
 	let some_id = default<Id>();
-	std::print(some_id);
+	print(some_id);
 }

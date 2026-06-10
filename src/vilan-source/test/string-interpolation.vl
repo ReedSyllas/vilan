@@ -1,11 +1,11 @@
-import std;
+import std::{ print };
 
 fun main() {
 	let name = "John";
 	
-	std::print("Hello, {name}!"); // should print "Hello, {name}!"
+	print("Hello, {name}!"); // should print "Hello, {name}!"
 	
-	std::print(i"Hello, {name}!"); // should print "Hello, John!"
+	print(i"Hello, {name}!"); // should print "Hello, John!"
 	
-	std::print(i"Hello, \{name\}!"); // should print "Hello, {name}!"
+	print(i"Hello, \{name\}!"); // should print "Hello, {name}!"
 }

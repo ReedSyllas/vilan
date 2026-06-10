@@ -462,12 +462,19 @@ where
         .boxed();
 
     let impl_ = just(Token::Impl)
-        // The subject is a plain type name; any `<...>` after it declares the
-        // impl's generic parameters (`impl List<T: str>`), so it must not be
-        // parsed as a generic type usage here.
+        // The subject is a type path — a name or a `module::Item` such as
+        // `std::i32`. Any `<...>` after it declares the impl's generic
+        // parameters (`impl List<T: str>`), so it must not be parsed as a
+        // generic type usage here.
         .ignore_then(
             identifier
                 .map_with(|name, e| (Node::Accessor(name), e.span()))
+                .foldl_with(
+                    just(Token::Op("::")).ignore_then(identifier).repeated(),
+                    |subject, member, e| {
+                        (Node::StaticAccessor(Box::new(subject), member), e.span())
+                    },
+                )
                 .labelled("implementation subject"),
         )
         .then(generic_parameters.clone().or_not())
