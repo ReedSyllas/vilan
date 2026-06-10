@@ -5,10 +5,25 @@ use crate::node::BinaryOp;
 use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
     Transformer::new(program, true).transform_entry()
+}
+
+/// Builds a binary expression, gluing adjacent string literals at compile time
+/// so concatenations like `"" + "Hello, " + "!"` collapse to a single literal.
+/// Because `+` is left-associative, folding here folds whole static runs.
+fn binary<'src>(op: BinaryOp, lhs: js::Node<'src>, rhs: js::Node<'src>) -> js::Node<'src> {
+    match (op, lhs, rhs) {
+        (BinaryOp::Add, js::Node::String(left), js::Node::String(right)) => {
+            let mut glued = left.into_owned();
+            glued.push_str(&right);
+            js::Node::String(Cow::Owned(glued))
+        }
+        (op, lhs, rhs) => js::Node::Binary(op, Box::new(lhs), Box::new(rhs)),
+    }
 }
 
 struct Transformer<'src> {
@@ -185,7 +200,7 @@ impl<'src> Transformer<'src> {
             Expr::Number(whole, fraction) => {
                 js::Node::Number(whole.to_string(), fraction.map(|x| x.to_string()))
             }
-            Expr::String(x) => js::Node::String(x),
+            Expr::String(x) => js::Node::String(Cow::Borrowed(x)),
             Expr::Struct(_) => {
                 return None;
             }
@@ -303,11 +318,11 @@ impl<'src> Transformer<'src> {
             Expr::FunctionReturn(value) => js::Node::Return(Box::new(
                 self.walk_entity(*value, block).unwrap_or(js::Node::Void),
             )),
-            Expr::Binary(op, lhs, rhs) => js::Node::Binary(
-                *op,
-                Box::new(self.walk_entity(*lhs, block).unwrap_or(js::Node::Void)),
-                Box::new(self.walk_entity(*rhs, block).unwrap_or(js::Node::Void)),
-            ),
+            Expr::Binary(op, lhs, rhs) => {
+                let lhs = self.walk_entity(*lhs, block).unwrap_or(js::Node::Void);
+                let rhs = self.walk_entity(*rhs, block).unwrap_or(js::Node::Void);
+                binary(*op, lhs, rhs)
+            }
             Expr::Variable(id) => {
                 if self
                     .program
@@ -853,6 +868,7 @@ impl Formatter {
 
 pub mod js {
     use crate::node::BinaryOp;
+    use std::borrow::Cow;
 
     #[derive(Clone, Debug)]
     pub enum Node<'src> {
@@ -873,7 +889,7 @@ pub mod js {
         Property(Box<Self>, String),
         PropertyIndex(Box<Self>, Box<Self>),
         Return(Box<Self>),
-        String(&'src str),
+        String(Cow<'src, str>),
         Void,
     }
 
