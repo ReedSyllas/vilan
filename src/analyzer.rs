@@ -22,11 +22,15 @@ pub enum Expr<'src> {
     Error,
     ExternalFunction(Id),
     Field(Id, Id, usize),
+    // A loop: the optional condition and the body (statements, trailing expr).
+    For(Option<Id>, (Vec<Id>, Id)),
     Function(Id),
     FunctionReturn(Id),
     Generic(TypeId),
     If(ExprIfBranch),
     Impl(Id),
+    // A `jump break` / `jump continue` — the target keyword.
+    Jump(&'src str),
     List(Vec<Id>),
     Local(Id),
     Module(Id),
@@ -662,6 +666,16 @@ impl<'src> Analyzer<'src> {
                 let expr_id = self.walk_expr_node(&children.0.1, body_scope_id);
                 Some(Expr::Block((ids, expr_id)))
             }
+            Node::For(condition, body) => {
+                let body_scope_id = self.create_owned_scope(Some(scope_id)).id;
+                let condition_id = condition
+                    .as_ref()
+                    .map(|condition| self.walk_expr_node(condition, body_scope_id));
+                let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
+                let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
+                Some(Expr::For(condition_id, (ids, expr_id)))
+            }
+            Node::Jump(target) => Some(Expr::Jump(target)),
             Node::If(if_) => {
                 fn walk_branch<'src>(
                     s: &mut Analyzer<'src>,
@@ -1312,6 +1326,18 @@ impl<'src> Analyzer<'src> {
                 }
             }
             Expr::Generic(type_id) => type_id.get_type(self),
+            // Comparisons produce a `bool`; arithmetic produces the operand
+            // type (taken from the left-hand side).
+            Expr::Binary(
+                BinaryOp::Eq
+                | BinaryOp::NotEq
+                | BinaryOp::Lt
+                | BinaryOp::Gt
+                | BinaryOp::LtEq
+                | BinaryOp::GtEq,
+                _,
+                _,
+            ) => Type::Primitive(PrimitiveType::Bool),
             Expr::Binary(_, lhs_id, _rhs_id) => {
                 let lhs =
                     self.infer_type_inner(*lhs_id, &constraint, substitution_context, exprs_seen);

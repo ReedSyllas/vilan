@@ -30,10 +30,12 @@ pub fn lexer<'src>()
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
         "else" => Token::Else,
         "false" => Token::Bool(false),
+        "for" => Token::For,
         "fun" => Token::Fun,
         "if" => Token::If,
         "impl" => Token::Impl,
         "import" => Token::Import,
+        "jump" => Token::Jump,
         "let" => Token::Let,
         "mod" => Token::Mod,
         "mut" => Token::Mut,

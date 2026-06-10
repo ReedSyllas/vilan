@@ -184,6 +184,11 @@ impl<'src> Transformer<'src> {
     fn walk_entities(&mut self, ids: &Vec<Id>, mut block: &mut Vec<js::Node<'src>>) {
         for id in ids {
             if let Some(node) = self.walk_entity(*id, &mut block) {
+                // A statement whose value is discarded and is `undefined` (e.g.
+                // the trailing void of a block used as a statement) is a no-op.
+                if matches!(node, js::Node::Void) {
+                    continue;
+                }
                 block.push(node);
             }
         }
@@ -367,6 +372,28 @@ impl<'src> Transformer<'src> {
                 }
                 return self.walk_entity(body.1, block);
             }
+            Expr::For(condition, body) => {
+                // Every loop compiles to a `while`; an absent condition is an
+                // infinite loop, i.e. `while (true)`.
+                let t_condition = condition
+                    .and_then(|condition| self.walk_entity(condition, block))
+                    .unwrap_or(js::Node::Bool(true));
+                let mut t_body = self.walk_list(&body.0);
+                match self.program.entity_map.get(&body.1) {
+                    Some(Expr::Void) | None => {}
+                    Some(_) => {
+                        if let Some(node) = self.walk_entity(body.1, &mut t_body) {
+                            t_body.push(node);
+                        }
+                    }
+                }
+                js::Node::While(Box::new(t_condition), t_body)
+            }
+            Expr::Jump(target) => match *target {
+                "break" => js::Node::Break,
+                "continue" => js::Node::Continue,
+                _ => js::Node::Void,
+            },
             Expr::If(branch) => {
                 fn walk_branch<'src>(
                     t: &mut Transformer<'src>,
@@ -706,13 +733,14 @@ impl Formatter {
                     .collect::<Vec<_>>()
                     .join(self.line_break);
                 format!(
-                    "function {}({}){}{{{}{}{}}}{}",
+                    "function {}({}){}{{{}{}{}{}}}{}",
                     name,
                     parameters,
                     self.space,
                     self.line_break,
                     body,
                     self.line_break,
+                    self.indentation.repeat(indentation),
                     match terminator {
                         ";" => "",
                         x => x,
@@ -749,6 +777,10 @@ impl Formatter {
                     BinaryOp::Div => "/",
                     BinaryOp::Eq => "===",
                     BinaryOp::NotEq => "!==",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::LtEq => "<=",
+                    BinaryOp::GtEq => ">=",
                 };
                 format!(
                     "{}{}{}{}{}{}",
@@ -810,7 +842,7 @@ impl Formatter {
                                 })
                                 .unwrap_or("".to_string());
                             format!(
-                                "{}if{}({}){}{{{}{}{}}}{}",
+                                "{}if{}({}){}{{{}{}{}{}}}{}",
                                 s_prefix,
                                 f.space,
                                 s_condition,
@@ -818,6 +850,7 @@ impl Formatter {
                                 f.line_break,
                                 s_body,
                                 f.line_break,
+                                f.indentation.repeat(indentation),
                                 s_else
                             )
                         }
@@ -828,14 +861,38 @@ impl Formatter {
                                 .collect::<Vec<_>>()
                                 .join("");
                             format!(
-                                "else{}{{{}{}{}}}",
-                                f.space, f.line_break, s_body, f.line_break
+                                "else{}{{{}{}{}{}}}",
+                                f.space,
+                                f.line_break,
+                                s_body,
+                                f.line_break,
+                                f.indentation.repeat(indentation)
                             )
                         }
                     }
                 }
                 walk_branch(self, branch, indentation, 0)
             }
+            js::Node::While(condition, body) => {
+                let s_condition = self.node(condition, "", 0);
+                let s_body = body
+                    .iter()
+                    .map(|x| self.node(x, ";", indentation + 1))
+                    .collect::<Vec<_>>()
+                    .join(self.line_break);
+                format!(
+                    "while{}({}){}{{{}{}{}{}}}",
+                    self.space,
+                    s_condition,
+                    self.space,
+                    self.line_break,
+                    s_body,
+                    self.line_break,
+                    self.indentation.repeat(indentation),
+                )
+            }
+            js::Node::Break => format!("break{}", terminator),
+            js::Node::Continue => format!("continue{}", terminator),
             js::Node::Closure(closure) => {
                 let s_parameters = closure
                     .parameters
@@ -850,13 +907,14 @@ impl Formatter {
                     .collect::<Vec<_>>()
                     .join(self.line_break);
                 format!(
-                    "({}){}=>{}{{{}{}{}}}{}",
+                    "({}){}=>{}{{{}{}{}{}}}{}",
                     s_parameters,
                     self.space,
                     self.space,
                     self.line_break,
                     s_body,
                     self.line_break,
+                    self.indentation.repeat(indentation),
                     terminator
                 )
             }
@@ -876,11 +934,14 @@ pub mod js {
         Assignment(Box<Self>, Box<Self>),
         Binary(BinaryOp, Box<Self>, Box<Self>),
         Bool(bool),
+        Break,
         Call(Box<Self>, Vec<Self>),
         Closure(Closure<'src>),
         ConstVariable(Variable<'src>),
+        Continue,
         Function(Function<'src>),
         If(IfBranch<'src>),
+        While(Box<Self>, Vec<Self>),
         LetVariable(Variable<'src>),
         Local(String), // TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
         Null,

@@ -64,9 +64,17 @@ pub enum Node<'src> {
         Option<Box<Spanned<Node<'src>>>>,
     ),
     Error,
+    // A loop: `for { .. }` (infinite, condition `None`) or `for cond { .. }`
+    // (while). The `for .. in ..` iterator form maps here too once added.
+    For(
+        Option<Box<Spanned<Self>>>,
+        Spanned<(NodeList<'src>, Box<Spanned<Self>>)>,
+    ),
     Func(Func<'src>),
     FuncReturn(Box<Spanned<Self>>),
     If(NodeIfBranch<'src>),
+    // `jump break` / `jump continue` — the target keyword that follows `jump`.
+    Jump(&'src str),
     Impl(
         Box<Spanned<Self>>,
         Option<GenericParameters<'src>>,
@@ -116,4 +124,8 @@ pub enum BinaryOp {
     Div,
     Eq,
     NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
 }

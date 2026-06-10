@@ -345,6 +345,31 @@ where
         .labelled("assignment")
         .boxed();
 
+    // `jump` is a namespace for the loop-control keywords; the target keyword
+    // (`break`, `continue`, ...) follows it.
+    let jump = just(Token::Jump)
+        .ignore_then(identifier.labelled("jump target"))
+        .map_with(|target, e| (Node::Jump(target), e.span()))
+        .labelled("jump")
+        .boxed();
+
+    // `for` covers every loop. With no condition it is an infinite loop
+    // (`for { .. }`); with one it is a while loop (`for cond { .. }`). The body
+    // is always the final block, so an infinite loop is tried first to avoid
+    // mistaking its block for a condition.
+    let for_ = just(Token::For)
+        .ignore_then(choice((
+            block.clone().map(|body| (None, body)),
+            secondary_expression
+                .clone()
+                .labelled("loop condition")
+                .then(block.clone())
+                .map(|(condition, body)| (Some(Box::new(condition)), body)),
+        )))
+        .map_with(|(condition, body), e| (Node::For(condition, body), e.span()))
+        .labelled("for loop")
+        .boxed();
+
     let function = just(Token::Fun)
         .ignore_then(
             identifier
@@ -535,6 +560,8 @@ where
             .clone()
             .map(|(x, span)| (Node::Block((x, span)), span)),
         if_.clone(),
+        for_.clone(),
+        jump,
         let_,
         return_,
         assignment,
@@ -550,6 +577,7 @@ where
     statement.define(choice((
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_,
+        for_,
         function,
         struct_,
         impl_,
@@ -698,10 +726,30 @@ where
         })
         .boxed();
 
-    // Comparison ops (equal, not-equal) have equal precedence
-    let op = just(Token::Op("=="))
-        .to(BinaryOp::Eq)
-        .or(just(Token::Op("!=")).to(BinaryOp::NotEq));
+    // Comparison ops have equal precedence. `<` and `>` are control tokens
+    // (also used for generics), and `<=`/`>=` lex as `<`/`>` followed by `=`.
+    let op = choice((
+        just(Token::Op("==")).to(BinaryOp::Eq),
+        just(Token::Op("!=")).to(BinaryOp::NotEq),
+        just(Token::Ctrl('<'))
+            .ignore_then(just(Token::Op("=")).or_not())
+            .map(|eq| {
+                if eq.is_some() {
+                    BinaryOp::LtEq
+                } else {
+                    BinaryOp::Lt
+                }
+            }),
+        just(Token::Ctrl('>'))
+            .ignore_then(just(Token::Op("=")).or_not())
+            .map(|eq| {
+                if eq.is_some() {
+                    BinaryOp::GtEq
+                } else {
+                    BinaryOp::Gt
+                }
+            }),
+    ));
     let compare = sum
         .clone()
         .foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
