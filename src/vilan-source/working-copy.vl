@@ -1,13 +1,13 @@
-import std;
+import std::{ print, i32 };
 
-impl std::i32 {
+impl i32 {
 	fun my_i32() {
 		500
 	}
 }
 
 fun main() {
-	let v = std::i32::my_i32();
+	let v = i32::my_i32();
 	
-	std::print(v);
+	print(v);
 }

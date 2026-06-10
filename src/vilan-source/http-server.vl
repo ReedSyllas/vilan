@@ -1,6 +1,4 @@
-import std::http::Request;
-import std::http::Response;
-import std::http::Server;
+import std::{ print, http::{ Request, Response, Server } };
 
 impl Response {
 	fun text(text: str): Self {

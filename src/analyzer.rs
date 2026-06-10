@@ -284,15 +284,15 @@ pub struct Analyzer<'src> {
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
-    prepped_imports: Vec<(Vec<&'src str>, &'src str, Id)>,
+    prepped_imports: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
     prepped_locals: Vec<(Id, &'src str)>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers:
         Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
-    prepped_type_locals: Vec<(TypeId, &'src str, Id)>,
-    prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str)>,
+    prepped_type_locals: Vec<(TypeId, &'src str, Id, Span)>,
+    prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Span)>,
     reference_count: HashMap<Id, u32>,
     resolved_types: HashMap<Id, TypeId>,
     scope_id: u32,
@@ -466,29 +466,10 @@ impl<'src> Analyzer<'src> {
         id
     }
 
-    fn get_expr_id_by_name(&mut self, name: &'src str, scope_id: Id) -> Id {
-        fn resolve<'src>(
-            analyzer: &mut Analyzer<'src>,
-            name: &'src str,
-            scope_id: Id,
-        ) -> Option<Id> {
-            let scope = analyzer.mut_scope_for_scope_id(scope_id);
-            let parent_id = scope.parent_id;
-            scope.name_to_id_map.get(name).map(|x| *x).or_else(|| {
-                let subject_id = parent_id
-                    .map(|parent_scope_id| resolve(analyzer, name, parent_scope_id))
-                    .flatten()?;
-                let scope = analyzer.mut_scope_for_scope_id(scope_id);
-                scope.name_to_id_map.insert(name, subject_id);
-                Some(subject_id)
-            })
-        }
-
-        resolve(self, name, scope_id).expect(format!("cannot find: {}", name).as_str())
-    }
-
-    /// Like [`Self::get_expr_id_by_name`], but returns `None` instead of
-    /// panicking when the name cannot be resolved.
+    /// Resolves a name to its declaring entity by walking the scope chain,
+    /// returning `None` if it is not in scope (callers turn that into a
+    /// user-facing diagnostic). Resolved names are cached into the originating
+    /// scope so repeated lookups stay cheap.
     fn try_get_expr_id_by_name(&mut self, name: &'src str, scope_id: Id) -> Option<Id> {
         let scope = self.mut_scope_for_scope_id(scope_id);
         let parent_id = scope.parent_id;
@@ -656,25 +637,26 @@ impl<'src> Analyzer<'src> {
                     branch: &ImportBranch<'src>,
                     mut path: Vec<&'src str>,
                     scope_id: Id,
+                    span: Span,
                 ) {
                     match branch {
                         ImportBranch::Path(name, child_branch) => match child_branch {
                             None => {
-                                s.prepped_imports.push((path, name, scope_id));
+                                s.prepped_imports.push((path, name, scope_id, span));
                             }
                             Some(branch) => {
                                 path.push(name);
-                                walk_branch(s, branch, path, scope_id);
+                                walk_branch(s, branch, path, scope_id, span);
                             }
                         },
                         ImportBranch::Set(branches) => {
                             for branch in branches {
-                                walk_branch(s, branch, path.clone(), scope_id);
+                                walk_branch(s, branch, path.clone(), scope_id, span);
                             }
                         }
                     }
                 }
-                walk_branch(self, root_branch, Vec::new(), scope_id);
+                walk_branch(self, root_branch, Vec::new(), scope_id, node.1);
                 None
             }
             Node::List(items) => {
@@ -1110,7 +1092,8 @@ impl<'src> Analyzer<'src> {
                 // registered in the prelude/global scope), like any other type.
                 "any" => Some(Type::Any),
                 _ => {
-                    self.prepped_type_locals.push((type_id, name, scope_id));
+                    self.prepped_type_locals
+                        .push((type_id, name, scope_id, node.1));
                     None
                 }
             },
@@ -1119,13 +1102,18 @@ impl<'src> Analyzer<'src> {
             // arguments still matter where they declare implicit impl
             // generics or drive monomorphization at call sites.
             Node::AccessorWithGenerics(name, _generic_arguments) => {
-                self.prepped_type_locals.push((type_id, name, scope_id));
+                self.prepped_type_locals
+                    .push((type_id, name, scope_id, node.1));
                 None
             }
             Node::StaticAccessor(subject, member_name) => {
                 let subject_type_id = self.walk_type_node(subject, scope_id);
-                self.prepped_type_static_accessors
-                    .push((type_id, subject_type_id, member_name));
+                self.prepped_type_static_accessors.push((
+                    type_id,
+                    subject_type_id,
+                    member_name,
+                    node.1,
+                ));
                 None
             }
             Node::Tuple(types) => Some(Type::Tuple(
@@ -1581,17 +1569,37 @@ impl<'src> Analyzer<'src> {
     }
 
     fn build(&mut self) {
-        for (path, name, scope_id) in self.prepped_imports.clone() {
+        for (path, name, scope_id, span) in self.prepped_imports.clone() {
             let mut path = path.iter().map(|x| *x).chain(std::iter::once(name));
             let root = path.next().unwrap();
-            let module_id = self
-                .module_id_by_name
-                .get(root)
-                .expect(format!("failed to import module {root}").as_str());
-            let mut target_id = *module_id;
-            let module_scope_id = self.modules.get(module_id).unwrap().body.1;
+            let module_id = match self.module_id_by_name.get(root) {
+                Some(module_id) => *module_id,
+                None => {
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!("cannot find module '{}' to import", root),
+                    });
+                    continue;
+                }
+            };
+            let mut target_id = module_id;
+            let module_scope_id = self.modules.get(&module_id).unwrap().body.1;
+            let mut unresolved = false;
             for part in path {
-                target_id = self.get_expr_id_by_name(part, module_scope_id);
+                match self.try_get_expr_id_by_name(part, module_scope_id) {
+                    Some(id) => target_id = id,
+                    None => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!("cannot find '{}' in the imported path", part),
+                        });
+                        unresolved = true;
+                        break;
+                    }
+                }
+            }
+            if unresolved {
+                continue;
             }
             let scope = self.mut_scope_for_scope_id(scope_id);
             scope.name_to_id_map.insert(name, target_id);
@@ -1599,10 +1607,20 @@ impl<'src> Analyzer<'src> {
 
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
-            let subject_id = self.get_expr_id_by_name(name, scope_id);
-            let rc = self.reference_count.entry(subject_id).or_insert(0);
-            *rc += 1;
-            self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
+            match self.try_get_expr_id_by_name(name, scope_id) {
+                Some(subject_id) => {
+                    let rc = self.reference_count.entry(subject_id).or_insert(0);
+                    *rc += 1;
+                    self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
+                }
+                None => {
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!("cannot find '{}' in this scope", name),
+                    });
+                    self.expr_id_to_expr_map.insert(id, Expr::Error);
+                }
+            }
         }
 
         // --- Wire assignments to their variables ---
@@ -1644,19 +1662,47 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (type_id, name, scope_id) in self.prepped_type_locals.clone() {
-            let subject_id = self.get_expr_id_by_name(name, scope_id);
-            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-            self.type_id_to_type_map.insert(type_id, subject_type);
+        for (type_id, name, scope_id, span) in self.prepped_type_locals.clone() {
+            match self.try_get_expr_id_by_name(name, scope_id) {
+                Some(subject_id) => {
+                    let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                    self.type_id_to_type_map.insert(type_id, subject_type);
+                }
+                None => {
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!("cannot find type '{}'", name),
+                    });
+                    self.type_id_to_type_map.insert(type_id, Type::Unknown);
+                }
+            }
         }
 
-        for (type_id, subject_type_id, member_name) in self.prepped_type_static_accessors.clone() {
+        for (type_id, subject_type_id, member_name, span) in
+            self.prepped_type_static_accessors.clone()
+        {
             match subject_type_id.get_type(self) {
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
-                    let member_id = self.get_expr_id_by_name(member_name, module.body.1);
-                    let member_type = self.infer_type(member_id, &Type::Unknown, &HashMap::new());
-                    self.type_id_to_type_map.insert(type_id, member_type);
+                    let module_scope_id = module.body.1;
+                    let module_name = module.name;
+                    match self.try_get_expr_id_by_name(member_name, module_scope_id) {
+                        Some(member_id) => {
+                            let member_type =
+                                self.infer_type(member_id, &Type::Unknown, &HashMap::new());
+                            self.type_id_to_type_map.insert(type_id, member_type);
+                        }
+                        None => {
+                            self.diagnostics.push(Error {
+                                span,
+                                msg: format!(
+                                    "cannot find '{}' in module '{}'",
+                                    member_name, module_name
+                                ),
+                            });
+                            self.type_id_to_type_map.insert(type_id, Type::Unknown);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1667,18 +1713,37 @@ impl<'src> Analyzer<'src> {
             match subject_type {
                 Type::Struct(struct_id) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
+                    let struct_name = struct_.name;
                     let field_index = struct_
                         .fields
                         .iter()
                         .enumerate()
-                        .find_map(|(i, x)| (x.name == member_name).then_some(i))
-                        .unwrap();
-                    self.expr_id_to_expr_map
-                        .insert(id, Expr::Field(subject_id, struct_id, field_index));
+                        .find_map(|(i, x)| (x.name == member_name).then_some(i));
+                    match field_index {
+                        Some(field_index) => {
+                            self.expr_id_to_expr_map
+                                .insert(id, Expr::Field(subject_id, struct_id, field_index));
+                        }
+                        None => {
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!(
+                                    "struct '{}' has no field '{}'",
+                                    struct_name, member_name
+                                ),
+                            });
+                            self.expr_id_to_expr_map.insert(id, Expr::Error);
+                        }
+                    }
                 }
-                _ => unimplemented!(
-                    "Unhandled subject type for member accessor. In other words, the type of `subject` in `subject.member` was not handled. This is a compiler bug, not one with your code."
-                ),
+                subject_type => {
+                    let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!("cannot access field '{}' on {}", member_name, subject_str),
+                    });
+                    self.expr_id_to_expr_map.insert(id, Expr::Error);
+                }
             }
         }
 
@@ -1719,12 +1784,25 @@ impl<'src> Analyzer<'src> {
                 }
                 Type::Module(module_id) => {
                     let module = self.modules.get(&module_id).unwrap();
-
-                    let member_id = self.get_expr_id_by_name(member_name, module.body.1);
-                    let rc = self.reference_count.entry(member_id).or_insert(0);
-                    *rc += 1;
-
-                    self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                    let module_scope_id = module.body.1;
+                    let module_name = module.name;
+                    match self.try_get_expr_id_by_name(member_name, module_scope_id) {
+                        Some(member_id) => {
+                            let rc = self.reference_count.entry(member_id).or_insert(0);
+                            *rc += 1;
+                            self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                        }
+                        None => {
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!(
+                                    "cannot find '{}' in module '{}'",
+                                    member_name, module_name
+                                ),
+                            });
+                            self.expr_id_to_expr_map.insert(id, Expr::Error);
+                        }
+                    }
                 }
                 // `T::member` where `T` is a generic parameter: resolve through
                 // the trait the parameter is bound by (e.g. `T: Default`).
@@ -1850,7 +1928,16 @@ impl<'src> Analyzer<'src> {
                     }
                 } else {
                     let scope_id = self.get_scope_id_for_entity(constraint.struct_id);
-                    self.get_expr_id_by_name(constraint.struct_name, scope_id)
+                    match self.try_get_expr_id_by_name(constraint.struct_name, scope_id) {
+                        Some(expr_id) => expr_id,
+                        None => {
+                            self.diagnostics.push(Error {
+                                span: constraint.fields_span.clone(),
+                                msg: format!("unknown struct: {}", constraint.struct_name),
+                            });
+                            continue;
+                        }
+                    }
                 };
                 constraint.struct_id = struct_expr_id;
                 let struct_ = match self.structs.get(&constraint.struct_id) {
@@ -1892,12 +1979,25 @@ impl<'src> Analyzer<'src> {
                 let mut defer = None;
                 let fields = constraint.fields.clone();
                 let struct_id = constraint.struct_id;
-                for (field_name, field_value, _field_value_span) in &fields {
-                    let (struct_field_index, struct_field) = struct_fields
+                let struct_name = constraint.struct_name;
+                for (field_name, field_value, field_value_span) in &fields {
+                    let field = struct_fields
                         .iter()
                         .enumerate()
-                        .find(|(_, x)| *x.name == **field_name)
-                        .expect(format!("unknown field: {}", field_name).as_str());
+                        .find(|(_, x)| *x.name == **field_name);
+                    let (struct_field_index, struct_field) = match field {
+                        Some(field) => field,
+                        None => {
+                            self.diagnostics.push(Error {
+                                span: *field_value_span,
+                                msg: format!(
+                                    "struct '{}' has no field '{}'",
+                                    struct_name, field_name
+                                ),
+                            });
+                            continue;
+                        }
+                    };
                     let struct_field_type = struct_field.type_id.get_type(self);
                     // Infer the value against the declared field type so that,
                     // e.g., an integer literal is treated as `f64` when the
@@ -1985,26 +2085,40 @@ impl<'src> Analyzer<'src> {
                                 continue;
                             }
                         };
-                        let field_index = struct_
-                            .fields
-                            .iter()
-                            .enumerate()
-                            .find_map(|(i, x)| (x.name == member_name).then_some(i))
-                            .unwrap();
-                        let field_type = struct_.fields[field_index].type_id;
-                        self.expr_id_to_expr_map
-                            .insert(id, Expr::Field(subject_id, struct_id, field_index));
-                        self.expr_id_to_type_id_map.insert(id, field_type);
-                        self.resolved_types.insert(id, field_type);
+                        let struct_name = struct_.name;
+                        let field =
+                            struct_.fields.iter().enumerate().find_map(|(i, x)| {
+                                (x.name == member_name).then_some((i, x.type_id))
+                            });
+                        match field {
+                            Some((field_index, field_type)) => {
+                                self.expr_id_to_expr_map
+                                    .insert(id, Expr::Field(subject_id, struct_id, field_index));
+                                self.expr_id_to_type_id_map.insert(id, field_type);
+                                self.resolved_types.insert(id, field_type);
+                            }
+                            None => {
+                                self.diagnostics.push(Error {
+                                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                                    msg: format!(
+                                        "struct '{}' has no field '{}'",
+                                        struct_name, member_name
+                                    ),
+                                });
+                                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                            }
+                        }
                     }
-                    _ => {
+                    subject_type => {
+                        let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                         self.diagnostics.push(Error {
-                            span: **self.span_map.get(&id).unwrap(),
+                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
-                                "Unhandled subject type for member accessor. The type of `subject` in `subject.{}` was not a struct.",
-                                member_name
+                                "cannot access field '{}' on {}",
+                                member_name, subject_str
                             ),
                         });
+                        self.expr_id_to_expr_map.insert(id, Expr::Error);
                     }
                 }
                 progress = true;
@@ -2033,56 +2147,68 @@ impl<'src> Analyzer<'src> {
                     match subject_type {
                         Type::Struct(struct_id) => {
                             let struct_name = self.structs.get(&struct_id).unwrap().name;
-                            let member_id =
-                                self.implementations
-                                    .iter()
-                                    .filter(|x| {
-                                        self.compare_type(
-                                            &subject_type,
-                                            &x.subject.get_type(self),
-                                            &HashMap::new(),
-                                        )
-                                    })
-                                    .find_map(|x| {
-                                        x.declarations.get(member_name).and_then(|member_id| {
-                                            match self.get_entity_by_id(*member_id) {
-                                                Expr::Function(function_id) => {
-                                                    let function =
-                                                        self.functions.get(function_id).unwrap();
-                                                    function.parameters.get(0).and_then(
-                                                        |parameter_id| {
-                                                            let parameter = self
-                                                                .parameters
-                                                                .get(parameter_id)
-                                                                .unwrap();
-                                                            (parameter.name == "self")
-                                                                .then_some(*member_id)
-                                                        },
-                                                    )
-                                                }
-                                                _ => panic!("method subject is not a function"),
+                            let member_id = self
+                                .implementations
+                                .iter()
+                                .filter(|x| {
+                                    self.compare_type(
+                                        &subject_type,
+                                        &x.subject.get_type(self),
+                                        &HashMap::new(),
+                                    )
+                                })
+                                .find_map(|x| {
+                                    x.declarations.get(member_name).and_then(|member_id| {
+                                        // Only a function whose first parameter
+                                        // is `self` is callable as a method.
+                                        match self.get_entity_by_id(*member_id) {
+                                            Expr::Function(function_id) => {
+                                                let function =
+                                                    self.functions.get(function_id).unwrap();
+                                                function.parameters.get(0).and_then(
+                                                    |parameter_id| {
+                                                        let parameter = self
+                                                            .parameters
+                                                            .get(parameter_id)
+                                                            .unwrap();
+                                                        (parameter.name == "self")
+                                                            .then_some(*member_id)
+                                                    },
+                                                )
                                             }
-                                        })
+                                            _ => None,
+                                        }
                                     })
-                                    .expect(
-                                        format!("cannot find {} in {}", member_name, struct_name)
-                                            .as_str(),
+                                });
+                            match member_id {
+                                Some(member_id) => {
+                                    let member_local_id = self.new_entity_id();
+                                    self.expr_id_to_expr_map
+                                        .insert(member_local_id, Expr::Local(member_id));
+                                    argument_ids.insert(0, subject_id);
+                                    self.function_calls.insert(
+                                        id,
+                                        FunctionCall {
+                                            id,
+                                            subject_id: member_local_id,
+                                            generic_argument_ids,
+                                            argument_ids,
+                                            arguments_span,
+                                        },
                                     );
-                            let member_local_id = self.new_entity_id();
-                            self.expr_id_to_expr_map
-                                .insert(member_local_id, Expr::Local(member_id));
-                            argument_ids.insert(0, subject_id);
-                            self.function_calls.insert(
-                                id,
-                                FunctionCall {
-                                    id,
-                                    subject_id: member_local_id,
-                                    generic_argument_ids,
-                                    argument_ids,
-                                    arguments_span,
-                                },
-                            );
-                            self.expr_id_to_expr_map.insert(id, Expr::Call(id));
+                                    self.expr_id_to_expr_map.insert(id, Expr::Call(id));
+                                }
+                                None => {
+                                    self.diagnostics.push(Error {
+                                        span: arguments_span,
+                                        msg: format!(
+                                            "struct '{}' has no method '{}'",
+                                            struct_name, member_name
+                                        ),
+                                    });
+                                    self.expr_id_to_expr_map.insert(id, Expr::Error);
+                                }
+                            }
                             progress = true;
                         }
                         Type::Unresolved => {
@@ -2724,6 +2850,10 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         let id = analyzer.register_primitive_struct(name);
         analyzer
             .mut_scope_for_scope_id(std_module_scope_id)
+            .name_to_id_map
+            .insert(name, id);
+        analyzer
+            .mut_scope_for_scope_id(global_scope_id)
             .name_to_id_map
             .insert(name, id);
     }

@@ -1,4 +1,4 @@
-import std::context::Context;
+import std::{ print, context::Context };
 
 fun level_1() {
 	print(count_context.get());
