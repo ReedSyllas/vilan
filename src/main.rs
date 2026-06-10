@@ -19,7 +19,17 @@ use chumsky::prelude::*;
 use std::{env, fs, path::Path};
 
 fn main() {
-    let filename = env::args().nth(1).expect("Expected file argument");
+    // Flags may appear in any position; the file is the first non-flag arg.
+    //   -d  also emit the `FILE.parse.out` / `FILE.analyze.out` debug files
+    //   -r  print the JS to stdout instead of writing `FILE.js`
+    let args: Vec<String> = env::args().skip(1).collect();
+    let emit_debug = args.iter().any(|arg| arg == "-d");
+    let print_output = args.iter().any(|arg| arg == "-r");
+    let filename = args
+        .iter()
+        .find(|arg| !arg.starts_with('-'))
+        .cloned()
+        .expect("Expected file argument");
     let src = fs::read_to_string(&filename).expect("Failed to read file");
 
     let (tokens, mut errs) = lexer().parse(src.as_str()).into_output_errors();
@@ -35,13 +45,15 @@ fn main() {
             .into_output_errors();
 
         if let Some((root, _file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-            fs::write(
-                Path::new(&filename).with_extension("parse.out"),
-                format!("{root:#?}"),
-            )
-            .unwrap_or_else(|_| {
-                println!("failed to write parse.out");
-            });
+            if emit_debug {
+                fs::write(
+                    Path::new(&filename).with_extension("parse.out"),
+                    format!("{root:#?}"),
+                )
+                .unwrap_or_else(|_| {
+                    println!("failed to write parse.out");
+                });
+            }
 
             let program = analyze(&root);
 
@@ -49,23 +61,28 @@ fn main() {
                 errs.push(Rich::custom(error.span, error.msg.as_str()));
             }
 
-            fs::write(
-                Path::new(&filename).with_extension("analyze.out"),
-                format!("{program:#?}"),
-            )
-            .unwrap_or_else(|_| {
-                println!("failed to write analyze.out");
-            });
+            if emit_debug {
+                fs::write(
+                    Path::new(&filename).with_extension("analyze.out"),
+                    format!("{program:#?}"),
+                )
+                .unwrap_or_else(|_| {
+                    println!("failed to write analyze.out");
+                });
+            }
 
             if errs.len() == 0 {
                 match transform(&program) {
                     Ok(output) => {
-                        // println!("Output: {output}");
-                        fs::write(Path::new(&filename).with_extension("js"), output)
-                            .unwrap_or_else(|_| {
-                                println!("failed to write file");
-                            });
-                        println!("Package has built successfully");
+                        if print_output {
+                            print!("{output}");
+                        } else {
+                            fs::write(Path::new(&filename).with_extension("js"), output)
+                                .unwrap_or_else(|_| {
+                                    println!("failed to write file");
+                                });
+                            println!("Package has built successfully");
+                        }
                     }
                     Err(e) => errs.push(Rich::custom(e.span, e.msg)),
                 }
