@@ -1,0 +1,30 @@
+import std;
+
+trait Default {
+	fun default(): Self;
+}
+
+struct Id {
+	n: u32
+}
+
+impl Id {
+	fun new(n: u32) {
+		Id { n }
+	}
+}
+
+impl Id with Default {
+	fun default() {
+		Id::new(0)
+	}
+}
+
+fun default<T: Default>(): T {
+	T::default()
+}
+
+fun main() {
+	let some_id = default<Id>();
+	std::print(some_id);
+}

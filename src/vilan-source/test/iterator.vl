@@ -1,0 +1,33 @@
+import std;
+
+trait Iterator<T> {
+	fun next(self): T;
+}
+
+struct FromFn<T> {
+	fn: || T,
+}
+
+impl FromFn<T> with Iterator<T> {
+	fun next(self) {
+		(self.fn)()
+	}
+}
+
+impl Iterator<T> {
+	fun from_fn(fn: || T): FromFn<T> {
+		FromFn { fn }
+	}
+}
+
+fun main() {
+	mut i = 0;
+	let naturals = Iterator::from_fn(|| {
+		i += 1;
+		i
+	});
+	
+	std::print(naturals.next());
+	std::print(naturals.next());
+	std::print(naturals.next());
+}
