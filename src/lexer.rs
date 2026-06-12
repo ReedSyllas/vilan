@@ -16,6 +16,10 @@ pub fn lexer<'src>()
         .then_ignore(just('"'))
         .map(Token::String);
 
+    // The match-leg arrow is its own token: `>` is a control character, so the
+    // operator charset alone would split `=>` into `=` and `>`.
+    let arrow = just("=>").to(Token::Op("=>"));
+
     // A parser for operators
     let op = one_of("-:!*/+=|")
         .repeated()
@@ -29,6 +33,7 @@ pub fn lexer<'src>()
     // A parser for identifiers and keywords
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
         "else" => Token::Else,
+        "enum" => Token::Enum,
         "false" => Token::Bool(false),
         "for" => Token::For,
         "fun" => Token::Fun,
@@ -37,6 +42,7 @@ pub fn lexer<'src>()
         "import" => Token::Import,
         "jump" => Token::Jump,
         "let" => Token::Let,
+        "match" => Token::Match,
         "mod" => Token::Mod,
         "mut" => Token::Mut,
         "null" => Token::Null,
@@ -44,6 +50,7 @@ pub fn lexer<'src>()
         "struct" => Token::Struct,
         "trait" => Token::Trait,
         "true" => Token::Bool(true),
+        "use" => Token::Use,
         "with" => Token::With,
         _ => Token::Ident(ident),
     });
@@ -52,6 +59,7 @@ pub fn lexer<'src>()
     let single = choice((
         number.clone(),
         string.clone(),
+        arrow,
         op.clone(),
         ctrl,
         identifier.clone(),

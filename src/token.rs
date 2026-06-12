@@ -3,6 +3,7 @@ pub enum Token<'src> {
     Bool(bool),
     Ctrl(char),
     Else,
+    Enum,
     For,
     Fun,
     Ident(&'src str),
@@ -11,6 +12,7 @@ pub enum Token<'src> {
     Import,
     Jump,
     Let,
+    Match,
     Mod,
     Mut,
     Null,
@@ -20,6 +22,7 @@ pub enum Token<'src> {
     String(&'src str),
     Struct,
     Trait,
+    Use,
     With,
 }
 
@@ -29,6 +32,7 @@ impl std::fmt::Display for Token<'_> {
             Token::Bool(x) => write!(f, "{x}"),
             Token::Ctrl(c) => write!(f, "{c}"),
             Token::Else => write!(f, "else"),
+            Token::Enum => write!(f, "enum"),
             Token::For => write!(f, "for"),
             Token::Fun => write!(f, "fun"),
             Token::Ident(s) => write!(f, "{s}"),
@@ -37,6 +41,7 @@ impl std::fmt::Display for Token<'_> {
             Token::Import => write!(f, "import"),
             Token::Jump => write!(f, "jump"),
             Token::Let => write!(f, "let"),
+            Token::Match => write!(f, "match"),
             Token::Mod => write!(f, "mod"),
             Token::Mut => write!(f, "mut"),
             Token::Null => write!(f, "null"),
@@ -53,6 +58,7 @@ impl std::fmt::Display for Token<'_> {
             Token::String(s) => write!(f, "{s}"),
             Token::Struct => write!(f, "struct"),
             Token::Trait => write!(f, "trait"),
+            Token::Use => write!(f, "use"),
             Token::With => write!(f, "with"),
         }
     }

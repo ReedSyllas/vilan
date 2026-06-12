@@ -1,5 +1,6 @@
 use crate::node::{
     BinaryOp, Closure, Func, GenericArguments, If, ImportBranch, Node, NodeIfBranch, NodeList,
+    Pattern,
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
@@ -255,20 +256,31 @@ where
             }),
     );
 
-    let import = just(Token::Import)
-        .ignore_then(recursive(|branch| {
-            let path = identifier
-                .then(just(Token::Op("::")).ignore_then(branch).or_not())
-                .map(|(a, b)| ImportBranch::Path(a, b.map(|b| Box::new(b))));
+    // A `::`-separated namespace path ending in a name or a `{ a, b }` set,
+    // shared by `import` and `use`.
+    let namespace_path = recursive(|branch| {
+        let path = identifier
+            .then(just(Token::Op("::")).ignore_then(branch).or_not())
+            .map(|(a, b)| ImportBranch::Path(a, b.map(|b| Box::new(b))));
 
-            path.clone().or(path
-                .separated_by(just(Token::Ctrl(',')))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-                .map(|x| ImportBranch::Set(x)))
-        }))
+        path.clone().or(path
+            .separated_by(just(Token::Ctrl(',')))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+            .map(|x| ImportBranch::Set(x)))
+    })
+    .boxed();
+
+    let import = just(Token::Import)
+        .ignore_then(namespace_path.clone())
         .map_with(|import_path, e| (Node::Import(import_path), e.span()))
+        .boxed();
+
+    let use_ = just(Token::Use)
+        .ignore_then(namespace_path)
+        .map_with(|use_path, e| (Node::Use(use_path), e.span()))
+        .labelled("use")
         .boxed();
 
     if_.define(
@@ -368,6 +380,81 @@ where
         )))
         .map_with(|(condition, body), e| (Node::For(condition, body), e.span()))
         .labelled("for loop")
+        .boxed();
+
+    let enum_variant = identifier
+        .labelled("variant name")
+        .then(
+            type_
+                .clone()
+                .separated_by(just(Token::Ctrl(',')))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                .or_not(),
+        )
+        .map_with(|(name, data), e| ((name, data.unwrap_or_default()), e.span()));
+
+    let enum_ = just(Token::Enum)
+        .ignore_then(identifier.labelled("enum name"))
+        .then(generic_parameters.clone().or_not())
+        .then(
+            enum_variant
+                .separated_by(just(Token::Ctrl(',')))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+                .map_with(|variants, e| (variants, e.span())),
+        )
+        .map_with(|((name, generic_parameters), variants), e| {
+            (Node::Enum(name, generic_parameters, variants), e.span())
+        })
+        .labelled("enum")
+        .boxed();
+
+    // A match-leg pattern: `_`, `let x` / `mut x`, or a variant with optional
+    // payload patterns like `Some(let x)`.
+    let pattern = recursive(|pattern| {
+        let binding = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
+            .then(identifier.labelled("capture name"))
+            .map(|(mutable, name)| Pattern::Binding(name, mutable));
+        let variant = identifier
+            .then(
+                pattern
+                    .separated_by(just(Token::Ctrl(',')))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                    .or_not(),
+            )
+            .map(|(name, payload)| {
+                if name == "_" && payload.is_none() {
+                    Pattern::Wildcard
+                } else {
+                    Pattern::Variant(name, payload)
+                }
+            });
+        choice((binding, variant)).map_with(|x, e| (x, e.span()))
+    })
+    .labelled("pattern")
+    .boxed();
+
+    let match_leg = pattern
+        .then_ignore(just(Token::Op("=>")))
+        .then(expression.clone().labelled("match leg body"));
+
+    let match_ = just(Token::Match)
+        .ignore_then(secondary_expression.clone().labelled("match subject"))
+        .then(
+            match_leg
+                .separated_by(just(Token::Ctrl(',')))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+                .map_with(|legs, e| (legs, e.span())),
+        )
+        .map_with(|(subject, legs), e| (Node::Match(Box::new(subject), legs), e.span()))
+        .labelled("match expression")
         .boxed();
 
     let function = just(Token::Fun)
@@ -568,6 +655,7 @@ where
             .map(|(x, span)| (Node::Block((x, span)), span)),
         if_.clone(),
         for_.clone(),
+        match_,
         jump,
         let_,
         return_,
@@ -587,10 +675,12 @@ where
         for_,
         function,
         struct_,
+        enum_,
         impl_,
         trait_,
         module,
         import.then_ignore(just(Token::Ctrl(';'))),
+        use_.then_ignore(just(Token::Ctrl(';'))),
         block.map(|(x, span)| (Node::Block((x, span)), span)),
     )));
 

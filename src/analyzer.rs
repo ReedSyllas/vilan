@@ -4,7 +4,9 @@ use indexmap::IndexMap;
 
 use crate::error::Error;
 use crate::id::Id;
-use crate::node::{BinaryOp, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList};
+use crate::node::{
+    BinaryOp, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
+};
 use crate::span::{Span, Spanned};
 use crate::type_::{PrimitiveType, SubstitutionContext, Type, TypeId};
 use crate::util::plural;
@@ -19,6 +21,10 @@ pub enum Expr<'src> {
     Bool(bool),
     Call(Id),
     Closure(Id),
+    // An enum declaration.
+    Enum(Id),
+    // A reference to one variant of an enum: the enum and the variant index.
+    EnumVariant(Id, usize),
     Error,
     ExternalFunction(Id),
     Field(Id, Id, usize),
@@ -33,6 +39,8 @@ pub enum Expr<'src> {
     Jump(&'src str),
     List(Vec<Id>),
     Local(Id),
+    // A match expression: the subject and the resolved legs.
+    Match(Id, Vec<ExprMatchLeg>),
     Module(Id),
     Null,
     Number(&'src str, Option<&'src str>),
@@ -50,6 +58,23 @@ pub enum Expr<'src> {
 pub enum ExprIfBranch {
     If(Id, (Vec<Id>, Id), Option<Box<ExprIfBranch>>),
     Else((Vec<Id>, Id)),
+}
+
+#[derive(Clone, Debug)]
+pub struct ExprMatchLeg {
+    pub pattern: ExprPattern,
+    pub body: Id,
+}
+
+// A fully resolved match pattern, ready for code generation.
+#[derive(Clone, Debug)]
+pub enum ExprPattern {
+    // `_` — matches anything without binding it.
+    Wildcard,
+    // A capture binding the matched value to a variable entity.
+    Binding(Id),
+    // A variant test by index, with payload sub-patterns.
+    Variant(usize, Vec<ExprPattern>),
 }
 
 #[derive(Debug)]
@@ -113,6 +138,41 @@ pub struct Struct<'src> {
 pub struct Field<'src> {
     pub name: &'src str,
     pub type_id: TypeId,
+}
+
+#[derive(Debug)]
+pub struct Enum<'src> {
+    pub id: Id,
+    pub name: &'src str,
+    pub generic_parameter_constraint_ids: Vec<TypeId>,
+    pub variants: Vec<EnumVariantDeclaration<'src>>,
+    // The namespace scope holding the variant entities by name, reachable
+    // through `use Enum::{ ... }` or `Enum::Variant`.
+    pub variants_scope_id: Id,
+}
+
+#[derive(Debug)]
+pub struct EnumVariantDeclaration<'src> {
+    pub name: &'src str,
+    pub data_type_ids: Vec<TypeId>,
+}
+
+// A match pattern as walked, with variant names not yet resolved.
+#[derive(Debug)]
+enum WalkPattern<'src> {
+    Wildcard,
+    Binding(Id),
+    Variant(&'src str, Span, Option<Vec<WalkPattern<'src>>>),
+}
+
+// A match expression awaiting subject and pattern resolution.
+#[derive(Debug)]
+struct PreppedMatch<'src> {
+    id: Id,
+    subject_id: Id,
+    scope_id: Id,
+    legs: Vec<(WalkPattern<'src>, Id)>,
+    span: Span,
 }
 
 #[derive(Debug)]
@@ -262,6 +322,7 @@ pub struct Analyzer<'src> {
     closures: IndexMap<Id, Closure>,
     diagnostics: Vec<Error>,
     entity_id: u32,
+    enums: IndexMap<Id, Enum<'src>>,
     expr_id_to_expr_map: HashMap<Id, Expr<'src>>,
     expr_id_to_scope_id_map: HashMap<Id, Id>,
     expr_id_to_type_id_map: HashMap<Id, TypeId>,
@@ -286,12 +347,14 @@ pub struct Analyzer<'src> {
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
     prepped_locals: Vec<(Id, &'src str)>,
+    prepped_matches: Vec<PreppedMatch<'src>>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers:
         Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
     prepped_type_locals: Vec<(TypeId, &'src str, Id, Span)>,
+    prepped_uses: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Span)>,
     reference_count: HashMap<Id, u32>,
     resolved_types: HashMap<Id, TypeId>,
@@ -314,6 +377,30 @@ static EMPTY_SPAN: Span = Span {
     context: (),
 };
 
+// Flattens an `import`/`use` tree into (path, leaf-name) pairs, e.g.
+// `a::{ b, c::d }` becomes `([a], b)` and `([a, c], d)`.
+fn flatten_namespace_branch<'src>(
+    branch: &ImportBranch<'src>,
+    path: Vec<&'src str>,
+    entries: &mut Vec<(Vec<&'src str>, &'src str)>,
+) {
+    match branch {
+        ImportBranch::Path(name, child_branch) => match child_branch {
+            None => entries.push((path, name)),
+            Some(child) => {
+                let mut path = path;
+                path.push(name);
+                flatten_namespace_branch(child, path, entries);
+            }
+        },
+        ImportBranch::Set(branches) => {
+            for child in branches {
+                flatten_namespace_branch(child, path.clone(), entries);
+            }
+        }
+    }
+}
+
 impl<'src> Analyzer<'src> {
     fn new() -> Self {
         Self {
@@ -322,6 +409,7 @@ impl<'src> Analyzer<'src> {
             closures: IndexMap::new(),
             diagnostics: Vec::new(),
             entity_id: 0,
+            enums: IndexMap::new(),
             expr_id_to_expr_map: HashMap::new(),
             expr_id_to_scope_id_map: HashMap::new(),
             expr_id_to_type_id_map: HashMap::new(),
@@ -340,12 +428,14 @@ impl<'src> Analyzer<'src> {
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
+            prepped_matches: Vec::new(),
             prepped_method_calls: Vec::new(),
             prepped_static_accessors: Vec::new(),
             prepped_struct_initializers: Vec::new(),
             prepped_trait_impls: Vec::new(),
             prepped_type_locals: Vec::new(),
             prepped_type_static_accessors: Vec::new(),
+            prepped_uses: Vec::new(),
             reference_count: HashMap::new(),
             resolved_types: HashMap::new(),
             scope_id: 0,
@@ -632,31 +722,19 @@ impl<'src> Analyzer<'src> {
                 None
             }
             Node::Import(root_branch) => {
-                fn walk_branch<'src>(
-                    s: &mut Analyzer<'src>,
-                    branch: &ImportBranch<'src>,
-                    mut path: Vec<&'src str>,
-                    scope_id: Id,
-                    span: Span,
-                ) {
-                    match branch {
-                        ImportBranch::Path(name, child_branch) => match child_branch {
-                            None => {
-                                s.prepped_imports.push((path, name, scope_id, span));
-                            }
-                            Some(branch) => {
-                                path.push(name);
-                                walk_branch(s, branch, path, scope_id, span);
-                            }
-                        },
-                        ImportBranch::Set(branches) => {
-                            for branch in branches {
-                                walk_branch(s, branch, path.clone(), scope_id, span);
-                            }
-                        }
-                    }
+                let mut entries = Vec::new();
+                flatten_namespace_branch(root_branch, Vec::new(), &mut entries);
+                for (path, name) in entries {
+                    self.prepped_imports.push((path, name, scope_id, node.1));
                 }
-                walk_branch(self, root_branch, Vec::new(), scope_id, node.1);
+                None
+            }
+            Node::Use(root_branch) => {
+                let mut entries = Vec::new();
+                flatten_namespace_branch(root_branch, Vec::new(), &mut entries);
+                for (path, name) in entries {
+                    self.prepped_uses.push((path, name, scope_id, node.1));
+                }
                 None
             }
             Node::List(items) => {
@@ -742,9 +820,13 @@ impl<'src> Analyzer<'src> {
                                 None => Type::Unknown.get_type_id(self),
                             },
                         };
-                        body_scope
-                            .name_to_id_map
-                            .insert(parameter.name, parameter_id);
+                        // `_` eats the argument: it stays positional but is
+                        // never referenceable.
+                        if parameter.name != "_" {
+                            body_scope
+                                .name_to_id_map
+                                .insert(parameter.name, parameter_id);
+                        }
                         self.parameters.insert(parameter_id, parameter);
                         self.expr_id_to_expr_map
                             .insert(parameter_id, Expr::Parameter(parameter_id));
@@ -822,8 +904,11 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Binary(*op, lhs_id, rhs_id))
             }
             Node::Let(name, type_, value, mutable) => {
-                let scope = self.mut_scope_for_scope_id(scope_id);
-                scope.name_to_id_map.insert(name, id);
+                // `_` eats the value: the binding is never referenceable.
+                if *name != "_" {
+                    let scope = self.mut_scope_for_scope_id(scope_id);
+                    scope.name_to_id_map.insert(name, id);
+                }
                 self.reference_count.entry(id).or_insert(0);
                 let initial = value.as_ref().map(|value| {
                     let value_id = self.walk_expr_node(value, scope_id);
@@ -912,6 +997,75 @@ impl<'src> Analyzer<'src> {
                     },
                 );
                 Some(Expr::Struct(id))
+            }
+            Node::Enum(name, generic_parameters, variants) => {
+                let scope = self.mut_scope_for_scope_id(scope_id);
+                scope.name_to_id_map.insert(name, id);
+                self.reference_count.entry(id).or_insert(0);
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                let generic_parameter_constraint_ids =
+                    self.register_generic_parameters(generic_parameters, body_scope_id);
+                // Variants live in the enum's own namespace, reachable through
+                // `use Enum::{ ... }` or `Enum::Variant` — not the outer scope.
+                let variants_scope = self.create_scope(None);
+                let variants_scope_id = self.push_scope(variants_scope);
+                let mut variant_declarations = Vec::new();
+                for (variant_index, variant) in variants.0.iter().enumerate() {
+                    let variant_name = variant.0.0;
+                    let data_type_ids = variant
+                        .0
+                        .1
+                        .iter()
+                        .map(|data_type| self.walk_type_node(data_type, body_scope_id))
+                        .collect();
+                    let variant_id = self.new_entity_id();
+                    self.expr_id_to_expr_map
+                        .insert(variant_id, Expr::EnumVariant(id, variant_index));
+                    self.expr_id_to_scope_id_map.insert(variant_id, scope_id);
+                    self.span_map.insert(variant_id, &variant.1);
+                    self.reference_count.entry(variant_id).or_insert(0);
+                    let variants_scope = self.mut_scope_for_scope_id(variants_scope_id);
+                    variants_scope
+                        .name_to_id_map
+                        .insert(variant_name, variant_id);
+                    variant_declarations.push(EnumVariantDeclaration {
+                        name: variant_name,
+                        data_type_ids,
+                    });
+                }
+                self.enums.insert(
+                    id,
+                    Enum {
+                        id,
+                        name,
+                        generic_parameter_constraint_ids,
+                        variants: variant_declarations,
+                        variants_scope_id,
+                    },
+                );
+                Some(Expr::Enum(id))
+            }
+            Node::Match(subject, legs) => {
+                let subject_id = self.walk_expr_node(subject, scope_id);
+                let mut walked_legs = Vec::new();
+                for (pattern, body) in &legs.0 {
+                    // Each leg scopes its captures to its own body.
+                    let leg_scope_id = self.create_owned_scope(Some(scope_id)).id;
+                    let walked_pattern = self.walk_pattern(pattern, leg_scope_id);
+                    let body_id = self.walk_expr_node(body, leg_scope_id);
+                    walked_legs.push((walked_pattern, body_id));
+                }
+                self.prepped_matches.push(PreppedMatch {
+                    id,
+                    subject_id,
+                    scope_id,
+                    legs: walked_legs,
+                    span: node.1,
+                });
+                // The entity is inserted once the subject type and the leg
+                // patterns have been resolved.
+                None
             }
             Node::StructInitializer(name, generic_arguments, fields) => {
                 let generic_argument_ids = generic_arguments
@@ -1032,9 +1186,13 @@ impl<'src> Analyzer<'src> {
                                 .map(|x| self.walk_type_node(x, scope_id))
                                 .unwrap_or(Type::Unknown.get_type_id(self)),
                         };
-                        body_scope
-                            .name_to_id_map
-                            .insert(parameter.name, parameter_id);
+                        // `_` eats the argument: it stays positional but is
+                        // never referenceable.
+                        if parameter.name != "_" {
+                            body_scope
+                                .name_to_id_map
+                                .insert(parameter.name, parameter_id);
+                        }
                         self.parameters.insert(parameter_id, parameter);
                         self.expr_id_to_expr_map
                             .insert(parameter_id, Expr::Parameter(parameter_id));
@@ -1080,6 +1238,143 @@ impl<'src> Analyzer<'src> {
         self.expr_id_to_scope_id_map.insert(id, scope_id);
 
         id
+    }
+
+    // Walks a match-leg pattern, creating capture variables in the leg's
+    // scope. Variant names stay unresolved until the subject type is known.
+    fn walk_pattern(
+        &mut self,
+        pattern: &'src Spanned<Pattern<'src>>,
+        scope_id: Id,
+    ) -> WalkPattern<'src> {
+        match &pattern.0 {
+            Pattern::Wildcard => WalkPattern::Wildcard,
+            Pattern::Binding(name, mutable) => {
+                let name = *name;
+                let capture_id = self.new_entity_id();
+                let unknown_type_id = Type::Unknown.get_type_id(self);
+                self.variables.insert(
+                    capture_id,
+                    Variable {
+                        id: capture_id,
+                        name,
+                        initial: None,
+                        type_id: unknown_type_id,
+                        mutable: *mutable,
+                    },
+                );
+                self.expr_id_to_expr_map
+                    .insert(capture_id, Expr::Variable(capture_id));
+                self.expr_id_to_scope_id_map.insert(capture_id, scope_id);
+                self.span_map.insert(capture_id, &pattern.1);
+                self.reference_count.entry(capture_id).or_insert(0);
+                // `_` eats the value: it matches but is never referenceable.
+                if name != "_" {
+                    let scope = self.mut_scope_for_scope_id(scope_id);
+                    scope.name_to_id_map.insert(name, capture_id);
+                }
+                WalkPattern::Binding(capture_id)
+            }
+            Pattern::Variant(name, payload) => WalkPattern::Variant(
+                name,
+                pattern.1,
+                payload.as_ref().map(|patterns| {
+                    patterns
+                        .iter()
+                        .map(|sub_pattern| self.walk_pattern(sub_pattern, scope_id))
+                        .collect()
+                }),
+            ),
+        }
+    }
+
+    // Resolves a walked pattern against the type it matches: variant names are
+    // looked up and verified to belong to the matched enum, and captures take
+    // the type of the value they bind. Returns `None` after emitting a
+    // diagnostic when the pattern is invalid.
+    fn resolve_pattern(
+        &mut self,
+        pattern: &WalkPattern<'src>,
+        expected_type_id: TypeId,
+        lookup_scope_id: Id,
+    ) -> Option<ExprPattern> {
+        match pattern {
+            WalkPattern::Wildcard => Some(ExprPattern::Wildcard),
+            WalkPattern::Binding(capture_id) => {
+                let capture_id = *capture_id;
+                self.variables.get_mut(&capture_id).unwrap().type_id = expected_type_id;
+                self.resolved_types.insert(capture_id, expected_type_id);
+                Some(ExprPattern::Binding(capture_id))
+            }
+            WalkPattern::Variant(name, span, payload) => {
+                let span = *span;
+                let entity = match self.try_get_expr_id_by_name(name, lookup_scope_id) {
+                    Some(entity) => entity,
+                    None => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!("cannot find '{}' in this scope", name),
+                        });
+                        return None;
+                    }
+                };
+                let (enum_id, variant_index) = match self.expr_id_to_expr_map.get(&entity) {
+                    Some(Expr::EnumVariant(enum_id, variant_index)) => (*enum_id, *variant_index),
+                    _ => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!("'{}' is not an enum variant", name),
+                        });
+                        return None;
+                    }
+                };
+                match expected_type_id.get_type(self) {
+                    Type::Enum(expected_enum_id) if expected_enum_id == enum_id => {}
+                    Type::Unknown | Type::Any | Type::Generic(_) => {}
+                    Type::Enum(_) => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!("variant '{}' does not belong to the matched enum", name),
+                        });
+                        return None;
+                    }
+                    other => {
+                        let subject_str = self.pretty_print_type(&other, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!("cannot match an enum variant against {}", subject_str),
+                        });
+                        return None;
+                    }
+                }
+                let data_type_ids = self.enums.get(&enum_id).unwrap().variants[variant_index]
+                    .data_type_ids
+                    .clone();
+                let payload_patterns: &[WalkPattern] = payload.as_deref().unwrap_or(&[]);
+                if payload_patterns.len() != data_type_ids.len() {
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "variant '{}' carries {} {}, but the pattern has {}",
+                            name,
+                            data_type_ids.len(),
+                            plural(data_type_ids.len(), "value", "values"),
+                            payload_patterns.len()
+                        ),
+                    });
+                    return None;
+                }
+                let mut resolved_payload = Vec::new();
+                for (sub_pattern, data_type_id) in payload_patterns.iter().zip(data_type_ids) {
+                    resolved_payload.push(self.resolve_pattern(
+                        sub_pattern,
+                        data_type_id,
+                        lookup_scope_id,
+                    )?);
+                }
+                Some(ExprPattern::Variant(variant_index, resolved_payload))
+            }
+        }
     }
 
     fn walk_type_node(&mut self, node: &Spanned<Node<'src>>, scope_id: Id) -> TypeId {
@@ -1248,6 +1543,11 @@ impl<'src> Analyzer<'src> {
             }
             Expr::Function(function_id) => Type::Function(*function_id),
             Expr::Struct(struct_id) => Type::Struct(*struct_id),
+            Expr::Enum(enum_id) => Type::Enum(*enum_id),
+            // A bare variant reference is a value of the enum (e.g. `None`); a
+            // variant with data acts as a constructor whose call also yields
+            // the enum.
+            Expr::EnumVariant(enum_id, _) => Type::Enum(*enum_id),
             Expr::Trait(trait_id) => Type::Trait(*trait_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
@@ -1274,6 +1574,9 @@ impl<'src> Analyzer<'src> {
                         let return_type = return_type_id.get_type(self);
                         self.substitute_type(&return_type, substitution_context)
                     }
+                    // Calling a variant constructor (e.g. `Some(1)`) yields a
+                    // value of the enum.
+                    Type::Enum(enum_id) => Type::Enum(enum_id),
                     // A call's type is the callee's return type: its declared
                     // return type if annotated, otherwise the inferred type of
                     // its body — with the call's generic arguments substituted
@@ -1605,6 +1908,65 @@ impl<'src> Analyzer<'src> {
             scope.name_to_id_map.insert(name, target_id);
         }
 
+        // --- Resolve `use` statements ---
+        // `use Namespace::{ a, b }` binds items out of a namespace — a module
+        // or an enum (whose namespace holds its variants) — into the scope the
+        // statement appears in.
+        for (path, name, scope_id, span) in std::mem::take(&mut self.prepped_uses) {
+            let mut segments = path.iter().copied().chain(std::iter::once(name));
+            let root = segments.next().unwrap();
+            let mut current = match self.try_get_expr_id_by_name(root, scope_id) {
+                Some(entity) => entity,
+                None => {
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!("cannot find '{}' in this scope", root),
+                    });
+                    continue;
+                }
+            };
+            let mut resolved = true;
+            for segment in segments {
+                let namespace_scope_id = match self.expr_id_to_expr_map.get(&current) {
+                    Some(Expr::Module(module_id)) => {
+                        self.modules.get(module_id).map(|module| module.body.1)
+                    }
+                    Some(Expr::Enum(enum_id)) => {
+                        self.enums.get(enum_id).map(|enum_| enum_.variants_scope_id)
+                    }
+                    _ => None,
+                };
+                let Some(namespace_scope_id) = namespace_scope_id else {
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: "`use` requires a namespace (a module or an enum)".to_string(),
+                    });
+                    resolved = false;
+                    break;
+                };
+                current = match self
+                    .scopes
+                    .get(&namespace_scope_id)
+                    .and_then(|scope| scope.name_to_id_map.get(segment))
+                    .copied()
+                {
+                    Some(entity) => entity,
+                    None => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!("cannot find '{}' in the `use` path", segment),
+                        });
+                        resolved = false;
+                        break;
+                    }
+                };
+            }
+            if resolved {
+                let scope = self.mut_scope_for_scope_id(scope_id);
+                scope.name_to_id_map.insert(name, current);
+            }
+        }
+
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             match self.try_get_expr_id_by_name(name, scope_id) {
@@ -1750,22 +2112,35 @@ impl<'src> Analyzer<'src> {
         for (id, subject_type_id, member_name) in self.prepped_static_accessors.clone() {
             let subject_type = subject_type_id.get_type(self);
             match subject_type {
-                // Static access on a nominal type (`Id::new`) or a trait
-                // (`Iterator::from_fn`): look the member up in the matching
+                // Static access on a nominal type (`Id::new`), a trait
+                // (`Iterator::from_fn`), or an enum (`Option::Some`): look the
+                // member up among the variants (for enums) and the matching
                 // implementations.
-                Type::Struct(_) | Type::Trait(_) => {
-                    let member_id = self
-                        .implementations
-                        .iter()
-                        .filter(|x| {
-                            self.compare_type(
-                                &subject_type,
-                                &x.subject.get_type(self),
-                                &HashMap::new(),
-                            )
-                        })
-                        .find_map(|x| x.declarations.get(member_name))
-                        .copied();
+                Type::Struct(_) | Type::Trait(_) | Type::Enum(_) => {
+                    let variant_id = match &subject_type {
+                        Type::Enum(enum_id) => {
+                            let variants_scope_id =
+                                self.enums.get(enum_id).unwrap().variants_scope_id;
+                            self.scopes
+                                .get(&variants_scope_id)
+                                .and_then(|scope| scope.name_to_id_map.get(member_name))
+                                .copied()
+                        }
+                        _ => None,
+                    };
+                    let member_id = variant_id.or_else(|| {
+                        self.implementations
+                            .iter()
+                            .filter(|x| {
+                                self.compare_type(
+                                    &subject_type,
+                                    &x.subject.get_type(self),
+                                    &HashMap::new(),
+                                )
+                            })
+                            .find_map(|x| x.declarations.get(member_name))
+                            .copied()
+                    });
                     match member_id {
                         Some(member_id) => {
                             let rc = self.reference_count.entry(member_id).or_insert(0);
@@ -1899,7 +2274,8 @@ impl<'src> Analyzer<'src> {
         let max_iterations = self.struct_initializer_constraints.len()
             + self.variable_constraints.len()
             + self.call_subject_constraints.len()
-            + self.field_accessor_constraints.len();
+            + self.field_accessor_constraints.len()
+            + self.prepped_matches.len();
 
         for _ in 0..max_iterations {
             let mut progress = false;
@@ -2128,6 +2504,122 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
 
+            // --- Resolve match expressions ---
+            // A match resolves once its subject type is known: the leg
+            // patterns are checked against the subject's enum (typing any
+            // captures), exhaustiveness is verified, and the match's own type
+            // is the unification of its leg body types.
+            let mut remaining_matches = Vec::new();
+            for prepped in std::mem::take(&mut self.prepped_matches) {
+                let subject_type =
+                    self.infer_type(prepped.subject_id, &Type::Unknown, &HashMap::new());
+                if matches!(subject_type, Type::Unresolved) {
+                    remaining_matches.push(prepped);
+                    continue;
+                }
+                let subject_type_id = subject_type.clone().get_type_id(self);
+
+                let mut resolved_legs = Vec::new();
+                let mut pattern_error = false;
+                for (pattern, body_id) in &prepped.legs {
+                    match self.resolve_pattern(pattern, subject_type_id, prepped.scope_id) {
+                        Some(resolved) => resolved_legs.push((resolved, *body_id)),
+                        None => pattern_error = true,
+                    }
+                }
+                if pattern_error {
+                    // Diagnostics were already emitted; drop the match.
+                    progress = true;
+                    continue;
+                }
+
+                // Exhaustiveness: every variant must be covered unless a
+                // catch-all (`_` or a binding) is present.
+                if let Type::Enum(enum_id) = subject_type {
+                    let has_catch_all = resolved_legs.iter().any(|(pattern, _)| {
+                        matches!(pattern, ExprPattern::Wildcard | ExprPattern::Binding(_))
+                    });
+                    if !has_catch_all {
+                        let covered = resolved_legs
+                            .iter()
+                            .filter_map(|(pattern, _)| match pattern {
+                                ExprPattern::Variant(variant_index, _) => Some(*variant_index),
+                                _ => None,
+                            })
+                            .collect::<HashSet<_>>();
+                        let missing = self
+                            .enums
+                            .get(&enum_id)
+                            .unwrap()
+                            .variants
+                            .iter()
+                            .enumerate()
+                            .filter(|(variant_index, _)| !covered.contains(variant_index))
+                            .map(|(_, variant)| format!("'{}'", variant.name))
+                            .collect::<Vec<_>>();
+                        if !missing.is_empty() {
+                            self.diagnostics.push(Error {
+                                span: prepped.span,
+                                msg: format!(
+                                    "match is not exhaustive: missing {}",
+                                    missing.join(", ")
+                                ),
+                            });
+                        }
+                    }
+                }
+
+                // The match's type unifies the leg body types.
+                let mut unified: Option<Type> = None;
+                let mut deferred = false;
+                for (_, body_id) in &resolved_legs {
+                    let body_type = self.infer_type(*body_id, &Type::Unknown, &HashMap::new());
+                    if matches!(body_type, Type::Unresolved) {
+                        deferred = true;
+                        break;
+                    }
+                    unified = Some(match unified {
+                        None => body_type,
+                        Some(current) => {
+                            match self.reconcile_type(&current, &body_type, &HashMap::new()) {
+                                Some((unified_type, _)) => unified_type,
+                                None => {
+                                    let expected =
+                                        self.pretty_print_type(&current, &HashMap::new());
+                                    let got = self.pretty_print_type(&body_type, &HashMap::new());
+                                    self.diagnostics.push(Error {
+                                        span: prepped.span,
+                                        msg: format!(
+                                            "match legs have mismatched types: expected {}, but got {} instead.",
+                                            expected, got
+                                        ),
+                                    });
+                                    current
+                                }
+                            }
+                        }
+                    });
+                }
+                if deferred {
+                    remaining_matches.push(prepped);
+                    continue;
+                }
+                let match_type = unified.unwrap_or(Type::Void);
+                let match_type_id = match_type.get_type_id(self);
+                self.resolved_types.insert(prepped.id, match_type_id);
+                let legs = resolved_legs
+                    .into_iter()
+                    .map(|(pattern, body)| ExprMatchLeg { pattern, body })
+                    .collect();
+                self.expr_id_to_expr_map
+                    .insert(prepped.id, Expr::Match(prepped.subject_id, legs));
+                progress = true;
+            }
+            self.prepped_matches = remaining_matches;
+            if !self.prepped_matches.is_empty() {
+                progress = true;
+            }
+
             // --- Resolve deferred method calls ---
             if !self.prepped_method_calls.is_empty() {
                 let mut remaining_methods = Vec::new();
@@ -2145,8 +2637,13 @@ impl<'src> Analyzer<'src> {
                 {
                     let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
                     match subject_type {
-                        Type::Struct(struct_id) => {
-                            let struct_name = self.structs.get(&struct_id).unwrap().name;
+                        Type::Struct(_) | Type::Enum(_) => {
+                            let subject_type_name = match &subject_type {
+                                Type::Struct(id) => self.structs.get(id).map(|x| x.name),
+                                Type::Enum(id) => self.enums.get(id).map(|x| x.name),
+                                _ => None,
+                            }
+                            .unwrap_or("?");
                             let member_id = self
                                 .implementations
                                 .iter()
@@ -2202,8 +2699,8 @@ impl<'src> Analyzer<'src> {
                                     self.diagnostics.push(Error {
                                         span: arguments_span,
                                         msg: format!(
-                                            "struct '{}' has no method '{}'",
-                                            struct_name, member_name
+                                            "'{}' has no method '{}'",
+                                            subject_type_name, member_name
                                         ),
                                     });
                                     self.expr_id_to_expr_map.insert(id, Expr::Error);
@@ -2447,6 +2944,84 @@ impl<'src> Analyzer<'src> {
                 match subject_expr {
                     Expr::Local(target_id) => {
                         let target = self.get_entity_by_id(*target_id);
+                        // A variant constructor call, e.g. `Some(1)`: the
+                        // arguments are checked against the variant's declared
+                        // data types and the call produces the enum value.
+                        if let Expr::EnumVariant(enum_id, variant_index) = target {
+                            let enum_id = *enum_id;
+                            let variant_index = *variant_index;
+                            let data_type_ids = self.enums.get(&enum_id).unwrap().variants
+                                [variant_index]
+                                .data_type_ids
+                                .clone();
+                            if argument_ids.len() != data_type_ids.len() {
+                                self.diagnostics.push(Error {
+                                    span: arguments_span,
+                                    msg: format!(
+                                        "Expected {} {}, but got {} instead.",
+                                        data_type_ids.len(),
+                                        plural(data_type_ids.len(), "argument", "arguments"),
+                                        argument_ids.len()
+                                    ),
+                                });
+                                continue;
+                            }
+                            let substitution_context = HashMap::new();
+                            let mut deferred = false;
+                            for (i, data_type_id) in data_type_ids.iter().enumerate() {
+                                let data_type = data_type_id.get_type(self);
+                                let argument_id = *argument_ids.get(i).unwrap();
+                                let argument_type =
+                                    self.infer_type(argument_id, &data_type, &substitution_context);
+                                if matches!(argument_type, Type::Unresolved) {
+                                    remaining_calls.push(CallSubjectConstraint {
+                                        call_id,
+                                        subject_id,
+                                        generic_argument_ids: generic_argument_ids.clone(),
+                                        argument_ids: argument_ids.clone(),
+                                        arguments_span,
+                                    });
+                                    deferred = true;
+                                    break;
+                                }
+                                if self
+                                    .reconcile_type(
+                                        &argument_type,
+                                        &data_type,
+                                        &substitution_context,
+                                    )
+                                    .is_none()
+                                {
+                                    let expected =
+                                        self.pretty_print_type(&data_type, &substitution_context);
+                                    let got = self
+                                        .pretty_print_type(&argument_type, &substitution_context);
+                                    self.diagnostics.push(Error {
+                                        span: **self.span_map.get(&argument_id).unwrap(),
+                                        msg: format!(
+                                            "Expected {}, but got {} instead.",
+                                            expected, got
+                                        ),
+                                    });
+                                }
+                            }
+                            if !deferred {
+                                self.function_calls.insert(
+                                    call_id,
+                                    FunctionCall {
+                                        id: call_id,
+                                        subject_id,
+                                        generic_argument_ids: generic_argument_ids.clone(),
+                                        argument_ids: argument_ids.clone(),
+                                        arguments_span,
+                                    },
+                                );
+                                self.expr_id_to_expr_map
+                                    .insert(call_id, Expr::Call(call_id));
+                                progress = true;
+                            }
+                            continue;
+                        }
                         let function_data = match target {
                             Expr::Function(function_id) => {
                                 let function = self.functions.get(function_id).unwrap();
@@ -2632,12 +3207,19 @@ impl<'src> Analyzer<'src> {
                 msg: "type of function call arguments could not be resolved".to_string(),
             });
         }
+        for prepped in &self.prepped_matches {
+            self.diagnostics.push(Error {
+                span: prepped.span,
+                msg: "type of match expression could not be resolved".to_string(),
+            });
+        }
 
         // Clear processed constraints
         self.struct_initializer_constraints.clear();
         self.field_accessor_constraints.clear();
         self.variable_constraints.clear();
         self.call_subject_constraints.clear();
+        self.prepped_matches.clear();
     }
 
     /// Pretty-prints a type for diagnostics, resolving generic names
@@ -2709,6 +3291,11 @@ impl<'src> Analyzer<'src> {
             Type::Trait(id) => {
                 let trait_ = self.traits.get(id).unwrap();
                 buf.push_str(&format!("trait {}", trait_.name));
+            }
+
+            Type::Enum(id) => {
+                let enum_ = self.enums.get(id).unwrap();
+                buf.push_str(&format!("enum {}", enum_.name));
             }
 
             Type::Module(id) => {

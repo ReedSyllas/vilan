@@ -63,6 +63,13 @@ pub enum Node<'src> {
         Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
         Option<Box<Spanned<Node<'src>>>>,
     ),
+    // An enum declaration: name, generics, and the variants — each a name
+    // with the types of its optional data.
+    Enum(
+        &'src str,
+        Option<GenericParameters<'src>>,
+        Spanned<Vec<Spanned<(&'src str, Vec<Spanned<Node<'src>>>)>>>,
+    ),
     Error,
     // A loop: `for { .. }` (infinite, condition `None`) or `for cond { .. }`
     // (while). The `for .. in ..` iterator form maps here too once added.
@@ -91,6 +98,11 @@ pub enum Node<'src> {
         bool,
     ),
     List(NodeList<'src>),
+    // A match expression: subject and legs of `pattern => expression`.
+    Match(
+        Box<Spanned<Self>>,
+        Spanned<Vec<(Spanned<Pattern<'src>>, Spanned<Node<'src>>)>>,
+    ),
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
     Module(&'src str, Spanned<NodeList<'src>>),
     Null,
@@ -113,7 +125,21 @@ pub enum Node<'src> {
         Spanned<NodeList<'src>>,
     ),
     Tuple(NodeList<'src>),
+    // `use Namespace::{ a, b };` — destructures items out of a namespace
+    // (a module or an enum) into the current scope.
+    Use(ImportBranch<'src>),
     Void,
+}
+
+// A match-leg pattern.
+#[derive(Debug)]
+pub enum Pattern<'src> {
+    // `_` — matches anything without binding it.
+    Wildcard,
+    // `let x` / `mut x` — matches anything, capturing the value.
+    Binding(&'src str, bool),
+    // `Name` or `Name(patterns...)` — an enum variant with payload patterns.
+    Variant(&'src str, Option<Vec<Spanned<Pattern<'src>>>>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,4 +154,7 @@ pub enum BinaryOp {
     Gt,
     LtEq,
     GtEq,
+    // Logical AND. Currently only produced by the compiler itself (e.g. for
+    // nested match-pattern tests); there is no surface syntax yet.
+    And,
 }

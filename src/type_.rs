@@ -6,6 +6,7 @@ use crate::id::Id;
 pub enum Type {
     Any,
     Closure(Vec<TypeId>, TypeId),
+    Enum(Id),
     Function(Id),
     Generic(TypeId),
     Module(Id),

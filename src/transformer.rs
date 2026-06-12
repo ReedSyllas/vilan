@@ -1,4 +1,4 @@
-use crate::analyzer::{Expr, ExprIfBranch, Function, Program};
+use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Program};
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::BinaryOp;
@@ -209,6 +209,9 @@ impl<'src> Transformer<'src> {
             Expr::Struct(_) => {
                 return None;
             }
+            Expr::Enum(_) => {
+                return None;
+            }
             Expr::Trait(_) => {
                 return None;
             }
@@ -225,7 +228,22 @@ impl<'src> Transformer<'src> {
                 let function = self.program.functions.get(id).unwrap();
                 self.function(function)
             }
-            Expr::Local(id) => js::Node::Local(self.ng.name_for(*id)),
+            // An enum value is an array whose first element identifies the
+            // variant; a bare (data-less) variant is just `[index]`.
+            Expr::EnumVariant(_, variant_index) => {
+                js::Node::Array(vec![js::Node::Number(variant_index.to_string(), None)])
+            }
+            Expr::Local(id) => {
+                // A reference to a data-less variant (e.g. `None`) is the
+                // variant value itself, not a named binding.
+                if let Some(Expr::EnumVariant(_, variant_index)) = self.program.entity_map.get(id) {
+                    return Some(js::Node::Array(vec![js::Node::Number(
+                        variant_index.to_string(),
+                        None,
+                    )]));
+                }
+                js::Node::Local(self.ng.name_for(*id))
+            }
             Expr::Field(subject_id, _struct_id, field_index) => {
                 let subject = self
                     .walk_entity(*subject_id, block)
@@ -269,6 +287,15 @@ impl<'src> Transformer<'src> {
                 match subject {
                     Expr::Local(target_id) => {
                         let target_id = *target_id;
+                        // A variant constructor call builds the enum value
+                        // directly: `[variant_index, ...data]`.
+                        if let Some(Expr::EnumVariant(_, variant_index)) =
+                            self.program.entity_map.get(&target_id)
+                        {
+                            let mut items = vec![js::Node::Number(variant_index.to_string(), None)];
+                            items.extend(args);
+                            return Some(js::Node::Array(items));
+                        }
                         if target_id == self.print_fn_id {
                             return Some(js::Node::Call(
                                 Box::new(js::Node::Property(
@@ -464,6 +491,72 @@ impl<'src> Transformer<'src> {
                     None => js::Node::If(branch),
                 }
             }
+            Expr::Match(subject_id, legs) => {
+                let t_subject = self
+                    .walk_entity(*subject_id, block)
+                    .unwrap_or(js::Node::Void);
+                // Evaluate the subject once into a temporary; every variant
+                // test and capture reads from it.
+                let subject_name = self.ng.next_name();
+                block.push(js::Node::ConstVariable(js::Variable {
+                    name: subject_name.clone(),
+                    value: Box::new(t_subject),
+                }));
+                let result_name = self.ng.next_name();
+                block.push(js::Node::LetVariable(js::Variable {
+                    name: result_name.clone(),
+                    value: Box::new(js::Node::Null),
+                }));
+                // Each leg becomes an optional variant test plus a body that
+                // declares its captures and assigns the leg's value.
+                let mut compiled_legs: Vec<(Option<js::Node<'src>>, Vec<js::Node<'src>>)> =
+                    Vec::new();
+                for leg in legs {
+                    let mut leg_body = Vec::new();
+                    let mut conditions = Vec::new();
+                    self.compile_pattern(
+                        &leg.pattern,
+                        js::Node::Local(subject_name.clone()),
+                        &mut conditions,
+                        &mut leg_body,
+                    );
+                    let condition = conditions
+                        .into_iter()
+                        .reduce(|a, b| js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)));
+                    let value = self.walk_entity(leg.body, &mut leg_body);
+                    leg_body.push(js::Node::Assignment(
+                        Box::new(js::Node::Local(result_name.clone())),
+                        Box::new(value.unwrap_or(js::Node::Null)),
+                    ));
+                    let is_catch_all = condition.is_none();
+                    compiled_legs.push((condition, leg_body));
+                    if is_catch_all {
+                        // Later legs are unreachable.
+                        break;
+                    }
+                }
+                // The analyzer verified exhaustiveness, so the final leg can
+                // always be the `else` branch.
+                if let Some(last_leg) = compiled_legs.last_mut() {
+                    last_leg.0 = None;
+                }
+                let mut chain: Option<js::IfBranch<'src>> = None;
+                for (condition, leg_body) in compiled_legs.into_iter().rev() {
+                    chain = Some(match condition {
+                        None => js::IfBranch::Else(leg_body),
+                        Some(condition) => {
+                            js::IfBranch::If(Box::new(condition), leg_body, chain.map(Box::new))
+                        }
+                    });
+                }
+                match chain {
+                    // A lone catch-all needs no branching at all.
+                    Some(js::IfBranch::Else(leg_body)) => block.extend(leg_body),
+                    Some(chain) => block.push(js::Node::If(chain)),
+                    None => {}
+                }
+                js::Node::Local(result_name)
+            }
             Expr::List(ids) => {
                 let items = ids
                     .iter()
@@ -500,6 +593,57 @@ impl<'src> Transformer<'src> {
                 return None;
             }
         })
+    }
+
+    // Compiles a match pattern against the JS expression holding the value it
+    // matches: variant tests are appended to `conditions` and capture
+    // declarations to `bindings`.
+    fn compile_pattern(
+        &mut self,
+        pattern: &ExprPattern,
+        subject: js::Node<'src>,
+        conditions: &mut Vec<js::Node<'src>>,
+        bindings: &mut Vec<js::Node<'src>>,
+    ) {
+        match pattern {
+            ExprPattern::Wildcard => {}
+            ExprPattern::Binding(capture_id) => {
+                let name = self.ng.name_for(*capture_id);
+                let mutable = self
+                    .program
+                    .variables
+                    .get(capture_id)
+                    .map(|variable| variable.mutable)
+                    .unwrap_or(false);
+                let variable = js::Variable {
+                    name,
+                    value: Box::new(subject),
+                };
+                bindings.push(if mutable {
+                    js::Node::LetVariable(variable)
+                } else {
+                    js::Node::ConstVariable(variable)
+                });
+            }
+            ExprPattern::Variant(variant_index, payload) => {
+                conditions.push(js::Node::Binary(
+                    BinaryOp::Eq,
+                    Box::new(js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number("0".to_string(), None)),
+                    )),
+                    Box::new(js::Node::Number(variant_index.to_string(), None)),
+                ));
+                for (data_index, sub_pattern) in payload.iter().enumerate() {
+                    // Variant data sits after the variant index.
+                    let element = js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number((data_index + 1).to_string(), None)),
+                    );
+                    self.compile_pattern(sub_pattern, element, conditions, bindings);
+                }
+            }
+        }
     }
 
     fn function(&mut self, function: &Function<'src>) -> js::Node<'src> {
@@ -781,6 +925,7 @@ impl Formatter {
                     BinaryOp::Gt => ">",
                     BinaryOp::LtEq => "<=",
                     BinaryOp::GtEq => ">=",
+                    BinaryOp::And => "&&",
                 };
                 format!(
                     "{}{}{}{}{}{}",
@@ -830,7 +975,7 @@ impl Formatter {
                                 .iter()
                                 .map(|x| f.node(x, ";", indentation + 1))
                                 .collect::<Vec<_>>()
-                                .join("");
+                                .join(f.line_break);
                             let s_else = else_
                                 .as_ref()
                                 .map(|x| {
@@ -859,7 +1004,7 @@ impl Formatter {
                                 .iter()
                                 .map(|x| f.node(x, ";", indentation + 1))
                                 .collect::<Vec<_>>()
-                                .join("");
+                                .join(f.line_break);
                             format!(
                                 "else{}{{{}{}{}{}}}",
                                 f.space,
