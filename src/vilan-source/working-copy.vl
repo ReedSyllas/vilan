@@ -1,13 +1,8 @@
-import std::{ print, List };
+import std::option::Option::{ self, Some, None };
+import std::print;
 
 fun main() {
-	mut names = List<str>::new();
+	let a = Some(10);
 	
-	names.push("Anna");
-	names.push("James");
-	names.push("Roger");
-	names.push("Kenneth");
-	names.push("Elisabeth");
-	
-	print(names);
+	print(a.map(|x| x * 6));
 }

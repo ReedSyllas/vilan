@@ -2079,8 +2079,27 @@ impl<'src> Analyzer<'src> {
 
     fn build(&mut self) {
         for (path, name, scope_id, span) in self.prepped_imports.clone() {
-            let mut path = path.iter().map(|x| *x).chain(std::iter::once(name));
-            let root = path.next().unwrap();
+            // A `self` leaf re-binds the namespace it sits in under its own name
+            // (e.g. `Option::{ self }` binds `Option`); otherwise the leaf is the
+            // final path segment and binds under its own name.
+            let (segments, bind_name): (Vec<&str>, &str) = if name == "self" {
+                match path.last() {
+                    Some(last) => (path.clone(), last),
+                    None => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: "`self` import has no enclosing namespace".to_string(),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                let mut segments = path.clone();
+                segments.push(name);
+                (segments, name)
+            };
+            let mut segments = segments.into_iter();
+            let root = segments.next().unwrap();
             let module_id = match self.module_id_by_name.get(root) {
                 Some(module_id) => *module_id,
                 None => {
@@ -2092,22 +2111,27 @@ impl<'src> Analyzer<'src> {
                 }
             };
             let mut target_id = module_id;
-            let mut module_scope_id = self.modules.get(&module_id).unwrap().body.1;
+            let mut namespace_scope_id = self.modules.get(&module_id).unwrap().body.1;
             let mut unresolved = false;
-            for part in path {
-                match self.try_get_expr_id_by_name(part, module_scope_id) {
+            for part in segments {
+                match self.try_get_expr_id_by_name(part, namespace_scope_id) {
                     Some(id) => {
                         target_id = id;
-                        // If this segment is itself a module, descend into it so
-                        // the next segment resolves there (e.g. `pkg::io::print`).
-                        let sub_module_id = match self.expr_id_to_expr_map.get(&id) {
-                            Some(Expr::Module(sub_module_id)) => Some(*sub_module_id),
+                        // If this segment is itself a namespace — a module or an
+                        // enum (whose namespace holds its variants) — descend into
+                        // it so the next segment resolves there, e.g. `pkg::io::print`
+                        // or `std::option::Option::Some`.
+                        let sub_scope_id = match self.expr_id_to_expr_map.get(&id) {
+                            Some(Expr::Module(sub_module_id)) => {
+                                self.modules.get(sub_module_id).map(|module| module.body.1)
+                            }
+                            Some(Expr::Enum(enum_id)) => {
+                                self.enums.get(enum_id).map(|enum_| enum_.variants_scope_id)
+                            }
                             _ => None,
                         };
-                        if let Some(sub_module_id) = sub_module_id {
-                            if let Some(module) = self.modules.get(&sub_module_id) {
-                                module_scope_id = module.body.1;
-                            }
+                        if let Some(sub_scope_id) = sub_scope_id {
+                            namespace_scope_id = sub_scope_id;
                         }
                     }
                     None => {
@@ -2124,7 +2148,7 @@ impl<'src> Analyzer<'src> {
                 continue;
             }
             let scope = self.mut_scope_for_scope_id(scope_id);
-            scope.name_to_id_map.insert(name, target_id);
+            scope.name_to_id_map.insert(bind_name, target_id);
         }
 
         // --- Resolve `use` statements ---
@@ -3664,10 +3688,12 @@ fn std_module_path(file: &str) -> String {
     )
 }
 
-/// Collects the names of sibling modules referenced via `pkg::<module>::..` in a
-/// module's top-level `import`/`use`/`export import` statements, so the loader
-/// can pull them in transitively.
-fn collect_pkg_module_refs<'a>(nodes: &'a NodeList<'a>) -> Vec<&'a str> {
+/// Collects the names of package modules referenced via `<root>::<module>::..`
+/// in a node list's top-level `import`/`use`/`export import` statements, so the
+/// loader can pull them in transitively. `root` is `pkg` when scanning a std
+/// module's own siblings, or `std` when scanning the entry program for the std
+/// submodules it addresses by path (e.g. `import std::option::Option`).
+fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> {
     let mut modules = Vec::new();
     for (node, _span) in nodes {
         let branch = match node {
@@ -3682,7 +3708,7 @@ fn collect_pkg_module_refs<'a>(nodes: &'a NodeList<'a>) -> Vec<&'a str> {
             let mut entries = Vec::new();
             flatten_namespace_branch(branch, Vec::new(), &mut entries);
             for (path, _leaf) in entries {
-                if path.first() == Some(&"pkg") && path.len() >= 2 {
+                if path.first() == Some(&root) && path.len() >= 2 {
                     modules.push(path[1]);
                 }
             }
@@ -3840,8 +3866,12 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
     let mut loaded: Vec<(&str, &Spanned<NodeList>, Id)> = Vec::new();
     let mut to_load: Vec<&str> = lib_ast
-        .map(|ast| collect_pkg_module_refs(&ast.0))
+        .map(|ast| collect_module_refs(&ast.0, "pkg"))
         .unwrap_or_default();
+    // The entry program addresses std submodules by path (`std::option::..`),
+    // so its imports also seed the reachable set. Names that aren't modules
+    // (e.g. the `print` in `std::print`) simply find no file and are skipped.
+    to_load.extend(collect_module_refs(&nodes.0, "std"));
     while let Some(name) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
@@ -3867,8 +3897,15 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .mut_scope_for_scope_id(pkg_scope_id)
             .name_to_id_map
             .insert(name, module_id);
+        // Also expose the module under the `std` package root so it is
+        // addressable by path from outside (`std::<module>::item`), mirroring
+        // the internal `pkg::<module>` reference.
+        analyzer
+            .mut_scope_for_scope_id(std_scope_id)
+            .name_to_id_map
+            .insert(name, module_id);
         module_scopes.insert(name, module_scope_id);
-        to_load.extend(collect_pkg_module_refs(&ast.0));
+        to_load.extend(collect_module_refs(&ast.0, "pkg"));
         loaded.push((name, ast, module_scope_id));
     }
     for (_name, ast, module_scope_id) in &loaded {

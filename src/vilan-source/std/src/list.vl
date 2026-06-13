@@ -1,6 +1,8 @@
 import pkg::default::Default;
-import pkg::iterator::Iterable;
+import pkg::io::panic;
+import pkg::iterator::{ Iterable, Iterator };
 import pkg::operators::{ Add, Mul };
+import pkg::option::Option::{ Some };
 
 external struct List<T>;
 
