@@ -1,2 +1,2 @@
 
-struct str;
+external struct str;

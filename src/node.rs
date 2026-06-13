@@ -1,17 +1,31 @@
 use crate::span::Spanned;
 
-pub type GenericParameters<'src> = Spanned<Vec<(&'src str, Option<Spanned<Node<'src>>>)>>;
+pub type GenericParameters<'src> = Spanned<Vec<GenericParameter<'src>>>;
+
+#[derive(Debug)]
+pub struct GenericParameter<'src> {
+    pub name: &'src str,
+    // Declared with the `type` keyword (a binder, e.g. `impl Foo<type T>`).
+    pub is_type: bool,
+    // Trait bounds: `T: A + B` collects `[A, B]`.
+    pub bounds: Vec<Spanned<Node<'src>>>,
+    // A default, e.g. the `Self` in `<B = Self>`.
+    pub default: Option<Box<Spanned<Node<'src>>>>,
+}
 
 pub type GenericArguments<'src> = Spanned<Vec<Spanned<Node<'src>>>>;
 
 #[derive(Debug)]
 pub struct Func<'src> {
     pub name: Spanned<&'src str>,
+    // Declared with the `external` keyword: an intrinsic with no Vilan body,
+    // implemented by the runtime/compiler (e.g. `external fun print(..);`).
+    pub external: bool,
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
-    // `None` for a function signature without a body, e.g. a required trait
-    // method declaration like `fun default(): Self;`.
+    // `None` for a function signature without a body: a required trait method
+    // declaration (`fun default(): Self;`) or an `external` intrinsic.
     pub body: Option<Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>>,
 }
 
@@ -63,33 +77,45 @@ pub enum Node<'src> {
         Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
         Option<Box<Spanned<Node<'src>>>>,
     ),
-    // An enum declaration: name, generics, and the variants — each a name
-    // with the types of its optional data.
+    // An enum declaration: name, generics, and the variants — each a name,
+    // the types of its optional data, and an optional explicit discriminant
+    // (`Less = -1`).
     Enum(
         &'src str,
         Option<GenericParameters<'src>>,
-        Spanned<Vec<Spanned<(&'src str, Vec<Spanned<Node<'src>>>)>>>,
+        Spanned<Vec<Spanned<EnumVariant<'src>>>>,
     ),
     Error,
     // A loop: `for { .. }` (infinite, condition `None`) or `for cond { .. }`
-    // (while). The `for .. in ..` iterator form maps here too once added.
+    // (while).
     For(
         Option<Box<Spanned<Self>>>,
+        Spanned<(NodeList<'src>, Box<Spanned<Self>>)>,
+    ),
+    // `for item in iterable { .. }` — the binding name, the iterable, the body.
+    ForIn(
+        &'src str,
+        Box<Spanned<Self>>,
         Spanned<(NodeList<'src>, Box<Spanned<Self>>)>,
     ),
     Func(Func<'src>),
     FuncReturn(Box<Spanned<Self>>),
     If(NodeIfBranch<'src>),
+    // `subject is pattern` — a pattern test that yields a `bool` and binds the
+    // pattern's captures into the surrounding scope.
+    Is(Box<Spanned<Self>>, Box<Spanned<Pattern<'src>>>),
     // `jump break` / `jump continue` — the target keyword that follows `jump`.
     Jump(&'src str),
     Impl(
         Box<Spanned<Self>>,
         Option<GenericParameters<'src>>,
-        // The trait being implemented, i.e. the `T` in `impl Subject with T`.
-        Option<Box<Spanned<Self>>>,
+        // The traits being implemented: the `A`, `B` in `impl Subject with A + B`.
+        Vec<Spanned<Self>>,
         Spanned<NodeList<'src>>,
     ),
     Import(ImportBranch<'src>),
+    // `export <item>` — re-export an import or expose a local declaration.
+    Export(Box<Spanned<Self>>),
     // `let`/`mut` binding: name, type annotation, value, mutability.
     Let(
         &'src str,
@@ -109,10 +135,14 @@ pub enum Node<'src> {
     Number(&'src str, Option<&'src str>),
     StaticAccessor(Box<Spanned<Self>>, &'src str),
     String(&'src str),
+    // A struct declaration. The `bool` marks an `external` (intrinsic) struct.
+    // The body is `Some(fields)` for `{ .. }` and `None` for a bodyless `;`
+    // declaration (only valid when `external`).
     Struct(
         &'src str,
         Option<GenericParameters<'src>>,
-        Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>,
+        bool,
+        Option<Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>>,
     ),
     StructInitializer(
         &'src str,
@@ -122,14 +152,26 @@ pub enum Node<'src> {
     Trait(
         &'src str,
         Option<GenericParameters<'src>>,
+        // Supertraits: the `A`, `B` in `trait T with A + B`.
+        Vec<Spanned<Self>>,
         Spanned<NodeList<'src>>,
     ),
     Tuple(NodeList<'src>),
+    // A prefix operator: `!x` or `-x`.
+    Unary(char, Box<Spanned<Self>>),
     // `use Namespace::{ a, b };` — destructures items out of a namespace
     // (a module or an enum) into the current scope.
     Use(ImportBranch<'src>),
     Void,
 }
+
+// One enum variant: name, the types of its optional data, and an optional
+// explicit discriminant expression (`Less = -1`).
+pub type EnumVariant<'src> = (
+    &'src str,
+    Vec<Spanned<Node<'src>>>,
+    Option<Box<Spanned<Node<'src>>>>,
+);
 
 // A match-leg pattern.
 #[derive(Debug)]
@@ -140,6 +182,8 @@ pub enum Pattern<'src> {
     Binding(&'src str, bool),
     // `Name` or `Name(patterns...)` — an enum variant with payload patterns.
     Variant(&'src str, Option<Vec<Spanned<Pattern<'src>>>>),
+    // `(a, b, ...)` — a tuple pattern.
+    Tuple(Vec<Spanned<Pattern<'src>>>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -154,7 +198,7 @@ pub enum BinaryOp {
     Gt,
     LtEq,
     GtEq,
-    // Logical AND. Currently only produced by the compiler itself (e.g. for
-    // nested match-pattern tests); there is no surface syntax yet.
+    // Logical AND (`&&`), also produced by the compiler for nested
+    // match-pattern tests.
     And,
 }

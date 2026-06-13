@@ -30,6 +30,8 @@ struct Transformer<'src> {
     formatter: Formatter,
     ng: NameGenerator,
     print_fn_id: Id,
+    list_new_fn_id: Id,
+    list_push_fn_id: Id,
     program: &'src Program<'src>,
     required_functions: IndexMap<Id, js::Node<'src>>,
     // The active generic-parameter substitution while emitting a monomorphized
@@ -82,6 +84,8 @@ impl<'src> Transformer<'src> {
             },
             ng: NameGenerator::new_simple(debug_names),
             print_fn_id,
+            list_new_fn_id: program.list_new_fn_id,
+            list_push_fn_id: program.list_push_fn_id,
             program,
             required_functions: IndexMap::new(),
             current_substitution: HashMap::new(),
@@ -303,6 +307,23 @@ impl<'src> Transformer<'src> {
                                     "log".to_string(),
                                 )),
                                 args,
+                            ));
+                        }
+                        // `List::new()` builds an empty JS array.
+                        if target_id == self.list_new_fn_id {
+                            return Some(js::Node::Array(Vec::new()));
+                        }
+                        // `list.push(x)` lowers to the native array method; the
+                        // receiver is the method call's first (`self`) argument.
+                        if target_id == self.list_push_fn_id {
+                            let mut arguments = args.into_iter();
+                            let receiver = arguments.next().unwrap_or(js::Node::Void);
+                            return Some(js::Node::Call(
+                                Box::new(js::Node::Property(
+                                    Box::new(receiver),
+                                    "push".to_string(),
+                                )),
+                                arguments.collect(),
                             ));
                         }
                         // A call to a generic function is compiled to a
@@ -639,6 +660,17 @@ impl<'src> Transformer<'src> {
                     let element = js::Node::PropertyIndex(
                         Box::new(subject.clone()),
                         Box::new(js::Node::Number((data_index + 1).to_string(), None)),
+                    );
+                    self.compile_pattern(sub_pattern, element, conditions, bindings);
+                }
+            }
+            ExprPattern::Tuple(elements) => {
+                // Tuples are plain arrays, so each element is matched
+                // positionally with no discriminant.
+                for (index, sub_pattern) in elements.iter().enumerate() {
+                    let element = js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number(index.to_string(), None)),
                     );
                     self.compile_pattern(sub_pattern, element, conditions, bindings);
                 }

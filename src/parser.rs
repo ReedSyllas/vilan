@@ -1,6 +1,6 @@
 use crate::node::{
-    BinaryOp, Closure, Func, GenericArguments, If, ImportBranch, Node, NodeIfBranch, NodeList,
-    Pattern,
+    BinaryOp, Closure, Func, GenericArguments, GenericParameter, If, ImportBranch, Node,
+    NodeIfBranch, NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
@@ -32,6 +32,16 @@ where
 
     let identifier = select! { Token::Ident(text) => text }.labelled("identifier");
 
+    // A name in a declaration or path position. Accepts the boolean literals so
+    // the bootstrap `bool` enum (`enum bool { false, true }`) and re-exports of
+    // its variants (`bool::{ self, true, false }`) can be written.
+    let name = select! {
+        Token::Ident(text) => text,
+        Token::Bool(true) => "true",
+        Token::Bool(false) => "false",
+    }
+    .labelled("name");
+
     let literal = select! {
         Token::Null => Node::Null,
         Token::Bool(x) => Node::Bool(x),
@@ -41,14 +51,39 @@ where
     .labelled("value")
     .map_with(|x, e| (x, e.span()));
 
-    let generic_parameters = identifier
-        .labelled("generic parameter name")
+    // A generic parameter: an optional `type` binder marker, a name, optional
+    // `: A + B` bounds, and an optional `= Default`.
+    let generic_parameter = just(Token::Type)
+        .or_not()
+        .then(identifier.labelled("generic parameter name"))
         .then(
             just(Token::Op(":"))
-                .ignore_then(type_.clone())
-                .labelled("generic parameter type")
+                .ignore_then(
+                    type_
+                        .clone()
+                        .separated_by(just(Token::Op("+")))
+                        .at_least(1)
+                        .collect::<Vec<_>>(),
+                )
+                .labelled("generic parameter bounds")
                 .or_not(),
         )
+        .then(
+            just(Token::Op("="))
+                .ignore_then(type_.clone().map(Box::new))
+                .labelled("generic parameter default")
+                .or_not(),
+        )
+        .map(
+            |(((type_keyword, name), bounds), default)| GenericParameter {
+                name,
+                is_type: type_keyword.is_some(),
+                bounds: bounds.unwrap_or_default(),
+                default,
+            },
+        );
+
+    let generic_parameters = generic_parameter
         .labelled("generic parameter")
         .separated_by(just(Token::Ctrl(',')))
         .allow_trailing()
@@ -259,7 +294,7 @@ where
     // A `::`-separated namespace path ending in a name or a `{ a, b }` set,
     // shared by `import` and `use`.
     let namespace_path = recursive(|branch| {
-        let path = identifier
+        let path = name
             .then(just(Token::Op("::")).ignore_then(branch).or_not())
             .map(|(a, b)| ImportBranch::Path(a, b.map(|b| Box::new(b))));
 
@@ -369,7 +404,23 @@ where
     // (`for { .. }`); with one it is a while loop (`for cond { .. }`). The body
     // is always the final block, so an infinite loop is tried first to avoid
     // mistaking its block for a condition.
-    let for_ = just(Token::For)
+    // `for item in iterable { .. }` — iterate over an `Iterable`. Tried before
+    // the condition/infinite forms since `item in ..` starts with an identifier.
+    let for_in = just(Token::For)
+        .ignore_then(identifier.labelled("loop variable"))
+        .then_ignore(just(Token::In))
+        .then(
+            secondary_expression
+                .clone()
+                .labelled("iterable")
+                .map(Box::new),
+        )
+        .then(block.clone())
+        .map_with(|((variable, iterable), body), e| {
+            (Node::ForIn(variable, iterable, body), e.span())
+        });
+
+    let for_loop = just(Token::For)
         .ignore_then(choice((
             block.clone().map(|body| (None, body)),
             secondary_expression
@@ -378,11 +429,21 @@ where
                 .then(block.clone())
                 .map(|(condition, body)| (Some(Box::new(condition)), body)),
         )))
-        .map_with(|(condition, body), e| (Node::For(condition, body), e.span()))
-        .labelled("for loop")
-        .boxed();
+        .map_with(|(condition, body), e| (Node::For(condition, body), e.span()));
 
-    let enum_variant = identifier
+    let for_ = choice((for_in, for_loop)).labelled("for loop").boxed();
+
+    // An explicit discriminant: `= 0` or `= -1`. The sign is accepted but not
+    // yet retained (discriminants are not used by the analyzer/codegen yet).
+    let discriminant = just(Token::Op("="))
+        .ignore_then(just(Token::Op("-")).or_not())
+        .ignore_then(
+            select! { Token::Number(whole, fraction) => (whole, fraction) }.map_with(
+                |(whole, fraction), e| Box::new((Node::Number(whole, fraction), e.span())),
+            ),
+        );
+
+    let enum_variant = name
         .labelled("variant name")
         .then(
             type_
@@ -393,7 +454,10 @@ where
                 .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
                 .or_not(),
         )
-        .map_with(|(name, data), e| ((name, data.unwrap_or_default()), e.span()));
+        .then(discriminant.or_not())
+        .map_with(|((name, data), discriminant), e| {
+            ((name, data.unwrap_or_default(), discriminant), e.span())
+        });
 
     let enum_ = just(Token::Enum)
         .ignore_then(identifier.labelled("enum name"))
@@ -418,7 +482,17 @@ where
         let binding = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
             .then(identifier.labelled("capture name"))
             .map(|(mutable, name)| Pattern::Binding(name, mutable));
-        let variant = identifier
+        // `(a, b, ...)` — a tuple pattern (at least two elements, to keep a
+        // single parenthesised pattern unambiguous as grouping).
+        let tuple = pattern
+            .clone()
+            .separated_by(just(Token::Ctrl(',')))
+            .at_least(2)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .map(Pattern::Tuple);
+        let variant = name
             .then(
                 pattern
                     .separated_by(just(Token::Ctrl(',')))
@@ -427,19 +501,20 @@ where
                     .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
                     .or_not(),
             )
-            .map(|(name, payload)| {
-                if name == "_" && payload.is_none() {
+            .map(|(variant_name, payload)| {
+                if variant_name == "_" && payload.is_none() {
                     Pattern::Wildcard
                 } else {
-                    Pattern::Variant(name, payload)
+                    Pattern::Variant(variant_name, payload)
                 }
             });
-        choice((binding, variant)).map_with(|x, e| (x, e.span()))
+        choice((binding, tuple, variant)).map_with(|x, e| (x, e.span()))
     })
     .labelled("pattern")
     .boxed();
 
     let match_leg = pattern
+        .clone()
         .then_ignore(just(Token::Op("=>")))
         .then(expression.clone().labelled("match leg body"));
 
@@ -457,8 +532,11 @@ where
         .labelled("match expression")
         .boxed();
 
-    let function = just(Token::Fun)
-        .ignore_then(
+    let function = just(Token::External)
+        .or_not()
+        .map(|external| external.is_some())
+        .then_ignore(just(Token::Fun))
+        .then(
             identifier
                 .map_with(|name, e| (name, e.span()))
                 .labelled("function name"),
@@ -497,10 +575,11 @@ where
                 .labelled("function body"),
         )
         .map_with(
-            |((((name, generic_parameters), parameters), return_type), body), e| {
+            |(((((external, name), generic_parameters), parameters), return_type), body), e| {
                 (
                     Node::Func(Func {
                         name,
+                        external,
                         generic_parameters,
                         parameters,
                         return_type,
@@ -521,10 +600,14 @@ where
         .then(just(Token::Op(":")).ignore_then(type_.clone()).or_not())
         .map_with(|(name, type_), e| ((name, type_), e.span()));
 
-    let struct_ = just(Token::Struct)
-        .ignore_then(identifier.labelled("struct name"))
+    let struct_ = just(Token::External)
+        .or_not()
+        .map(|external| external.is_some())
+        .then_ignore(just(Token::Struct))
+        .then(identifier.labelled("struct name"))
         .then(generic_parameters.clone().or_not())
-        .then(
+        .then(choice((
+            // `struct Name { field: T, ... }`
             struct_field
                 .separated_by(just(Token::Ctrl(',')))
                 .allow_trailing()
@@ -540,10 +623,16 @@ where
                     ],
                     |span| (None, span),
                 )))
-                .map(|x| (x.0.unwrap_or_else(|| Vec::new()), x.1)),
-        )
-        .map_with(|((name, generic_parameters), body), e| {
-            (Node::Struct(name, generic_parameters, body), e.span())
+                .map(|x| Some((x.0.unwrap_or_else(Vec::new), x.1))),
+            // `struct Name;` — a bodyless declaration (only valid for an
+            // `external` struct, e.g. a primitive like `external struct str;`).
+            just(Token::Ctrl(';')).map(|_| None),
+        )))
+        .map_with(|(((external, name), generic_parameters), body), e| {
+            (
+                Node::Struct(name, generic_parameters, external, body),
+                e.span(),
+            )
         })
         .labelled("struct")
         .boxed();
@@ -551,24 +640,37 @@ where
     let impl_ = just(Token::Impl)
         // The subject is a type path — a name or a `module::Item` such as
         // `std::i32`. Any `<...>` after it declares the impl's generic
-        // parameters (`impl List<T: str>`), so it must not be parsed as a
-        // generic type usage here.
+        // parameters (`impl List<type T>`), so it must not be parsed as a
+        // generic type usage here. A leading `type` marks a bare blanket
+        // binder, e.g. `impl type T with Into<T>`.
         .ignore_then(
-            identifier
-                .map_with(|name, e| (Node::Accessor(name), e.span()))
-                .foldl_with(
-                    just(Token::Op("::")).ignore_then(identifier).repeated(),
-                    |subject, member, e| {
-                        (Node::StaticAccessor(Box::new(subject), member), e.span())
-                    },
+            just(Token::Type)
+                .or_not()
+                .ignore_then(
+                    identifier
+                        .map_with(|name, e| (Node::Accessor(name), e.span()))
+                        .foldl_with(
+                            just(Token::Op("::")).ignore_then(identifier).repeated(),
+                            |subject, member, e| {
+                                (Node::StaticAccessor(Box::new(subject), member), e.span())
+                            },
+                        ),
                 )
                 .labelled("implementation subject"),
         )
         .then(generic_parameters.clone().or_not())
         .then(
             just(Token::With)
-                .ignore_then(type_.clone().labelled("implemented trait"))
-                .or_not(),
+                .ignore_then(
+                    type_
+                        .clone()
+                        .labelled("implemented trait")
+                        .separated_by(just(Token::Op("+")))
+                        .at_least(1)
+                        .collect::<Vec<_>>(),
+                )
+                .or_not()
+                .map(|traits| traits.unwrap_or_default()),
         )
         .then(
             statement
@@ -587,14 +689,9 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(|(((subject, generic_parameters), trait_), body), e| {
+        .map_with(|(((subject, generic_parameters), traits), body), e| {
             (
-                Node::Impl(
-                    Box::new(subject),
-                    generic_parameters,
-                    trait_.map(|x| Box::new(x)),
-                    body,
-                ),
+                Node::Impl(Box::new(subject), generic_parameters, traits, body),
                 e.span(),
             )
         })
@@ -603,6 +700,19 @@ where
     let trait_ = just(Token::Trait)
         .ignore_then(identifier.labelled("trait name"))
         .then(generic_parameters.clone().or_not())
+        .then(
+            just(Token::With)
+                .ignore_then(
+                    type_
+                        .clone()
+                        .labelled("supertrait")
+                        .separated_by(just(Token::Op("+")))
+                        .at_least(1)
+                        .collect::<Vec<_>>(),
+                )
+                .or_not()
+                .map(|supertraits| supertraits.unwrap_or_default()),
+        )
         .then(
             function
                 .clone()
@@ -620,8 +730,11 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(|((name, generic_parameters), body), e| {
-            (Node::Trait(name, generic_parameters, body), e.span())
+        .map_with(|(((name, generic_parameters), supertraits), body), e| {
+            (
+                Node::Trait(name, generic_parameters, supertraits, body),
+                e.span(),
+            )
         })
         .labelled("trait")
         .boxed();
@@ -648,6 +761,34 @@ where
         .map_with(|(name, body), e| (Node::Module(name, body), e.span()))
         .boxed();
 
+    // The operator-precedence expression (calls, member/static access,
+    // arithmetic, comparison), then the `is` pattern test, then `&&`.
+    let chained = chain_expr_parser(
+        identifier,
+        generic_arguments.clone(),
+        expression_list.clone(),
+        atom.clone(),
+    );
+    let is_expression = chained
+        .then(just(Token::Is).ignore_then(pattern.clone()).or_not())
+        .map_with(|(subject, matched), e| match matched {
+            Some(matched) => (Node::Is(Box::new(subject), Box::new(matched)), e.span()),
+            None => subject,
+        })
+        .boxed();
+    let logical_and = is_expression
+        .clone()
+        .foldl_with(
+            just(Token::Op("&&")).ignore_then(is_expression).repeated(),
+            |a, b, e| {
+                (
+                    Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)),
+                    e.span(),
+                )
+            },
+        )
+        .boxed();
+
     secondary_expression.define(choice((
         closure,
         block
@@ -655,12 +796,12 @@ where
             .map(|(x, span)| (Node::Block((x, span)), span)),
         if_.clone(),
         for_.clone(),
-        match_,
+        match_.clone(),
         jump,
         let_,
         return_,
         assignment,
-        chain_expr_parser(identifier, generic_arguments, expression_list, atom),
+        logical_and,
     )));
 
     expression.define(
@@ -669,10 +810,18 @@ where
             .as_context(),
     );
 
+    // `export <statement>` — re-export an import or expose a declaration.
+    let export_ = just(Token::Export)
+        .ignore_then(statement.clone())
+        .map_with(|inner, e| (Node::Export(Box::new(inner)), e.span()))
+        .labelled("export");
+
     statement.define(choice((
+        export_,
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_,
         for_,
+        match_,
         function,
         struct_,
         enum_,
@@ -759,8 +908,21 @@ fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
 {
-    let static_accessor = atom
-        .clone()
+    // `Name<Args>` is the head of a `::` path only when a `::` actually
+    // follows (e.g. `List<str>::new()`); the trailing `::` is matched with a
+    // lookahead so a generic *call* like `default<Id>()` is left untouched.
+    let generic_static_head = identifier
+        .then(generic_arguments.clone())
+        .then_ignore(just(Token::Op("::")).rewind())
+        .map_with(|(name, generic_arguments), e| {
+            (
+                Node::AccessorWithGenerics(name, generic_arguments),
+                e.span(),
+            )
+        });
+
+    let static_accessor = generic_static_head
+        .or(atom.clone())
         .foldl_with(
             just(Token::Op("::")).ignore_then(identifier).repeated(),
             |subject, member_name, e| {
@@ -801,13 +963,22 @@ where
         )
         .boxed();
 
+    // Unary prefix `!` (logical not), binding tighter than the binary ops.
+    let unary = recursive(|unary| {
+        just(Token::Op("!"))
+            .ignore_then(unary)
+            .map_with(|expr, e| (Node::Unary('!', Box::new(expr)), e.span()))
+            .or(member_accessor.clone())
+            .boxed()
+    });
+
     // Product ops (multiply and divide) have equal precedence
     let op = just(Token::Op("*"))
         .to(BinaryOp::Mul)
         .or(just(Token::Op("/")).to(BinaryOp::Div));
-    let product = member_accessor
+    let product = unary
         .clone()
-        .foldl_with(op.then(member_accessor).repeated(), |a, (op, b), e| {
+        .foldl_with(op.then(unary).repeated(), |a, (op, b), e| {
             (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
         })
         .boxed();

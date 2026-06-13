@@ -1,4 +1,4 @@
 
-fun print(message: any): void;
+external fun print(message: any): void;
 
-fun panic(message: str): void;
+external fun panic(message: str): void;

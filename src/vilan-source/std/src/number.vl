@@ -1,6 +1,6 @@
 import pkg::default::Default;
 
-struct u32;
+external struct u32;
 
 impl u32 with Default {
 	fun default(): u32 {
@@ -8,7 +8,7 @@ impl u32 with Default {
 	}
 }
 
-struct i32;
+external struct i32;
 
 impl i32 with Default {
 	fun default(): i32 {
@@ -16,7 +16,7 @@ impl i32 with Default {
 	}
 }
 
-struct f64;
+external struct f64;
 
 impl f64 with Default {
 	fun default(): f64 {
@@ -24,7 +24,7 @@ impl f64 with Default {
 	}
 }
 
-struct BigInt;
+external struct BigInt;
 
 impl BigInt with Default {
 	fun default(): BigInt {

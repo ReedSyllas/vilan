@@ -4,10 +4,13 @@ use chumsky::prelude::*;
 
 pub fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
-    // A parser for numbers
+    // A parser for numbers. A trailing type suffix (`0u32`, `1f`, `2n`, ...) is
+    // accepted and currently discarded; the literal's type is inferred from
+    // context or the fractional part.
     let number = text::int(10)
         .to_slice()
         .then(just('.').ignore_then(text::digits(10).to_slice()).or_not())
+        .then_ignore(text::ascii::ident().or_not())
         .map(|(whole, fraction)| Token::Number(whole, fraction));
 
     // A parser for strings
@@ -21,7 +24,7 @@ pub fn lexer<'src>()
     let arrow = just("=>").to(Token::Op("=>"));
 
     // A parser for operators
-    let op = one_of("-:!*/+=|")
+    let op = one_of("-:!*/+=|&")
         .repeated()
         .at_least(1)
         .to_slice()
@@ -34,12 +37,16 @@ pub fn lexer<'src>()
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
         "else" => Token::Else,
         "enum" => Token::Enum,
+        "export" => Token::Export,
+        "external" => Token::External,
         "false" => Token::Bool(false),
         "for" => Token::For,
         "fun" => Token::Fun,
         "if" => Token::If,
         "impl" => Token::Impl,
         "import" => Token::Import,
+        "in" => Token::In,
+        "is" => Token::Is,
         "jump" => Token::Jump,
         "let" => Token::Let,
         "match" => Token::Match,
@@ -49,6 +56,7 @@ pub fn lexer<'src>()
         "ret" => Token::Ret,
         "struct" => Token::Struct,
         "trait" => Token::Trait,
+        "type" => Token::Type,
         "true" => Token::Bool(true),
         "use" => Token::Use,
         "with" => Token::With,

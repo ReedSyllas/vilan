@@ -75,6 +75,8 @@ pub enum ExprPattern {
     Binding(Id),
     // A variant test by index, with payload sub-patterns.
     Variant(usize, Vec<ExprPattern>),
+    // A tuple destructure, matching each element positionally.
+    Tuple(Vec<ExprPattern>),
 }
 
 #[derive(Debug)]
@@ -163,6 +165,7 @@ enum WalkPattern<'src> {
     Wildcard,
     Binding(Id),
     Variant(&'src str, Span, Option<Vec<WalkPattern<'src>>>),
+    Tuple(Span, Vec<WalkPattern<'src>>),
 }
 
 // A match expression awaiting subject and pattern resolution.
@@ -369,6 +372,9 @@ pub struct Analyzer<'src> {
     type_id: u32,
     variable_constraints: Vec<VariableConstraint>,
     variables: IndexMap<Id, Variable<'src>>,
+    // True while walking a trait body, where a bodyless method is a legitimate
+    // requirement; elsewhere a bodyless function must be declared `external`.
+    walking_trait_body: bool,
 }
 
 static EMPTY_SPAN: Span = Span {
@@ -449,6 +455,7 @@ impl<'src> Analyzer<'src> {
             type_id: 0,
             variable_constraints: Vec::new(),
             variables: IndexMap::new(),
+            walking_trait_body: false,
         }
     }
 
@@ -583,12 +590,16 @@ impl<'src> Analyzer<'src> {
     ) -> Vec<TypeId> {
         let mut generic_parameter_constraint_ids = Vec::new();
         if let Some(generic_parameters) = generic_parameters {
-            for (name, type_) in &generic_parameters.0 {
-                let constraint_type_id = type_
-                    .as_ref()
-                    .map(|x| self.walk_type_node(x, scope_id))
+            for parameter in &generic_parameters.0 {
+                // A parameter may carry several bounds (`T: A + B`); the first
+                // is used as its constraint for now. Defaults (`B = Self`) are
+                // accepted by the grammar but not yet applied.
+                let constraint_type_id = parameter
+                    .bounds
+                    .first()
+                    .map(|bound| self.walk_type_node(bound, scope_id))
                     .unwrap_or_else(|| Type::Any.get_type_id(self));
-                self.register_generic_parameter(name, constraint_type_id, scope_id);
+                self.register_generic_parameter(parameter.name, constraint_type_id, scope_id);
                 generic_parameter_constraint_ids.push(constraint_type_id);
             }
         }
@@ -760,6 +771,59 @@ impl<'src> Analyzer<'src> {
                 let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
                 Some(Expr::For(condition_id, (ids, expr_id)))
             }
+            // NOTE: `for x in iterable` parses and walks (binding `x`, walking
+            // the iterable and body), but full `Iterable`-driven typing and
+            // lowering is not implemented yet — it currently lowers like an
+            // unconditioned loop. Not reached by the current reachable set.
+            Node::ForIn(variable, iterable, body) => {
+                let _iterable_id = self.walk_expr_node(iterable, scope_id);
+                let body_scope_id = self.create_owned_scope(Some(scope_id)).id;
+                if *variable != "_" {
+                    let variable_id = self.new_entity_id();
+                    let unknown_type_id = Type::Unknown.get_type_id(self);
+                    self.variables.insert(
+                        variable_id,
+                        Variable {
+                            id: variable_id,
+                            name: variable,
+                            initial: None,
+                            type_id: unknown_type_id,
+                            mutable: false,
+                        },
+                    );
+                    self.expr_id_to_expr_map
+                        .insert(variable_id, Expr::Variable(variable_id));
+                    self.expr_id_to_scope_id_map
+                        .insert(variable_id, body_scope_id);
+                    self.span_map.insert(variable_id, &node.1);
+                    self.reference_count.entry(variable_id).or_insert(0);
+                    self.mut_scope_for_scope_id(body_scope_id)
+                        .name_to_id_map
+                        .insert(variable, variable_id);
+                }
+                let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
+                let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
+                Some(Expr::For(None, (ids, expr_id)))
+            }
+            // NOTE: `subject is pattern` parses and walks (registering captures
+            // into the current scope); a proper boolean-test lowering that
+            // threads captures is deferred. Typed `bool`. Not reached yet.
+            Node::Is(subject, pattern) => {
+                let _subject_id = self.walk_expr_node(subject, scope_id);
+                let _ = self.walk_pattern(pattern, scope_id);
+                Some(Expr::Bool(true))
+            }
+            // Re-export visibility is not tracked yet; walking the inner
+            // statement is enough to bind it into the current scope.
+            Node::Export(inner) => {
+                self.walk_expr_node(inner, scope_id);
+                None
+            }
+            // Only `!` exists today and yields `bool`; full lowering deferred.
+            Node::Unary(_operator, operand) => {
+                let _operand_id = self.walk_expr_node(operand, scope_id);
+                Some(Expr::Bool(true))
+            }
             Node::Jump(target) => Some(Expr::Jump(target)),
             Node::If(if_) => {
                 fn walk_branch<'src>(
@@ -842,35 +906,75 @@ impl<'src> Analyzer<'src> {
                     .return_type
                     .as_ref()
                     .map(|return_type| self.walk_type_node(return_type, body_scope_id));
-                let (ids, expr_id) = match &function.body {
-                    Some(body) => {
-                        let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
-                        let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
-                        (ids, expr_id)
+                if function.external {
+                    // An `external` function is an intrinsic: no Vilan body, a
+                    // declared (or void) return type, registered as an external
+                    // function with a callable type so calls infer their return.
+                    if function.body.is_some() {
+                        self.diagnostics.push(Error {
+                            span: function.name.1,
+                            msg: "an `external` function cannot have a body".to_string(),
+                        });
                     }
-                    None => {
-                        // A signature without a body (e.g. a required trait
-                        // method). Model it as an empty body yielding void.
-                        let void_id = self.new_entity_id();
-                        self.expr_id_to_expr_map.insert(void_id, Expr::Void);
-                        self.expr_id_to_scope_id_map.insert(void_id, body_scope_id);
-                        self.span_map.insert(void_id, &EMPTY_SPAN);
-                        (Vec::new(), void_id)
-                    }
-                };
-                self.functions.insert(
-                    id,
-                    Function {
+                    let return_type_id =
+                        return_type_id.unwrap_or_else(|| Type::Void.get_type_id(self));
+                    self.external_functions.insert(
                         id,
-                        name,
-                        generic_parameter_constraint_ids,
-                        parameters,
-                        return_type_id,
-                        body: (ids, expr_id, body_scope_id),
-                        call_count: 0,
-                    },
-                );
-                Some(Expr::Function(id))
+                        ExternalFunction {
+                            id,
+                            name,
+                            generic_parameter_constraint_ids,
+                            parameters,
+                            return_type_id,
+                            call_count: 0,
+                        },
+                    );
+                    let function_type_id = self.new_type_id();
+                    self.type_id_to_type_map
+                        .insert(function_type_id, Type::Function(id));
+                    self.expr_id_to_type_id_map.insert(id, function_type_id);
+                    Some(Expr::ExternalFunction(id))
+                } else {
+                    let (ids, expr_id) = match &function.body {
+                        Some(body) => {
+                            let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
+                            let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
+                            (ids, expr_id)
+                        }
+                        None => {
+                            // A signature without a body is only legitimate as a
+                            // trait method requirement; anywhere else it must be
+                            // declared `external`.
+                            if !self.walking_trait_body {
+                                self.diagnostics.push(Error {
+                                    span: function.name.1,
+                                    msg: format!(
+                                        "function '{}' must have a body or be declared `external`",
+                                        name
+                                    ),
+                                });
+                            }
+                            let void_id = self.new_entity_id();
+                            self.expr_id_to_expr_map.insert(void_id, Expr::Void);
+                            self.expr_id_to_scope_id_map.insert(void_id, body_scope_id);
+                            self.span_map.insert(void_id, &EMPTY_SPAN);
+                            (Vec::new(), void_id)
+                        }
+                    };
+                    self.functions.insert(
+                        id,
+                        Function {
+                            id,
+                            name,
+                            generic_parameter_constraint_ids,
+                            parameters,
+                            return_type_id,
+                            body: (ids, expr_id, body_scope_id),
+                            call_count: 0,
+                        },
+                    );
+                    Some(Expr::Function(id))
+                }
             }
             Node::Call(subject, generic_arguments, arguments) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
@@ -968,7 +1072,7 @@ impl<'src> Analyzer<'src> {
                 self.prepped_assignments.push((target_id, stored_value_id));
                 Some(Expr::Assignment(target_id, stored_value_id))
             }
-            Node::Struct(name, generic_parameters, body) => {
+            Node::Struct(name, generic_parameters, external, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -976,8 +1080,20 @@ impl<'src> Analyzer<'src> {
                 let body_scope_id = self.push_scope(body_scope);
                 let generic_parameter_constraint_ids =
                     self.register_generic_parameters(generic_parameters, body_scope_id);
+                // A bodyless `struct Name;` is only valid when `external`; an
+                // ordinary struct must list its fields in `{ .. }` (possibly
+                // empty).
+                if !external && body.is_none() {
+                    self.diagnostics.push(Error {
+                        span: node.1,
+                        msg: format!(
+                            "struct '{}' must declare a body or be declared `external`",
+                            name
+                        ),
+                    });
+                }
                 let mut fields = Vec::new();
-                for child in &body.0 {
+                for child in body.iter().flat_map(|body| &body.0) {
                     let name = child.0.0;
                     let type_id = child
                         .0
@@ -1109,22 +1225,22 @@ impl<'src> Analyzer<'src> {
                     ));
                 None
             }
-            Node::Impl(subject, generic_parameters, trait_, body) => {
+            Node::Impl(subject, generic_parameters, traits, body) => {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
                 // The impl's generic parameters are declared by the `<...>` on
-                // the subject (`impl List<T: str>`), each optionally bounded by
-                // a constraint. The trait clause (`with Iterator<T>`) only uses
-                // these parameters, so it does not declare any.
+                // the subject (`impl List<type T: str>`), each optionally
+                // bounded by a constraint. The trait clause (`with Iterator<T>`)
+                // only uses these parameters, so it does not declare any.
                 self.register_generic_parameters(generic_parameters, body_scope_id);
                 let subject = self.walk_type_node(subject, body_scope_id);
                 // Within an `impl`, `Self` refers to the subject type.
                 self.register_self_type(body_scope_id, subject);
                 self.walk_expr_nodes(&body.0, body_scope_id);
                 let declarations = self.collect_declarations(body_scope_id);
-                // `impl Subject with Trait` must satisfy the trait; record a
-                // conformance check to run once all declarations are known.
-                if let Some(trait_) = trait_ {
+                // `impl Subject with A + B` must satisfy each trait; record a
+                // conformance check per trait to run once declarations are known.
+                for trait_ in traits {
                     let trait_name = match &trait_.0 {
                         Node::Accessor(name) | Node::AccessorWithGenerics(name, _) => Some(*name),
                         _ => None,
@@ -1146,7 +1262,7 @@ impl<'src> Analyzer<'src> {
 
                 Some(Expr::Impl(id))
             }
-            Node::Trait(name, generic_parameters, body) => {
+            Node::Trait(name, generic_parameters, _supertraits, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -1156,7 +1272,11 @@ impl<'src> Analyzer<'src> {
                 // Inside a trait, `Self` is the (abstract) implementing type.
                 let any_type_id = Type::Any.get_type_id(self);
                 self.register_self_type(body_scope_id, any_type_id);
+                // Bodyless methods are legitimate requirements inside a trait.
+                let was_walking_trait_body = self.walking_trait_body;
+                self.walking_trait_body = true;
                 self.walk_expr_nodes(&body.0, body_scope_id);
+                self.walking_trait_body = was_walking_trait_body;
                 let declarations = self.collect_declarations(body_scope_id);
                 self.traits.insert(
                     id,
@@ -1285,6 +1405,13 @@ impl<'src> Analyzer<'src> {
                         .collect()
                 }),
             ),
+            Pattern::Tuple(patterns) => WalkPattern::Tuple(
+                pattern.1,
+                patterns
+                    .iter()
+                    .map(|sub_pattern| self.walk_pattern(sub_pattern, scope_id))
+                    .collect(),
+            ),
         }
     }
 
@@ -1373,6 +1500,27 @@ impl<'src> Analyzer<'src> {
                     )?);
                 }
                 Some(ExprPattern::Variant(variant_index, resolved_payload))
+            }
+            WalkPattern::Tuple(span, patterns) => {
+                // Element types come from the matched tuple type when known;
+                // otherwise each element resolves against `Unknown`.
+                let element_type_ids = match expected_type_id.get_type(self) {
+                    Type::Tuple(ids) if ids.len() == patterns.len() => ids,
+                    _ => {
+                        let unknown = Type::Unknown.get_type_id(self);
+                        vec![unknown; patterns.len()]
+                    }
+                };
+                let _ = span;
+                let mut resolved = Vec::new();
+                for (sub_pattern, element_type_id) in patterns.iter().zip(element_type_ids) {
+                    resolved.push(self.resolve_pattern(
+                        sub_pattern,
+                        element_type_id,
+                        lookup_scope_id,
+                    )?);
+                }
+                Some(ExprPattern::Tuple(resolved))
             }
         }
     }
@@ -2656,25 +2804,30 @@ impl<'src> Analyzer<'src> {
                                 })
                                 .find_map(|x| {
                                     x.declarations.get(member_name).and_then(|member_id| {
-                                        // Only a function whose first parameter
-                                        // is `self` is callable as a method.
-                                        match self.get_entity_by_id(*member_id) {
+                                        // Only a function (or intrinsic) whose
+                                        // first parameter is `self` is callable
+                                        // as a method.
+                                        let first_parameter_id = match self
+                                            .get_entity_by_id(*member_id)
+                                        {
                                             Expr::Function(function_id) => {
-                                                let function =
-                                                    self.functions.get(function_id).unwrap();
-                                                function.parameters.get(0).and_then(
-                                                    |parameter_id| {
-                                                        let parameter = self
-                                                            .parameters
-                                                            .get(parameter_id)
-                                                            .unwrap();
-                                                        (parameter.name == "self")
-                                                            .then_some(*member_id)
-                                                    },
+                                                self.functions.get(function_id).and_then(
+                                                    |function| function.parameters.get(0).copied(),
                                                 )
                                             }
+                                            Expr::ExternalFunction(external_function_id) => self
+                                                .external_functions
+                                                .get(external_function_id)
+                                                .and_then(|external| {
+                                                    external.parameters.get(0).copied()
+                                                }),
                                             _ => None,
-                                        }
+                                        };
+                                        first_parameter_id.and_then(|parameter_id| {
+                                            let parameter =
+                                                self.parameters.get(&parameter_id).unwrap();
+                                            (parameter.name == "self").then_some(*member_id)
+                                        })
                                     })
                                 });
                             match member_id {
@@ -3364,6 +3517,10 @@ pub struct Program<'src> {
     pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
+    // The builtin `List` intrinsics, special-cased in codegen (`new` -> `[]`,
+    // `push` -> `subject.push(..)`).
+    pub list_new_fn_id: Id,
+    pub list_push_fn_id: Id,
     pub module_id_by_name: HashMap<&'src str, Id>,
     pub modules: IndexMap<Id, Module<'src>>,
     pub reference_count: HashMap<Id, u32>,
@@ -3444,6 +3601,97 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .name_to_id_map
             .insert(name, id);
     }
+
+    // `List` is a builtin generic container, reachable as `std::List` and the
+    // bare `List`. Its element type is erased like other generic nominal types;
+    // `new` and `push` are intrinsics special-cased by the transformer
+    // (`List::new()` -> `[]`, `list.push(x)` -> `list.push(x)`).
+    let list_struct_id = analyzer.register_primitive_struct("List");
+    analyzer
+        .mut_scope_for_scope_id(std_module_scope_id)
+        .name_to_id_map
+        .insert("List", list_struct_id);
+    analyzer
+        .mut_scope_for_scope_id(global_scope_id)
+        .name_to_id_map
+        .insert("List", list_struct_id);
+    let list_type_id = Type::Struct(list_struct_id).get_type_id(&mut analyzer);
+    let any_type_id = Type::Any.get_type_id(&mut analyzer);
+    let void_type_id = Type::Void.get_type_id(&mut analyzer);
+
+    // `fun new(): List`
+    let list_new_fn_id = analyzer.new_entity_id();
+    analyzer.external_functions.insert(
+        list_new_fn_id,
+        ExternalFunction {
+            id: list_new_fn_id,
+            name: "new",
+            generic_parameter_constraint_ids: Vec::new(),
+            parameters: Vec::new(),
+            return_type_id: list_type_id,
+            call_count: 0,
+        },
+    );
+    analyzer
+        .expr_id_to_expr_map
+        .insert(list_new_fn_id, Expr::ExternalFunction(list_new_fn_id));
+
+    // `fun push(self, item): void`
+    let list_push_fn_id = analyzer.new_entity_id();
+    let push_self_parameter_id = analyzer.new_entity_id();
+    analyzer.parameters.insert(
+        push_self_parameter_id,
+        Parameter {
+            id: push_self_parameter_id,
+            function_id: list_push_fn_id,
+            name: "self",
+            type_id: list_type_id,
+        },
+    );
+    let push_item_parameter_id = analyzer.new_entity_id();
+    analyzer.parameters.insert(
+        push_item_parameter_id,
+        Parameter {
+            id: push_item_parameter_id,
+            function_id: list_push_fn_id,
+            name: "item",
+            type_id: any_type_id,
+        },
+    );
+    analyzer.external_functions.insert(
+        list_push_fn_id,
+        ExternalFunction {
+            id: list_push_fn_id,
+            name: "push",
+            generic_parameter_constraint_ids: Vec::new(),
+            parameters: vec![push_self_parameter_id, push_item_parameter_id],
+            return_type_id: void_type_id,
+            call_count: 0,
+        },
+    );
+    analyzer
+        .expr_id_to_expr_map
+        .insert(list_push_fn_id, Expr::ExternalFunction(list_push_fn_id));
+
+    // Both intrinsics need a function type so calls infer their return type.
+    for function_id in [list_new_fn_id, list_push_fn_id] {
+        let function_type_id = analyzer.new_type_id();
+        analyzer
+            .type_id_to_type_map
+            .insert(function_type_id, Type::Function(function_id));
+        analyzer
+            .expr_id_to_type_id_map
+            .insert(function_id, function_type_id);
+    }
+
+    let mut list_declarations = IndexMap::new();
+    list_declarations.insert("new", list_new_fn_id);
+    list_declarations.insert("push", list_push_fn_id);
+    analyzer.implementations.push(Implementation {
+        subject: list_type_id,
+        declarations: list_declarations,
+    });
+
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
     Program {
@@ -3456,6 +3704,8 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         generic_static_accessors: analyzer.generic_static_accessors,
         global_scope_id,
         implementations: analyzer.implementations,
+        list_new_fn_id,
+        list_push_fn_id,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,
         reference_count: analyzer.reference_count,

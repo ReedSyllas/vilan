@@ -2,7 +2,13 @@ import pkg::default::Default;
 import pkg::iterator::Iterable;
 import pkg::operators::{ Add, Mul };
 
-struct List<T>;
+external struct List<T>;
+
+impl List<type T> {
+	external fun new(): List<T>;
+
+	external fun push(self, item: T): void;
+}
 
 impl List<type T> with Iterable<T> {
 	fun iter(self): Iterator<T> {

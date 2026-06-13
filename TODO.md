@@ -94,14 +94,17 @@ Implementations
 	[x] Analyze
 	[x] Transform
 
-Context provider / system
+Context provider / system (based on NodeJS `AsyncLocalContext` API)
 
 Memory / object disposal
 
 References
 
 Importing
+	[x] Parse
+	[x] Analyze
+	[x] Transform
 
 Standard library
-	[ ] std::io
+	[-] std::io
 	[ ] std::fs
