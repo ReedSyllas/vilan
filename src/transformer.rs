@@ -32,6 +32,7 @@ struct Transformer<'src> {
     print_fn_id: Id,
     list_new_fn_id: Id,
     list_push_fn_id: Id,
+    panic_fn_id: Option<Id>,
     program: &'src Program<'src>,
     required_functions: IndexMap<Id, js::Node<'src>>,
     // The active generic-parameter substitution while emitting a monomorphized
@@ -86,6 +87,7 @@ impl<'src> Transformer<'src> {
             print_fn_id,
             list_new_fn_id: program.list_new_fn_id,
             list_push_fn_id: program.list_push_fn_id,
+            panic_fn_id: program.panic_fn_id,
             program,
             required_functions: IndexMap::new(),
             current_substitution: HashMap::new(),
@@ -122,21 +124,19 @@ impl<'src> Transformer<'src> {
 
         let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
 
-        if let Some(x) = self.program.entity_map.get(&main_fn.body.1) {
-            match x {
-                Expr::Void => {}
-                _ => {
-                    let t_exit = js::Node::Call(
-                        Box::new(js::Node::Property(
-                            Box::new(js::Node::Local("process".to_string())),
-                            "exit".to_string(),
-                        )),
-                        self.walk_entity(main_fn.body.1, &mut t_main_fn_body)
-                            .map(|x| vec![x])
-                            .unwrap_or_else(|| Vec::new()),
-                    );
-                    t_main_fn_body.push(t_exit)
-                }
+        // Emit main's trailing expression (and any statements it expands to).
+        // Only a non-void result is forwarded to `process.exit`; a tail that
+        // evaluates to void (e.g. a block ending in a loop) exits normally.
+        if let Some(value) = self.walk_entity(main_fn.body.1, &mut t_main_fn_body) {
+            if !matches!(value, js::Node::Void) {
+                let t_exit = js::Node::Call(
+                    Box::new(js::Node::Property(
+                        Box::new(js::Node::Local("process".to_string())),
+                        "exit".to_string(),
+                    )),
+                    vec![value],
+                );
+                t_main_fn_body.push(t_exit);
             }
         }
 
@@ -206,8 +206,15 @@ impl<'src> Transformer<'src> {
             Expr::Void => js::Node::Void,
             Expr::Null => js::Node::Null,
             Expr::Bool(x) => js::Node::Bool(*x),
-            Expr::Number(whole, fraction) => {
-                js::Node::Number(whole.to_string(), fraction.map(|x| x.to_string()))
+            Expr::Number(whole, fraction, suffix) => {
+                // `n`-suffixed literals are JS BigInts (`5n`); other suffixes
+                // only affect typing and are dropped in the output.
+                let whole = if matches!(*suffix, Some("n")) {
+                    format!("{whole}n")
+                } else {
+                    whole.to_string()
+                };
+                js::Node::Number(whole, fraction.map(|x| x.to_string()))
             }
             Expr::String(x) => js::Node::String(Cow::Borrowed(x)),
             Expr::Struct(_) => {
@@ -326,6 +333,19 @@ impl<'src> Transformer<'src> {
                                 arguments.collect(),
                             ));
                         }
+                        // `panic(msg)` lowers to a thrown error. It's wrapped in
+                        // an immediately-invoked arrow so it stays valid in
+                        // expression position (e.g. a match leg).
+                        if Some(target_id) == self.panic_fn_id {
+                            let message = args.into_iter().next().unwrap_or(js::Node::Void);
+                            return Some(js::Node::Call(
+                                Box::new(js::Node::Closure(js::Closure {
+                                    parameters: Vec::new(),
+                                    body: vec![js::Node::Throw(Box::new(message))],
+                                })),
+                                Vec::new(),
+                            ));
+                        }
                         // A call to a generic function is compiled to a
                         // specialized variant chosen by its concrete type
                         // arguments — no runtime dispatch.
@@ -435,7 +455,11 @@ impl<'src> Transformer<'src> {
                         }
                     }
                 }
-                js::Node::While(Box::new(t_condition), t_body)
+                // A loop is a statement with no value: emit it into the block
+                // and yield void, so a loop as a block's tail isn't treated as
+                // the block's result.
+                block.push(js::Node::While(Box::new(t_condition), t_body));
+                js::Node::Void
             }
             Expr::Jump(target) => match *target {
                 "break" => js::Node::Break,
@@ -936,8 +960,17 @@ impl Formatter {
                 js::Node::Void => format!("return{}", terminator),
                 x => format!("return {}{}", self.node(x, "", 0), terminator),
             },
+            js::Node::Throw(value) => {
+                format!("throw {}{}", self.node(value, "", 0), terminator)
+            }
             js::Node::Call(subject, args) => {
                 let s_subject = self.node(subject, "", 0);
+                // A closure called directly must be parenthesised: `(() => …)()`.
+                let s_subject = if matches!(&**subject, js::Node::Closure(_)) {
+                    format!("({s_subject})")
+                } else {
+                    s_subject
+                };
                 let s_args = args
                     .iter()
                     .map(|x| self.node(x, "", 0))
@@ -1128,6 +1161,7 @@ pub mod js {
         PropertyIndex(Box<Self>, Box<Self>),
         Return(Box<Self>),
         String(Cow<'src, str>),
+        Throw(Box<Self>),
         Void,
     }
 

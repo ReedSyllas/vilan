@@ -4,14 +4,14 @@ use chumsky::prelude::*;
 
 pub fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
-    // A parser for numbers. A trailing type suffix (`0u32`, `1f`, `2n`, ...) is
-    // accepted and currently discarded; the literal's type is inferred from
-    // context or the fractional part.
+    // A parser for numbers. A trailing type suffix (`0u32`, `1f`, `2n`, ...)
+    // is captured; otherwise the literal's type is inferred from the fractional
+    // part or the surrounding context.
     let number = text::int(10)
         .to_slice()
         .then(just('.').ignore_then(text::digits(10).to_slice()).or_not())
-        .then_ignore(text::ascii::ident().or_not())
-        .map(|(whole, fraction)| Token::Number(whole, fraction));
+        .then(text::ascii::ident().or_not())
+        .map(|((whole, fraction), suffix)| Token::Number(whole, fraction, suffix));
 
     // A parser for strings
     let string = just('"')

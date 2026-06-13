@@ -45,7 +45,7 @@ where
     let literal = select! {
         Token::Null => Node::Null,
         Token::Bool(x) => Node::Bool(x),
-        Token::Number(whole, fraction) => Node::Number(whole, fraction),
+        Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix),
         Token::String(s) => Node::String(s),
     }
     .labelled("value")
@@ -438,9 +438,10 @@ where
     let discriminant = just(Token::Op("="))
         .ignore_then(just(Token::Op("-")).or_not())
         .ignore_then(
-            select! { Token::Number(whole, fraction) => (whole, fraction) }.map_with(
-                |(whole, fraction), e| Box::new((Node::Number(whole, fraction), e.span())),
-            ),
+            select! { Token::Number(whole, fraction, suffix) => (whole, fraction, suffix) }
+                .map_with(|(whole, fraction, suffix), e| {
+                    Box::new((Node::Number(whole, fraction, suffix), e.span()))
+                }),
         );
 
     let enum_variant = name
@@ -816,12 +817,18 @@ where
         .map_with(|inner, e| (Node::Export(Box::new(inner)), e.span()))
         .labelled("export");
 
+    // A block-like expression (`if`/`for`/`match`/`{ .. }`) may be used as a
+    // statement, but only when it isn't the last thing in its block — i.e. a
+    // non-`}` token follows. When it *is* last, it falls through to the block's
+    // trailing expression and so becomes the block's value (e.g. a function
+    // whose body is a single `match`).
+    let not_block_end = just(Token::Ctrl('}')).not();
     statement.define(choice((
         export_,
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
-        if_,
-        for_,
-        match_,
+        if_.then_ignore(not_block_end.clone()),
+        for_.then_ignore(not_block_end.clone()),
+        match_.then_ignore(not_block_end.clone()),
         function,
         struct_,
         enum_,
@@ -830,7 +837,9 @@ where
         module,
         import.then_ignore(just(Token::Ctrl(';'))),
         use_.then_ignore(just(Token::Ctrl(';'))),
-        block.map(|(x, span)| (Node::Block((x, span)), span)),
+        block
+            .map(|(x, span)| (Node::Block((x, span)), span))
+            .then_ignore(not_block_end),
     )));
 
     let tuple_type = type_

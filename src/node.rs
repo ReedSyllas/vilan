@@ -132,7 +132,8 @@ pub enum Node<'src> {
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
     Module(&'src str, Spanned<NodeList<'src>>),
     Null,
-    Number(&'src str, Option<&'src str>),
+    // The whole part, an optional fractional part, and an optional type suffix.
+    Number(&'src str, Option<&'src str>, Option<&'src str>),
     StaticAccessor(Box<Spanned<Self>>, &'src str),
     String(&'src str),
     // A struct declaration. The `bool` marks an `external` (intrinsic) struct.

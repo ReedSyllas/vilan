@@ -20,7 +20,9 @@ pub enum Token<'src> {
     Mod,
     Mut,
     Null,
-    Number(&'src str, Option<&'src str>),
+    // The whole part, an optional fractional part, and an optional type suffix
+    // (`u32`, `f`, `n`, ...).
+    Number(&'src str, Option<&'src str>, Option<&'src str>),
     Op(&'src str),
     Ret,
     String(&'src str),
@@ -54,13 +56,14 @@ impl std::fmt::Display for Token<'_> {
             Token::Mod => write!(f, "mod"),
             Token::Mut => write!(f, "mut"),
             Token::Null => write!(f, "null"),
-            Token::Number(whole, fraction) => write!(
+            Token::Number(whole, fraction, suffix) => write!(
                 f,
-                "{}{}",
+                "{}{}{}",
                 whole,
                 fraction
                     .map(|x| format!(".{}", x))
-                    .unwrap_or("".to_string())
+                    .unwrap_or("".to_string()),
+                suffix.unwrap_or("")
             ),
             Token::Op(s) => write!(f, "{s}"),
             Token::Ret => write!(f, "ret"),

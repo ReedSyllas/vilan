@@ -43,7 +43,7 @@ pub enum Expr<'src> {
     Match(Id, Vec<ExprMatchLeg>),
     Module(Id),
     Null,
-    Number(&'src str, Option<&'src str>),
+    Number(&'src str, Option<&'src str>, Option<&'src str>),
     Parameter(Id),
     String(&'src str),
     Struct(Id),
@@ -375,6 +375,9 @@ pub struct Analyzer<'src> {
     // True while walking a trait body, where a bodyless method is a legitimate
     // requirement; elsewhere a bodyless function must be declared `external`.
     walking_trait_body: bool,
+    // The `std` `panic` intrinsic, if loaded. A call to it never returns, so it
+    // types as `any` (unifying with any expected type) and lowers to a `throw`.
+    panic_fn_id: Option<Id>,
 }
 
 static EMPTY_SPAN: Span = Span {
@@ -456,6 +459,7 @@ impl<'src> Analyzer<'src> {
             variable_constraints: Vec::new(),
             variables: IndexMap::new(),
             walking_trait_body: false,
+            panic_fn_id: None,
         }
     }
 
@@ -672,7 +676,7 @@ impl<'src> Analyzer<'src> {
             Node::Null => Some(Expr::Null),
             Node::Bool(x) => Some(Expr::Bool(*x)),
             Node::String(x) => Some(Expr::String(x)),
-            Node::Number(whole, fraction) => Some(Expr::Number(whole, *fraction)),
+            Node::Number(whole, fraction, suffix) => Some(Expr::Number(whole, *fraction, *suffix)),
             Node::Accessor(name) => {
                 self.prepped_locals.push((id, name));
                 None
@@ -694,7 +698,7 @@ impl<'src> Analyzer<'src> {
                             },
                         );
                     }
-                    Node::Number(name, _) => {
+                    Node::Number(name, _, _) => {
                         self.prepped_field_accessors.push((id, subject_id, *name));
                     }
                     Node::Call(call_subject, call_generic_arguments, call_arguments) => {
@@ -1534,6 +1538,7 @@ impl<'src> Analyzer<'src> {
                 // Scalar primitives are `std` structs resolved by name (they're
                 // registered in the prelude/global scope), like any other type.
                 "any" => Some(Type::Any),
+                "void" => Some(Type::Void),
                 _ => {
                     self.prepped_type_locals
                         .push((type_id, name, scope_id, node.1));
@@ -1642,13 +1647,36 @@ impl<'src> Analyzer<'src> {
             Expr::Null => self.primitive_struct_type("null"),
             Expr::Bool(_) => self.primitive_struct_type("bool"),
             Expr::String(_) => self.primitive_struct_type("str"),
-            // A numeric literal takes its width from the expected type, like
-            // `f64` for a field of that type, defaulting to `i32`.
-            Expr::Number(_, _) => {
-                let name = match &constraint {
-                    Type::Struct(id) if *id == self.primitive_struct_ids["f64"] => "f64",
-                    Type::Struct(id) if *id == self.primitive_struct_ids["u32"] => "u32",
-                    _ => "i32",
+            // A numeric literal's type comes from its suffix (`5u32`), then a
+            // fractional part (`0.0` is a float), then the expected type
+            // (`0` against an `f64` field), defaulting to `i32`.
+            Expr::Number(_, fraction, suffix) => {
+                let name = match *suffix {
+                    Some("u32") => "u32",
+                    Some("i32") => "i32",
+                    Some("f64") | Some("f") => "f64",
+                    Some("n") => "BigInt",
+                    _ => {
+                        if fraction.is_some() {
+                            "f64"
+                        } else {
+                            match &constraint {
+                                Type::Struct(id) if *id == self.primitive_struct_ids["f64"] => {
+                                    "f64"
+                                }
+                                Type::Struct(id) if *id == self.primitive_struct_ids["u32"] => {
+                                    "u32"
+                                }
+                                Type::Struct(id) if *id == self.primitive_struct_ids["i32"] => {
+                                    "i32"
+                                }
+                                Type::Struct(id) if *id == self.primitive_struct_ids["BigInt"] => {
+                                    "BigInt"
+                                }
+                                _ => "i32",
+                            }
+                        }
+                    }
                 };
                 self.primitive_struct_type(name)
             }
@@ -1730,6 +1758,12 @@ impl<'src> Analyzer<'src> {
                     // its body — with the call's generic arguments substituted
                     // for the function's generic parameters.
                     Type::Function(function_id) => {
+                        // `panic(..)` never returns, so its call types as `any`,
+                        // which unifies with any expected type (e.g. it can be
+                        // the sole body of a function with any return type).
+                        if Some(function_id) == self.panic_fn_id {
+                            return Type::Any;
+                        }
                         let function = self.functions.get(&function_id).map(|f| {
                             (
                                 f.generic_parameter_constraint_ids.clone(),
@@ -2034,11 +2068,24 @@ impl<'src> Analyzer<'src> {
                 }
             };
             let mut target_id = module_id;
-            let module_scope_id = self.modules.get(&module_id).unwrap().body.1;
+            let mut module_scope_id = self.modules.get(&module_id).unwrap().body.1;
             let mut unresolved = false;
             for part in path {
                 match self.try_get_expr_id_by_name(part, module_scope_id) {
-                    Some(id) => target_id = id,
+                    Some(id) => {
+                        target_id = id;
+                        // If this segment is itself a module, descend into it so
+                        // the next segment resolves there (e.g. `pkg::io::print`).
+                        let sub_module_id = match self.expr_id_to_expr_map.get(&id) {
+                            Some(Expr::Module(sub_module_id)) => Some(*sub_module_id),
+                            _ => None,
+                        };
+                        if let Some(sub_module_id) = sub_module_id {
+                            if let Some(module) = self.modules.get(&sub_module_id) {
+                                module_scope_id = module.body.1;
+                            }
+                        }
+                    }
                     None => {
                         self.diagnostics.push(Error {
                             span,
@@ -3521,6 +3568,8 @@ pub struct Program<'src> {
     // `push` -> `subject.push(..)`).
     pub list_new_fn_id: Id,
     pub list_push_fn_id: Id,
+    // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
+    pub panic_fn_id: Option<Id>,
     pub module_id_by_name: HashMap<&'src str, Id>,
     pub modules: IndexMap<Id, Module<'src>>,
     pub reference_count: HashMap<Id, u32>,
@@ -3531,86 +3580,57 @@ pub struct Program<'src> {
     pub variables: IndexMap<Id, Variable<'src>>,
 }
 
+/// Lexes and parses a Vilan source file into an AST, leaking the source and the
+/// resulting tree so they live for the whole compilation. Used to pull the
+/// `std` package's modules in from source. Returns `None` if the file can't be
+/// read or fails to lex/parse.
+fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>> {
+    use chumsky::prelude::*;
+    // The source is leaked so the parsed tree (which borrows it) can live for
+    // the whole compilation. The token vector is transient — the AST holds
+    // `&'static str` slices into the source, not into the tokens.
+    let source: &'static str = Box::leak(std::fs::read_to_string(path).ok()?.into_boxed_str());
+    let tokens = crate::lexer::lexer().parse(source).into_output()?;
+    let end = source.len();
+    let (root, _file_span) = crate::parser::parser()
+        .map_with(|ast, e| (ast, e.span()))
+        .parse(
+            tokens
+                .as_slice()
+                .map((end..end).into(), |(token, span)| (token, span)),
+        )
+        .into_output()?;
+    Some(Box::leak(Box::new(root)))
+}
+
+/// Builds the path to a module file in the hardcoded `std` package.
+fn std_module_path(file: &str) -> String {
+    format!(
+        "{}/src/vilan-source/std/src/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        file
+    )
+}
+
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let mut analyzer = Analyzer::new();
-    let mut std_module_scope = analyzer.create_scope(None);
-    let print_fn_id = analyzer.new_entity_id();
-    let print_fn_message_parameter_id = {
-        let parameter_id = analyzer.new_entity_id();
-        let parameter = Parameter {
-            id: parameter_id,
-            function_id: print_fn_id,
-            name: "message",
-            type_id: Type::Any.get_type_id(&mut analyzer),
-        };
-        analyzer.parameters.insert(parameter_id, parameter);
-        parameter_id
-    };
-    let print_fn_name = "print";
-    let print_fn = ExternalFunction {
-        id: print_fn_id,
-        name: print_fn_name,
-        generic_parameter_constraint_ids: Vec::new(),
-        parameters: vec![print_fn_message_parameter_id],
-        return_type_id: Type::Void.get_type_id(&mut analyzer),
-        call_count: 0,
-    };
-    analyzer.external_functions.insert(print_fn_id, print_fn);
-    analyzer
-        .expr_id_to_expr_map
-        .insert(print_fn_id, Expr::ExternalFunction(print_fn_id));
-    std_module_scope
-        .name_to_id_map
-        .insert(print_fn_name, print_fn_id);
-    {
-        let print_fn_type_id = analyzer.new_type_id();
-        analyzer
-            .type_id_to_type_map
-            .insert(print_fn_type_id, Type::Function(print_fn_id));
-        analyzer
-            .expr_id_to_type_id_map
-            .insert(print_fn_id, print_fn_type_id);
-    }
-    let std_module_scope_id = analyzer.push_scope(std_module_scope);
-    let std_module_id = analyzer.new_entity_id();
-    let std_module = Module {
-        id: std_module_id,
-        name: "std",
-        body: (Vec::new(), std_module_scope_id),
-    };
-    analyzer
-        .module_id_by_name
-        .insert(std_module.name, std_module_id);
-    analyzer.modules.insert(std_module_id, std_module);
-    analyzer
-        .expr_id_to_expr_map
-        .insert(std_module_id, Expr::Module(std_module_id));
     let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
-    // Scalar primitives are built-in `std` structs. They are reachable both as
-    // `std::i32` (via the module) and as the bare `i32` (the prelude, here the
-    // global scope), so existing unqualified annotations keep working.
-    for name in ["i32", "u32", "f64", "str", "bool", "null"] {
+    // Scalar primitives are built-in structs, reachable as the bare `i32` (the
+    // prelude, here the global scope) and — since the module scopes below are
+    // children of the global scope — as `std::i32`.
+    for name in ["i32", "u32", "f64", "str", "bool", "null", "BigInt"] {
         let id = analyzer.register_primitive_struct(name);
-        analyzer
-            .mut_scope_for_scope_id(std_module_scope_id)
-            .name_to_id_map
-            .insert(name, id);
         analyzer
             .mut_scope_for_scope_id(global_scope_id)
             .name_to_id_map
             .insert(name, id);
     }
 
-    // `List` is a builtin generic container, reachable as `std::List` and the
-    // bare `List`. Its element type is erased like other generic nominal types;
-    // `new` and `push` are intrinsics special-cased by the transformer
-    // (`List::new()` -> `[]`, `list.push(x)` -> `list.push(x)`).
+    // `List` is a builtin generic container. Its element type is erased like
+    // other generic nominal types; `new` and `push` are intrinsics special-cased
+    // by the transformer (`List::new()` -> `[]`, `list.push(x)` -> `list.push(x)`).
     let list_struct_id = analyzer.register_primitive_struct("List");
-    analyzer
-        .mut_scope_for_scope_id(std_module_scope_id)
-        .name_to_id_map
-        .insert("List", list_struct_id);
     analyzer
         .mut_scope_for_scope_id(global_scope_id)
         .name_to_id_map
@@ -3692,6 +3712,74 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         declarations: list_declarations,
     });
 
+    // --- Load the `std` package from source ---
+    // `io` module: walked into a scope childed to the global scope so its
+    // `panic(message: str)` can see the builtin `str`.
+    let io_scope = analyzer.create_scope(Some(global_scope_id));
+    let io_scope_id = analyzer.push_scope(io_scope);
+    let io_module_id = analyzer.new_entity_id();
+    analyzer.modules.insert(
+        io_module_id,
+        Module {
+            id: io_module_id,
+            name: "io",
+            body: (Vec::new(), io_scope_id),
+        },
+    );
+    analyzer
+        .expr_id_to_expr_map
+        .insert(io_module_id, Expr::Module(io_module_id));
+    analyzer.module_id_by_name.insert("io", io_module_id);
+    if let Some(io_ast) = load_package_module(&std_module_path("io.vl")) {
+        analyzer.walk_expr_nodes(&io_ast.0, io_scope_id);
+    }
+    // Remember `panic` so its calls can be typed as never and lowered to a throw.
+    analyzer.panic_fn_id = analyzer
+        .scopes
+        .get(&io_scope_id)
+        .and_then(|scope| scope.name_to_id_map.get("panic").copied());
+
+    // `pkg` aliases the current package's modules so `pkg::io::print` (used by
+    // `lib.vl`) resolves to the `io` module.
+    let mut pkg_scope = analyzer.create_scope(None);
+    pkg_scope.name_to_id_map.insert("io", io_module_id);
+    let pkg_scope_id = analyzer.push_scope(pkg_scope);
+    let pkg_module_id = analyzer.new_entity_id();
+    analyzer.modules.insert(
+        pkg_module_id,
+        Module {
+            id: pkg_module_id,
+            name: "pkg",
+            body: (Vec::new(), pkg_scope_id),
+        },
+    );
+    analyzer
+        .expr_id_to_expr_map
+        .insert(pkg_module_id, Expr::Module(pkg_module_id));
+    analyzer.module_id_by_name.insert("pkg", pkg_module_id);
+
+    // `std` module: the package root, integrated from `lib.vl`. Its
+    // `export import pkg::io::print` re-exports bind into this scope; childing it
+    // to the global scope lets `std::i32`, `std::List`, ... reach the builtins.
+    let std_scope = analyzer.create_scope(Some(global_scope_id));
+    let std_scope_id = analyzer.push_scope(std_scope);
+    let std_module_id = analyzer.new_entity_id();
+    analyzer.modules.insert(
+        std_module_id,
+        Module {
+            id: std_module_id,
+            name: "std",
+            body: (Vec::new(), std_scope_id),
+        },
+    );
+    analyzer
+        .expr_id_to_expr_map
+        .insert(std_module_id, Expr::Module(std_module_id));
+    analyzer.module_id_by_name.insert("std", std_module_id);
+    if let Some(lib_ast) = load_package_module(&std_module_path("lib.vl")) {
+        analyzer.walk_expr_nodes(&lib_ast.0, std_scope_id);
+    }
+
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
     Program {
@@ -3706,6 +3794,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         implementations: analyzer.implementations,
         list_new_fn_id,
         list_push_fn_id,
+        panic_fn_id: analyzer.panic_fn_id,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,
         reference_count: analyzer.reference_count,
