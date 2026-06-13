@@ -1,0 +1,35 @@
+import pkg::default::Default;
+import pkg::iterator::Iterable;
+import pkg::operators::{ Add, Mul };
+
+struct List<T>;
+
+impl List<type T> with Iterable<T> {
+	fun iter(self): Iterator<T> {
+		panic("not implemented yet");
+	}
+}
+
+impl List<type T: Add + Default> {
+	fun sum(self): T {
+		mut iter = self.iter();
+		if iter.next() is Some(mut sum) {
+			for item in iter { sum += item; }
+			sum
+		} else {
+			T::default()
+		}
+	}
+}
+
+impl List<type T: Mul + Default> {
+	fun product(self): T {
+		mut iter = self.iter();
+		if iter.next() is Some(mut product) {
+			for item in iter { product *= item; }
+			product
+		} else {
+			T::default()
+		}
+	}
+}

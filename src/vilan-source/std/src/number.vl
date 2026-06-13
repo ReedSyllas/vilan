@@ -1,0 +1,33 @@
+import pkg::default::Default;
+
+struct u32;
+
+impl u32 with Default {
+	fun default(): u32 {
+		0u32
+	}
+}
+
+struct i32;
+
+impl i32 with Default {
+	fun default(): i32 {
+		0i32
+	}
+}
+
+struct f64;
+
+impl f64 with Default {
+	fun default(): f64 {
+		0f
+	}
+}
+
+struct BigInt;
+
+impl BigInt with Default {
+	fun default(): BigInt {
+		0n
+	}
+}

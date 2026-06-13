@@ -1,0 +1,30 @@
+
+trait Iterator<T> {
+	fun next(self): Option<T>;
+}
+
+struct IteratorFromFn<T> {
+	fn: || Option<T>,
+}
+
+impl IteratorFromFn<type T> with Iterator<T> {
+	fun next(self) {
+		(self.fn)()
+	}
+}
+
+impl Iterator<type T> {
+	fun from_fn(fn: || Option<T>): IteratorFromFn<T> {
+		IteratorFromFn { fn }
+	}
+}
+
+trait Iterable<T> {
+	fun iter(self): Iterator<T>;
+}
+
+impl Iterator<type T> with Iterable<T> {
+	fun iter(self): Iterator<T> {
+		self
+	}
+}

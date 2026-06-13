@@ -1,0 +1,10 @@
+
+trait Into<T> {
+	fun into(self): T;
+}
+
+impl type T with Into<T> {
+	fun into(self): T {
+		self
+	}
+}

@@ -1,0 +1,17 @@
+import pkg::option::Option::{ self, Some, None };
+
+enum bool {
+	false,
+	true,
+}
+
+use bool::{ false, true };
+
+impl bool {
+	fun then_some<T>(self, value: T): Option<T> {
+		match self {
+			true => Some(value),
+			false => None,
+		}
+	}
+}

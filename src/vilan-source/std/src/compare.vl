@@ -1,0 +1,77 @@
+import pkg::boolean::bool;
+
+trait PartialEq<B = Self> {
+	fun eq(self, b: B): bool;
+	
+	fun ne(self, b: B): bool {
+		!self.eq(b)
+	}
+}
+
+trait Eq with PartialEq {}
+
+enum Ordering {
+	Less = -1,
+	Equal = 0,
+	Greater = 1,
+}
+
+trait PartialOrd<B = Self> with PartialEq<B> {
+	fun partial_compare(self, b: B): Option<Ordering>;
+	
+	fun lt(self, b: B): bool {
+		self.partial_compare(b) is Some(x) && x < Ordering::Equal
+	}
+	
+	fun le(self, b: B): bool {
+		self.partial_compare(b) is Some(x) && x <= Ordering::Equal
+	}
+	
+	fun gt(self, b: B): bool {
+		self.partial_compare(b) is Some(x) && x > Ordering::Equal
+	}
+	
+	fun ge(self, b: B): bool {
+		self.partial_compare(b) is Some(x) && x >= Ordering::Equal
+	}
+}
+
+trait Ord with Eq + PartialOrd {
+	fun compare(self, b: Self): Ordering;
+	
+	fun min(self, b: Self): Self {
+		if self.compare(b) <= Ordering::Equal {
+			self
+		} else {
+			b
+		}
+	}
+	
+	fun max(self, b: Self): Self {
+		if self.compare(b) >= Ordering::Equal {
+			self
+		} else {
+			b
+		}
+	}
+	
+	fun clamp(self, min: Self, max: Self): Self {
+		self.min(max).max(min)
+	}
+}
+
+fun min<T: Ord>(a: T, b: T): T {
+	a.min(b)
+}
+
+fun max<T: Ord>(a: T, b: T): T {
+	a.max(b)
+}
+
+fun minmax<T: Ord>(a: T, b: T): (T, T) {
+	if a <= b {
+		(a, b)
+	} else {
+		(b, a)
+	}
+}

@@ -1,0 +1,204 @@
+import pkg::default::Default;
+import pkg::io::panic;
+
+enum Option<T> {
+	Some(T),
+	None,
+}
+
+use Option::{ Some, None };
+
+impl Option<type T> {
+	fun is_some(self): bool {
+		self is Some(_)
+	}
+	
+	fun is_some_and(self, fn: |T| bool): bool {
+		match self {
+			Some(x) => fn(x),
+			_ => false,
+		}
+	}
+	
+	fun is_none(self): bool {
+		self is None
+	}
+	
+	fun is_none_or(self, fn: |T| bool): bool {
+		match self {
+			Some(x) => fn(x),
+			_ => true,
+		}
+	}
+	
+	fun unwrap(self): T {
+		match self {
+			Some(x) => x,
+			_ => panic("expected Some but got None"),
+		}
+	}
+	
+	fun unwrap_or(self, fallback: T): T {
+		match self {
+			Some(x) => x,
+			_ => fallback,
+		}
+	}
+	
+	fun unwrap_or_else(self, fn: || T): T {
+		match self {
+			Some(x) => x,
+			_ => fn(),
+		}
+	}
+	
+	fun map<U>(self, fn: |T| U): Option<U> {
+		match self {
+			Some(let x) => Some(fn(x)),
+			let x => x,
+		}
+	}
+	
+	fun map_or<U>(self, fn: |T| U, fallback: U): U {
+		match self {
+			Some(x) => fn(x),
+			_ => fallback,
+		}
+	}
+	
+	fun map_or_else<U>(self, fn: |T| U, fallback: || U): U {
+		match self {
+			Some(x) => fn(x),
+			_ => fallback(),
+		}
+	}
+	
+	fun map_or_default<U: Default>(self, fn: |T| U): U {
+		match self {
+			Some(x) => fn(x),
+			_ => U::default(),
+		}
+	}
+	
+	fun inspect(self, fn: |T| void): Self {
+		match self {
+			Some(x) => fn(x),
+			_ => {}
+		}
+		self
+	}
+	
+	fun ok_or<E>(self, err: E): Result<T, E> {
+		match self {
+			Some(x) => Ok(x),
+			_ => Err(err),
+		}
+	}
+	
+	fun ok_or_else<E>(self, err: || E): Result<T, E> {
+		match self {
+			Some(x) => Ok(x),
+			_ => Err(err()),
+		}
+	}
+	
+	fun and<U>(self, b: Option<U>): Option<U> {
+		match self {
+			Some(_) => b,
+			_ => None,
+		}
+	}
+	
+	fun and_then<U>(self, fn: |T| Option<U>): Option<U> {
+		match self {
+			Some(x) => fn(x),
+			_ => None,
+		}
+	}
+	
+	fun filter(self, predicate: |T| bool): Option<T> {
+		self.and_then(|x| predicate(x).then_some(x))
+	}
+	
+	fun or(self, b: Option<T>): Option<T> {
+		match self {
+			Some(_) => self,
+			_ => b,
+		}
+	}
+	
+	fun or_else(self, fn: || Option<T>): Option<T> {
+		match self {
+			Some(_) => self,
+			_ => fn(),
+		}
+	}
+	
+	fun xor(self, b: Option<T>): Option<T> {
+		match (self, b) {
+			(Some(_), None) => self,
+			(None, Some(_)) => b,
+			_ => None,
+		}
+	}
+	
+	fun zip<U>(self, peer: Option<U>): Option<(T, U)> {
+		match (self, peer) {
+			(Some(x), Some(y)) => Some((x, y)),
+			_ => None,
+		}
+	}
+}
+
+impl Option<type T: Default> {
+	fun unwrap_or_default(self): T {
+		match self {
+			Some(x) => x,
+			_ => T::default(),
+		}
+	}
+}
+
+impl Option<(type T, type U)> {
+	fun unzip(self): (Option<T>, Option<U>) {
+		match self {
+			Some((x, y)) => (Some(x), Some(y)),
+			_ => (None, None),
+		}
+	}
+}
+
+impl Option<Result<type T, type E>> {
+	fun transpose(self): Result<Option<T>, E> {
+		match self {
+			Some(Ok(x)) => Ok(Some(x)),
+			Some(Err(x)) => Err(x),
+			_ => Ok(None),
+		}
+	}
+}
+
+impl Option<Option<type T>> {
+	fun flatten(self): Option<T> {
+		match self {
+			Some(x) => x,
+			_ => None,
+		}
+	}
+}
+
+impl Option<type T> with Default {
+	fun default(): Option<T> {
+		None
+	}
+}
+
+impl Option<type T: PartialEq> with PartialEq {
+	fun eq(self, b: Option<T>): bool {
+		match (self, b) {
+			(Some(x), Some(y)) => x == y,
+			(None, None) => true,
+			_ => false,
+		}
+	}
+}

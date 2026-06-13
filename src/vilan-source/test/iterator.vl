@@ -8,13 +8,13 @@ struct FromFn<T> {
 	fn: || T,
 }
 
-impl FromFn<T> with Iterator<T> {
+impl FromFn<type T> with Iterator<T> {
 	fun next(self) {
 		(self.fn)()
 	}
 }
 
-impl Iterator<T> {
+impl Iterator<type T> {
 	fun from_fn(fn: || T): FromFn<T> {
 		FromFn { fn }
 	}

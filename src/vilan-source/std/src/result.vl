@@ -1,0 +1,17 @@
+
+enum Result<T, E> {
+	Ok(T),
+	Err(E),
+}
+
+impl Result<type T, type E> {
+	fun is_ok(self): bool {
+		self is Ok(_)
+	}
+	
+	fun is_err(self): bool {
+		self is Err(_)
+	}
+}
+
+use Result::{ Ok, Err };
