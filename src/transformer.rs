@@ -42,6 +42,9 @@ struct Transformer<'src> {
     // type arguments) so each distinct instantiation is emitted exactly once.
     instances: HashMap<(Id, Vec<String>), String>,
     monomorphized: Vec<js::Node<'src>>,
+    // Captures introduced by an `is` test, aliased to the subject's payload
+    // slots (e.g. `t[1]`) since they can't be JS bindings in expression position.
+    is_bindings: HashMap<Id, js::Node<'src>>,
 }
 
 impl<'src> Transformer<'src> {
@@ -93,6 +96,7 @@ impl<'src> Transformer<'src> {
             current_substitution: HashMap::new(),
             instances: HashMap::new(),
             monomorphized: Vec::new(),
+            is_bindings: HashMap::new(),
         }
     }
 
@@ -245,6 +249,10 @@ impl<'src> Transformer<'src> {
                 js::Node::Array(vec![js::Node::Number(variant_index.to_string(), None)])
             }
             Expr::Local(id) => {
+                // A capture from an `is` test aliases the subject's payload slot.
+                if let Some(accessor) = self.is_bindings.get(id) {
+                    return Some(accessor.clone());
+                }
                 // A reference to a data-less variant (e.g. `None`) is the
                 // variant value itself, not a named binding.
                 if let Some(Expr::EnumVariant(_, variant_index)) = self.program.entity_map.get(id) {
@@ -536,6 +544,25 @@ impl<'src> Transformer<'src> {
                     None => js::Node::If(branch),
                 }
             }
+            Expr::Is(subject_id, pattern) => {
+                // Evaluate the subject once into a temp; the test reads from it,
+                // and any captures alias its payload slots.
+                let t_subject = self
+                    .walk_entity(*subject_id, block)
+                    .unwrap_or(js::Node::Void);
+                let subject_name = self.ng.next_name();
+                block.push(js::Node::ConstVariable(js::Variable {
+                    name: subject_name.clone(),
+                    value: Box::new(t_subject),
+                }));
+                let mut conditions = Vec::new();
+                self.compile_is_pattern(pattern, js::Node::Local(subject_name), &mut conditions);
+                // An irrefutable pattern (binding/wildcard/tuple) is always true.
+                conditions
+                    .into_iter()
+                    .reduce(|a, b| js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)))
+                    .unwrap_or(js::Node::Bool(true))
+            }
             Expr::Match(subject_id, legs) => {
                 let t_subject = self
                     .walk_entity(*subject_id, block)
@@ -643,6 +670,49 @@ impl<'src> Transformer<'src> {
     // Compiles a match pattern against the JS expression holding the value it
     // matches: variant tests are appended to `conditions` and capture
     // declarations to `bindings`.
+    /// Compiles a pattern for an `is` test: collects the boolean test conditions
+    /// and records each capture as an alias to the subject's payload slot (so
+    /// references compile to `t[i]` rather than a binding statement).
+    fn compile_is_pattern(
+        &mut self,
+        pattern: &ExprPattern,
+        subject: js::Node<'src>,
+        conditions: &mut Vec<js::Node<'src>>,
+    ) {
+        match pattern {
+            ExprPattern::Wildcard => {}
+            ExprPattern::Binding(capture_id) => {
+                self.is_bindings.insert(*capture_id, subject);
+            }
+            ExprPattern::Variant(variant_index, payload) => {
+                conditions.push(js::Node::Binary(
+                    BinaryOp::Eq,
+                    Box::new(js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number("0".to_string(), None)),
+                    )),
+                    Box::new(js::Node::Number(variant_index.to_string(), None)),
+                ));
+                for (data_index, sub_pattern) in payload.iter().enumerate() {
+                    let element = js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number((data_index + 1).to_string(), None)),
+                    );
+                    self.compile_is_pattern(sub_pattern, element, conditions);
+                }
+            }
+            ExprPattern::Tuple(elements) => {
+                for (index, sub_pattern) in elements.iter().enumerate() {
+                    let element = js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number(index.to_string(), None)),
+                    );
+                    self.compile_is_pattern(sub_pattern, element, conditions);
+                }
+            }
+        }
+    }
+
     fn compile_pattern(
         &mut self,
         pattern: &ExprPattern,

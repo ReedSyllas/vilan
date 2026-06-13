@@ -3,3 +3,6 @@
 // More items are added here as their modules become loadable from source.
 export import pkg::io::print;
 export import pkg::io::panic;
+export import pkg::string::str;
+export import pkg::number::{ u32, i32, f64, BigInt };
+export import pkg::default::Default;

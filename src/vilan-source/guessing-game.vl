@@ -10,10 +10,10 @@ fun main() {
 	print("Type `quit` at any time to quit.");
 	print("Are you ready to play? Y/n");
 	for {
-		match scan().trim() {
+		match scan().trim().to_lowercase_ascii() {
 			"quit" => {},
 			"",
-			"Y" => {
+			"y" => {
 				match play() {
 					Signal::Quit => {},
 					Signal::Normal => {
@@ -36,7 +36,7 @@ fun play(): Signal {
 	print("I have chosen a secret number from {range.start()} to {range.end()}.");
 	print("Take a guess!");
 	for {
-		match scan().trim() {
+		match scan().trim().to_lowercase_ascii() {
 			"quit" => {
 				ret Signal::Quit;
 			},

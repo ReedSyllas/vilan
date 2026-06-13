@@ -37,6 +37,9 @@ pub enum Expr<'src> {
     Impl(Id),
     // A `jump break` / `jump continue` — the target keyword.
     Jump(&'src str),
+    // `subject is pattern` — a boolean pattern test. Captures bind into the
+    // surrounding scope.
+    Is(Id, ExprPattern),
     List(Vec<Id>),
     Local(Id),
     // A match expression: the subject and the resolved legs.
@@ -176,6 +179,16 @@ struct PreppedMatch<'src> {
     scope_id: Id,
     legs: Vec<(WalkPattern<'src>, Id)>,
     span: Span,
+}
+
+// An `is` pattern test awaiting subject and pattern resolution. Its captures are
+// already walked into `scope_id`.
+#[derive(Debug)]
+struct PreppedIs<'src> {
+    id: Id,
+    subject_id: Id,
+    scope_id: Id,
+    pattern: WalkPattern<'src>,
 }
 
 #[derive(Debug)]
@@ -350,6 +363,7 @@ pub struct Analyzer<'src> {
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
     prepped_locals: Vec<(Id, &'src str)>,
+    prepped_is: Vec<PreppedIs<'src>>,
     prepped_matches: Vec<PreppedMatch<'src>>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
@@ -437,6 +451,7 @@ impl<'src> Analyzer<'src> {
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
+            prepped_is: Vec::new(),
             prepped_matches: Vec::new(),
             prepped_method_calls: Vec::new(),
             prepped_static_accessors: Vec::new(),
@@ -809,13 +824,20 @@ impl<'src> Analyzer<'src> {
                 let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
                 Some(Expr::For(None, (ids, expr_id)))
             }
-            // NOTE: `subject is pattern` parses and walks (registering captures
-            // into the current scope); a proper boolean-test lowering that
-            // threads captures is deferred. Typed `bool`. Not reached yet.
+            // `subject is pattern` — walk the subject and the pattern (binding
+            // captures into the current scope so a guarded `if`/`&&` can use
+            // them), then resolve the pattern against the subject type in
+            // `build`. The expression itself types as `bool`.
             Node::Is(subject, pattern) => {
-                let _subject_id = self.walk_expr_node(subject, scope_id);
-                let _ = self.walk_pattern(pattern, scope_id);
-                Some(Expr::Bool(true))
+                let subject_id = self.walk_expr_node(subject, scope_id);
+                let walk_pattern = self.walk_pattern(pattern, scope_id);
+                self.prepped_is.push(PreppedIs {
+                    id,
+                    subject_id,
+                    scope_id,
+                    pattern: walk_pattern,
+                });
+                None
             }
             // Re-export visibility is not tracked yet; walking the inner
             // statement is enough to bind it into the current scope.
@@ -1646,6 +1668,8 @@ impl<'src> Analyzer<'src> {
         let inferred_type: Type = match expr {
             Expr::Null => self.primitive_struct_type("null"),
             Expr::Bool(_) => self.primitive_struct_type("bool"),
+            // `subject is pattern` is a boolean test.
+            Expr::Is(_, _) => self.primitive_struct_type("bool"),
             Expr::String(_) => self.primitive_struct_type("str"),
             // A numeric literal's type comes from its suffix (`5u32`), then a
             // fractional part (`0.0` is a float), then the expected type
@@ -2470,6 +2494,7 @@ impl<'src> Analyzer<'src> {
             + self.variable_constraints.len()
             + self.call_subject_constraints.len()
             + self.field_accessor_constraints.len()
+            + self.prepped_is.len()
             + self.prepped_matches.len();
 
         for _ in 0..max_iterations {
@@ -2696,6 +2721,33 @@ impl<'src> Analyzer<'src> {
             }
             self.field_accessor_constraints = remaining_accessors;
             if !self.field_accessor_constraints.is_empty() {
+                progress = true;
+            }
+
+            // --- Resolve `is` pattern tests ---
+            // Once the subject type is known, resolve the pattern (typing its
+            // captures) and record the resolved `Expr::Is`. The expression's own
+            // type is always `bool`.
+            let mut remaining_is = Vec::new();
+            for prepped in std::mem::take(&mut self.prepped_is) {
+                let subject_type =
+                    self.infer_type(prepped.subject_id, &Type::Unknown, &HashMap::new());
+                if matches!(subject_type, Type::Unresolved) {
+                    remaining_is.push(prepped);
+                    continue;
+                }
+                let subject_type_id = subject_type.get_type_id(self);
+                match self.resolve_pattern(&prepped.pattern, subject_type_id, prepped.scope_id) {
+                    Some(resolved) => {
+                        self.expr_id_to_expr_map
+                            .insert(prepped.id, Expr::Is(prepped.subject_id, resolved));
+                    }
+                    None => {} // a diagnostic was already emitted
+                }
+                progress = true;
+            }
+            self.prepped_is = remaining_is;
+            if !self.prepped_is.is_empty() {
                 progress = true;
             }
 
@@ -3612,6 +3664,33 @@ fn std_module_path(file: &str) -> String {
     )
 }
 
+/// Collects the names of sibling modules referenced via `pkg::<module>::..` in a
+/// module's top-level `import`/`use`/`export import` statements, so the loader
+/// can pull them in transitively.
+fn collect_pkg_module_refs<'a>(nodes: &'a NodeList<'a>) -> Vec<&'a str> {
+    let mut modules = Vec::new();
+    for (node, _span) in nodes {
+        let branch = match node {
+            Node::Import(branch) | Node::Use(branch) => Some(branch),
+            Node::Export(inner) => match &inner.0 {
+                Node::Import(branch) | Node::Use(branch) => Some(branch),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(branch) = branch {
+            let mut entries = Vec::new();
+            flatten_namespace_branch(branch, Vec::new(), &mut entries);
+            for (path, _leaf) in entries {
+                if path.first() == Some(&"pkg") && path.len() >= 2 {
+                    modules.push(path[1]);
+                }
+            }
+        }
+    }
+    modules
+}
+
 pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let mut analyzer = Analyzer::new();
     let global_scope = analyzer.create_scope(None);
@@ -3619,7 +3698,9 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // Scalar primitives are built-in structs, reachable as the bare `i32` (the
     // prelude, here the global scope) and — since the module scopes below are
     // children of the global scope — as `std::i32`.
-    for name in ["i32", "u32", "f64", "str", "bool", "null", "BigInt"] {
+    // Scalar number/string primitives are migrated to source (`number.vl`,
+    // `string.vl`); `bool` (an enum) and `null` stay hardcoded for now.
+    for name in ["bool", "null"] {
         let id = analyzer.register_primitive_struct(name);
         analyzer
             .mut_scope_for_scope_id(global_scope_id)
@@ -3713,36 +3794,10 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     });
 
     // --- Load the `std` package from source ---
-    // `io` module: walked into a scope childed to the global scope so its
-    // `panic(message: str)` can see the builtin `str`.
-    let io_scope = analyzer.create_scope(Some(global_scope_id));
-    let io_scope_id = analyzer.push_scope(io_scope);
-    let io_module_id = analyzer.new_entity_id();
-    analyzer.modules.insert(
-        io_module_id,
-        Module {
-            id: io_module_id,
-            name: "io",
-            body: (Vec::new(), io_scope_id),
-        },
-    );
-    analyzer
-        .expr_id_to_expr_map
-        .insert(io_module_id, Expr::Module(io_module_id));
-    analyzer.module_id_by_name.insert("io", io_module_id);
-    if let Some(io_ast) = load_package_module(&std_module_path("io.vl")) {
-        analyzer.walk_expr_nodes(&io_ast.0, io_scope_id);
-    }
-    // Remember `panic` so its calls can be typed as never and lowered to a throw.
-    analyzer.panic_fn_id = analyzer
-        .scopes
-        .get(&io_scope_id)
-        .and_then(|scope| scope.name_to_id_map.get("panic").copied());
-
-    // `pkg` aliases the current package's modules so `pkg::io::print` (used by
-    // `lib.vl`) resolves to the `io` module.
-    let mut pkg_scope = analyzer.create_scope(None);
-    pkg_scope.name_to_id_map.insert("io", io_module_id);
+    // `pkg` aliases this package's sibling modules so `pkg::<module>::item`
+    // resolves; module scopes are children of the global scope so they can see
+    // the builtins (e.g. `str` in `io`'s `panic(message: str)`).
+    let pkg_scope = analyzer.create_scope(None);
     let pkg_scope_id = analyzer.push_scope(pkg_scope);
     let pkg_module_id = analyzer.new_entity_id();
     analyzer.modules.insert(
@@ -3758,9 +3813,9 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         .insert(pkg_module_id, Expr::Module(pkg_module_id));
     analyzer.module_id_by_name.insert("pkg", pkg_module_id);
 
-    // `std` module: the package root, integrated from `lib.vl`. Its
-    // `export import pkg::io::print` re-exports bind into this scope; childing it
-    // to the global scope lets `std::i32`, `std::List`, ... reach the builtins.
+    // `std` is the package root, integrated from `lib.vl`. Its re-exports bind
+    // into this scope; childing it to the global scope lets `std::i32`,
+    // `std::List`, ... reach the builtins.
     let std_scope = analyzer.create_scope(Some(global_scope_id));
     let std_scope_id = analyzer.push_scope(std_scope);
     let std_module_id = analyzer.new_entity_id();
@@ -3776,8 +3831,81 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         .expr_id_to_expr_map
         .insert(std_module_id, Expr::Module(std_module_id));
     analyzer.module_id_by_name.insert("std", std_module_id);
-    if let Some(lib_ast) = load_package_module(&std_module_path("lib.vl")) {
+
+    // Load `lib.vl` plus every module reachable through `pkg::` references,
+    // transitively. Each becomes a module registered in the `pkg` namespace;
+    // bodies are walked after all are registered so cross-module references
+    // resolve during `build()`.
+    let lib_ast = load_package_module(&std_module_path("lib.vl"));
+    let mut module_scopes: HashMap<&str, Id> = HashMap::new();
+    let mut loaded: Vec<(&str, &Spanned<NodeList>, Id)> = Vec::new();
+    let mut to_load: Vec<&str> = lib_ast
+        .map(|ast| collect_pkg_module_refs(&ast.0))
+        .unwrap_or_default();
+    while let Some(name) = to_load.pop() {
+        if module_scopes.contains_key(name) {
+            continue;
+        }
+        let Some(ast) = load_package_module(&std_module_path(&format!("{name}.vl"))) else {
+            continue;
+        };
+        let module_scope = analyzer.create_scope(Some(global_scope_id));
+        let module_scope_id = analyzer.push_scope(module_scope);
+        let module_id = analyzer.new_entity_id();
+        analyzer.modules.insert(
+            module_id,
+            Module {
+                id: module_id,
+                name,
+                body: (Vec::new(), module_scope_id),
+            },
+        );
+        analyzer
+            .expr_id_to_expr_map
+            .insert(module_id, Expr::Module(module_id));
+        analyzer
+            .mut_scope_for_scope_id(pkg_scope_id)
+            .name_to_id_map
+            .insert(name, module_id);
+        module_scopes.insert(name, module_scope_id);
+        to_load.extend(collect_pkg_module_refs(&ast.0));
+        loaded.push((name, ast, module_scope_id));
+    }
+    for (_name, ast, module_scope_id) in &loaded {
+        analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
+    }
+    if let Some(lib_ast) = lib_ast {
         analyzer.walk_expr_nodes(&lib_ast.0, std_scope_id);
+    }
+    // Remember `panic` so its calls can be typed as never and lowered to a throw.
+    if let Some(io_scope_id) = module_scopes.get("io") {
+        analyzer.panic_fn_id = analyzer
+            .scopes
+            .get(io_scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("panic").copied());
+    }
+
+    // Bind source-defined primitive structs into the literal registry (so number
+    // and string literals infer the right type) and the global scope (so bare
+    // `str`, `i32`, ... annotations resolve), replacing the hardcoded ones.
+    for (primitive, module) in [
+        ("str", "string"),
+        ("i32", "number"),
+        ("u32", "number"),
+        ("f64", "number"),
+        ("BigInt", "number"),
+    ] {
+        let id = module_scopes
+            .get(module)
+            .and_then(|scope_id| analyzer.scopes.get(scope_id))
+            .and_then(|scope| scope.name_to_id_map.get(primitive).copied());
+        if let Some(id) = id {
+            analyzer.primitive_struct_ids.insert(primitive, id);
+            analyzer
+                .mut_scope_for_scope_id(global_scope_id)
+                .name_to_id_map
+                .insert(primitive, id);
+        }
     }
 
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
