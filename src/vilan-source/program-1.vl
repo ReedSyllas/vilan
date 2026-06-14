@@ -1,0 +1,130 @@
+import std::option::Option::{ self, Some, None };
+import std::print;
+
+trait Vehicle {
+	fun get_name(self): str;
+}
+
+struct Car {
+	make: str,
+	model: str,
+	year: u32,
+}
+
+impl Car {
+	fun new(make: str, model: str, year: u32) {
+		Car { make, model, year }
+	}
+}
+
+impl Car with Vehicle {
+	fun get_name(self): str {
+		i"{self.year} {self.make} {self.model}"
+	}
+}
+
+struct Dealership {
+	cars: List<Car>,
+}
+
+impl Dealership {
+	fun new(): Self {
+		Dealership {
+			cars = List::new()
+		}
+	}
+	
+	fun has_car(self, car: Car): bool {
+		for item in self.cars {
+			if item == car {
+				ret true;
+			}
+		}
+		ret false;
+	}
+	
+	fun add_car(self, car: Car) {
+		self.cars.push(car);
+	}
+	
+	fun find_car_by_make(self, make: str): Option<Car> {
+		for car in self.cars {
+			if car.make == make {
+				ret Some(car);
+			}
+		}
+		None
+	}
+	
+	fun place_order(self, car: Car) {
+		mut i = 0;
+		mut has_car = false;
+		
+		for item in self.cars {
+			i += 1;
+			
+			if item == car {
+				has_car = true;
+				jump break;
+			}
+		}
+		
+		if has_car {
+			// TODO: Remove car from dealership with index `i`.
+			
+			let ordered_cars = List::new();
+			ordered_cars.push(car);
+			
+			Some(Order { cars = ordered_cars })
+		} else {
+			None
+		}
+	}
+}
+
+struct Person {
+	name: str,
+	purchases: List<Order>,
+}
+
+impl Person {
+	fun new(name: str) {
+		Person {
+			name,
+			purchases = List::new(),
+		}
+	}
+	
+	fun purchase(self, order: Order) {
+		self.purchases.push(order);
+	}
+}
+
+struct Order {
+	cars: List<Car>,
+}
+
+fun mock_dealership(): Dealership {
+	mut dealership = Dealership::new();
+	
+	let car1 = Car::new("Toyota", "Tacoma", 2024);
+	dealership.add_car(car1);
+	
+	let car2 = Car::new("Honda", "Accord", 2021);
+	dealership.add_car(car2);
+	
+	dealership
+}
+
+fun main() {
+	mut dealership = mock_dealership();
+	
+	let john = Person::new("John E. Smith");
+	
+	if dealership.find_car_by_make("Honda") is Some(let johns_car) {
+		print(i"Found: {johns_car.get_name()}");
+		
+		john.purchase(dealership.place_order(johns_car));
+		print(i"Purchased: {johns_car.get_name()}");
+	}
+}

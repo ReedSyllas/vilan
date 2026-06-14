@@ -997,6 +997,19 @@ impl<'src> Analyzer<'src> {
         None
     }
 
+    /// The substitution mapping an enum's declared generic parameters to a
+    /// matched value's concrete type arguments — so `Some(let x)` on a value of
+    /// type `Option<Car>` binds `x: Car` (the variant payload `T` -> `Car`).
+    /// `None` when the type isn't this enum or carries no (non-erased) arguments.
+    fn enum_type_substitution(&self, enum_id: Id, type_id: TypeId) -> Option<SubstitutionContext> {
+        let arguments = match type_id.get_type(self) {
+            Type::Enum(id, arguments) if id == enum_id && !arguments.is_empty() => arguments,
+            _ => return None,
+        };
+        let declared = &self.enums.get(&enum_id)?.generic_parameter_constraint_ids;
+        Some(declared.iter().copied().zip(arguments).collect())
+    }
+
     /// The trait ids a generic parameter is bound by (`T: A + B` -> `[A, B]`),
     /// resolved at call time. A multi-bound parameter's bounds are recorded in
     /// `generic_bounds`; a single bound is recoverable from the constraint id
@@ -2002,12 +2015,15 @@ impl<'src> Analyzer<'src> {
                 let mut data_type_ids = self.enums.get(&enum_id).unwrap().variants[variant_index]
                     .data_type_ids
                     .clone();
-                // When matching `self` inside an `impl Enum<args>`, substitute the
-                // enum's declared parameters for the impl's concrete subject args,
-                // so e.g. `Some`'s payload on a `Option<(T, U)>` subject is the
-                // tuple `(T, U)` and `Some((let x, let y))` binds `x: T`, `y: U`.
-                if let Some(substitution) = self.impl_subject_substitution(lookup_scope_id, enum_id)
-                {
+                // Substitute the variant's declared payload types for the matched
+                // enum's concrete type arguments, so `Some(let x)` on `Option<Car>`
+                // binds `x: Car` (not the abstract `T`). The arguments come from
+                // the matched value's type, or — when `self`'s type is the still
+                // abstract enum inside an `impl Enum<args>` — from the impl subject.
+                let substitution = self
+                    .enum_type_substitution(enum_id, expected_type_id)
+                    .or_else(|| self.impl_subject_substitution(lookup_scope_id, enum_id));
+                if let Some(substitution) = substitution {
                     data_type_ids = data_type_ids
                         .iter()
                         .map(|data_type_id| {

@@ -497,7 +497,11 @@ impl<'src> Transformer<'src> {
             Expr::Block(body) => {
                 for statement in &body.0 {
                     if let Some(node) = self.walk_entity(*statement, block) {
-                        block.push(node);
+                        // A statement that lowered to nothing (a void tail, a
+                        // self-emitting loop/`if`) leaves no stray `undefined`.
+                        if !matches!(node, js::Node::Void) {
+                            block.push(node);
+                        }
                     }
                 }
                 return self.walk_entity(body.1, block);
@@ -513,7 +517,9 @@ impl<'src> Transformer<'src> {
                     Some(Expr::Void) | None => {}
                     Some(_) => {
                         if let Some(node) = self.walk_entity(body.1, &mut t_body) {
-                            t_body.push(node);
+                            if !matches!(node, js::Node::Void) {
+                                t_body.push(node);
+                            }
                         }
                     }
                 }
@@ -573,7 +579,9 @@ impl<'src> Transformer<'src> {
                     loop_body.extend(self.walk_list(&body.0));
                     if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
                     } else if let Some(node) = self.walk_entity(body.1, &mut loop_body) {
-                        loop_body.push(node);
+                        if !matches!(node, js::Node::Void) {
+                            loop_body.push(node);
+                        }
                     }
                     block.push(js::Node::While(Box::new(js::Node::Bool(true)), loop_body));
                     return Some(js::Node::Void);
@@ -586,7 +594,9 @@ impl<'src> Transformer<'src> {
                 let mut t_body = self.walk_list(&body.0);
                 if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
                 } else if let Some(node) = self.walk_entity(body.1, &mut t_body) {
-                    t_body.push(node);
+                    if !matches!(node, js::Node::Void) {
+                        t_body.push(node);
+                    }
                 }
                 block.push(js::Node::ForOf(binding, Box::new(t_iterable), t_body));
                 js::Node::Void
@@ -663,7 +673,14 @@ impl<'src> Transformer<'src> {
                         block.push(js::Node::If(branch));
                         js::Node::Local(variable_name)
                     }
-                    None => js::Node::If(branch),
+                    // A value-less `if` (no branch produces a value) is a
+                    // statement: emit it into the block and yield void, so a
+                    // trailing `if` isn't mistaken for the block's/function's
+                    // result (and wrapped in `return`/`process.exit`).
+                    None => {
+                        block.push(js::Node::If(branch));
+                        js::Node::Void
+                    }
                 }
             }
             Expr::Is(subject_id, pattern) => {
