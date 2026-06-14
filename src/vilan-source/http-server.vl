@@ -2,9 +2,9 @@ import std::{ print, http::{ Request, Response, Server } };
 
 impl Response {
 	fun text(text: str): Self {
-		Self::builder()
+		Response::builder()
 			.code(200)
-			.content_type_plain()
+			.set_header("Content-Type", "text/plain")
 			.body("{text}\n")
 			.build()
 	}
@@ -12,7 +12,7 @@ impl Response {
 
 impl Server {
 	fun create(request_handler: |Request| Response, with_logging: bool): Self {
-		let builder = Self::builder();
+		let builder = Server::builder();
 		
 		if with_logging {
 			builder
