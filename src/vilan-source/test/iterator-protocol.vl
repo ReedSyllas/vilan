@@ -1,0 +1,35 @@
+import std::option::Option::{ self, Some, None };
+import std::iterator::Iterator;
+import std::print;
+
+// `for x in iterable` over a custom iterator (a type with `next(self): Option<T>`)
+// lowers to a loop that calls `next()` until it yields `None`. A `List` (a JS
+// array) instead iterates via a native `for...of`.
+mut produced = 0;
+
+struct Naturals { limit: i32 }
+
+impl Naturals with Iterator<i32> {
+	fun next(self): Option<i32> {
+		produced = produced + 1;
+		if produced <= self.limit {
+			Some(produced)
+		} else {
+			None
+		}
+	}
+}
+
+fun main() {
+	let naturals = Naturals { limit = 3 };
+	for n in naturals {
+		print(n);
+	}
+
+	mut numbers = List::new();
+	numbers.push(2);
+	numbers.push(3);
+	numbers.push(4);
+	print(numbers.sum());
+	print(numbers.product());
+}

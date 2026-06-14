@@ -1,0 +1,26 @@
+import std::print;
+
+// A trait generic parameter with a default (`B = Self`). In `mix`'s default
+// body the parameter `b: B` is treated as a `Self` value, so both
+// `self.value_of()` and `b.value_of()` resolve — which only holds if `B`
+// defaulted to `Self`.
+trait Combine<B = Self> {
+	fun value_of(self): i32;
+	fun mix(self, b: B): i32 {
+		self.value_of() + b.value_of()
+	}
+}
+
+struct Counter { value: i32 }
+
+impl Counter with Combine {
+	fun value_of(self): i32 {
+		self.value
+	}
+}
+
+fun main() {
+	let a = Counter { value = 4 };
+	let b = Counter { value = 6 };
+	print(a.mix(b));
+}

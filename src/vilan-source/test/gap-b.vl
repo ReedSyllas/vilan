@@ -1,0 +1,23 @@
+import std::option::Option::{ self, Some, None };
+import std::print;
+
+// Gap B: an impl subject with `type` binders nested anywhere in its type
+// pattern (here a tuple) binds them as the impl's generics and flows them into
+// the method body, so `Some((let x, let y))` on a `Option<(T, U)>` self
+// destructures into `x: T`, `y: U`.
+impl Option<(type T, type U)> {
+	fun unzip(self): (Option<T>, Option<U>) {
+		match self {
+			Some((let x, let y)) => (Some(x), Some(y)),
+			_ => (None, None),
+		}
+	}
+}
+
+fun main() {
+	let pair = Some((3, 7));
+	print(pair.unzip());
+
+	let empty: Option<(i32, i32)> = None;
+	print(empty.unzip());
+}

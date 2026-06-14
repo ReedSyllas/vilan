@@ -1,0 +1,27 @@
+import std::operators::{ Add, Mul };
+import std::print;
+
+struct Vec2 { x: i32, y: i32 }
+
+impl Vec2 with Add {
+	fun add(self, b: Vec2): Vec2 {
+		Vec2 { x = self.x + b.x, y = self.y + b.y }
+	}
+}
+
+impl Vec2 with Mul {
+	fun mul(self, b: Vec2): Vec2 {
+		Vec2 { x = self.x * b.x, y = self.y * b.y }
+	}
+}
+
+fun main() {
+	let a = Vec2 { x = 1, y = 2 };
+	let b = Vec2 { x = 3, y = 4 };
+	let sum = a + b;
+	print(sum.x);
+	print(sum.y);
+	let product = a * b;
+	print(product.x);
+	print(product.y);
+}

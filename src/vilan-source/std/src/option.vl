@@ -161,18 +161,14 @@ impl Option<type T: Default> {
 	}
 }
 
-// DEFERRED (gap B): matching `Some((let x, let y))` against `Option<(T, U)>`
-// doesn't substitute `Some`'s payload to the tuple `(T, U)` here, so `x`/`y`
-// stay untyped and the match type won't resolve. Needs generic-payload
-// substitution for variant patterns in a specialized impl. See std-migration plan.
-// impl Option<(type T, type U)> {
-// 	fun unzip(self): (Option<T>, Option<U>) {
-// 		match self {
-// 			Some((let x, let y)) => (Some(x), Some(y)),
-// 			_ => (None, None),
-// 		}
-// 	}
-// }
+impl Option<(type T, type U)> {
+	fun unzip(self): (Option<T>, Option<U>) {
+		match self {
+			Some((let x, let y)) => (Some(x), Some(y)),
+			_ => (None, None),
+		}
+	}
+}
 
 impl Option<Result<type T, type E>> {
 	fun transpose(self): Result<Option<T>, E> {

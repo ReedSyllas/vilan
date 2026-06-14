@@ -1,7 +1,0 @@
-export import pkg::boolean::{ bool::{ self, true, false } };
-export import pkg::io::print;
-export import pkg::list::List;
-export import pkg::number::{ u32, i32, f64, BigInt };
-export import pkg::option::Option::{ self, Some, None };
-export import pkg::result::Result::{ self, Ok, Err };
-export import pkg::string::str;

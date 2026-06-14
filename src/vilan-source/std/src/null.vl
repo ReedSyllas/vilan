@@ -1,0 +1,4 @@
+// `null` is the built-in null/unit value. Like the scalar primitives it is an
+// opaque `external` type (lowered to JS `null`); this module is dependency-free
+// so it can always be loaded as a core type.
+external struct null;

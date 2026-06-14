@@ -1,7 +1,9 @@
 // `List<T>` is the built-in growable array. It is `external` (an opaque
 // intrinsic): a `List` value is a native JS array, `List::new()` is `[]`, and
-// `push` is the native `.push`. This module is dependency-free so it can always
-// be loaded as a core type without pulling in the rest of std.
+// `push` is the native `.push`. Iterating a `List` uses a native `for...of`.
+import pkg::default::Default;
+import pkg::operators::{ Add, Mul };
+
 external struct List<T>;
 
 impl List<type T> {
@@ -10,39 +12,43 @@ impl List<type T> {
 	external fun push(self, item: T): void;
 }
 
-// DEFERRED: `iter` (Iterable), `sum`, and `product` need the Iterator protocol
-// for `for..in` — iterating a custom iterator (not a JS array) and an `iter()`
-// that returns a concrete iterator rather than the abstract `Iterator<T>` trait.
-// `for x in myList` works today via native `for...of` without them. Restoring
-// these also requires re-adding the `iterator`/`operators`/`option` imports.
-// See std-migration plan.
-//
-// impl List<type T> with Iterable<T> {
-// 	fun iter(self): Iterator<T> {
-// 		panic("not implemented yet");
-// 	}
-// }
-//
-// impl List<type T: Add + Default> {
-// 	fun sum(self): T {
-// 		mut iter = self.iter();
-// 		if iter.next() is Some(mut sum) {
-// 			for item in iter { sum += item; }
-// 			sum
-// 		} else {
-// 			T::default()
-// 		}
-// 	}
-// }
-//
-// impl List<type T: Mul + Default> {
-// 	fun product(self): T {
-// 		mut iter = self.iter();
-// 		if iter.next() is Some(mut product) {
-// 			for item in iter { product *= item; }
-// 			product
-// 		} else {
-// 			T::default()
-// 		}
-// 	}
-// }
+// `sum`/`product` seed with the first element and fall back to `T::default()`
+// only for an empty list. NOTE: that empty-list fallback can't resolve `T`
+// concretely yet — a `List` erases its element type — so it relies on Gap B
+// (parameterized enum/struct types). The common non-empty path works today.
+impl List<type T: Add + Default> {
+	fun sum(self): T {
+		mut total = T::default();
+		mut seeded = false;
+		for item in self {
+			if seeded {
+				total += item;
+			} else {
+				total = item;
+				seeded = true;
+			}
+		}
+		total
+	}
+}
+
+impl List<type T: Mul + Default> {
+	fun product(self): T {
+		mut total = T::default();
+		mut seeded = false;
+		for item in self {
+			if seeded {
+				total *= item;
+			} else {
+				total = item;
+				seeded = true;
+			}
+		}
+		total
+	}
+}
+
+// DEFERRED: `iter` (the `Iterable` trait) needs a concrete `List` iterator
+// (returning `ListIterator<T>`, not the abstract `Iterator<T>`) plus `length`/
+// `get` array intrinsics and mutable iterator state. `for x in myList` and
+// `sum`/`product` work today via native `for...of` without it.

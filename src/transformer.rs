@@ -41,6 +41,12 @@ struct Transformer<'src> {
     // Monomorphized function variants, keyed by (generic function, concrete
     // type arguments) so each distinct instantiation is emitted exactly once.
     instances: HashMap<(Id, Vec<String>), String>,
+    // The concrete type a trait default method is currently being specialized
+    // for, so `self.method()` calls in its body re-dispatch to that type's impl.
+    current_self_type: Option<TypeId>,
+    // Trait default methods specialized per concrete type, keyed by
+    // (default function, concrete type) so each is emitted once.
+    default_instances: HashMap<(Id, String), String>,
     monomorphized: Vec<js::Node<'src>>,
     // Captures introduced by an `is` test, aliased to the subject's payload
     // slots (e.g. `t[1]`) since they can't be JS bindings in expression position.
@@ -95,6 +101,8 @@ impl<'src> Transformer<'src> {
             required_functions: IndexMap::new(),
             current_substitution: HashMap::new(),
             instances: HashMap::new(),
+            current_self_type: None,
+            default_instances: HashMap::new(),
             monomorphized: Vec::new(),
             is_bindings: HashMap::new(),
         }
@@ -298,6 +306,20 @@ impl<'src> Transformer<'src> {
                     }
                 }
 
+                // A trait method re-dispatched to the receiver's concrete type: an
+                // inherited default called on a concrete value (Gap E, with the
+                // type recorded), or a `self`-call inside a default body (no type,
+                // dispatched on the type the default is being specialized for).
+                if let Some(&(concrete_type, member_name)) =
+                    self.program.trait_method_dispatch.get(id)
+                {
+                    if let Some(type_id) = concrete_type.or(self.current_self_type) {
+                        if let Some(name) = self.emit_dispatched_method(type_id, member_name) {
+                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                        }
+                    }
+                }
+
                 let subject = self
                     .program
                     .entity_map
@@ -401,7 +423,21 @@ impl<'src> Transformer<'src> {
             Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.walk_entity(*lhs, block).unwrap_or(js::Node::Void);
                 let rhs = self.walk_entity(*rhs, block).unwrap_or(js::Node::Void);
+                // An overloaded operator (`a + b` where `a`'s type implements
+                // `Add`) compiles to the trait method call `add(a, b)`.
+                if let Some(&method_id) = self.program.binary_op_dispatch.get(&id) {
+                    self.ensure_function_emitted(method_id);
+                    let name = self.ng.name_for(method_id);
+                    return Some(js::Node::Call(
+                        Box::new(js::Node::Local(name)),
+                        vec![lhs, rhs],
+                    ));
+                }
                 binary(*op, lhs, rhs)
+            }
+            Expr::Unary(operator, operand) => {
+                let operand = self.walk_entity(*operand, block).unwrap_or(js::Node::Void);
+                js::Node::Unary(*operator, Box::new(operand))
             }
             Expr::Variable(id) => {
                 if self
@@ -469,10 +505,62 @@ impl<'src> Transformer<'src> {
                 js::Node::Void
             }
             Expr::ForEach(iterable_id, item_id, body) => {
-                // `for item in iterable` lowers to a native `for...of`.
                 let t_iterable = self
                     .walk_entity(*iterable_id, block)
                     .unwrap_or(js::Node::Void);
+
+                if let Some(&next_id) = self.program.for_each_next.get(&id) {
+                    // Iterator protocol: evaluate the iterator once, then loop
+                    // calling `next()` until it yields `None` (variant 1); the
+                    // `Some` payload (slot 1) is the element.
+                    self.ensure_function_emitted(next_id);
+                    let next_name = self.ng.name_for(next_id);
+                    let iterator_name = self.ng.next_name();
+                    let next_value_name = self.ng.next_name();
+                    block.push(js::Node::ConstVariable(js::Variable {
+                        name: iterator_name.clone(),
+                        value: Box::new(t_iterable),
+                    }));
+                    let mut loop_body = vec![
+                        js::Node::ConstVariable(js::Variable {
+                            name: next_value_name.clone(),
+                            value: Box::new(js::Node::Call(
+                                Box::new(js::Node::Local(next_name)),
+                                vec![js::Node::Local(iterator_name.clone())],
+                            )),
+                        }),
+                        js::Node::If(js::IfBranch::If(
+                            Box::new(js::Node::Binary(
+                                BinaryOp::NotEq,
+                                Box::new(js::Node::PropertyIndex(
+                                    Box::new(js::Node::Local(next_value_name.clone())),
+                                    Box::new(js::Node::Number("0".to_string(), None)),
+                                )),
+                                Box::new(js::Node::Number("0".to_string(), None)),
+                            )),
+                            vec![js::Node::Break],
+                            None,
+                        )),
+                    ];
+                    if let Some(item_id) = item_id {
+                        loop_body.push(js::Node::ConstVariable(js::Variable {
+                            name: self.ng.name_for(*item_id),
+                            value: Box::new(js::Node::PropertyIndex(
+                                Box::new(js::Node::Local(next_value_name)),
+                                Box::new(js::Node::Number("1".to_string(), None)),
+                            )),
+                        }));
+                    }
+                    loop_body.extend(self.walk_list(&body.0));
+                    if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
+                    } else if let Some(node) = self.walk_entity(body.1, &mut loop_body) {
+                        loop_body.push(node);
+                    }
+                    block.push(js::Node::While(Box::new(js::Node::Bool(true)), loop_body));
+                    return Some(js::Node::Void);
+                }
+
+                // Otherwise a native `for...of` (a `List` is a JS array).
                 let binding = item_id
                     .map(|item_id| self.ng.name_for(item_id))
                     .unwrap_or_else(|| "_".to_string());
@@ -683,7 +771,8 @@ impl<'src> Transformer<'src> {
     }
 
     /// The JS value for an enum variant. `bool` lowers to a native boolean
-    /// (`false`/`true`); every other enum is an array `[index, ...data]`.
+    /// (`false`/`true`), a numeric (C-like) enum to its integer discriminant, and
+    /// every other enum to an array `[index, ...data]`.
     fn variant_value(
         &self,
         enum_id: Id,
@@ -693,9 +782,50 @@ impl<'src> Transformer<'src> {
         if Some(enum_id) == self.program.bool_enum_id {
             return js::Node::Bool(variant_index == 1);
         }
+        if let Some(discriminant) = self.numeric_enum_discriminant(enum_id, variant_index) {
+            return js::Node::Number(discriminant.to_string(), None);
+        }
         let mut items = vec![js::Node::Number(variant_index.to_string(), None)];
         items.extend(data);
         js::Node::Array(items)
+    }
+
+    /// The integer discriminant of a variant if `enum_id` is a numeric (C-like)
+    /// enum, else `None` (it uses the array representation).
+    fn numeric_enum_discriminant(&self, enum_id: Id, variant_index: usize) -> Option<i64> {
+        let enum_ = self.program.enums.get(&enum_id)?;
+        if !enum_.is_numeric {
+            return None;
+        }
+        enum_
+            .variants
+            .get(variant_index)
+            .map(|variant| variant.discriminant)
+    }
+
+    /// For a variant of an enum that lowers to a native scalar — `bool`
+    /// (`subject === true`) or a numeric enum (`subject === discriminant`) — the
+    /// equality test. `None` for array-form enums, which test the `[0]` slot.
+    fn scalar_variant_test(
+        &self,
+        enum_id: Id,
+        variant_index: usize,
+        subject: &js::Node<'src>,
+    ) -> Option<js::Node<'src>> {
+        let value = if Some(enum_id) == self.program.bool_enum_id {
+            js::Node::Bool(variant_index == 1)
+        } else {
+            js::Node::Number(
+                self.numeric_enum_discriminant(enum_id, variant_index)?
+                    .to_string(),
+                None,
+            )
+        };
+        Some(js::Node::Binary(
+            BinaryOp::Eq,
+            Box::new(subject.clone()),
+            Box::new(value),
+        ))
     }
 
     // Compiles a match pattern against the JS expression holding the value it
@@ -716,13 +846,10 @@ impl<'src> Transformer<'src> {
                 self.is_bindings.insert(*capture_id, subject);
             }
             ExprPattern::Variant(enum_id, variant_index, payload) => {
-                // `bool` lowers to a native boolean (see `compile_pattern`).
-                if Some(*enum_id) == self.program.bool_enum_id {
-                    conditions.push(js::Node::Binary(
-                        BinaryOp::Eq,
-                        Box::new(subject),
-                        Box::new(js::Node::Bool(*variant_index == 1)),
-                    ));
+                // `bool` and numeric enums lower to native values (see
+                // `compile_pattern`), so they test by value, not array slot.
+                if let Some(test) = self.scalar_variant_test(*enum_id, *variant_index, &subject) {
+                    conditions.push(test);
                     return;
                 }
                 conditions.push(js::Node::Binary(
@@ -781,14 +908,11 @@ impl<'src> Transformer<'src> {
                 });
             }
             ExprPattern::Variant(enum_id, variant_index, payload) => {
-                // `bool` is lowered to a native JS boolean, so its variants test
-                // by value (`subject === true`) rather than by array discriminant.
-                if Some(*enum_id) == self.program.bool_enum_id {
-                    conditions.push(js::Node::Binary(
-                        BinaryOp::Eq,
-                        Box::new(subject),
-                        Box::new(js::Node::Bool(*variant_index == 1)),
-                    ));
+                // `bool` and numeric (C-like) enums lower to native scalars, so
+                // their variants test by value (`subject === true` / `=== -1`)
+                // rather than by array discriminant slot.
+                if let Some(test) = self.scalar_variant_test(*enum_id, *variant_index, &subject) {
+                    conditions.push(test);
                     return;
                 }
                 conditions.push(js::Node::Binary(
@@ -851,18 +975,116 @@ impl<'src> Transformer<'src> {
         })
     }
 
-    /// Emits a concrete (non-generic) function once, keyed by its id. Any
-    /// active substitution is cleared while walking it, since its body has no
-    /// generic parameters of its own.
+    /// Emits a concrete (non-generic) function once, keyed by its id. Any active
+    /// substitution and self-type are cleared while walking it, since its body
+    /// has no generic parameters of its own and is not a default being
+    /// specialized.
     fn ensure_function_emitted(&mut self, function_id: Id) {
         if self.required_functions.contains_key(&function_id) {
             return;
         }
         if let Some(function) = self.program.functions.get(&function_id) {
             let saved = std::mem::take(&mut self.current_substitution);
+            let saved_self = self.current_self_type.take();
             let js_function = self.function(function);
             self.current_substitution = saved;
+            self.current_self_type = saved_self;
             self.required_functions.insert(function_id, js_function);
+        }
+    }
+
+    /// Re-dispatches a trait method call to the receiver's concrete `type_id`,
+    /// returning the JS name to call: the type's own impl member if it declares
+    /// one, otherwise an inherited trait default emitted specialized for the type
+    /// (so the default's inner `self.method()` calls dispatch to this type too).
+    fn emit_dispatched_method(&mut self, type_id: TypeId, member: &str) -> Option<String> {
+        let type_id = self.resolve_type_id(type_id);
+        if let Some(member_id) = self.resolve_member_on_type(type_id, member) {
+            self.ensure_function_emitted(member_id);
+            return Some(self.ng.name_for(member_id));
+        }
+        let default_id = self.resolve_inherited_default(type_id, member)?;
+        Some(self.emit_default_instance(default_id, type_id))
+    }
+
+    /// Emits a trait default method specialized for a concrete type, keyed by
+    /// (default, type) so each pairing is emitted once. While walking the body,
+    /// `current_self_type` is the concrete type so its `self.method()` calls
+    /// re-dispatch there.
+    fn emit_default_instance(&mut self, default_id: Id, type_id: TypeId) -> String {
+        let key = (default_id, self.type_key(type_id));
+        if let Some(name) = self.default_instances.get(&key) {
+            return name.clone();
+        }
+        let name = self.ng.next_name();
+        self.default_instances.insert(key, name.clone());
+        if let Some(function) = self.program.functions.get(&default_id) {
+            let saved_self = std::mem::replace(&mut self.current_self_type, Some(type_id));
+            let saved_substitution = std::mem::take(&mut self.current_substitution);
+            let js_function = self.function_with_name(function, name.clone());
+            self.current_self_type = saved_self;
+            self.current_substitution = saved_substitution;
+            self.monomorphized.push(js_function);
+        }
+        name
+    }
+
+    /// Resolves `member` as an inherited trait *default* on a concrete type — a
+    /// member none of the type's impls declare, but a (super)trait it implements
+    /// provides with a body. Mirrors the analyzer's Gap E resolution.
+    fn resolve_inherited_default(&self, type_id: TypeId, member: &str) -> Option<Id> {
+        let type_ = self.program.type_id_to_type_map.get(&type_id)?.clone();
+        self.program
+            .implementations
+            .iter()
+            .filter(|implementation| {
+                self.program
+                    .type_id_to_type_map
+                    .get(&implementation.subject)
+                    == Some(&type_)
+            })
+            .flat_map(|implementation| implementation.trait_ids.iter().copied())
+            .find_map(|trait_id| self.trait_default_member(trait_id, member))
+    }
+
+    /// Searches a trait and its supertraits for a default (bodied) member.
+    fn trait_default_member(&self, trait_id: Id, member: &str) -> Option<Id> {
+        let mut stack = vec![trait_id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(trait_) = self.program.traits.get(&id) else {
+                continue;
+            };
+            if let Some(&member_id) = trait_.declarations.get(member) {
+                if self.function_has_body(member_id) {
+                    return Some(member_id);
+                }
+            }
+            for supertrait_type_id in &trait_.supertraits {
+                if let Some(Type::Trait(super_id)) =
+                    self.program.type_id_to_type_map.get(supertrait_type_id)
+                {
+                    stack.push(*super_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether `member_id` is a function with a source-provided body (a trait
+    /// default, as opposed to a signature-only requirement).
+    fn function_has_body(&self, member_id: Id) -> bool {
+        match self.program.entity_map.get(&member_id) {
+            Some(Expr::Function(function_id)) => self
+                .program
+                .functions
+                .get(function_id)
+                .map(|function| function.has_body)
+                .unwrap_or(false),
+            _ => false,
         }
     }
 
@@ -938,7 +1160,7 @@ impl<'src> Transformer<'src> {
     fn resolve_member_on_type(&self, type_id: TypeId, member: &str) -> Option<Id> {
         let type_ = self.program.type_id_to_type_map.get(&type_id)?;
         match type_ {
-            Type::Struct(_) => self
+            Type::Struct(_) | Type::Enum(_) => self
                 .program
                 .implementations
                 .iter()
@@ -1122,6 +1344,11 @@ impl Formatter {
                     terminator
                 )
             }
+            js::Node::Unary(operator, operand) => {
+                // Parenthesise the operand so precedence is preserved — e.g.
+                // `!(a < b)` must not render as `!a < b`.
+                format!("{}({}){}", operator, self.node(operand, "", 0), terminator)
+            }
             js::Node::LetVariable(variable) => {
                 let value = self.node(&variable.value, "", 0);
                 format!(
@@ -1282,6 +1509,7 @@ pub mod js {
         Array(Vec<Self>),
         Assignment(Box<Self>, Box<Self>),
         Binary(BinaryOp, Box<Self>, Box<Self>),
+        Unary(char, Box<Self>),
         Bool(bool),
         Break,
         Call(Box<Self>, Vec<Self>),

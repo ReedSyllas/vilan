@@ -61,9 +61,15 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 pub enum Node<'src> {
     Accessor(&'src str),
     AccessorWithGenerics(&'src str, GenericArguments<'src>),
+    // A `type X` generic binder appearing inside a type — the impl subject
+    // pattern (`impl Option<(type T, type U)>`), including a bare blanket
+    // (`impl type T`). The optional bounds are `T: A + B`.
+    TypeBinder(&'src str, Vec<Spanned<Self>>),
     // `x = v` or a compound assignment like `x += v` (the operator is the
-    // binary op the assignment applies, e.g. `Add` for `+=`).
-    Assign(&'src str, Option<BinaryOp>, Box<Spanned<Self>>),
+    // binary op the assignment applies, e.g. `Add` for `+=`). The target is an
+    // lvalue: a local (`Accessor`) or a field place (`MemberAccessor`, e.g.
+    // `self.n = v`).
+    Assign(Box<Spanned<Self>>, Option<BinaryOp>, Box<Spanned<Self>>),
     Binary(BinaryOp, Box<Spanned<Self>>, Box<Spanned<Self>>),
     Block(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     Bool(bool),
@@ -107,8 +113,10 @@ pub enum Node<'src> {
     // `jump break` / `jump continue` — the target keyword that follows `jump`.
     Jump(&'src str),
     Impl(
+        // The subject type pattern. May contain `type X` binders anywhere
+        // (`impl Option<(type T, type U)>`) or be a bare binder (`impl type T`);
+        // those binders are the impl's generic parameters.
         Box<Spanned<Self>>,
-        Option<GenericParameters<'src>>,
         // The traits being implemented: the `A`, `B` in `impl Subject with A + B`.
         Vec<Spanned<Self>>,
         Spanned<NodeList<'src>>,
@@ -167,12 +175,8 @@ pub enum Node<'src> {
 }
 
 // One enum variant: name, the types of its optional data, and an optional
-// explicit discriminant expression (`Less = -1`).
-pub type EnumVariant<'src> = (
-    &'src str,
-    Vec<Spanned<Node<'src>>>,
-    Option<Box<Spanned<Node<'src>>>>,
-);
+// explicit integer discriminant (`Less = -1`).
+pub type EnumVariant<'src> = (&'src str, Vec<Spanned<Node<'src>>>, Option<i64>);
 
 // A match-leg pattern.
 #[derive(Debug)]

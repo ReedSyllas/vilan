@@ -1,0 +1,27 @@
+import std::print;
+
+struct Counter { value: i32 }
+
+impl Counter {
+	fun increment(self) {
+		self.value = self.value + 1;
+	}
+	fun bump(self, by: i32) {
+		self.value += by;
+	}
+}
+
+fun main() {
+	mut c = Counter { value = 10 };
+	c.value = 5;
+	print(c.value);
+	c.increment();
+	print(c.value);
+	c.bump(100);
+	print(c.value);
+
+	mut x = 1;
+	x = 2;
+	x += 3;
+	print(x);
+}

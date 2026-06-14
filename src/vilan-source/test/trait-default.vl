@@ -1,0 +1,45 @@
+import std::compare::{ Ord, Ordering, PartialOrd, PartialEq };
+import std::option::Option::{ self, Some };
+import std::print;
+
+// A concrete type implementing `Ord` supplies only the required members
+// (`compare` from Ord, `eq` from PartialEq, `partial_compare` from PartialOrd);
+// the default methods `min`/`max`/`clamp` are inherited. Calling them dispatches
+// to a per-type specialization of the trait default whose inner `self.compare`/
+// `self.min`/`self.max` calls re-dispatch to this type's `compare`.
+struct Num { v: i32 }
+
+impl Num with Ord {
+	fun compare(self, b: Num): Ordering {
+		if self.v < b.v {
+			Ordering::Less
+		} else if self.v > b.v {
+			Ordering::Greater
+		} else {
+			Ordering::Equal
+		}
+	}
+
+	fun eq(self, b: Num): bool {
+		self.v == b.v
+	}
+
+	fun partial_compare(self, b: Num): Option<Ordering> {
+		Some(self.compare(b))
+	}
+}
+
+fun main() {
+	let low = Num { v = 3 };
+	let high = Num { v = 7 };
+
+	print(low.min(high));
+	print(low.max(high));
+	// `clamp` is a default that itself calls the `min`/`max` defaults.
+	let below = Num { v = 1 };
+	let above = Num { v = 9 };
+	let within = Num { v = 5 };
+	print(below.clamp(low, high));
+	print(above.clamp(low, high));
+	print(within.clamp(low, high));
+}

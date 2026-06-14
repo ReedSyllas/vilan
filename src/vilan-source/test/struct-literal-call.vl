@@ -1,0 +1,20 @@
+import std::print;
+
+// A struct literal can be the subject of a field access or a method call
+// directly, including chained calls — no intermediate `let` needed.
+struct Point { x: i32, y: i32 }
+
+impl Point {
+	fun sum(self): i32 {
+		self.x + self.y
+	}
+	fun shifted(self): Point {
+		Point { x = self.x + 1, y = self.y + 1 }
+	}
+}
+
+fun main() {
+	print(Point { x = 3, y = 4 }.sum());
+	print(Point { x = 3, y = 4 }.x);
+	print(Point { x = 10, y = 20 }.shifted().sum());
+}

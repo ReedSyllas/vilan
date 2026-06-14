@@ -379,7 +379,22 @@ where
         .labelled("let binding")
         .boxed();
 
-    let assignment = identifier
+    // An assignment target is an lvalue: a local (`x`) or a field place
+    // (`self.n`, `a.b.c`). A `.field` chain folds into `MemberAccessor`s, the
+    // same shape a field read parses to.
+    let assignment_target = identifier
+        .map_with(|name, e| (Node::Accessor(name), e.span()))
+        .foldl_with(
+            just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
+            |subject, field, e| {
+                let field = (Node::Accessor(field), e.span());
+                (
+                    Node::MemberAccessor(Box::new(subject), Box::new(field)),
+                    e.span(),
+                )
+            },
+        );
+    let assignment = assignment_target
         .then(choice((
             just(Token::Op("=")).to(None),
             just(Token::Op("+=")).to(Some(BinaryOp::Add)),
@@ -388,7 +403,12 @@ where
             just(Token::Op("/=")).to(Some(BinaryOp::Div)),
         )))
         .then(expression.clone())
-        .map_with(|((name, op), value), e| (Node::Assign(name, op, Box::new(value)), e.span()))
+        .map_with(|((target, op), value), e| {
+            (
+                Node::Assign(Box::new(target), op, Box::new(value)),
+                e.span(),
+            )
+        })
         .labelled("assignment")
         .boxed();
 
@@ -433,16 +453,14 @@ where
 
     let for_ = choice((for_in, for_loop)).labelled("for loop").boxed();
 
-    // An explicit discriminant: `= 0` or `= -1`. The sign is accepted but not
-    // yet retained (discriminants are not used by the analyzer/codegen yet).
+    // An explicit integer discriminant: `= 0` or `= -1`.
     let discriminant = just(Token::Op("="))
-        .ignore_then(just(Token::Op("-")).or_not())
-        .ignore_then(
-            select! { Token::Number(whole, fraction, suffix) => (whole, fraction, suffix) }
-                .map_with(|(whole, fraction, suffix), e| {
-                    Box::new((Node::Number(whole, fraction, suffix), e.span()))
-                }),
-        );
+        .ignore_then(just(Token::Op("-")).or_not().map(|sign| sign.is_some()))
+        .then(select! { Token::Number(whole, _fraction, _suffix) => whole })
+        .map(|(negative, whole)| {
+            let magnitude = whole.parse::<i64>().unwrap_or(0);
+            if negative { -magnitude } else { magnitude }
+        });
 
     let enum_variant = name
         .labelled("variant name")
@@ -605,7 +623,9 @@ where
         .or_not()
         .map(|external| external.is_some())
         .then_ignore(just(Token::Struct))
-        .then(identifier.labelled("struct name"))
+        // `null` is a keyword but also the name of the built-in `external struct
+        // null`, so the struct name accepts it alongside ordinary identifiers.
+        .then(choice((identifier, just(Token::Null).to("null"))).labelled("struct name"))
         .then(generic_parameters.clone().or_not())
         .then(choice((
             // `struct Name { field: T, ... }`
@@ -639,24 +659,10 @@ where
         .boxed();
 
     let impl_ = just(Token::Impl)
-        // The subject is a type path — a name or a `module::Item` such as
-        // `std::i32`. Any `<...>` after it declares the impl's generic
-        // parameters (`impl List<type T>`), so it must not be parsed as a
-        // generic type usage here. A leading `type` marks a bare blanket
-        // binder, e.g. `impl type T with Into<T>`.
-        .ignore_then(just(Token::Type).or_not())
-        .then(
-            identifier
-                .map_with(|name, e| (Node::Accessor(name), e.span()))
-                .foldl_with(
-                    just(Token::Op("::")).ignore_then(identifier).repeated(),
-                    |subject, member, e| {
-                        (Node::StaticAccessor(Box::new(subject), member), e.span())
-                    },
-                )
-                .labelled("implementation subject"),
-        )
-        .then(generic_parameters.clone().or_not())
+        // The subject is a type pattern. `type X` binders in it (anywhere —
+        // `impl List<type T>`, `impl Option<(type T, type U)>`, or a bare
+        // blanket `impl type T`) declare the impl's generic parameters.
+        .ignore_then(type_.clone().labelled("implementation subject"))
         .then(
             just(Token::With)
                 .ignore_then(
@@ -687,33 +693,9 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(
-            |((((blanket, subject), generic_parameters), traits), body), e| {
-                // `impl type T with ...` — the subject name is a blanket binder,
-                // i.e. a generic parameter of the impl, not a reference to an
-                // existing type. Make it the impl's first generic parameter.
-                let generic_parameters = match &subject.0 {
-                    Node::Accessor(name) if blanket.is_some() => {
-                        let binder = GenericParameter {
-                            name: *name,
-                            is_type: true,
-                            bounds: Vec::new(),
-                            default: None,
-                        };
-                        let mut parameters = generic_parameters
-                            .map(|(parameters, _)| parameters)
-                            .unwrap_or_default();
-                        parameters.insert(0, binder);
-                        Some((parameters, subject.1))
-                    }
-                    _ => generic_parameters,
-                };
-                (
-                    Node::Impl(Box::new(subject), generic_parameters, traits, body),
-                    e.span(),
-                )
-            },
-        )
+        .map_with(|((subject, traits), body), e| {
+            (Node::Impl(Box::new(subject), traits, body), e.span())
+        })
         .boxed();
 
     let trait_ = just(Token::Trait)
@@ -823,8 +805,37 @@ where
         logical_and,
     )));
 
+    // A struct literal may be the subject of a `.field` access or `.method()`
+    // call (`Point { x = 1, y = 2 }.length()`). Struct literals are parsed only
+    // at the top expression level (conditions use `secondary_expression`, so
+    // `if Foo { .. }` stays unambiguous); this folds any trailing member chain
+    // onto the literal there. Each member is a field name or a call, mirroring
+    // the postfix shape `MemberAccessor` resolves.
+    let struct_member = identifier
+        .map_with(|name, e| (Node::Accessor(name), e.span()))
+        .then(
+            expression_list
+                .clone()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                .map_with(|args, e| (args, e.span()))
+                .or_not(),
+        )
+        .map_with(|(accessor, args), e| match args {
+            Some(args) => (Node::Call(Box::new(accessor), None, args), e.span()),
+            None => accessor,
+        });
+    let struct_initializer_expression = struct_initializer.clone().foldl_with(
+        just(Token::Ctrl('.')).ignore_then(struct_member).repeated(),
+        |subject, member, e| {
+            (
+                Node::MemberAccessor(Box::new(subject), Box::new(member)),
+                e.span(),
+            )
+        },
+    );
+
     expression.define(
-        choice((struct_initializer.clone(), secondary_expression))
+        choice((struct_initializer_expression, secondary_expression))
             .labelled("expression")
             .as_context(),
     );
@@ -899,9 +910,35 @@ where
         .labelled("closure type")
         .boxed();
 
+    // A `type X` generic binder in type position, with optional `: A + B`
+    // bounds. Only meaningful in an impl subject pattern (`impl Option<type T>`,
+    // `impl Option<(type T, type U)>`), where it declares the impl's generics.
+    let type_binder = just(Token::Type)
+        .ignore_then(identifier.labelled("type binder name"))
+        .then(
+            just(Token::Op(":"))
+                .ignore_then(
+                    type_
+                        .clone()
+                        .separated_by(just(Token::Op("+")))
+                        .at_least(1)
+                        .collect::<Vec<_>>(),
+                )
+                .or_not()
+                .map(|bounds| bounds.unwrap_or_default()),
+        )
+        .map_with(|(name, bounds), e| (Node::TypeBinder(name, bounds), e.span()));
+
     // `local_type` (e.g. `FromFn<T>`) must come before the plain identifier so
-    // generic arguments are consumed as part of the type.
-    type_.define(choice((closure_type, local_type, local, tuple_type)));
+    // generic arguments are consumed as part of the type. `type_binder` is first
+    // so the `type` keyword isn't mistaken for an identifier.
+    type_.define(choice((
+        type_binder,
+        closure_type,
+        local_type,
+        local,
+        tuple_type,
+    )));
 
     statement
         .clone()

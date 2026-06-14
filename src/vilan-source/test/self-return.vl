@@ -1,0 +1,25 @@
+import std::print;
+
+trait Combine<B = Self> {
+	fun value_of(self): i32;
+	fun combine(self, b: B): Self;
+	fun combine_twice(self): Self {
+		self.combine(self).combine(self)
+	}
+}
+
+struct Counter { value: i32 }
+
+impl Counter with Combine {
+	fun value_of(self): i32 { self.value }
+	fun combine(self, b: Counter): Counter {
+		Counter { value = self.value + b.value }
+	}
+}
+
+fun main() {
+	let c = Counter { value = 5 };
+	// `combine_twice` returns `Self`; on a concrete `Counter` the result is a
+	// `Counter`, so `.value` (a concrete field) resolves.
+	print(c.combine_twice().value);
+}

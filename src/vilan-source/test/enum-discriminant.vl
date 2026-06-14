@@ -1,0 +1,30 @@
+import std::print;
+
+// A C-like enum: every variant is data-less and has an explicit discriminant, so
+// it lowers to its integer value rather than the `[index]` array form. Variants
+// then compare and equality-test as plain numbers, and `match` tests by value.
+enum Ordering {
+	Less = -1,
+	Equal = 0,
+	Greater = 1,
+}
+
+use Ordering::{ Less, Equal, Greater };
+
+fun describe(order: Ordering): str {
+	match order {
+		Less => "less",
+		Equal => "equal",
+		Greater => "greater",
+	}
+}
+
+fun main() {
+	print(Less);
+	print(Greater);
+	print(Less < Equal);
+	print(Greater < Equal);
+	print(Equal == Equal);
+	print(describe(Greater));
+	print(describe(Less));
+}

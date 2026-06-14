@@ -56,6 +56,8 @@ pub enum Expr<'src> {
     StructInitializer(Id, IndexMap<usize, Id>),
     Trait(Id),
     Tuple(Vec<Id>),
+    // A unary prefix operator and its operand. Only `!` (logical not) exists.
+    Unary(char, Id),
     Variable(Id),
     Void,
 }
@@ -163,12 +165,20 @@ pub struct Enum<'src> {
     // The namespace scope holding the variant entities by name, reachable
     // through `use Enum::{ ... }` or `Enum::Variant`.
     pub variants_scope_id: Id,
+    // A C-like enum: every variant is data-less and at least one has an explicit
+    // discriminant (`enum Ordering { Less = -1, Equal = 0, Greater = 1 }`). Such
+    // enums lower to their integer discriminant rather than the `[index, ..data]`
+    // array form, so they compare and equality-test as plain numbers.
+    pub is_numeric: bool,
 }
 
 #[derive(Debug)]
 pub struct EnumVariantDeclaration<'src> {
     pub name: &'src str,
     pub data_type_ids: Vec<TypeId>,
+    // The variant's integer value, used for `is_numeric` enums: the explicit
+    // discriminant, or the previous variant's value plus one (C-style), from 0.
+    pub discriminant: i64,
 }
 
 // A match pattern as walked, with variant names not yet resolved.
@@ -204,6 +214,10 @@ struct PreppedIs<'src> {
 pub struct Implementation<'src> {
     pub subject: TypeId,
     pub declarations: IndexMap<&'src str, Id>,
+    /// The traits this impl provides (`impl Point with Eq + Ord` -> [Eq, Ord]),
+    /// resolved during the conformance check. Lets a method call on the subject
+    /// fall back to a trait's inherited default methods.
+    pub trait_ids: Vec<Id>,
 }
 
 #[derive(Debug)]
@@ -213,6 +227,10 @@ pub struct Trait<'src> {
     /// The members the trait declares, keyed by name. For a required method
     /// without a default body these point at signature-only functions.
     pub declarations: IndexMap<&'src str, Id>,
+    /// Supertraits (`trait Ord with Eq + PartialOrd`), as the type ids of the
+    /// `with` clause. A type implementing this trait must also satisfy these,
+    /// and their members are inherited for method resolution.
+    pub supertraits: Vec<TypeId>,
 }
 
 /// A pending `impl Subject with Trait` conformance check: the subject type
@@ -224,6 +242,9 @@ pub struct TraitImplCheck<'src> {
     pub scope_id: Id,
     pub declarations: IndexMap<&'src str, Id>,
     pub span: Span,
+    // Index into `implementations` of the impl this check belongs to, so the
+    // resolved trait id can be recorded back onto it.
+    pub implementation_index: usize,
 }
 
 #[derive(Debug)]
@@ -360,12 +381,22 @@ pub struct Analyzer<'src> {
     // recorded as `accessor_id -> (constraint_id, member_name)` so the
     // transformer can re-resolve them per monomorphized instantiation.
     generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
+    // Method calls (by call id) that must re-dispatch to the receiver's concrete
+    // type at codegen, by member name: a trait default called on a concrete value
+    // (`Some(type)`) — Gap E — or a `self`/trait-typed call inside a default body
+    // (`None`, dispatched on the type the default is being specialized for).
+    trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
     // All trait-bound type ids of a generic parameter (`T: A + B` -> [A, B]),
     // keyed by the parameter's constraint id (its first bound, which is its
     // `Type::Generic` identity). Stored unresolved (bounds resolve in `build()`,
     // not during the walk); member resolution on a `T`-typed value searches every
     // bound.
     generic_bounds: HashMap<TypeId, Vec<TypeId>>,
+    // For an impl whose subject is a generic application (`impl Option<(type T,
+    // type U)>`), the impl body scope -> (subject type id, the subject's walked
+    // generic arguments). Lets `self`'s variant patterns substitute the subject
+    // enum's declared parameters for these args.
+    impl_subject_args: HashMap<Id, (TypeId, Vec<TypeId>)>,
     implementations: Vec<Implementation<'src>>,
     module_id_by_name: HashMap<&'src str, Id>,
     modules: IndexMap<Id, Module<'src>>,
@@ -385,6 +416,20 @@ pub struct Analyzer<'src> {
     prepped_is: Vec<PreppedIs<'src>>,
     prepped_matches: Vec<PreppedMatch<'src>>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
+    // `for x in iterable` expressions, as (for-each id, iterable id), resolved
+    // after typing to decide native `for...of` vs the Iterator-protocol loop.
+    prepped_for_each: Vec<(Id, Id)>,
+    // For-each loops whose iterable is a custom iterator: the resolved `next`
+    // method id, so codegen emits a `next()`/`Some`-matching loop instead.
+    for_each_next: HashMap<Id, Id>,
+    // Arithmetic binary expressions (`a + b`), as (binary id, op, lhs id),
+    // resolved after typing to decide native JS arithmetic vs an operator-trait
+    // method call (`Add::add`, ...).
+    prepped_binary_ops: Vec<(Id, BinaryOp, Id)>,
+    // Arithmetic binary expressions whose left operand's type implements the
+    // matching operator trait: the resolved method id, so codegen emits
+    // `add(lhs, rhs)` instead of `lhs + rhs`.
+    binary_op_dispatch: HashMap<Id, Id>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers:
         Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
@@ -421,6 +466,25 @@ static EMPTY_SPAN: Span = Span {
 
 // Flattens an `import`/`use` tree into (path, leaf-name) pairs, e.g.
 // `a::{ b, c::d }` becomes `([a], b)` and `([a, c], d)`.
+/// Whether `op` is an arithmetic operator that a type can overload by
+/// implementing the corresponding `std::operators` trait.
+fn is_overloadable_operator(op: BinaryOp) -> bool {
+    operator_trait_method(op).is_some()
+}
+
+/// The `(trait name, method name)` an arithmetic operator dispatches to, e.g.
+/// `+` -> `("Add", "add")`. Returns `None` for comparison/logical operators,
+/// which are not overloadable.
+fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
+    match op {
+        BinaryOp::Add => Some(("Add", "add")),
+        BinaryOp::Sub => Some(("Sub", "sub")),
+        BinaryOp::Mul => Some(("Mul", "mul")),
+        BinaryOp::Div => Some(("Div", "div")),
+        _ => None,
+    }
+}
+
 fn flatten_namespace_branch<'src>(
     branch: &ImportBranch<'src>,
     path: Vec<&'src str>,
@@ -461,7 +525,9 @@ impl<'src> Analyzer<'src> {
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
             generic_static_accessors: HashMap::new(),
+            trait_method_dispatch: HashMap::new(),
             generic_bounds: HashMap::new(),
+            impl_subject_args: HashMap::new(),
             implementations: Vec::new(),
             module_id_by_name: HashMap::new(),
             modules: IndexMap::new(),
@@ -475,6 +541,10 @@ impl<'src> Analyzer<'src> {
             prepped_is: Vec::new(),
             prepped_matches: Vec::new(),
             prepped_method_calls: Vec::new(),
+            prepped_for_each: Vec::new(),
+            for_each_next: HashMap::new(),
+            prepped_binary_ops: Vec::new(),
+            binary_op_dispatch: HashMap::new(),
             prepped_static_accessors: Vec::new(),
             prepped_struct_initializers: Vec::new(),
             prepped_trait_impls: Vec::new(),
@@ -556,15 +626,95 @@ impl<'src> Analyzer<'src> {
             })
     }
 
+    /// Resolves the operator method for `op` on a value of `subject_type` — the
+    /// `add`/`sub`/`mul`/`div` declared by an `impl Subject with Add/...`. Used to
+    /// dispatch `a + b` to `Add::add(a, b)` when the left operand's type
+    /// overloads the operator; returns `None` (so codegen keeps native JS
+    /// arithmetic) for numbers and any type without the matching operator impl.
+    fn operator_method(&self, op: BinaryOp, subject_type: &Type) -> Option<Id> {
+        let (trait_name, method_name) = operator_trait_method(op)?;
+        self.implementations
+            .iter()
+            .filter(|implementation| {
+                self.compare_type(
+                    subject_type,
+                    &implementation.subject.get_type(self),
+                    &HashMap::new(),
+                )
+            })
+            .filter(|implementation| {
+                implementation.trait_ids.iter().any(|trait_id| {
+                    self.traits
+                        .get(trait_id)
+                        .map(|trait_| trait_.name == trait_name)
+                        .unwrap_or(false)
+                })
+            })
+            .find_map(|implementation| implementation.declarations.get(method_name).copied())
+    }
+
     /// Resolves a method `member_name` declared by `trait_id` — a default method
     /// or a signature-only requirement — callable on a `Self`-typed receiver.
     /// Used for abstract receivers: `Self` in a trait default method, a
-    /// trait-bounded generic, or a trait-typed value.
+    /// trait-bounded generic, or a trait-typed value. Searches the trait and its
+    /// supertraits, so e.g. a `T: Ord` value can call `eq` (from `PartialEq`).
     fn method_member_in_trait(&self, trait_id: Id, member_name: &str) -> Option<Id> {
-        self.traits
-            .get(&trait_id)
-            .and_then(|trait_| trait_.declarations.get(member_name).copied())
-            .filter(|member_id| self.is_self_method(*member_id))
+        self.trait_with_supertraits(trait_id)
+            .into_iter()
+            .find_map(|id| {
+                self.traits
+                    .get(&id)
+                    .and_then(|trait_| trait_.declarations.get(member_name).copied())
+                    .filter(|member_id| self.is_self_method(*member_id))
+            })
+    }
+
+    /// `trait_id` plus its transitive supertraits (each supertrait's `TypeId`
+    /// resolved to a trait id). A trait's full interface — for method resolution
+    /// and impl conformance — includes everything its supertraits declare.
+    fn trait_with_supertraits(&self, trait_id: Id) -> Vec<Id> {
+        let mut result = Vec::new();
+        let mut stack = vec![trait_id];
+        while let Some(id) = stack.pop() {
+            if result.contains(&id) {
+                continue;
+            }
+            result.push(id);
+            if let Some(trait_) = self.traits.get(&id) {
+                for supertrait_type_id in &trait_.supertraits {
+                    if let Type::Trait(super_id) = supertrait_type_id.get_type(self) {
+                        stack.push(super_id);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Resolves `member_name` as an inherited trait *default* method on a
+    /// concrete `subject_type` — one the type's `impl ... with Trait` doesn't
+    /// itself declare but a (super)trait provides with a body (Gap E). A
+    /// non-default requirement is never inherited (conformance forces the impl
+    /// to declare it, so `method_member_in_impls` finds it first).
+    fn method_member_in_inherited_defaults(
+        &self,
+        subject_type: &Type,
+        member_name: &str,
+    ) -> Option<Id> {
+        self.implementations
+            .iter()
+            .filter(|implementation| {
+                self.compare_type(
+                    subject_type,
+                    &implementation.subject.get_type(self),
+                    &HashMap::new(),
+                )
+            })
+            .flat_map(|implementation| implementation.trait_ids.iter().copied())
+            .find_map(|trait_id| {
+                let member_id = self.method_member_in_trait(trait_id, member_name)?;
+                self.member_has_default_body(member_id).then_some(member_id)
+            })
     }
 
     /// Whether a trait member has a source-provided body (a default method), so
@@ -686,26 +836,6 @@ impl<'src> Analyzer<'src> {
         }
     }
 
-    /// Registers a built-in scalar primitive as an empty `std` struct, recording
-    /// its id so literals and primitive names can resolve to it. Like `print`,
-    /// it is an externally-provided declaration with no user-written source.
-    fn register_primitive_struct(&mut self, name: &'static str) -> Id {
-        let id = self.new_entity_id();
-        self.structs.insert(
-            id,
-            Struct {
-                id,
-                name,
-                generic_parameter_constraint_ids: Vec::new(),
-                fields: Vec::new(),
-            },
-        );
-        self.expr_id_to_expr_map.insert(id, Expr::Struct(id));
-        self.reference_count.entry(id).or_insert(0);
-        self.primitive_struct_ids.insert(name, id);
-        id
-    }
-
     /// Resolves a name to its declaring entity by walking the scope chain,
     /// returning `None` if it is not in scope (callers turn that into a
     /// user-facing diagnostic). Resolved names are cached into the originating
@@ -734,33 +864,108 @@ impl<'src> Analyzer<'src> {
         let mut generic_parameter_constraint_ids = Vec::new();
         if let Some(generic_parameters) = generic_parameters {
             for parameter in &generic_parameters.0 {
-                // A parameter may carry several bounds (`T: A + B`). The first is
-                // its constraint id (its `Type::Generic` identity, used for
-                // substitution); all of them are recorded so member resolution on
-                // a `T`-typed value can search every bound. Defaults (`B = Self`)
-                // are accepted by the grammar but not yet applied.
-                let bound_type_ids: Vec<TypeId> = parameter
-                    .bounds
-                    .iter()
-                    .map(|bound| self.walk_type_node(bound, scope_id))
-                    .collect();
-                let constraint_type_id = bound_type_ids
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| Type::Any.get_type_id(self));
-                self.register_generic_parameter(parameter.name, constraint_type_id, scope_id);
-                // Record the bounds unresolved (trait references resolve in
-                // `build()`, not during this walk); only needed when there is more
-                // than one, since a single bound is recoverable from the
-                // constraint id itself.
-                if bound_type_ids.len() > 1 {
-                    self.generic_bounds
-                        .insert(constraint_type_id, bound_type_ids);
+                // A default (`B = Self`) supplies the type used when no argument
+                // is given: the parameter name resolves to the default type
+                // rather than to a fresh, unbounded generic.
+                if let Some(default) = &parameter.default {
+                    let default_type_id = self.walk_type_node(default, scope_id);
+                    self.register_defaulted_parameter(parameter.name, default_type_id, scope_id);
+                    generic_parameter_constraint_ids.push(default_type_id);
+                    continue;
                 }
+                let constraint_type_id =
+                    self.register_binder(parameter.name, &parameter.bounds, scope_id);
                 generic_parameter_constraint_ids.push(constraint_type_id);
             }
         }
         generic_parameter_constraint_ids
+    }
+
+    /// Registers one generic binder (a name with optional `: A + B` bounds) into
+    /// `scope_id`, returning its constraint id (its `Type::Generic` identity).
+    /// The first bound is the constraint; all bounds are recorded so member
+    /// resolution on a value of this type can search each.
+    fn register_binder(
+        &mut self,
+        name: &'src str,
+        bounds: &[Spanned<Node<'src>>],
+        scope_id: Id,
+    ) -> TypeId {
+        let bound_type_ids: Vec<TypeId> = bounds
+            .iter()
+            .map(|bound| self.walk_type_node(bound, scope_id))
+            .collect();
+        let constraint_type_id = bound_type_ids
+            .first()
+            .copied()
+            .unwrap_or_else(|| Type::Any.get_type_id(self));
+        self.register_generic_parameter(name, constraint_type_id, scope_id);
+        // Bounds resolve in `build()`, so they're stored unresolved; only needed
+        // when there is more than one (a single bound is recoverable from the
+        // constraint id itself).
+        if bound_type_ids.len() > 1 {
+            self.generic_bounds
+                .insert(constraint_type_id, bound_type_ids);
+        }
+        constraint_type_id
+    }
+
+    /// Registers every `type X` binder in an impl subject pattern as one of the
+    /// impl's generic parameters — at the top level (`impl type T`), in generic
+    /// arguments (`impl Option<type T>`), in tuples (`impl Option<(type T, type
+    /// U)>`), and nested (`impl Option<Result<type T, type E>>`).
+    fn register_subject_binders(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) {
+        match &node.0 {
+            Node::TypeBinder(name, bounds) => {
+                self.register_binder(name, bounds, scope_id);
+            }
+            Node::AccessorWithGenerics(_, generic_arguments) => {
+                for argument in &generic_arguments.0 {
+                    self.register_subject_binders(argument, scope_id);
+                }
+            }
+            Node::Tuple(items) => {
+                for item in items {
+                    self.register_subject_binders(item, scope_id);
+                }
+            }
+            Node::ClosureType(parameters, return_type) => {
+                for parameter in &parameters.0 {
+                    self.register_subject_binders(&parameter.1, scope_id);
+                }
+                if let Some(return_type) = return_type {
+                    self.register_subject_binders(return_type, scope_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The substitution mapping a subject enum's declared generic parameters to
+    /// the impl's concrete subject arguments, for `self`'s patterns inside an
+    /// `impl Enum<args>` — e.g. inside `impl Option<(T, U)>`, `Some`'s declared
+    /// payload (`Option`'s `T`) maps to the tuple `(T, U)`. Searches up the scope
+    /// chain for the enclosing impl; `None` unless the matched enum is its
+    /// subject (so a different enum's payloads are left untouched).
+    fn impl_subject_substitution(&self, scope_id: Id, enum_id: Id) -> Option<SubstitutionContext> {
+        let mut current = Some(scope_id);
+        while let Some(scope_id) = current {
+            if let Some((subject_type_id, arguments)) = self.impl_subject_args.get(&scope_id) {
+                if subject_type_id.get_type(self) != Type::Enum(enum_id) {
+                    return None;
+                }
+                let declared = &self.enums.get(&enum_id)?.generic_parameter_constraint_ids;
+                return Some(
+                    declared
+                        .iter()
+                        .copied()
+                        .zip(arguments.iter().copied())
+                        .collect(),
+                );
+            }
+            current = self.scopes.get(&scope_id).and_then(|scope| scope.parent_id);
+        }
+        None
     }
 
     /// The trait ids a generic parameter is bound by (`T: A + B` -> `[A, B]`),
@@ -799,6 +1004,25 @@ impl<'src> Analyzer<'src> {
             .insert(expr_id, Expr::Generic(constraint_type_id));
         self.expr_id_to_scope_id_map.insert(expr_id, scope_id);
         self.expr_id_to_type_id_map.insert(expr_id, type_id);
+        let scope = self.mut_scope_for_scope_id(scope_id);
+        scope.name_to_id_map.insert(name, expr_id);
+    }
+
+    /// Registers a generic parameter that has a default (`B = Self`). The name
+    /// resolves to the default's type, so a use of the parameter with no
+    /// explicit argument falls back to it. Marked `Expr::Generic` (like any
+    /// generic parameter) so it's still excluded from the scope's declarations.
+    fn register_defaulted_parameter(
+        &mut self,
+        name: &'src str,
+        default_type_id: TypeId,
+        scope_id: Id,
+    ) {
+        let expr_id = self.new_entity_id();
+        self.expr_id_to_expr_map
+            .insert(expr_id, Expr::Generic(default_type_id));
+        self.expr_id_to_type_id_map.insert(expr_id, default_type_id);
+        self.expr_id_to_scope_id_map.insert(expr_id, scope_id);
         let scope = self.mut_scope_for_scope_id(scope_id);
         scope.name_to_id_map.insert(name, expr_id);
     }
@@ -858,6 +1082,8 @@ impl<'src> Analyzer<'src> {
                 self.prepped_locals.push((id, name));
                 None
             }
+            // `type X` binders only appear in type position (impl subjects).
+            Node::TypeBinder(..) => Some(Expr::Error),
             Node::MemberAccessor(subject, member) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 match &member.0 {
@@ -948,10 +1174,10 @@ impl<'src> Analyzer<'src> {
                 let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
                 Some(Expr::For(condition_id, (ids, expr_id)))
             }
-            // NOTE: `for x in iterable` parses and walks (binding `x`, walking
-            // the iterable and body), but full `Iterable`-driven typing and
-            // lowering is not implemented yet — it currently lowers like an
-            // unconditioned loop. Not reached by the current reachable set.
+            // `for x in iterable` lowers to a native JS `for...of` (see
+            // `Expr::ForEach`); it iterates a JS-iterable (e.g. a `List`, which is
+            // an array). Iterating a custom `Iterator` (the trait protocol) is not
+            // supported yet — that needs trait dispatch.
             Node::ForIn(variable, iterable, body) => {
                 let iterable_id = self.walk_expr_node(iterable, scope_id);
                 let body_scope_id = self.create_owned_scope(Some(scope_id)).id;
@@ -986,6 +1212,9 @@ impl<'src> Analyzer<'src> {
                 });
                 let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
                 let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
+                // Decide native `for...of` vs the Iterator-protocol loop once the
+                // iterable's type is known (in `build`).
+                self.prepped_for_each.push((id, iterable_id));
                 Some(Expr::ForEach(iterable_id, item_id, (ids, expr_id)))
             }
             // `subject is pattern` — walk the subject and the pattern (binding
@@ -1010,9 +1239,9 @@ impl<'src> Analyzer<'src> {
                 None
             }
             // Only `!` exists today and yields `bool`; full lowering deferred.
-            Node::Unary(_operator, operand) => {
-                let _operand_id = self.walk_expr_node(operand, scope_id);
-                Some(Expr::Bool(true))
+            Node::Unary(operator, operand) => {
+                let operand_id = self.walk_expr_node(operand, scope_id);
+                Some(Expr::Unary(*operator, operand_id))
             }
             Node::Jump(target) => Some(Expr::Jump(target)),
             Node::If(if_) => {
@@ -1196,6 +1425,9 @@ impl<'src> Analyzer<'src> {
             Node::Binary(op, lhs, rhs) => {
                 let lhs_id = self.walk_expr_node(lhs, scope_id);
                 let rhs_id = self.walk_expr_node(rhs, scope_id);
+                if is_overloadable_operator(*op) {
+                    self.prepped_binary_ops.push((id, *op, lhs_id));
+                }
                 Some(Expr::Binary(*op, lhs_id, rhs_id))
             }
             Node::Let(name, type_, value, mutable) => {
@@ -1238,24 +1470,26 @@ impl<'src> Analyzer<'src> {
                     .push(VariableConstraint::from_walk(id, type_id, value_ids));
                 Some(Expr::Variable(id))
             }
-            Node::Assign(name, op, value) => {
+            Node::Assign(target, op, value) => {
                 let value_id = self.walk_expr_node(value, scope_id);
-                let target_id = self.new_entity_id();
-                self.prepped_locals.push((target_id, name));
-                self.expr_id_to_scope_id_map.insert(target_id, scope_id);
-                self.span_map.insert(target_id, &node.1);
-                // A compound assignment like `x += v` desugars to `x = x + v`.
+                // The target is an lvalue node — a local (`Accessor`) or a field
+                // place (`MemberAccessor`). Walking it yields an `Expr::Local`
+                // or, once resolved, an `Expr::Field`; the transformer renders
+                // either as the left side of a JS assignment.
+                let target_id = self.walk_expr_node(target, scope_id);
+                // A compound assignment like `x += v` desugars to `x = x + v`;
+                // the left operand re-reads the same place.
                 let stored_value_id = match op {
                     Some(op) => {
-                        let lhs_id = self.new_entity_id();
-                        self.prepped_locals.push((lhs_id, name));
-                        self.expr_id_to_scope_id_map.insert(lhs_id, scope_id);
-                        self.span_map.insert(lhs_id, &node.1);
+                        let lhs_id = self.walk_expr_node(target, scope_id);
                         let binary_id = self.new_entity_id();
                         self.expr_id_to_expr_map
                             .insert(binary_id, Expr::Binary(*op, lhs_id, value_id));
                         self.expr_id_to_scope_id_map.insert(binary_id, scope_id);
                         self.span_map.insert(binary_id, &node.1);
+                        if is_overloadable_operator(*op) {
+                            self.prepped_binary_ops.push((binary_id, *op, lhs_id));
+                        }
                         binary_id
                     }
                     None => value_id,
@@ -1318,14 +1552,25 @@ impl<'src> Analyzer<'src> {
                 let variants_scope = self.create_scope(None);
                 let variants_scope_id = self.push_scope(variants_scope);
                 let mut variant_declarations = Vec::new();
+                // C-style discriminants: each unspecified variant continues from
+                // the previous value plus one, starting at 0. The enum is numeric
+                // only if every variant is data-less and one is explicit.
+                let mut next_discriminant: i64 = 0;
+                let mut all_data_less = true;
+                let mut any_explicit_discriminant = false;
                 for (variant_index, variant) in variants.0.iter().enumerate() {
                     let variant_name = variant.0.0;
-                    let data_type_ids = variant
+                    let data_type_ids: Vec<TypeId> = variant
                         .0
                         .1
                         .iter()
                         .map(|data_type| self.walk_type_node(data_type, body_scope_id))
                         .collect();
+                    all_data_less &= data_type_ids.is_empty();
+                    let explicit_discriminant = variant.0.2;
+                    any_explicit_discriminant |= explicit_discriminant.is_some();
+                    let discriminant = explicit_discriminant.unwrap_or(next_discriminant);
+                    next_discriminant = discriminant + 1;
                     let variant_id = self.new_entity_id();
                     self.expr_id_to_expr_map
                         .insert(variant_id, Expr::EnumVariant(id, variant_index));
@@ -1339,6 +1584,7 @@ impl<'src> Analyzer<'src> {
                     variant_declarations.push(EnumVariantDeclaration {
                         name: variant_name,
                         data_type_ids,
+                        discriminant,
                     });
                 }
                 self.enums.insert(
@@ -1349,6 +1595,7 @@ impl<'src> Analyzer<'src> {
                         generic_parameter_constraint_ids,
                         variants: variant_declarations,
                         variants_scope_id,
+                        is_numeric: all_data_less && any_explicit_discriminant,
                     },
                 );
                 Some(Expr::Enum(id))
@@ -1416,21 +1663,38 @@ impl<'src> Analyzer<'src> {
                     ));
                 None
             }
-            Node::Impl(subject, generic_parameters, traits, body) => {
+            Node::Impl(subject, traits, body) => {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
-                // The impl's generic parameters are declared by the `<...>` on
-                // the subject (`impl List<type T: str>`), each optionally
-                // bounded by a constraint. The trait clause (`with Iterator<T>`)
-                // only uses these parameters, so it does not declare any.
-                self.register_generic_parameters(generic_parameters, body_scope_id);
-                let subject = self.walk_type_node(subject, body_scope_id);
+                // The impl's generic parameters are the `type X` binders in the
+                // subject pattern (anywhere: `impl List<type T>`, `impl
+                // Option<(type T, type U)>`, or a blanket `impl type T`). Register
+                // them before walking the subject so they resolve.
+                self.register_subject_binders(subject, body_scope_id);
+                let subject_type_id = self.walk_type_node(subject, body_scope_id);
                 // Within an `impl`, `Self` refers to the subject type.
-                self.register_self_type(body_scope_id, subject);
+                self.register_self_type(body_scope_id, subject_type_id);
+                // Record the subject's generic arguments (the `<...>` on the head)
+                // so `self`'s variant patterns substitute the enum/struct's
+                // declared parameters for these args — e.g. `Some` on a
+                // `Option<(T, U)>` subject has payload `(T, U)`, not the abstract
+                // `T` of `enum Option<T>`.
+                if let Node::AccessorWithGenerics(_, generic_arguments) = &subject.0 {
+                    let argument_type_ids: Vec<TypeId> = generic_arguments
+                        .0
+                        .iter()
+                        .map(|argument| self.walk_type_node(argument, body_scope_id))
+                        .collect();
+                    self.impl_subject_args
+                        .insert(body_scope_id, (subject_type_id, argument_type_ids));
+                }
+                let subject = subject_type_id;
                 self.walk_expr_nodes(&body.0, body_scope_id);
                 let declarations = self.collect_declarations(body_scope_id);
+                let implementation_index = self.implementations.len();
                 // `impl Subject with A + B` must satisfy each trait; record a
                 // conformance check per trait to run once declarations are known.
+                // The check also resolves the trait id back onto the impl.
                 for trait_ in traits {
                     let trait_name = match &trait_.0 {
                         Node::Accessor(name) | Node::AccessorWithGenerics(name, _) => Some(*name),
@@ -1443,17 +1707,19 @@ impl<'src> Analyzer<'src> {
                             scope_id,
                             declarations: declarations.clone(),
                             span: trait_.1,
+                            implementation_index,
                         });
                     }
                 }
                 self.implementations.push(Implementation {
                     subject,
                     declarations,
+                    trait_ids: Vec::new(),
                 });
 
                 Some(Expr::Impl(id))
             }
-            Node::Trait(name, generic_parameters, _supertraits, body) => {
+            Node::Trait(name, generic_parameters, supertraits, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -1465,6 +1731,12 @@ impl<'src> Analyzer<'src> {
                 // calls against this trait's own declarations.
                 let self_type_id = Type::Trait(id).get_type_id(self);
                 self.register_self_type(body_scope_id, self_type_id);
+                // Supertraits are resolved in the body scope so their generic
+                // arguments (`PartialEq<B>`) see the trait's parameters.
+                let supertraits = supertraits
+                    .iter()
+                    .map(|supertrait| self.walk_type_node(supertrait, body_scope_id))
+                    .collect();
                 // Bodyless methods are legitimate requirements inside a trait.
                 let was_walking_trait_body = self.walking_trait_body;
                 self.walking_trait_body = true;
@@ -1477,6 +1749,7 @@ impl<'src> Analyzer<'src> {
                         id,
                         name,
                         declarations,
+                        supertraits,
                     },
                 );
                 Some(Expr::Trait(id))
@@ -1694,9 +1967,24 @@ impl<'src> Analyzer<'src> {
                         return None;
                     }
                 }
-                let data_type_ids = self.enums.get(&enum_id).unwrap().variants[variant_index]
+                let mut data_type_ids = self.enums.get(&enum_id).unwrap().variants[variant_index]
                     .data_type_ids
                     .clone();
+                // When matching `self` inside an `impl Enum<args>`, substitute the
+                // enum's declared parameters for the impl's concrete subject args,
+                // so e.g. `Some`'s payload on a `Option<(T, U)>` subject is the
+                // tuple `(T, U)` and `Some((let x, let y))` binds `x: T`, `y: U`.
+                if let Some(substitution) = self.impl_subject_substitution(lookup_scope_id, enum_id)
+                {
+                    data_type_ids = data_type_ids
+                        .iter()
+                        .map(|data_type_id| {
+                            let substituted =
+                                self.substitute_type(&data_type_id.get_type(self), &substitution);
+                            substituted.get_type_id(self)
+                        })
+                        .collect();
+                }
                 let payload_patterns: &[WalkPattern] = payload.as_deref().unwrap_or(&[]);
                 if payload_patterns.len() != data_type_ids.len() {
                     self.diagnostics.push(Error {
@@ -1774,6 +2062,13 @@ impl<'src> Analyzer<'src> {
                     .push((type_id, name, scope_id, node.1));
                 None
             }
+            // A `type X` binder resolves to the generic it was registered as (by
+            // `register_subject_binders` before the subject is walked).
+            Node::TypeBinder(name, _bounds) => {
+                self.prepped_type_locals
+                    .push((type_id, name, scope_id, node.1));
+                None
+            }
             Node::StaticAccessor(subject, member_name) => {
                 let subject_type_id = self.walk_type_node(subject, scope_id);
                 self.prepped_type_static_accessors.push((
@@ -1833,11 +2128,28 @@ impl<'src> Analyzer<'src> {
         substitution_context: &SubstitutionContext,
         exprs_seen: &mut HashSet<Id>,
     ) -> Type {
+        // `exprs_seen` guards against infinite recursion through a genuine cycle
+        // (an expression whose type depends on itself). It tracks the current
+        // recursion *path*, not every expression ever visited: the id is removed
+        // again once this call returns, so a node shared by two sibling branches
+        // (a DAG, e.g. the same `Some` variant in `(Some(x), Some(y))`) is not
+        // wrongly treated as a cycle on the second visit.
         if exprs_seen.contains(&expr_id) {
             return Type::Unresolved;
         }
         exprs_seen.insert(expr_id);
+        let inferred = self.infer_type_path(expr_id, constraint, substitution_context, exprs_seen);
+        exprs_seen.remove(&expr_id);
+        inferred
+    }
 
+    fn infer_type_path(
+        &mut self,
+        expr_id: Id,
+        constraint: &Type,
+        substitution_context: &SubstitutionContext,
+        exprs_seen: &mut HashSet<Id>,
+    ) -> Type {
         if let Some(type_id) = self.expr_id_to_type_id_map.get(&expr_id) {
             return type_id.get_type(self);
         }
@@ -1868,6 +2180,11 @@ impl<'src> Analyzer<'src> {
             Expr::Bool(_) => self.bool_type(),
             // `subject is pattern` is a boolean test.
             Expr::Is(_, _) => self.bool_type(),
+            // `!x` (logical not) is a boolean.
+            Expr::Unary('!', _) => self.bool_type(),
+            Expr::Unary(_, operand_id) => {
+                self.infer_type_inner(*operand_id, &constraint, substitution_context, exprs_seen)
+            }
             Expr::String(_) => self.primitive_struct_type("str"),
             // A numeric literal's type comes from its suffix (`5u32`), then a
             // fractional part (`0.0` is a float), then the expected type
@@ -1951,13 +2268,15 @@ impl<'src> Analyzer<'src> {
             Expr::Call(id) => {
                 // The call may not have been wired up yet (its `FunctionCall`
                 // is recorded once the subject resolves). Defer until it is.
-                let (subject_id, generic_argument_ids) = match self.function_calls.get(id) {
-                    Some(function_call) => (
-                        function_call.subject_id,
-                        function_call.generic_argument_ids.clone(),
-                    ),
-                    None => return Type::Unresolved,
-                };
+                let (subject_id, generic_argument_ids, argument_ids) =
+                    match self.function_calls.get(id) {
+                        Some(function_call) => (
+                            function_call.subject_id,
+                            function_call.generic_argument_ids.clone(),
+                            function_call.argument_ids.clone(),
+                        ),
+                        None => return Type::Unresolved,
+                    };
                 let subject_type = self.infer_type_inner(
                     subject_id,
                     &Type::Unknown,
@@ -1991,10 +2310,15 @@ impl<'src> Analyzer<'src> {
                                 f.generic_parameter_constraint_ids.clone(),
                                 f.return_type_id,
                                 f.body.1,
+                                f.parameters.first().copied(),
                             )
                         });
-                        let Some((generic_constraint_ids, return_type_id, body_return_id)) =
-                            function
+                        let Some((
+                            generic_constraint_ids,
+                            return_type_id,
+                            body_return_id,
+                            self_parameter_id,
+                        )) = function
                         else {
                             // An external function: use its declared return type.
                             return self
@@ -2009,7 +2333,7 @@ impl<'src> Analyzer<'src> {
                                 substitution_context.insert(*constraint_id, *argument_id);
                             }
                         }
-                        match return_type_id {
+                        let return_type = match return_type_id {
                             Some(return_type_id) => {
                                 let return_type = return_type_id.get_type(self);
                                 self.substitute_type(&return_type, &substitution_context)
@@ -2020,7 +2344,37 @@ impl<'src> Analyzer<'src> {
                                 &substitution_context,
                                 exprs_seen,
                             ),
+                        };
+                        // Specialize a `Self` return. When a method's declared
+                        // return type is the same as its `self` parameter's type
+                        // — i.e. it returns `Self` — the call yields the
+                        // receiver's actual type. So a `Self`-returning trait
+                        // default called on a concrete value gives that concrete
+                        // type, not the abstract `Type::Trait` Self stands for.
+                        let returns_self = match (self_parameter_id, return_type_id) {
+                            (Some(self_parameter_id), Some(return_type_id)) => {
+                                let self_type = self
+                                    .parameters
+                                    .get(&self_parameter_id)
+                                    .map(|parameter| parameter.type_id.get_type(self));
+                                self_type == Some(return_type_id.get_type(self))
+                            }
+                            _ => false,
+                        };
+                        if returns_self {
+                            if let Some(receiver_id) = argument_ids.first().copied() {
+                                let receiver_type = self.infer_type_inner(
+                                    receiver_id,
+                                    &Type::Unknown,
+                                    &substitution_context,
+                                    exprs_seen,
+                                );
+                                if matches!(receiver_type, Type::Struct(_) | Type::Enum(_)) {
+                                    return receiver_type;
+                                }
+                            }
                         }
+                        return_type
                     }
                     x => panic!("type is not callable: {:?}", x),
                 }
@@ -2048,15 +2402,16 @@ impl<'src> Analyzer<'src> {
                 }
             }
             Expr::Generic(type_id) => type_id.get_type(self),
-            // Comparisons produce a `bool`; arithmetic produces the operand
-            // type (taken from the left-hand side).
+            // Comparisons and logical `&&` produce a `bool`; arithmetic produces
+            // the operand type (taken from the left-hand side).
             Expr::Binary(
                 BinaryOp::Eq
                 | BinaryOp::NotEq
                 | BinaryOp::Lt
                 | BinaryOp::Gt
                 | BinaryOp::LtEq
-                | BinaryOp::GtEq,
+                | BinaryOp::GtEq
+                | BinaryOp::And,
                 _,
                 _,
             ) => self.bool_type(),
@@ -2077,6 +2432,31 @@ impl<'src> Analyzer<'src> {
                     substitution_context,
                     exprs_seen,
                 )
+            }
+            // A value `if` (an `if`/`else` chain with a final `else`) has the
+            // type of its branches — take the first branch's trailing expression
+            // (the branches must agree). Without a final `else` it is a statement,
+            // so it is void.
+            Expr::If(branch) => {
+                fn has_final_else(branch: &ExprIfBranch) -> bool {
+                    match branch {
+                        ExprIfBranch::If(_, _, Some(next)) => has_final_else(next),
+                        ExprIfBranch::If(_, _, None) => false,
+                        ExprIfBranch::Else(_) => true,
+                    }
+                }
+                match branch {
+                    ExprIfBranch::If(_, (_, trailing), _) if has_final_else(branch) => {
+                        let trailing = *trailing;
+                        self.infer_type_inner(
+                            trailing,
+                            &constraint,
+                            substitution_context,
+                            exprs_seen,
+                        )
+                    }
+                    _ => Type::Void,
+                }
             }
             Expr::Closure(closure_id) => {
                 let closure = self.closures.get(closure_id).unwrap();
@@ -2275,78 +2655,111 @@ impl<'src> Analyzer<'src> {
         }
     }
 
-    fn build(&mut self) {
-        for (path, name, scope_id, span) in self.prepped_imports.clone() {
-            // A `self` leaf re-binds the namespace it sits in under its own name
-            // (e.g. `Option::{ self }` binds `Option`); otherwise the leaf is the
-            // final path segment and binds under its own name.
-            let (segments, bind_name): (Vec<&str>, &str) = if name == "self" {
-                match path.last() {
-                    Some(last) => (path.clone(), last),
-                    None => {
+    /// Attempts to resolve one `import`/`export import` and bind it into its
+    /// scope, returning whether it bound. A re-export can name an item another,
+    /// not-yet-resolved re-export will bind (`lib` re-exports from `io` via a
+    /// chain of relay modules), so a single failure is not final — the caller
+    /// retries to a fixpoint. `report` emits the diagnostic for a genuine
+    /// failure; during the fixpoint passes it is `false` (a miss just defers).
+    fn resolve_import(
+        &mut self,
+        path: &[&'src str],
+        name: &'src str,
+        scope_id: Id,
+        span: Span,
+        report: bool,
+    ) -> bool {
+        // A `self` leaf re-binds the namespace it sits in under its own name
+        // (e.g. `Option::{ self }` binds `Option`); otherwise the leaf is the
+        // final path segment and binds under its own name.
+        let (segments, bind_name): (Vec<&str>, &str) = if name == "self" {
+            match path.last().copied() {
+                Some(last) => (path.to_vec(), last),
+                None => {
+                    if report {
                         self.diagnostics.push(Error {
                             span,
                             msg: "`self` import has no enclosing namespace".to_string(),
                         });
-                        continue;
                     }
+                    return false;
                 }
-            } else {
-                let mut segments = path.clone();
-                segments.push(name);
-                (segments, name)
-            };
-            let mut segments = segments.into_iter();
-            let root = segments.next().unwrap();
-            let module_id = match self.module_id_by_name.get(root) {
-                Some(module_id) => *module_id,
-                None => {
+            }
+        } else {
+            let mut segments = path.to_vec();
+            segments.push(name);
+            (segments, name)
+        };
+        let mut segments = segments.into_iter();
+        let root = segments.next().unwrap();
+        let module_id = match self.module_id_by_name.get(root) {
+            Some(module_id) => *module_id,
+            None => {
+                if report {
                     self.diagnostics.push(Error {
                         span,
                         msg: format!("cannot find module '{}' to import", root),
                     });
-                    continue;
                 }
-            };
-            let mut target_id = module_id;
-            let mut namespace_scope_id = self.modules.get(&module_id).unwrap().body.1;
-            let mut unresolved = false;
-            for part in segments {
-                match self.try_get_expr_id_by_name(part, namespace_scope_id) {
-                    Some(id) => {
-                        target_id = id;
-                        // If this segment is itself a namespace — a module or an
-                        // enum (whose namespace holds its variants) — descend into
-                        // it so the next segment resolves there, e.g. `pkg::io::print`
-                        // or `std::option::Option::Some`.
-                        let sub_scope_id = match self.expr_id_to_expr_map.get(&id) {
-                            Some(Expr::Module(sub_module_id)) => {
-                                self.modules.get(sub_module_id).map(|module| module.body.1)
-                            }
-                            Some(Expr::Enum(enum_id)) => {
-                                self.enums.get(enum_id).map(|enum_| enum_.variants_scope_id)
-                            }
-                            _ => None,
-                        };
-                        if let Some(sub_scope_id) = sub_scope_id {
-                            namespace_scope_id = sub_scope_id;
+                return false;
+            }
+        };
+        let mut target_id = module_id;
+        let mut namespace_scope_id = self.modules.get(&module_id).unwrap().body.1;
+        for part in segments {
+            match self.try_get_expr_id_by_name(part, namespace_scope_id) {
+                Some(id) => {
+                    target_id = id;
+                    // If this segment is itself a namespace — a module or an
+                    // enum (whose namespace holds its variants) — descend into
+                    // it so the next segment resolves there, e.g. `pkg::io::print`
+                    // or `std::option::Option::Some`.
+                    let sub_scope_id = match self.expr_id_to_expr_map.get(&id) {
+                        Some(Expr::Module(sub_module_id)) => {
+                            self.modules.get(sub_module_id).map(|module| module.body.1)
                         }
+                        Some(Expr::Enum(enum_id)) => {
+                            self.enums.get(enum_id).map(|enum_| enum_.variants_scope_id)
+                        }
+                        _ => None,
+                    };
+                    if let Some(sub_scope_id) = sub_scope_id {
+                        namespace_scope_id = sub_scope_id;
                     }
-                    None => {
+                }
+                None => {
+                    if report {
                         self.diagnostics.push(Error {
                             span,
                             msg: format!("cannot find '{}' in the imported path", part),
                         });
-                        unresolved = true;
-                        break;
                     }
+                    return false;
                 }
             }
-            if unresolved {
-                continue;
+        }
+        let scope = self.mut_scope_for_scope_id(scope_id);
+        scope.name_to_id_map.insert(bind_name, target_id);
+        true
+    }
+
+    fn build(&mut self) {
+        // Resolve imports/re-exports to a fixpoint: a re-export may name an item
+        // bound by another re-export resolved in a later pass (a chain of relay
+        // modules), so keep retrying the unresolved ones until a pass binds
+        // nothing new, then report whatever genuinely could not be found.
+        let mut remaining = self.prepped_imports.clone();
+        loop {
+            let before = remaining.len();
+            remaining.retain(|(path, name, scope_id, span)| {
+                !self.resolve_import(path, name, *scope_id, *span, false)
+            });
+            if remaining.len() == before || remaining.is_empty() {
+                break;
             }
-            let scope = self.mut_scope_for_scope_id(scope_id);
-            scope.name_to_id_map.insert(bind_name, target_id);
+        }
+        for (path, name, scope_id, span) in remaining {
+            self.resolve_import(&path, name, scope_id, span, true);
         }
 
         // --- Resolve `use` statements ---
@@ -2687,21 +3100,34 @@ impl<'src> Analyzer<'src> {
             // Required members are the trait's signature-only declarations; a
             // member with a default body is inherited, so an impl need not
             // provide it.
-            let required: Vec<&'src str> = match self.traits.get(&trait_id) {
-                Some(trait_) => trait_
-                    .declarations
-                    .iter()
-                    .filter(|(_, member_id)| !self.member_has_default_body(**member_id))
-                    .map(|(name, _)| *name)
-                    .collect(),
-                None => {
-                    self.diagnostics.push(Error {
-                        span: check.span,
-                        msg: format!("'{}' is not a trait", check.trait_name),
-                    });
-                    continue;
-                }
-            };
+            if !self.traits.contains_key(&trait_id) {
+                self.diagnostics.push(Error {
+                    span: check.span,
+                    msg: format!("'{}' is not a trait", check.trait_name),
+                });
+                continue;
+            }
+            // Record the trait on its impl so method calls on the subject can
+            // fall back to the trait's inherited default methods.
+            if let Some(implementation) = self.implementations.get_mut(check.implementation_index) {
+                implementation.trait_ids.push(trait_id);
+            }
+            // Required members are the signature-only declarations of the trait
+            // AND its supertraits (a member with a default body is inherited, so
+            // an impl need not provide it). Implementing `X with Ord` thus
+            // requires the members of `Ord` plus `Eq`/`PartialOrd`/`PartialEq`.
+            let required: Vec<&'src str> = self
+                .trait_with_supertraits(trait_id)
+                .into_iter()
+                .filter_map(|id| self.traits.get(&id))
+                .flat_map(|trait_| {
+                    trait_
+                        .declarations
+                        .iter()
+                        .filter(|(_, member_id)| !self.member_has_default_body(**member_id))
+                        .map(|(name, _)| *name)
+                })
+                .collect();
             let subject_name = match check.subject_type_id.get_type(self) {
                 Type::Struct(struct_id) => self
                     .structs
@@ -3140,10 +3566,34 @@ impl<'src> Analyzer<'src> {
                     };
                     let lookup = match &subject_type {
                         Type::Struct(_) | Type::Enum(_) => {
-                            found(self.method_member_in_impls(&subject_type, member_name))
+                            match self.method_member_in_impls(&subject_type, member_name) {
+                                Some(member_id) => MethodLookup::Found(member_id),
+                                // Gap E: fall back to an inherited trait default,
+                                // re-dispatched to this concrete type at codegen.
+                                None => match self
+                                    .method_member_in_inherited_defaults(&subject_type, member_name)
+                                {
+                                    Some(member_id) => {
+                                        let receiver_type_id =
+                                            subject_type.clone().get_type_id(self);
+                                        self.trait_method_dispatch
+                                            .insert(id, (Some(receiver_type_id), member_name));
+                                        MethodLookup::Found(member_id)
+                                    }
+                                    None => MethodLookup::NoMethod,
+                                },
+                            }
                         }
                         Type::Trait(trait_id) => {
-                            found(self.method_member_in_trait(*trait_id, member_name))
+                            let member = self.method_member_in_trait(*trait_id, member_name);
+                            // Inside a trait default body `self`/`Self` is
+                            // `Type::Trait`; record the call so codegen re-dispatches
+                            // it to whatever concrete type the default is
+                            // specialized for.
+                            if member.is_some() {
+                                self.trait_method_dispatch.insert(id, (None, member_name));
+                            }
+                            found(member)
                         }
                         Type::Generic(constraint_id) => {
                             let bound_trait_ids = self.generic_bound_trait_ids(*constraint_id);
@@ -3652,6 +4102,32 @@ impl<'src> Analyzer<'src> {
             }
         }
 
+        // --- Resolve `for x in iterable` to the Iterator protocol where it
+        // applies --- a concrete iterable with a `next` method (a custom
+        // iterator) iterates by calling `next()` until `None`; anything else
+        // (e.g. a `List`) stays a native `for...of`.
+        for (for_each_id, iterable_id) in std::mem::take(&mut self.prepped_for_each) {
+            let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
+            if matches!(iterable_type, Type::Struct(_) | Type::Enum(_)) {
+                if let Some(next_id) = self.method_member_in_impls(&iterable_type, "next") {
+                    self.for_each_next.insert(for_each_id, next_id);
+                }
+            }
+        }
+
+        // --- Resolve operator overloading --- an arithmetic `a <op> b` whose
+        // left operand's type implements the matching operator trait
+        // (`impl T with Add` for `+`, ...) dispatches to that method; everything
+        // else (numbers, strings) keeps native JS arithmetic.
+        for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {
+            let lhs_type = self.infer_type(lhs_id, &Type::Unknown, &HashMap::new());
+            if matches!(lhs_type, Type::Struct(_) | Type::Enum(_)) {
+                if let Some(method_id) = self.operator_method(op, &lhs_type) {
+                    self.binary_op_dispatch.insert(binary_id, method_id);
+                }
+            }
+        }
+
         // --- Post-solve diagnostics ---
         for constraint in &self.struct_initializer_constraints {
             self.diagnostics.push(Error {
@@ -3846,11 +4322,16 @@ impl Type {
 pub struct Program<'src> {
     pub closures: IndexMap<Id, Closure>,
     pub diagnostics: Vec<Error>,
+    pub enums: IndexMap<Id, Enum<'src>>,
     pub entity_map: HashMap<Id, Expr<'src>>,
     pub entity_scope_map: HashMap<Id, Id>,
     pub function_calls: IndexMap<Id, FunctionCall>,
     pub functions: IndexMap<Id, Function<'src>>,
+    pub traits: IndexMap<Id, Trait<'src>>,
     pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
+    pub trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
+    pub for_each_next: HashMap<Id, Id>,
+    pub binary_op_dispatch: HashMap<Id, Id>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
     // The source `List` intrinsics (`list.vl`), special-cased in codegen
@@ -3938,19 +4419,11 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let mut analyzer = Analyzer::new();
     let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
-    // Scalar primitives are built-in structs, reachable as the bare `i32` (the
-    // prelude, here the global scope) and — since the module scopes below are
-    // children of the global scope — as `std::i32`.
-    // Scalar number/string primitives are migrated to source (`number.vl`,
-    // `string.vl`); `bool` is the source `enum bool` (captured below after
-    // `boolean.vl` loads). Only `null` remains hardcoded.
-    for name in ["null"] {
-        let id = analyzer.register_primitive_struct(name);
-        analyzer
-            .mut_scope_for_scope_id(global_scope_id)
-            .name_to_id_map
-            .insert(name, id);
-    }
+    // Every primitive is now migrated to source and captured after its module
+    // loads, reachable as the bare name (the prelude, here the global scope) and
+    // — since the module scopes below are children of the global scope — as
+    // `std::<name>`: scalars `str`/`i32`/... (`string.vl`/`number.vl`), `bool`
+    // (`boolean.vl`), `List` (`list.vl`), and `null` (`null.vl`).
 
     // `List` is the built-in growable array. It is migrated to source
     // (`list.vl`, an `external struct` with `external fun new`/`push`); the
@@ -4012,10 +4485,11 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // so its imports also seed the reachable set. Names that aren't modules
     // (e.g. the `print` in `std::print`) simply find no file and are skipped.
     to_load.extend(collect_module_refs(&nodes.0, "std"));
-    // `bool` and `List` are core primitives, so their (dependency-free) modules
-    // are always loaded even when not imported.
+    // `bool`, `List`, and `null` are core primitives, so their (dependency-free)
+    // modules are always loaded even when not imported.
     to_load.push("boolean");
     to_load.push("list");
+    to_load.push("null");
     while let Some(name) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
@@ -4075,6 +4549,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         ("u32", "number"),
         ("f64", "number"),
         ("BigInt", "number"),
+        ("null", "null"),
     ] {
         let id = module_scopes
             .get(module)
@@ -4143,11 +4618,16 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     Program {
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
+        enums: analyzer.enums,
         entity_map: analyzer.expr_id_to_expr_map,
         entity_scope_map: analyzer.expr_id_to_scope_id_map,
         function_calls: analyzer.function_calls,
         functions: analyzer.functions,
+        traits: analyzer.traits,
         generic_static_accessors: analyzer.generic_static_accessors,
+        trait_method_dispatch: analyzer.trait_method_dispatch,
+        for_each_next: analyzer.for_each_next,
+        binary_op_dispatch: analyzer.binary_op_dispatch,
         global_scope_id,
         implementations: analyzer.implementations,
         list_new_fn_id,
