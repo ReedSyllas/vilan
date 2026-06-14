@@ -1,0 +1,22 @@
+import std::print;
+
+// A list literal carries its element type (`[Point, Point]` is `List<Point>`),
+// so a `for`-loop binding is typed concretely and can answer method calls.
+struct Point { x: i32, y: i32 }
+
+impl Point {
+	fun sum(self): i32 {
+		self.x + self.y
+	}
+}
+
+fun main() {
+	let points = [Point { x = 1, y = 2 }, Point { x = 3, y = 4 }];
+	for point in points {
+		print(point.sum());
+	}
+	let numbers = [10, 20, 30];
+	for number in numbers {
+		print(number);
+	}
+}

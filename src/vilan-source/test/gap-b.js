@@ -1,4 +1,4 @@
-function b/*unzip*/(c) {
+function b(c) {
 	const d = c;
 	let e = null;
 	if (d[0] === 0) {
@@ -11,6 +11,6 @@ function b/*unzip*/(c) {
 	return e;
 }
 const a/*pair*/ = [ 0, [ 3, 7 ] ];
-console.log(b/*unzip*/(a/*pair*/));
+console.log(b(a/*pair*/));
 const h/*empty*/ = [ 1 ];
-console.log(b/*unzip*/(h/*empty*/));
+console.log(b(h/*empty*/));

@@ -12,6 +12,17 @@ pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
     Transformer::new(program, true).transform_entry()
 }
 
+/// Whether two types name the same nominal struct/enum, ignoring type
+/// arguments — so an `impl List<T>` (subject `List<Generic>`) matches a concrete
+/// `List<i32>` value when resolving a member to emit.
+fn nominal_matches(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Struct(a_id, _), Type::Struct(b_id, _)) => a_id == b_id,
+        (Type::Enum(a_id, _), Type::Enum(b_id, _)) => a_id == b_id,
+        _ => a == b,
+    }
+}
+
 /// Builds a binary expression, gluing adjacent string literals at compile time
 /// so concatenations like `"" + "Hello, " + "!"` collapse to a single literal.
 /// Because `+` is left-associative, folding here folds whole static runs.
@@ -389,6 +400,14 @@ impl<'src> Transformer<'src> {
                                 target_id,
                                 &function_call.generic_argument_ids,
                             );
+                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                        }
+                        // A method on a generic impl whose generics bind to
+                        // concrete types from the receiver (`xs.sum()` on
+                        // `List<i32>`) is emitted as a monomorphized instance.
+                        if let Some(substitution) = self.program.method_call_substitution.get(&id) {
+                            let substitution = substitution.clone();
+                            let name = self.emit_method_instance(target_id, &substitution);
                             return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
                         }
                         self.ensure_function_emitted(target_id);
@@ -1134,6 +1153,45 @@ impl<'src> Transformer<'src> {
         name
     }
 
+    /// Emits a monomorphized instance of a method whose impl generics are bound
+    /// to concrete types (`xs.sum()` on `List<i32>` -> `sum` specialized with
+    /// `T = i32`), keyed by (method, bound types) so each instantiation is
+    /// emitted once. While walking the body, `current_substitution` is the
+    /// binding, so `T::default()` and `T`-typed values resolve concretely.
+    fn emit_method_instance(
+        &mut self,
+        method_id: Id,
+        substitution: &HashMap<TypeId, TypeId>,
+    ) -> String {
+        // Resolve each bound type under the active substitution (so a nested
+        // instantiation composes) and order by constraint id for a stable key.
+        let mut entries: Vec<(TypeId, TypeId)> = substitution
+            .iter()
+            .map(|(constraint_id, type_id)| (*constraint_id, self.resolve_type_id(*type_id)))
+            .collect();
+        entries.sort_by_key(|(constraint_id, _)| constraint_id.0);
+        let key = (
+            method_id,
+            entries
+                .iter()
+                .map(|(_, type_id)| self.type_key(*type_id))
+                .collect::<Vec<_>>(),
+        );
+        if let Some(name) = self.instances.get(&key) {
+            return name.clone();
+        }
+        let substitution: HashMap<TypeId, TypeId> = entries.into_iter().collect();
+        let name = self.ng.next_name();
+        self.instances.insert(key, name.clone());
+        if let Some(function) = self.program.functions.get(&method_id) {
+            let saved = std::mem::replace(&mut self.current_substitution, substitution);
+            let js_function = self.function_with_name(function, name.clone());
+            self.current_substitution = saved;
+            self.monomorphized.push(js_function);
+        }
+        name
+    }
+
     /// Resolves a type id to its concrete form under the active substitution,
     /// following generic parameters to the type they're currently bound to.
     fn resolve_type_id(&self, type_id: TypeId) -> TypeId {
@@ -1160,7 +1218,7 @@ impl<'src> Transformer<'src> {
     fn resolve_member_on_type(&self, type_id: TypeId, member: &str) -> Option<Id> {
         let type_ = self.program.type_id_to_type_map.get(&type_id)?;
         match type_ {
-            Type::Struct(_) | Type::Enum(_) => self
+            Type::Struct(_, _) | Type::Enum(_, _) => self
                 .program
                 .implementations
                 .iter()
@@ -1168,7 +1226,7 @@ impl<'src> Transformer<'src> {
                     self.program
                         .type_id_to_type_map
                         .get(&implementation.subject)
-                        == Some(type_)
+                        .is_some_and(|subject| nominal_matches(subject, type_))
                 })
                 .find_map(|implementation| implementation.declarations.get(member).copied()),
             _ => None,

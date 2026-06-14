@@ -1,0 +1,20 @@
+import std::print;
+
+// `List<T>` tracks its element type, so `sum`/`product` monomorphize `T` from
+// the list and an empty list's `sum` resolves `T::default()` (0 for `i32`)
+// instead of producing `undefined`.
+fun main() {
+	mut numbers = List::new();
+	numbers.push(2);
+	numbers.push(3);
+	numbers.push(4);
+	print(numbers.sum());
+	print(numbers.product());
+
+	let empty: List<i32> = List::new();
+	print(empty.sum());
+
+	for n in numbers {
+		print(n);
+	}
+}

@@ -8,7 +8,7 @@ use crate::node::{
     BinaryOp, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
-use crate::type_::{PrimitiveType, SubstitutionContext, Type, TypeId};
+use crate::type_::{SubstitutionContext, Type, TypeId};
 use crate::util::plural;
 
 #[derive(Clone, Debug)]
@@ -419,6 +419,10 @@ pub struct Analyzer<'src> {
     // `for x in iterable` expressions, as (for-each id, iterable id), resolved
     // after typing to decide native `for...of` vs the Iterator-protocol loop.
     prepped_for_each: Vec<(Id, Id)>,
+    // `for x in iterable` element bindings, as (item variable id, iterable id),
+    // resolved in the constraint loop: the item takes the iterable's element
+    // type (`List<i32>` -> `i32`), so the body can use it concretely.
+    prepped_for_each_items: Vec<(Id, Id)>,
     // For-each loops whose iterable is a custom iterator: the resolved `next`
     // method id, so codegen emits a `next()`/`Some`-matching loop instead.
     for_each_next: HashMap<Id, Id>,
@@ -430,11 +434,20 @@ pub struct Analyzer<'src> {
     // matching operator trait: the resolved method id, so codegen emits
     // `add(lhs, rhs)` instead of `lhs + rhs`.
     binary_op_dispatch: HashMap<Id, Id>,
+    // Method calls (by call id) on a generic impl whose generic parameters bind
+    // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
+    // impl's `T` to `i32`): the resulting substitution, so codegen emits a
+    // monomorphized instance of the method body (e.g. `T::default()` -> `0`).
+    method_call_substitution: HashMap<Id, SubstitutionContext>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_struct_initializers:
         Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
-    prepped_type_locals: Vec<(TypeId, &'src str, Id, Span)>,
+    // Deferred named type references: (target type id, name, scope, span, the
+    // walked generic argument type ids). The arguments parameterize the resolved
+    // nominal type (`Option<i32>` -> `Enum(option_id, [i32])`); empty for a bare
+    // name or a generic parameter.
+    prepped_type_locals: Vec<(TypeId, &'src str, Id, Span, Vec<TypeId>)>,
     prepped_uses: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Span)>,
     reference_count: HashMap<Id, u32>,
@@ -542,9 +555,11 @@ impl<'src> Analyzer<'src> {
             prepped_matches: Vec::new(),
             prepped_method_calls: Vec::new(),
             prepped_for_each: Vec::new(),
+            prepped_for_each_items: Vec::new(),
             for_each_next: HashMap::new(),
             prepped_binary_ops: Vec::new(),
             binary_op_dispatch: HashMap::new(),
+            method_call_substitution: HashMap::new(),
             prepped_static_accessors: Vec::new(),
             prepped_struct_initializers: Vec::new(),
             prepped_trait_impls: Vec::new(),
@@ -608,6 +623,19 @@ impl<'src> Analyzer<'src> {
     /// Resolves a method `member_name` callable on a concrete `subject_type`
     /// (a struct or enum) by searching its implementations.
     fn method_member_in_impls(&self, subject_type: &Type, member_name: &str) -> Option<Id> {
+        self.method_member_impl_subject(subject_type, member_name)
+            .map(|(member_id, _)| member_id)
+    }
+
+    /// Like `method_member_in_impls`, but also returns the matching impl's
+    /// subject type id. Reconciling that subject against the concrete receiver
+    /// binds the impl's generic parameters (`impl List<T>` against `List<i32>`
+    /// binds `T = i32`), which monomorphizes the method body.
+    fn method_member_impl_subject(
+        &self,
+        subject_type: &Type,
+        member_name: &str,
+    ) -> Option<(Id, TypeId)> {
         self.implementations
             .iter()
             .filter(|implementation| {
@@ -618,11 +646,12 @@ impl<'src> Analyzer<'src> {
                 )
             })
             .find_map(|implementation| {
-                implementation
+                let member_id = implementation
                     .declarations
                     .get(member_name)
                     .copied()
-                    .filter(|member_id| self.is_self_method(*member_id))
+                    .filter(|member_id| self.is_self_method(*member_id))?;
+                Some((member_id, implementation.subject))
             })
     }
 
@@ -823,7 +852,7 @@ impl<'src> Analyzer<'src> {
     /// The type of a built-in scalar primitive (`i32`, `str`, ...), which is
     /// the `std` struct that now backs it.
     fn primitive_struct_type(&self, name: &str) -> Type {
-        Type::Struct(self.primitive_struct_ids[name])
+        Type::Struct(self.primitive_struct_ids[name], Vec::new())
     }
 
     /// The boolean type — the source-defined `enum bool`. Falls back to
@@ -831,7 +860,7 @@ impl<'src> Analyzer<'src> {
     /// solver defers rather than panicking.
     fn bool_type(&self) -> Type {
         match self.bool_enum_id {
-            Some(id) => Type::Enum(id),
+            Some(id) => Type::Enum(id, Vec::new()),
             None => Type::Unresolved,
         }
     }
@@ -951,7 +980,7 @@ impl<'src> Analyzer<'src> {
         let mut current = Some(scope_id);
         while let Some(scope_id) = current {
             if let Some((subject_type_id, arguments)) = self.impl_subject_args.get(&scope_id) {
-                if subject_type_id.get_type(self) != Type::Enum(enum_id) {
+                if !matches!(subject_type_id.get_type(self), Type::Enum(id, _) if id == enum_id) {
                     return None;
                 }
                 let declared = &self.enums.get(&enum_id)?.generic_parameter_constraint_ids;
@@ -1186,9 +1215,11 @@ impl<'src> Analyzer<'src> {
                 // type). `_` introduces no binding.
                 let item_id = (*variable != "_").then(|| {
                     let variable_id = self.new_entity_id();
-                    // A `List` value erases its element type, so the binding is
-                    // `any` — permissive rather than an unresolvable unknown.
-                    let element_type_id = Type::Any.get_type_id(self);
+                    // The binding starts `Unknown` (so a method call on it defers
+                    // rather than erroring) and is resolved to the iterable's
+                    // element type in the constraint loop, falling back to `any`
+                    // for an iterable whose element type can't be recovered.
+                    let element_type_id = Type::Unknown.get_type_id(self);
                     self.variables.insert(
                         variable_id,
                         Variable {
@@ -1208,6 +1239,7 @@ impl<'src> Analyzer<'src> {
                     self.mut_scope_for_scope_id(body_scope_id)
                         .name_to_id_map
                         .insert(variable, variable_id);
+                    self.prepped_for_each_items.push((variable_id, iterable_id));
                     variable_id
                 });
                 let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
@@ -1909,7 +1941,7 @@ impl<'src> Analyzer<'src> {
                     // `match flag { true => .., false => .. }` needs no imports.
                     None if matches!(
                         expected_type_id.get_type(self),
-                        Type::Enum(id) if Some(id) == self.bool_enum_id
+                        Type::Enum(id, _) if Some(id) == self.bool_enum_id
                     ) =>
                     {
                         match self.bool_enum_id.and_then(|bool_id| {
@@ -1949,9 +1981,9 @@ impl<'src> Analyzer<'src> {
                     }
                 };
                 match expected_type_id.get_type(self) {
-                    Type::Enum(expected_enum_id) if expected_enum_id == enum_id => {}
+                    Type::Enum(expected_enum_id, _) if expected_enum_id == enum_id => {}
                     Type::Unknown | Type::Any | Type::Generic(_) => {}
-                    Type::Enum(_) => {
+                    Type::Enum(_, _) => {
                         self.diagnostics.push(Error {
                             span,
                             msg: format!("variant '{}' does not belong to the matched enum", name),
@@ -2049,24 +2081,28 @@ impl<'src> Analyzer<'src> {
                 "void" => Some(Type::Void),
                 _ => {
                     self.prepped_type_locals
-                        .push((type_id, name, scope_id, node.1));
+                        .push((type_id, name, scope_id, node.1, Vec::new()));
                     None
                 }
             },
-            // Generic arguments are currently erased from the nominal type:
-            // `FromFn<T>` resolves to the same type as `FromFn`. The
-            // arguments still matter where they declare implicit impl
-            // generics or drive monomorphization at call sites.
-            Node::AccessorWithGenerics(name, _generic_arguments) => {
+            // `Option<i32>` resolves to the nominal type carrying its walked
+            // arguments (`Enum(option_id, [i32])`); the arguments parameterize the
+            // type, declare implicit impl generics, and drive monomorphization.
+            Node::AccessorWithGenerics(name, generic_arguments) => {
+                let argument_type_ids: Vec<TypeId> = generic_arguments
+                    .0
+                    .iter()
+                    .map(|argument| self.walk_type_node(argument, scope_id))
+                    .collect();
                 self.prepped_type_locals
-                    .push((type_id, name, scope_id, node.1));
+                    .push((type_id, name, scope_id, node.1, argument_type_ids));
                 None
             }
             // A `type X` binder resolves to the generic it was registered as (by
             // `register_subject_binders` before the subject is walked).
             Node::TypeBinder(name, _bounds) => {
                 self.prepped_type_locals
-                    .push((type_id, name, scope_id, node.1));
+                    .push((type_id, name, scope_id, node.1, Vec::new()));
                 None
             }
             Node::StaticAccessor(subject, member_name) => {
@@ -2105,6 +2141,81 @@ impl<'src> Analyzer<'src> {
         }
 
         type_id
+    }
+
+    /// The element type of an iterable, when recoverable: a `List<T>` yields
+    /// `T`. Returns `None` for an erased `List` (no arguments) or a non-list
+    /// iterable (e.g. a custom iterator), whose element the caller treats as
+    /// `any`.
+    fn iterable_element_type(&self, iterable_type: &Type) -> Option<Type> {
+        match iterable_type {
+            Type::Struct(id, arguments)
+                if Some(*id) == self.primitive_struct_ids.get("List").copied() =>
+            {
+                arguments
+                    .first()
+                    .map(|element_type_id| element_type_id.get_type(self))
+            }
+            _ => None,
+        }
+    }
+
+    /// The variant index a constructor subject refers to (`Some` -> 0), following
+    /// `Local` indirections to the `EnumVariant` entity.
+    fn enum_variant_index(&self, subject_id: Id) -> Option<usize> {
+        let mut id = subject_id;
+        loop {
+            match self.expr_id_to_expr_map.get(&id)? {
+                Expr::Local(target_id) => id = *target_id,
+                Expr::EnumVariant(_, variant_index) => return Some(*variant_index),
+                _ => return None,
+            }
+        }
+    }
+
+    /// Infers a generic enum's type arguments from a variant constructor's
+    /// arguments: the variant's declared payload types mention the enum's
+    /// parameters, so reconciling them against the actual argument types binds
+    /// each parameter (`Some(3)` — payload `T`, argument `i32` — gives `[i32]`,
+    /// i.e. `Option<i32>`). Returns `None` when the enum is non-generic, the
+    /// variant index is unknown, an argument is still unresolved, or some
+    /// parameter stays unbound (e.g. `None`) — leaving the arguments erased,
+    /// which matches any instantiation.
+    fn infer_enum_constructor_arguments(
+        &mut self,
+        subject_id: Id,
+        enum_id: Id,
+        argument_ids: &[Id],
+        substitution_context: &SubstitutionContext,
+        exprs_seen: &mut HashSet<Id>,
+    ) -> Option<Vec<TypeId>> {
+        let variant_index = self.enum_variant_index(subject_id)?;
+        let enum_ = self.enums.get(&enum_id)?;
+        let generic_parameters = enum_.generic_parameter_constraint_ids.clone();
+        if generic_parameters.is_empty() {
+            return None;
+        }
+        let data_type_ids = enum_.variants.get(variant_index)?.data_type_ids.clone();
+        let mut bindings: SubstitutionContext = HashMap::new();
+        for (data_type_id, argument_id) in data_type_ids.iter().zip(argument_ids.iter()) {
+            let data_type = data_type_id.get_type(self);
+            let argument_type =
+                self.infer_type_inner(*argument_id, &data_type, substitution_context, exprs_seen);
+            if matches!(argument_type, Type::Unresolved) {
+                return None;
+            }
+            if let Some((_, new_bindings)) =
+                self.reconcile_type(&data_type, &argument_type, &bindings)
+            {
+                bindings.extend(new_bindings);
+            }
+        }
+        // Only commit when every parameter is bound; a partial inference keeps
+        // the arguments erased rather than inventing placeholders.
+        generic_parameters
+            .iter()
+            .map(|constraint_id| bindings.get(constraint_id).copied())
+            .collect()
     }
 
     fn infer_type(
@@ -2200,16 +2311,18 @@ impl<'src> Analyzer<'src> {
                             "f64"
                         } else {
                             match &constraint {
-                                Type::Struct(id) if *id == self.primitive_struct_ids["f64"] => {
+                                Type::Struct(id, _) if *id == self.primitive_struct_ids["f64"] => {
                                     "f64"
                                 }
-                                Type::Struct(id) if *id == self.primitive_struct_ids["u32"] => {
+                                Type::Struct(id, _) if *id == self.primitive_struct_ids["u32"] => {
                                     "u32"
                                 }
-                                Type::Struct(id) if *id == self.primitive_struct_ids["i32"] => {
+                                Type::Struct(id, _) if *id == self.primitive_struct_ids["i32"] => {
                                     "i32"
                                 }
-                                Type::Struct(id) if *id == self.primitive_struct_ids["BigInt"] => {
+                                Type::Struct(id, _)
+                                    if *id == self.primitive_struct_ids["BigInt"] =>
+                                {
                                     "BigInt"
                                 }
                                 _ => "i32",
@@ -2219,7 +2332,43 @@ impl<'src> Analyzer<'src> {
                 };
                 self.primitive_struct_type(name)
             }
-            Expr::List(_) => Type::Primitive(PrimitiveType::List(Type::Void.get_type_id(self))),
+            Expr::List(item_ids) => {
+                // A list literal is the `List` struct parameterized by its
+                // unified element type (`[1, 2]` -> `List<i32>`); an empty list
+                // erases the element (matches any `List<T>`).
+                let item_ids = item_ids.clone();
+                let mut element_type = Type::Unknown;
+                for item_id in &item_ids {
+                    let item_type = self.infer_type_inner(
+                        *item_id,
+                        &element_type,
+                        substitution_context,
+                        exprs_seen,
+                    );
+                    if matches!(item_type, Type::Unresolved) {
+                        return Type::Unresolved;
+                    }
+                    element_type = match self.reconcile_type(
+                        &element_type,
+                        &item_type,
+                        substitution_context,
+                    ) {
+                        Some((unified, _)) => unified,
+                        None => element_type,
+                    };
+                }
+                match self.primitive_struct_ids.get("List").copied() {
+                    Some(list_id) => {
+                        let arguments = if matches!(element_type, Type::Unknown) {
+                            Vec::new()
+                        } else {
+                            vec![element_type.get_type_id(self)]
+                        };
+                        Type::Struct(list_id, arguments)
+                    }
+                    None => Type::Unknown,
+                }
+            }
             Expr::Tuple(item_ids) => {
                 let constraint_items = match constraint {
                     Type::Tuple(items) => items.clone(),
@@ -2257,12 +2406,12 @@ impl<'src> Analyzer<'src> {
                 }
             }
             Expr::Function(function_id) => Type::Function(*function_id),
-            Expr::Struct(struct_id) => Type::Struct(*struct_id),
-            Expr::Enum(enum_id) => Type::Enum(*enum_id),
+            Expr::Struct(struct_id) => Type::Struct(*struct_id, Vec::new()),
+            Expr::Enum(enum_id) => Type::Enum(*enum_id, Vec::new()),
             // A bare variant reference is a value of the enum (e.g. `None`); a
             // variant with data acts as a constructor whose call also yields
             // the enum.
-            Expr::EnumVariant(enum_id, _) => Type::Enum(*enum_id),
+            Expr::EnumVariant(enum_id, _) => Type::Enum(*enum_id, Vec::new()),
             Expr::Trait(trait_id) => Type::Trait(*trait_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
@@ -2292,8 +2441,22 @@ impl<'src> Analyzer<'src> {
                         self.substitute_type(&return_type, substitution_context)
                     }
                     // Calling a variant constructor (e.g. `Some(1)`) yields a
-                    // value of the enum.
-                    Type::Enum(enum_id) => Type::Enum(enum_id),
+                    // value of the enum, with the enum's type arguments inferred
+                    // from the constructor arguments (`Some(3)` -> `Option<i32>`).
+                    Type::Enum(enum_id, arguments) => {
+                        if arguments.is_empty() {
+                            let inferred = self.infer_enum_constructor_arguments(
+                                subject_id,
+                                enum_id,
+                                &argument_ids,
+                                substitution_context,
+                                exprs_seen,
+                            );
+                            Type::Enum(enum_id, inferred.unwrap_or(arguments))
+                        } else {
+                            Type::Enum(enum_id, arguments)
+                        }
+                    }
                     // A call's type is the callee's return type: its declared
                     // return type if annotated, otherwise the inferred type of
                     // its body — with the call's generic arguments substituted
@@ -2369,7 +2532,7 @@ impl<'src> Analyzer<'src> {
                                     &substitution_context,
                                     exprs_seen,
                                 );
-                                if matches!(receiver_type, Type::Struct(_) | Type::Enum(_)) {
+                                if matches!(receiver_type, Type::Struct(_, _) | Type::Enum(_, _)) {
                                     return receiver_type;
                                 }
                             }
@@ -2396,9 +2559,9 @@ impl<'src> Analyzer<'src> {
                 // Look up the actual struct definition ID from the mapping.
                 // If not found, defer and let downstream constraints handle it.
                 if let Some(&struct_def_id) = self.struct_initializer_to_def.get(initializer_id) {
-                    Type::Struct(struct_def_id)
+                    Type::Struct(struct_def_id, Vec::new())
                 } else {
-                    Type::Struct(*initializer_id)
+                    Type::Struct(*initializer_id, Vec::new())
                 }
             }
             Expr::Generic(type_id) => type_id.get_type(self),
@@ -2521,16 +2684,6 @@ impl<'src> Analyzer<'src> {
                     (b.clone(), bindings)
                 }
             },
-            (
-                Type::Primitive(PrimitiveType::List(l_id)),
-                Type::Primitive(PrimitiveType::List(r_id)),
-            ) => {
-                let l = l_id.get_type(self);
-                let r = r_id.get_type(self);
-                let (item_type, bindings) = self.reconcile_type(&l, &r, substitution_context)?;
-                let item_type_id = item_type.get_type_id(self);
-                (Type::Primitive(PrimitiveType::List(item_type_id)), bindings)
-            }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 let mut result_items = Vec::with_capacity(l_items.len());
                 let mut all_bindings = Vec::new();
@@ -2542,6 +2695,20 @@ impl<'src> Analyzer<'src> {
                     result_items.push(item.get_type_id(self));
                 }
                 (Type::Tuple(result_items), all_bindings)
+            }
+            // Same nominal type: unify argument-wise, keeping the instantiated
+            // side when the other is erased. Reconciling the arguments collects
+            // the generic bindings that drive element-type inference (e.g.
+            // `List<T>` against `List<i32>` binds `T = i32`).
+            (Type::Enum(l_id, l_arguments), Type::Enum(r_id, r_arguments)) if l_id == r_id => {
+                let (arguments, bindings) =
+                    self.reconcile_argument_types(l_arguments, r_arguments, substitution_context)?;
+                (Type::Enum(*l_id, arguments), bindings)
+            }
+            (Type::Struct(l_id, l_arguments), Type::Struct(r_id, r_arguments)) if l_id == r_id => {
+                let (arguments, bindings) =
+                    self.reconcile_argument_types(l_arguments, r_arguments, substitution_context)?;
+                (Type::Struct(*l_id, arguments), bindings)
             }
             (
                 Type::Closure(l_parameter_ids, l_return_id),
@@ -2580,6 +2747,37 @@ impl<'src> Analyzer<'src> {
         })
     }
 
+    /// Reconciles two nominal types' argument lists. An erased (empty) side
+    /// yields the other; otherwise the arguments unify pairwise, accumulating
+    /// the generic bindings discovered along the way.
+    fn reconcile_argument_types(
+        &mut self,
+        left: &[TypeId],
+        right: &[TypeId],
+        substitution_context: &SubstitutionContext,
+    ) -> Option<(Vec<TypeId>, Vec<(TypeId, TypeId)>)> {
+        if left.is_empty() {
+            return Some((right.to_vec(), Vec::new()));
+        }
+        if right.is_empty() {
+            return Some((left.to_vec(), Vec::new()));
+        }
+        if left.len() != right.len() {
+            return None;
+        }
+        let mut arguments = Vec::with_capacity(left.len());
+        let mut all_bindings = Vec::new();
+        for (left_id, right_id) in left.iter().zip(right.iter()) {
+            let left_type = left_id.get_type(self);
+            let right_type = right_id.get_type(self);
+            let (argument, bindings) =
+                self.reconcile_type(&left_type, &right_type, substitution_context)?;
+            all_bindings.extend(bindings);
+            arguments.push(argument.get_type_id(self));
+        }
+        Some((arguments, all_bindings))
+    }
+
     fn compare_type(&self, a: &Type, b: &Type, substitution_context: &SubstitutionContext) -> bool {
         match (a, b) {
             (Type::Unknown, _) | (_, Type::Unknown) | (Type::Any, _) | (_, Type::Any) => true,
@@ -2598,14 +2796,6 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or_else(|| constraint_id.get_type(self));
                 return self.compare_type(a, &r, substitution_context);
             }
-            (
-                Type::Primitive(PrimitiveType::List(l_id)),
-                Type::Primitive(PrimitiveType::List(r_id)),
-            ) => {
-                let l = l_id.get_type(self);
-                let r = r_id.get_type(self);
-                self.compare_type(&l, &r, substitution_context)
-            }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 l_items
                     .iter()
@@ -2615,6 +2805,15 @@ impl<'src> Analyzer<'src> {
                         let r = r_item_id.get_type(self);
                         self.compare_type(&l, &r, substitution_context)
                     })
+            }
+            // Same nominal type: compatible when the arguments are (a side with
+            // no arguments is an erased/abstract `List`/`Option`, compatible with
+            // any instantiation).
+            (Type::Enum(l_id, l_arguments), Type::Enum(r_id, r_arguments)) if l_id == r_id => {
+                self.compare_argument_types(l_arguments, r_arguments, substitution_context)
+            }
+            (Type::Struct(l_id, l_arguments), Type::Struct(r_id, r_arguments)) if l_id == r_id => {
+                self.compare_argument_types(l_arguments, r_arguments, substitution_context)
             }
             (
                 Type::Closure(l_parameter_ids, l_return_id),
@@ -2639,10 +2838,40 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Compares two nominal types' argument lists. A side with no arguments is
+    /// erased (an abstract `List`/`Option`) and matches any instantiation;
+    /// otherwise the arguments must be pairwise compatible.
+    fn compare_argument_types(
+        &self,
+        left: &[TypeId],
+        right: &[TypeId],
+        substitution_context: &SubstitutionContext,
+    ) -> bool {
+        if left.is_empty() || right.is_empty() {
+            return true;
+        }
+        left.len() == right.len()
+            && left.iter().zip(right.iter()).all(|(left_id, right_id)| {
+                let left_type = left_id.get_type(self);
+                let right_type = right_id.get_type(self);
+                // A generic argument (an impl's type parameter, e.g. the `T` of
+                // `impl List<T: Add>`) is a hole to be bound, not a constraint to
+                // satisfy structurally — so it matches any concrete argument. The
+                // bound is enforced separately by member resolution.
+                matches!(left_type, Type::Generic(_))
+                    || matches!(right_type, Type::Generic(_))
+                    || self.compare_type(&left_type, &right_type, substitution_context)
+            })
+    }
+
     /// Resolves any generic type parameters in `type_` using the substitution
     /// context, e.g. turning the return type `T` of `default<T>` into `Id` for
     /// a call `default<Id>()`.
-    fn substitute_type(&self, type_: &Type, substitution_context: &SubstitutionContext) -> Type {
+    fn substitute_type(
+        &mut self,
+        type_: &Type,
+        substitution_context: &SubstitutionContext,
+    ) -> Type {
         match type_ {
             Type::Generic(constraint_id) => substitution_context
                 .get(constraint_id)
@@ -2651,8 +2880,41 @@ impl<'src> Analyzer<'src> {
                     self.substitute_type(&resolved, substitution_context)
                 })
                 .unwrap_or_else(|| type_.clone()),
+            // A nominal type substitutes its arguments (`Option<T>` -> `Option<i32>`
+            // when `T` is bound).
+            Type::Enum(id, arguments) => {
+                let arguments = arguments.clone();
+                Type::Enum(
+                    *id,
+                    self.substitute_argument_types(&arguments, substitution_context),
+                )
+            }
+            Type::Struct(id, arguments) => {
+                let arguments = arguments.clone();
+                Type::Struct(
+                    *id,
+                    self.substitute_argument_types(&arguments, substitution_context),
+                )
+            }
             _ => type_.clone(),
         }
+    }
+
+    /// Substitutes each argument type id through the context, re-interning the
+    /// results. Used for the arguments of a nominal `Enum`/`Struct` type.
+    fn substitute_argument_types(
+        &mut self,
+        arguments: &[TypeId],
+        substitution_context: &SubstitutionContext,
+    ) -> Vec<TypeId> {
+        arguments
+            .iter()
+            .map(|argument| {
+                let argument_type = argument.get_type(self);
+                let substituted = self.substitute_type(&argument_type, substitution_context);
+                substituted.get_type_id(self)
+            })
+            .collect()
     }
 
     /// Attempts to resolve one `import`/`export import` and bind it into its
@@ -2878,10 +3140,18 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (type_id, name, scope_id, span) in self.prepped_type_locals.clone() {
+        for (type_id, name, scope_id, span, argument_type_ids) in self.prepped_type_locals.clone() {
             match self.try_get_expr_id_by_name(name, scope_id) {
                 Some(subject_id) => {
                     let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                    // Attach the written generic arguments to the nominal type
+                    // (`Option<i32>` -> `Enum(option_id, [i32])`). A bare name
+                    // keeps whatever the reference resolved to.
+                    let subject_type = match (subject_type, argument_type_ids.is_empty()) {
+                        (Type::Enum(id, _), false) => Type::Enum(id, argument_type_ids),
+                        (Type::Struct(id, _), false) => Type::Struct(id, argument_type_ids),
+                        (other, _) => other,
+                    };
                     self.type_id_to_type_map.insert(type_id, subject_type);
                 }
                 None => {
@@ -2927,7 +3197,7 @@ impl<'src> Analyzer<'src> {
         for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
             let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             match subject_type {
-                Type::Struct(struct_id) => {
+                Type::Struct(struct_id, _) => {
                     let struct_ = self.structs.get(&struct_id).unwrap();
                     let struct_name = struct_.name;
                     let field_index = struct_
@@ -2970,9 +3240,9 @@ impl<'src> Analyzer<'src> {
                 // (`Iterator::from_fn`), or an enum (`Option::Some`): look the
                 // member up among the variants (for enums) and the matching
                 // implementations.
-                Type::Struct(_) | Type::Trait(_) | Type::Enum(_) => {
+                Type::Struct(_, _) | Type::Trait(_) | Type::Enum(_, _) => {
                     let variant_id = match &subject_type {
-                        Type::Enum(enum_id) => {
+                        Type::Enum(enum_id, _) => {
                             let variants_scope_id =
                                 self.enums.get(enum_id).unwrap().variants_scope_id;
                             self.scopes
@@ -3129,7 +3399,7 @@ impl<'src> Analyzer<'src> {
                 })
                 .collect();
             let subject_name = match check.subject_type_id.get_type(self) {
-                Type::Struct(struct_id) => self
+                Type::Struct(struct_id, _) => self
                     .structs
                     .get(&struct_id)
                     .map(|s| s.name)
@@ -3284,7 +3554,7 @@ impl<'src> Analyzer<'src> {
                                 self.pretty_print_type(&value_type, &substitution_context),
                             ),
                         });
-                        let type_id = Type::Struct(struct_id).get_type_id(self);
+                        let type_id = Type::Struct(struct_id, Vec::new()).get_type_id(self);
                         self.resolved_types.insert(initializer_id, type_id);
                         self.struct_initializer_to_def
                             .insert(initializer_id, struct_id);
@@ -3301,7 +3571,7 @@ impl<'src> Analyzer<'src> {
                 // Store the mapping from initializer to struct definition.
                 self.struct_initializer_to_def
                     .insert(initializer_id, struct_id);
-                let type_id = Type::Struct(struct_id).get_type_id(self);
+                let type_id = Type::Struct(struct_id, Vec::new()).get_type_id(self);
                 self.resolved_types.insert(initializer_id, type_id);
             }
             self.struct_initializer_constraints = unresolved_constraints;
@@ -3333,7 +3603,7 @@ impl<'src> Analyzer<'src> {
                         remaining_accessors.insert(id, constraint);
                         continue;
                     }
-                    Type::Struct(struct_id) => {
+                    Type::Struct(struct_id, _) => {
                         let struct_ = match self.structs.get(&struct_id) {
                             Some(s) => s,
                             None => {
@@ -3445,7 +3715,7 @@ impl<'src> Analyzer<'src> {
 
                 // Exhaustiveness: every variant must be covered unless a
                 // catch-all (`_` or a binding) is present.
-                if let Type::Enum(enum_id) = subject_type {
+                if let Type::Enum(enum_id, _) = subject_type {
                     let has_catch_all = resolved_legs.iter().any(|(pattern, _)| {
                         matches!(pattern, ExprPattern::Wildcard | ExprPattern::Binding(_))
                     });
@@ -3565,9 +3835,26 @@ impl<'src> Analyzer<'src> {
                         None => MethodLookup::NoMethod,
                     };
                     let lookup = match &subject_type {
-                        Type::Struct(_) | Type::Enum(_) => {
-                            match self.method_member_in_impls(&subject_type, member_name) {
-                                Some(member_id) => MethodLookup::Found(member_id),
+                        Type::Struct(_, _) | Type::Enum(_, _) => {
+                            match self.method_member_impl_subject(&subject_type, member_name) {
+                                Some((member_id, impl_subject_id)) => {
+                                    // Bind the impl's generic parameters from the
+                                    // receiver (`List<i32>` against the impl's
+                                    // `List<T>` binds `T = i32`) so the method body
+                                    // monomorphizes.
+                                    let impl_subject = impl_subject_id.get_type(self);
+                                    if let Some((_, bindings)) = self.reconcile_type(
+                                        &impl_subject,
+                                        &subject_type,
+                                        &HashMap::new(),
+                                    ) {
+                                        if !bindings.is_empty() {
+                                            self.method_call_substitution
+                                                .insert(id, bindings.into_iter().collect());
+                                        }
+                                    }
+                                    MethodLookup::Found(member_id)
+                                }
                                 // Gap E: fall back to an inherited trait default,
                                 // re-dispatched to this concrete type at codegen.
                                 None => match self
@@ -3658,6 +3945,37 @@ impl<'src> Analyzer<'src> {
                 }
                 self.prepped_method_calls = remaining_methods;
                 if !self.prepped_method_calls.is_empty() {
+                    progress = true;
+                }
+            }
+
+            // --- Resolve `for x in iterable` element bindings ---
+            // Once the iterable's type is known, the item takes its element type
+            // (`List<i32>` -> `i32`), falling back to `any` when the element type
+            // can't be recovered (an erased `List`, a custom iterator). Done in
+            // the loop so a method call on the item — deferred while the item is
+            // still `Unknown` — resolves once the element type lands.
+            if !self.prepped_for_each_items.is_empty() {
+                let mut remaining_items = Vec::new();
+                for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
+                    let iterable_type =
+                        self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
+                    if matches!(iterable_type, Type::Unresolved) {
+                        remaining_items.push((item_id, iterable_id));
+                        continue;
+                    }
+                    let element_type = self
+                        .iterable_element_type(&iterable_type)
+                        .unwrap_or(Type::Any);
+                    let element_type_id = element_type.get_type_id(self);
+                    if let Some(variable) = self.variables.get_mut(&item_id) {
+                        variable.type_id = element_type_id;
+                    }
+                    self.resolved_types.insert(item_id, element_type_id);
+                    progress = true;
+                }
+                self.prepped_for_each_items = remaining_items;
+                if !self.prepped_for_each_items.is_empty() {
                     progress = true;
                 }
             }
@@ -4108,7 +4426,7 @@ impl<'src> Analyzer<'src> {
         // (e.g. a `List`) stays a native `for...of`.
         for (for_each_id, iterable_id) in std::mem::take(&mut self.prepped_for_each) {
             let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
-            if matches!(iterable_type, Type::Struct(_) | Type::Enum(_)) {
+            if matches!(iterable_type, Type::Struct(_, _) | Type::Enum(_, _)) {
                 if let Some(next_id) = self.method_member_in_impls(&iterable_type, "next") {
                     self.for_each_next.insert(for_each_id, next_id);
                 }
@@ -4121,7 +4439,7 @@ impl<'src> Analyzer<'src> {
         // else (numbers, strings) keeps native JS arithmetic.
         for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {
             let lhs_type = self.infer_type(lhs_id, &Type::Unknown, &HashMap::new());
-            if matches!(lhs_type, Type::Struct(_) | Type::Enum(_)) {
+            if matches!(lhs_type, Type::Struct(_, _) | Type::Enum(_, _)) {
                 if let Some(method_id) = self.operator_method(op, &lhs_type) {
                     self.binary_op_dispatch.insert(binary_id, method_id);
                 }
@@ -4195,6 +4513,28 @@ impl<'src> Analyzer<'src> {
         buf
     }
 
+    /// Appends `<A, B>` to `buf` for a nominal type's arguments (nothing when
+    /// there are none), so `Option<i32>` reads as `enum Option<i32>`.
+    fn push_type_arguments(
+        &self,
+        buf: &mut String,
+        arguments: &[TypeId],
+        substitution: &SubstitutionContext,
+    ) {
+        if arguments.is_empty() {
+            return;
+        }
+        buf.push('<');
+        for (index, argument) in arguments.iter().enumerate() {
+            if index > 0 {
+                buf.push_str(", ");
+            }
+            let argument_type = argument.get_type(self);
+            self.pretty_print_type_inner(&argument_type, substitution, buf, 0);
+        }
+        buf.push('>');
+    }
+
     fn pretty_print_type_inner(
         &self,
         type_: &Type,
@@ -4238,7 +4578,7 @@ impl<'src> Analyzer<'src> {
                 buf.push(')');
             }
 
-            Type::Struct(id) => {
+            Type::Struct(id, arguments) => {
                 let struct_ = self.structs.get(id).unwrap();
                 // Built-in primitive structs read as plain types (`i32`), not
                 // `struct i32`, in diagnostics.
@@ -4251,6 +4591,7 @@ impl<'src> Analyzer<'src> {
                 } else {
                     buf.push_str(&format!("struct {}", struct_.name));
                 }
+                self.push_type_arguments(buf, arguments, substitution);
             }
 
             Type::Trait(id) => {
@@ -4258,9 +4599,10 @@ impl<'src> Analyzer<'src> {
                 buf.push_str(&format!("trait {}", trait_.name));
             }
 
-            Type::Enum(id) => {
+            Type::Enum(id, arguments) => {
                 let enum_ = self.enums.get(id).unwrap();
                 buf.push_str(&format!("enum {}", enum_.name));
+                self.push_type_arguments(buf, arguments, substitution);
             }
 
             Type::Module(id) => {
@@ -4280,14 +4622,6 @@ impl<'src> Analyzer<'src> {
                 buf.push_str("| ");
                 let return_type = return_id.get_type(self);
                 buf.push_str(&self.pretty_print_type(&return_type, substitution));
-            }
-
-            Type::Primitive(PrimitiveType::List(item_id)) => {
-                buf.push_str("type List<");
-                let item_type = item_id.get_type(self);
-                let item_str = self.pretty_print_type(&item_type, substitution);
-                buf.push_str(&item_str);
-                buf.push('>');
             }
 
             Type::Tuple(items) => {
@@ -4332,6 +4666,7 @@ pub struct Program<'src> {
     pub trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
     pub for_each_next: HashMap<Id, Id>,
     pub binary_op_dispatch: HashMap<Id, Id>,
+    pub method_call_substitution: HashMap<Id, SubstitutionContext>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
     // The source `List` intrinsics (`list.vl`), special-cased in codegen
@@ -4599,9 +4934,14 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // Find `List`'s `new`/`push` (special-cased by the transformer to `[]` /
     // `.push`) now that impl subjects have resolved.
     if let Some(list_struct_id) = list_struct_id {
-        let list_type = Type::Struct(list_struct_id);
         for implementation in &analyzer.implementations {
-            if analyzer.type_id_to_type_map.get(&implementation.subject) == Some(&list_type) {
+            // Match the `List` impl by nominal id, ignoring the subject's type
+            // arguments (`impl List<type T>` has subject `List<Generic>`).
+            let subject_is_list = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == list_struct_id
+            );
+            if subject_is_list {
                 list_new_fn_id = implementation
                     .declarations
                     .get("new")
@@ -4628,6 +4968,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         trait_method_dispatch: analyzer.trait_method_dispatch,
         for_each_next: analyzer.for_each_next,
         binary_op_dispatch: analyzer.binary_op_dispatch,
+        method_call_substitution: analyzer.method_call_substitution,
         global_scope_id,
         implementations: analyzer.implementations,
         list_new_fn_id,

@@ -1,4 +1,4 @@
-function c/*map*/(d, e) {
+function c(d, e) {
 	const f = d;
 	let g = null;
 	if (f[0] === 0) {
@@ -10,6 +10,6 @@ function c/*map*/(d, e) {
 	return g;
 }
 const a/*value*/ = [ 0, 5 ];
-console.log(c/*map*/(a/*value*/, (b) => {
+console.log(c(a/*value*/, (b) => {
 	return b * 6;
 }));

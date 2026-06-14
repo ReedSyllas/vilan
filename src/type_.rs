@@ -6,24 +6,21 @@ use crate::id::Id;
 pub enum Type {
     Any,
     Closure(Vec<TypeId>, TypeId),
-    Enum(Id),
+    // A nominal enum/struct and its type arguments (`Option<i32>` ->
+    // `Enum(option_id, [i32])`, `List<str>` -> `Struct(list_id, [str])`). The
+    // arguments are empty for a non-generic type, or where they are not (yet)
+    // known; member/variant resolution substitutes the type's declared
+    // parameters with them.
+    Enum(Id, Vec<TypeId>),
     Function(Id),
     Generic(TypeId),
     Module(Id),
-    Primitive(PrimitiveType),
-    Struct(Id),
+    Struct(Id, Vec<TypeId>),
     Trait(Id),
     Tuple(Vec<TypeId>),
     Unknown,
     Unresolved,
     Void,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PrimitiveType {
-    // The scalar primitives (`i32`, `str`, ...) are now built-in structs of
-    // the `std` package; `List` is the remaining parameterized container.
-    List(TypeId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
