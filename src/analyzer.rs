@@ -76,8 +76,10 @@ pub enum ExprPattern {
     Wildcard,
     // A capture binding the matched value to a variable entity.
     Binding(Id),
-    // A variant test by index, with payload sub-patterns.
-    Variant(usize, Vec<ExprPattern>),
+    // A variant test: the owning enum's id, the variant index, and payload
+    // sub-patterns. The enum id lets the transformer lower `bool` patterns to a
+    // native boolean comparison rather than the array discriminant form.
+    Variant(Id, usize, Vec<ExprPattern>),
     // A tuple destructure, matching each element positionally.
     Tuple(Vec<ExprPattern>),
 }
@@ -358,6 +360,10 @@ pub struct Analyzer<'src> {
     // The built-in `std` structs that back scalar primitives, keyed by name
     // (`i32`, `str`, ...). Used to type literals and resolve primitive names.
     primitive_struct_ids: HashMap<&'static str, Id>,
+    // The source-defined `enum bool` (from `std/boolean.vl`), captured after the
+    // module loads. `bool` literals, comparisons, and `is` tests all type as
+    // this enum; the transformer lowers it to a native JS boolean.
+    bool_enum_id: Option<Id>,
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
@@ -447,6 +453,7 @@ impl<'src> Analyzer<'src> {
             modules: IndexMap::new(),
             parameters: IndexMap::new(),
             primitive_struct_ids: HashMap::new(),
+            bool_enum_id: None,
             prepped_assignments: Vec::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
@@ -560,6 +567,16 @@ impl<'src> Analyzer<'src> {
     /// the `std` struct that now backs it.
     fn primitive_struct_type(&self, name: &str) -> Type {
         Type::Struct(self.primitive_struct_ids[name])
+    }
+
+    /// The boolean type — the source-defined `enum bool`. Falls back to
+    /// `Unresolved` if `boolean.vl` has not been captured yet, so the constraint
+    /// solver defers rather than panicking.
+    fn bool_type(&self) -> Type {
+        match self.bool_enum_id {
+            Some(id) => Type::Enum(id),
+            None => Type::Unresolved,
+        }
     }
 
     /// Registers a built-in scalar primitive as an empty `std` struct, recording
@@ -1463,6 +1480,33 @@ impl<'src> Analyzer<'src> {
                 let span = *span;
                 let entity = match self.try_get_expr_id_by_name(name, lookup_scope_id) {
                     Some(entity) => entity,
+                    // `true`/`false` are keywords, not names in scope, so they
+                    // never resolve by lookup. When the subject is a `bool`,
+                    // resolve them against the `bool` enum's variants directly so
+                    // `match flag { true => .., false => .. }` needs no imports.
+                    None if matches!(
+                        expected_type_id.get_type(self),
+                        Type::Enum(id) if Some(id) == self.bool_enum_id
+                    ) =>
+                    {
+                        match self.bool_enum_id.and_then(|bool_id| {
+                            let variants_scope_id = self.enums.get(&bool_id)?.variants_scope_id;
+                            self.scopes
+                                .get(&variants_scope_id)?
+                                .name_to_id_map
+                                .get(name)
+                                .copied()
+                        }) {
+                            Some(entity) => entity,
+                            None => {
+                                self.diagnostics.push(Error {
+                                    span,
+                                    msg: format!("cannot find '{}' in this scope", name),
+                                });
+                                return None;
+                            }
+                        }
+                    }
                     None => {
                         self.diagnostics.push(Error {
                             span,
@@ -1525,7 +1569,11 @@ impl<'src> Analyzer<'src> {
                         lookup_scope_id,
                     )?);
                 }
-                Some(ExprPattern::Variant(variant_index, resolved_payload))
+                Some(ExprPattern::Variant(
+                    enum_id,
+                    variant_index,
+                    resolved_payload,
+                ))
             }
             WalkPattern::Tuple(span, patterns) => {
                 // Element types come from the matched tuple type when known;
@@ -1667,9 +1715,9 @@ impl<'src> Analyzer<'src> {
 
         let inferred_type: Type = match expr {
             Expr::Null => self.primitive_struct_type("null"),
-            Expr::Bool(_) => self.primitive_struct_type("bool"),
+            Expr::Bool(_) => self.bool_type(),
             // `subject is pattern` is a boolean test.
-            Expr::Is(_, _) => self.primitive_struct_type("bool"),
+            Expr::Is(_, _) => self.bool_type(),
             Expr::String(_) => self.primitive_struct_type("str"),
             // A numeric literal's type comes from its suffix (`5u32`), then a
             // fractional part (`0.0` is a float), then the expected type
@@ -1861,7 +1909,7 @@ impl<'src> Analyzer<'src> {
                 | BinaryOp::GtEq,
                 _,
                 _,
-            ) => self.primitive_struct_type("bool"),
+            ) => self.bool_type(),
             Expr::Binary(_, lhs_id, _rhs_id) => {
                 let lhs =
                     self.infer_type_inner(*lhs_id, &constraint, substitution_context, exprs_seen);
@@ -2814,7 +2862,7 @@ impl<'src> Analyzer<'src> {
                         let covered = resolved_legs
                             .iter()
                             .filter_map(|(pattern, _)| match pattern {
-                                ExprPattern::Variant(variant_index, _) => Some(*variant_index),
+                                ExprPattern::Variant(_, variant_index, _) => Some(*variant_index),
                                 _ => None,
                             })
                             .collect::<HashSet<_>>();
@@ -3646,6 +3694,9 @@ pub struct Program<'src> {
     pub list_push_fn_id: Id,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
+    // The source `enum bool`; the transformer lowers its variants/patterns to
+    // native JS booleans rather than the array form used by other enums.
+    pub bool_enum_id: Option<Id>,
     pub module_id_by_name: HashMap<&'src str, Id>,
     pub modules: IndexMap<Id, Module<'src>>,
     pub reference_count: HashMap<Id, u32>,
@@ -3725,8 +3776,9 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // prelude, here the global scope) and — since the module scopes below are
     // children of the global scope — as `std::i32`.
     // Scalar number/string primitives are migrated to source (`number.vl`,
-    // `string.vl`); `bool` (an enum) and `null` stay hardcoded for now.
-    for name in ["bool", "null"] {
+    // `string.vl`); `bool` is the source `enum bool` (captured below after
+    // `boolean.vl` loads). Only `null` remains hardcoded.
+    for name in ["null"] {
         let id = analyzer.register_primitive_struct(name);
         analyzer
             .mut_scope_for_scope_id(global_scope_id)
@@ -3872,6 +3924,9 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // so its imports also seed the reachable set. Names that aren't modules
     // (e.g. the `print` in `std::print`) simply find no file and are skipped.
     to_load.extend(collect_module_refs(&nodes.0, "std"));
+    // `bool` is a core primitive, so `boolean.vl` is always loaded (it is
+    // dependency-free, so this pulls in nothing else).
+    to_load.push("boolean");
     while let Some(name) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
@@ -3945,6 +4000,20 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         }
     }
 
+    // Capture the source `enum bool` so boolean literals/comparisons type as it,
+    // and bind it into the global scope so bare `bool` annotations resolve.
+    if let Some(bool_id) = module_scopes
+        .get("boolean")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("bool").copied())
+    {
+        analyzer.bool_enum_id = Some(bool_id);
+        analyzer
+            .mut_scope_for_scope_id(global_scope_id)
+            .name_to_id_map
+            .insert("bool", bool_id);
+    }
+
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
     Program {
@@ -3960,6 +4029,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         list_new_fn_id,
         list_push_fn_id,
         panic_fn_id: analyzer.panic_fn_id,
+        bool_enum_id: analyzer.bool_enum_id,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,
         reference_count: analyzer.reference_count,

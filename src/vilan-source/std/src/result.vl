@@ -1,5 +1,3 @@
-import pkg::boolean::bool;
-
 enum Result<T, E> {
 	Ok(T),
 	Err(E),

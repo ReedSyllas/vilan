@@ -1,4 +1,3 @@
-import pkg::boolean::bool;
 import pkg::option::Option::{ self, Some };
 
 trait PartialEq<B = Self> {

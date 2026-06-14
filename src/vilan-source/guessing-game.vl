@@ -7,7 +7,7 @@ enum Signal {
 
 fun main() {
 	print("Welcome to the number guessing game!");
-	print("Type `quit` at any time to quit.");
+	print("Type 'quit' at any time to quit.");
 	print("Are you ready to play? Y/n");
 	for {
 		match scan().trim().to_lowercase_ascii() {

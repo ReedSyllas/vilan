@@ -244,9 +244,10 @@ impl<'src> Transformer<'src> {
                 self.function(function)
             }
             // An enum value is an array whose first element identifies the
-            // variant; a bare (data-less) variant is just `[index]`.
-            Expr::EnumVariant(_, variant_index) => {
-                js::Node::Array(vec![js::Node::Number(variant_index.to_string(), None)])
+            // variant; a bare (data-less) variant is just `[index]`. `bool` is
+            // the exception — it lowers to a native boolean.
+            Expr::EnumVariant(enum_id, variant_index) => {
+                self.variant_value(*enum_id, *variant_index, Vec::new())
             }
             Expr::Local(id) => {
                 // A capture from an `is` test aliases the subject's payload slot.
@@ -255,11 +256,10 @@ impl<'src> Transformer<'src> {
                 }
                 // A reference to a data-less variant (e.g. `None`) is the
                 // variant value itself, not a named binding.
-                if let Some(Expr::EnumVariant(_, variant_index)) = self.program.entity_map.get(id) {
-                    return Some(js::Node::Array(vec![js::Node::Number(
-                        variant_index.to_string(),
-                        None,
-                    )]));
+                if let Some(Expr::EnumVariant(enum_id, variant_index)) =
+                    self.program.entity_map.get(id)
+                {
+                    return Some(self.variant_value(*enum_id, *variant_index, Vec::new()));
                 }
                 js::Node::Local(self.ng.name_for(*id))
             }
@@ -307,13 +307,12 @@ impl<'src> Transformer<'src> {
                     Expr::Local(target_id) => {
                         let target_id = *target_id;
                         // A variant constructor call builds the enum value
-                        // directly: `[variant_index, ...data]`.
-                        if let Some(Expr::EnumVariant(_, variant_index)) =
+                        // directly: `[variant_index, ...data]` (or a native
+                        // boolean for `bool`).
+                        if let Some(Expr::EnumVariant(enum_id, variant_index)) =
                             self.program.entity_map.get(&target_id)
                         {
-                            let mut items = vec![js::Node::Number(variant_index.to_string(), None)];
-                            items.extend(args);
-                            return Some(js::Node::Array(items));
+                            return Some(self.variant_value(*enum_id, *variant_index, args));
                         }
                         if target_id == self.print_fn_id {
                             return Some(js::Node::Call(
@@ -667,6 +666,22 @@ impl<'src> Transformer<'src> {
         })
     }
 
+    /// The JS value for an enum variant. `bool` lowers to a native boolean
+    /// (`false`/`true`); every other enum is an array `[index, ...data]`.
+    fn variant_value(
+        &self,
+        enum_id: Id,
+        variant_index: usize,
+        data: Vec<js::Node<'src>>,
+    ) -> js::Node<'src> {
+        if Some(enum_id) == self.program.bool_enum_id {
+            return js::Node::Bool(variant_index == 1);
+        }
+        let mut items = vec![js::Node::Number(variant_index.to_string(), None)];
+        items.extend(data);
+        js::Node::Array(items)
+    }
+
     // Compiles a match pattern against the JS expression holding the value it
     // matches: variant tests are appended to `conditions` and capture
     // declarations to `bindings`.
@@ -684,7 +699,16 @@ impl<'src> Transformer<'src> {
             ExprPattern::Binding(capture_id) => {
                 self.is_bindings.insert(*capture_id, subject);
             }
-            ExprPattern::Variant(variant_index, payload) => {
+            ExprPattern::Variant(enum_id, variant_index, payload) => {
+                // `bool` lowers to a native boolean (see `compile_pattern`).
+                if Some(*enum_id) == self.program.bool_enum_id {
+                    conditions.push(js::Node::Binary(
+                        BinaryOp::Eq,
+                        Box::new(subject),
+                        Box::new(js::Node::Bool(*variant_index == 1)),
+                    ));
+                    return;
+                }
                 conditions.push(js::Node::Binary(
                     BinaryOp::Eq,
                     Box::new(js::Node::PropertyIndex(
@@ -740,7 +764,17 @@ impl<'src> Transformer<'src> {
                     js::Node::ConstVariable(variable)
                 });
             }
-            ExprPattern::Variant(variant_index, payload) => {
+            ExprPattern::Variant(enum_id, variant_index, payload) => {
+                // `bool` is lowered to a native JS boolean, so its variants test
+                // by value (`subject === true`) rather than by array discriminant.
+                if Some(*enum_id) == self.program.bool_enum_id {
+                    conditions.push(js::Node::Binary(
+                        BinaryOp::Eq,
+                        Box::new(subject),
+                        Box::new(js::Node::Bool(*variant_index == 1)),
+                    ));
+                    return;
+                }
                 conditions.push(js::Node::Binary(
                     BinaryOp::Eq,
                     Box::new(js::Node::PropertyIndex(

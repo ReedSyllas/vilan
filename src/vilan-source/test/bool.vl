@@ -1,0 +1,21 @@
+import std::print;
+
+// `bool` is the source-defined `enum bool { false, true }` lowered to a native
+// JS boolean: literals are `true`/`false`, comparisons emit `===`/`<`, `&&` is
+// native, and `match`/`is` on a bool test by value rather than array variant.
+fun describe(flag: bool): str {
+	match flag {
+		true => "yes",
+		false => "no",
+	}
+}
+
+fun main() {
+	let flag = true;
+	let computed = 3 < 5;
+	print(flag);
+	print(flag && computed);
+	print(describe(flag));
+	print(describe(9 > 5));
+	print(flag is true);
+}

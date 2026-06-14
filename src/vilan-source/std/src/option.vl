@@ -1,4 +1,3 @@
-import pkg::boolean::bool;
 import pkg::compare::PartialEq;
 import pkg::default::Default;
 import pkg::io::panic;
@@ -202,6 +201,20 @@ impl Option<type T: PartialEq> with PartialEq {
 			(Some(let x), Some(let y)) => x == y,
 			(None, None) => true,
 			_ => false,
+		}
+	}
+}
+
+// `then_some` lives here rather than in `boolean.vl` so that the always-loaded
+// core `bool` module stays dependency-free (it would otherwise have to import
+// `Option`). An `impl` block does not need to share a module with the type it
+// extends.
+impl bool {
+	fun then_some<T>(self, value: T): Option<T> {
+		if self {
+			Some(value)
+		} else {
+			None
 		}
 	}
 }
