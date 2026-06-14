@@ -1,4 +1,4 @@
-use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Program};
+use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Intrinsic, Program};
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::BinaryOp;
@@ -10,6 +10,39 @@ use std::collections::HashMap;
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
     Transformer::new(program, true).transform_entry()
+}
+
+/// The JS source for a runtime helper an intrinsic call needs. `__scan` reads
+/// all of stdin once and hands out one line per call; `__parse_i32` returns the
+/// `Option<i32>` array form (`[0, n]` = `Some`, `[1]` = `None`).
+fn helper_source(name: &str) -> &'static str {
+    match name {
+        "__scan" => {
+            "let __vilan_stdin = null, __vilan_stdin_index = 0;\n\
+             function __scan() {\n\
+             \tif (__vilan_stdin === null) {\n\
+             \t\ttry {\n\
+             \t\t\t__vilan_stdin = require(\"fs\").readFileSync(0, \"utf-8\").split(\"\\n\");\n\
+             \t\t} catch (error) {\n\
+             \t\t\t__vilan_stdin = [];\n\
+             \t\t}\n\
+             \t}\n\
+             \treturn __vilan_stdin_index < __vilan_stdin.length ? __vilan_stdin[__vilan_stdin_index++] : \"\";\n\
+             }"
+        }
+        "__parse_i32" => {
+            "function __parse_i32(text) {\n\
+             \tconst value = Number.parseInt(text, 10);\n\
+             \treturn Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
+             }"
+        }
+        "__random_i32" => {
+            "function __random_i32(low, high) {\n\
+             \treturn Math.floor(Math.random() * (high - low + 1)) + low;\n\
+             }"
+        }
+        _ => "",
+    }
 }
 
 /// Whether two types name the same nominal struct/enum, ignoring type
@@ -62,6 +95,9 @@ struct Transformer<'src> {
     // Captures introduced by an `is` test, aliased to the subject's payload
     // slots (e.g. `t[1]`) since they can't be JS bindings in expression position.
     is_bindings: HashMap<Id, js::Node<'src>>,
+    // Runtime helper functions (`__scan`, `__parse_i32`, `__random_i32`) an
+    // intrinsic call needs; emitted as a prelude only when used.
+    used_helpers: std::collections::BTreeSet<&'static str>,
 }
 
 impl<'src> Transformer<'src> {
@@ -116,6 +152,7 @@ impl<'src> Transformer<'src> {
             default_instances: HashMap::new(),
             monomorphized: Vec::new(),
             is_bindings: HashMap::new(),
+            used_helpers: std::collections::BTreeSet::new(),
         }
     }
 
@@ -171,17 +208,27 @@ impl<'src> Transformer<'src> {
         // among declarations is irrelevant since JS hoists them.
         let t_instances = self.monomorphized.into_iter();
 
-        Ok(format!(
-            "{}{}",
-            self.formatter.file(
-                &t_functions
-                    .chain(t_instances)
-                    .chain(t_global_variables.into_iter())
-                    .chain(t_main_fn_body.into_iter())
-                    .collect::<Vec<_>>()
-            ),
-            self.formatter.line_break
-        ))
+        // Runtime helpers (`__scan`, ...) needed by intrinsic calls, as a prelude.
+        let prelude = self
+            .used_helpers
+            .iter()
+            .map(|name| helper_source(name))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let body = self.formatter.file(
+            &t_functions
+                .chain(t_instances)
+                .chain(t_global_variables.into_iter())
+                .chain(t_main_fn_body.into_iter())
+                .collect::<Vec<_>>(),
+        );
+        let output = if prelude.is_empty() {
+            body
+        } else {
+            format!("{}\n{}", prelude, body)
+        };
+        Ok(format!("{}{}", output, self.formatter.line_break))
     }
 
     fn find_global_variables(&self, globals: &Vec<Id>) -> Vec<Id> {
@@ -339,6 +386,11 @@ impl<'src> Transformer<'src> {
                 match subject {
                     Expr::Local(target_id) => {
                         let target_id = *target_id;
+                        // An external std intrinsic lowers to native JS or a
+                        // runtime helper.
+                        if let Some(intrinsic) = self.program.intrinsics.get(&target_id).copied() {
+                            return Some(self.emit_intrinsic(intrinsic, args));
+                        }
                         // A variant constructor call builds the enum value
                         // directly: `[variant_index, ...data]` (or a native
                         // boolean for `bool`).
@@ -724,16 +776,45 @@ impl<'src> Transformer<'src> {
                     Vec::new();
                 for leg in legs {
                     let mut leg_body = Vec::new();
-                    let mut conditions = Vec::new();
-                    self.compile_pattern(
-                        &leg.pattern,
-                        js::Node::Local(subject_name.clone()),
-                        &mut conditions,
-                        &mut leg_body,
-                    );
-                    let condition = conditions
-                        .into_iter()
-                        .reduce(|a, b| js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)));
+                    let subject = js::Node::Local(subject_name.clone());
+                    let condition = if leg.guard.is_none() {
+                        // No guard: captures are declared as `const`s in the body.
+                        let mut conditions = Vec::new();
+                        self.compile_pattern(&leg.pattern, subject, &mut conditions, &mut leg_body);
+                        conditions.into_iter().reduce(|a, b| {
+                            js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b))
+                        })
+                    } else {
+                        // Guarded: the guard reads the pattern's captures, so they
+                        // can't be `const`s declared inside the matched body — alias
+                        // them to the subject's slots (like an `is` test) for the
+                        // guard and body, then clear the aliases after this leg.
+                        let captures = Self::pattern_capture_ids(&leg.pattern);
+                        let mut conditions = Vec::new();
+                        self.compile_is_pattern(&leg.pattern, subject, &mut conditions);
+                        let mut guard_block = Vec::new();
+                        if let Some(guard) = self.walk_entity(leg.guard.unwrap(), &mut guard_block)
+                        {
+                            conditions.push(guard);
+                        }
+                        let condition = conditions.into_iter().reduce(|a, b| {
+                            js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b))
+                        });
+                        let value = self.walk_entity(leg.body, &mut leg_body);
+                        leg_body.push(js::Node::Assignment(
+                            Box::new(js::Node::Local(result_name.clone())),
+                            Box::new(value.unwrap_or(js::Node::Null)),
+                        ));
+                        for capture in captures {
+                            self.is_bindings.remove(&capture);
+                        }
+                        let is_catch_all = condition.is_none();
+                        compiled_legs.push((condition, leg_body));
+                        if is_catch_all {
+                            break;
+                        }
+                        continue;
+                    };
                     let value = self.walk_entity(leg.body, &mut leg_body);
                     leg_body.push(js::Node::Assignment(
                         Box::new(js::Node::Local(result_name.clone())),
@@ -913,7 +994,84 @@ impl<'src> Transformer<'src> {
                     self.compile_is_pattern(sub_pattern, element, conditions);
                 }
             }
+            ExprPattern::Literal(literal_id) => {
+                conditions.push(self.literal_equality(*literal_id, subject));
+            }
         }
+    }
+
+    /// Lowers an `external` std intrinsic call. Method intrinsics take the
+    /// receiver as the first argument; helper-backed ones record the helper so
+    /// it's emitted in the prelude.
+    fn emit_intrinsic(
+        &mut self,
+        intrinsic: Intrinsic,
+        args: Vec<js::Node<'src>>,
+    ) -> js::Node<'src> {
+        let method_call = |receiver: js::Node<'src>, method: &str| {
+            js::Node::Call(
+                Box::new(js::Node::Property(Box::new(receiver), method.to_string())),
+                Vec::new(),
+            )
+        };
+        let mut args = args.into_iter();
+        match intrinsic {
+            Intrinsic::Scan => {
+                self.used_helpers.insert("__scan");
+                js::Node::Call(Box::new(js::Node::Local("__scan".to_string())), Vec::new())
+            }
+            Intrinsic::StrTrim => method_call(args.next().unwrap_or(js::Node::Void), "trim"),
+            Intrinsic::StrToLowercaseAscii => {
+                method_call(args.next().unwrap_or(js::Node::Void), "toLowerCase")
+            }
+            Intrinsic::ParseI32 => {
+                self.used_helpers.insert("__parse_i32");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__parse_i32".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
+                )
+            }
+            Intrinsic::RandomI32 => {
+                self.used_helpers.insert("__random_i32");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__random_i32".to_string())),
+                    args.collect(),
+                )
+            }
+        }
+    }
+
+    /// `subject === <literal>` — the test a literal pattern compiles to.
+    fn literal_equality(&mut self, literal_id: Id, subject: js::Node<'src>) -> js::Node<'src> {
+        let mut throwaway = Vec::new();
+        let literal = self
+            .walk_entity(literal_id, &mut throwaway)
+            .unwrap_or(js::Node::Void);
+        js::Node::Binary(BinaryOp::Eq, Box::new(subject), Box::new(literal))
+    }
+
+    /// The capture variable ids a pattern binds, in order — so a guarded leg can
+    /// clear their subject-slot aliases after the leg is compiled.
+    fn pattern_capture_ids(pattern: &ExprPattern) -> Vec<Id> {
+        let mut ids = Vec::new();
+        fn collect(pattern: &ExprPattern, ids: &mut Vec<Id>) {
+            match pattern {
+                ExprPattern::Binding(capture_id) => ids.push(*capture_id),
+                ExprPattern::Variant(_, _, payload) => {
+                    for sub_pattern in payload {
+                        collect(sub_pattern, ids);
+                    }
+                }
+                ExprPattern::Tuple(elements) => {
+                    for sub_pattern in elements {
+                        collect(sub_pattern, ids);
+                    }
+                }
+                ExprPattern::Wildcard | ExprPattern::Literal(_) => {}
+            }
+        }
+        collect(pattern, &mut ids);
+        ids
     }
 
     fn compile_pattern(
@@ -978,6 +1136,9 @@ impl<'src> Transformer<'src> {
                     );
                     self.compile_pattern(sub_pattern, element, conditions, bindings);
                 }
+            }
+            ExprPattern::Literal(literal_id) => {
+                conditions.push(self.literal_equality(*literal_id, subject));
             }
         }
     }

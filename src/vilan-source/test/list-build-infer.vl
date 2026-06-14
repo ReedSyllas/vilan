@@ -1,0 +1,26 @@
+import std::print;
+
+// A list built with `List::new()` + `push` infers its element type from the
+// pushed values, so a `for`-loop binding is concrete and answers method calls.
+struct Point { x: i32, y: i32 }
+
+impl Point {
+	fun sum(self): i32 {
+		self.x + self.y
+	}
+}
+
+fun main() {
+	mut points = List::new();
+	points.push(Point { x = 1, y = 2 });
+	points.push(Point { x = 3, y = 4 });
+	for point in points {
+		print(point.sum());
+	}
+
+	mut numbers = List::new();
+	numbers.push(10);
+	numbers.push(20);
+	numbers.push(30);
+	print(numbers.sum());
+}

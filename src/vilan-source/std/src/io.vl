@@ -2,3 +2,5 @@
 external fun print(message: any): void;
 
 external fun panic(message: str): void;
+
+external fun scan(): str;

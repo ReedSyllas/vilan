@@ -71,6 +71,11 @@ pub enum ExprIfBranch {
 #[derive(Clone, Debug)]
 pub struct ExprMatchLeg {
     pub pattern: ExprPattern,
+    // An optional `if` guard, evaluated (with the pattern's captures in scope)
+    // after the pattern matches; the leg only fires when it holds. An or-pattern
+    // (`"y", "" =>`) is expanded to one leg per alternative, sharing the guard
+    // and body.
+    pub guard: Option<Id>,
     pub body: Id,
 }
 
@@ -87,6 +92,8 @@ pub enum ExprPattern {
     Variant(Id, usize, Vec<ExprPattern>),
     // A tuple destructure, matching each element positionally.
     Tuple(Vec<ExprPattern>),
+    // A literal value test: the matched value equals this literal expression.
+    Literal(Id),
 }
 
 #[derive(Debug)]
@@ -186,8 +193,20 @@ pub struct EnumVariantDeclaration<'src> {
 enum WalkPattern<'src> {
     Wildcard,
     Binding(Id),
-    Variant(&'src str, Span, Option<Vec<WalkPattern<'src>>>),
+    // A variant path (`["Some"]`, `["Signal", "Quit"]`) and optional payload.
+    Variant(Vec<&'src str>, Span, Option<Vec<WalkPattern<'src>>>),
     Tuple(Span, Vec<WalkPattern<'src>>),
+    // A literal value, walked to its expression id (for type-checking + codegen).
+    Literal(Id),
+}
+
+// A walked match leg: its patterns (an or-pattern when more than one), optional
+// guard, and body, each scoped to the leg's captures.
+#[derive(Debug)]
+struct WalkLeg<'src> {
+    patterns: Vec<WalkPattern<'src>>,
+    guard: Option<Id>,
+    body: Id,
 }
 
 // A match expression awaiting subject and pattern resolution.
@@ -196,7 +215,7 @@ struct PreppedMatch<'src> {
     id: Id,
     subject_id: Id,
     scope_id: Id,
-    legs: Vec<(WalkPattern<'src>, Id)>,
+    legs: Vec<WalkLeg<'src>>,
     span: Span,
 }
 
@@ -408,6 +427,14 @@ pub struct Analyzer<'src> {
     // module loads. `bool` literals, comparisons, and `is` tests all type as
     // this enum; the transformer lowers it to a native JS boolean.
     bool_enum_id: Option<Id>,
+    // A fresh element-type inference slot (an `Unknown` type id) per `List::new()`
+    // call, keyed by the call id so the slot stays stable across re-inference.
+    // `push` unifies it with the pushed value's type, so a built-up list's
+    // element is inferred (`List::new(); push(p: Point)` -> `List<Point>`).
+    list_element_slots: HashMap<Id, TypeId>,
+    // Pending element-slot unifications from `push` calls: (element slot, the
+    // pushed argument's expression id). Resolved in the constraint loop.
+    prepped_slot_unifications: Vec<(TypeId, Id)>,
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
@@ -547,6 +574,8 @@ impl<'src> Analyzer<'src> {
             parameters: IndexMap::new(),
             primitive_struct_ids: HashMap::new(),
             bool_enum_id: None,
+            list_element_slots: HashMap::new(),
+            prepped_slot_unifications: Vec::new(),
             prepped_assignments: Vec::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
@@ -880,6 +909,37 @@ impl<'src> Analyzer<'src> {
             scope.name_to_id_map.insert(name, subject_id);
             Some(subject_id)
         })
+    }
+
+    /// Resolves a name in type position, walking outward to the nearest binding
+    /// that denotes a *type* (a struct/enum/trait/module/generic, or `Self`),
+    /// skipping value bindings. So in `random.vl`'s `external fun i32(low: i32)`,
+    /// the parameter type `i32` resolves to the global `i32` struct rather than
+    /// the enclosing `i32` function that shares its name.
+    fn try_get_type_id_by_name(&self, name: &str, scope_id: Id) -> Option<Id> {
+        let mut current = Some(scope_id);
+        while let Some(scope_id) = current {
+            let scope = self.scopes.get(&scope_id)?;
+            if let Some(entity_id) = scope.name_to_id_map.get(name).copied() {
+                let is_type = match self.expr_id_to_expr_map.get(&entity_id) {
+                    Some(
+                        Expr::Struct(_)
+                        | Expr::Enum(_)
+                        | Expr::Trait(_)
+                        | Expr::Module(_)
+                        | Expr::Generic(_),
+                    ) => true,
+                    Some(_) => false,
+                    // No expression but a type id (e.g. the implicit `Self`).
+                    None => self.expr_id_to_type_id_map.contains_key(&entity_id),
+                };
+                if is_type {
+                    return Some(entity_id);
+                }
+            }
+            current = scope.parent_id;
+        }
+        None
     }
 
     /// Walks the optional generic parameters of a declaration into `scope_id`,
@@ -1648,12 +1708,22 @@ impl<'src> Analyzer<'src> {
             Node::Match(subject, legs) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 let mut walked_legs = Vec::new();
-                for (pattern, body) in &legs.0 {
-                    // Each leg scopes its captures to its own body.
+                for (patterns, guard, body) in &legs.0 {
+                    // Each leg scopes its captures (and guard) to its own body.
                     let leg_scope_id = self.create_owned_scope(Some(scope_id)).id;
-                    let walked_pattern = self.walk_pattern(pattern, leg_scope_id);
+                    let walked_patterns = patterns
+                        .iter()
+                        .map(|pattern| self.walk_pattern(pattern, leg_scope_id))
+                        .collect();
+                    let guard_id = guard
+                        .as_ref()
+                        .map(|guard| self.walk_expr_node(guard, leg_scope_id));
                     let body_id = self.walk_expr_node(body, leg_scope_id);
-                    walked_legs.push((walked_pattern, body_id));
+                    walked_legs.push(WalkLeg {
+                        patterns: walked_patterns,
+                        guard: guard_id,
+                        body: body_id,
+                    });
                 }
                 self.prepped_matches.push(PreppedMatch {
                     id,
@@ -1906,8 +1976,8 @@ impl<'src> Analyzer<'src> {
                 }
                 WalkPattern::Binding(capture_id)
             }
-            Pattern::Variant(name, payload) => WalkPattern::Variant(
-                name,
+            Pattern::Variant(path, payload) => WalkPattern::Variant(
+                path.clone(),
                 pattern.1,
                 payload.as_ref().map(|patterns| {
                     patterns
@@ -1923,7 +1993,63 @@ impl<'src> Analyzer<'src> {
                     .map(|sub_pattern| self.walk_pattern(sub_pattern, scope_id))
                     .collect(),
             ),
+            Pattern::Literal(literal) => {
+                WalkPattern::Literal(self.walk_expr_node(literal, scope_id))
+            }
         }
+    }
+
+    /// Resolves a variant pattern's path to its entity: a bare name (`Some`,
+    /// or `true`/`false` against a `bool` subject), or a qualified path
+    /// (`Signal::Quit`) descended through the leading namespaces (an enum's
+    /// variants or a module's members).
+    fn resolve_variant_path(
+        &mut self,
+        path: &[&'src str],
+        lookup_scope_id: Id,
+        expected_type_id: TypeId,
+    ) -> Option<Id> {
+        if let [name] = path {
+            if let Some(entity) = self.try_get_expr_id_by_name(name, lookup_scope_id) {
+                return Some(entity);
+            }
+            // `true`/`false` are keywords, not names in scope; against a `bool`
+            // subject resolve them directly against the `bool` enum's variants so
+            // `match flag { true => .., false => .. }` needs no imports.
+            if matches!(
+                expected_type_id.get_type(self),
+                Type::Enum(id, _) if Some(id) == self.bool_enum_id
+            ) {
+                return self.bool_enum_id.and_then(|bool_id| {
+                    let variants_scope_id = self.enums.get(&bool_id)?.variants_scope_id;
+                    self.scopes
+                        .get(&variants_scope_id)?
+                        .name_to_id_map
+                        .get(name)
+                        .copied()
+                });
+            }
+            return None;
+        }
+        // A qualified path: resolve the head, then descend each segment through
+        // an enum's variant namespace or a module's scope.
+        let mut segments = path.iter();
+        let head = segments.next()?;
+        let mut current = self.try_get_expr_id_by_name(head, lookup_scope_id)?;
+        for segment in segments {
+            let scope_id = match self.expr_id_to_expr_map.get(&current)? {
+                Expr::Enum(enum_id) => self.enums.get(enum_id)?.variants_scope_id,
+                Expr::Module(module_id) => self.modules.get(module_id)?.body.1,
+                _ => return None,
+            };
+            current = self
+                .scopes
+                .get(&scope_id)?
+                .name_to_id_map
+                .get(*segment)
+                .copied()?;
+        }
+        Some(current)
     }
 
     // Resolves a walked pattern against the type it matches: variant names are
@@ -1944,45 +2070,20 @@ impl<'src> Analyzer<'src> {
                 self.resolved_types.insert(capture_id, expected_type_id);
                 Some(ExprPattern::Binding(capture_id))
             }
-            WalkPattern::Variant(name, span, payload) => {
+            WalkPattern::Variant(path, span, payload) => {
                 let span = *span;
-                let entity = match self.try_get_expr_id_by_name(name, lookup_scope_id) {
-                    Some(entity) => entity,
-                    // `true`/`false` are keywords, not names in scope, so they
-                    // never resolve by lookup. When the subject is a `bool`,
-                    // resolve them against the `bool` enum's variants directly so
-                    // `match flag { true => .., false => .. }` needs no imports.
-                    None if matches!(
-                        expected_type_id.get_type(self),
-                        Type::Enum(id, _) if Some(id) == self.bool_enum_id
-                    ) =>
-                    {
-                        match self.bool_enum_id.and_then(|bool_id| {
-                            let variants_scope_id = self.enums.get(&bool_id)?.variants_scope_id;
-                            self.scopes
-                                .get(&variants_scope_id)?
-                                .name_to_id_map
-                                .get(name)
-                                .copied()
-                        }) {
-                            Some(entity) => entity,
-                            None => {
-                                self.diagnostics.push(Error {
-                                    span,
-                                    msg: format!("cannot find '{}' in this scope", name),
-                                });
-                                return None;
-                            }
+                let name = path.join("::");
+                let entity =
+                    match self.resolve_variant_path(path, lookup_scope_id, expected_type_id) {
+                        Some(entity) => entity,
+                        None => {
+                            self.diagnostics.push(Error {
+                                span,
+                                msg: format!("cannot find '{}' in this scope", name),
+                            });
+                            return None;
                         }
-                    }
-                    None => {
-                        self.diagnostics.push(Error {
-                            span,
-                            msg: format!("cannot find '{}' in this scope", name),
-                        });
-                        return None;
-                    }
-                };
+                    };
                 let (enum_id, variant_index) = match self.expr_id_to_expr_map.get(&entity) {
                     Some(Expr::EnumVariant(enum_id, variant_index)) => (*enum_id, *variant_index),
                     _ => {
@@ -2082,6 +2183,24 @@ impl<'src> Analyzer<'src> {
                 }
                 Some(ExprPattern::Tuple(resolved))
             }
+            WalkPattern::Literal(literal_id) => {
+                // The literal's type must be compatible with the matched value's.
+                let literal_id = *literal_id;
+                let literal_type = self.infer_type(literal_id, &Type::Unknown, &HashMap::new());
+                let subject_type = expected_type_id.get_type(self);
+                if !matches!(subject_type, Type::Unknown | Type::Any | Type::Unresolved)
+                    && !self.compare_type(&subject_type, &literal_type, &HashMap::new())
+                {
+                    let expected = self.pretty_print_type(&subject_type, &HashMap::new());
+                    let got = self.pretty_print_type(&literal_type, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&literal_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!("literal pattern of type {} cannot match {}", got, expected),
+                    });
+                    return None;
+                }
+                Some(ExprPattern::Literal(literal_id))
+            }
         }
     }
 
@@ -2173,6 +2292,47 @@ impl<'src> Analyzer<'src> {
                     .map(|element_type_id| element_type_id.get_type(self))
             }
             _ => None,
+        }
+    }
+
+    /// If `type_` is a `List` whose element is still an unresolved inference slot
+    /// (an `Unknown` type id from `List::new()`), returns that slot's type id.
+    fn list_element_slot(&self, type_: &Type) -> Option<TypeId> {
+        let list_id = self.primitive_struct_ids.get("List").copied()?;
+        match type_ {
+            Type::Struct(id, arguments) if *id == list_id && arguments.len() == 1 => {
+                let slot = arguments[0];
+                matches!(slot.get_type(self), Type::Unknown).then_some(slot)
+            }
+            _ => None,
+        }
+    }
+
+    /// If `type_` is a `List` whose element is an unbound generic (i.e. the
+    /// result of `List::new()`), replaces the element with a fresh inference
+    /// slot stable for this call id, so the element can be unified from later
+    /// `push` calls. Otherwise returns the type unchanged.
+    fn freshen_list_element_slots(&mut self, type_: Type, call_id: Id) -> Type {
+        let Some(list_id) = self.primitive_struct_ids.get("List").copied() else {
+            return type_;
+        };
+        match type_ {
+            Type::Struct(id, arguments)
+                if id == list_id
+                    && arguments.len() == 1
+                    && matches!(arguments[0].get_type(self), Type::Generic(_)) =>
+            {
+                let slot = match self.list_element_slots.get(&call_id).copied() {
+                    Some(slot) => slot,
+                    None => {
+                        let slot = Type::Unknown.get_type_id(self);
+                        self.list_element_slots.insert(call_id, slot);
+                        slot
+                    }
+                };
+                Type::Struct(id, vec![slot])
+            }
+            other => other,
         }
     }
 
@@ -2431,10 +2591,11 @@ impl<'src> Analyzer<'src> {
             Expr::Trait(trait_id) => Type::Trait(*trait_id),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
+                let id = *id;
                 // The call may not have been wired up yet (its `FunctionCall`
                 // is recorded once the subject resolves). Defer until it is.
                 let (subject_id, generic_argument_ids, argument_ids) =
-                    match self.function_calls.get(id) {
+                    match self.function_calls.get(&id) {
                         Some(function_call) => (
                             function_call.subject_id,
                             function_call.generic_argument_ids.clone(),
@@ -2499,12 +2660,14 @@ impl<'src> Analyzer<'src> {
                             self_parameter_id,
                         )) = function
                         else {
-                            // An external function: use its declared return type.
-                            return self
+                            // An external function: use its declared return type
+                            // (giving `List::new()` a fresh element slot).
+                            let return_type = self
                                 .external_functions
                                 .get(&function_id)
                                 .map(|f| f.return_type_id.get_type(self))
                                 .unwrap_or(Type::Void);
+                            return self.freshen_list_element_slots(return_type, id);
                         };
                         let mut substitution_context = substitution_context.clone();
                         for (i, constraint_id) in generic_constraint_ids.iter().enumerate() {
@@ -2524,6 +2687,7 @@ impl<'src> Analyzer<'src> {
                                 exprs_seen,
                             ),
                         };
+                        let return_type = self.freshen_list_element_slots(return_type, id);
                         // Specialize a `Self` return. When a method's declared
                         // return type is the same as its `self` parameter's type
                         // — i.e. it returns `Self` — the call yields the
@@ -3157,7 +3321,12 @@ impl<'src> Analyzer<'src> {
         }
 
         for (type_id, name, scope_id, span, argument_type_ids) in self.prepped_type_locals.clone() {
-            match self.try_get_expr_id_by_name(name, scope_id) {
+            // Prefer a type binding (so a value sharing the name doesn't shadow
+            // it in type position), falling back to any binding for diagnostics.
+            let resolved = self
+                .try_get_type_id_by_name(name, scope_id)
+                .or_else(|| self.try_get_expr_id_by_name(name, scope_id));
+            match resolved {
                 Some(subject_id) => {
                     let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
                     // Attach the written generic arguments to the nominal type
@@ -3715,13 +3884,42 @@ impl<'src> Analyzer<'src> {
                 }
                 let subject_type_id = subject_type.clone().get_type_id(self);
 
-                let mut resolved_legs = Vec::new();
+                // Resolve each leg's patterns (an or-pattern has several) and its
+                // optional guard.
+                let mut resolved_legs: Vec<(Vec<ExprPattern>, Option<Id>, Id)> = Vec::new();
                 let mut pattern_error = false;
-                for (pattern, body_id) in &prepped.legs {
-                    match self.resolve_pattern(pattern, subject_type_id, prepped.scope_id) {
-                        Some(resolved) => resolved_legs.push((resolved, *body_id)),
-                        None => pattern_error = true,
+                let mut guard_deferred = false;
+                for leg in &prepped.legs {
+                    let mut resolved_patterns = Vec::new();
+                    for pattern in &leg.patterns {
+                        match self.resolve_pattern(pattern, subject_type_id, prepped.scope_id) {
+                            Some(resolved) => resolved_patterns.push(resolved),
+                            None => pattern_error = true,
+                        }
                     }
+                    if let Some(guard_id) = leg.guard {
+                        // A guard must be a resolved `bool`.
+                        let guard_type = self.infer_type(guard_id, &Type::Unknown, &HashMap::new());
+                        if matches!(guard_type, Type::Unresolved) {
+                            guard_deferred = true;
+                        } else if !self.compare_type(
+                            &guard_type,
+                            &self.bool_type(),
+                            &HashMap::new(),
+                        ) {
+                            let got = self.pretty_print_type(&guard_type, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&guard_id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!("match guard must be a bool, but got {}", got),
+                            });
+                            pattern_error = true;
+                        }
+                    }
+                    resolved_legs.push((resolved_patterns, leg.guard, leg.body));
+                }
+                if guard_deferred {
+                    remaining_matches.push(prepped);
+                    continue;
                 }
                 if pattern_error {
                     // Diagnostics were already emitted; drop the match.
@@ -3729,23 +3927,36 @@ impl<'src> Analyzer<'src> {
                     continue;
                 }
 
-                // Exhaustiveness: every variant must be covered unless a
-                // catch-all (`_` or a binding) is present.
-                if let Type::Enum(enum_id, _) = subject_type {
-                    let has_catch_all = resolved_legs.iter().any(|(pattern, _)| {
-                        matches!(pattern, ExprPattern::Wildcard | ExprPattern::Binding(_))
-                    });
-                    if !has_catch_all {
+                // Exhaustiveness: a leg is an irrefutable catch-all when it is
+                // unguarded and a pattern matches anything (`_`, a binding, or a
+                // tuple destructure).
+                let has_catch_all = resolved_legs.iter().any(|(patterns, guard, _)| {
+                    guard.is_none()
+                        && patterns.iter().any(|pattern| {
+                            matches!(
+                                pattern,
+                                ExprPattern::Wildcard
+                                    | ExprPattern::Binding(_)
+                                    | ExprPattern::Tuple(_)
+                            )
+                        })
+                });
+                match &subject_type {
+                    Type::Enum(enum_id, _) if !has_catch_all => {
+                        // Each unguarded variant pattern (in any leg) covers its
+                        // variant.
                         let covered = resolved_legs
                             .iter()
-                            .filter_map(|(pattern, _)| match pattern {
+                            .filter(|(_, guard, _)| guard.is_none())
+                            .flat_map(|(patterns, _, _)| patterns)
+                            .filter_map(|pattern| match pattern {
                                 ExprPattern::Variant(_, variant_index, _) => Some(*variant_index),
                                 _ => None,
                             })
                             .collect::<HashSet<_>>();
                         let missing = self
                             .enums
-                            .get(&enum_id)
+                            .get(enum_id)
                             .unwrap()
                             .variants
                             .iter()
@@ -3763,12 +3974,23 @@ impl<'src> Analyzer<'src> {
                             });
                         }
                     }
+                    // A non-enum subject (e.g. a `str` matched with literals) has
+                    // an unbounded domain, so it needs an explicit catch-all. Tuples
+                    // and not-yet-known types are exempt.
+                    Type::Tuple(_) | Type::Unknown | Type::Any | Type::Generic(_) => {}
+                    _ if !has_catch_all => {
+                        self.diagnostics.push(Error {
+                            span: prepped.span,
+                            msg: "match is not exhaustive: add a catch-all `_` leg".to_string(),
+                        });
+                    }
+                    _ => {}
                 }
 
                 // The match's type unifies the leg body types.
                 let mut unified: Option<Type> = None;
                 let mut deferred = false;
-                for (_, body_id) in &resolved_legs {
+                for (_, _, body_id) in &resolved_legs {
                     let body_type = self.infer_type(*body_id, &Type::Unknown, &HashMap::new());
                     if matches!(body_type, Type::Unresolved) {
                         deferred = true;
@@ -3803,9 +4025,17 @@ impl<'src> Analyzer<'src> {
                 let match_type = unified.unwrap_or(Type::Void);
                 let match_type_id = match_type.get_type_id(self);
                 self.resolved_types.insert(prepped.id, match_type_id);
+                // Expand each or-pattern leg into one leg per alternative, all
+                // sharing the guard and body.
                 let legs = resolved_legs
                     .into_iter()
-                    .map(|(pattern, body)| ExprMatchLeg { pattern, body })
+                    .flat_map(|(patterns, guard, body)| {
+                        patterns.into_iter().map(move |pattern| ExprMatchLeg {
+                            pattern,
+                            guard,
+                            body,
+                        })
+                    })
                     .collect();
                 self.expr_id_to_expr_map
                     .insert(prepped.id, Expr::Match(prepped.subject_id, legs));
@@ -3867,6 +4097,18 @@ impl<'src> Analyzer<'src> {
                                         if !bindings.is_empty() {
                                             self.method_call_substitution
                                                 .insert(id, bindings.into_iter().collect());
+                                        }
+                                    }
+                                    // `list.push(value)` on a list whose element
+                                    // is still an inference slot unifies the slot
+                                    // with the value's type.
+                                    if member_name == "push" {
+                                        if let (Some(slot), [argument_id]) = (
+                                            self.list_element_slot(&subject_type),
+                                            argument_ids.as_slice(),
+                                        ) {
+                                            self.prepped_slot_unifications
+                                                .push((slot, *argument_id));
                                         }
                                     }
                                     MethodLookup::Found(member_id)
@@ -3965,6 +4207,34 @@ impl<'src> Analyzer<'src> {
                 }
             }
 
+            // --- Unify `List` element slots from `push` calls ---
+            // `list.push(value)` writes the list's element inference slot
+            // (`List::new()`'s fresh `Unknown`) with the pushed value's type, so a
+            // built-up list's element is inferred.
+            if !self.prepped_slot_unifications.is_empty() {
+                let mut remaining = Vec::new();
+                for (slot, argument_id) in std::mem::take(&mut self.prepped_slot_unifications) {
+                    if !matches!(slot.get_type(self), Type::Unknown) {
+                        // Already unified by an earlier push.
+                        continue;
+                    }
+                    let argument_type =
+                        self.infer_type(argument_id, &Type::Unknown, &HashMap::new());
+                    if matches!(argument_type, Type::Unresolved) {
+                        remaining.push((slot, argument_id));
+                        continue;
+                    }
+                    if !matches!(argument_type, Type::Unknown) {
+                        self.type_id_to_type_map.insert(slot, argument_type);
+                        progress = true;
+                    }
+                }
+                self.prepped_slot_unifications = remaining;
+                if !self.prepped_slot_unifications.is_empty() {
+                    progress = true;
+                }
+            }
+
             // --- Resolve `for x in iterable` element bindings ---
             // Once the iterable's type is known, the item takes its element type
             // (`List<i32>` -> `i32`), falling back to `any` when the element type
@@ -3976,14 +4246,17 @@ impl<'src> Analyzer<'src> {
                 for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
                     let iterable_type =
                         self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
-                    if matches!(iterable_type, Type::Unresolved) {
+                    let element_type = self.iterable_element_type(&iterable_type);
+                    // Defer while the iterable or its element is still unresolved
+                    // (an element slot a later `push` may yet fill); a post-loop
+                    // pass commits whatever remains to `any`.
+                    if matches!(iterable_type, Type::Unresolved)
+                        || matches!(element_type, Some(Type::Unknown | Type::Unresolved))
+                    {
                         remaining_items.push((item_id, iterable_id));
                         continue;
                     }
-                    let element_type = self
-                        .iterable_element_type(&iterable_type)
-                        .unwrap_or(Type::Any);
-                    let element_type_id = element_type.get_type_id(self);
+                    let element_type_id = element_type.unwrap_or(Type::Any).get_type_id(self);
                     if let Some(variable) = self.variables.get_mut(&item_id) {
                         variable.type_id = element_type_id;
                     }
@@ -4436,6 +4709,21 @@ impl<'src> Analyzer<'src> {
             }
         }
 
+        // Commit any `for x in iterable` bindings still deferred (their element
+        // slot never resolved — an empty, never-pushed list): the item is `any`.
+        for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
+            let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
+            let element_type = self
+                .iterable_element_type(&iterable_type)
+                .filter(|element| !matches!(element, Type::Unknown | Type::Unresolved))
+                .unwrap_or(Type::Any);
+            let element_type_id = element_type.get_type_id(self);
+            if let Some(variable) = self.variables.get_mut(&item_id) {
+                variable.type_id = element_type_id;
+            }
+            self.resolved_types.insert(item_id, element_type_id);
+        }
+
         // --- Resolve `for x in iterable` to the Iterator protocol where it
         // applies --- a concrete iterable with a `next` method (a custom
         // iterator) iterates by calling `next()` until `None`; anything else
@@ -4668,6 +4956,21 @@ impl Type {
     }
 }
 
+/// An `external` std function with a built-in JS lowering.
+#[derive(Debug, Clone, Copy)]
+pub enum Intrinsic {
+    // `scan(): str` — read a line of stdin (runtime helper).
+    Scan,
+    // `str.trim()` -> native `.trim()`.
+    StrTrim,
+    // `str.to_lowercase_ascii()` -> native `.toLowerCase()`.
+    StrToLowercaseAscii,
+    // `str.parse_i32(): Option<i32>` -> a runtime helper returning the enum form.
+    ParseI32,
+    // `random::i32(low, high): i32` -> a runtime helper over `Math.random`.
+    RandomI32,
+}
+
 #[derive(Debug)]
 pub struct Program<'src> {
     pub closures: IndexMap<Id, Closure>,
@@ -4692,6 +4995,9 @@ pub struct Program<'src> {
     pub list_push_fn_id: Option<Id>,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
+    // `external` std functions the transformer lowers to native JS or a runtime
+    // helper (`str.trim()`, `scan()`, `random::i32(..)`, ...), keyed by fn id.
+    pub intrinsics: HashMap<Id, Intrinsic>,
     // The source `enum bool`; the transformer lowers its variants/patterns to
     // native JS booleans rather than the array form used by other enums.
     pub bool_enum_id: Option<Id>,
@@ -4756,9 +5062,16 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
         if let Some(branch) = branch {
             let mut entries = Vec::new();
             flatten_namespace_branch(branch, Vec::new(), &mut entries);
-            for (path, _leaf) in entries {
-                if path.first() == Some(&root) && path.len() >= 2 {
+            for (path, leaf) in entries {
+                if path.first() != Some(&root) {
+                    continue;
+                }
+                // `import std::option::..` -> the module is the segment after the
+                // root; a bare `import std::random` -> the module is the leaf.
+                if path.len() >= 2 {
                     modules.push(path[1]);
+                } else {
+                    modules.push(leaf);
                 }
             }
         }
@@ -4971,6 +5284,43 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             }
         }
     }
+
+    // Capture the external std functions with built-in JS lowerings: `str`'s
+    // methods (across every `impl str` block), and the module-level `scan` /
+    // `random::i32`.
+    let mut intrinsics: HashMap<Id, Intrinsic> = HashMap::new();
+    if let Some(str_struct_id) = analyzer.primitive_struct_ids.get("str").copied() {
+        for implementation in &analyzer.implementations {
+            let subject_is_str = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == str_struct_id
+            );
+            if subject_is_str {
+                for (name, intrinsic) in [
+                    ("trim", Intrinsic::StrTrim),
+                    ("to_lowercase_ascii", Intrinsic::StrToLowercaseAscii),
+                    ("parse_i32", Intrinsic::ParseI32),
+                ] {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
+            }
+        }
+    }
+    let module_member = |module: &str, name: &str| {
+        module_scopes
+            .get(module)
+            .and_then(|scope_id| analyzer.scopes.get(scope_id))
+            .and_then(|scope| scope.name_to_id_map.get(name).copied())
+    };
+    if let Some(scan_id) = module_member("io", "scan") {
+        intrinsics.insert(scan_id, Intrinsic::Scan);
+    }
+    if let Some(random_id) = module_member("random", "i32") {
+        intrinsics.insert(random_id, Intrinsic::RandomI32);
+    }
+
     Program {
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
@@ -4985,6 +5335,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         for_each_next: analyzer.for_each_next,
         binary_op_dispatch: analyzer.binary_op_dispatch,
         method_call_substitution: analyzer.method_call_substitution,
+        intrinsics,
         global_scope_id,
         implementations: analyzer.implementations,
         list_new_fn_id,

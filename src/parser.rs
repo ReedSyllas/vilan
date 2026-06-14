@@ -495,8 +495,8 @@ where
         .labelled("enum")
         .boxed();
 
-    // A match-leg pattern: `_`, `let x` / `mut x`, or a variant with optional
-    // payload patterns like `Some(let x)`.
+    // A match-leg pattern: `_`, `let x` / `mut x`, a literal (`"quit"`, `42`), or
+    // a variant (`Some(let x)`, qualified `Signal::Quit`).
     let pattern = recursive(|pattern| {
         let binding = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
             .then(identifier.labelled("capture name"))
@@ -511,7 +511,21 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
             .map(Pattern::Tuple);
+        // A string/number literal pattern — matched by equality. (`bool`/`null`
+        // stay variant/keyword patterns, resolved against their enum.)
+        let literal_pattern = select! {
+            Token::String(s) => Node::String(s),
+            Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix),
+        }
+        .map_with(|node, e| Pattern::Literal(Box::new((node, e.span()))));
+        // A variant path (`Name`, `Enum::Variant`) with optional payload patterns.
         let variant = name
+            .then(
+                just(Token::Op("::"))
+                    .ignore_then(identifier)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
             .then(
                 pattern
                     .separated_by(just(Token::Ctrl(',')))
@@ -520,22 +534,35 @@ where
                     .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
                     .or_not(),
             )
-            .map(|(variant_name, payload)| {
-                if variant_name == "_" && payload.is_none() {
+            .map(|((head, rest), payload)| {
+                if rest.is_empty() && head == "_" && payload.is_none() {
                     Pattern::Wildcard
                 } else {
-                    Pattern::Variant(variant_name, payload)
+                    let mut path = vec![head];
+                    path.extend(rest);
+                    Pattern::Variant(path, payload)
                 }
             });
-        choice((binding, tuple, variant)).map_with(|x, e| (x, e.span()))
+        choice((binding, tuple, literal_pattern, variant)).map_with(|x, e| (x, e.span()))
     })
     .labelled("pattern")
     .boxed();
 
+    // A leg: one or more comma-separated patterns (an or-pattern), an optional
+    // `if` guard, then `=> body`.
     let match_leg = pattern
         .clone()
+        .separated_by(just(Token::Ctrl(',')))
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .then(
+            just(Token::If)
+                .ignore_then(expression.clone().labelled("match guard"))
+                .or_not(),
+        )
         .then_ignore(just(Token::Op("=>")))
-        .then(expression.clone().labelled("match leg body"));
+        .then(expression.clone().labelled("match leg body"))
+        .map(|((patterns, guard), body)| (patterns, guard.map(Box::new), body));
 
     let match_ = just(Token::Match)
         .ignore_then(secondary_expression.clone().labelled("match subject"))

@@ -10,6 +10,16 @@ impl u32 with Default {
 
 external struct i32;
 
+impl i32 {
+	fun diff(self, other: i32): i32 {
+		if self > other {
+			self - other
+		} else {
+			other - self
+		}
+	}
+}
+
 impl i32 with Default {
 	fun default(): i32 {
 		0i32

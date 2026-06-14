@@ -1,17 +1,4 @@
-function m/*default*/() {
-
-}
-function c/*next*/(d) {
-	a/*produced*/ = a/*produced*/ + 1;
-	let e = null;
-	if (a/*produced*/ <= d[0]) {
-		e = [ 0, a/*produced*/ ];
-	} else {
-		e = [ 1 ];
-	}
-	return e;
-}
-function j(k) {
+function j/*sum*/(k) {
 	let l/*total*/ = m/*default*/();
 	let n/*seeded*/ = false;
 	for (const o/*item*/ of k) {
@@ -24,7 +11,7 @@ function j(k) {
 	}
 	return l/*total*/;
 }
-function p(q) {
+function p/*product*/(q) {
 	let r/*total*/ = m/*default*/();
 	let s/*seeded*/ = false;
 	for (const t/*item*/ of q) {
@@ -36,6 +23,19 @@ function p(q) {
 		}
 	}
 	return r/*total*/;
+}
+function m/*default*/() {
+
+}
+function c/*next*/(d) {
+	a/*produced*/ = a/*produced*/ + 1;
+	let e = null;
+	if (a/*produced*/ <= d[0]) {
+		e = [ 0, a/*produced*/ ];
+	} else {
+		e = [ 1 ];
+	}
+	return e;
 }
 let a/*produced*/ = 0;
 const b/*naturals*/ = [ 3 ];
@@ -52,5 +52,5 @@ let i/*numbers*/ = [  ];
 i/*numbers*/.push(2);
 i/*numbers*/.push(3);
 i/*numbers*/.push(4);
-console.log(j(i/*numbers*/));
-console.log(p(i/*numbers*/));
+console.log(j/*sum*/(i/*numbers*/));
+console.log(p/*product*/(i/*numbers*/));

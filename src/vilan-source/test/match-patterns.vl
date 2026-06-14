@@ -1,0 +1,40 @@
+import std::print;
+
+// String-literal patterns, or-patterns (`"y", ""`), qualified variant patterns
+// (`Signal::Quit`), and `let NAME if CONDITION` match guards.
+enum Signal { Quit, Finished }
+
+fun classify(s: str): str {
+	match s {
+		"quit" => "leaving",
+		"y", "" => "affirmative",
+		_ => "other",
+	}
+}
+
+fun describe(signal: Signal): str {
+	match signal {
+		Signal::Quit => "quit",
+		Signal::Finished => "finished",
+	}
+}
+
+fun temperature(distance: i32): str {
+	match distance {
+		let x if x <= 2 => "very hot",
+		let x if x <= 10 => "warm",
+		_ => "cold",
+	}
+}
+
+fun main() {
+	print(classify("quit"));
+	print(classify("y"));
+	print(classify(""));
+	print(classify("maybe"));
+	print(describe(Signal::Quit));
+	print(describe(Signal::Finished));
+	print(temperature(1));
+	print(temperature(7));
+	print(temperature(40));
+}

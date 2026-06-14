@@ -132,11 +132,8 @@ pub enum Node<'src> {
         bool,
     ),
     List(NodeList<'src>),
-    // A match expression: subject and legs of `pattern => expression`.
-    Match(
-        Box<Spanned<Self>>,
-        Spanned<Vec<(Spanned<Pattern<'src>>, Spanned<Node<'src>>)>>,
-    ),
+    // A match expression: subject and legs of `patterns (if guard)? => body`.
+    Match(Box<Spanned<Self>>, Spanned<Vec<MatchLeg<'src>>>),
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
     Module(&'src str, Spanned<NodeList<'src>>),
     Null,
@@ -185,11 +182,23 @@ pub enum Pattern<'src> {
     Wildcard,
     // `let x` / `mut x` — matches anything, capturing the value.
     Binding(&'src str, bool),
-    // `Name` or `Name(patterns...)` — an enum variant with payload patterns.
-    Variant(&'src str, Option<Vec<Spanned<Pattern<'src>>>>),
+    // A path to an enum variant with optional payload patterns: a bare `Name`
+    // (`["Name"]`) or a qualified `Enum::Variant` (`["Enum", "Variant"]`).
+    Variant(Vec<&'src str>, Option<Vec<Spanned<Pattern<'src>>>>),
     // `(a, b, ...)` — a tuple pattern.
     Tuple(Vec<Spanned<Pattern<'src>>>),
+    // A literal value pattern (`"quit"`, `42`, `true`): matches by equality,
+    // binding nothing. Holds the literal as its node.
+    Literal(Box<Spanned<Node<'src>>>),
 }
+
+// One match leg: the patterns it matches (more than one is an or-pattern,
+// `"y", "" => ..`), an optional `if` guard, and the body.
+pub type MatchLeg<'src> = (
+    Vec<Spanned<Pattern<'src>>>,
+    Option<Box<Spanned<Node<'src>>>>,
+    Spanned<Node<'src>>,
+);
 
 #[derive(Clone, Copy, Debug)]
 pub enum BinaryOp {

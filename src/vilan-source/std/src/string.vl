@@ -1,2 +1,8 @@
 
 external struct str;
+
+impl str {
+	external fun trim(self): str;
+
+	external fun to_lowercase_ascii(self): str;
+}

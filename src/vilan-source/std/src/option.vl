@@ -218,3 +218,10 @@ impl bool {
 		}
 	}
 }
+
+// `parse_i32` lives here (not in the always-loaded `string.vl`) because its
+// result is an `Option`, which the core `str` module must not depend on. An
+// `impl` block does not need to share a module with the type it extends.
+impl str {
+	external fun parse_i32(self): Option<i32>;
+}
