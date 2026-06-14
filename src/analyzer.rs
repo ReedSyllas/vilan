@@ -30,6 +30,9 @@ pub enum Expr<'src> {
     Field(Id, Id, usize),
     // A loop: the optional condition and the body (statements, trailing expr).
     For(Option<Id>, (Vec<Id>, Id)),
+    // `for item in iterable` — the iterable, the optional element binding (None
+    // for `_`), and the body. Lowers to a native JS `for...of`.
+    ForEach(Id, Option<Id>, (Vec<Id>, Id)),
     Function(Id),
     FunctionReturn(Id),
     Generic(TypeId),
@@ -94,6 +97,10 @@ pub struct Function<'src> {
     /// the body's type, which matters for generic returns like `(): T`.
     pub return_type_id: Option<TypeId>,
     pub body: (Vec<Id>, Id, Id),
+    /// Whether the source provided a body. A trait method without one is a
+    /// signature-only requirement (impls must supply it); with one it is a
+    /// default method (impls may inherit it). Always true outside a trait.
+    pub has_body: bool,
     pub call_count: u32,
 }
 
@@ -353,6 +360,12 @@ pub struct Analyzer<'src> {
     // recorded as `accessor_id -> (constraint_id, member_name)` so the
     // transformer can re-resolve them per monomorphized instantiation.
     generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
+    // All trait-bound type ids of a generic parameter (`T: A + B` -> [A, B]),
+    // keyed by the parameter's constraint id (its first bound, which is its
+    // `Type::Generic` identity). Stored unresolved (bounds resolve in `build()`,
+    // not during the walk); member resolution on a `T`-typed value searches every
+    // bound.
+    generic_bounds: HashMap<TypeId, Vec<TypeId>>,
     implementations: Vec<Implementation<'src>>,
     module_id_by_name: HashMap<&'src str, Id>,
     modules: IndexMap<Id, Module<'src>>,
@@ -448,6 +461,7 @@ impl<'src> Analyzer<'src> {
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
             generic_static_accessors: HashMap::new(),
+            generic_bounds: HashMap::new(),
             implementations: Vec::new(),
             module_id_by_name: HashMap::new(),
             modules: IndexMap::new(),
@@ -499,6 +513,99 @@ impl<'src> Analyzer<'src> {
             )
             .as_str(),
         )
+    }
+
+    /// Whether `member_id` is callable as a method — a function (or intrinsic)
+    /// whose first parameter is named `self`.
+    fn is_self_method(&self, member_id: Id) -> bool {
+        let first_parameter_id = match self.get_entity_by_id(member_id) {
+            Expr::Function(function_id) => self
+                .functions
+                .get(function_id)
+                .and_then(|function| function.parameters.first().copied()),
+            Expr::ExternalFunction(external_function_id) => self
+                .external_functions
+                .get(external_function_id)
+                .and_then(|external| external.parameters.first().copied()),
+            _ => None,
+        };
+        first_parameter_id
+            .and_then(|parameter_id| self.parameters.get(&parameter_id))
+            .map(|parameter| parameter.name == "self")
+            .unwrap_or(false)
+    }
+
+    /// Resolves a method `member_name` callable on a concrete `subject_type`
+    /// (a struct or enum) by searching its implementations.
+    fn method_member_in_impls(&self, subject_type: &Type, member_name: &str) -> Option<Id> {
+        self.implementations
+            .iter()
+            .filter(|implementation| {
+                self.compare_type(
+                    subject_type,
+                    &implementation.subject.get_type(self),
+                    &HashMap::new(),
+                )
+            })
+            .find_map(|implementation| {
+                implementation
+                    .declarations
+                    .get(member_name)
+                    .copied()
+                    .filter(|member_id| self.is_self_method(*member_id))
+            })
+    }
+
+    /// Resolves a method `member_name` declared by `trait_id` — a default method
+    /// or a signature-only requirement — callable on a `Self`-typed receiver.
+    /// Used for abstract receivers: `Self` in a trait default method, a
+    /// trait-bounded generic, or a trait-typed value.
+    fn method_member_in_trait(&self, trait_id: Id, member_name: &str) -> Option<Id> {
+        self.traits
+            .get(&trait_id)
+            .and_then(|trait_| trait_.declarations.get(member_name).copied())
+            .filter(|member_id| self.is_self_method(*member_id))
+    }
+
+    /// Whether a trait member has a source-provided body (a default method), so
+    /// an `impl` of the trait may inherit it rather than supply its own.
+    fn member_has_default_body(&self, member_id: Id) -> bool {
+        match self.get_entity_by_id(member_id) {
+            Expr::Function(function_id) => self
+                .functions
+                .get(function_id)
+                .map(|function| function.has_body)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Wires a resolved method call: prepends the receiver as the first argument
+    /// and records the `FunctionCall` behind an `Expr::Call`.
+    fn wire_method_call(
+        &mut self,
+        id: Id,
+        subject_id: Id,
+        member_id: Id,
+        generic_argument_ids: Vec<TypeId>,
+        mut argument_ids: Vec<Id>,
+        arguments_span: Span,
+    ) {
+        let member_local_id = self.new_entity_id();
+        self.expr_id_to_expr_map
+            .insert(member_local_id, Expr::Local(member_id));
+        argument_ids.insert(0, subject_id);
+        self.function_calls.insert(
+            id,
+            FunctionCall {
+                id,
+                subject_id: member_local_id,
+                generic_argument_ids,
+                argument_ids,
+                arguments_span,
+            },
+        );
+        self.expr_id_to_expr_map.insert(id, Expr::Call(id));
     }
 
     fn new_scope_id(&mut self) -> Id {
@@ -627,19 +734,53 @@ impl<'src> Analyzer<'src> {
         let mut generic_parameter_constraint_ids = Vec::new();
         if let Some(generic_parameters) = generic_parameters {
             for parameter in &generic_parameters.0 {
-                // A parameter may carry several bounds (`T: A + B`); the first
-                // is used as its constraint for now. Defaults (`B = Self`) are
-                // accepted by the grammar but not yet applied.
-                let constraint_type_id = parameter
+                // A parameter may carry several bounds (`T: A + B`). The first is
+                // its constraint id (its `Type::Generic` identity, used for
+                // substitution); all of them are recorded so member resolution on
+                // a `T`-typed value can search every bound. Defaults (`B = Self`)
+                // are accepted by the grammar but not yet applied.
+                let bound_type_ids: Vec<TypeId> = parameter
                     .bounds
-                    .first()
+                    .iter()
                     .map(|bound| self.walk_type_node(bound, scope_id))
+                    .collect();
+                let constraint_type_id = bound_type_ids
+                    .first()
+                    .copied()
                     .unwrap_or_else(|| Type::Any.get_type_id(self));
                 self.register_generic_parameter(parameter.name, constraint_type_id, scope_id);
+                // Record the bounds unresolved (trait references resolve in
+                // `build()`, not during this walk); only needed when there is more
+                // than one, since a single bound is recoverable from the
+                // constraint id itself.
+                if bound_type_ids.len() > 1 {
+                    self.generic_bounds
+                        .insert(constraint_type_id, bound_type_ids);
+                }
                 generic_parameter_constraint_ids.push(constraint_type_id);
             }
         }
         generic_parameter_constraint_ids
+    }
+
+    /// The trait ids a generic parameter is bound by (`T: A + B` -> `[A, B]`),
+    /// resolved at call time. A multi-bound parameter's bounds are recorded in
+    /// `generic_bounds`; a single bound is recoverable from the constraint id
+    /// itself. Empty if the parameter is unconstrained or its bounds are
+    /// unresolved/non-trait. Must be called in `build()`, once types resolve.
+    fn generic_bound_trait_ids(&self, constraint_id: TypeId) -> Vec<Id> {
+        let bound_type_ids = self
+            .generic_bounds
+            .get(&constraint_id)
+            .cloned()
+            .unwrap_or_else(|| vec![constraint_id]);
+        bound_type_ids
+            .iter()
+            .filter_map(|type_id| match type_id.get_type(self) {
+                Type::Trait(trait_id) => Some(trait_id),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Registers a single generic parameter named `name` (bound by the
@@ -812,18 +953,23 @@ impl<'src> Analyzer<'src> {
             // lowering is not implemented yet — it currently lowers like an
             // unconditioned loop. Not reached by the current reachable set.
             Node::ForIn(variable, iterable, body) => {
-                let _iterable_id = self.walk_expr_node(iterable, scope_id);
+                let iterable_id = self.walk_expr_node(iterable, scope_id);
                 let body_scope_id = self.create_owned_scope(Some(scope_id)).id;
-                if *variable != "_" {
+                // The element binding's type is the iterable's element type when
+                // recoverable, else unknown (a `List` value erases its element
+                // type). `_` introduces no binding.
+                let item_id = (*variable != "_").then(|| {
                     let variable_id = self.new_entity_id();
-                    let unknown_type_id = Type::Unknown.get_type_id(self);
+                    // A `List` value erases its element type, so the binding is
+                    // `any` — permissive rather than an unresolvable unknown.
+                    let element_type_id = Type::Any.get_type_id(self);
                     self.variables.insert(
                         variable_id,
                         Variable {
                             id: variable_id,
                             name: variable,
                             initial: None,
-                            type_id: unknown_type_id,
+                            type_id: element_type_id,
                             mutable: false,
                         },
                     );
@@ -836,10 +982,11 @@ impl<'src> Analyzer<'src> {
                     self.mut_scope_for_scope_id(body_scope_id)
                         .name_to_id_map
                         .insert(variable, variable_id);
-                }
+                    variable_id
+                });
                 let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
                 let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
-                Some(Expr::For(None, (ids, expr_id)))
+                Some(Expr::ForEach(iterable_id, item_id, (ids, expr_id)))
             }
             // `subject is pattern` — walk the subject and the pattern (binding
             // captures into the current scope so a guarded `if`/`&&` can use
@@ -1013,6 +1160,7 @@ impl<'src> Analyzer<'src> {
                             parameters,
                             return_type_id,
                             body: (ids, expr_id, body_scope_id),
+                            has_body: function.body.is_some(),
                             call_count: 0,
                         },
                     );
@@ -1312,9 +1460,11 @@ impl<'src> Analyzer<'src> {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
                 self.register_generic_parameters(generic_parameters, body_scope_id);
-                // Inside a trait, `Self` is the (abstract) implementing type.
-                let any_type_id = Type::Any.get_type_id(self);
-                self.register_self_type(body_scope_id, any_type_id);
+                // Inside a trait, `Self` is the trait itself (abstractly): a
+                // `self`-typed receiver in a default method resolves its method
+                // calls against this trait's own declarations.
+                let self_type_id = Type::Trait(id).get_type_id(self);
+                self.register_self_type(body_scope_id, self_type_id);
                 // Bodyless methods are legitimate requirements inside a trait.
                 let was_walking_trait_body = self.walking_trait_body;
                 self.walking_trait_body = true;
@@ -2472,36 +2622,9 @@ impl<'src> Analyzer<'src> {
                 }
                 // `T::member` where `T` is a generic parameter: resolve through
                 // the trait the parameter is bound by (e.g. `T: Default`).
-                Type::Generic(constraint_id) => match constraint_id.get_type(self) {
-                    Type::Trait(trait_id) => {
-                        // Record the accessor so codegen can monomorphize it to
-                        // the concrete type's member at each call site.
-                        self.generic_static_accessors
-                            .insert(id, (constraint_id, member_name));
-                        let member_id = self
-                            .traits
-                            .get(&trait_id)
-                            .and_then(|trait_| trait_.declarations.get(member_name).copied());
-                        match member_id {
-                            Some(member_id) => {
-                                let rc = self.reference_count.entry(member_id).or_insert(0);
-                                *rc += 1;
-                                self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
-                            }
-                            None => {
-                                let trait_name = self.traits.get(&trait_id).map(|t| t.name);
-                                self.diagnostics.push(Error {
-                                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                                    msg: format!(
-                                        "trait '{}' has no member '{}'",
-                                        trait_name.unwrap_or("?"),
-                                        member_name
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                    _ => {
+                Type::Generic(constraint_id) => {
+                    let bound_trait_ids = self.generic_bound_trait_ids(constraint_id);
+                    if bound_trait_ids.is_empty() {
                         self.diagnostics.push(Error {
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
@@ -2509,8 +2632,42 @@ impl<'src> Analyzer<'src> {
                                 member_name
                             ),
                         });
+                    } else {
+                        // Record the accessor so codegen can monomorphize it to
+                        // the concrete type's member at each call site.
+                        self.generic_static_accessors
+                            .insert(id, (constraint_id, member_name));
+                        // Search every bound trait (`T: A + B`) for the member.
+                        let member_id = bound_trait_ids.iter().find_map(|trait_id| {
+                            self.traits
+                                .get(trait_id)
+                                .and_then(|trait_| trait_.declarations.get(member_name).copied())
+                        });
+                        match member_id {
+                            Some(member_id) => {
+                                let rc = self.reference_count.entry(member_id).or_insert(0);
+                                *rc += 1;
+                                self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                            }
+                            None => {
+                                let bounds = bound_trait_ids
+                                    .iter()
+                                    .filter_map(|trait_id| {
+                                        self.traits.get(trait_id).map(|t| t.name)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" + ");
+                                self.diagnostics.push(Error {
+                                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                                    msg: format!(
+                                        "no bound of this type parameter ({}) has a member '{}'",
+                                        bounds, member_name
+                                    ),
+                                });
+                            }
+                        }
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -2527,8 +2684,16 @@ impl<'src> Analyzer<'src> {
                     continue;
                 }
             };
+            // Required members are the trait's signature-only declarations; a
+            // member with a default body is inherited, so an impl need not
+            // provide it.
             let required: Vec<&'src str> = match self.traits.get(&trait_id) {
-                Some(trait_) => trait_.declarations.keys().copied().collect(),
+                Some(trait_) => trait_
+                    .declarations
+                    .iter()
+                    .filter(|(_, member_id)| !self.member_has_default_body(**member_id))
+                    .map(|(name, _)| *name)
+                    .collect(),
                 None => {
                     self.diagnostics.push(Error {
                         span: check.span,
@@ -2941,6 +3106,15 @@ impl<'src> Analyzer<'src> {
 
             // --- Resolve deferred method calls ---
             if !self.prepped_method_calls.is_empty() {
+                // The outcome of resolving one method call's receiver to a callable
+                // member (kept separate from acting on it so the lookup can borrow
+                // `self` immutably and the wiring mutably).
+                enum MethodLookup {
+                    Found(Id),
+                    NoMethod,
+                    Defer,
+                    NotCallable,
+                }
                 let mut remaining_methods = Vec::new();
                 let method_calls: Vec<_> = std::mem::take(&mut self.prepped_method_calls)
                     .into_iter()
@@ -2950,89 +3124,66 @@ impl<'src> Analyzer<'src> {
                     subject_id,
                     member_name,
                     generic_argument_ids,
-                    mut argument_ids,
+                    argument_ids,
                     arguments_span,
                 ) in method_calls
                 {
                     let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-                    match subject_type {
+                    // Resolve the method against the receiver's implementations
+                    // for a concrete struct/enum, or against a trait's declarations
+                    // for an abstract receiver: `Self` in a trait default method
+                    // (`Type::Trait`), a trait-bounded generic (`Type::Generic`
+                    // whose constraint is a trait), or a trait-typed value.
+                    let found = |member_id: Option<Id>| match member_id {
+                        Some(member_id) => MethodLookup::Found(member_id),
+                        None => MethodLookup::NoMethod,
+                    };
+                    let lookup = match &subject_type {
                         Type::Struct(_) | Type::Enum(_) => {
-                            let subject_type_name = match &subject_type {
-                                Type::Struct(id) => self.structs.get(id).map(|x| x.name),
-                                Type::Enum(id) => self.enums.get(id).map(|x| x.name),
-                                _ => None,
-                            }
-                            .unwrap_or("?");
-                            let member_id = self
-                                .implementations
-                                .iter()
-                                .filter(|x| {
-                                    self.compare_type(
-                                        &subject_type,
-                                        &x.subject.get_type(self),
-                                        &HashMap::new(),
-                                    )
-                                })
-                                .find_map(|x| {
-                                    x.declarations.get(member_name).and_then(|member_id| {
-                                        // Only a function (or intrinsic) whose
-                                        // first parameter is `self` is callable
-                                        // as a method.
-                                        let first_parameter_id = match self
-                                            .get_entity_by_id(*member_id)
-                                        {
-                                            Expr::Function(function_id) => {
-                                                self.functions.get(function_id).and_then(
-                                                    |function| function.parameters.get(0).copied(),
-                                                )
-                                            }
-                                            Expr::ExternalFunction(external_function_id) => self
-                                                .external_functions
-                                                .get(external_function_id)
-                                                .and_then(|external| {
-                                                    external.parameters.get(0).copied()
-                                                }),
-                                            _ => None,
-                                        };
-                                        first_parameter_id.and_then(|parameter_id| {
-                                            let parameter =
-                                                self.parameters.get(&parameter_id).unwrap();
-                                            (parameter.name == "self").then_some(*member_id)
-                                        })
-                                    })
-                                });
-                            match member_id {
-                                Some(member_id) => {
-                                    let member_local_id = self.new_entity_id();
-                                    self.expr_id_to_expr_map
-                                        .insert(member_local_id, Expr::Local(member_id));
-                                    argument_ids.insert(0, subject_id);
-                                    self.function_calls.insert(
-                                        id,
-                                        FunctionCall {
-                                            id,
-                                            subject_id: member_local_id,
-                                            generic_argument_ids,
-                                            argument_ids,
-                                            arguments_span,
-                                        },
-                                    );
-                                    self.expr_id_to_expr_map.insert(id, Expr::Call(id));
+                            found(self.method_member_in_impls(&subject_type, member_name))
+                        }
+                        Type::Trait(trait_id) => {
+                            found(self.method_member_in_trait(*trait_id, member_name))
+                        }
+                        Type::Generic(constraint_id) => {
+                            let bound_trait_ids = self.generic_bound_trait_ids(*constraint_id);
+                            if bound_trait_ids.is_empty() {
+                                match constraint_id.get_type(self) {
+                                    Type::Unresolved => MethodLookup::Defer,
+                                    _ => MethodLookup::NotCallable,
                                 }
-                                None => {
-                                    self.diagnostics.push(Error {
-                                        span: arguments_span,
-                                        msg: format!(
-                                            "'{}' has no method '{}'",
-                                            subject_type_name, member_name
-                                        ),
-                                    });
-                                    self.expr_id_to_expr_map.insert(id, Expr::Error);
-                                }
+                            } else {
+                                // Search every bound trait (`T: A + B`) for the method.
+                                found(bound_trait_ids.iter().find_map(|trait_id| {
+                                    self.method_member_in_trait(*trait_id, member_name)
+                                }))
                             }
+                        }
+                        Type::Unresolved => MethodLookup::Defer,
+                        _ => MethodLookup::NotCallable,
+                    };
+                    match lookup {
+                        MethodLookup::Found(member_id) => {
+                            self.wire_method_call(
+                                id,
+                                subject_id,
+                                member_id,
+                                generic_argument_ids,
+                                argument_ids,
+                                arguments_span,
+                            );
                             progress = true;
                         }
-                        Type::Unresolved => {
+                        MethodLookup::NoMethod => {
+                            let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: arguments_span,
+                                msg: format!("{} has no method '{}'", type_str, member_name),
+                            });
+                            self.expr_id_to_expr_map.insert(id, Expr::Error);
+                            progress = true;
+                        }
+                        MethodLookup::Defer => {
                             remaining_methods.push((
                                 id,
                                 subject_id,
@@ -3042,10 +3193,14 @@ impl<'src> Analyzer<'src> {
                                 arguments_span,
                             ));
                         }
-                        _ => {
+                        MethodLookup::NotCallable => {
+                            let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
                             self.diagnostics.push(Error {
-                                span: arguments_span.clone(),
-                                msg: format!("cannot call method on non-struct type"),
+                                span: arguments_span,
+                                msg: format!(
+                                    "cannot call method '{}' on {}",
+                                    member_name, type_str
+                                ),
                             });
                             progress = true;
                         }
@@ -3531,10 +3686,20 @@ impl<'src> Analyzer<'src> {
                 msg: "type of function call arguments could not be resolved".to_string(),
             });
         }
-        for prepped in &self.prepped_matches {
+        let unresolved_matches: Vec<(Id, Span)> = self
+            .prepped_matches
+            .iter()
+            .map(|prepped| (prepped.subject_id, prepped.span))
+            .collect();
+        for (subject_id, span) in unresolved_matches {
+            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+            let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
             self.diagnostics.push(Error {
-                span: prepped.span,
-                msg: "type of match expression could not be resolved".to_string(),
+                span,
+                msg: format!(
+                    "type of match expression could not be resolved (subject: {})",
+                    subject_str
+                ),
             });
         }
 
@@ -3688,10 +3853,11 @@ pub struct Program<'src> {
     pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
-    // The builtin `List` intrinsics, special-cased in codegen (`new` -> `[]`,
-    // `push` -> `subject.push(..)`).
-    pub list_new_fn_id: Id,
-    pub list_push_fn_id: Id,
+    // The source `List` intrinsics (`list.vl`), special-cased in codegen
+    // (`new` -> `[]`, `push` -> `subject.push(..)`). `None` only if `list.vl`
+    // failed to load.
+    pub list_new_fn_id: Option<Id>,
+    pub list_push_fn_id: Option<Id>,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
     // The source `enum bool`; the transformer lowers its variants/patterns to
@@ -3786,90 +3952,12 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .insert(name, id);
     }
 
-    // `List` is a builtin generic container. Its element type is erased like
-    // other generic nominal types; `new` and `push` are intrinsics special-cased
-    // by the transformer (`List::new()` -> `[]`, `list.push(x)` -> `list.push(x)`).
-    let list_struct_id = analyzer.register_primitive_struct("List");
-    analyzer
-        .mut_scope_for_scope_id(global_scope_id)
-        .name_to_id_map
-        .insert("List", list_struct_id);
-    let list_type_id = Type::Struct(list_struct_id).get_type_id(&mut analyzer);
-    let any_type_id = Type::Any.get_type_id(&mut analyzer);
-    let void_type_id = Type::Void.get_type_id(&mut analyzer);
-
-    // `fun new(): List`
-    let list_new_fn_id = analyzer.new_entity_id();
-    analyzer.external_functions.insert(
-        list_new_fn_id,
-        ExternalFunction {
-            id: list_new_fn_id,
-            name: "new",
-            generic_parameter_constraint_ids: Vec::new(),
-            parameters: Vec::new(),
-            return_type_id: list_type_id,
-            call_count: 0,
-        },
-    );
-    analyzer
-        .expr_id_to_expr_map
-        .insert(list_new_fn_id, Expr::ExternalFunction(list_new_fn_id));
-
-    // `fun push(self, item): void`
-    let list_push_fn_id = analyzer.new_entity_id();
-    let push_self_parameter_id = analyzer.new_entity_id();
-    analyzer.parameters.insert(
-        push_self_parameter_id,
-        Parameter {
-            id: push_self_parameter_id,
-            function_id: list_push_fn_id,
-            name: "self",
-            type_id: list_type_id,
-        },
-    );
-    let push_item_parameter_id = analyzer.new_entity_id();
-    analyzer.parameters.insert(
-        push_item_parameter_id,
-        Parameter {
-            id: push_item_parameter_id,
-            function_id: list_push_fn_id,
-            name: "item",
-            type_id: any_type_id,
-        },
-    );
-    analyzer.external_functions.insert(
-        list_push_fn_id,
-        ExternalFunction {
-            id: list_push_fn_id,
-            name: "push",
-            generic_parameter_constraint_ids: Vec::new(),
-            parameters: vec![push_self_parameter_id, push_item_parameter_id],
-            return_type_id: void_type_id,
-            call_count: 0,
-        },
-    );
-    analyzer
-        .expr_id_to_expr_map
-        .insert(list_push_fn_id, Expr::ExternalFunction(list_push_fn_id));
-
-    // Both intrinsics need a function type so calls infer their return type.
-    for function_id in [list_new_fn_id, list_push_fn_id] {
-        let function_type_id = analyzer.new_type_id();
-        analyzer
-            .type_id_to_type_map
-            .insert(function_type_id, Type::Function(function_id));
-        analyzer
-            .expr_id_to_type_id_map
-            .insert(function_id, function_type_id);
-    }
-
-    let mut list_declarations = IndexMap::new();
-    list_declarations.insert("new", list_new_fn_id);
-    list_declarations.insert("push", list_push_fn_id);
-    analyzer.implementations.push(Implementation {
-        subject: list_type_id,
-        declarations: list_declarations,
-    });
+    // `List` is the built-in growable array. It is migrated to source
+    // (`list.vl`, an `external struct` with `external fun new`/`push`); the
+    // struct id and the `new`/`push` intrinsic ids are captured below after the
+    // module loads, and the transformer lowers them to `[]` / `.push`.
+    let mut list_new_fn_id: Option<Id> = None;
+    let mut list_push_fn_id: Option<Id> = None;
 
     // --- Load the `std` package from source ---
     // `pkg` aliases this package's sibling modules so `pkg::<module>::item`
@@ -3924,9 +4012,10 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // so its imports also seed the reachable set. Names that aren't modules
     // (e.g. the `print` in `std::print`) simply find no file and are skipped.
     to_load.extend(collect_module_refs(&nodes.0, "std"));
-    // `bool` is a core primitive, so `boolean.vl` is always loaded (it is
-    // dependency-free, so this pulls in nothing else).
+    // `bool` and `List` are core primitives, so their (dependency-free) modules
+    // are always loaded even when not imported.
     to_load.push("boolean");
+    to_load.push("list");
     while let Some(name) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
@@ -4014,8 +4103,43 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .insert("bool", bool_id);
     }
 
+    // Bind the source `List` struct into the global scope (so bare `List`
+    // resolves in user code). Its `new`/`push` intrinsic ids are captured after
+    // `build()`, once impl subjects resolve.
+    let list_struct_id = module_scopes
+        .get("list")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("List").copied());
+    if let Some(list_struct_id) = list_struct_id {
+        analyzer.primitive_struct_ids.insert("List", list_struct_id);
+        analyzer
+            .mut_scope_for_scope_id(global_scope_id)
+            .name_to_id_map
+            .insert("List", list_struct_id);
+    }
+
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
+
+    // Find `List`'s `new`/`push` (special-cased by the transformer to `[]` /
+    // `.push`) now that impl subjects have resolved.
+    if let Some(list_struct_id) = list_struct_id {
+        let list_type = Type::Struct(list_struct_id);
+        for implementation in &analyzer.implementations {
+            if analyzer.type_id_to_type_map.get(&implementation.subject) == Some(&list_type) {
+                list_new_fn_id = implementation
+                    .declarations
+                    .get("new")
+                    .copied()
+                    .or(list_new_fn_id);
+                list_push_fn_id = implementation
+                    .declarations
+                    .get("push")
+                    .copied()
+                    .or(list_push_fn_id);
+            }
+        }
+    }
     Program {
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,

@@ -1,0 +1,37 @@
+import std::print;
+
+// `for item in iterable` lowers to a native JS `for...of`. `List` is a JS array,
+// so iterating one works directly; `jump break`/`continue` map to JS
+// `break`/`continue`, and `for _ in` iterates without binding.
+fun main() {
+	mut names = List::new();
+	names.push("Anna");
+	names.push("James");
+	names.push("Roger");
+
+	for name in names {
+		print(name);
+	}
+
+	mut numbers = List::new();
+	numbers.push(1);
+	numbers.push(2);
+	numbers.push(3);
+	numbers.push(4);
+
+	for number in numbers {
+		if number == 3 {
+			jump continue;
+		}
+		if number == 4 {
+			jump break;
+		}
+		print(number);
+	}
+
+	mut count = 0;
+	for _ in names {
+		count += 1;
+	}
+	print(count);
+}

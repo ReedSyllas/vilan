@@ -1,9 +1,7 @@
-import pkg::default::Default;
-import pkg::io::panic;
-import pkg::iterator::{ Iterable, Iterator };
-import pkg::operators::{ Add, Mul };
-import pkg::option::Option::{ Some };
-
+// `List<T>` is the built-in growable array. It is `external` (an opaque
+// intrinsic): a `List` value is a native JS array, `List::new()` is `[]`, and
+// `push` is the native `.push`. This module is dependency-free so it can always
+// be loaded as a core type without pulling in the rest of std.
 external struct List<T>;
 
 impl List<type T> {
@@ -12,32 +10,39 @@ impl List<type T> {
 	external fun push(self, item: T): void;
 }
 
-impl List<type T> with Iterable<T> {
-	fun iter(self): Iterator<T> {
-		panic("not implemented yet");
-	}
-}
-
-impl List<type T: Add + Default> {
-	fun sum(self): T {
-		mut iter = self.iter();
-		if iter.next() is Some(mut sum) {
-			for item in iter { sum += item; }
-			sum
-		} else {
-			T::default()
-		}
-	}
-}
-
-impl List<type T: Mul + Default> {
-	fun product(self): T {
-		mut iter = self.iter();
-		if iter.next() is Some(mut product) {
-			for item in iter { product *= item; }
-			product
-		} else {
-			T::default()
-		}
-	}
-}
+// DEFERRED: `iter` (Iterable), `sum`, and `product` need the Iterator protocol
+// for `for..in` — iterating a custom iterator (not a JS array) and an `iter()`
+// that returns a concrete iterator rather than the abstract `Iterator<T>` trait.
+// `for x in myList` works today via native `for...of` without them. Restoring
+// these also requires re-adding the `iterator`/`operators`/`option` imports.
+// See std-migration plan.
+//
+// impl List<type T> with Iterable<T> {
+// 	fun iter(self): Iterator<T> {
+// 		panic("not implemented yet");
+// 	}
+// }
+//
+// impl List<type T: Add + Default> {
+// 	fun sum(self): T {
+// 		mut iter = self.iter();
+// 		if iter.next() is Some(mut sum) {
+// 			for item in iter { sum += item; }
+// 			sum
+// 		} else {
+// 			T::default()
+// 		}
+// 	}
+// }
+//
+// impl List<type T: Mul + Default> {
+// 	fun product(self): T {
+// 		mut iter = self.iter();
+// 		if iter.next() is Some(mut product) {
+// 			for item in iter { product *= item; }
+// 			product
+// 		} else {
+// 			T::default()
+// 		}
+// 	}
+// }

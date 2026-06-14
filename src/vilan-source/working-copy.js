@@ -3,7 +3,7 @@ function c/*map*/(d, e) {
 	let g = null;
 	if (f[0] === 0) {
 		const h/*x*/ = f[1];
-		g = e(h/*x*/);
+		g = [ 0, e(h/*x*/) ];
 	} else {
 		g = [ 1 ];
 	}

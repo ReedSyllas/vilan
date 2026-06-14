@@ -2,7 +2,6 @@ import std::option::Option::{ self, Some, None };
 import std::print;
 
 fun main() {
-	let a = Some(10);
-	
-	print(a.map(|x| x * 6));
+	let value = Some(5);
+	print(value.map(|x| x * 6));
 }

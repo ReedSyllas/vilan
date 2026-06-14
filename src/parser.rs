@@ -644,18 +644,15 @@ where
         // parameters (`impl List<type T>`), so it must not be parsed as a
         // generic type usage here. A leading `type` marks a bare blanket
         // binder, e.g. `impl type T with Into<T>`.
-        .ignore_then(
-            just(Token::Type)
-                .or_not()
-                .ignore_then(
-                    identifier
-                        .map_with(|name, e| (Node::Accessor(name), e.span()))
-                        .foldl_with(
-                            just(Token::Op("::")).ignore_then(identifier).repeated(),
-                            |subject, member, e| {
-                                (Node::StaticAccessor(Box::new(subject), member), e.span())
-                            },
-                        ),
+        .ignore_then(just(Token::Type).or_not())
+        .then(
+            identifier
+                .map_with(|name, e| (Node::Accessor(name), e.span()))
+                .foldl_with(
+                    just(Token::Op("::")).ignore_then(identifier).repeated(),
+                    |subject, member, e| {
+                        (Node::StaticAccessor(Box::new(subject), member), e.span())
+                    },
                 )
                 .labelled("implementation subject"),
         )
@@ -690,12 +687,33 @@ where
                     |span| (Vec::new(), span),
                 ))),
         )
-        .map_with(|(((subject, generic_parameters), traits), body), e| {
-            (
-                Node::Impl(Box::new(subject), generic_parameters, traits, body),
-                e.span(),
-            )
-        })
+        .map_with(
+            |((((blanket, subject), generic_parameters), traits), body), e| {
+                // `impl type T with ...` — the subject name is a blanket binder,
+                // i.e. a generic parameter of the impl, not a reference to an
+                // existing type. Make it the impl's first generic parameter.
+                let generic_parameters = match &subject.0 {
+                    Node::Accessor(name) if blanket.is_some() => {
+                        let binder = GenericParameter {
+                            name: *name,
+                            is_type: true,
+                            bounds: Vec::new(),
+                            default: None,
+                        };
+                        let mut parameters = generic_parameters
+                            .map(|(parameters, _)| parameters)
+                            .unwrap_or_default();
+                        parameters.insert(0, binder);
+                        Some((parameters, subject.1))
+                    }
+                    _ => generic_parameters,
+                };
+                (
+                    Node::Impl(Box::new(subject), generic_parameters, traits, body),
+                    e.span(),
+                )
+            },
+        )
         .boxed();
 
     let trait_ = just(Token::Trait)

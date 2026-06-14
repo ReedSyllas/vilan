@@ -30,8 +30,8 @@ struct Transformer<'src> {
     formatter: Formatter,
     ng: NameGenerator,
     print_fn_id: Id,
-    list_new_fn_id: Id,
-    list_push_fn_id: Id,
+    list_new_fn_id: Option<Id>,
+    list_push_fn_id: Option<Id>,
     panic_fn_id: Option<Id>,
     program: &'src Program<'src>,
     required_functions: IndexMap<Id, js::Node<'src>>,
@@ -324,12 +324,12 @@ impl<'src> Transformer<'src> {
                             ));
                         }
                         // `List::new()` builds an empty JS array.
-                        if target_id == self.list_new_fn_id {
+                        if Some(target_id) == self.list_new_fn_id {
                             return Some(js::Node::Array(Vec::new()));
                         }
                         // `list.push(x)` lowers to the native array method; the
                         // receiver is the method call's first (`self`) argument.
-                        if target_id == self.list_push_fn_id {
+                        if Some(target_id) == self.list_push_fn_id {
                             let mut arguments = args.into_iter();
                             let receiver = arguments.next().unwrap_or(js::Node::Void);
                             return Some(js::Node::Call(
@@ -466,6 +466,22 @@ impl<'src> Transformer<'src> {
                 // and yield void, so a loop as a block's tail isn't treated as
                 // the block's result.
                 block.push(js::Node::While(Box::new(t_condition), t_body));
+                js::Node::Void
+            }
+            Expr::ForEach(iterable_id, item_id, body) => {
+                // `for item in iterable` lowers to a native `for...of`.
+                let t_iterable = self
+                    .walk_entity(*iterable_id, block)
+                    .unwrap_or(js::Node::Void);
+                let binding = item_id
+                    .map(|item_id| self.ng.name_for(item_id))
+                    .unwrap_or_else(|| "_".to_string());
+                let mut t_body = self.walk_list(&body.0);
+                if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
+                } else if let Some(node) = self.walk_entity(body.1, &mut t_body) {
+                    t_body.push(node);
+                }
+                block.push(js::Node::ForOf(binding, Box::new(t_iterable), t_body));
                 js::Node::Void
             }
             Expr::Jump(target) => match *target {
@@ -1205,6 +1221,25 @@ impl Formatter {
                     self.indentation.repeat(indentation),
                 )
             }
+            js::Node::ForOf(binding, iterable, body) => {
+                let s_iterable = self.node(iterable, "", 0);
+                let s_body = body
+                    .iter()
+                    .map(|x| self.node(x, ";", indentation + 1))
+                    .collect::<Vec<_>>()
+                    .join(self.line_break);
+                format!(
+                    "for{}(const {} of {}){}{{{}{}{}{}}}",
+                    self.space,
+                    binding,
+                    s_iterable,
+                    self.space,
+                    self.line_break,
+                    s_body,
+                    self.line_break,
+                    self.indentation.repeat(indentation),
+                )
+            }
             js::Node::Break => format!("break{}", terminator),
             js::Node::Continue => format!("continue{}", terminator),
             js::Node::Closure(closure) => {
@@ -1256,6 +1291,9 @@ pub mod js {
         Function(Function<'src>),
         If(IfBranch<'src>),
         While(Box<Self>, Vec<Self>),
+        // `for (const <binding> of <iterable>) { <body> }`. The binding name is
+        // `_` for a discarded element.
+        ForOf(String, Box<Self>, Vec<Self>),
         LetVariable(Variable<'src>),
         Local(String), // TODO: Consider extracting identifiers into a separate lookup table for late identifier substitution.
         Null,
