@@ -14,7 +14,8 @@ async function b/*delayed*/(c, d) {
 	a/*promises*/.push((async () => {
 	return await (b/*delayed*/("c", 30));
 })());
-	for (const e/*result*/ of await (Promise.all(a/*promises*/))) {
-		console.log(e/*result*/);
+	const e/*results*/ = await (Promise.all(a/*promises*/));
+	for (const f/*result*/ of e/*results*/) {
+		console.log(f/*result*/);
 	}
 })();

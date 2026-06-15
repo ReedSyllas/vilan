@@ -3806,15 +3806,18 @@ impl<'src> Analyzer<'src> {
         }
 
         // --- Constraint solving loop ---
-        // Each iteration resolves at least one new type (unknown -> concrete).
-        // The maximum number of iterations equals the number of expressions
-        // with unknown types, since each resolved type never reverts to unknown.
-        let max_iterations = self.struct_initializer_constraints.len()
-            + self.variable_constraints.len()
-            + self.call_subject_constraints.len()
-            + self.field_accessor_constraints.len()
-            + self.prepped_is.len()
-            + self.prepped_matches.len();
+        // A true fixpoint: each pass resolves at least one deferred item along a
+        // live dependency chain (its blocked dependents resolve on later passes)
+        // and sets `progress`; resolved types never revert. The loop exits the
+        // moment a pass resolves nothing — so it is order-independent: whatever
+        // can resolve eventually does, regardless of which pass reaches it. The
+        // bound below is only a safety net against a non-converging bug; it is
+        // never the reason a well-typed program resolves, so it just has to
+        // exceed any real chain. Each resolution consumes a distinct deferred
+        // item, and the items (including the slot unifications generated
+        // mid-solve while resolving `push`/`run`) are bounded by the entity
+        // count, so twice it is ample.
+        let max_iterations = 2 * self.entity_id as usize + 16;
 
         for _ in 0..max_iterations {
             let mut progress = false;
@@ -3948,6 +3951,9 @@ impl<'src> Analyzer<'src> {
                 }
                 if let Some(deferred) = defer {
                     unresolved_constraints.push(deferred);
+                } else {
+                    // The constraint fully resolved this pass.
+                    progress = true;
                 }
                 // Always store the struct initializer expression so infer_type can handle it.
                 self.expr_id_to_expr_map.insert(
@@ -3961,9 +3967,6 @@ impl<'src> Analyzer<'src> {
                 self.resolved_types.insert(initializer_id, type_id);
             }
             self.struct_initializer_constraints = unresolved_constraints;
-            if !self.struct_initializer_constraints.is_empty() {
-                progress = true;
-            }
 
             // --- Resolve field accessor constraints ---
             let mut remaining_accessors = IndexMap::new();
@@ -4039,9 +4042,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.field_accessor_constraints = remaining_accessors;
-            if !self.field_accessor_constraints.is_empty() {
-                progress = true;
-            }
 
             // --- Resolve `is` pattern tests ---
             // Once the subject type is known, resolve the pattern (typing its
@@ -4066,9 +4066,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.prepped_is = remaining_is;
-            if !self.prepped_is.is_empty() {
-                progress = true;
-            }
 
             // --- Resolve match expressions ---
             // A match resolves once its subject type is known: the leg
@@ -4243,9 +4240,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.prepped_matches = remaining_matches;
-            if !self.prepped_matches.is_empty() {
-                progress = true;
-            }
 
             // --- Resolve deferred method calls ---
             if !self.prepped_method_calls.is_empty() {
@@ -4422,9 +4416,6 @@ impl<'src> Analyzer<'src> {
                     }
                 }
                 self.prepped_method_calls = remaining_methods;
-                if !self.prepped_method_calls.is_empty() {
-                    progress = true;
-                }
             }
 
             // --- Unify `List` element slots from `push` calls ---
@@ -4450,9 +4441,6 @@ impl<'src> Analyzer<'src> {
                     }
                 }
                 self.prepped_slot_unifications = remaining;
-                if !self.prepped_slot_unifications.is_empty() {
-                    progress = true;
-                }
             }
 
             // --- Resolve `for x in iterable` element bindings ---
@@ -4484,9 +4472,6 @@ impl<'src> Analyzer<'src> {
                     progress = true;
                 }
                 self.prepped_for_each_items = remaining_items;
-                if !self.prepped_for_each_items.is_empty() {
-                    progress = true;
-                }
             }
 
             // --- Type-check method-call arguments against parameters ---
@@ -4554,9 +4539,6 @@ impl<'src> Analyzer<'src> {
                     progress = true;
                 }
                 self.prepped_method_arg_checks = remaining;
-                if !self.prepped_method_arg_checks.is_empty() {
-                    progress = true;
-                }
             }
 
             // --- Resolve variable constraints ---
@@ -4670,9 +4652,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.variable_constraints = remaining_vars;
-            if !self.variable_constraints.is_empty() {
-                progress = true;
-            }
 
             // --- Resolve call subject constraints ---
             let mut remaining_calls = Vec::new();
@@ -4984,16 +4963,12 @@ impl<'src> Analyzer<'src> {
                         }
                     }
                 }
-
-                if !remaining_calls.is_empty() {
-                    progress = true;
-                }
             }
             self.call_subject_constraints = remaining_calls;
-            if !self.call_subject_constraints.is_empty() {
-                progress = true;
-            }
 
+            // A true fixpoint: a pass that resolves nothing is stuck — every
+            // resolution above sets `progress`, so unresolved work that *could*
+            // make progress would have. Whatever remains is reported below.
             if !progress {
                 break;
             }

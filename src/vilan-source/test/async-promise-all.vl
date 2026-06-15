@@ -1,5 +1,6 @@
 // `Promise::all` waits for every promise concurrently and preserves order, so
-// the output is a, b, c regardless of each promise's delay.
+// the output is a, b, c regardless of each promise's delay. It is `async`, so
+// the call is implicitly awaited to a `List<str>` — no explicit `await`.
 import std::{ print };
 import std::promise::Promise;
 
@@ -16,7 +17,8 @@ fun main() {
 	promises.push(async delayed("a", 20));
 	promises.push(async delayed("b", 10));
 	promises.push(async delayed("c", 30));
-	for result in await Promise::all(promises) {
+	let results: List<str> = Promise::all(promises);
+	for result in results {
 		print(result);
 	}
 }
