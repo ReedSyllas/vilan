@@ -215,6 +215,7 @@ impl<'src> Transformer<'src> {
                 msg: "Cannot execute program without a main function".to_string(),
                 span: Span::new((), 0..0),
             })?;
+        let main_is_async = self.program.async_functions.contains(&main_fn.id);
 
         let t_global_variables = self.walk_list(&global_variables);
 
@@ -234,6 +235,19 @@ impl<'src> Transformer<'src> {
                 );
                 t_main_fn_body.push(t_exit);
             }
+        }
+
+        // An async `main` (it awaits) runs inside an invoked async arrow, since
+        // top-level `await` isn't assumed: `(async () => { .. })()`.
+        if main_is_async {
+            t_main_fn_body = vec![js::Node::Call(
+                Box::new(js::Node::Closure(js::Closure {
+                    parameters: Vec::new(),
+                    body: t_main_fn_body,
+                    is_async: true,
+                })),
+                Vec::new(),
+            )];
         }
 
         let mut t_functions = self.required_functions.into_iter().collect::<Vec<_>>();
@@ -316,6 +330,16 @@ impl<'src> Transformer<'src> {
                 }
                 block.push(node);
             }
+        }
+    }
+
+    /// Wraps a call in `await` when its target is async (the implicit await), so
+    /// the value flows as the resolved `T` rather than a promise.
+    fn maybe_await(&self, target_id: Id, node: js::Node<'src>) -> js::Node<'src> {
+        if self.program.async_functions.contains(&target_id) {
+            js::Node::Await(Box::new(node))
+        } else {
+            node
         }
     }
 
@@ -410,7 +434,8 @@ impl<'src> Transformer<'src> {
                         {
                             self.ensure_function_emitted(target_id);
                             let name = self.ng.name_for(target_id);
-                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                            return Some(self.maybe_await(target_id, call));
                         }
                     }
                 }
@@ -423,8 +448,15 @@ impl<'src> Transformer<'src> {
                     self.program.trait_method_dispatch.get(id)
                 {
                     if let Some(type_id) = concrete_type.or(self.current_self_type) {
-                        if let Some(name) = self.emit_dispatched_method(type_id, member_name) {
-                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                        if let Some((name, is_async)) =
+                            self.emit_dispatched_method(type_id, member_name)
+                        {
+                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                            return Some(if is_async {
+                                js::Node::Await(Box::new(call))
+                            } else {
+                                call
+                            });
                         }
                     }
                 }
@@ -450,7 +482,8 @@ impl<'src> Transformer<'src> {
                             .get(&target_id)
                             .and_then(|external| external.extern_binding.clone())
                         {
-                            return Some(self.emit_extern(target_id, binding, args));
+                            let call = self.emit_extern(target_id, binding, args);
+                            return Some(self.maybe_await(target_id, call));
                         }
                         // A variant constructor call builds the enum value
                         // directly: `[variant_index, ...data]` (or a native
@@ -495,6 +528,7 @@ impl<'src> Transformer<'src> {
                                 Box::new(js::Node::Closure(js::Closure {
                                     parameters: Vec::new(),
                                     body: vec![js::Node::Throw(Box::new(message))],
+                                    is_async: false,
                                 })),
                                 Vec::new(),
                             ));
@@ -513,7 +547,8 @@ impl<'src> Transformer<'src> {
                                 target_id,
                                 &function_call.generic_argument_ids,
                             );
-                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                            return Some(self.maybe_await(target_id, call));
                         }
                         // A method on a generic impl whose generics bind to
                         // concrete types from the receiver (`xs.sum()` on
@@ -521,11 +556,13 @@ impl<'src> Transformer<'src> {
                         if let Some(substitution) = self.program.method_call_substitution.get(&id) {
                             let substitution = substitution.clone();
                             let name = self.emit_method_instance(target_id, &substitution);
-                            return Some(js::Node::Call(Box::new(js::Node::Local(name)), args));
+                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                            return Some(self.maybe_await(target_id, call));
                         }
                         self.ensure_function_emitted(target_id);
                         let name = self.ng.name_for(target_id);
-                        js::Node::Call(Box::new(js::Node::Local(name)), args)
+                        let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                        self.maybe_await(target_id, call)
                     }
                     _ => {
                         let t_subject = self.walk_entity(function_call.subject_id, block).unwrap();
@@ -547,7 +584,24 @@ impl<'src> Transformer<'src> {
                 if let Some(value) = value {
                     body.push(js::Node::Return(Box::new(value)));
                 }
-                js::Node::Closure(js::Closure { parameters, body })
+                js::Node::Closure(js::Closure {
+                    parameters,
+                    body,
+                    is_async: self.program.async_functions.contains(closure_id),
+                })
+            }
+            // `async <body>` — the async-block closure invoked with no
+            // arguments, yielding a promise: `(async () => { <body> })()`.
+            Expr::Async(closure_id) => {
+                let closure = self
+                    .walk_entity(*closure_id, block)
+                    .unwrap_or(js::Node::Void);
+                js::Node::Call(Box::new(closure), Vec::new())
+            }
+            // `await <inner>`.
+            Expr::Await(inner) => {
+                let inner = self.walk_entity(*inner, block).unwrap_or(js::Node::Void);
+                js::Node::Await(Box::new(inner))
             }
             Expr::FunctionReturn(value) => js::Node::Return(Box::new(
                 self.walk_entity(*value, block).unwrap_or(js::Node::Void),
@@ -1283,6 +1337,7 @@ impl<'src> Transformer<'src> {
             name,
             parameters,
             body,
+            is_async: self.program.async_functions.contains(&function.id),
         })
     }
 
@@ -1308,14 +1363,18 @@ impl<'src> Transformer<'src> {
     /// returning the JS name to call: the type's own impl member if it declares
     /// one, otherwise an inherited trait default emitted specialized for the type
     /// (so the default's inner `self.method()` calls dispatch to this type too).
-    fn emit_dispatched_method(&mut self, type_id: TypeId, member: &str) -> Option<String> {
+    /// Resolves a trait method on a concrete type to its emitted JS name, paired
+    /// with whether that method is async (so the caller can implicitly await it).
+    fn emit_dispatched_method(&mut self, type_id: TypeId, member: &str) -> Option<(String, bool)> {
         let type_id = self.resolve_type_id(type_id);
         if let Some(member_id) = self.resolve_member_on_type(type_id, member) {
             self.ensure_function_emitted(member_id);
-            return Some(self.ng.name_for(member_id));
+            let is_async = self.program.async_functions.contains(&member_id);
+            return Some((self.ng.name_for(member_id), is_async));
         }
         let default_id = self.resolve_inherited_default(type_id, member)?;
-        Some(self.emit_default_instance(default_id, type_id))
+        let is_async = self.program.async_functions.contains(&default_id);
+        Some((self.emit_default_instance(default_id, type_id), is_async))
     }
 
     /// Emits a trait default method specialized for a concrete type, keyed by
@@ -1625,7 +1684,8 @@ impl Formatter {
                     .collect::<Vec<_>>()
                     .join(self.line_break);
                 format!(
-                    "function {}({}){}{{{}{}{}{}}}{}",
+                    "{}function {}({}){}{{{}{}{}{}}}{}",
+                    if function.is_async { "async " } else { "" },
                     name,
                     parameters,
                     self.space,
@@ -1833,7 +1893,8 @@ impl Formatter {
                     .collect::<Vec<_>>()
                     .join(self.line_break);
                 format!(
-                    "({}){}=>{}{{{}{}{}{}}}{}",
+                    "{}({}){}=>{}{{{}{}{}{}}}{}",
+                    if closure.is_async { "async " } else { "" },
                     s_parameters,
                     self.space,
                     self.space,
@@ -1843,6 +1904,11 @@ impl Formatter {
                     self.indentation.repeat(indentation),
                     terminator
                 )
+            }
+            js::Node::Await(operand) => {
+                // Parenthesise so `await` doesn't bind too loosely (e.g.
+                // `await (a + b)`), mirroring the unary `!` rendering.
+                format!("await ({}){}", self.node(operand, "", 0), terminator)
             }
         };
 
@@ -1858,6 +1924,8 @@ pub mod js {
     pub enum Node<'src> {
         Array(Vec<Self>),
         Assignment(Box<Self>, Box<Self>),
+        // `await <operand>`.
+        Await(Box<Self>),
         Binary(BinaryOp, Box<Self>, Box<Self>),
         Unary(char, Box<Self>),
         Bool(bool),
@@ -1896,6 +1964,7 @@ pub mod js {
         pub name: String,
         pub parameters: Vec<Parameter>,
         pub body: Vec<Node<'src>>,
+        pub is_async: bool,
     }
 
     #[derive(Clone, Debug)]
@@ -1913,6 +1982,7 @@ pub mod js {
     pub struct Closure<'src> {
         pub parameters: Vec<Parameter>,
         pub body: Vec<Node<'src>>,
+        pub is_async: bool,
     }
 }
 

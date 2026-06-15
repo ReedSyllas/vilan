@@ -1,0 +1,30 @@
+// Async/await: an `async` extern (a promise-returning host function), implicit
+// await of an async function, and the explicit `async` (spawn) / `await` forms.
+// Output is deterministic (`sleep(0)`): first, second, third.
+import std::{ print };
+
+@extern("node:timers/promises", "setTimeout")
+async external fun sleep(ms: i32): void;
+
+// `labelled` awaits `sleep`, so it is inferred async; callers implicitly await
+// it. Its declared return type stays the plain `str` — no `Promise` wrapper.
+fun labelled(label: str): str {
+	sleep(0);
+	label
+}
+
+fun main() {
+	// Implicit await: the call is awaited, so `main` becomes async too.
+	print(labelled("first"));
+
+	// Explicit spawn then await.
+	let pending = async labelled("second");
+	print(await pending);
+
+	// `async { .. }` block as a spawned promise.
+	let block = async {
+		sleep(0);
+		"third"
+	};
+	print(await block);
+}

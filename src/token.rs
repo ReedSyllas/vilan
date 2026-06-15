@@ -1,5 +1,7 @@
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'src> {
+    Async,
+    Await,
     Bool(bool),
     Ctrl(char),
     Else,
@@ -36,6 +38,8 @@ pub enum Token<'src> {
 impl std::fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Token::Async => write!(f, "async"),
+            Token::Await => write!(f, "await"),
             Token::Bool(x) => write!(f, "{x}"),
             Token::Ctrl(c) => write!(f, "{c}"),
             Token::Else => write!(f, "else"),

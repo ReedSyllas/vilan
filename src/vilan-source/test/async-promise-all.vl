@@ -1,0 +1,22 @@
+// `Promise::all` waits for every promise concurrently and preserves order, so
+// the output is a, b, c regardless of each promise's delay.
+import std::{ print };
+import std::promise::Promise;
+
+@extern("node:timers/promises", "setTimeout")
+async external fun sleep(ms: i32): void;
+
+fun delayed(label: str, ms: i32): str {
+	sleep(ms);
+	label
+}
+
+fun main() {
+	let promises: List<Promise<str>> = List::new();
+	promises.push(async delayed("a", 20));
+	promises.push(async delayed("b", 10));
+	promises.push(async delayed("c", 30));
+	for result in await Promise::all(promises) {
+		print(result);
+	}
+}

@@ -39,6 +39,8 @@ pub fn lexer<'src>()
 
     // A parser for identifiers and keywords
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
+        "async" => Token::Async,
+        "await" => Token::Await,
         "else" => Token::Else,
         "enum" => Token::Enum,
         "export" => Token::Export,

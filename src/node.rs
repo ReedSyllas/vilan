@@ -45,6 +45,10 @@ pub enum ExternBinding<'src> {
 #[derive(Debug)]
 pub struct Func<'src> {
     pub name: Spanned<&'src str>,
+    // Declared with the `async` keyword. For an `external` (a leaf with no body)
+    // this is the only signal that it is async; for an ordinary function it is
+    // usually inferred instead, but `async fun` forces it.
+    pub is_async: bool,
     // Declared with the `external` keyword: an intrinsic with no Vilan body,
     // implemented by the runtime/compiler (e.g. `external fun print(..);`).
     pub external: bool,
@@ -92,6 +96,12 @@ pub type NodeList<'src> = Vec<Spanned<Node<'src>>>;
 pub enum Node<'src> {
     Accessor(&'src str),
     AccessorWithGenerics(&'src str, GenericArguments<'src>),
+    // `async <block-or-expr>` — runs the body as a promise, evaluating to a
+    // `Promise<T>` immediately (non-blocking). Lowers to an invoked async arrow.
+    Async(Box<Spanned<Self>>),
+    // `await <expr>` — suspends until the promise resolves, yielding `T`. Forces
+    // its enclosing function to be async.
+    Await(Box<Spanned<Self>>),
     // A `type X` generic binder appearing inside a type — the impl subject
     // pattern (`impl Option<(type T, type U)>`), including a bare blanket
     // (`impl type T`). The optional bounds are `T: A + B`.

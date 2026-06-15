@@ -1,0 +1,24 @@
+// `std::context` — a dynamically-scoped value, like a compile-time
+// `AsyncLocalStorage`. `Context::new()` creates a context bound at module
+// scope; `run(value, body)` makes `value` the context's value for the dynamic
+// extent of `body`; `get()` reads the value established by the nearest
+// enclosing `run`. The compiler threads the value as a hidden parameter through
+// every function that transitively calls `get()` (and captures it into
+// closures created within a `run`), so there is no runtime storage and it works
+// in the browser.
+//
+// `Context`, `new`, `run`, and `get` are intrinsics: the `context` threading
+// pass rewrites their call sites away, so these signatures exist only to type
+// check user code. `Context<T>`'s value type `T` is inferred from the first
+// `run` (`count.run(0, ..)` makes it `Context<i32>`), exactly as `List<T>`'s
+// element type is inferred from `push`.
+
+external struct Context<T>;
+
+impl Context<type T> {
+	external fun new(): Context<T>;
+
+	external fun run(self, value: T, body: || void): void;
+
+	external fun get(self): T;
+}

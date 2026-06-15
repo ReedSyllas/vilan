@@ -1,0 +1,15 @@
+// `std::fs` — minimal async filesystem access over `node:fs/promises`. The raw
+// bindings are `async` (promise-returning host functions), so calls to them are
+// implicitly awaited.
+
+@extern("node:fs/promises", "readFile")
+async external fun read_file_bytes(path: str, encoding: str): str;
+
+@extern("node:fs/promises", "writeFile")
+async external fun write_file(path: str, contents: str): void;
+
+// Reads a UTF-8 text file to a string. Async (it awaits `readFile`), so callers
+// implicitly await it.
+fun read_file_to_str(path: str): str {
+	read_file_bytes(path, "utf8")
+}

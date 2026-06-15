@@ -16,6 +16,12 @@ pub enum Expr<'src> {
     // An assignment to a local: target accessor and the (possibly desugared,
     // e.g. `x + v` for `x += v`) value expression.
     Assignment(Id, Id),
+    // `async <body>` — the body, lowered to an invoked async arrow, yielding a
+    // promise. The id is the async-block closure (in `closures`).
+    Async(Id),
+    // `await <inner>` — resolve the inner promise; forces the enclosing function
+    // async at code generation.
+    Await(Id),
     Binary(BinaryOp, Id, Id),
     Block((Vec<Id>, Id)),
     Bool(bool),
@@ -111,6 +117,10 @@ pub struct Function<'src> {
     /// default method (impls may inherit it). Always true outside a trait.
     pub has_body: bool,
     pub call_count: u32,
+    /// Declared `async`, or inferred async (its body awaits). Such a function
+    /// compiles to a JS `async function`, and calls to it are implicitly
+    /// awaited. Set by the async inference pass.
+    pub is_async: bool,
 }
 
 #[derive(Debug)]
@@ -124,6 +134,9 @@ pub struct ExternalFunction<'src> {
     // import/call, method, or property access.
     pub extern_binding: Option<ExternBinding<'src>>,
     pub call_count: u32,
+    /// Declared `async` — a promise-returning host function. Calls to it are
+    /// implicitly awaited.
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -505,6 +518,9 @@ pub struct Analyzer<'src> {
     // The `std` `panic` intrinsic, if loaded. A call to it never returns, so it
     // types as `any` (unifying with any expected type) and lowers to a `throw`.
     panic_fn_id: Option<Id>,
+    // The `std::promise` `Promise<T>` struct, if loaded. `async e` types as
+    // `Promise<type of e>`, and `await p` unwraps a `Promise<T>` to `T`.
+    promise_struct_id: Option<Id>,
 }
 
 static EMPTY_SPAN: Span = Span {
@@ -620,6 +636,7 @@ impl<'src> Analyzer<'src> {
             variables: IndexMap::new(),
             walking_trait_body: false,
             panic_fn_id: None,
+            promise_struct_id: None,
         }
     }
 
@@ -1463,6 +1480,7 @@ impl<'src> Analyzer<'src> {
                             return_type_id,
                             extern_binding: function.extern_binding.clone(),
                             call_count: 0,
+                            is_async: function.is_async,
                         },
                     );
                     let function_type_id = self.new_type_id();
@@ -1508,6 +1526,7 @@ impl<'src> Analyzer<'src> {
                             body: (ids, expr_id, body_scope_id),
                             has_body: function.body.is_some(),
                             call_count: 0,
+                            is_async: function.is_async,
                         },
                     );
                     Some(Expr::Function(id))
@@ -1924,6 +1943,36 @@ impl<'src> Analyzer<'src> {
                 );
                 Some(Expr::Closure(id))
             }
+            // `async <body>` lowers to an immediately-invoked, no-parameter
+            // async closure. The closure is its own node (in `closures`), so the
+            // async inference pass treats it as a boundary: its awaits make the
+            // closure async, not the enclosing function.
+            Node::Async(body) => {
+                let closure_id = self.new_entity_id();
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                let return_id = self.walk_expr_node(body, body_scope_id);
+                self.closures.insert(
+                    closure_id,
+                    Closure {
+                        id: closure_id,
+                        parameters: Vec::new(),
+                        return_: return_id,
+                    },
+                );
+                self.expr_id_to_expr_map
+                    .insert(closure_id, Expr::Closure(closure_id));
+                self.span_map.insert(closure_id, &node.1);
+                self.expr_id_to_scope_id_map
+                    .insert(closure_id, body_scope_id);
+                // The type (`Promise<T>`) is inferred lazily in `infer_type_path`.
+                Some(Expr::Async(closure_id))
+            }
+            // `await <inner>` — its type (the unwrapped `T`) is inferred lazily.
+            Node::Await(inner) => {
+                let inner_id = self.walk_expr_node(inner, scope_id);
+                Some(Expr::Await(inner_id))
+            }
             Node::ClosureType(_, _) => panic!("found a type in the expression context"),
             Node::Module(name, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
@@ -2310,9 +2359,8 @@ impl<'src> Analyzer<'src> {
     /// If `type_` is a `List` whose element is still an unresolved inference slot
     /// (an `Unknown` type id from `List::new()`), returns that slot's type id.
     fn list_element_slot(&self, type_: &Type) -> Option<TypeId> {
-        let list_id = self.primitive_struct_ids.get("List").copied()?;
         match type_ {
-            Type::Struct(id, arguments) if *id == list_id && arguments.len() == 1 => {
+            Type::Struct(id, arguments) if self.is_slot_container(*id) && arguments.len() == 1 => {
                 let slot = arguments[0];
                 matches!(slot.get_type(self), Type::Unknown).then_some(slot)
             }
@@ -2320,17 +2368,22 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Whether a struct is an element-slot container — `List` or `Context` —
+    /// whose single type argument is inferred from a method call (`List::push`
+    /// fills `List<T>`; `Context::run`'s value fills `Context<T>`).
+    fn is_slot_container(&self, id: Id) -> bool {
+        self.primitive_struct_ids.get("List") == Some(&id)
+            || self.primitive_struct_ids.get("Context") == Some(&id)
+    }
+
     /// If `type_` is a `List` whose element is an unbound generic (i.e. the
     /// result of `List::new()`), replaces the element with a fresh inference
     /// slot stable for this call id, so the element can be unified from later
     /// `push` calls. Otherwise returns the type unchanged.
     fn freshen_list_element_slots(&mut self, type_: Type, call_id: Id) -> Type {
-        let Some(list_id) = self.primitive_struct_ids.get("List").copied() else {
-            return type_;
-        };
         match type_ {
             Type::Struct(id, arguments)
-                if id == list_id
+                if self.is_slot_container(id)
                     && arguments.len() == 1
                     && matches!(arguments[0].get_type(self), Type::Generic(_)) =>
             {
@@ -2539,6 +2592,58 @@ impl<'src> Analyzer<'src> {
             Expr::Bool(_) => self.bool_type(),
             // `subject is pattern` is a boolean test.
             Expr::Is(_, _) => self.bool_type(),
+            // `async <body>` is a `Promise<T>`, T the type of the body. If the
+            // expected type is itself `Promise<U>`, the body is checked against U.
+            Expr::Async(closure_id) => {
+                let body_id = self.closures.get(closure_id).map(|closure| closure.return_);
+                let inner_constraint = match &constraint {
+                    Type::Struct(id, arguments) if Some(*id) == self.promise_struct_id => arguments
+                        .first()
+                        .map(|type_id| type_id.get_type(self))
+                        .unwrap_or(Type::Unknown),
+                    _ => Type::Unknown,
+                };
+                let body_type = body_id
+                    .map(|body_id| {
+                        self.infer_type_inner(
+                            body_id,
+                            &inner_constraint,
+                            substitution_context,
+                            exprs_seen,
+                        )
+                    })
+                    .unwrap_or(Type::Unknown);
+                // Defer while the body type is still settling, so the wrapped
+                // `Promise<unresolved>` isn't compared against and rejected.
+                if matches!(body_type, Type::Unresolved) {
+                    return Type::Unresolved;
+                }
+                match self.promise_struct_id {
+                    Some(promise_id) => {
+                        let body_type_id = body_type.get_type_id(self);
+                        Type::Struct(promise_id, vec![body_type_id])
+                    }
+                    None => Type::Any,
+                }
+            }
+            // `await <inner>` unwraps a `Promise<T>` to `T` (and is the identity
+            // on a non-promise).
+            Expr::Await(inner_id) => {
+                let inner = self.infer_type_inner(
+                    *inner_id,
+                    &Type::Unknown,
+                    substitution_context,
+                    exprs_seen,
+                );
+                match &inner {
+                    Type::Unresolved => Type::Unresolved,
+                    Type::Struct(id, arguments) if Some(*id) == self.promise_struct_id => arguments
+                        .first()
+                        .map(|type_id| type_id.get_type(self))
+                        .unwrap_or(Type::Any),
+                    _ => inner,
+                }
+            }
             // `!x` (logical not) is a boolean.
             Expr::Unary('!', _) => self.bool_type(),
             Expr::Unary(_, operand_id) => {
@@ -4195,13 +4300,14 @@ impl<'src> Analyzer<'src> {
                                                 .insert(id, bindings.into_iter().collect());
                                         }
                                     }
-                                    // `list.push(value)` on a list whose element
-                                    // is still an inference slot unifies the slot
-                                    // with the value's type.
-                                    if member_name == "push" {
-                                        if let (Some(slot), [argument_id]) = (
+                                    // A method that fills a container's inference
+                                    // slot — `list.push(value)` or
+                                    // `context.run(value, ..)` — unifies the slot
+                                    // with the value (the first argument).
+                                    if member_name == "push" || member_name == "run" {
+                                        if let (Some(slot), Some(argument_id)) = (
                                             self.list_element_slot(&subject_type),
-                                            argument_ids.as_slice(),
+                                            argument_ids.first(),
                                         ) {
                                             self.prepped_slot_unifications
                                                 .push((slot, *argument_id));
@@ -5180,6 +5286,13 @@ pub struct Program<'src> {
     pub list_push_fn_id: Option<Id>,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
+    // The `std::context` `Context` intrinsics (if `context.vl` loaded): the
+    // `new`/`run`/`get` method ids. The context threading pass keys off these to
+    // find context bindings and their `run`/`get` sites; the transformer lowers
+    // `Context::new()` to an opaque value.
+    pub context_new_fn_id: Option<Id>,
+    pub context_run_fn_id: Option<Id>,
+    pub context_get_fn_id: Option<Id>,
     // `external` std functions the transformer lowers to native JS or a runtime
     // helper (`str.trim()`, `scan()`, `random::i32(..)`, ...), keyed by fn id.
     pub intrinsics: HashMap<Id, Intrinsic>,
@@ -5194,6 +5307,15 @@ pub struct Program<'src> {
     pub structs: IndexMap<Id, Struct<'src>>,
     pub type_id_to_type_map: HashMap<TypeId, Type>,
     pub variables: IndexMap<Id, Variable<'src>>,
+    // The next unused entity id. Post-analysis passes (the context threading
+    // pass) mint fresh entities — synthetic parameters and references — from
+    // here without colliding with analyzed ones.
+    pub next_entity_id: u32,
+    // Functions and closures that are async (declared `async`, or inferred — its
+    // body awaits, directly or by calling an async function). Filled by the
+    // async inference pass; the transformer emits these as `async` and awaits
+    // calls to them.
+    pub async_functions: HashSet<Id>,
 }
 
 /// Lexes and parses a Vilan source file into an AST, leaking the source and the
@@ -5339,6 +5461,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     to_load.push("boolean");
     to_load.push("list");
     to_load.push("null");
+    to_load.push("promise");
     while let Some(name) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
@@ -5442,8 +5565,69 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .insert("List", list_struct_id);
     }
 
+    // The `std::context` `Context` struct, if `context.vl` loaded. Its
+    // `new`/`run`/`get` method ids are captured after `build()`, once impl
+    // subjects resolve. `Context` is reached only by path (`std::context::..`),
+    // so it isn't bound into the global scope.
+    let context_struct_id = module_scopes
+        .get("context")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Context").copied());
+    // Register `Context` as an element-slot container so `Context<T>`'s value
+    // type is inferred from `run` (mirroring `List` + `push`).
+    if let Some(context_struct_id) = context_struct_id {
+        analyzer
+            .primitive_struct_ids
+            .insert("Context", context_struct_id);
+    }
+
+    // The `std::promise` `Promise<T>` struct, so `async`/`await` type precisely.
+    analyzer.promise_struct_id = module_scopes
+        .get("promise")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Promise").copied());
+    // Bind `Promise` into the global scope so a bare `Promise<T>` annotation
+    // resolves (alongside `std::promise::Promise` by path).
+    if let Some(promise_struct_id) = analyzer.promise_struct_id {
+        analyzer
+            .mut_scope_for_scope_id(global_scope_id)
+            .name_to_id_map
+            .insert("Promise", promise_struct_id);
+    }
+
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
+
+    // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
+    // keys off them) now that impl subjects have resolved.
+    let mut context_new_fn_id: Option<Id> = None;
+    let mut context_run_fn_id: Option<Id> = None;
+    let mut context_get_fn_id: Option<Id> = None;
+    if let Some(context_struct_id) = context_struct_id {
+        for implementation in &analyzer.implementations {
+            let subject_is_context = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == context_struct_id
+            );
+            if subject_is_context {
+                context_new_fn_id = implementation
+                    .declarations
+                    .get("new")
+                    .copied()
+                    .or(context_new_fn_id);
+                context_run_fn_id = implementation
+                    .declarations
+                    .get("run")
+                    .copied()
+                    .or(context_run_fn_id);
+                context_get_fn_id = implementation
+                    .declarations
+                    .get("get")
+                    .copied()
+                    .or(context_get_fn_id);
+            }
+        }
+    }
 
     // Find `List`'s `new`/`push` (special-cased by the transformer to `[]` /
     // `.push`) now that impl subjects have resolved.
@@ -5527,6 +5711,9 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         list_new_fn_id,
         list_push_fn_id,
         panic_fn_id: analyzer.panic_fn_id,
+        context_new_fn_id,
+        context_run_fn_id,
+        context_get_fn_id,
         bool_enum_id: analyzer.bool_enum_id,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,
@@ -5536,5 +5723,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         structs: analyzer.structs,
         type_id_to_type_map: analyzer.type_id_to_type_map,
         variables: analyzer.variables,
+        next_entity_id: analyzer.entity_id,
+        async_functions: HashSet::new(),
     }
 }

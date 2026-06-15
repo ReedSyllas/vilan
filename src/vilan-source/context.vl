@@ -14,7 +14,7 @@ fun level_3() {
 	print(count_context.get());
 }
 
-let count_context = Context::new<u32>();
+let count_context = Context::new();
 
 fun main() {
 	count_context.run(0, || level_1());

@@ -631,6 +631,7 @@ where
 
     let function = extern_attribute
         .or_not()
+        .then(just(Token::Async).or_not().map(|async_| async_.is_some()))
         .then(
             just(Token::External)
                 .or_not()
@@ -678,7 +679,10 @@ where
         .map_with(
             |(
                 (
-                    ((((extern_binding, external), name), generic_parameters), parameters),
+                    (
+                        ((((extern_binding, is_async), external), name), generic_parameters),
+                        parameters,
+                    ),
                     return_type,
                 ),
                 body,
@@ -687,6 +691,7 @@ where
                 (
                     Node::Func(Func {
                         name,
+                        is_async,
                         external,
                         extern_binding,
                         generic_parameters,
@@ -859,6 +864,9 @@ where
         generic_arguments.clone(),
         expression_list.clone(),
         atom.clone(),
+        block
+            .clone()
+            .map(|(x, span)| (Node::Block((x, span)), span)),
     );
     let is_expression = chained
         .then(just(Token::Is).ignore_then(pattern.clone()).or_not())
@@ -957,6 +965,7 @@ where
         import.then_ignore(just(Token::Ctrl(';'))),
         use_.then_ignore(just(Token::Ctrl(';'))),
         block
+            .clone()
             .map(|(x, span)| (Node::Block((x, span)), span))
             .then_ignore(not_block_end),
     )));
@@ -1058,6 +1067,14 @@ fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
     atom: impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>>
     + Clone
     + 'tokens,
+    // A `{ .. }` block already mapped to a `Node::Block`, for `async { .. }`.
+    block_expr: impl Parser<
+        'tokens,
+        I,
+        Spanned<Node<'src>>,
+        extra::Err<Rich<'tokens, Token<'src>, Span>>,
+    > + Clone
+    + 'tokens,
 ) -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
@@ -1117,13 +1134,23 @@ where
         )
         .boxed();
 
-    // Unary prefix `!` (logical not), binding tighter than the binary ops.
+    // Unary prefix operators, binding tighter than the binary ops: `!` (logical
+    // not), `await` (resolve a promise), and `async` (spawn a promise). `async`
+    // takes a block (`async { .. }`) or any unary expression (`async fetch(x)`).
     let unary = recursive(|unary| {
-        just(Token::Op("!"))
-            .ignore_then(unary)
-            .map_with(|expr, e| (Node::Unary('!', Box::new(expr)), e.span()))
-            .or(member_accessor.clone())
-            .boxed()
+        choice((
+            just(Token::Op("!"))
+                .ignore_then(unary.clone())
+                .map_with(|expr, e| (Node::Unary('!', Box::new(expr)), e.span())),
+            just(Token::Await)
+                .ignore_then(unary.clone())
+                .map_with(|expr, e| (Node::Await(Box::new(expr)), e.span())),
+            just(Token::Async)
+                .ignore_then(choice((block_expr.clone(), unary.clone())))
+                .map_with(|expr, e| (Node::Async(Box::new(expr)), e.span())),
+            member_accessor.clone(),
+        ))
+        .boxed()
     });
 
     // Product ops (multiply and divide) have equal precedence

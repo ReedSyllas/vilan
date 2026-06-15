@@ -1,4 +1,7 @@
 mod analyzer;
+mod async_infer;
+mod call_graph;
+mod context;
 mod error;
 mod id;
 mod lexer;
@@ -55,7 +58,15 @@ fn main() {
                 });
             }
 
-            let program = analyze(&root);
+            let mut program = analyze(&root);
+
+            // Thread `std::context::Context` values as hidden parameters (a
+            // no-op unless the program creates a context).
+            crate::context::thread_contexts(&mut program);
+
+            // Infer which functions/closures are async (drives `async`/`await`
+            // code generation).
+            crate::async_infer::infer(&mut program);
 
             for error in &program.diagnostics {
                 errs.push(Rich::custom(error.span, error.msg.as_str()));
@@ -68,6 +79,15 @@ fn main() {
                 )
                 .unwrap_or_else(|_| {
                     println!("failed to write analyze.out");
+                });
+
+                let call_graph = crate::call_graph::CallGraph::build(&program);
+                fs::write(
+                    Path::new(&filename).with_extension("callgraph.out"),
+                    call_graph.debug_dump(&program),
+                )
+                .unwrap_or_else(|_| {
+                    println!("failed to write callgraph.out");
                 });
             }
 
