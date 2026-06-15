@@ -15,12 +15,43 @@ pub struct GenericParameter<'src> {
 
 pub type GenericArguments<'src> = Spanned<Vec<Spanned<Node<'src>>>>;
 
+// How an `external` function is bound to the host (JS): a `@extern(..)`
+// attribute selects the form. The receiver of a method/property is the
+// function's first parameter.
+#[derive(Clone, Debug)]
+pub enum ExternBinding<'src> {
+    // `@extern("node:http", "createServer")` — import `symbol` from `module`
+    // (or, with no module, a global/verbatim symbol like `"console.log"`) and
+    // call it: `symbol(args)`.
+    Function {
+        module: Option<&'src str>,
+        symbol: &'src str,
+    },
+    // `@extern(method)` / `@extern(method, "setHeader")` — `receiver.symbol(rest)`
+    // (the JS name defaults to the function's own name).
+    Method {
+        symbol: Option<&'src str>,
+    },
+    // `@extern(get, "statusCode")` — `receiver.symbol` (a property read).
+    Get {
+        symbol: &'src str,
+    },
+    // `@extern(set, "statusCode")` — `receiver.symbol = value` (a property write).
+    Set {
+        symbol: &'src str,
+    },
+}
+
 #[derive(Debug)]
 pub struct Func<'src> {
     pub name: Spanned<&'src str>,
     // Declared with the `external` keyword: an intrinsic with no Vilan body,
     // implemented by the runtime/compiler (e.g. `external fun print(..);`).
     pub external: bool,
+    // A `@extern(..)` host binding, lowering this external to a JS import/call,
+    // method, or property access. `None` for a plain `external` (compiler
+    // intrinsic) or an ordinary function.
+    pub extern_binding: Option<ExternBinding<'src>>,
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,

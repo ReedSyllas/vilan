@@ -123,8 +123,10 @@ fun main() {
 	
 	if dealership.find_car_by_make("Honda") is Some(let johns_car) {
 		print(i"Found: {johns_car.get_name()}");
-		
-		john.purchase(dealership.place_order(johns_car));
-		print(i"Purchased: {johns_car.get_name()}");
+
+		if dealership.place_order(johns_car) is Some(let order) {
+			john.purchase(order);
+			print(i"Purchased: {johns_car.get_name()}");
+		}
 	}
 }

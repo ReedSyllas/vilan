@@ -1,10 +1,43 @@
 use crate::node::{
-    BinaryOp, Closure, Func, GenericArguments, GenericParameter, If, ImportBranch, Node,
-    NodeIfBranch, NodeList, Pattern,
+    BinaryOp, Closure, ExternBinding, Func, GenericArguments, GenericParameter, If, ImportBranch,
+    Node, NodeIfBranch, NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 use chumsky::{input::ValueInput, prelude::*};
+
+// One argument inside a `@extern(..)` attribute — a bare word (`method`/`get`/
+// `set`) or a quoted string (a module path or host symbol).
+enum ExternArg<'src> {
+    Word(&'src str),
+    Text(&'src str),
+}
+
+/// Interprets a `@extern(..)` attribute's arguments into a host binding.
+fn extern_binding_from_args<'src>(args: &[ExternArg<'src>]) -> ExternBinding<'src> {
+    use ExternArg::{Text, Word};
+    match args {
+        [Text(symbol)] => ExternBinding::Function {
+            module: None,
+            symbol,
+        },
+        [Text(module), Text(symbol)] => ExternBinding::Function {
+            module: Some(module),
+            symbol,
+        },
+        [Word("method")] => ExternBinding::Method { symbol: None },
+        [Word("method"), Text(symbol)] => ExternBinding::Method {
+            symbol: Some(symbol),
+        },
+        [Word("get"), Text(symbol)] => ExternBinding::Get { symbol },
+        [Word("set"), Text(symbol)] => ExternBinding::Set { symbol },
+        // A malformed attribute (author error) lowers to an empty global symbol.
+        _ => ExternBinding::Function {
+            module: None,
+            symbol: "",
+        },
+    }
+}
 
 pub fn parser<'tokens, 'src: 'tokens, I>()
 -> impl Parser<'tokens, I, Spanned<NodeList<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
@@ -578,9 +611,31 @@ where
         .labelled("match expression")
         .boxed();
 
-    let function = just(Token::External)
+    // `@extern("node:http", "createServer")` / `@extern(method)` / `@extern(get,
+    // "statusCode")` — the host binding for the `external` function that follows.
+    let extern_attribute = just(Token::Ctrl('@'))
+        .ignore_then(select! { Token::Ident("extern") => () }.labelled("`extern`"))
+        .ignore_then(
+            choice((
+                select! { Token::Ident(word) => ExternArg::Word(word) },
+                select! { Token::String(text) => ExternArg::Text(text) },
+            ))
+            .separated_by(just(Token::Ctrl(',')))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+        )
+        .map(|args| extern_binding_from_args(&args))
+        .labelled("extern attribute")
+        .boxed();
+
+    let function = extern_attribute
         .or_not()
-        .map(|external| external.is_some())
+        .then(
+            just(Token::External)
+                .or_not()
+                .map(|external| external.is_some()),
+        )
         .then_ignore(just(Token::Fun))
         .then(
             identifier
@@ -621,11 +676,19 @@ where
                 .labelled("function body"),
         )
         .map_with(
-            |(((((external, name), generic_parameters), parameters), return_type), body), e| {
+            |(
+                (
+                    ((((extern_binding, external), name), generic_parameters), parameters),
+                    return_type,
+                ),
+                body,
+            ),
+             e| {
                 (
                     Node::Func(Func {
                         name,
                         external,
+                        extern_binding,
                         generic_parameters,
                         parameters,
                         return_type,

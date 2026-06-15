@@ -1,0 +1,193 @@
+// `std::http` — a small HTTP server over `node:http`, exposed through an
+// abstract `Server`/`Response` API. The raw `node:http` calls are `@extern`
+// host bindings used internally; everything else is ordinary Vilan.
+
+// --- Raw node:http bindings ---
+
+@extern("node:http", "createServer")
+external fun node_create_server(handler: |NodeRequest, NodeResponse| void): NodeServer;
+
+external struct NodeServer;
+
+impl NodeServer {
+	@extern(method)
+	external fun listen(self, port: i32, on_ready: || void);
+}
+
+external struct NodeRequest;
+
+external struct NodeResponse;
+
+impl NodeResponse {
+	@extern(set, "statusCode")
+	external fun set_status_code(self, code: i32);
+
+	@extern(method, "setHeader")
+	external fun set_header_raw(self, name: str, value: str);
+
+	@extern(method, "end")
+	external fun end(self, body: str);
+}
+
+// --- Request ---
+
+struct Request {
+	node: NodeRequest,
+}
+
+// --- Response ---
+
+struct Response {
+	status: i32,
+	header_name: str,
+	header_value: str,
+	body: str,
+}
+
+struct ResponseBuilder {
+	status: i32,
+	header_name: str,
+	header_value: str,
+	body: str,
+}
+
+impl Response {
+	fun builder(): ResponseBuilder {
+		ResponseBuilder {
+			status = 200,
+			header_name = "Content-Type",
+			header_value = "text/plain",
+			body = "",
+		}
+	}
+}
+
+impl ResponseBuilder {
+	fun code(self, code: i32): ResponseBuilder {
+		ResponseBuilder {
+			status = code,
+			header_name = self.header_name,
+			header_value = self.header_value,
+			body = self.body,
+		}
+	}
+
+	fun set_header(self, name: str, value: str): ResponseBuilder {
+		ResponseBuilder {
+			status = self.status,
+			header_name = name,
+			header_value = value,
+			body = self.body,
+		}
+	}
+
+	fun body(self, body: str): ResponseBuilder {
+		ResponseBuilder {
+			status = self.status,
+			header_name = self.header_name,
+			header_value = self.header_value,
+			body = body,
+		}
+	}
+
+	fun build(self): Response {
+		Response {
+			status = self.status,
+			header_name = self.header_name,
+			header_value = self.header_value,
+			body = self.body,
+		}
+	}
+}
+
+// --- Server ---
+
+struct Server {
+	port: i32,
+	request_handler: |Request| Response,
+	on_start: |Server| void,
+}
+
+struct ServerBuilder {
+	port: i32,
+	request_handler: |Request| Response,
+	on_start: |Server| void,
+	on_stop: |Server| void,
+}
+
+impl Server {
+	fun builder(): ServerBuilder {
+		ServerBuilder {
+			port = 3000,
+			request_handler = |request| Response::builder().code(404).body("Not Found").build(),
+			on_start = |server| {},
+			on_stop = |server| {},
+		}
+	}
+
+	fun url(self): str {
+		i"http://localhost:{self.port}/"
+	}
+
+	fun start(self) {
+		let request_handler = self.request_handler;
+		let on_start = self.on_start;
+		let server = self;
+		let port = self.port;
+		let node_server = node_create_server(|node_request, node_response| {
+			let response = request_handler(Request { node = node_request });
+			node_response.set_status_code(response.status);
+			node_response.set_header_raw(response.header_name, response.header_value);
+			node_response.end(response.body);
+		});
+		node_server.listen(port, || {
+			on_start(server);
+		});
+	}
+}
+
+impl ServerBuilder {
+	fun port(self, port: i32): ServerBuilder {
+		ServerBuilder {
+			port = port,
+			request_handler = self.request_handler,
+			on_start = self.on_start,
+			on_stop = self.on_stop,
+		}
+	}
+
+	fun on_request(self, handler: |Request| Response): ServerBuilder {
+		ServerBuilder {
+			port = self.port,
+			request_handler = handler,
+			on_start = self.on_start,
+			on_stop = self.on_stop,
+		}
+	}
+
+	fun on_start(self, callback: |Server| void): ServerBuilder {
+		ServerBuilder {
+			port = self.port,
+			request_handler = self.request_handler,
+			on_start = callback,
+			on_stop = self.on_stop,
+		}
+	}
+
+	fun on_stop(self, callback: |Server| void): ServerBuilder {
+		ServerBuilder {
+			port = self.port,
+			request_handler = self.request_handler,
+			on_start = self.on_start,
+			on_stop = callback,
+		}
+	}
+
+	fun build(self): Server {
+		Server {
+			port = self.port,
+			request_handler = self.request_handler,
+			on_start = self.on_start,
+		}
+	}
+}

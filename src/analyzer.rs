@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::{
-    BinaryOp, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
+    BinaryOp, ExternBinding, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
 use crate::type_::{SubstitutionContext, Type, TypeId};
@@ -120,6 +120,9 @@ pub struct ExternalFunction<'src> {
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
     pub return_type_id: TypeId,
+    // The `@extern(..)` host binding, if any — lowers calls to a JS
+    // import/call, method, or property access.
+    pub extern_binding: Option<ExternBinding<'src>>,
     pub call_count: u32,
 }
 
@@ -450,6 +453,12 @@ pub struct Analyzer<'src> {
     // resolved in the constraint loop: the item takes the iterable's element
     // type (`List<i32>` -> `i32`), so the body can use it concretely.
     prepped_for_each_items: Vec<(Id, Id)>,
+    // Method calls whose arguments need checking against the method's parameters,
+    // as (member id, explicit argument ids). A wired method call isn't checked by
+    // the free-call machinery, so this is a dedicated deferred pass (no subject
+    // re-resolution — that recurses); it also drives bidirectional closure-arg
+    // inference. The method's first parameter is `self`, so args align at +1.
+    prepped_method_arg_checks: Vec<(Id, Vec<Id>)>,
     // For-each loops whose iterable is a custom iterator: the resolved `next`
     // method id, so codegen emits a `next()`/`Some`-matching loop instead.
     for_each_next: HashMap<Id, Id>,
@@ -585,6 +594,7 @@ impl<'src> Analyzer<'src> {
             prepped_method_calls: Vec::new(),
             prepped_for_each: Vec::new(),
             prepped_for_each_items: Vec::new(),
+            prepped_method_arg_checks: Vec::new(),
             for_each_next: HashMap::new(),
             prepped_binary_ops: Vec::new(),
             binary_op_dispatch: HashMap::new(),
@@ -808,12 +818,13 @@ impl<'src> Analyzer<'src> {
             FunctionCall {
                 id,
                 subject_id: member_local_id,
-                generic_argument_ids,
-                argument_ids,
+                generic_argument_ids: generic_argument_ids.clone(),
+                argument_ids: argument_ids.clone(),
                 arguments_span,
             },
         );
         self.expr_id_to_expr_map.insert(id, Expr::Call(id));
+        let _ = (generic_argument_ids, arguments_span);
     }
 
     fn new_scope_id(&mut self) -> Id {
@@ -1450,6 +1461,7 @@ impl<'src> Analyzer<'src> {
                             generic_parameter_constraint_ids,
                             parameters,
                             return_type_id,
+                            extern_binding: function.extern_binding.clone(),
                             call_count: 0,
                         },
                     );
@@ -2336,6 +2348,66 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Infers each closure argument of a method call against the method's
+    /// corresponding parameter type, so an unannotated closure param is filled
+    /// bidirectionally (`builder.on_start(|s| ..)` types `s` from `|Server|
+    /// void`). `argument_ids` are the explicit args (no receiver); the method's
+    /// first parameter is `self`, so they align at offset 1.
+    fn infer_closure_args_against_params(&mut self, member_id: Id, argument_ids: &[Id]) {
+        let parameter_ids = match self.expr_id_to_expr_map.get(&member_id) {
+            Some(Expr::Function(function_id)) => self
+                .functions
+                .get(function_id)
+                .map(|f| f.parameters.clone()),
+            Some(Expr::ExternalFunction(function_id)) => self
+                .external_functions
+                .get(function_id)
+                .map(|f| f.parameters.clone()),
+            _ => None,
+        };
+        let Some(parameter_ids) = parameter_ids else {
+            return;
+        };
+        for (index, argument_id) in argument_ids.iter().enumerate() {
+            if !matches!(
+                self.expr_id_to_expr_map.get(argument_id),
+                Some(Expr::Closure(_))
+            ) {
+                continue;
+            }
+            // `+ 1` skips the method's `self` parameter.
+            let Some(parameter_id) = parameter_ids.get(index + 1) else {
+                continue;
+            };
+            let parameter_type = self
+                .parameters
+                .get(parameter_id)
+                .map(|parameter| parameter.type_id.get_type(self));
+            if let Some(parameter_type) = parameter_type {
+                self.infer_type(*argument_id, &parameter_type, &HashMap::new());
+            }
+        }
+    }
+
+    /// Whether `expr_id` is a closure parameter whose type is still `Unknown`
+    /// (an unannotated `|x| ..` awaiting bidirectional inference), following
+    /// `Local` indirections to the `Parameter` entity.
+    fn is_unknown_closure_parameter(&self, expr_id: Id) -> bool {
+        let mut id = expr_id;
+        loop {
+            match self.expr_id_to_expr_map.get(&id) {
+                Some(Expr::Local(target_id)) => id = *target_id,
+                Some(Expr::Parameter(parameter_id)) => {
+                    return self.parameters.get(parameter_id).is_some_and(|parameter| {
+                        self.closures.contains_key(&parameter.function_id)
+                            && matches!(parameter.type_id.get_type(self), Type::Unknown)
+                    });
+                }
+                _ => return false,
+            }
+        }
+    }
+
     /// The variant index a constructor subject refers to (`Some` -> 0), following
     /// `Local` indirections to the `EnumVariant` entity.
     fn enum_variant_index(&self, subject_id: Id) -> Option<usize> {
@@ -2805,6 +2877,30 @@ impl<'src> Analyzer<'src> {
                 let closure = self.closures.get(closure_id).unwrap();
                 let parameter_ids = closure.parameters.clone();
                 let return_expr_id = closure.return_;
+                // Bidirectional inference: when the expected type is a closure of
+                // matching arity, fill any unannotated (`Unknown`) parameter from
+                // it — so `|res|` passed where `|Res| void` is expected types
+                // `res` as `Res`.
+                if let Type::Closure(expected_parameter_ids, _) = &constraint {
+                    if expected_parameter_ids.len() == parameter_ids.len() {
+                        let expected = expected_parameter_ids.clone();
+                        for (parameter_id, expected_type_id) in parameter_ids.iter().zip(expected) {
+                            let is_unknown = self
+                                .parameters
+                                .get(parameter_id)
+                                .is_some_and(|p| matches!(p.type_id.get_type(self), Type::Unknown));
+                            let expected_known = !matches!(
+                                expected_type_id.get_type(self),
+                                Type::Unknown | Type::Unresolved
+                            );
+                            if is_unknown && expected_known {
+                                if let Some(parameter) = self.parameters.get_mut(parameter_id) {
+                                    parameter.type_id = expected_type_id;
+                                }
+                            }
+                        }
+                    }
+                }
                 let parameter_type_ids = parameter_ids
                     .iter()
                     .map(|parameter_id| self.parameters.get(parameter_id).unwrap().type_id)
@@ -4155,10 +4251,28 @@ impl<'src> Analyzer<'src> {
                             }
                         }
                         Type::Unresolved => MethodLookup::Defer,
+                        // An unannotated closure parameter awaiting bidirectional
+                        // inference (e.g. `|res| { res.method() }` where `res`'s
+                        // type is filled in from the expected closure type) defers
+                        // rather than erroring; once its type lands the call
+                        // resolves. (Only closure params, so an uncalled closure's
+                        // method-less param doesn't churn the loop.)
+                        Type::Unknown if self.is_unknown_closure_parameter(subject_id) => {
+                            MethodLookup::Defer
+                        }
                         _ => MethodLookup::NotCallable,
                     };
                     match lookup {
                         MethodLookup::Found(member_id) => {
+                            // Drive bidirectional inference of any closure
+                            // arguments against the method's parameter types (a
+                            // wired method call isn't arg-checked like a free
+                            // call, so `builder.on_start(|s| ..)` would otherwise
+                            // leave `s` untyped), and defer a full argument
+                            // type-check against the parameters.
+                            self.infer_closure_args_against_params(member_id, &argument_ids);
+                            self.prepped_method_arg_checks
+                                .push((member_id, argument_ids.clone()));
                             self.wire_method_call(
                                 id,
                                 subject_id,
@@ -4265,6 +4379,76 @@ impl<'src> Analyzer<'src> {
                 }
                 self.prepped_for_each_items = remaining_items;
                 if !self.prepped_for_each_items.is_empty() {
+                    progress = true;
+                }
+            }
+
+            // --- Type-check method-call arguments against parameters ---
+            // Deferred until every argument resolves; then each is reconciled
+            // against the method's parameter type. (Only argument checking — no
+            // subject re-resolution, which would recurse.)
+            if !self.prepped_method_arg_checks.is_empty() {
+                let mut remaining = Vec::new();
+                'checks: for (member_id, argument_ids) in
+                    std::mem::take(&mut self.prepped_method_arg_checks)
+                {
+                    let parameter_ids = match self.expr_id_to_expr_map.get(&member_id) {
+                        Some(Expr::Function(function_id)) => self
+                            .functions
+                            .get(function_id)
+                            .map(|f| f.parameters.clone()),
+                        Some(Expr::ExternalFunction(function_id)) => self
+                            .external_functions
+                            .get(function_id)
+                            .map(|f| f.parameters.clone()),
+                        _ => None,
+                    };
+                    let Some(parameter_ids) = parameter_ids else {
+                        continue;
+                    };
+                    // Infer every argument first; defer the whole check until they
+                    // all resolve, so errors aren't reported against partial types.
+                    let mut argument_types = Vec::with_capacity(argument_ids.len());
+                    for argument_id in &argument_ids {
+                        // `+ 1` skips the method's `self` parameter.
+                        let parameter_type = parameter_ids
+                            .get(argument_types.len() + 1)
+                            .and_then(|parameter_id| self.parameters.get(parameter_id))
+                            .map(|parameter| parameter.type_id.get_type(self))
+                            .unwrap_or(Type::Unknown);
+                        let argument_type =
+                            self.infer_type(*argument_id, &parameter_type, &HashMap::new());
+                        if matches!(argument_type, Type::Unresolved) {
+                            remaining.push((member_id, argument_ids.clone()));
+                            continue 'checks;
+                        }
+                        argument_types.push(argument_type);
+                    }
+                    for (index, argument_type) in argument_types.into_iter().enumerate() {
+                        let argument_id = argument_ids[index];
+                        let Some(parameter_type) = parameter_ids
+                            .get(index + 1)
+                            .and_then(|parameter_id| self.parameters.get(parameter_id))
+                            .map(|parameter| parameter.type_id.get_type(self))
+                        else {
+                            continue;
+                        };
+                        if self
+                            .reconcile_type(&argument_type, &parameter_type, &HashMap::new())
+                            .is_none()
+                        {
+                            let expected = self.pretty_print_type(&parameter_type, &HashMap::new());
+                            let got = self.pretty_print_type(&argument_type, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&argument_id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!("Expected {}, but got {} instead.", expected, got),
+                            });
+                        }
+                    }
+                    progress = true;
+                }
+                self.prepped_method_arg_checks = remaining;
+                if !self.prepped_method_arg_checks.is_empty() {
                     progress = true;
                 }
             }
@@ -4980,6 +5164,7 @@ pub struct Program<'src> {
     pub entity_scope_map: HashMap<Id, Id>,
     pub function_calls: IndexMap<Id, FunctionCall>,
     pub functions: IndexMap<Id, Function<'src>>,
+    pub external_functions: IndexMap<Id, ExternalFunction<'src>>,
     pub traits: IndexMap<Id, Trait<'src>>,
     pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
     pub trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
@@ -5329,6 +5514,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         entity_scope_map: analyzer.expr_id_to_scope_id_map,
         function_calls: analyzer.function_calls,
         functions: analyzer.functions,
+        external_functions: analyzer.external_functions,
         traits: analyzer.traits,
         generic_static_accessors: analyzer.generic_static_accessors,
         trait_method_dispatch: analyzer.trait_method_dispatch,

@@ -1,4 +1,5 @@
 
+@extern("console.log")
 external fun print(message: any): void;
 
 external fun panic(message: str): void;

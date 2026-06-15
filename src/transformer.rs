@@ -1,15 +1,47 @@
 use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Intrinsic, Program};
 use crate::error::Error;
 use crate::id::Id;
-use crate::node::BinaryOp;
+use crate::node::{BinaryOp, ExternBinding};
 use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
     Transformer::new(program, true).transform_entry()
+}
+
+/// Interprets a string literal's backslash escapes into the characters they
+/// denote (`\n` -> newline, `\t`, `\r`, `\"`, `\\`, `\0`), so the value is the
+/// real text — the JS formatter then re-escapes it for output. Borrows the slice
+/// unchanged when it has no escapes. An unknown escape keeps both characters.
+fn unescape_string(raw: &str) -> Cow<'_, str> {
+    if !raw.contains('\\') {
+        return Cow::Borrowed(raw);
+    }
+    let mut result = String::with_capacity(raw.len());
+    let mut characters = raw.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            result.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('n') => result.push('\n'),
+            Some('t') => result.push('\t'),
+            Some('r') => result.push('\r'),
+            Some('"') => result.push('"'),
+            Some('\\') => result.push('\\'),
+            Some('0') => result.push('\0'),
+            Some(other) => {
+                result.push('\\');
+                result.push(other);
+            }
+            None => result.push('\\'),
+        }
+    }
+    Cow::Owned(result)
 }
 
 /// The JS source for a runtime helper an intrinsic call needs. `__scan` reads
@@ -97,7 +129,10 @@ struct Transformer<'src> {
     is_bindings: HashMap<Id, js::Node<'src>>,
     // Runtime helper functions (`__scan`, `__parse_i32`, `__random_i32`) an
     // intrinsic call needs; emitted as a prelude only when used.
-    used_helpers: std::collections::BTreeSet<&'static str>,
+    used_helpers: BTreeSet<&'static str>,
+    // Host imports an `@extern` call needs, as module -> imported symbols;
+    // emitted as `import { a, b } from "module";` lines at the top.
+    used_imports: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl<'src> Transformer<'src> {
@@ -152,7 +187,8 @@ impl<'src> Transformer<'src> {
             default_instances: HashMap::new(),
             monomorphized: Vec::new(),
             is_bindings: HashMap::new(),
-            used_helpers: std::collections::BTreeSet::new(),
+            used_helpers: BTreeSet::new(),
+            used_imports: BTreeMap::new(),
         }
     }
 
@@ -208,11 +244,26 @@ impl<'src> Transformer<'src> {
         // among declarations is irrelevant since JS hoists them.
         let t_instances = self.monomorphized.into_iter();
 
-        // Runtime helpers (`__scan`, ...) needed by intrinsic calls, as a prelude.
-        let prelude = self
+        // Host imports (`import { a, b } from "module";`) from `@extern` calls,
+        // then runtime helpers (`__scan`, ...) — both a prelude before the body.
+        let imports = self
+            .used_imports
+            .iter()
+            .map(|(module, symbols)| {
+                let names = symbols.iter().cloned().collect::<Vec<_>>().join(", ");
+                format!("import {{ {} }} from \"{}\";", names, module)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let helpers = self
             .used_helpers
             .iter()
             .map(|name| helper_source(name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prelude = [imports, helpers]
+            .into_iter()
+            .filter(|section| !section.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -286,7 +337,7 @@ impl<'src> Transformer<'src> {
                 };
                 js::Node::Number(whole, fraction.map(|x| x.to_string()))
             }
-            Expr::String(x) => js::Node::String(Cow::Borrowed(x)),
+            Expr::String(x) => js::Node::String(unescape_string(x)),
             Expr::Struct(_) => {
                 return None;
             }
@@ -390,6 +441,16 @@ impl<'src> Transformer<'src> {
                         // runtime helper.
                         if let Some(intrinsic) = self.program.intrinsics.get(&target_id).copied() {
                             return Some(self.emit_intrinsic(intrinsic, args));
+                        }
+                        // An `@extern`-bound external lowers to its host (JS)
+                        // import/call, method, or property access.
+                        if let Some(binding) = self
+                            .program
+                            .external_functions
+                            .get(&target_id)
+                            .and_then(|external| external.extern_binding.clone())
+                        {
+                            return Some(self.emit_extern(target_id, binding, args));
                         }
                         // A variant constructor call builds the enum value
                         // directly: `[variant_index, ...data]` (or a native
@@ -996,6 +1057,59 @@ impl<'src> Transformer<'src> {
             }
             ExprPattern::Literal(literal_id) => {
                 conditions.push(self.literal_equality(*literal_id, subject));
+            }
+        }
+    }
+
+    /// Lowers an `@extern`-bound call to its host (JS) form. The first argument
+    /// is the receiver for method/property bindings; a `Function` binding with a
+    /// module records the import to emit.
+    fn emit_extern(
+        &mut self,
+        target_id: Id,
+        binding: ExternBinding<'src>,
+        args: Vec<js::Node<'src>>,
+    ) -> js::Node<'src> {
+        match binding {
+            ExternBinding::Function { module, symbol } => {
+                if let Some(module) = module {
+                    self.used_imports
+                        .entry(module.to_string())
+                        .or_default()
+                        .insert(symbol.to_string());
+                }
+                js::Node::Call(Box::new(js::Node::Local(symbol.to_string())), args)
+            }
+            ExternBinding::Method { symbol } => {
+                // The JS method name defaults to the external's source name.
+                let method = symbol
+                    .or_else(|| {
+                        self.program
+                            .external_functions
+                            .get(&target_id)
+                            .map(|e| e.name)
+                    })
+                    .unwrap_or("")
+                    .to_string();
+                let mut args = args.into_iter();
+                let receiver = args.next().unwrap_or(js::Node::Void);
+                js::Node::Call(
+                    Box::new(js::Node::Property(Box::new(receiver), method)),
+                    args.collect(),
+                )
+            }
+            ExternBinding::Get { symbol } => {
+                let receiver = args.into_iter().next().unwrap_or(js::Node::Void);
+                js::Node::Property(Box::new(receiver), symbol.to_string())
+            }
+            ExternBinding::Set { symbol } => {
+                let mut args = args.into_iter();
+                let receiver = args.next().unwrap_or(js::Node::Void);
+                let value = args.next().unwrap_or(js::Node::Void);
+                js::Node::Assignment(
+                    Box::new(js::Node::Property(Box::new(receiver), symbol.to_string())),
+                    Box::new(value),
+                )
             }
         }
     }

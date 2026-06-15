@@ -5,17 +5,17 @@ impl Response {
 		Response::builder()
 			.code(200)
 			.set_header("Content-Type", "text/plain")
-			.body("{text}\n")
+			.body(i"{text}\n")
 			.build()
 	}
 }
 
 impl Server {
 	fun create(request_handler: |Request| Response, with_logging: bool): Self {
-		let builder = Server::builder();
-		
+		mut builder = Server::builder();
+
 		if with_logging {
-			builder
+			builder = builder
 			.on_start(|server| {
 				print(i"server: Server running at {server.url()}");
 			})
@@ -24,22 +24,22 @@ impl Server {
 			})
 			.on_request(|req| {
 				print("server: Request received");
-				request_handler(req);
+				request_handler(req)
 			});
 		} else {
-			builder.on_request(request_handler);
+			builder = builder.on_request(request_handler);
 		}
-		
+
 		builder.port(3000).build()
 	}
 }
 
 fun main() {
 	let server = Server::create(
-		request_handler = |_| {
+		|_| {
 			Response::text("Hello, World!")
 		},
-		with_logging = true,
+		true,
 	);
 	
 	server.start();

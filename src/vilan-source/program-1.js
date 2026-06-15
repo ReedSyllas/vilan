@@ -41,8 +41,8 @@ function x/*place_order*/(y, z) {
 function o/*new*/(p) {
 	return [ p, [  ] ];
 }
-function F/*purchase*/(G, H) {
-	G[1].push(H);
+function G/*purchase*/(H, I) {
+	H[1].push(I);
 }
 function b/*mock_dealership*/() {
 	let c/*dealership*/ = d/*new*/();
@@ -55,8 +55,14 @@ function b/*mock_dealership*/() {
 let a/*dealership*/ = b/*mock_dealership*/();
 const n/*john*/ = o/*new*/("John E. Smith");
 const u = q/*find_car_by_make*/(a/*dealership*/, "Honda");
+let J = null;
 if (u[0] === 0) {
 	console.log("Found: " + v/*get_name*/(u[1]));
-	F/*purchase*/(n/*john*/, x/*place_order*/(a/*dealership*/, u[1]));
-	console.log("Purchased: " + v/*get_name*/(u[1]));
+	const F = x/*place_order*/(a/*dealership*/, u[1]);
+	if (F[0] === 0) {
+		G/*purchase*/(n/*john*/, F[1]);
+		console.log("Purchased: " + v/*get_name*/(u[1]));
+	}
+	J = undefined;
 }
+process.exit(J);

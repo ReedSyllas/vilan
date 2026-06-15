@@ -13,9 +13,12 @@ pub fn lexer<'src>()
         .then(text::ascii::ident().or_not())
         .map(|((whole, fraction), suffix)| Token::Number(whole, fraction, suffix));
 
-    // A parser for strings
+    // A parser for strings. A backslash escapes the next character, so `\"` and
+    // `\\` don't terminate the string; the raw (still-escaped) slice is kept and
+    // the escapes are interpreted at code generation.
+    let string_char = choice((just('\\').then(any()).ignored(), none_of("\"\\").ignored()));
     let string = just('"')
-        .ignore_then(none_of('"').repeated().to_slice())
+        .ignore_then(string_char.repeated().to_slice())
         .then_ignore(just('"'))
         .map(Token::String);
 
@@ -30,8 +33,9 @@ pub fn lexer<'src>()
         .to_slice()
         .map(Token::Op);
 
-    // A parser for control characters (delimiters, semicolons, etc.)
-    let ctrl = one_of("()[]{}<>;,.").map(Token::Ctrl);
+    // A parser for control characters (delimiters, semicolons, etc.). `@`
+    // introduces an attribute (`@extern(..)`).
+    let ctrl = one_of("()[]{}<>;,.@").map(Token::Ctrl);
 
     // A parser for identifiers and keywords
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
@@ -104,9 +108,11 @@ pub fn lexer<'src>()
             });
 
         // Literal fragments are captured as source slices so they stay
-        // `&'src str`; an escaped brace is just the brace character's slice.
+        // `&'src str`. `\{`/`\}` collapse to the brace itself; any other escape
+        // (`\n`, `\"`, `\\`) is kept raw and interpreted at code generation, like
+        // a plain string.
         let escaped_brace = just('\\').ignore_then(one_of("{}").to_slice());
-        let backslash = just('\\').to_slice();
+        let escape = just('\\').then(none_of("{}")).to_slice();
         let text = none_of("{}\"\\").repeated().at_least(1).to_slice();
 
         enum Part<'src> {
@@ -117,7 +123,7 @@ pub fn lexer<'src>()
         let part = choice((
             hole.map(Part::Hole),
             escaped_brace.map(Part::Text),
-            backslash.map(Part::Text),
+            escape.map(Part::Text),
             text.map(Part::Text),
         ));
 
