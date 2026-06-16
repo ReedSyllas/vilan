@@ -1148,6 +1148,18 @@ where
             just(Token::Async)
                 .ignore_then(choice((block_expr.clone(), unary.clone())))
                 .map_with(|expr, e| (Node::Async(Box::new(expr)), e.span())),
+            // `&x` / `&mut x` — take a view of a place. `*x` — deref a view.
+            // Prefix `*` is unambiguous against binary `*` (multiply), which only
+            // appears between two operands in `product`.
+            just(Token::Op("&"))
+                .ignore_then(just(Token::Mut).or_not())
+                .then(unary.clone())
+                .map_with(|(mutable, expr), e| {
+                    (Node::Reference(mutable.is_some(), Box::new(expr)), e.span())
+                }),
+            just(Token::Op("*"))
+                .ignore_then(unary.clone())
+                .map_with(|expr, e| (Node::Dereference(Box::new(expr)), e.span())),
             member_accessor.clone(),
         ))
         .boxed()

@@ -206,6 +206,11 @@ pub enum Node<'src> {
     Tuple(NodeList<'src>),
     // A prefix operator: `!x` or `-x`.
     Unary(char, Box<Spanned<Self>>),
+    // `&x` / `&mut x` — take a (readonly / writable) view of a place. The bool is
+    // whether the view is writable (`&mut`).
+    Reference(bool, Box<Spanned<Self>>),
+    // `*v` — read or write through a view.
+    Dereference(Box<Spanned<Self>>),
     // `use Namespace::{ a, b };` — destructures items out of a namespace
     // (a module or an enum) into the current scope.
     Use(ImportBranch<'src>),

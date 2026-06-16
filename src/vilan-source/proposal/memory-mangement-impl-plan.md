@@ -45,11 +45,27 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
   existing `reference_count`; the fuller *positional* liveness pass ("last use
   *through views*") is deferred to Phase 3, where views define its real
   requirements — the `mark_repeatable` walk is the reusable seed.
-- **Phase 3 — Rule 3 core (views) + conventions.** Lexer/parser for the new
-  surface; IR representation of views + deref; analyzer types views (`&mut`
-  requires `mut` target, position-default conventions, `own`, auto-deref);
-  transformer lowers views to `(base, key)` and boxes viewed primitive locals;
-  `&mut self` methods. **Carries the migration** (below).
+- **Phase 3 — Rule 3 core (views) + conventions. — IN PROGRESS.** Built in
+  sound, testable slices:
+  - **Slice 1 — expression-level `&` / `&mut` / `*`. — DONE.** Lexer already
+    lexes `&`; added `Node::Reference(mutable, _)` / `Node::Dereference(_)` (AST),
+    `Expr::Reference(Id, bool)` / `Expr::Dereference(Id)` (IR), the `unary`-parser
+    prefixes (`*` unambiguous in operand position), identity typing and
+    pass-through codegen (a view of an aggregate *is* the value's JS reference).
+    Views are not clone candidates, so they alias rather than copy. Validated by
+    `test/view-basic.vl` (`&mut c` aliases → `99`; a plain binding copies → `10`);
+    zero corpus regression. Primitive-local views (which need a boxed cell) and
+    `*v = wholeValue` writes are deferred.
+  - **Slice 2 — param/`self` conventions.** `&T` / `&mut T` in type position;
+    `own x: T` and `&mut self` / `own self` receivers; record each parameter's
+    convention in the IR. Codegen stays pass-through (aggregates are already JS
+    references), so this is additive.
+  - **Slice 3 — default-flip + mutability checker. Carries the migration.** Bare
+    param/`self` becomes a readonly view; mutating through it, or storing/returning
+    it, is a compile error directing to `&mut` / `own`. Migrate
+    `field-assignment.vl` (`&mut self`) and `program-1.vl` (`&mut self` + `own`).
+  - **Slice 4 — primitive-local views.** Box a viewed primitive local into a
+    `(base, key)` cell; support `*v = wholeValue`.
 - **Phase 4 — Rule 4 checker.** Lexical view-range analysis flagging
   invalidation + the two interaction rules; enforced on JS → "JS build ⇒
   native-safe".

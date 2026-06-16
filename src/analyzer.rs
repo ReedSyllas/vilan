@@ -64,6 +64,11 @@ pub enum Expr<'src> {
     Tuple(Vec<Id>),
     // A unary prefix operator and its operand. Only `!` (logical not) exists.
     Unary(char, Id),
+    // `&x` / `&mut x` — a view of a place (the operand). The bool is whether the
+    // view is writable (`&mut`).
+    Reference(Id, bool),
+    // `*v` — read or write through a view (the operand).
+    Dereference(Id),
     Variable(Id),
     Void,
 }
@@ -1089,7 +1094,9 @@ impl<'src> Analyzer<'src> {
                 self.mark_repeatable(*lhs, depth, interior, visited);
                 self.mark_repeatable(*rhs, depth, interior, visited);
             }
-            Expr::Unary(_, operand) => self.mark_repeatable(*operand, depth, interior, visited),
+            Expr::Unary(_, operand) | Expr::Reference(operand, _) | Expr::Dereference(operand) => {
+                self.mark_repeatable(*operand, depth, interior, visited)
+            }
             Expr::Assignment(target_id, value_id) => {
                 self.mark_repeatable(*target_id, depth, interior, visited);
                 self.mark_repeatable(*value_id, depth, interior, visited);
@@ -1632,6 +1639,18 @@ impl<'src> Analyzer<'src> {
             Node::Unary(operator, operand) => {
                 let operand_id = self.walk_expr_node(operand, scope_id);
                 Some(Expr::Unary(*operator, operand_id))
+            }
+            // `&x` / `&mut x` — a view of a place. For aggregates a view is the
+            // value's own reference, so it types and lowers as the operand;
+            // mutability tracking and primitive-local boxing come later.
+            Node::Reference(mutable, operand) => {
+                let operand_id = self.walk_expr_node(operand, scope_id);
+                Some(Expr::Reference(operand_id, *mutable))
+            }
+            // `*v` — read/write through a view; types and lowers as the operand.
+            Node::Dereference(operand) => {
+                let operand_id = self.walk_expr_node(operand, scope_id);
+                Some(Expr::Dereference(operand_id))
             }
             Node::Jump(target) => Some(Expr::Jump(target)),
             Node::If(if_) => {
@@ -2904,6 +2923,12 @@ impl<'src> Analyzer<'src> {
             // `!x` (logical not) is a boolean.
             Expr::Unary('!', _) => self.bool_type(),
             Expr::Unary(_, operand_id) => {
+                self.infer_type_inner(*operand_id, &constraint, substitution_context, exprs_seen)
+            }
+            // A view (`&x` / `&mut x`) and a deref (`*v`) both carry the operand's
+            // type for now — a view of `T` reads and writes as a `T`. A distinct
+            // view type arrives with the mutability checker.
+            Expr::Reference(operand_id, _) | Expr::Dereference(operand_id) => {
                 self.infer_type_inner(*operand_id, &constraint, substitution_context, exprs_seen)
             }
             Expr::String(_) => self.primitive_struct_type("str"),

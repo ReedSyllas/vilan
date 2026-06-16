@@ -327,7 +327,9 @@ impl<'a, 'src> Collector<'a, 'src> {
                 self.walk(*lhs);
                 self.walk(*rhs);
             }
-            Expr::Unary(_, operand) => self.walk(*operand),
+            Expr::Unary(_, operand) | Expr::Reference(operand, _) | Expr::Dereference(operand) => {
+                self.walk(*operand)
+            }
             Expr::Assignment(target_id, value_id) => {
                 self.walk(*target_id);
                 self.walk(*value_id);

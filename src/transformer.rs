@@ -639,6 +639,12 @@ impl<'src> Transformer<'src> {
                 let operand = self.walk_entity(*operand, block).unwrap_or(js::Node::Void);
                 js::Node::Unary(*operator, Box::new(operand))
             }
+            // A view of an aggregate is the value's own JS reference, and a deref
+            // reads/writes through it — both lower to the operand directly.
+            // (Primitive-local views, which need a boxed cell, come later.)
+            Expr::Reference(operand, _) | Expr::Dereference(operand) => {
+                return self.walk_entity(*operand, block);
+            }
             Expr::Variable(id) => {
                 if self
                     .program
