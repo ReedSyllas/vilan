@@ -74,6 +74,7 @@ pub type Parameter<'src> = (&'src str, Option<Box<Spanned<Node<'src>>>>, Convent
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Convention {
     Bare,
+    Own,
     Ref,
     RefMut,
 }

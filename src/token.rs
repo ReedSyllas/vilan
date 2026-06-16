@@ -26,6 +26,7 @@ pub enum Token<'src> {
     // (`u32`, `f`, `n`, ...).
     Number(&'src str, Option<&'src str>, Option<&'src str>),
     Op(&'src str),
+    Own,
     Ret,
     String(&'src str),
     Struct,
@@ -70,6 +71,7 @@ impl std::fmt::Display for Token<'_> {
                 suffix.unwrap_or("")
             ),
             Token::Op(s) => write!(f, "{s}"),
+            Token::Own => write!(f, "own"),
             Token::Ret => write!(f, "ret"),
             Token::String(s) => write!(f, "{s}"),
             Token::Struct => write!(f, "struct"),

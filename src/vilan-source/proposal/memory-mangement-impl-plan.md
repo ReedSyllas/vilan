@@ -56,13 +56,15 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     `test/view-basic.vl` (`&mut c` aliases → `99`; a plain binding copies → `10`);
     zero corpus regression. Primitive-local views (which need a boxed cell) and
     `*v = wholeValue` writes are deferred.
-  - **Slice 2 — `&` / `&mut` param conventions. — DONE.** A `Convention`
-    (`Bare`/`Ref`/`RefMut`) is parsed from an optional `&` / `&mut` prefix on
-    parameters (covers `&self`, `&mut self`, `&mut x: T`) and threaded onto the
-    analyzer's `Parameter`. Codegen is unchanged (aggregates are already JS
+  - **Slice 2 — param/`self` conventions. — DONE.** A `Convention`
+    (`Bare`/`Own`/`Ref`/`RefMut`) is threaded onto the analyzer's `Parameter`,
+    parsed from: a `&`/`&mut` prefix (`&self`, `&mut self`, `&mut x`), the `own`
+    keyword (new token), or a type-position `&T`/`&mut T` (`x: &mut T`, a new
+    `reference_type` arm in the type parser; `walk_type_node` carries it as the
+    inner type by identity). Codegen is unchanged (aggregates are already JS
     references), so it is additive — `test/view-params.vl` (`&mut self` +
-    `&mut c: Counter`) runs `21`, no corpus regression. Still deferred: `own`
-    (needs its keyword) and `&T`/`&mut T` in *type* position (`x: &mut T`).
+    `&mut c: Counter`) runs `21` and `test/view-conventions.vl` (type-position
+    `&mut T` + `own`) runs `11 11`; no corpus regression.
   - **Slice 3 — default-flip + mutability checker. Carries the migration.** Bare
     param/`self` becomes a readonly view; mutating through it, or storing/returning
     it, is a compile error directing to `&mut` / `own`. Migrate

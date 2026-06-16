@@ -2611,6 +2611,9 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or_else(|| Type::Unknown.get_type_id(self));
                 Some(Type::Closure(t_parameter_type_ids, t_return_type_id))
             }
+            // `&T` / `&mut T` carries the inner type for now (identity); a
+            // parameter captures the `&`/`&mut` separately as its convention.
+            Node::Reference(_, inner) => return self.walk_type_node(inner, scope_id),
             x => unimplemented!("unhandled type node: {:?}", x),
         };
 

@@ -1,0 +1,21 @@
+// Phase 3 (views, slice 2b): the full convention surface parses — a
+// type-position `&mut T` parameter and an `own` parameter. Codegen is still
+// pass-through this slice, so these behave like the bare forms.
+import std::print;
+
+struct Counter { value: i32 }
+
+fun bump(c: &mut Counter) {
+	c.value = c.value + 1;
+}
+
+fun peek(own c: Counter): i32 {
+	c.value
+}
+
+fun main() {
+	mut c = Counter { value = 10 };
+	bump(&mut c);   // type-position `&mut Counter` parameter
+	print(c.value); // 11
+	print(peek(c)); // 11 — `own` parameter
+}

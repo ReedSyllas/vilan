@@ -59,6 +59,7 @@ pub fn lexer<'src>()
         "mod" => Token::Mod,
         "mut" => Token::Mut,
         "null" => Token::Null,
+        "own" => Token::Own,
         "ret" => Token::Ret,
         "struct" => Token::Struct,
         "trait" => Token::Trait,

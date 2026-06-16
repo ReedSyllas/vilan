@@ -647,33 +647,48 @@ where
         )
         .then(generic_parameters.clone().or_not())
         .then(
-            // An optional `&` / `&mut` prefix gives the parameter's convention
-            // (`&self`, `&mut self`, `&mut x`); bare is the default.
-            just(Token::Op("&"))
-                .ignore_then(just(Token::Mut).or_not().map(|mutable| mutable.is_some()))
-                .or_not()
-                .then(identifier.labelled("parameter name"))
-                .then(
-                    just(Token::Op(":"))
-                        .ignore_then(type_.clone().map(|x| Box::new(x)))
-                        .labelled("parameter type")
-                        .or_not(),
-                )
-                .map(|((reference, name), parameter_type)| {
-                    let convention = match reference {
-                        Some(true) => Convention::RefMut,
-                        Some(false) => Convention::Ref,
-                        None => Convention::Bare,
-                    };
-                    (name, parameter_type, convention)
-                })
-                .labelled("parameter")
-                .separated_by(just(Token::Ctrl(',')))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-                .map_with(|parameters, e| (parameters, e.span()))
-                .labelled("function parameters"),
+            // A `own` / `&` / `&mut` prefix gives the parameter's convention
+            // (`own x`, `&self`, `&mut self`); a `&T` / `&mut T` type does too.
+            // Bare is the default.
+            choice((
+                just(Token::Own).to(Convention::Own),
+                just(Token::Op("&"))
+                    .ignore_then(just(Token::Mut).or_not())
+                    .map(|mutable| {
+                        if mutable.is_some() {
+                            Convention::RefMut
+                        } else {
+                            Convention::Ref
+                        }
+                    }),
+            ))
+            .or_not()
+            .then(identifier.labelled("parameter name"))
+            .then(
+                just(Token::Op(":"))
+                    .ignore_then(type_.clone().map(|x| Box::new(x)))
+                    .labelled("parameter type")
+                    .or_not(),
+            )
+            .map(|((prefix, name), parameter_type)| {
+                // A prefix wins; otherwise a `&T` / `&mut T` type gives the
+                // convention; otherwise bare.
+                let convention = prefix.unwrap_or_else(|| {
+                    match parameter_type.as_deref().map(|spanned| &spanned.0) {
+                        Some(Node::Reference(true, _)) => Convention::RefMut,
+                        Some(Node::Reference(false, _)) => Convention::Ref,
+                        _ => Convention::Bare,
+                    }
+                });
+                (name, parameter_type, convention)
+            })
+            .labelled("parameter")
+            .separated_by(just(Token::Ctrl(',')))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .map_with(|parameters, e| (parameters, e.span()))
+            .labelled("function parameters"),
         )
         .then(
             just(Token::Op(":"))
@@ -1042,10 +1057,23 @@ where
         )
         .map_with(|(name, bounds), e| (Node::TypeBinder(name, bounds), e.span()));
 
+    // `&T` / `&mut T` — a view type. Lowers to the inner type for now (identity);
+    // a parameter captures the `&`/`&mut` as its convention.
+    let reference_type = just(Token::Op("&"))
+        .ignore_then(just(Token::Mut).or_not())
+        .then(type_.clone())
+        .map_with(|(mutable, inner), e| {
+            (
+                Node::Reference(mutable.is_some(), Box::new(inner)),
+                e.span(),
+            )
+        });
+
     // `local_type` (e.g. `FromFn<T>`) must come before the plain identifier so
     // generic arguments are consumed as part of the type. `type_binder` is first
     // so the `type` keyword isn't mistaken for an identifier.
     type_.define(choice((
+        reference_type,
         type_binder,
         closure_type,
         local_type,
