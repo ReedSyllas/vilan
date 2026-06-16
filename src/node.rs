@@ -57,16 +57,30 @@ pub struct Func<'src> {
     // intrinsic) or an ordinary function.
     pub extern_binding: Option<ExternBinding<'src>>,
     pub generic_parameters: Option<GenericParameters<'src>>,
-    pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
+    pub parameters: Spanned<Vec<Parameter<'src>>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
     // `None` for a function signature without a body: a required trait method
     // declaration (`fun default(): Self;`) or an `external` intrinsic.
     pub body: Option<Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>>,
 }
 
+/// A parsed parameter: its name, optional declared type, and how it receives its
+/// argument (rule 3 conventions).
+pub type Parameter<'src> = (&'src str, Option<Box<Spanned<Node<'src>>>>, Convention);
+
+/// How a parameter receives its argument (rule 3). `Bare` is the default (a
+/// readonly view, once the default flip lands); `Ref` / `RefMut` are `&` / `&mut`
+/// views. `Own` (owned value) is added with its keyword later.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Convention {
+    Bare,
+    Ref,
+    RefMut,
+}
+
 #[derive(Debug)]
 pub struct Closure<'src> {
-    pub parameters: Spanned<Vec<(&'src str, Option<Box<Spanned<Node<'src>>>>)>>,
+    pub parameters: Spanned<Vec<Parameter<'src>>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
     pub return_value: Box<Spanned<Node<'src>>>,
 }

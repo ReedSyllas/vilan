@@ -5,7 +5,8 @@ use indexmap::IndexMap;
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::{
-    BinaryOp, ExternBinding, GenericParameters, ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
+    BinaryOp, Convention, ExternBinding, GenericParameters, ImportBranch, Node, NodeIfBranch,
+    NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
 use crate::type_::{SubstitutionContext, Type, TypeId};
@@ -159,6 +160,9 @@ pub struct Parameter<'src> {
     pub function_id: Id,
     pub name: &'src str,
     pub type_id: TypeId,
+    /// How the parameter receives its argument (rule 3). Recorded now; the
+    /// default flip and mutability checking consume it later.
+    pub convention: Convention,
 }
 
 #[derive(Debug)]
@@ -1701,8 +1705,8 @@ impl<'src> Analyzer<'src> {
                             name: x.0,
                             type_id: match &x.1 {
                                 Some(type_node) => self.walk_type_node(type_node, body_scope.id),
-                                // A bare `self` parameter takes the enclosing
-                                // `Self` type (the impl/trait subject).
+                                // A bare `self` parameter (incl. `&self` /
+                                // `&mut self`) takes the enclosing `Self` type.
                                 None if x.0 == "self" => self
                                     .try_get_expr_id_by_name("Self", scope_id)
                                     .and_then(|self_id| {
@@ -1711,6 +1715,7 @@ impl<'src> Analyzer<'src> {
                                     .unwrap_or_else(|| Type::Unknown.get_type_id(self)),
                                 None => Type::Unknown.get_type_id(self),
                             },
+                            convention: x.2,
                         };
                         // `_` eats the argument: it stays positional but is
                         // never referenceable.
@@ -2193,6 +2198,7 @@ impl<'src> Analyzer<'src> {
                                 .as_ref()
                                 .map(|x| self.walk_type_node(x, scope_id))
                                 .unwrap_or(Type::Unknown.get_type_id(self)),
+                            convention: x.2,
                         };
                         // `_` eats the argument: it stays positional but is
                         // never referenceable.

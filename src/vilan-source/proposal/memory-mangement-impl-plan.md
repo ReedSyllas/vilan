@@ -56,10 +56,13 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     `test/view-basic.vl` (`&mut c` aliases → `99`; a plain binding copies → `10`);
     zero corpus regression. Primitive-local views (which need a boxed cell) and
     `*v = wholeValue` writes are deferred.
-  - **Slice 2 — param/`self` conventions.** `&T` / `&mut T` in type position;
-    `own x: T` and `&mut self` / `own self` receivers; record each parameter's
-    convention in the IR. Codegen stays pass-through (aggregates are already JS
-    references), so this is additive.
+  - **Slice 2 — `&` / `&mut` param conventions. — DONE.** A `Convention`
+    (`Bare`/`Ref`/`RefMut`) is parsed from an optional `&` / `&mut` prefix on
+    parameters (covers `&self`, `&mut self`, `&mut x: T`) and threaded onto the
+    analyzer's `Parameter`. Codegen is unchanged (aggregates are already JS
+    references), so it is additive — `test/view-params.vl` (`&mut self` +
+    `&mut c: Counter`) runs `21`, no corpus regression. Still deferred: `own`
+    (needs its keyword) and `&T`/`&mut T` in *type* position (`x: &mut T`).
   - **Slice 3 — default-flip + mutability checker. Carries the migration.** Bare
     param/`self` becomes a readonly view; mutating through it, or storing/returning
     it, is a compile error directing to `&mut` / `own`. Migrate
@@ -184,3 +187,10 @@ Per phase:
    *within* a phase.
 3. Track the migration list explicitly: a P2 program is *expected* to error
    until migrated in Phase 3, then expected to pass.
+
+**Stale baselines (regenerate when convenient):** the per-phase checks so far
+only regenerated `test/*.vl`, so the committed `.js` for the *root examples* is
+stale w.r.t. Phase 1 value semantics — `http-server.js` legitimately gains a
+`structuredClone` on `let server = <struct param>` (a copy; `server` is
+read-only, so behavior is unchanged). Do a one-shot regenerate-all pass to
+refresh the root-example golden files before relying on them as baselines.

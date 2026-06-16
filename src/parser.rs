@@ -1,6 +1,6 @@
 use crate::node::{
-    BinaryOp, Closure, ExternBinding, Func, GenericArguments, GenericParameter, If, ImportBranch,
-    Node, NodeIfBranch, NodeList, Pattern,
+    BinaryOp, Closure, Convention, ExternBinding, Func, GenericArguments, GenericParameter, If,
+    ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
@@ -260,6 +260,8 @@ where
                 .labelled("parameter type")
                 .or_not(),
         )
+        // Closure parameters carry no view convention yet.
+        .map(|(name, parameter_type)| (name, parameter_type, Convention::Bare))
         .labelled("parameter")
         .separated_by(just(Token::Ctrl(',')))
         .allow_trailing()
@@ -645,14 +647,26 @@ where
         )
         .then(generic_parameters.clone().or_not())
         .then(
-            identifier
-                .labelled("parameter name")
+            // An optional `&` / `&mut` prefix gives the parameter's convention
+            // (`&self`, `&mut self`, `&mut x`); bare is the default.
+            just(Token::Op("&"))
+                .ignore_then(just(Token::Mut).or_not().map(|mutable| mutable.is_some()))
+                .or_not()
+                .then(identifier.labelled("parameter name"))
                 .then(
                     just(Token::Op(":"))
                         .ignore_then(type_.clone().map(|x| Box::new(x)))
                         .labelled("parameter type")
                         .or_not(),
                 )
+                .map(|((reference, name), parameter_type)| {
+                    let convention = match reference {
+                        Some(true) => Convention::RefMut,
+                        Some(false) => Convention::Ref,
+                        None => Convention::Bare,
+                    };
+                    (name, parameter_type, convention)
+                })
                 .labelled("parameter")
                 .separated_by(just(Token::Ctrl(',')))
                 .allow_trailing()

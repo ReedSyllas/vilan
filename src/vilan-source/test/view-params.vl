@@ -1,0 +1,23 @@
+// Phase 3 (views, slice 2): `&mut self` receivers and `&mut` parameters parse
+// and carry their convention. Codegen is unchanged this slice (an aggregate is
+// already a JS reference), so these behave like the bare forms.
+import std::print;
+
+struct Counter { value: i32 }
+
+impl Counter {
+	fun increment(&mut self) {
+		self.value = self.value + 1;
+	}
+}
+
+fun bump(&mut c: Counter) {
+	c.value = c.value + 10;
+}
+
+fun main() {
+	mut c = Counter { value = 10 };
+	c.increment();  // &mut self method:  10 -> 11
+	bump(&mut c);   // &mut param + &mut arg: 11 -> 21
+	print(c.value); // 21
+}
