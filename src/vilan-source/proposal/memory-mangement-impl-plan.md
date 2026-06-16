@@ -65,10 +65,19 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     references), so it is additive — `test/view-params.vl` (`&mut self` +
     `&mut c: Counter`) runs `21` and `test/view-conventions.vl` (type-position
     `&mut T` + `own`) runs `11 11`; no corpus regression.
-  - **Slice 3 — default-flip + mutability checker. Carries the migration.** Bare
-    param/`self` becomes a readonly view; mutating through it, or storing/returning
-    it, is a compile error directing to `&mut` / `own`. Migrate
-    `field-assignment.vl` (`&mut self`) and `program-1.vl` (`&mut self` + `own`).
+  - **Slice 3a — default-flip + assignment mutability check. — DONE.** Bare
+    `self`/params are readonly (the `Bare`/`Ref` conventions). A post-`build()`
+    pass `check_readonly_mutation` (with `readonly_root_parameter`, which walks a
+    field/deref place chain to its root) rejects an *assignment* rooted in a
+    readonly parameter: "cannot mutate through readonly parameter 'x'; declare it
+    `&mut x`". Runs after `build()` so field accessors have resolved to
+    `Expr::Field`. Migrated `field-assignment.vl` (`increment`/`bump` →
+    `&mut self`) — and its `.js` is byte-identical (pass-through codegen confirms
+    additivity). Enforcement proven by a negative case; no corpus regression.
+  - **Slice 3b — method-call mutability check.** Reject `recv.method()` where the
+    method is `&mut self` and `recv` is rooted in a readonly place (catches
+    `self.cars.push(...)` in `program-1.vl`). Requires migrating std mutating
+    methods (`List::push` → `&mut self`) and `program-1.vl` (`&mut self` + `own`).
   - **Slice 4 — primitive-local views.** Box a viewed primitive local into a
     `(base, key)` cell; support `*v = wholeValue`.
 - **Phase 4 — Rule 4 checker.** Lexical view-range analysis flagging

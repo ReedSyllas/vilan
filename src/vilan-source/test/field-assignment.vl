@@ -3,10 +3,10 @@ import std::print;
 struct Counter { value: i32 }
 
 impl Counter {
-	fun increment(self) {
+	fun increment(&mut self) {
 		self.value = self.value + 1;
 	}
-	fun bump(self, by: i32) {
+	fun bump(&mut self, by: i32) {
 		self.value += by;
 	}
 }

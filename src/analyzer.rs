@@ -973,6 +973,49 @@ impl<'src> Analyzer<'src> {
         )
     }
 
+    /// Rule 3: if a place is a field/deref chain rooted in a readonly (bare or
+    /// `&`) parameter, its name — used to reject mutation through it. `None` when
+    /// the root is mutable (a `mut` local, or an `own` / `&mut` parameter) or is
+    /// not a parameter at all. Bare parameters are readonly by default (the
+    /// position-default-convention flip); `&mut` / `own` opt back into mutation.
+    fn readonly_root_parameter(&self, expr_id: Id) -> Option<&'src str> {
+        match self.expr_id_to_expr_map.get(&expr_id)? {
+            Expr::Field(subject_id, _, _) => self.readonly_root_parameter(*subject_id),
+            Expr::Dereference(operand_id) => self.readonly_root_parameter(*operand_id),
+            Expr::Local(binding_id) => {
+                let parameter = self.parameters.get(binding_id)?;
+                matches!(parameter.convention, Convention::Bare | Convention::Ref)
+                    .then_some(parameter.name)
+            }
+            _ => None,
+        }
+    }
+
+    /// Rule 3 (position-default conventions): a write rooted in a readonly (bare
+    /// or `&`) parameter is rejected — the author must declare it `&mut`. Runs
+    /// after `build()`, once field accessors have resolved to `Expr::Field`, so
+    /// the whole place chain is walkable.
+    fn check_readonly_mutation(&mut self) {
+        let assignment_targets: Vec<Id> = self
+            .expr_id_to_expr_map
+            .values()
+            .filter_map(|expr| match expr {
+                Expr::Assignment(target_id, _) => Some(*target_id),
+                _ => None,
+            })
+            .collect();
+        for target_id in assignment_targets {
+            if let Some(name) = self.readonly_root_parameter(target_id) {
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!(
+                        "cannot mutate through readonly parameter '{name}'; declare it `&mut {name}` to allow mutation."
+                    ),
+                });
+            }
+        }
+    }
+
     /// Rule 1 (value semantics): the value expressions that must be deep-copied
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
@@ -5867,6 +5910,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
 
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
+    analyzer.check_readonly_mutation();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.
