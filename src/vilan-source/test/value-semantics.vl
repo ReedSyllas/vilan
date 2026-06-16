@@ -1,0 +1,24 @@
+// Rule 1: assignment of an aggregate is a semantic copy. Binding one aggregate
+// to another and mutating the copy must NOT affect the source — under the old
+// JS-reference semantics both would change.
+import std::print;
+
+struct Point { x: i32, y: i32 }
+
+fun main() {
+	// Struct copy: `b` is an independent copy of `a`.
+	mut a = Point { x = 1, y = 2 };
+	mut b = a;
+	b.x = 99;
+	print(a.x); // 1  (unchanged)
+	print(b.x); // 99
+
+	// List copy: `ys` is an independent copy of `xs`.
+	mut xs = List::new();
+	xs.push(1);
+	xs.push(2);
+	mut ys = xs;
+	ys.push(99);
+	print(xs.sum()); // 3   (unchanged)
+	print(ys.sum()); // 102
+}

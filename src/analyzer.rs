@@ -922,6 +922,77 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// A scalar primitive (`i32`, `str`, ...) — backed by a JS value type, so
+    /// assigning it never aliases and never needs a copy. Distinct from the
+    /// *aggregate* primitives (`List`, `Context`), which lower to mutable JS
+    /// arrays and do.
+    fn is_scalar_primitive(&self, id: Id) -> bool {
+        ["str", "i32", "u32", "f64", "BigInt", "null"]
+            .iter()
+            .any(|name| self.primitive_struct_ids.get(name) == Some(&id))
+    }
+
+    /// Whether a type lowers to a mutable JS aggregate (a struct, `List`,
+    /// `Context`, or a tuple) — the types that alias under assignment and so
+    /// need a semantic copy (rule 1). Scalars and `bool` do not.
+    fn is_cloneable_aggregate(&self, type_: &Type) -> bool {
+        match type_ {
+            Type::Struct(id, _) => !self.is_scalar_primitive(*id),
+            Type::Tuple(_) => true,
+            _ => false,
+        }
+    }
+
+    /// The resolved type of an expression, if known — the same two-map lookup
+    /// `infer_type_path` begins with.
+    fn type_of_expr(&self, expr_id: Id) -> Option<Type> {
+        if let Some(type_id) = self.expr_id_to_type_id_map.get(&expr_id) {
+            return Some(type_id.get_type(self));
+        }
+        self.resolved_types
+            .get(&expr_id)
+            .map(|type_id| type_id.get_type(self))
+    }
+
+    /// Whether an expression reads existing aggregate storage (a binding or a
+    /// field) rather than producing a fresh value (a literal, constructor, or
+    /// call). Only a place can alias, so only a place needs a copy.
+    fn is_place_expr(&self, expr_id: Id) -> bool {
+        matches!(
+            self.expr_id_to_expr_map.get(&expr_id),
+            Some(Expr::Local(_)) | Some(Expr::Field(_, _, _))
+        )
+    }
+
+    /// Rule 1 (value semantics): the value expressions that must be deep-copied
+    /// at code generation, because they bind or assign an aggregate *place* that
+    /// would otherwise alias its source under JS reference semantics. Fresh
+    /// values (constructors, literals, calls) own their result and are left
+    /// alone; eliding the remaining copies on last use is a later phase.
+    fn compute_clone_sites(&self) -> HashSet<Id> {
+        let mut sites = HashSet::new();
+        for expr in self.expr_id_to_expr_map.values() {
+            let (value_id, value_type) = match expr {
+                Expr::Variable(variable_id) => match self.variables.get(variable_id) {
+                    Some(variable) => match variable.initial {
+                        Some(value_id) => (value_id, variable.type_id.get_type(self)),
+                        None => continue,
+                    },
+                    None => continue,
+                },
+                Expr::Assignment(_target_id, value_id) => match self.type_of_expr(*value_id) {
+                    Some(value_type) => (*value_id, value_type),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if self.is_place_expr(value_id) && self.is_cloneable_aggregate(&value_type) {
+                sites.insert(value_id);
+            }
+        }
+        sites
+    }
+
     /// Resolves a name to its declaring entity by walking the scope chain,
     /// returning `None` if it is not in scope (callers turn that into a
     /// user-facing diagnostic). Resolved names are cached into the originating
@@ -5291,6 +5362,10 @@ pub struct Program<'src> {
     // async inference pass; the transformer emits these as `async` and awaits
     // calls to them.
     pub async_functions: HashSet<Id>,
+    // Rule 1 (value semantics): value expressions that the transformer wraps in
+    // a deep copy because they bind/assign an aggregate place that would
+    // otherwise alias its source. Filled by `compute_clone_sites`.
+    pub clone_sites: HashSet<Id>,
 }
 
 /// Lexes and parses a Vilan source file into an AST, leaking the source and the
@@ -5665,6 +5740,8 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         intrinsics.insert(random_id, Intrinsic::RandomI32);
     }
 
+    let clone_sites = analyzer.compute_clone_sites();
+
     Program {
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
@@ -5700,5 +5777,6 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         variables: analyzer.variables,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
+        clone_sites,
     }
 }

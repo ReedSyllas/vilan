@@ -343,6 +343,20 @@ impl<'src> Transformer<'src> {
         }
     }
 
+    /// Rule 1 (value semantics): wrap a value in `structuredClone(...)` when the
+    /// analyzer marked this binding/assignment as copying an aggregate place
+    /// that would otherwise alias its source.
+    fn maybe_clone(&self, value_id: Id, node: js::Node<'src>) -> js::Node<'src> {
+        if self.program.clone_sites.contains(&value_id) {
+            js::Node::Call(
+                Box::new(js::Node::Local("structuredClone".to_string())),
+                vec![node],
+            )
+        } else {
+            node
+        }
+    }
+
     fn walk_entity(&mut self, id: Id, block: &mut Vec<js::Node<'src>>) -> Option<js::Node<'src>> {
         let entity = self.program.entity_map.get(&id).unwrap();
 
@@ -639,7 +653,10 @@ impl<'src> Transformer<'src> {
                 let variable = self.program.variables.get(id).unwrap();
                 let value = variable
                     .initial
-                    .and_then(|id| self.walk_entity(id, block))
+                    .and_then(|value_id| {
+                        self.walk_entity(value_id, block)
+                            .map(|node| self.maybe_clone(value_id, node))
+                    })
                     .unwrap_or(js::Node::Void);
                 let js_variable = js::Variable {
                     name,
@@ -656,6 +673,7 @@ impl<'src> Transformer<'src> {
                     .walk_entity(*target_id, block)
                     .unwrap_or(js::Node::Void);
                 let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
+                let value = self.maybe_clone(*value_id, value);
                 js::Node::Assignment(Box::new(target), Box::new(value))
             }
             Expr::Parameter(_) => {
