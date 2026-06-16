@@ -724,11 +724,24 @@ impl<'src> Transformer<'src> {
                 }
             }
             Expr::Assignment(target_id, value_id) => {
+                let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
+                let value = self.maybe_clone(*value_id, value);
+                // `*view = wholeValue` through an aggregate view copies the fields
+                // in place, so the view's target (and any aliases) update rather
+                // than rebinding the local. A primitive view's `*c` is a `[0]`
+                // slot write, handled by the normal path below.
+                if let Some(Expr::Dereference(operand)) = self.program.entity_map.get(target_id) {
+                    if !self.derefs_boxed(*operand) {
+                        let base = self.walk_entity(*operand, block).unwrap_or(js::Node::Void);
+                        return Some(js::Node::Call(
+                            Box::new(js::Node::Local("Object.assign".to_string())),
+                            vec![base, value],
+                        ));
+                    }
+                }
                 let target = self
                     .walk_entity(*target_id, block)
                     .unwrap_or(js::Node::Void);
-                let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
-                let value = self.maybe_clone(*value_id, value);
                 js::Node::Assignment(Box::new(target), Box::new(value))
             }
             Expr::Parameter(_) => {

@@ -18,5 +18,5 @@ fun main() {
 }
 
 fun f(a: &mut Point) {
-	*a = Point(1, 2);
+	*a = Point::new(1, 2);
 }

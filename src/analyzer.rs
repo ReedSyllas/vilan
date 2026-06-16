@@ -685,6 +685,20 @@ impl<'src> Analyzer<'src> {
             .unwrap_or(false)
     }
 
+    /// Whether a concrete `subject_type` implements `trait_id` — has an
+    /// `impl Subject with Trait`. Lets a concrete value satisfy a trait-typed
+    /// parameter (e.g. a `Self`-defaulted generic that resolved to the trait).
+    fn type_implements_trait(&self, subject_type: &Type, trait_id: Id) -> bool {
+        self.implementations.iter().any(|implementation| {
+            implementation.trait_ids.contains(&trait_id)
+                && self.compare_type(
+                    subject_type,
+                    &implementation.subject.get_type(self),
+                    &HashMap::new(),
+                )
+        })
+    }
+
     /// Resolves a method `member_name` callable on a concrete `subject_type`
     /// (a struct or enum) by searching its implementations.
     fn method_member_in_impls(&self, subject_type: &Type, member_name: &str) -> Option<Id> {
@@ -4067,6 +4081,17 @@ impl<'src> Analyzer<'src> {
                     (b.clone(), bindings)
                 }
             },
+            // A concrete value satisfies a trait-typed parameter when it
+            // implements that trait — e.g. a `Counter` (which `impl`s `Combine`)
+            // passed where a `Combine` is expected, including a `Self`-defaulted
+            // generic that resolved to the trait.
+            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id)) => {
+                if self.type_implements_trait(a, *trait_id) {
+                    (a.clone(), Vec::new())
+                } else {
+                    return None;
+                }
+            }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 let mut result_items = Vec::with_capacity(l_items.len());
                 let mut all_bindings = Vec::new();
