@@ -116,8 +116,18 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     validation-only. **Deferred:** resize (`push`)/move/drop invalidation, and
     index-into-container views (need subscript syntax + a "which methods
     invalidate" notion).
-  - **Slice P4c — interaction rules.** A closure that captures a view is itself
-    second-class (can't escape); a view may not live across an `await`.
+  - **Slice P4c — interaction rules. — DONE (closure-capture).** A closure that
+    captures a view is itself second-class — `escapes_as_view` extends the escape
+    check so a *capturing* closure in a return/field/collection position is
+    rejected. `closure_captures_view_param` (a body walk, not descending into
+    nested closures) flags a closure that references a `&`/`&mut` *parameter* —
+    necessarily one captured from an enclosing function, since closure
+    parameters are always bare, so it is precise with no false positives. This is
+    what routes the signals "return an unsubscribe closure capturing `self`"
+    pattern to `Shared`. Validated: capturing-closure return errors, non-capturing
+    is fine, no corpus false positives, validation-only. **Deferred:** capturing
+    an outer view *binding* (vs parameter); and **no view across `await`** (needs
+    precise last-use liveness, not the block-lexical approximation).
 - **Phase 5 — Projections + provenance.** `borrows` as an inferred signature
   effect (reuses the async/context effect-inference machinery); provenance
   origin-sets enforced via Phase 2 liveness + Phase 4 rule 4; subscript/field

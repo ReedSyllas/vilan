@@ -1040,36 +1040,48 @@ impl<'src> Analyzer<'src> {
     /// `borrows` (Phase 5).
     fn check_view_escape(&mut self) {
         let view_bindings = self.compute_view_bindings();
+        // A closure that captures a view is itself second-class (P4c): it cannot
+        // escape either, or the captured view would outlive its target.
+        let closure_ids: Vec<Id> = self.closures.keys().copied().collect();
+        let capturing: HashSet<Id> = closure_ids
+            .into_iter()
+            .filter(|closure_id| self.closure_captures_view_param(*closure_id))
+            .collect();
         let mut escapes: Vec<Id> = Vec::new();
         for expr in self.expr_id_to_expr_map.values() {
             match expr {
-                Expr::FunctionReturn(value_id) if self.is_view_expr(*value_id, &view_bindings) => {
+                Expr::FunctionReturn(value_id)
+                    if self.escapes_as_view(*value_id, &view_bindings, &capturing) =>
+                {
                     escapes.push(*value_id);
                 }
                 Expr::StructInitializer(_, fields) => escapes.extend(
                     fields
                         .values()
                         .copied()
-                        .filter(|id| self.is_view_expr(*id, &view_bindings)),
+                        .filter(|id| self.escapes_as_view(*id, &view_bindings, &capturing)),
                 ),
                 Expr::List(ids) | Expr::Tuple(ids) => escapes.extend(
                     ids.iter()
                         .copied()
-                        .filter(|id| self.is_view_expr(*id, &view_bindings)),
+                        .filter(|id| self.escapes_as_view(*id, &view_bindings, &capturing)),
                 ),
                 _ => {}
             }
         }
-        // A function or closure body whose trailing expression is a view returns
-        // it implicitly.
+        // A function or closure body whose trailing expression escapes a view
+        // returns it implicitly.
         for function in self.functions.values() {
-            if function.has_body && self.is_view_expr(function.body.1, &view_bindings) {
+            if function.has_body
+                && self.escapes_as_view(function.body.1, &view_bindings, &capturing)
+            {
                 escapes.push(function.body.1);
             }
         }
-        for closure in self.closures.values() {
-            if self.is_view_expr(closure.return_, &view_bindings) {
-                escapes.push(closure.return_);
+        let closure_returns: Vec<Id> = self.closures.values().map(|c| c.return_).collect();
+        for return_id in closure_returns {
+            if self.escapes_as_view(return_id, &view_bindings, &capturing) {
+                escapes.push(return_id);
             }
         }
         for expr_id in escapes {
@@ -1077,6 +1089,158 @@ impl<'src> Analyzer<'src> {
                 span: **self.span_map.get(&expr_id).unwrap_or(&&EMPTY_SPAN),
                 msg: "a view cannot escape its scope: it may not be returned, stored in a field, or placed in a collection. Return an owned value or a handle instead.".to_string(),
             });
+        }
+    }
+
+    /// Whether an expression escapes a view when placed in a return / field /
+    /// collection position: a view itself, or a closure that captures one.
+    fn escapes_as_view(
+        &self,
+        expr_id: Id,
+        view_bindings: &HashSet<Id>,
+        capturing: &HashSet<Id>,
+    ) -> bool {
+        if self.is_view_expr(expr_id, view_bindings) {
+            return true;
+        }
+        matches!(
+            self.expr_id_to_expr_map.get(&expr_id),
+            Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id))
+                if capturing.contains(closure_id)
+        )
+    }
+
+    /// Whether a closure body references a `&` / `&mut` parameter — necessarily
+    /// one captured from an enclosing function, since closure parameters are
+    /// always bare. (Capturing an outer view *binding* is deferred.)
+    fn closure_captures_view_param(&self, closure_id: Id) -> bool {
+        let Some(closure) = self.closures.get(&closure_id) else {
+            return false;
+        };
+        let mut captured = false;
+        let mut visited = HashSet::new();
+        self.scan_view_param_ref(closure.return_, &mut captured, &mut visited);
+        captured
+    }
+
+    fn scan_view_param_ref(&self, expr_id: Id, captured: &mut bool, visited: &mut HashSet<Id>) {
+        if *captured || !visited.insert(expr_id) {
+            return;
+        }
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        let mut recurse = |this: &Self, id: Id, captured: &mut bool, visited: &mut HashSet<Id>| {
+            this.scan_view_param_ref(id, captured, visited);
+        };
+        match expr {
+            Expr::Local(binding_id) => {
+                if self.parameters.get(&binding_id).is_some_and(|parameter| {
+                    matches!(parameter.convention, Convention::Ref | Convention::RefMut)
+                }) {
+                    *captured = true;
+                }
+            }
+            // Nested closures are their own nodes; their captures are checked
+            // separately.
+            Expr::Closure(_) | Expr::Async(_) => {}
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    recurse(self, initial, captured, visited);
+                }
+            }
+            Expr::Reference(operand, _) | Expr::Dereference(operand) | Expr::Unary(_, operand) => {
+                recurse(self, operand, captured, visited)
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                recurse(self, lhs, captured, visited);
+                recurse(self, rhs, captured, visited);
+            }
+            Expr::Assignment(target, value) => {
+                recurse(self, target, captured, visited);
+                recurse(self, value, captured, visited);
+            }
+            Expr::Field(subject, _, _) => recurse(self, subject, captured, visited),
+            Expr::FunctionReturn(value) | Expr::Await(value) => {
+                recurse(self, value, captured, visited)
+            }
+            Expr::Call(call_id) => {
+                if let Some(function_call) = self.function_calls.get(&call_id) {
+                    for argument in function_call.argument_ids.clone() {
+                        recurse(self, argument, captured, visited);
+                    }
+                }
+            }
+            Expr::Block((statements, tail)) => {
+                for statement in statements {
+                    recurse(self, statement, captured, visited);
+                }
+                recurse(self, tail, captured, visited);
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    recurse(self, condition, captured, visited);
+                }
+                for statement in statements {
+                    recurse(self, statement, captured, visited);
+                }
+                recurse(self, tail, captured, visited);
+            }
+            Expr::ForEach(iterable, _, (statements, tail)) => {
+                recurse(self, iterable, captured, visited);
+                for statement in statements {
+                    recurse(self, statement, captured, visited);
+                }
+                recurse(self, tail, captured, visited);
+            }
+            Expr::Match(subject, legs) => {
+                recurse(self, subject, captured, visited);
+                for leg in legs {
+                    if let Some(guard) = leg.guard {
+                        recurse(self, guard, captured, visited);
+                    }
+                    recurse(self, leg.body, captured, visited);
+                }
+            }
+            Expr::List(ids) | Expr::Tuple(ids) => {
+                for id in ids {
+                    recurse(self, id, captured, visited);
+                }
+            }
+            Expr::StructInitializer(_, fields) => {
+                for value in fields.values() {
+                    recurse(self, *value, captured, visited);
+                }
+            }
+            // `If` is the one branch form left; walk it explicitly.
+            Expr::If(branch) => self.scan_view_param_ref_if(&branch, captured, visited),
+            _ => {}
+        }
+    }
+
+    fn scan_view_param_ref_if(
+        &self,
+        branch: &ExprIfBranch,
+        captured: &mut bool,
+        visited: &mut HashSet<Id>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.scan_view_param_ref(*condition, captured, visited);
+                for statement in statements {
+                    self.scan_view_param_ref(*statement, captured, visited);
+                }
+                self.scan_view_param_ref(*tail, captured, visited);
+                if let Some(else_branch) = else_branch {
+                    self.scan_view_param_ref_if(else_branch, captured, visited);
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                for statement in statements {
+                    self.scan_view_param_ref(*statement, captured, visited);
+                }
+                self.scan_view_param_ref(*tail, captured, visited);
+            }
         }
     }
 
