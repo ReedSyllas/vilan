@@ -1,0 +1,19 @@
+// Rule 2 elision must stay sound inside loops: `a` is read only once textually
+// (`mut b = a`), but that read repeats every iteration, so the copy must NOT be
+// elided — otherwise `b` would alias `a` and `b.x` would accumulate across
+// iterations. With the copy kept, each `b` is an independent copy of `a` (whose
+// `x` stays 0), so `b.x` is 1 every time and the total is 3, not 6.
+import std::print;
+
+struct Point { x: i32, y: i32 }
+
+fun main() {
+	mut a = Point { x = 0, y = 0 };
+	mut total = 0;
+	for n in [ 1, 2, 3 ] {
+		mut b = a;
+		b.x = b.x + 1;
+		total = total + b.x;
+	}
+	print(total); // 3
+}

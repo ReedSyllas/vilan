@@ -31,9 +31,20 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
   *Known limitation:* `structuredClone` throws on aggregates containing closures
   (e.g. `List<|T|void>`); none occur in the corpus, and a type-aware copy
   routine can replace it later.
-- **Phase 2 — Rule 2, elision.** Intra-function last-use/liveness over the
-  resolved IR; provably-dead copies downgrade to moves. Output gets lean again;
-  the liveness pass now exists for reuse by later phases.
+- **Phase 2 — Rule 2, elision. — DONE.** `is_elidable_copy` downgrades a copy to
+  a move when the source is a *local* read exactly once (`reference_count == 1`,
+  which also rules out closure captures — a capture is a second read) and that
+  read is not inside a loop or closure (`collect_repeatable_interiors` /
+  `mark_repeatable`, a depth-tracking walk mirroring the call graph). Parameters
+  are never elided (they alias the caller). Elision is implemented as *not*
+  marking the site a clone site, so the transformer is unchanged. Validated:
+  `test/copy-elision.vl` elides (no `structuredClone`, `99`), `test/copy-in-loop.vl`
+  keeps the copy in a loop (`3`, not the `6` aliasing would give),
+  `value-semantics.vl` keeps its live-source clones, zero corpus regression.
+  *Scope note:* this is a deliberately sound-not-complete elision built on the
+  existing `reference_count`; the fuller *positional* liveness pass ("last use
+  *through views*") is deferred to Phase 3, where views define its real
+  requirements — the `mark_repeatable` walk is the reusable seed.
 - **Phase 3 — Rule 3 core (views) + conventions.** Lexer/parser for the new
   surface; IR representation of views + deref; analyzer types views (`&mut`
   requires `mut` target, position-default conventions, `own`, auto-deref);

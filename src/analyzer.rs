@@ -968,8 +968,10 @@ impl<'src> Analyzer<'src> {
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
     /// values (constructors, literals, calls) own their result and are left
-    /// alone; eliding the remaining copies on last use is a later phase.
+    /// alone. Rule 2 (elision) then removes the copies whose source is dead (see
+    /// `is_elidable_copy`).
     fn compute_clone_sites(&self) -> HashSet<Id> {
+        let repeatable = self.collect_repeatable_interiors();
         let mut sites = HashSet::new();
         for expr in self.expr_id_to_expr_map.values() {
             let (value_id, value_type) = match expr {
@@ -986,11 +988,195 @@ impl<'src> Analyzer<'src> {
                 },
                 _ => continue,
             };
-            if self.is_place_expr(value_id) && self.is_cloneable_aggregate(&value_type) {
+            if self.is_place_expr(value_id)
+                && self.is_cloneable_aggregate(&value_type)
+                && !self.is_elidable_copy(value_id, &repeatable)
+            {
                 sites.insert(value_id);
             }
         }
         sites
+    }
+
+    /// Rule 2 (elision): whether a copy of an aggregate place can be downgraded
+    /// to a move because the aliasing can never be observed. Sound, not complete
+    /// — we only elide when the source is a local read *exactly once* (so there
+    /// is no later read, and no closure capture, which would be a second read)
+    /// and that read is not inside a loop or closure, where it could repeat and
+    /// the alias would persist into the next iteration. A parameter is never
+    /// elided: it aliases the caller's value, which outlives the call.
+    fn is_elidable_copy(&self, value_id: Id, repeatable: &HashSet<Id>) -> bool {
+        if repeatable.contains(&value_id) {
+            return false;
+        }
+        let Some(Expr::Local(binding_id)) = self.expr_id_to_expr_map.get(&value_id) else {
+            // Only a simple binding alias is elided; a field/element source
+            // (`mut b = a.field`) is conservatively always copied.
+            return false;
+        };
+        self.variables.contains_key(binding_id)
+            && self.reference_count.get(binding_id).copied() == Some(1)
+    }
+
+    /// Entity ids inside a loop or closure body — code that may run a different
+    /// number of times than its enclosing scope, so a copy there cannot be
+    /// elided (the alias would survive into the next repetition). Every function,
+    /// module, and closure body is walked; closures are also roots (at depth 1)
+    /// so a copy inside any closure is treated as repeatable.
+    fn collect_repeatable_interiors(&self) -> HashSet<Id> {
+        let mut interior = HashSet::new();
+        let mut visited = HashSet::new();
+        for function in self.functions.values() {
+            if function.has_body {
+                for statement in &function.body.0 {
+                    self.mark_repeatable(*statement, 0, &mut interior, &mut visited);
+                }
+                self.mark_repeatable(function.body.1, 0, &mut interior, &mut visited);
+            }
+        }
+        for module in self.modules.values() {
+            for statement in &module.body.0 {
+                self.mark_repeatable(*statement, 0, &mut interior, &mut visited);
+            }
+        }
+        for closure in self.closures.values() {
+            self.mark_repeatable(closure.return_, 1, &mut interior, &mut visited);
+        }
+        interior
+    }
+
+    /// Walks the expression tree from `id`, recording every id reached at
+    /// `depth > 0` (inside a loop or closure) in `interior`. Mirrors the call
+    /// graph's traversal; `visited` guards against shared sub-expressions.
+    fn mark_repeatable(
+        &self,
+        id: Id,
+        depth: u32,
+        interior: &mut HashSet<Id>,
+        visited: &mut HashSet<Id>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+        if depth > 0 {
+            interior.insert(id);
+        }
+        let Some(expr) = self.expr_id_to_expr_map.get(&id) else {
+            return;
+        };
+        match expr {
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self
+                    .variables
+                    .get(variable_id)
+                    .and_then(|variable| variable.initial)
+                {
+                    self.mark_repeatable(initial, depth, interior, visited);
+                }
+            }
+            Expr::Closure(closure_id) | Expr::Async(closure_id) => {
+                if let Some(closure) = self.closures.get(closure_id) {
+                    self.mark_repeatable(closure.return_, depth + 1, interior, visited);
+                }
+            }
+            Expr::Field(subject_id, _, _) => {
+                self.mark_repeatable(*subject_id, depth, interior, visited)
+            }
+            Expr::FunctionReturn(value_id) => {
+                self.mark_repeatable(*value_id, depth, interior, visited)
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.mark_repeatable(*lhs, depth, interior, visited);
+                self.mark_repeatable(*rhs, depth, interior, visited);
+            }
+            Expr::Unary(_, operand) => self.mark_repeatable(*operand, depth, interior, visited),
+            Expr::Assignment(target_id, value_id) => {
+                self.mark_repeatable(*target_id, depth, interior, visited);
+                self.mark_repeatable(*value_id, depth, interior, visited);
+            }
+            Expr::Call(call_id) => {
+                if let Some(function_call) = self.function_calls.get(call_id) {
+                    self.mark_repeatable(function_call.subject_id, depth, interior, visited);
+                    for argument_id in &function_call.argument_ids {
+                        self.mark_repeatable(*argument_id, depth, interior, visited);
+                    }
+                }
+            }
+            Expr::Await(inner) => self.mark_repeatable(*inner, depth, interior, visited),
+            Expr::Block((statements, tail)) => {
+                for statement in statements {
+                    self.mark_repeatable(*statement, depth, interior, visited);
+                }
+                self.mark_repeatable(*tail, depth, interior, visited);
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    self.mark_repeatable(*condition, depth + 1, interior, visited);
+                }
+                for statement in statements {
+                    self.mark_repeatable(*statement, depth + 1, interior, visited);
+                }
+                self.mark_repeatable(*tail, depth + 1, interior, visited);
+            }
+            Expr::ForEach(iterable, _item, (statements, tail)) => {
+                self.mark_repeatable(*iterable, depth, interior, visited);
+                for statement in statements {
+                    self.mark_repeatable(*statement, depth + 1, interior, visited);
+                }
+                self.mark_repeatable(*tail, depth + 1, interior, visited);
+            }
+            Expr::If(branch) => self.mark_repeatable_if(branch, depth, interior, visited),
+            Expr::Is(subject_id, _pattern) => {
+                self.mark_repeatable(*subject_id, depth, interior, visited)
+            }
+            Expr::Match(subject_id, legs) => {
+                self.mark_repeatable(*subject_id, depth, interior, visited);
+                for leg in legs {
+                    if let Some(guard) = leg.guard {
+                        self.mark_repeatable(guard, depth, interior, visited);
+                    }
+                    self.mark_repeatable(leg.body, depth, interior, visited);
+                }
+            }
+            Expr::List(ids) | Expr::Tuple(ids) => {
+                for id in ids {
+                    self.mark_repeatable(*id, depth, interior, visited);
+                }
+            }
+            Expr::StructInitializer(_, fields) => {
+                for value_id in fields.values() {
+                    self.mark_repeatable(*value_id, depth, interior, visited);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_repeatable_if(
+        &self,
+        branch: &ExprIfBranch,
+        depth: u32,
+        interior: &mut HashSet<Id>,
+        visited: &mut HashSet<Id>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.mark_repeatable(*condition, depth, interior, visited);
+                for statement in statements {
+                    self.mark_repeatable(*statement, depth, interior, visited);
+                }
+                self.mark_repeatable(*tail, depth, interior, visited);
+                if let Some(else_branch) = else_branch {
+                    self.mark_repeatable_if(else_branch, depth, interior, visited);
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                for statement in statements {
+                    self.mark_repeatable(*statement, depth, interior, visited);
+                }
+                self.mark_repeatable(*tail, depth, interior, visited);
+            }
+        }
     }
 
     /// Resolves a name to its declaring entity by walking the scope chain,

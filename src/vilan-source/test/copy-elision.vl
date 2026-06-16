@@ -1,0 +1,13 @@
+// Rule 2 (elision): a semantic copy whose source is dead after the copy is
+// downgraded to a move — no `structuredClone` is emitted. Here `a` is read only
+// at `mut b = a` and never again, so the copy is elided; `b` simply reuses it.
+import std::print;
+
+struct Point { x: i32, y: i32 }
+
+fun main() {
+	mut a = Point { x = 1, y = 2 };
+	mut b = a; // `a` is dead after this — copy elided to a move
+	b.x = 99;
+	print(b.x); // 99
+}
