@@ -9,7 +9,7 @@ external struct List<T>;
 impl List<type T> {
 	external fun new(): List<T>;
 
-	external fun push(self, item: T): void;
+	external fun push(&mut self, item: T): void;
 }
 
 // `sum`/`product` seed with the first element and fall back to `T::default()`

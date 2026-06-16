@@ -30,7 +30,7 @@ function x/*place_order*/(y, z) {
 	}
 	let E = null;
 	if (B/*has_car*/) {
-		const D/*ordered_cars*/ = [  ];
+		let D/*ordered_cars*/ = [  ];
 		D/*ordered_cars*/.push(z);
 		E = [ 0, [ D/*ordered_cars*/ ] ];
 	} else {
@@ -53,7 +53,7 @@ function b/*mock_dealership*/() {
 	return c/*dealership*/;
 }
 let a/*dealership*/ = b/*mock_dealership*/();
-const n/*john*/ = o/*new*/("John E. Smith");
+let n/*john*/ = o/*new*/("John E. Smith");
 const u = q/*find_car_by_make*/(a/*dealership*/, "Honda");
 let J = null;
 if (u[0] === 0) {

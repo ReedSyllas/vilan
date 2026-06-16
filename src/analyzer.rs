@@ -1016,6 +1016,62 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Rule 3: an argument passed to a `&mut` parameter must be a mutable place.
+    /// In particular the receiver of a `&mut self` method (argument 0) cannot be
+    /// rooted in a readonly parameter — `self.cars.push(..)` inside a bare-`self`
+    /// method is rejected, directing the author to `&mut self`. Only direct
+    /// calls (`subject -> Local(callee)`) are resolved; dispatched/generic
+    /// callees are conservatively skipped.
+    fn check_mutable_arguments(&mut self) {
+        let call_ids: Vec<Id> = self
+            .expr_id_to_expr_map
+            .values()
+            .filter_map(|expr| match expr {
+                Expr::Call(call_id) => Some(*call_id),
+                _ => None,
+            })
+            .collect();
+        for call_id in call_ids {
+            let Some(function_call) = self.function_calls.get(&call_id) else {
+                continue;
+            };
+            let subject_id = function_call.subject_id;
+            let argument_ids = function_call.argument_ids.clone();
+            let callee_id = match self.expr_id_to_expr_map.get(&subject_id) {
+                Some(Expr::Local(callee_id)) => *callee_id,
+                _ => continue,
+            };
+            let parameter_ids = self
+                .functions
+                .get(&callee_id)
+                .map(|function| function.parameters.clone())
+                .or_else(|| {
+                    self.external_functions
+                        .get(&callee_id)
+                        .map(|external| external.parameters.clone())
+                });
+            let Some(parameter_ids) = parameter_ids else {
+                continue;
+            };
+            for (parameter_id, argument_id) in parameter_ids.iter().zip(argument_ids.iter()) {
+                let writable = self
+                    .parameters
+                    .get(parameter_id)
+                    .is_some_and(|parameter| parameter.convention == Convention::RefMut);
+                if writable {
+                    if let Some(name) = self.readonly_root_parameter(*argument_id) {
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(argument_id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "cannot mutate through readonly parameter '{name}'; declare it `&mut {name}` to allow mutation."
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Rule 1 (value semantics): the value expressions that must be deep-copied
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
@@ -5911,6 +5967,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
     analyzer.build();
     analyzer.check_readonly_mutation();
+    analyzer.check_mutable_arguments();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

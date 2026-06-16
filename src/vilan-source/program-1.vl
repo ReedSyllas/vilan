@@ -43,7 +43,7 @@ impl Dealership {
 		ret false;
 	}
 	
-	fun add_car(self, car: Car) {
+	fun add_car(&mut self, own car: Car) {
 		self.cars.push(car);
 	}
 	
@@ -72,7 +72,7 @@ impl Dealership {
 		if has_car {
 			// TODO: Remove car from dealership with index `i`.
 			
-			let ordered_cars = List::new();
+			mut ordered_cars = List::new();
 			ordered_cars.push(car);
 			
 			Some(Order { cars = ordered_cars })
@@ -95,7 +95,7 @@ impl Person {
 		}
 	}
 	
-	fun purchase(self, order: Order) {
+	fun purchase(&mut self, own order: Order) {
 		self.purchases.push(order);
 	}
 }
@@ -119,7 +119,7 @@ fun mock_dealership(): Dealership {
 fun main() {
 	mut dealership = mock_dealership();
 	
-	let john = Person::new("John E. Smith");
+	mut john = Person::new("John E. Smith");
 	
 	if dealership.find_car_by_make("Honda") is Some(let johns_car) {
 		print(i"Found: {johns_car.get_name()}");

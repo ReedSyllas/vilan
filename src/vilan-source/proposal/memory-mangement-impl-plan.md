@@ -74,10 +74,21 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     `Expr::Field`. Migrated `field-assignment.vl` (`increment`/`bump` →
     `&mut self`) — and its `.js` is byte-identical (pass-through codegen confirms
     additivity). Enforcement proven by a negative case; no corpus regression.
-  - **Slice 3b — method-call mutability check.** Reject `recv.method()` where the
-    method is `&mut self` and `recv` is rooted in a readonly place (catches
-    `self.cars.push(...)` in `program-1.vl`). Requires migrating std mutating
-    methods (`List::push` → `&mut self`) and `program-1.vl` (`&mut self` + `own`).
+  - **Slice 3b — method-call mutability check. — DONE.** A post-`build()` pass
+    `check_mutable_arguments` resolves each call's callee via the direct
+    `subject -> Local(callee)` path (functions *and* external functions carry
+    parameter ids/conventions); for any parameter with `RefMut` convention, the
+    matching argument may not be readonly-rooted — so `recv.method()` where the
+    method is `&mut self` and `recv` roots in a readonly parameter is rejected
+    (dispatched/generic callees are conservatively skipped). Migrated std
+    `List::push` → `&mut self` (blast radius across the whole corpus was exactly
+    `program-1.vl`) and `program-1.vl` (`add_car`/`purchase` → `&mut self` +
+    `own`; two mutated `let` locals → `mut`). program-1 runs unchanged; the only
+    `.js` delta is `const`→`let` for the now-`mut` bindings (the `&mut self`/`own`
+    changes are pure pass-through). Method-call negative case errors; no
+    functional regression. *Known gap:* a `&mut self` call on an immutable `let`
+    *local* (e.g. `let xs = List::new(); xs.push(1)`) is not yet flagged — the
+    check covers readonly parameters, not let-locals.
   - **Slice 4 — primitive-local views.** Box a viewed primitive local into a
     `(base, key)` cell; support `*v = wholeValue`.
 - **Phase 4 — Rule 4 checker.** Lexical view-range analysis flagging
