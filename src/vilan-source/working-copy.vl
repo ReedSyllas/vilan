@@ -1,7 +1,22 @@
-import std::option::Option::{ self, Some, None };
 import std::print;
 
+struct Point {
+	x: f64,
+	y: f64,
+}
+
+impl Point {
+	fun new(x: f64, y: f64) {
+		Point { x, y }
+	}
+}
+
 fun main() {
-	let value = Some(5);
-	print(value.map(|x| x * 6));
+	mut a = Point::new(6, 5);
+	f(a);
+	print(a);
+}
+
+fun f(a: &mut Point) {
+	*a = Point(1, 2);
 }

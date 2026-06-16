@@ -1,15 +1,6 @@
-function c(d, e) {
-	const f = d;
-	let g = null;
-	if (f[0] === 0) {
-		const h/*x*/ = f[1];
-		g = [ 0, e(h/*x*/) ];
-	} else {
-		g = [ 1 ];
-	}
-	return g;
+function b/*new*/(c, d) {
+	return [ c, d ];
 }
-const a/*value*/ = [ 0, 5 ];
-console.log(c(a/*value*/, (b) => {
-	return b * 6;
-}));
+let a/*a*/ = b/*new*/(6, 5);
+a/*a*/ = a/*a*/ / 10;
+console.log(a/*a*/);

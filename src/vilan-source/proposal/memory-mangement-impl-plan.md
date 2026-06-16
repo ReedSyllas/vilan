@@ -267,6 +267,17 @@ behavior is unchanged).
   binding holding a writable view from one holding an owned value. Corpus blast
   radius was one program (`async-promise-all.vl` → `mut promises`).
 - **Primitive-local view boxing** (slice 4) — done; see above.
+- **`own` parameter copy** — `own` was a compile-time convention only; parameter
+  passing stayed pass-through, so an `own` aggregate argument was *not* copied and
+  mutating it inside the callee corrupted the caller (`working-copy.vl`). Fixed:
+  `compute_clone_sites` now also marks an aggregate-*place* argument passed to an
+  `own` parameter (callee resolved via the direct `subject -> Local` path), and
+  the transformer `maybe_clone`s call arguments — so `f(a)` emits
+  `f(structuredClone(a))`. Same last-use elision applies (a dead arg is moved, not
+  copied — e.g. `program-1`'s `add_car(car1)`). Needed a `place_value_type` helper
+  because a `Local` reference carries no type entry on its own expr id (the type
+  is on the bound variable). NB: elision is the conservative `reference_count==1`
+  rule, so an `own` arg read more than once is copied even at its last use.
 
 **Still deferred** (need larger features): no-view-across-`await` (precise
 last-use liveness), resize/move/drop invalidation and index-into-container views

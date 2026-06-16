@@ -453,7 +453,12 @@ impl<'src> Transformer<'src> {
                 let args = function_call
                     .argument_ids
                     .iter()
-                    .filter_map(|arg| self.walk_entity(*arg, block))
+                    .filter_map(|arg| {
+                        // An argument to an `own` parameter is copied (marked in
+                        // `clone_sites`), like a binding copy.
+                        self.walk_entity(*arg, block)
+                            .map(|node| self.maybe_clone(*arg, node))
+                    })
                     .collect::<Vec<_>>();
 
                 // `T::member()` inside a monomorphized body: dispatch directly

@@ -7,4 +7,4 @@ function d/*peek*/(e) {
 let a/*c*/ = [ 10 ];
 b/*bump*/(a/*c*/);
 console.log(a/*c*/[0]);
-console.log(d/*peek*/(a/*c*/));
+console.log(d/*peek*/(structuredClone(a/*c*/)));

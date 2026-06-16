@@ -963,6 +963,27 @@ impl<'src> Analyzer<'src> {
             .map(|type_id| type_id.get_type(self))
     }
 
+    /// The type of a place expression. Falls back to the binding's type for a
+    /// `Local` reference, whose own expr id usually carries no type entry (the
+    /// type lives on the variable/parameter it names).
+    fn place_value_type(&self, expr_id: Id) -> Option<Type> {
+        if let Some(value_type) = self.type_of_expr(expr_id) {
+            return Some(value_type);
+        }
+        match self.expr_id_to_expr_map.get(&expr_id)? {
+            Expr::Local(binding_id) => {
+                if let Some(variable) = self.variables.get(binding_id) {
+                    Some(variable.type_id.get_type(self))
+                } else {
+                    self.parameters
+                        .get(binding_id)
+                        .map(|parameter| parameter.type_id.get_type(self))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Whether an expression reads existing aggregate storage (a binding or a
     /// field) rather than producing a fresh value (a literal, constructor, or
     /// call). Only a place can alias, so only a place needs a copy.
@@ -1649,6 +1670,49 @@ impl<'src> Analyzer<'src> {
                 && !self.is_elidable_copy(value_id, &repeatable)
             {
                 sites.insert(value_id);
+            }
+        }
+        // An aggregate place passed to an `own` parameter is copied: the callee
+        // owns its value, so mutating it must not affect the caller. Resolved by
+        // the direct `subject -> Local(callee)` path, with the same elision.
+        for expr in self.expr_id_to_expr_map.values() {
+            let Expr::Call(call_id) = expr else {
+                continue;
+            };
+            let Some(function_call) = self.function_calls.get(call_id) else {
+                continue;
+            };
+            let callee_id = match self.expr_id_to_expr_map.get(&function_call.subject_id) {
+                Some(Expr::Local(callee_id)) => *callee_id,
+                _ => continue,
+            };
+            let parameter_ids = self
+                .functions
+                .get(&callee_id)
+                .map(|function| function.parameters.clone())
+                .or_else(|| {
+                    self.external_functions
+                        .get(&callee_id)
+                        .map(|external| external.parameters.clone())
+                });
+            let Some(parameter_ids) = parameter_ids else {
+                continue;
+            };
+            for (parameter_id, argument_id) in parameter_ids.iter().zip(&function_call.argument_ids)
+            {
+                let is_own = self
+                    .parameters
+                    .get(parameter_id)
+                    .is_some_and(|parameter| parameter.convention == Convention::Own);
+                if is_own
+                    && self.is_place_expr(*argument_id)
+                    && self
+                        .place_value_type(*argument_id)
+                        .is_some_and(|value_type| self.is_cloneable_aggregate(&value_type))
+                    && !self.is_elidable_copy(*argument_id, &repeatable)
+                {
+                    sites.insert(*argument_id);
+                }
             }
         }
         sites
@@ -5872,6 +5936,30 @@ impl<'src> Analyzer<'src> {
                                         .insert(call_id, Expr::Call(call_id));
                                 }
                             }
+                        } else if !matches!(target, Expr::Error) {
+                            // The subject resolved to a non-callable value (a
+                            // struct or module name, not a function or variant) —
+                            // e.g. `Point(1, 2)`. Without this the call stays an
+                            // `Expr::Call` with no `FunctionCall` and the
+                            // transformer panics; report it instead. (A subject
+                            // that's already an error is left to its own
+                            // diagnostic.)
+                            let struct_name = match target {
+                                Expr::Struct(struct_id) => {
+                                    self.structs.get(struct_id).map(|struct_| struct_.name)
+                                }
+                                _ => None,
+                            };
+                            self.diagnostics.push(Error {
+                                span: arguments_span,
+                                msg: match struct_name {
+                                    Some(name) => format!(
+                                        "cannot call '{name}': it is a struct, not a function — construct it with `{{ .. }}` or `::new(..)`"
+                                    ),
+                                    None => "cannot call a non-function value".to_string(),
+                                },
+                            });
+                            progress = true;
                         }
                     }
                     _ => {
@@ -5946,9 +6034,31 @@ impl<'src> Analyzer<'src> {
         // else (numbers, strings) keeps native JS arithmetic.
         for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {
             let lhs_type = self.infer_type(lhs_id, &Type::Unknown, &HashMap::new());
-            if matches!(lhs_type, Type::Struct(_, _) | Type::Enum(_, _)) {
-                if let Some(method_id) = self.operator_method(op, &lhs_type) {
-                    self.binary_op_dispatch.insert(binary_id, method_id);
+            if !matches!(lhs_type, Type::Struct(_, _) | Type::Enum(_, _)) {
+                continue;
+            }
+            if let Some(method_id) = self.operator_method(op, &lhs_type) {
+                self.binary_op_dispatch.insert(binary_id, method_id);
+            } else if let Some((trait_name, method_name)) = operator_trait_method(op) {
+                // An arithmetic operator applied to a non-scalar struct/enum that
+                // doesn't overload it (scalars use native arithmetic; comparisons
+                // aren't overloadable, so `operator_trait_method` excludes them).
+                let is_scalar =
+                    matches!(&lhs_type, Type::Struct(id, _) if self.is_scalar_primitive(*id));
+                if !is_scalar {
+                    let type_name = match &lhs_type {
+                        Type::Struct(id, _) => self.structs.get(id).map(|s| s.name),
+                        Type::Enum(id, _) => self.enums.get(id).map(|e| e.name),
+                        _ => None,
+                    }
+                    .unwrap_or("value");
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "type '{type_name}' does not implement the `{trait_name}` operator; \
+                             add `impl {trait_name} for {type_name}` with the `{method_name}` method"
+                        ),
+                    });
                 }
             }
         }
