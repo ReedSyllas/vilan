@@ -991,6 +991,95 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Whether an expression evaluates to a *view* (rule 3, second-class): a
+    /// `&`/`&mut` reference, a binding that holds one, or a `&`/`&mut` parameter.
+    /// (A bare parameter is conceptually a readonly view too, but is excluded
+    /// here — flagging every returned bare parameter is deferred.)
+    fn is_view_expr(&self, expr_id: Id, view_bindings: &HashSet<Id>) -> bool {
+        match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::Reference(_, _)) => true,
+            Some(Expr::Local(binding_id)) => {
+                view_bindings.contains(binding_id)
+                    || self.parameters.get(binding_id).is_some_and(|parameter| {
+                        matches!(parameter.convention, Convention::Ref | Convention::RefMut)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Local bindings that hold a view (`let v = &x`, or `let w = v` where `v`
+    /// is one) — a greatest fixpoint, since a view can be copied between locals.
+    fn compute_view_bindings(&self) -> HashSet<Id> {
+        let mut view_bindings = HashSet::new();
+        loop {
+            let mut changed = false;
+            for variable in self.variables.values() {
+                if view_bindings.contains(&variable.id) {
+                    continue;
+                }
+                if let Some(initial) = variable.initial {
+                    if self.is_view_expr(initial, &view_bindings) {
+                        view_bindings.insert(variable.id);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        view_bindings
+    }
+
+    /// Rule 3 (second-class): a view may not escape its scope — it cannot be
+    /// returned, stored in a struct field, or placed in a collection. (Passing a
+    /// view as an argument, or binding it to a local, is fine.) This is what
+    /// removes lifetimes: a view structurally cannot outlive its target.
+    /// Returning a borrow derived from an argument is recovered later by
+    /// `borrows` (Phase 5).
+    fn check_view_escape(&mut self) {
+        let view_bindings = self.compute_view_bindings();
+        let mut escapes: Vec<Id> = Vec::new();
+        for expr in self.expr_id_to_expr_map.values() {
+            match expr {
+                Expr::FunctionReturn(value_id) if self.is_view_expr(*value_id, &view_bindings) => {
+                    escapes.push(*value_id);
+                }
+                Expr::StructInitializer(_, fields) => escapes.extend(
+                    fields
+                        .values()
+                        .copied()
+                        .filter(|id| self.is_view_expr(*id, &view_bindings)),
+                ),
+                Expr::List(ids) | Expr::Tuple(ids) => escapes.extend(
+                    ids.iter()
+                        .copied()
+                        .filter(|id| self.is_view_expr(*id, &view_bindings)),
+                ),
+                _ => {}
+            }
+        }
+        // A function or closure body whose trailing expression is a view returns
+        // it implicitly.
+        for function in self.functions.values() {
+            if function.has_body && self.is_view_expr(function.body.1, &view_bindings) {
+                escapes.push(function.body.1);
+            }
+        }
+        for closure in self.closures.values() {
+            if self.is_view_expr(closure.return_, &view_bindings) {
+                escapes.push(closure.return_);
+            }
+        }
+        for expr_id in escapes {
+            self.diagnostics.push(Error {
+                span: **self.span_map.get(&expr_id).unwrap_or(&&EMPTY_SPAN),
+                msg: "a view cannot escape its scope: it may not be returned, stored in a field, or placed in a collection. Return an owned value or a handle instead.".to_string(),
+            });
+        }
+    }
+
     /// Rule 3 (position-default conventions): a write rooted in a readonly (bare
     /// or `&`) parameter is rejected — the author must declare it `&mut`. Runs
     /// after `build()`, once field accessors have resolved to `Expr::Field`, so
@@ -5968,6 +6057,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     analyzer.build();
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
+    analyzer.check_view_escape();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

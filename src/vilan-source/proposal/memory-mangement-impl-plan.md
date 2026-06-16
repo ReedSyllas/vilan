@@ -91,9 +91,24 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     check covers readonly parameters, not let-locals.
   - **Slice 4 — primitive-local views.** Box a viewed primitive local into a
     `(base, key)` cell; support `*v = wholeValue`.
-- **Phase 4 — Rule 4 checker.** Lexical view-range analysis flagging
-  invalidation + the two interaction rules; enforced on JS → "JS build ⇒
-  native-safe".
+- **Phase 4 — second-class + rule-4 enforcement. — IN PROGRESS.** Enforced on
+  JS → "JS build ⇒ native-safe". Built in slices:
+  - **Slice P4a — second-class view escape. — DONE.** `check_view_escape`
+    (post-`build()`) rejects a view that is returned, stored in a struct field,
+    or placed in a collection — the rule that removes lifetimes. `is_view_expr`
+    recognizes a `&`/`&mut` reference, a `&`/`&mut` parameter, or a binding that
+    holds a view (`compute_view_bindings`, a greatest fixpoint over `let v = &x`
+    / `let w = v` chains). Passing a view as an argument or binding it locally is
+    fine. Validated: all three escape forms error; the view tests pass (local
+    use); no false positives across the corpus; validation-only (no codegen).
+    Bare parameters (conceptually readonly views) are *not* yet flagged on
+    return — deferred. Returning a borrow of an argument is recovered by
+    `borrows` (Phase 5).
+  - **Slice P4b — rule 4 (no invalidating mutation under a live view).** Lexical
+    view live-range analysis; a resize/reassign/move/drop of a target while a
+    view into it is live → error.
+  - **Slice P4c — interaction rules.** A closure that captures a view is itself
+    second-class (can't escape); a view may not live across an `await`.
 - **Phase 5 — Projections + provenance.** `borrows` as an inferred signature
   effect (reuses the async/context effect-inference machinery); provenance
   origin-sets enforced via Phase 2 liveness + Phase 4 rule 4; subscript/field
