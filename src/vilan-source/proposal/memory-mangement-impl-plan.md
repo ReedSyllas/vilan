@@ -104,9 +104,18 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     Bare parameters (conceptually readonly views) are *not* yet flagged on
     return — deferred. Returning a borrow of an argument is recovered by
     `borrows` (Phase 5).
-  - **Slice P4b — rule 4 (no invalidating mutation under a live view).** Lexical
-    view live-range analysis; a resize/reassign/move/drop of a target while a
-    view into it is live → error.
+  - **Slice P4b — rule 4 (no invalidating mutation under a live view). — DONE
+    (reassignment case).** `check_invalidation` does a **block-scoped lexical
+    live-range scan** (`scan_invalidation`/`_block`/`_if`, mirroring the call
+    graph but threading a live-view set; a view is live from its declaration to
+    the end of its block). `compute_view_origins` (fixpoint, with `place_root`)
+    maps each local view binding to the root it borrows. Reassigning a binding
+    while a view into it is live → "cannot reassign 'x' while a view into it is
+    live". Validated: reassign-while-live errors; reassign-*before*-view is clean
+    (ordering/scoping correct); view tests pass; no corpus false positives;
+    validation-only. **Deferred:** resize (`push`)/move/drop invalidation, and
+    index-into-container views (need subscript syntax + a "which methods
+    invalidate" notion).
   - **Slice P4c — interaction rules.** A closure that captures a view is itself
     second-class (can't escape); a view may not live across an `await`.
 - **Phase 5 — Projections + provenance.** `borrows` as an inferred signature

@@ -1080,6 +1080,223 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// The root binding of a place expression (`x.field.field` / `*v` → `x`).
+    fn place_root(&self, expr_id: Id) -> Option<Id> {
+        match self.expr_id_to_expr_map.get(&expr_id)? {
+            Expr::Local(binding_id) => Some(*binding_id),
+            Expr::Field(subject_id, _, _) => self.place_root(*subject_id),
+            Expr::Dereference(operand_id) => self.place_root(*operand_id),
+            _ => None,
+        }
+    }
+
+    /// For each local view binding, the *local* root it borrows (`let v = &x` →
+    /// `x`; `let w = v` → `v`'s root). A fixpoint, since views copy between
+    /// locals. Views of parameters borrow outside the function, so they have no
+    /// local root and are omitted.
+    fn compute_view_origins(&self) -> HashMap<Id, Id> {
+        let mut origins: HashMap<Id, Id> = HashMap::new();
+        loop {
+            let mut changed = false;
+            for variable in self.variables.values() {
+                if origins.contains_key(&variable.id) {
+                    continue;
+                }
+                let Some(initial) = variable.initial else {
+                    continue;
+                };
+                let root = match self.expr_id_to_expr_map.get(&initial) {
+                    Some(Expr::Reference(operand_id, _)) => self.place_root(*operand_id),
+                    Some(Expr::Local(source_id)) => origins.get(source_id).copied(),
+                    _ => None,
+                };
+                if let Some(root) = root {
+                    origins.insert(variable.id, root);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        origins
+    }
+
+    /// Rule 4 (no invalidating mutation under a live view): a binding may not be
+    /// reassigned while a view into it is live. The live range is lexical — a
+    /// view is live from its declaration to the end of its block. (Resize / move
+    /// / drop invalidation, and index-into-container views, are deferred.)
+    fn check_invalidation(&mut self) {
+        let view_origins = self.compute_view_origins();
+        if view_origins.is_empty() {
+            return;
+        }
+        let bodies: Vec<(Vec<Id>, Id)> = self
+            .functions
+            .values()
+            .filter(|function| function.has_body)
+            .map(|function| (function.body.0.clone(), function.body.1))
+            .collect();
+        let closure_returns: Vec<Id> = self.closures.values().map(|c| c.return_).collect();
+        let mut violations: Vec<(Id, Id)> = Vec::new();
+        for (statements, tail) in &bodies {
+            let mut live = HashSet::new();
+            self.scan_invalidation_block(
+                statements,
+                *tail,
+                &view_origins,
+                &mut live,
+                &mut violations,
+            );
+        }
+        for return_id in closure_returns {
+            let mut live = HashSet::new();
+            self.scan_invalidation_block(&[], return_id, &view_origins, &mut live, &mut violations);
+        }
+        for (reassignment_id, root_id) in violations {
+            let name = self
+                .variables
+                .get(&root_id)
+                .map(|v| v.name)
+                .unwrap_or("value");
+            self.diagnostics.push(Error {
+                span: **self.span_map.get(&reassignment_id).unwrap_or(&&EMPTY_SPAN),
+                msg: format!(
+                    "cannot reassign '{name}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
+                ),
+            });
+        }
+    }
+
+    /// Scans a block's statements in order, tracking live view bindings.
+    /// `live` carries views from enclosing blocks in; views declared here die at
+    /// the block's end.
+    fn scan_invalidation_block(
+        &self,
+        statements: &[Id],
+        tail: Id,
+        view_origins: &HashMap<Id, Id>,
+        live: &mut HashSet<Id>,
+        violations: &mut Vec<(Id, Id)>,
+    ) {
+        let outer = live.clone();
+        for statement in statements {
+            self.scan_invalidation(*statement, view_origins, live, violations);
+        }
+        self.scan_invalidation(tail, view_origins, live, violations);
+        live.retain(|view| outer.contains(view));
+    }
+
+    fn scan_invalidation(
+        &self,
+        expr_id: Id,
+        view_origins: &HashMap<Id, Id>,
+        live: &mut HashSet<Id>,
+        violations: &mut Vec<(Id, Id)>,
+    ) {
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        match expr {
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    self.scan_invalidation(initial, view_origins, live, violations);
+                }
+                if view_origins.contains_key(&variable_id) {
+                    live.insert(variable_id);
+                }
+            }
+            Expr::Assignment(target_id, value_id) => {
+                self.scan_invalidation(value_id, view_origins, live, violations);
+                // Reassigning a whole binding invalidates views into it.
+                if let Some(Expr::Local(root_id)) = self.expr_id_to_expr_map.get(&target_id) {
+                    if live
+                        .iter()
+                        .any(|view| view_origins.get(view) == Some(root_id))
+                    {
+                        violations.push((target_id, *root_id));
+                    }
+                }
+                self.scan_invalidation(target_id, view_origins, live, violations);
+            }
+            Expr::Block((statements, tail)) => {
+                self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    self.scan_invalidation(condition, view_origins, live, violations);
+                }
+                self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+            }
+            Expr::ForEach(iterable, _, (statements, tail)) => {
+                self.scan_invalidation(iterable, view_origins, live, violations);
+                self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+            }
+            Expr::If(branch) => self.scan_invalidation_if(&branch, view_origins, live, violations),
+            Expr::Match(subject_id, legs) => {
+                self.scan_invalidation(subject_id, view_origins, live, violations);
+                for leg in legs {
+                    if let Some(guard) = leg.guard {
+                        self.scan_invalidation(guard, view_origins, live, violations);
+                    }
+                    self.scan_invalidation_block(&[], leg.body, view_origins, live, violations);
+                }
+            }
+            Expr::Reference(operand, _) | Expr::Dereference(operand) | Expr::Unary(_, operand) => {
+                self.scan_invalidation(operand, view_origins, live, violations);
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.scan_invalidation(lhs, view_origins, live, violations);
+                self.scan_invalidation(rhs, view_origins, live, violations);
+            }
+            Expr::Field(subject, _, _) => {
+                self.scan_invalidation(subject, view_origins, live, violations)
+            }
+            Expr::FunctionReturn(value) | Expr::Await(value) => {
+                self.scan_invalidation(value, view_origins, live, violations)
+            }
+            Expr::Call(call_id) => {
+                if let Some(function_call) = self.function_calls.get(&call_id) {
+                    for argument in function_call.argument_ids.clone() {
+                        self.scan_invalidation(argument, view_origins, live, violations);
+                    }
+                }
+            }
+            Expr::List(ids) | Expr::Tuple(ids) => {
+                for id in ids {
+                    self.scan_invalidation(id, view_origins, live, violations);
+                }
+            }
+            Expr::StructInitializer(_, fields) => {
+                for value in fields.values() {
+                    self.scan_invalidation(*value, view_origins, live, violations);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_invalidation_if(
+        &self,
+        branch: &ExprIfBranch,
+        view_origins: &HashMap<Id, Id>,
+        live: &mut HashSet<Id>,
+        violations: &mut Vec<(Id, Id)>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.scan_invalidation(*condition, view_origins, live, violations);
+                self.scan_invalidation_block(statements, *tail, view_origins, live, violations);
+                if let Some(else_branch) = else_branch {
+                    self.scan_invalidation_if(else_branch, view_origins, live, violations);
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                self.scan_invalidation_block(statements, *tail, view_origins, live, violations);
+            }
+        }
+    }
+
     /// Rule 3 (position-default conventions): a write rooted in a readonly (bare
     /// or `&`) parameter is rejected — the author must declare it `&mut`. Runs
     /// after `build()`, once field accessors have resolved to `Expr::Field`, so
@@ -6058,6 +6275,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
     analyzer.check_view_escape();
+    analyzer.check_invalidation();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.
