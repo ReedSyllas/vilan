@@ -973,20 +973,44 @@ impl<'src> Analyzer<'src> {
         )
     }
 
-    /// Rule 3: if a place is a field/deref chain rooted in a readonly (bare or
-    /// `&`) parameter, its name — used to reject mutation through it. `None` when
-    /// the root is mutable (a `mut` local, or an `own` / `&mut` parameter) or is
-    /// not a parameter at all. Bare parameters are readonly by default (the
-    /// position-default-convention flip); `&mut` / `own` opt back into mutation.
-    fn readonly_root_parameter(&self, expr_id: Id) -> Option<&'src str> {
+    /// If a place is a field/deref chain rooted in something immutable, its name
+    /// and the fix hint (`&mut x` for a readonly parameter, `mut` for an
+    /// immutable `let` local). `None` when the root is mutable — a `mut` local,
+    /// or an `own` / `&mut` parameter. A bare parameter is readonly by default
+    /// (the position-default-convention flip).
+    fn readonly_root(&self, expr_id: Id) -> Option<(&'src str, &'static str)> {
         match self.expr_id_to_expr_map.get(&expr_id)? {
-            Expr::Field(subject_id, _, _) => self.readonly_root_parameter(*subject_id),
-            Expr::Dereference(operand_id) => self.readonly_root_parameter(*operand_id),
+            Expr::Field(subject_id, _, _) => self.readonly_root(*subject_id),
+            Expr::Dereference(operand_id) => self.readonly_root(*operand_id),
             Expr::Local(binding_id) => {
-                let parameter = self.parameters.get(binding_id)?;
-                matches!(parameter.convention, Convention::Bare | Convention::Ref)
-                    .then_some(parameter.name)
+                if let Some(parameter) = self.parameters.get(binding_id) {
+                    matches!(parameter.convention, Convention::Bare | Convention::Ref)
+                        .then_some((parameter.name, "`&mut`"))
+                } else if let Some(variable) = self.variables.get(binding_id) {
+                    // A binding holding a view is governed by the view's
+                    // mutability, not the `let`/`mut` of the binding: `let v =
+                    // &mut c` is writable, `let v = &c` is readonly.
+                    match self.view_binding_mutability(*binding_id) {
+                        Some(true) => None,
+                        Some(false) => Some((variable.name, "`&mut`")),
+                        None => (!variable.mutable).then_some((variable.name, "`mut`")),
+                    }
+                } else {
+                    None
+                }
             }
+            _ => None,
+        }
+    }
+
+    /// Whether a binding holds a view, and if so whether it is writable: `&mut`
+    /// → `Some(true)`, `&` → `Some(false)`, an owned value → `None`. Follows
+    /// copies between locals (`let w = v`).
+    fn view_binding_mutability(&self, binding_id: Id) -> Option<bool> {
+        let initial = self.variables.get(&binding_id)?.initial?;
+        match self.expr_id_to_expr_map.get(&initial)? {
+            Expr::Reference(_, mutable) => Some(*mutable),
+            Expr::Local(source_id) => self.view_binding_mutability(*source_id),
             _ => None,
         }
     }
@@ -1286,6 +1310,52 @@ impl<'src> Analyzer<'src> {
         origins
     }
 
+    /// Slice 4 (primitive-local view boxing): scalar locals that have a view
+    /// taken of them. A JS number isn't addressable, so a viewed scalar local is
+    /// boxed into a one-slot cell `[value]`; its reads/writes go through `[0]`
+    /// and `&`/`&mut` of it yields the cell. Aggregates (already JS objects) and
+    /// field/element views need no boxing.
+    fn compute_boxed_locals(&self) -> HashSet<Id> {
+        let mut boxed = HashSet::new();
+        for expr in self.expr_id_to_expr_map.values() {
+            if let Expr::Reference(operand, _) = expr {
+                if let Some(root) = self.place_root(*operand) {
+                    let is_scalar_local = self.variables.get(&root).is_some_and(|variable| {
+                        matches!(variable.type_id.get_type(self), Type::Struct(id, _) if self.is_scalar_primitive(id))
+                    });
+                    if is_scalar_local {
+                        boxed.insert(root);
+                    }
+                }
+            }
+        }
+        boxed
+    }
+
+    /// Bindings whose deref reads/writes a boxed scalar cell's slot 0: a view
+    /// binding of a boxed local, or a `&`/`&mut` parameter of scalar type (which
+    /// receives a cell from the boxed local the caller views).
+    fn compute_primitive_views(&self, boxed_locals: &HashSet<Id>) -> HashSet<Id> {
+        let mut views: HashSet<Id> = self
+            .compute_view_origins()
+            .into_iter()
+            .filter(|(_, root)| boxed_locals.contains(root))
+            .map(|(view, _)| view)
+            .collect();
+        for parameter in self.parameters.values() {
+            let is_scalar_view =
+                matches!(parameter.convention, Convention::Ref | Convention::RefMut)
+                    && matches!(
+                        parameter.type_id.get_type(self),
+                        Type::Struct(id, _) if self.is_scalar_primitive(id)
+                    );
+            if is_scalar_view {
+                views.insert(parameter.id);
+            }
+        }
+        views
+    }
+
     /// Rule 4 (no invalidating mutation under a live view): a binding may not be
     /// reassigned while a view into it is live. The live range is lexical — a
     /// view is live from its declaration to the end of its block. (Resize / move
@@ -1475,12 +1545,15 @@ impl<'src> Analyzer<'src> {
             })
             .collect();
         for target_id in assignment_targets {
-            if let Some(name) = self.readonly_root_parameter(target_id) {
+            if let Some((name, fix)) = self.readonly_root(target_id) {
+                let advice = if fix == "`&mut`" {
+                    format!("declare it `&mut {name}`")
+                } else {
+                    "declare it `mut`".to_string()
+                };
                 self.diagnostics.push(Error {
                     span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
-                    msg: format!(
-                        "cannot mutate through readonly parameter '{name}'; declare it `&mut {name}` to allow mutation."
-                    ),
+                    msg: format!("cannot mutate immutable '{name}'; {advice} to allow mutation."),
                 });
             }
         }
@@ -1529,11 +1602,16 @@ impl<'src> Analyzer<'src> {
                     .get(parameter_id)
                     .is_some_and(|parameter| parameter.convention == Convention::RefMut);
                 if writable {
-                    if let Some(name) = self.readonly_root_parameter(*argument_id) {
+                    if let Some((name, fix)) = self.readonly_root(*argument_id) {
+                        let advice = if fix == "`&mut`" {
+                            format!("declare it `&mut {name}`")
+                        } else {
+                            "declare it `mut`".to_string()
+                        };
                         self.diagnostics.push(Error {
                             span: **self.span_map.get(argument_id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
-                                "cannot mutate through readonly parameter '{name}'; declare it `&mut {name}` to allow mutation."
+                                "cannot mutate immutable '{name}'; {advice} to allow mutation."
                             ),
                         });
                     }
@@ -6155,6 +6233,11 @@ pub struct Program<'src> {
     // a deep copy because they bind/assign an aggregate place that would
     // otherwise alias its source. Filled by `compute_clone_sites`.
     pub clone_sites: HashSet<Id>,
+    // Slice 4: scalar locals boxed into a `[value]` cell because a view is taken
+    // of them; their reads/writes lower through `[0]`.
+    pub boxed_locals: HashSet<Id>,
+    // View bindings whose target is a boxed scalar local; `*v` lowers to `v[0]`.
+    pub primitive_views: HashSet<Id>,
 }
 
 /// Lexes and parses a Vilan source file into an AST, leaking the source and the
@@ -6534,6 +6617,8 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     }
 
     let clone_sites = analyzer.compute_clone_sites();
+    let boxed_locals = analyzer.compute_boxed_locals();
+    let primitive_views = analyzer.compute_primitive_views(&boxed_locals);
 
     Program {
         closures: analyzer.closures,
@@ -6571,5 +6656,7 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
         clone_sites,
+        boxed_locals,
+        primitive_views,
     }
 }

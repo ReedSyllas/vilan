@@ -13,7 +13,7 @@ fun delayed(label: str, ms: i32): str {
 }
 
 fun main() {
-	let promises: List<Promise<str>> = List::new();
+	mut promises: List<Promise<str>> = List::new();
 	promises.push(async delayed("a", 20));
 	promises.push(async delayed("b", 10));
 	promises.push(async delayed("c", 30));

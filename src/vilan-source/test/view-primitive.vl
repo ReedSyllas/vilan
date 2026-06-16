@@ -1,0 +1,21 @@
+// Slice 4: a view of a primitive (scalar) local boxes the local into a one-slot
+// cell `[value]`; the view *is* the cell, and `*v` reads/writes slot 0. Works
+// for both a local view and a `&mut i32` parameter.
+import std::print;
+
+fun scale(target: &mut i32, factor: i32) {
+	*target = *target * factor;
+}
+
+fun main() {
+	// Local view of a scalar: `a` is boxed, `c` aliases its cell.
+	mut a = 10;
+	let c = &mut a;
+	*c = 40;
+	print(a); // 40
+
+	// `&mut i32` parameter: `n` is boxed, the cell is passed to `scale`.
+	mut n = 5;
+	scale(&mut n, 4);
+	print(n); // 20
+}

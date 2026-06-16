@@ -29,7 +29,7 @@ function A/*url*/(B) {
 function S/*start*/(T) {
 	const U/*request_handler*/ = T[1];
 	const V/*on_start*/ = T[2];
-	const W/*server*/ = T;
+	const W/*server*/ = structuredClone(T);
 	const X/*port*/ = T[0];
 	const Y/*node_server*/ = createServer((Z, aa) => {
 	const ab/*response*/ = U/*request_handler*/([ Z ]);

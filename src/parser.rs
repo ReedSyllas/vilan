@@ -414,21 +414,29 @@ where
         .labelled("let binding")
         .boxed();
 
-    // An assignment target is an lvalue: a local (`x`) or a field place
-    // (`self.n`, `a.b.c`). A `.field` chain folds into `MemberAccessor`s, the
-    // same shape a field read parses to.
-    let assignment_target = identifier
-        .map_with(|name, e| (Node::Accessor(name), e.span()))
-        .foldl_with(
-            just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
-            |subject, field, e| {
-                let field = (Node::Accessor(field), e.span());
-                (
-                    Node::MemberAccessor(Box::new(subject), Box::new(field)),
-                    e.span(),
-                )
-            },
-        );
+    // An assignment target is an lvalue: a local (`x`), a field place (`self.n`,
+    // `a.b.c`), or a deref through a view (`*v`). A `.field` chain folds into
+    // `MemberAccessor`s, the same shape a field read parses to.
+    let assignment_target = just(Token::Op("*"))
+        .or_not()
+        .then(
+            identifier
+                .map_with(|name, e| (Node::Accessor(name), e.span()))
+                .foldl_with(
+                    just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
+                    |subject, field, e| {
+                        let field = (Node::Accessor(field), e.span());
+                        (
+                            Node::MemberAccessor(Box::new(subject), Box::new(field)),
+                            e.span(),
+                        )
+                    },
+                ),
+        )
+        .map_with(|(deref, place), e| match deref {
+            Some(_) => (Node::Dereference(Box::new(place)), e.span()),
+            None => place,
+        });
     let assignment = assignment_target
         .then(choice((
             just(Token::Op("=")).to(None),

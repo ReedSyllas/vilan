@@ -89,8 +89,17 @@ language on JS; 4–5 earn the safety guarantees; 6+ is opt-in surface.
     functional regression. *Known gap:* a `&mut self` call on an immutable `let`
     *local* (e.g. `let xs = List::new(); xs.push(1)`) is not yet flagged — the
     check covers readonly parameters, not let-locals.
-  - **Slice 4 — primitive-local views.** Box a viewed primitive local into a
-    `(base, key)` cell; support `*v = wholeValue`.
+  - **Slice 4 — primitive-local view boxing. — DONE.** A scalar local that has a
+    view taken of it (`compute_boxed_locals`) is boxed into a one-slot cell
+    `[value]`: its declaration wraps the value, reads/writes go through `[0]`, and
+    `&`/`&mut` of it yields the cell. A deref of a primitive view
+    (`compute_primitive_views` — view bindings of a boxed local, plus scalar
+    `&`/`&mut` parameters that receive a cell) lowers to `[0]`. The assignment
+    grammar gained a `*v` deref target. Validated by `test/view-primitive.vl`:
+    `mut a = 10; let c = &mut a; *c = 40; print(a)` → `40`, and
+    `scale(target: &mut i32)` over `scale(&mut n, 4)` → `20`; readonly-view writes
+    still error; no corpus regression. *Deferred:* viewing a scalar *parameter*
+    directly (`&mut x` where `x` is itself a param — needs entry re-boxing).
 - **Phase 4 — second-class + rule-4 enforcement. — IN PROGRESS.** Enforced on
   JS → "JS build ⇒ native-safe". Built in slices:
   - **Slice P4a — second-class view escape. — DONE.** `check_view_escape`
@@ -244,9 +253,22 @@ Per phase:
 3. Track the migration list explicitly: a P2 program is *expected* to error
    until migrated in Phase 3, then expected to pass.
 
-**Stale baselines (regenerate when convenient):** the per-phase checks so far
-only regenerated `test/*.vl`, so the committed `.js` for the *root examples* is
-stale w.r.t. Phase 1 value semantics — `http-server.js` legitimately gains a
-`structuredClone` on `let server = <struct param>` (a copy; `server` is
-read-only, so behavior is unchanged). Do a one-shot regenerate-all pass to
-refresh the root-example golden files before relying on them as baselines.
+**Stale baselines — DONE.** A one-shot regenerate-all refreshed the root-example
+golden `.js`; the only stale file was `http-server.js` (a correct
+`structuredClone` on `let server = <struct param>`; `server` is read-only, so
+behavior is unchanged).
+
+## Post-Phase-4 fixes — DONE
+
+- **let-local mutability gap** closed: `readonly_root` (was `readonly_root_parameter`)
+  now also flags an immutable `let` *local* mutated through a field/method
+  (`let xs = List::new(); xs.push(1)` → "declare it `mut`"). A `let v = &mut x`
+  binding is correctly *not* flagged — `view_binding_mutability` distinguishes a
+  binding holding a writable view from one holding an owned value. Corpus blast
+  radius was one program (`async-promise-all.vl` → `mut promises`).
+- **Primitive-local view boxing** (slice 4) — done; see above.
+
+**Still deferred** (need larger features): no-view-across-`await` (precise
+last-use liveness), resize/move/drop invalidation and index-into-container views
+(subscript syntax + a "which methods invalidate" notion), capturing an outer
+view *binding*, and viewing a scalar *parameter* directly.

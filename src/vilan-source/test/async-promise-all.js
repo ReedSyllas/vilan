@@ -4,7 +4,7 @@ async function b/*delayed*/(c, d) {
 	return c;
 }
 (async () => {
-	const a/*promises*/ = [  ];
+	let a/*promises*/ = [  ];
 	a/*promises*/.push((async () => {
 	return await (b/*delayed*/("a", 20));
 })());

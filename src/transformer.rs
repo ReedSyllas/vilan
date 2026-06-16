@@ -357,6 +357,20 @@ impl<'src> Transformer<'src> {
         }
     }
 
+    /// Whether a deref operand views a boxed scalar local — so `*operand` reads
+    /// or writes the cell's slot 0. True for a primitive-view binding, or `&` of
+    /// a boxed local directly.
+    fn derefs_boxed(&self, operand: Id) -> bool {
+        match self.program.entity_map.get(&operand) {
+            Some(Expr::Local(binding)) => self.program.primitive_views.contains(binding),
+            Some(Expr::Reference(inner, _)) => matches!(
+                self.program.entity_map.get(inner),
+                Some(Expr::Local(root)) if self.program.boxed_locals.contains(root)
+            ),
+            _ => false,
+        }
+    }
+
     fn walk_entity(&mut self, id: Id, block: &mut Vec<js::Node<'src>>) -> Option<js::Node<'src>> {
         let entity = self.program.entity_map.get(&id).unwrap();
 
@@ -415,6 +429,13 @@ impl<'src> Transformer<'src> {
                     self.program.entity_map.get(id)
                 {
                     return Some(self.variant_value(*enum_id, *variant_index, Vec::new()));
+                }
+                // A boxed scalar local reads through its cell's slot 0.
+                if self.program.boxed_locals.contains(id) {
+                    return Some(js::Node::PropertyIndex(
+                        Box::new(js::Node::Local(self.ng.name_for(*id))),
+                        Box::new(js::Node::Number("0".to_string(), None)),
+                    ));
                 }
                 js::Node::Local(self.ng.name_for(*id))
             }
@@ -639,11 +660,28 @@ impl<'src> Transformer<'src> {
                 let operand = self.walk_entity(*operand, block).unwrap_or(js::Node::Void);
                 js::Node::Unary(*operator, Box::new(operand))
             }
-            // A view of an aggregate is the value's own JS reference, and a deref
-            // reads/writes through it — both lower to the operand directly.
-            // (Primitive-local views, which need a boxed cell, come later.)
-            Expr::Reference(operand, _) | Expr::Dereference(operand) => {
+            // A view of an aggregate is the value's own JS reference; a view of a
+            // boxed scalar local is its cell. Either way `&x` lowers to the cell
+            // / reference, not a `[0]` read.
+            Expr::Reference(operand, _) => {
+                if let Some(Expr::Local(root)) = self.program.entity_map.get(operand) {
+                    if self.program.boxed_locals.contains(root) {
+                        return Some(js::Node::Local(self.ng.name_for(*root)));
+                    }
+                }
                 return self.walk_entity(*operand, block);
+            }
+            // Deref of an aggregate view is the operand itself; deref of a
+            // primitive view reads/writes through the cell's slot 0.
+            Expr::Dereference(operand) => {
+                let value = self.walk_entity(*operand, block);
+                if self.derefs_boxed(*operand) {
+                    return Some(js::Node::PropertyIndex(
+                        Box::new(value.unwrap_or(js::Node::Void)),
+                        Box::new(js::Node::Number("0".to_string(), None)),
+                    ));
+                }
+                return value;
             }
             Expr::Variable(id) => {
                 if self
@@ -664,6 +702,12 @@ impl<'src> Transformer<'src> {
                             .map(|node| self.maybe_clone(value_id, node))
                     })
                     .unwrap_or(js::Node::Void);
+                // A boxed scalar local is declared as a one-slot cell.
+                let value = if self.program.boxed_locals.contains(id) {
+                    js::Node::Array(vec![value])
+                } else {
+                    value
+                };
                 let js_variable = js::Variable {
                     name,
                     value: Box::new(value),
