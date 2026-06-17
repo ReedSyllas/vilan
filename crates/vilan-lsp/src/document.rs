@@ -10,6 +10,15 @@ use vilan_core::{Error, Program, Span, analyze_source};
 
 use crate::line_index::LineIndex;
 
+/// A content hash of a document's text, used to skip re-analysis when an edit
+/// leaves the buffer byte-for-byte unchanged (undo/redo, a cursor-only change).
+pub fn hash_text(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// What a use site ultimately refers to — the key for find-references / rename.
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
@@ -47,6 +56,9 @@ pub struct Document {
     pub line_index: LineIndex,
     pub program: Option<Program<'static>>,
     pub diagnostics: Vec<Error>,
+    /// A hash of the source text this document was analyzed from, so an edit that
+    /// leaves the buffer unchanged can skip re-analysis.
+    pub text_hash: u64,
     /// `(start, end, id)` for every entry-file entity with a real span, used to
     /// find the innermost entity under a cursor.
     entity_spans: Vec<(usize, usize, Id)>,
@@ -60,6 +72,7 @@ fn span_of(program: &Program, id: Id) -> Option<Span> {
 impl Document {
     pub fn analyze(text: &str, std_root: &Path, entry_path: &Path) -> Self {
         let line_index = LineIndex::new(text);
+        let text_hash = hash_text(text);
         // The program borrows its source for `'static`, so leak a copy (the
         // editor re-analyzes on change; see the known leak tradeoff).
         let leaked: &'static str = Box::leak(text.to_string().into_boxed_str());
@@ -82,6 +95,7 @@ impl Document {
             line_index,
             program,
             diagnostics,
+            text_hash,
             entity_spans,
         }
     }

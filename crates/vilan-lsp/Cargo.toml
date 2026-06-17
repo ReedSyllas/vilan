@@ -10,5 +10,5 @@ path = "src/main.rs"
 [dependencies]
 vilan-core = { path = "../vilan-core" }
 tower-lsp = "0.20"
-tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "time"] }
 dashmap = "6"

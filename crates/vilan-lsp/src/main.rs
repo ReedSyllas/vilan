@@ -7,6 +7,8 @@ mod line_index;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
@@ -14,8 +16,12 @@ use tower_lsp::{Client, LanguageServer, LspService, Server, jsonrpc::Result};
 use vilan_core::Span;
 use vilan_core::analyzer::SourceId;
 
-use crate::document::{Document, Symbol, SymbolKind as VilanSymbolKind};
+use crate::document::{Document, Symbol, SymbolKind as VilanSymbolKind, hash_text};
 use crate::line_index::LineIndex;
+
+/// How long to wait after the last edit before re-analyzing, so a burst of
+/// keystrokes collapses to a single analysis instead of one per character.
+const DEBOUNCE_MS: u64 = 150;
 
 /// Convert a Vilan outline node to an LSP `DocumentSymbol`.
 #[allow(deprecated)]
@@ -50,7 +56,13 @@ fn to_lsp_symbol(symbol: Symbol, line_index: &LineIndex) -> DocumentSymbol {
 
 struct Backend {
     client: Client,
-    documents: DashMap<Url, Document>,
+    documents: Arc<DashMap<Url, Document>>,
+    /// The latest edit generation per document, so a debounced analysis can tell
+    /// whether a newer edit (or a close) has superseded it before it runs.
+    pending: Arc<DashMap<Url, u64>>,
+    /// `std` files don't change during a session, so cache their line indices
+    /// rather than re-reading the file on every cross-file definition/reference.
+    line_indices: Arc<DashMap<PathBuf, Arc<LineIndex>>>,
 }
 
 /// Locate the `std` package's source root: `$VILAN_STD`, else the nearest
@@ -70,32 +82,85 @@ fn discover_std_root(start: &Path) -> PathBuf {
     PathBuf::from("vilan/std/src")
 }
 
+/// Analyze `text` as the document at `uri`, store the result, and publish its
+/// diagnostics. The analysis is CPU-bound, so it runs on a blocking thread to
+/// keep the async runtime responsive.
+async fn analyze_and_publish(
+    documents: &DashMap<Url, Document>,
+    client: &Client,
+    uri: Url,
+    text: String,
+) {
+    let path = uri.to_file_path().unwrap_or_default();
+    let std_root = discover_std_root(&path);
+    let document =
+        match tokio::task::spawn_blocking(move || Document::analyze(&text, &std_root, &path)).await
+        {
+            Ok(document) => document,
+            Err(_) => return,
+        };
+    let diagnostics = build_diagnostics(&document);
+    documents.insert(uri.clone(), document);
+    client.publish_diagnostics(uri, diagnostics, None).await;
+}
+
+/// Render a document's analyzer diagnostics as LSP diagnostics.
+fn build_diagnostics(document: &Document) -> Vec<Diagnostic> {
+    document
+        .diagnostics
+        .iter()
+        .map(|error| Diagnostic {
+            range: document.line_index.range(&error.span),
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("vilan".to_string()),
+            message: error.msg.clone(),
+            ..Default::default()
+        })
+        .collect()
+}
+
 impl Backend {
-    async fn on_change(&self, uri: Url, text: String) {
-        let path = uri.to_file_path().unwrap_or_default();
-        let std_root = discover_std_root(&path);
-        let document = Document::analyze(&text, &std_root, &path);
+    /// Schedule a debounced re-analysis. A burst of edits collapses to a single
+    /// analysis once typing pauses, and an edit that leaves the buffer unchanged
+    /// is skipped entirely.
+    fn on_change(&self, uri: Url, text: String) {
+        let generation = {
+            let mut entry = self.pending.entry(uri.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let documents = Arc::clone(&self.documents);
+        let pending = Arc::clone(&self.pending);
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+            // A newer edit (or a close) superseded this one.
+            if pending.get(&uri).map(|current| *current) != Some(generation) {
+                return;
+            }
+            // The buffer is byte-for-byte what we last analyzed — nothing to do.
+            if documents.get(&uri).map(|document| document.text_hash) == Some(hash_text(&text)) {
+                return;
+            }
+            analyze_and_publish(&documents, &client, uri, text).await;
+        });
+    }
 
-        let diagnostics = document
-            .diagnostics
-            .iter()
-            .map(|error| Diagnostic {
-                range: document.line_index.range(&error.span),
-                severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("vilan".to_string()),
-                message: error.msg.clone(),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
-
-        self.documents.insert(uri.clone(), document);
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+    /// The line index for a `std` file, cached by path so a cross-file query
+    /// doesn't re-read and re-index the file on every lookup.
+    fn line_index_for(&self, path: &Path) -> Option<Arc<LineIndex>> {
+        if let Some(cached) = self.line_indices.get(path) {
+            return Some(Arc::clone(cached.value()));
+        }
+        let text = std::fs::read_to_string(path).ok()?;
+        let line_index = Arc::new(LineIndex::new(&text));
+        self.line_indices
+            .insert(path.to_path_buf(), Arc::clone(&line_index));
+        Some(line_index)
     }
 
     /// Convert a `(source, span)` from analysis into an LSP `Location`. The entry
-    /// file uses the open document's line index; a `std` file is read from disk.
+    /// file uses the open document's line index; a `std` file uses its cached one.
     fn location_for(
         &self,
         document: &Document,
@@ -111,8 +176,7 @@ impl Backend {
         }
         let program = document.program.as_ref()?;
         let path = program.source_path(source)?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let line_index = LineIndex::new(&text);
+        let line_index = self.line_index_for(path)?;
         let uri = Url::from_file_path(path).ok()?;
         Some(Location {
             uri,
@@ -154,18 +218,31 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.on_change(params.text_document.uri, params.text_document.text)
+        // Analyze inline and insert the document before the first `.await`, so a
+        // query that arrives right after open — before diagnostics are published
+        // — still finds it. (The debounced change path runs off the async thread,
+        // but there a previous analysis is always already in place.)
+        let uri = params.text_document.uri;
+        let path = uri.to_file_path().unwrap_or_default();
+        let std_root = discover_std_root(&path);
+        let document = Document::analyze(&params.text_document.text, &std_root, &path);
+        let diagnostics = build_diagnostics(&document);
+        self.documents.insert(uri.clone(), document);
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
             .await;
     }
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.pop() {
-            self.on_change(params.text_document.uri, change.text).await;
+            self.on_change(params.text_document.uri, change.text);
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.remove(&params.text_document.uri);
+        // Drop the edit generation so any in-flight debounced analysis bails.
+        self.pending.remove(&params.text_document.uri);
         self.client
             .publish_diagnostics(params.text_document.uri, Vec::new(), None)
             .await;
@@ -267,7 +344,9 @@ async fn main() {
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(|client| Backend {
         client,
-        documents: DashMap::new(),
+        documents: Arc::new(DashMap::new()),
+        pending: Arc::new(DashMap::new()),
+        line_indices: Arc::new(DashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
