@@ -428,6 +428,14 @@ pub struct Analyzer<'src> {
     // The span of the member identifier in a field access or method call (`.x`),
     // keyed by the access expr id — the precise use-site span for rename/nav.
     member_name_spans: HashMap<Id, Span>,
+    // The file currently being walked, so type references (which aren't entities)
+    // can be tagged with their source for the language server.
+    current_source_id: SourceId,
+    // Each named type reference in a type position (`Option`, `i32`, a trait
+    // bound, ...): its file, name span, the definition it resolves to (when one
+    // exists), and its type id (rendered to a hover label after `build`, once
+    // all referenced types are resolved). Drives go-to-definition / hover.
+    type_references: Vec<(SourceId, Span, Option<Id>, TypeId)>,
     external_functions: IndexMap<Id, ExternalFunction<'src>>,
     field_accessor_constraints: IndexMap<Id, FieldAccessorConstraint<'src>>,
     function_calls: IndexMap<Id, FunctionCall>,
@@ -517,7 +525,7 @@ pub struct Analyzer<'src> {
     // walked generic argument type ids). The arguments parameterize the resolved
     // nominal type (`Option<i32>` -> `Enum(option_id, [i32])`); empty for a bare
     // name or a generic parameter.
-    prepped_type_locals: Vec<(TypeId, &'src str, Id, Span, Vec<TypeId>)>,
+    prepped_type_locals: Vec<(TypeId, &'src str, Id, Span, Vec<TypeId>, SourceId)>,
     prepped_uses: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Span)>,
     reference_count: HashMap<Id, u32>,
@@ -606,6 +614,8 @@ impl<'src> Analyzer<'src> {
             expr_id_to_scope_id_map: HashMap::new(),
             expr_id_to_type_id_map: HashMap::new(),
             member_name_spans: HashMap::new(),
+            current_source_id: SourceId(0),
+            type_references: Vec::new(),
             external_functions: IndexMap::new(),
             field_accessor_constraints: IndexMap::new(),
             function_calls: IndexMap::new(),
@@ -2464,6 +2474,9 @@ impl<'src> Analyzer<'src> {
                         self.parameters.insert(parameter_id, parameter);
                         self.expr_id_to_expr_map
                             .insert(parameter_id, Expr::Parameter(parameter_id));
+                        // The name span makes the parameter go-to-definable and
+                        // hoverable, and a referenceable cursor target.
+                        self.span_map.insert(parameter_id, &x.3);
                         parameter_id
                     })
                     .collect::<Vec<_>>();
@@ -2957,6 +2970,9 @@ impl<'src> Analyzer<'src> {
                         self.parameters.insert(parameter_id, parameter);
                         self.expr_id_to_expr_map
                             .insert(parameter_id, Expr::Parameter(parameter_id));
+                        // The name span makes the parameter go-to-definable and
+                        // hoverable, and a referenceable cursor target.
+                        self.span_map.insert(parameter_id, &x.3);
                         parameter_id
                     })
                     .collect::<Vec<_>>();
@@ -3305,8 +3321,14 @@ impl<'src> Analyzer<'src> {
                 "any" => Some(Type::Any),
                 "void" => Some(Type::Void),
                 _ => {
-                    self.prepped_type_locals
-                        .push((type_id, name, scope_id, node.1, Vec::new()));
+                    self.prepped_type_locals.push((
+                        type_id,
+                        name,
+                        scope_id,
+                        node.1,
+                        Vec::new(),
+                        self.current_source_id,
+                    ));
                     None
                 }
             },
@@ -3319,15 +3341,27 @@ impl<'src> Analyzer<'src> {
                     .iter()
                     .map(|argument| self.walk_type_node(argument, scope_id))
                     .collect();
-                self.prepped_type_locals
-                    .push((type_id, name, scope_id, node.1, argument_type_ids));
+                self.prepped_type_locals.push((
+                    type_id,
+                    name,
+                    scope_id,
+                    node.1,
+                    argument_type_ids,
+                    self.current_source_id,
+                ));
                 None
             }
             // A `type X` binder resolves to the generic it was registered as (by
             // `register_subject_binders` before the subject is walked).
             Node::TypeBinder(name, _bounds) => {
-                self.prepped_type_locals
-                    .push((type_id, name, scope_id, node.1, Vec::new()));
+                self.prepped_type_locals.push((
+                    type_id,
+                    name,
+                    scope_id,
+                    node.1,
+                    Vec::new(),
+                    self.current_source_id,
+                ));
                 None
             }
             Node::StaticAccessor(subject, member_name) => {
@@ -4570,7 +4604,9 @@ impl<'src> Analyzer<'src> {
             }
         }
 
-        for (type_id, name, scope_id, span, argument_type_ids) in self.prepped_type_locals.clone() {
+        for (type_id, name, scope_id, span, argument_type_ids, source_id) in
+            self.prepped_type_locals.clone()
+        {
             // Prefer a type binding (so a value sharing the name doesn't shadow
             // it in type position), falling back to any binding for diagnostics.
             let resolved = self
@@ -4587,6 +4623,17 @@ impl<'src> Analyzer<'src> {
                         (Type::Struct(id, _), false) => Type::Struct(id, argument_type_ids),
                         (other, _) => other,
                     };
+                    // Record the reference for the language server: the type name
+                    // span, the definition it points at, and a hover label.
+                    let definition_id = match &subject_type {
+                        Type::Struct(id, _) | Type::Enum(id, _) | Type::Trait(id) => Some(*id),
+                        _ => None,
+                    };
+                    // Store the type id; its label is rendered after `build`,
+                    // when all referenced types are resolved. Rendering here could
+                    // hit a not-yet-resolved type id and panic.
+                    self.type_references
+                        .push((source_id, span, definition_id, type_id));
                     self.type_id_to_type_map.insert(type_id, subject_type);
                 }
                 None => {
@@ -6459,6 +6506,10 @@ pub struct Program<'src> {
     // Maps a struct initializer expr id to the struct definition it constructs,
     // so go-to-definition on `Point { .. }` reaches the `struct` declaration.
     pub struct_initializer_to_def: HashMap<Id, Id>,
+    // Named type references in type position: `(file, name span, definition id,
+    // label)`. Type names aren't entities, so this drives go-to-definition and
+    // hover on them (e.g. `Option`, `i32`, a trait bound).
+    pub type_references: Vec<(SourceId, Span, Option<Id>, String)>,
     // A human-readable type label for every typed expression (e.g. `struct
     // Point`, `type i32`, `enum Option<i32>`), pre-rendered during analysis for
     // language-server hover. Keyed by expr id; `expr_id_to_type_id_map` wins
@@ -6646,22 +6697,47 @@ pub fn analyze<'src>(
     // so its imports also seed the reachable set. Names that aren't modules
     // (e.g. the `print` in `std::print`) simply find no file and are skipped.
     to_load.extend(collect_module_refs(&nodes.0, "std"));
+    // When the entry file *is* a std module (e.g. opened directly in an editor),
+    // it references its siblings via the internal `pkg::` root; seed those too so
+    // its imports resolve. A normal program uses no `pkg::` paths, so this is a
+    // no-op for it.
+    to_load.extend(collect_module_refs(&nodes.0, "pkg"));
     // `bool`, `List`, and `null` are core primitives, so their (dependency-free)
     // modules are always loaded even when not imported.
     to_load.push("boolean");
     to_load.push("list");
     to_load.push("null");
     to_load.push("promise");
+    // Set when the entry file is itself a std module (a std file opened directly
+    // in an editor): it is then analyzed *as* that module from the editor's
+    // buffer rather than loaded a second time from disk, which would create
+    // duplicate, non-unifiable types. The separate entry walk is skipped below.
+    let mut entry_is_module = false;
     while let Some(name) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
         }
         let module_path = std_module_path(std_root, &format!("{name}.vl"));
-        let Some(ast) = load_package_module(&module_path) else {
-            continue;
+        let is_entry_module = match (
+            std::fs::canonicalize(&module_path),
+            std::fs::canonicalize(entry_path),
+        ) {
+            (Ok(module_canonical), Ok(entry_canonical)) => module_canonical == entry_canonical,
+            _ => false,
         };
-        sources.push(PathBuf::from(&module_path));
-        let module_source_id = SourceId((sources.len() - 1) as u32);
+        // Use the entry's (buffer) AST for its own module; load the rest from
+        // disk. The entry module keeps SourceId 0 so editor features resolve to
+        // the open document.
+        let (ast, module_source_id): (&Spanned<NodeList>, SourceId) = if is_entry_module {
+            entry_is_module = true;
+            (nodes, SourceId(0))
+        } else {
+            let Some(loaded_ast) = load_package_module(&module_path) else {
+                continue;
+            };
+            sources.push(PathBuf::from(&module_path));
+            (loaded_ast, SourceId((sources.len() - 1) as u32))
+        };
         let module_scope = analyzer.create_scope(Some(global_scope_id));
         let module_scope_id = analyzer.push_scope(module_scope);
         let module_id = analyzer.new_entity_id();
@@ -6692,6 +6768,7 @@ pub fn analyze<'src>(
         loaded.push((name, ast, module_scope_id, module_source_id));
     }
     for (_name, ast, module_scope_id, source_id) in &loaded {
+        analyzer.current_source_id = *source_id;
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
         source_ranges.push(SourceRange {
@@ -6701,6 +6778,7 @@ pub fn analyze<'src>(
         });
     }
     if let Some(lib_ast) = lib_ast {
+        analyzer.current_source_id = lib_source_id;
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, std_scope_id);
         source_ranges.push(SourceRange {
@@ -6800,13 +6878,19 @@ pub fn analyze<'src>(
             .insert("Promise", promise_struct_id);
     }
 
-    let entry_walk_start = analyzer.entity_id;
-    analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
-    source_ranges.push(SourceRange {
-        start: entry_walk_start,
-        end: analyzer.entity_id,
-        source: SourceId(0),
-    });
+    // A normal entry is walked here in the global scope. When the entry is a std
+    // module it was already walked (as its module) in the loop above, so skip
+    // this to avoid analyzing it twice.
+    if !entry_is_module {
+        analyzer.current_source_id = SourceId(0);
+        let entry_walk_start = analyzer.entity_id;
+        analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
+        source_ranges.push(SourceRange {
+            start: entry_walk_start,
+            end: analyzer.entity_id,
+            source: SourceId(0),
+        });
+    }
     analyzer.build();
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
@@ -6942,6 +7026,43 @@ pub fn analyze<'src>(
             analyzer.pretty_print_type(&type_, &empty_substitution),
         );
     }
+    // Label declarations themselves, so hover works on a function/type at its
+    // definition (and on a bare reference to one).
+    for function_id in analyzer
+        .functions
+        .keys()
+        .chain(analyzer.external_functions.keys())
+        .copied()
+        .collect::<Vec<_>>()
+    {
+        let label = analyzer.pretty_print_type(&Type::Function(function_id), &empty_substitution);
+        expr_types.insert(function_id, label);
+    }
+    for struct_id in analyzer.structs.keys().copied().collect::<Vec<_>>() {
+        let label =
+            analyzer.pretty_print_type(&Type::Struct(struct_id, Vec::new()), &empty_substitution);
+        expr_types.insert(struct_id, label);
+    }
+    for enum_id in analyzer.enums.keys().copied().collect::<Vec<_>>() {
+        let label =
+            analyzer.pretty_print_type(&Type::Enum(enum_id, Vec::new()), &empty_substitution);
+        expr_types.insert(enum_id, label);
+    }
+    for trait_id in analyzer.traits.keys().copied().collect::<Vec<_>>() {
+        let label = analyzer.pretty_print_type(&Type::Trait(trait_id), &empty_substitution);
+        expr_types.insert(trait_id, label);
+    }
+
+    // Render each type reference's hover label now that all types are resolved.
+    let type_references = analyzer
+        .type_references
+        .iter()
+        .map(|(source, span, definition, type_id)| {
+            let type_ = type_id.get_type(&analyzer);
+            let label = analyzer.pretty_print_type(&type_, &empty_substitution);
+            (*source, *span, *definition, label)
+        })
+        .collect::<Vec<_>>();
 
     Program {
         closures: analyzer.closures,
@@ -6981,6 +7102,7 @@ pub fn analyze<'src>(
         source_ranges,
         member_name_spans: analyzer.member_name_spans,
         struct_initializer_to_def: analyzer.struct_initializer_to_def,
+        type_references,
         expr_types,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),

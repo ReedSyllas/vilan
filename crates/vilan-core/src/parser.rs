@@ -254,6 +254,7 @@ where
 
     let closure = identifier
         .labelled("parameter name")
+        .map_with(|name, e| (name, e.span()))
         .then(
             just(Token::Op(":"))
                 .ignore_then(type_.clone().map(|x| Box::new(x)))
@@ -261,7 +262,9 @@ where
                 .or_not(),
         )
         // Closure parameters carry no view convention yet.
-        .map(|(name, parameter_type)| (name, parameter_type, Convention::Bare))
+        .map(|((name, name_span), parameter_type)| {
+            (name, parameter_type, Convention::Bare, name_span)
+        })
         .labelled("parameter")
         .separated_by(just(Token::Ctrl(',')))
         .allow_trailing()
@@ -671,14 +674,18 @@ where
                     }),
             ))
             .or_not()
-            .then(identifier.labelled("parameter name"))
+            .then(
+                identifier
+                    .labelled("parameter name")
+                    .map_with(|name, e| (name, e.span())),
+            )
             .then(
                 just(Token::Op(":"))
                     .ignore_then(type_.clone().map(|x| Box::new(x)))
                     .labelled("parameter type")
                     .or_not(),
             )
-            .map(|((prefix, name), parameter_type)| {
+            .map(|((prefix, (name, name_span)), parameter_type)| {
                 // A prefix wins; otherwise a `&T` / `&mut T` type gives the
                 // convention; otherwise bare.
                 let convention = prefix.unwrap_or_else(|| {
@@ -688,7 +695,7 @@ where
                         _ => Convention::Bare,
                     }
                 });
-                (name, parameter_type, convention)
+                (name, parameter_type, convention, name_span)
             })
             .labelled("parameter")
             .separated_by(just(Token::Ctrl(',')))

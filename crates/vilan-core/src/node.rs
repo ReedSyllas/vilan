@@ -1,4 +1,4 @@
-use crate::span::Spanned;
+use crate::span::{Span, Spanned};
 
 pub type GenericParameters<'src> = Spanned<Vec<GenericParameter<'src>>>;
 
@@ -66,7 +66,14 @@ pub struct Func<'src> {
 
 /// A parsed parameter: its name, optional declared type, and how it receives its
 /// argument (rule 3 conventions).
-pub type Parameter<'src> = (&'src str, Option<Box<Spanned<Node<'src>>>>, Convention);
+/// A parsed parameter: name, optional declared type, view convention, and the
+/// span of the name (for go-to-definition / hover in the language server).
+pub type Parameter<'src> = (
+    &'src str,
+    Option<Box<Spanned<Node<'src>>>>,
+    Convention,
+    Span,
+);
 
 /// How a parameter receives its argument (rule 3). `Bare` is the default (a
 /// readonly view, once the default flip lands); `Ref` / `RefMut` are `&` / `&mut`

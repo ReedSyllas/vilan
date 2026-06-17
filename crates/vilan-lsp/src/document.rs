@@ -96,6 +96,10 @@ impl Document {
     /// The hover label (a rendered type) for the entity under `offset`.
     pub fn hover(&self, offset: usize) -> Option<String> {
         let program = self.program.as_ref()?;
+        // A type name in type position renders its type directly.
+        if let Some((_, label)) = self.type_reference_at(program, offset) {
+            return Some(label);
+        }
         let id = self.entity_at(offset)?;
         if let Some(label) = program.expr_types.get(&id) {
             return Some(label.clone());
@@ -105,6 +109,10 @@ impl Document {
             Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => {
                 program.expr_types.get(binding).cloned()
             }
+            Expr::EnumVariant(enum_id, _) => program
+                .enums
+                .get(enum_id)
+                .map(|e| format!("enum {}", e.name)),
             _ => None,
         }
     }
@@ -112,8 +120,37 @@ impl Document {
     /// The definition location `(file, span)` for the entity under `offset`.
     pub fn definition(&self, offset: usize) -> Option<(SourceId, Span)> {
         let program = self.program.as_ref()?;
+        // A type name in type position resolves straight to its definition (type
+        // references aren't entities). Being inside one but with no navigable
+        // target (a generic) yields nothing rather than falling through.
+        if let Some((definition, _)) = self.type_reference_at(program, offset) {
+            let definition = definition?;
+            return Some((
+                program.source_of(definition)?,
+                span_of(program, definition)?,
+            ));
+        }
         let id = self.entity_at(offset)?;
         self.definition_of(program, id)
+    }
+
+    /// The innermost type reference under `offset` in the open file, as
+    /// `(definition id, label)`.
+    fn type_reference_at(&self, program: &Program, offset: usize) -> Option<(Option<Id>, String)> {
+        program
+            .type_references
+            .iter()
+            .filter(|(source, span, _, _)| {
+                *source == SourceId(0) && {
+                    let range = span.into_range();
+                    range.start <= offset && offset < range.end
+                }
+            })
+            .min_by_key(|(_, span, _, _)| {
+                let range = span.into_range();
+                range.end - range.start
+            })
+            .map(|(_, _, definition, label)| (*definition, label.clone()))
     }
 
     fn definition_of(&self, program: &Program, id: Id) -> Option<(SourceId, Span)> {
@@ -132,6 +169,9 @@ impl Document {
             Expr::Field(_, struct_id, index) => {
                 let field = program.structs.get(struct_id)?.fields.get(*index)?;
                 Some((program.source_of(*struct_id)?, field.name_span))
+            }
+            Expr::EnumVariant(enum_id, _) => {
+                Some((program.source_of(*enum_id)?, span_of(program, *enum_id)?))
             }
             Expr::Call(call_id) => {
                 let subject = program.function_calls.get(call_id)?.subject_id;
