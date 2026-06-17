@@ -490,7 +490,7 @@ pub struct Analyzer<'src> {
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
-    prepped_imports: Vec<(Vec<&'src str>, &'src str, Id, Span, Span, SourceId)>,
+    prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
     prepped_is: Vec<PreppedIs<'src>>,
     prepped_matches: Vec<PreppedMatch<'src>>,
@@ -533,7 +533,7 @@ pub struct Analyzer<'src> {
     // nominal type (`Option<i32>` -> `Enum(option_id, [i32])`); empty for a bare
     // name or a generic parameter.
     prepped_type_locals: Vec<(TypeId, &'src str, Id, Span, Vec<TypeId>, SourceId)>,
-    prepped_uses: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
+    prepped_uses: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_type_static_accessors: Vec<(TypeId, TypeId, &'src str, Span)>,
     reference_count: HashMap<Id, u32>,
     resolved_types: HashMap<Id, TypeId>,
@@ -588,15 +588,15 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
 
 fn flatten_namespace_branch<'src>(
     branch: &ImportBranch<'src>,
-    path: Vec<&'src str>,
-    entries: &mut Vec<(Vec<&'src str>, &'src str, Span)>,
+    path: Vec<(&'src str, Span)>,
+    entries: &mut Vec<(Vec<(&'src str, Span)>, &'src str, Span)>,
 ) {
     match branch {
         ImportBranch::Path(name, span, child_branch) => match child_branch {
             None => entries.push((path, name, *span)),
             Some(child) => {
                 let mut path = path;
-                path.push(name);
+                path.push((name, *span));
                 flatten_namespace_branch(child, path, entries);
             }
         },
@@ -1995,7 +1995,7 @@ impl<'src> Analyzer<'src> {
     /// returns the constraint type ids in declaration order.
     fn register_generic_parameters(
         &mut self,
-        generic_parameters: &Option<GenericParameters<'src>>,
+        generic_parameters: &'src Option<GenericParameters<'src>>,
         scope_id: Id,
     ) -> Vec<TypeId> {
         let mut generic_parameter_constraint_ids = Vec::new();
@@ -2010,8 +2010,12 @@ impl<'src> Analyzer<'src> {
                     generic_parameter_constraint_ids.push(default_type_id);
                     continue;
                 }
-                let constraint_type_id =
-                    self.register_binder(parameter.name, &parameter.bounds, scope_id);
+                let constraint_type_id = self.register_binder(
+                    parameter.name,
+                    &parameter.name_span,
+                    &parameter.bounds,
+                    scope_id,
+                );
                 generic_parameter_constraint_ids.push(constraint_type_id);
             }
         }
@@ -2025,6 +2029,7 @@ impl<'src> Analyzer<'src> {
     fn register_binder(
         &mut self,
         name: &'src str,
+        name_span: &'src Span,
         bounds: &[Spanned<Node<'src>>],
         scope_id: Id,
     ) -> TypeId {
@@ -2036,7 +2041,7 @@ impl<'src> Analyzer<'src> {
             .first()
             .copied()
             .unwrap_or_else(|| Type::Any.get_type_id(self));
-        self.register_generic_parameter(name, constraint_type_id, scope_id);
+        self.register_generic_parameter(name, name_span, constraint_type_id, scope_id);
         // Bounds resolve in `build()`, so they're stored unresolved; only needed
         // when there is more than one (a single bound is recoverable from the
         // constraint id itself).
@@ -2054,7 +2059,7 @@ impl<'src> Analyzer<'src> {
     fn register_subject_binders(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) {
         match &node.0 {
             Node::TypeBinder(name, bounds) => {
-                self.register_binder(name, bounds, scope_id);
+                self.register_binder(name, &node.1, bounds, scope_id);
             }
             Node::AccessorWithGenerics(_, generic_arguments) => {
                 for argument in &generic_arguments.0 {
@@ -2143,6 +2148,7 @@ impl<'src> Analyzer<'src> {
     fn register_generic_parameter(
         &mut self,
         name: &'src str,
+        name_span: &'src Span,
         constraint_type_id: TypeId,
         scope_id: Id,
     ) {
@@ -2154,6 +2160,8 @@ impl<'src> Analyzer<'src> {
             .insert(expr_id, Expr::Generic(constraint_type_id));
         self.expr_id_to_scope_id_map.insert(expr_id, scope_id);
         self.expr_id_to_type_id_map.insert(expr_id, type_id);
+        // The binder's name span makes a use of the parameter go-to-definable.
+        self.span_map.insert(expr_id, name_span);
         let scope = self.mut_scope_for_scope_id(scope_id);
         scope.name_to_id_map.insert(name, expr_id);
     }
@@ -2305,8 +2313,15 @@ impl<'src> Analyzer<'src> {
             Node::Use(root_branch) => {
                 let mut entries = Vec::new();
                 flatten_namespace_branch(root_branch, Vec::new(), &mut entries);
-                for (path, name, _leaf_span) in entries {
-                    self.prepped_uses.push((path, name, scope_id, node.1));
+                for (path, name, leaf_span) in entries {
+                    self.prepped_uses.push((
+                        path,
+                        name,
+                        scope_id,
+                        node.1,
+                        leaf_span,
+                        self.current_source_id,
+                    ));
                 }
                 None
             }
@@ -4414,9 +4429,26 @@ impl<'src> Analyzer<'src> {
     /// chain of relay modules), so a single failure is not final — the caller
     /// retries to a fixpoint. `report` emits the diagnostic for a genuine
     /// failure; during the fixpoint passes it is `false` (a miss just defers).
+    /// Record a name→definition reference for the language server (drives
+    /// go-to-definition and hover): `span` is where the name appears, `target_id`
+    /// the entity it refers to. A label is rendered from the entity's kind.
+    fn record_reference(&mut self, source_id: SourceId, span: Span, target_id: Id) {
+        let label_type = match self.expr_id_to_expr_map.get(&target_id) {
+            Some(Expr::Enum(id)) | Some(Expr::EnumVariant(id, _)) => Type::Enum(*id, Vec::new()),
+            Some(Expr::Struct(id)) => Type::Struct(*id, Vec::new()),
+            Some(Expr::Trait(id)) => Type::Trait(*id),
+            Some(Expr::Module(id)) => Type::Module(*id),
+            Some(Expr::Function(id)) | Some(Expr::ExternalFunction(id)) => Type::Function(*id),
+            _ => Type::Unknown,
+        };
+        let label_type_id = label_type.get_type_id(self);
+        self.type_references
+            .push((source_id, span, Some(target_id), label_type_id));
+    }
+
     fn resolve_import(
         &mut self,
-        path: &[&'src str],
+        path: &[(&'src str, Span)],
         name: &'src str,
         scope_id: Id,
         span: Span,
@@ -4424,12 +4456,12 @@ impl<'src> Analyzer<'src> {
         leaf_span: Span,
         source_id: SourceId,
     ) -> bool {
-        // A `self` leaf re-binds the namespace it sits in under its own name
-        // (e.g. `Option::{ self }` binds `Option`); otherwise the leaf is the
-        // final path segment and binds under its own name.
-        let (segments, bind_name): (Vec<&str>, &str) = if name == "self" {
-            match path.last().copied() {
-                Some(last) => (path.to_vec(), last),
+        // The segments to walk, each with its source span. A `self` leaf re-binds
+        // the namespace it sits in (e.g. `Option::{ self }` binds `Option`);
+        // otherwise the leaf is the final segment and binds under its own name.
+        let (segments, bind_name): (Vec<(&str, Span)>, &str) = if name == "self" {
+            match path.last() {
+                Some((last, _)) => (path.to_vec(), *last),
                 None => {
                     if report {
                         self.diagnostics.push(Error {
@@ -4442,11 +4474,11 @@ impl<'src> Analyzer<'src> {
             }
         } else {
             let mut segments = path.to_vec();
-            segments.push(name);
+            segments.push((name, leaf_span));
             (segments, name)
         };
         let mut segments = segments.into_iter();
-        let root = segments.next().unwrap();
+        let (root, root_span) = segments.next().unwrap();
         let module_id = match self.module_id_by_name.get(root) {
             Some(module_id) => *module_id,
             None => {
@@ -4459,12 +4491,14 @@ impl<'src> Analyzer<'src> {
                 return false;
             }
         };
+        self.record_reference(source_id, root_span, module_id);
         let mut target_id = module_id;
         let mut namespace_scope_id = self.modules.get(&module_id).unwrap().body.1;
-        for part in segments {
+        for (part, part_span) in segments {
             match self.try_get_expr_id_by_name(part, namespace_scope_id) {
                 Some(id) => {
                     target_id = id;
+                    self.record_reference(source_id, part_span, id);
                     // If this segment is itself a namespace — a module or an
                     // enum (whose namespace holds its variants) — descend into
                     // it so the next segment resolves there, e.g. `pkg::io::print`
@@ -4493,20 +4527,12 @@ impl<'src> Analyzer<'src> {
                 }
             }
         }
+        // A `self` leaf's own span points at the namespace it re-binds.
+        if name == "self" {
+            self.record_reference(source_id, leaf_span, target_id);
+        }
         let scope = self.mut_scope_for_scope_id(scope_id);
         scope.name_to_id_map.insert(bind_name, target_id);
-        // Record the imported leaf for go-to-definition / hover on the import.
-        let label_type = match self.expr_id_to_expr_map.get(&target_id) {
-            Some(Expr::Enum(id)) | Some(Expr::EnumVariant(id, _)) => Type::Enum(*id, Vec::new()),
-            Some(Expr::Struct(id)) => Type::Struct(*id, Vec::new()),
-            Some(Expr::Trait(id)) => Type::Trait(*id),
-            Some(Expr::Module(id)) => Type::Module(*id),
-            Some(Expr::Function(id)) | Some(Expr::ExternalFunction(id)) => Type::Function(*id),
-            _ => Type::Unknown,
-        };
-        let label_type_id = label_type.get_type_id(self);
-        self.type_references
-            .push((source_id, leaf_span, Some(target_id), label_type_id));
         true
     }
 
@@ -4533,9 +4559,14 @@ impl<'src> Analyzer<'src> {
         // `use Namespace::{ a, b }` binds items out of a namespace — a module
         // or an enum (whose namespace holds its variants) — into the scope the
         // statement appears in.
-        for (path, name, scope_id, span) in std::mem::take(&mut self.prepped_uses) {
-            let mut segments = path.iter().copied().chain(std::iter::once(name));
-            let root = segments.next().unwrap();
+        for (path, name, scope_id, span, leaf_span, source_id) in
+            std::mem::take(&mut self.prepped_uses)
+        {
+            let mut segments = path
+                .iter()
+                .copied()
+                .chain(std::iter::once((name, leaf_span)));
+            let (root, root_span) = segments.next().unwrap();
             let mut current = match self.try_get_expr_id_by_name(root, scope_id) {
                 Some(entity) => entity,
                 None => {
@@ -4546,8 +4577,9 @@ impl<'src> Analyzer<'src> {
                     continue;
                 }
             };
+            self.record_reference(source_id, root_span, current);
             let mut resolved = true;
-            for segment in segments {
+            for (segment, segment_span) in segments {
                 let namespace_scope_id = match self.expr_id_to_expr_map.get(&current) {
                     Some(Expr::Module(module_id)) => {
                         self.modules.get(module_id).map(|module| module.body.1)
@@ -4581,6 +4613,7 @@ impl<'src> Analyzer<'src> {
                         break;
                     }
                 };
+                self.record_reference(source_id, segment_span, current);
             }
             if resolved {
                 let scope = self.mut_scope_for_scope_id(scope_id);
@@ -4665,9 +4698,12 @@ impl<'src> Analyzer<'src> {
                         (other, _) => other,
                     };
                     // Record the reference for the language server: the type name
-                    // span, the definition it points at, and a hover label.
+                    // span, the definition it points at, and a hover label. A
+                    // generic resolves to its binder entity (`subject_id`), which
+                    // carries the `<T>` name span.
                     let definition_id = match &subject_type {
                         Type::Struct(id, _) | Type::Enum(id, _) | Type::Trait(id) => Some(*id),
+                        Type::Generic(_) => Some(subject_id),
                         _ => None,
                     };
                     // Store the type id; its label is rendered after `build`,
@@ -6645,13 +6681,13 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
             let mut entries = Vec::new();
             flatten_namespace_branch(branch, Vec::new(), &mut entries);
             for (path, leaf, _span) in entries {
-                if path.first() != Some(&root) {
+                if path.first().map(|(name, _)| *name) != Some(root) {
                     continue;
                 }
                 // `import std::option::..` -> the module is the segment after the
                 // root; a bare `import std::random` -> the module is the leaf.
                 if path.len() >= 2 {
-                    modules.push(path[1]);
+                    modules.push(path[1].0);
                 } else {
                     modules.push(leaf);
                 }
@@ -6794,6 +6830,15 @@ pub fn analyze<'src>(
                 body: (Vec::new(), module_scope_id),
             },
         );
+        // Give the module entity a location (its file, at the top) so a path
+        // segment naming it can go-to-definition. A one-id range maps it to its
+        // source; the span is the file start.
+        analyzer.span_map.insert(module_id, &EMPTY_SPAN);
+        source_ranges.push(SourceRange {
+            start: module_id.0,
+            end: module_id.0 + 1,
+            source: module_source_id,
+        });
         analyzer
             .expr_id_to_expr_map
             .insert(module_id, Expr::Module(module_id));

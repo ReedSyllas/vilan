@@ -88,7 +88,11 @@ where
     // `: A + B` bounds, and an optional `= Default`.
     let generic_parameter = just(Token::Type)
         .or_not()
-        .then(identifier.labelled("generic parameter name"))
+        .then(
+            identifier
+                .labelled("generic parameter name")
+                .map_with(|name, e| (name, e.span())),
+        )
         .then(
             just(Token::Op(":"))
                 .ignore_then(
@@ -108,8 +112,9 @@ where
                 .or_not(),
         )
         .map(
-            |(((type_keyword, name), bounds), default)| GenericParameter {
+            |(((type_keyword, (name, name_span)), bounds), default)| GenericParameter {
                 name,
+                name_span,
                 is_type: type_keyword.is_some(),
                 bounds: bounds.unwrap_or_default(),
                 default,

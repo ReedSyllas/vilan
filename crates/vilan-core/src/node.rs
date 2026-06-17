@@ -5,6 +5,8 @@ pub type GenericParameters<'src> = Spanned<Vec<GenericParameter<'src>>>;
 #[derive(Debug)]
 pub struct GenericParameter<'src> {
     pub name: &'src str,
+    /// The span of the parameter's name (for go-to-definition on a use of it).
+    pub name_span: Span,
     // Declared with the `type` keyword (a binder, e.g. `impl Foo<type T>`).
     pub is_type: bool,
     // Trait bounds: `T: A + B` collects `[A, B]`.
