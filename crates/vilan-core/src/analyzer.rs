@@ -6351,21 +6351,24 @@ impl<'src> Analyzer<'src> {
     /// Pretty-prints a type for diagnostics, resolving generic names
     /// with their substitution context when available.
     fn pretty_print_type(&self, type_: &Type, substitution: &SubstitutionContext) -> String {
-        self.pretty_print_type_at(type_, substitution, 0)
+        let mut visiting = Vec::new();
+        self.pretty_print_type_at(type_, substitution, 0, &mut visiting)
     }
 
-    /// Render a type at a given recursion depth. The depth is bounded so a cyclic
-    /// type can't overflow the stack — e.g. `random.vl`'s `external fun i32`,
+    /// Render a type at a given recursion depth. `visiting` holds the function
+    /// ids currently being expanded, so a self-referential signature stops at the
+    /// cycle instead of recursing forever — e.g. `random.vl`'s `external fun i32`,
     /// whose name collides with the `i32` type, so a parameter type can resolve
-    /// back to the function and recurse forever.
+    /// back to the function. `depth` is a coarse backstop for any other cycle.
     fn pretty_print_type_at(
         &self,
         type_: &Type,
         substitution: &SubstitutionContext,
         depth: usize,
+        visiting: &mut Vec<Id>,
     ) -> String {
         let mut buf = String::new();
-        self.pretty_print_type_inner(type_, substitution, &mut buf, depth);
+        self.pretty_print_type_inner(type_, substitution, &mut buf, depth, visiting);
         buf
     }
 
@@ -6377,6 +6380,7 @@ impl<'src> Analyzer<'src> {
         arguments: &[TypeId],
         substitution: &SubstitutionContext,
         depth: usize,
+        visiting: &mut Vec<Id>,
     ) {
         if arguments.is_empty() {
             return;
@@ -6387,7 +6391,7 @@ impl<'src> Analyzer<'src> {
                 buf.push_str(", ");
             }
             let argument_type = argument.get_type(self);
-            self.pretty_print_type_inner(&argument_type, substitution, buf, depth + 1);
+            self.pretty_print_type_inner(&argument_type, substitution, buf, depth + 1, visiting);
         }
         buf.push('>');
     }
@@ -6398,6 +6402,7 @@ impl<'src> Analyzer<'src> {
         substitution: &SubstitutionContext,
         buf: &mut String,
         depth: usize,
+        visiting: &mut Vec<Id>,
     ) {
         const MAX_DEPTH: usize = 24;
         if depth > MAX_DEPTH {
@@ -6420,7 +6425,8 @@ impl<'src> Analyzer<'src> {
                     .get(constraint_id)
                     .copied()
                     .unwrap_or("?");
-                let concrete_str = self.pretty_print_type_at(&constraint, substitution, depth + 1);
+                let concrete_str =
+                    self.pretty_print_type_at(&constraint, substitution, depth + 1, visiting);
                 buf.push_str(&format!("generic {} of {}", generic_name, concrete_str));
             }
 
@@ -6440,6 +6446,15 @@ impl<'src> Analyzer<'src> {
                     buf.push_str("fn");
                     return;
                 };
+                // A function whose own signature refers back to it would recurse
+                // forever — e.g. `random.vl`'s `i32`, whose parameter type can
+                // resolve to the function itself (its name collides with the
+                // `i32` type). If it's already on the path, render the name alone.
+                if visiting.contains(id) {
+                    buf.push_str(&format!("fn {}", name));
+                    return;
+                }
+                visiting.push(*id);
                 buf.push_str(&format!("fn {}(", name));
                 let mut first = true;
                 for parameter_id in parameter_ids {
@@ -6450,12 +6465,17 @@ impl<'src> Analyzer<'src> {
                         buf.push_str(", ");
                     }
                     let parameter_type = parameter.type_id.get_type(self);
-                    let parameter_type_str =
-                        self.pretty_print_type_at(&parameter_type, substitution, depth + 1);
+                    let parameter_type_str = self.pretty_print_type_at(
+                        &parameter_type,
+                        substitution,
+                        depth + 1,
+                        visiting,
+                    );
                     buf.push_str(&parameter_type_str);
                     first = false;
                 }
                 buf.push(')');
+                visiting.pop();
             }
 
             Type::Struct(id, arguments) => {
@@ -6474,7 +6494,7 @@ impl<'src> Analyzer<'src> {
                 } else {
                     buf.push_str(&format!("struct {}", struct_.name));
                 }
-                self.push_type_arguments(buf, arguments, substitution, depth);
+                self.push_type_arguments(buf, arguments, substitution, depth, visiting);
             }
 
             Type::Trait(id) => {
@@ -6491,7 +6511,7 @@ impl<'src> Analyzer<'src> {
                     return;
                 };
                 buf.push_str(&format!("enum {}", enum_.name));
-                self.push_type_arguments(buf, arguments, substitution, depth);
+                self.push_type_arguments(buf, arguments, substitution, depth, visiting);
             }
 
             Type::Module(id) => {
@@ -6513,11 +6533,17 @@ impl<'src> Analyzer<'src> {
                         &parameter_type,
                         substitution,
                         depth + 1,
+                        visiting,
                     ));
                 }
                 buf.push_str("| ");
                 let return_type = return_id.get_type(self);
-                buf.push_str(&self.pretty_print_type_at(&return_type, substitution, depth + 1));
+                buf.push_str(&self.pretty_print_type_at(
+                    &return_type,
+                    substitution,
+                    depth + 1,
+                    visiting,
+                ));
             }
 
             Type::Tuple(items) => {
@@ -6527,7 +6553,8 @@ impl<'src> Analyzer<'src> {
                         buf.push_str(", ");
                     }
                     let item_type = item_id.get_type(self);
-                    let item_str = self.pretty_print_type_at(&item_type, substitution, depth + 1);
+                    let item_str =
+                        self.pretty_print_type_at(&item_type, substitution, depth + 1, visiting);
                     buf.push_str(&item_str);
                 }
                 buf.push(')');
