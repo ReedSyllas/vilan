@@ -74,11 +74,11 @@
         },
         {
           "name": "storage.type.vilan",
-          "match": "\\b(fun|struct|enum|impl|trait|import|type|mod|async)\\b"
+          "match": "\\b(fun|struct|enum|impl|trait|import|type|mod|async|self|use)\\b"
         },
         {
           "name": "storage.modifier.vilan",
-          "match": "\\b(let|mut|own|external|export|use)\\b"
+          "match": "\\b(let|mut|own|external|export)\\b"
         },
         {
           "name": "constant.language.vilan",
@@ -98,7 +98,7 @@
       "patterns": [
         {
           "name": "entity.name.function.vilan",
-          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
+          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*[(<])"
         }
       ]
     },
