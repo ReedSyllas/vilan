@@ -63,31 +63,20 @@ impl Response {
 }
 
 impl ResponseBuilder {
-	fun code(self, code: i32): ResponseBuilder {
-		ResponseBuilder {
-			status = code,
-			header_name = self.header_name,
-			header_value = self.header_value,
-			body = self.body,
-		}
+	fun code(own self, code: i32): ResponseBuilder {
+		self.status = code;
+		self
 	}
 
-	fun set_header(self, name: str, value: str): ResponseBuilder {
-		ResponseBuilder {
-			status = self.status,
-			header_name = name,
-			header_value = value,
-			body = self.body,
-		}
+	fun set_header(own self, name: str, value: str): ResponseBuilder {
+		self.header_name = name;
+		self.header_value = value;
+		self
 	}
 
-	fun body(self, body: str): ResponseBuilder {
-		ResponseBuilder {
-			status = self.status,
-			header_name = self.header_name,
-			header_value = self.header_value,
-			body = body,
-		}
+	fun body(own self, body: str): ResponseBuilder {
+		self.body = body;
+		self
 	}
 
 	fun build(self): Response {
@@ -147,40 +136,24 @@ impl Server {
 }
 
 impl ServerBuilder {
-	fun port(self, port: i32): ServerBuilder {
-		ServerBuilder {
-			port = port,
-			request_handler = self.request_handler,
-			on_start = self.on_start,
-			on_stop = self.on_stop,
-		}
+	fun port(own self, port: i32): ServerBuilder {
+		self.port = port;
+		self
 	}
 
-	fun on_request(self, handler: |Request| Response): ServerBuilder {
-		ServerBuilder {
-			port = self.port,
-			request_handler = handler,
-			on_start = self.on_start,
-			on_stop = self.on_stop,
-		}
+	fun on_request(own self, handler: |Request| Response): ServerBuilder {
+		self.request_handler = handler;
+		self
 	}
 
-	fun on_start(self, callback: |Server| void): ServerBuilder {
-		ServerBuilder {
-			port = self.port,
-			request_handler = self.request_handler,
-			on_start = callback,
-			on_stop = self.on_stop,
-		}
+	fun on_start(own self, callback: |Server| void): ServerBuilder {
+		self.on_start = callback;
+		self
 	}
 
-	fun on_stop(self, callback: |Server| void): ServerBuilder {
-		ServerBuilder {
-			port = self.port,
-			request_handler = self.request_handler,
-			on_start = self.on_start,
-			on_stop = callback,
-		}
+	fun on_stop(own self, callback: |Server| void): ServerBuilder {
+		self.on_stop = callback;
+		self
 	}
 
 	fun build(self): Server {

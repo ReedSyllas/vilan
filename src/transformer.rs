@@ -73,6 +73,15 @@ fn helper_source(name: &str) -> &'static str {
              \treturn Math.floor(Math.random() * (high - low + 1)) + low;\n\
              }"
         }
+        // Value-semantics deep clone. Structs/lists/enums/tuples are arrays, so
+        // recurse into them; everything else — primitives and closures — is
+        // returned by reference (a closure is immutable, so sharing it is a
+        // copy). Unlike `structuredClone`, this doesn't throw on functions.
+        "__clone" => {
+            "function __clone(value) {\n\
+             \treturn Array.isArray(value) ? value.map(__clone) : value;\n\
+             }"
+        }
         _ => "",
     }
 }
@@ -269,6 +278,12 @@ impl<'src> Transformer<'src> {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // Value-semantics copies (`own` arguments, aggregate bindings) lower to
+        // the `__clone` helper rather than `structuredClone`, which can't copy
+        // the closures a struct may hold.
+        if !self.program.clone_sites.is_empty() {
+            self.used_helpers.insert("__clone");
+        }
         let helpers = self
             .used_helpers
             .iter()
@@ -343,15 +358,13 @@ impl<'src> Transformer<'src> {
         }
     }
 
-    /// Rule 1 (value semantics): wrap a value in `structuredClone(...)` when the
-    /// analyzer marked this binding/assignment as copying an aggregate place
-    /// that would otherwise alias its source.
+    /// Rule 1 (value semantics): wrap a value in `__clone(...)` when the analyzer
+    /// marked this binding/assignment as copying an aggregate place that would
+    /// otherwise alias its source. `__clone` (not `structuredClone`) so a value
+    /// holding closures can be copied.
     fn maybe_clone(&self, value_id: Id, node: js::Node<'src>) -> js::Node<'src> {
         if self.program.clone_sites.contains(&value_id) {
-            js::Node::Call(
-                Box::new(js::Node::Local("structuredClone".to_string())),
-                vec![node],
-            )
+            js::Node::Call(Box::new(js::Node::Local("__clone".to_string())), vec![node])
         } else {
             node
         }
