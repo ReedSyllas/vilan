@@ -252,21 +252,27 @@ impl Document {
         None
     }
 
-    /// What a use site refers to, for find-references / rename. `None` for
-    /// symbols whose rename isn't supported yet (e.g. free functions, whose
-    /// declaration and call-site spans aren't cleanly separable).
+    /// What a use site refers to, for find-references / rename.
     fn target_of(&self, program: &Program, id: Id) -> Option<Target> {
         match program.entity_map.get(&id)? {
             Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => {
                 Some(Target::Binding(*binding))
             }
             Expr::Field(_, struct_id, index) => Some(Target::Field(*struct_id, *index)),
+            // The cursor is on a function/method declaration name.
+            Expr::Function(function_id) => Some(Target::Method(*function_id)),
             Expr::Call(call_id) => {
-                // A method call resolves to a method whose call sites carry a
-                // precise member span (unlike a free function).
+                // A method call carries a member span, and its wired subject is a
+                // `Local` pointing at the resolved method function (see
+                // `wire_method_call`).
+                if !program.member_name_spans.contains_key(&id) {
+                    return None;
+                }
                 let subject = program.function_calls.get(call_id)?.subject_id;
                 match program.entity_map.get(&subject)? {
-                    Expr::Function(function_id) if program.member_name_spans.contains_key(&id) => {
+                    Expr::Local(function_id) | Expr::Function(function_id)
+                        if program.functions.contains_key(function_id) =>
+                    {
                         Some(Target::Method(*function_id))
                     }
                     _ => None,
@@ -328,20 +334,23 @@ impl Document {
                     push(function_id, function.name_span);
                 }
                 for (use_id, expr) in &program.entity_map {
-                    if let Expr::Call(call_id) = expr {
-                        let resolves = program
-                            .function_calls
-                            .get(call_id)
-                            .map(|call| call.subject_id)
-                            .and_then(|subject| program.entity_map.get(&subject))
-                            .is_some_and(|subject| {
-                                matches!(subject, Expr::Function(other) if *other == function_id)
-                            });
-                        if resolves {
-                            if let Some(span) = program.member_name_spans.get(use_id) {
-                                push(*use_id, *span);
-                            }
-                        }
+                    let Expr::Call(call_id) = expr else {
+                        continue;
+                    };
+                    // A method call site carries a member span and a wired subject
+                    // that is a `Local` pointing at the method function.
+                    let Some(member_span) = program.member_name_spans.get(use_id) else {
+                        continue;
+                    };
+                    let Some(call) = program.function_calls.get(call_id) else {
+                        continue;
+                    };
+                    let refers = matches!(
+                        program.entity_map.get(&call.subject_id),
+                        Some(Expr::Local(other)) | Some(Expr::Function(other)) if *other == function_id
+                    );
+                    if refers {
+                        push(*use_id, *member_span);
                     }
                 }
             }
