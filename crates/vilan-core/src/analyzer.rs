@@ -3267,16 +3267,32 @@ impl<'src> Analyzer<'src> {
                         return None;
                     }
                 };
-                // Record the variant reference so the language server can navigate
-                // a pattern like `Some(..)` to its enum. Use just the leading
-                // name's span so a payload capture inside isn't shadowed by it.
-                let variant_name = path.last().copied().unwrap_or("");
-                let name_range = span.into_range();
-                let name_span: Span =
-                    (name_range.start..name_range.start + variant_name.len()).into();
+                // Record each `::`-separated segment for the language server: the
+                // variant name (the last segment) navigates to the variant, and
+                // the enum name before it (in a qualified `Enum::Variant`) to the
+                // enum. A payload capture inside the pattern keeps its own span.
                 let enum_type_id = Type::Enum(enum_id, Vec::new()).get_type_id(self);
-                self.type_references
-                    .push((source_id, name_span, Some(enum_id), enum_type_id));
+                let last = path.len().saturating_sub(1);
+                let mut offset = span.into_range().start;
+                for (index, segment) in path.iter().enumerate() {
+                    let segment_span: Span = (offset..offset + segment.len()).into();
+                    if index == last {
+                        self.type_references.push((
+                            source_id,
+                            segment_span,
+                            Some(entity),
+                            enum_type_id,
+                        ));
+                    } else if index + 1 == last {
+                        self.type_references.push((
+                            source_id,
+                            segment_span,
+                            Some(enum_id),
+                            enum_type_id,
+                        ));
+                    }
+                    offset += segment.len() + "::".len();
+                }
                 match expected_type_id.get_type(self) {
                     Type::Enum(expected_enum_id, _) if expected_enum_id == enum_id => {}
                     Type::Unknown | Type::Any | Type::Generic(_) => {}
