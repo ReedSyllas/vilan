@@ -154,7 +154,7 @@ pub enum Node<'src> {
     // the types of its optional data, and an optional explicit discriminant
     // (`Less = -1`).
     Enum(
-        &'src str,
+        Spanned<&'src str>,
         Option<GenericParameters<'src>>,
         Spanned<Vec<Spanned<EnumVariant<'src>>>>,
     ),
@@ -193,7 +193,7 @@ pub enum Node<'src> {
     Export(Box<Spanned<Self>>),
     // `let`/`mut` binding: name, type annotation, value, mutability.
     Let(
-        &'src str,
+        Spanned<&'src str>,
         Option<Box<Spanned<Self>>>,
         Option<Box<Spanned<Self>>>,
         bool,
@@ -212,7 +212,7 @@ pub enum Node<'src> {
     // The body is `Some(fields)` for `{ .. }` and `None` for a bodyless `;`
     // declaration (only valid when `external`).
     Struct(
-        &'src str,
+        Spanned<&'src str>,
         Option<GenericParameters<'src>>,
         bool,
         Option<Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>>,
@@ -223,7 +223,7 @@ pub enum Node<'src> {
         Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>,
     ),
     Trait(
-        &'src str,
+        Spanned<&'src str>,
         Option<GenericParameters<'src>>,
         // Supertraits: the `A`, `B` in `trait T with A + B`.
         Vec<Spanned<Self>>,

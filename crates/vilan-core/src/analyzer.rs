@@ -175,6 +175,8 @@ pub struct Parameter<'src> {
 pub struct Variable<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// The span of the binding's name (for go-to-definition / rename).
+    pub name_span: Span,
     pub initial: Option<Id>,
     pub type_id: TypeId,
     pub mutable: bool,
@@ -184,6 +186,8 @@ pub struct Variable<'src> {
 pub struct Struct<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// The span of the struct's name (for go-to-definition / rename).
+    pub name_span: Span,
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub fields: Vec<Field<'src>>,
 }
@@ -201,6 +205,8 @@ pub struct Field<'src> {
 pub struct Enum<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// The span of the enum's name (for go-to-definition / rename).
+    pub name_span: Span,
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub variants: Vec<EnumVariantDeclaration<'src>>,
     // The namespace scope holding the variant entities by name, reachable
@@ -282,6 +288,8 @@ pub struct Implementation<'src> {
 pub struct Trait<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// The span of the trait's name (for go-to-definition / rename).
+    pub name_span: Span,
     /// The members the trait declares, keyed by name. For a required method
     /// without a default body these point at signature-only functions.
     pub declarations: IndexMap<&'src str, Id>,
@@ -2365,11 +2373,16 @@ impl<'src> Analyzer<'src> {
                     // element type in the constraint loop, falling back to `any`
                     // for an iterable whose element type can't be recovered.
                     let element_type_id = Type::Unknown.get_type_id(self);
+                    // The binding name follows `for ` in the loop header.
+                    let header = node.1.into_range();
+                    let name_span: Span =
+                        (header.start + 4..header.start + 4 + variable.len()).into();
                     self.variables.insert(
                         variable_id,
                         Variable {
                             id: variable_id,
                             name: variable,
+                            name_span,
                             initial: None,
                             type_id: element_type_id,
                             mutable: false,
@@ -2629,8 +2642,10 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Binary(*op, lhs_id, rhs_id))
             }
             Node::Let(name, type_, value, mutable) => {
+                let name_span = name.1;
+                let name = name.0;
                 // `_` eats the value: the binding is never referenceable.
-                if *name != "_" {
+                if name != "_" {
                     let scope = self.mut_scope_for_scope_id(scope_id);
                     scope.name_to_id_map.insert(name, id);
                 }
@@ -2653,6 +2668,7 @@ impl<'src> Analyzer<'src> {
                     Variable {
                         id,
                         name,
+                        name_span,
                         initial,
                         type_id,
                         mutable: *mutable,
@@ -2696,6 +2712,8 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Assignment(target_id, stored_value_id))
             }
             Node::Struct(name, generic_parameters, external, body) => {
+                let name_span = name.1;
+                let name = name.0;
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -2739,6 +2757,7 @@ impl<'src> Analyzer<'src> {
                     Struct {
                         id,
                         name,
+                        name_span,
                         generic_parameter_constraint_ids,
                         fields,
                     },
@@ -2746,6 +2765,8 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Struct(id))
             }
             Node::Enum(name, generic_parameters, variants) => {
+                let name_span = name.1;
+                let name = name.0;
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -2798,6 +2819,7 @@ impl<'src> Analyzer<'src> {
                     Enum {
                         id,
                         name,
+                        name_span,
                         generic_parameter_constraint_ids,
                         variants: variant_declarations,
                         variants_scope_id,
@@ -2937,6 +2959,8 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Impl(id))
             }
             Node::Trait(name, generic_parameters, supertraits, body) => {
+                let name_span = name.1;
+                let name = name.0;
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -2965,6 +2989,7 @@ impl<'src> Analyzer<'src> {
                     Trait {
                         id,
                         name,
+                        name_span,
                         declarations,
                         supertraits,
                     },
@@ -3090,11 +3115,21 @@ impl<'src> Analyzer<'src> {
                 let name = *name;
                 let capture_id = self.new_entity_id();
                 let unknown_type_id = Type::Unknown.get_type_id(self);
+                // The capture name follows `let ` (or `let mut `) in the pattern.
+                let header = pattern.1.into_range();
+                let prefix = if *mutable {
+                    "let mut ".len()
+                } else {
+                    "let ".len()
+                };
+                let name_span: Span =
+                    (header.start + prefix..header.start + prefix + name.len()).into();
                 self.variables.insert(
                     capture_id,
                     Variable {
                         id: capture_id,
                         name,
+                        name_span,
                         initial: None,
                         type_id: unknown_type_id,
                         mutable: *mutable,

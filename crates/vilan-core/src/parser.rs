@@ -396,7 +396,7 @@ where
     );
 
     let let_ = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
-        .then(identifier)
+        .then(identifier.map_with(|name, e| (name, e.span())))
         .then(
             just(Token::Op(":"))
                 .ignore_then(type_.clone())
@@ -531,7 +531,11 @@ where
         });
 
     let enum_ = just(Token::Enum)
-        .ignore_then(identifier.labelled("enum name"))
+        .ignore_then(
+            identifier
+                .labelled("enum name")
+                .map_with(|name, e| (name, e.span())),
+        )
         .then(generic_parameters.clone().or_not())
         .then(
             enum_variant
@@ -770,7 +774,11 @@ where
         .then_ignore(just(Token::Struct))
         // `null` is a keyword but also the name of the built-in `external struct
         // null`, so the struct name accepts it alongside ordinary identifiers.
-        .then(choice((identifier, just(Token::Null).to("null"))).labelled("struct name"))
+        .then(
+            choice((identifier, just(Token::Null).to("null")))
+                .labelled("struct name")
+                .map_with(|name, e| (name, e.span())),
+        )
         .then(generic_parameters.clone().or_not())
         .then(choice((
             // `struct Name { field: T, ... }`
@@ -844,7 +852,11 @@ where
         .boxed();
 
     let trait_ = just(Token::Trait)
-        .ignore_then(identifier.labelled("trait name"))
+        .ignore_then(
+            identifier
+                .labelled("trait name")
+                .map_with(|name, e| (name, e.span())),
+        )
         .then(generic_parameters.clone().or_not())
         .then(
             just(Token::With)

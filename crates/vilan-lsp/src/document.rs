@@ -19,6 +19,8 @@ enum Target {
     Field(Id, usize),
     /// A method, by its function id (call sites carry a precise member span).
     Method(Id),
+    /// A struct/enum/trait definition, by its id (uses live in `type_references`).
+    Type(Id),
 }
 
 /// A kind of declaration, for the document outline.
@@ -139,11 +141,35 @@ impl Document {
             let definition = definition?;
             return Some((
                 program.source_of(definition)?,
-                span_of(program, definition)?,
+                self.definition_name_span(program, definition)?,
             ));
         }
         let id = self.entity_at(offset)?;
         self.definition_of(program, id)
+    }
+
+    /// The span to jump to for a definition id: the declaration's *name* for a
+    /// type/function/variable (else its whole span, e.g. a module's file start).
+    fn definition_name_span(&self, program: &Program, id: Id) -> Option<Span> {
+        if let Some(structure) = program.structs.get(&id) {
+            return Some(structure.name_span);
+        }
+        if let Some(enumeration) = program.enums.get(&id) {
+            return Some(enumeration.name_span);
+        }
+        if let Some(trait_definition) = program.traits.get(&id) {
+            return Some(trait_definition.name_span);
+        }
+        if let Some(function) = program.functions.get(&id) {
+            return Some(function.name_span);
+        }
+        if let Some(function) = program.external_functions.get(&id) {
+            return Some(function.name_span);
+        }
+        if let Some(variable) = program.variables.get(&id) {
+            return Some(variable.name_span);
+        }
+        span_of(program, id)
     }
 
     /// The innermost type reference under `offset` in the open file, as
@@ -168,13 +194,17 @@ impl Document {
     fn definition_of(&self, program: &Program, id: Id) -> Option<(SourceId, Span)> {
         match program.entity_map.get(&id)? {
             Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => {
-                // A binding that names a function resolves to its name, not the
-                // whole declaration.
+                // Resolve to the name span of the thing the binding actually is —
+                // a function, a `let`/`mut` variable, or (parameters/generics,
+                // whose `span_map` entry is already the name) the span itself.
                 if let Some(function) = program.functions.get(binding) {
                     return Some((program.source_of(*binding)?, function.name_span));
                 }
                 if let Some(function) = program.external_functions.get(binding) {
                     return Some((program.source_of(*binding)?, function.name_span));
+                }
+                if let Some(variable) = program.variables.get(binding) {
+                    return Some((program.source_of(*binding)?, variable.name_span));
                 }
                 Some((program.source_of(*binding)?, span_of(program, *binding)?))
             }
@@ -199,21 +229,23 @@ impl Document {
             )),
             Expr::Struct(struct_id) => Some((
                 program.source_of(*struct_id)?,
-                span_of(program, *struct_id)?,
+                program.structs.get(struct_id)?.name_span,
             )),
             Expr::StructInitializer(initializer_id, _) => {
                 let struct_id = program.struct_initializer_to_def.get(initializer_id)?;
                 Some((
                     program.source_of(*struct_id)?,
-                    span_of(program, *struct_id)?,
+                    program.structs.get(struct_id)?.name_span,
                 ))
             }
-            Expr::Enum(enum_id) => {
-                Some((program.source_of(*enum_id)?, span_of(program, *enum_id)?))
-            }
-            Expr::Trait(trait_id) => {
-                Some((program.source_of(*trait_id)?, span_of(program, *trait_id)?))
-            }
+            Expr::Enum(enum_id) => Some((
+                program.source_of(*enum_id)?,
+                program.enums.get(enum_id)?.name_span,
+            )),
+            Expr::Trait(trait_id) => Some((
+                program.source_of(*trait_id)?,
+                program.traits.get(trait_id)?.name_span,
+            )),
             _ => None,
         }
     }
@@ -224,15 +256,33 @@ impl Document {
             return Vec::new();
         };
         // Resolve a target from the entity under the cursor, falling back to a
-        // struct field declaration (whose name has no entity of its own).
+        // type reference (a type *use* is not an entity) and then to a struct
+        // field declaration (whose name has no entity of its own).
         let target = self
             .entity_at(offset)
             .and_then(|id| self.target_of(program, id))
+            .or_else(|| self.type_reference_target(program, offset))
             .or_else(|| self.field_decl_at(program, offset));
         let Some(target) = target else {
             return Vec::new();
         };
         self.occurrences(program, target)
+    }
+
+    /// A struct/enum/trait target when the cursor is on a type *use* (e.g.
+    /// `Option` in `Option<T>`), which lives in `type_references` rather than as
+    /// an entity.
+    fn type_reference_target(&self, program: &Program, offset: usize) -> Option<Target> {
+        let (definition, _) = self.type_reference_at(program, offset)?;
+        let definition = definition?;
+        if program.structs.contains_key(&definition)
+            || program.enums.contains_key(&definition)
+            || program.traits.contains_key(&definition)
+        {
+            Some(Target::Type(definition))
+        } else {
+            None
+        }
     }
 
     /// The struct field whose declaration name contains `offset`, if any (field
@@ -261,6 +311,14 @@ impl Document {
             Expr::Field(_, struct_id, index) => Some(Target::Field(*struct_id, *index)),
             // The cursor is on a function/method declaration name.
             Expr::Function(function_id) => Some(Target::Method(*function_id)),
+            // The cursor is on a type declaration name or a constructor.
+            Expr::Struct(struct_id) => Some(Target::Type(*struct_id)),
+            Expr::Enum(enum_id) => Some(Target::Type(*enum_id)),
+            Expr::Trait(trait_id) => Some(Target::Type(*trait_id)),
+            Expr::StructInitializer(initializer_id, _) => program
+                .struct_initializer_to_def
+                .get(initializer_id)
+                .map(|struct_id| Target::Type(*struct_id)),
             Expr::Call(call_id) => {
                 // A method call carries a member span, and its wired subject is a
                 // `Local` pointing at the resolved method function (see
@@ -294,8 +352,14 @@ impl Document {
 
         match target {
             Target::Binding(binding) => {
-                // The declaration's own span is the binding name.
-                if let Some(span) = span_of(program, binding) {
+                // The declaration name span: a variable carries it explicitly; a
+                // parameter/capture's `span_map` entry is already the name.
+                let decl_span = program
+                    .variables
+                    .get(&binding)
+                    .map(|variable| variable.name_span)
+                    .or_else(|| span_of(program, binding));
+                if let Some(span) = decl_span {
                     push(binding, span);
                 }
                 for (use_id, expr) in &program.entity_map {
@@ -351,6 +415,41 @@ impl Document {
                     );
                     if refers {
                         push(*use_id, *member_span);
+                    }
+                }
+            }
+            Target::Type(type_id) => {
+                // The declaration's name span.
+                let name_span = program
+                    .structs
+                    .get(&type_id)
+                    .map(|s| s.name_span)
+                    .or_else(|| program.enums.get(&type_id).map(|e| e.name_span))
+                    .or_else(|| program.traits.get(&type_id).map(|t| t.name_span));
+                if let Some(span) = name_span {
+                    push(type_id, span);
+                }
+                // Every type-position use is recorded in `type_references`.
+                for (source, span, definition, _label) in &program.type_references {
+                    if *definition == Some(type_id) {
+                        spans.push((*source, *span));
+                    }
+                }
+                // Constructor uses (`Point { .. }`) aren't type references; the
+                // name leads the initializer span.
+                if let Some(structure) = program.structs.get(&type_id) {
+                    for (initializer_id, struct_id) in &program.struct_initializer_to_def {
+                        if *struct_id != type_id {
+                            continue;
+                        }
+                        if let (Some(initializer_span), Some(source)) = (
+                            span_of(program, *initializer_id),
+                            program.source_of(*initializer_id),
+                        ) {
+                            let start = initializer_span.into_range().start;
+                            let name_span: Span = (start..start + structure.name.len()).into();
+                            spans.push((source, name_span));
+                        }
                     }
                 }
             }
