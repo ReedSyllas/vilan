@@ -108,7 +108,9 @@ pub enum NodeIfBranch<'src> {
 
 #[derive(Debug)]
 pub enum ImportBranch<'src> {
-    Path(&'src str, Option<Box<Self>>),
+    // A path segment: its name, the span of that name, and an optional `::`
+    // continuation. The span drives go-to-definition / hover on imports.
+    Path(&'src str, Span, Option<Box<Self>>),
     Set(Vec<Self>),
 }
 

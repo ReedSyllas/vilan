@@ -228,7 +228,12 @@ enum WalkPattern<'src> {
     Wildcard,
     Binding(Id),
     // A variant path (`["Some"]`, `["Signal", "Quit"]`) and optional payload.
-    Variant(Vec<&'src str>, Span, Option<Vec<WalkPattern<'src>>>),
+    Variant(
+        Vec<&'src str>,
+        Span,
+        SourceId,
+        Option<Vec<WalkPattern<'src>>>,
+    ),
     Tuple(Span, Vec<WalkPattern<'src>>),
     // A literal value, walked to its expression id (for type-checking + codegen).
     Literal(Id),
@@ -295,6 +300,8 @@ pub struct TraitImplCheck<'src> {
     pub scope_id: Id,
     pub declarations: IndexMap<&'src str, Id>,
     pub span: Span,
+    // The file the `with <trait>` clause is in, for the type-reference index.
+    pub source_id: SourceId,
     // Index into `implementations` of the impl this check belongs to, so the
     // resolved trait id can be recorded back onto it.
     pub implementation_index: usize,
@@ -483,7 +490,7 @@ pub struct Analyzer<'src> {
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
-    prepped_imports: Vec<(Vec<&'src str>, &'src str, Id, Span)>,
+    prepped_imports: Vec<(Vec<&'src str>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
     prepped_is: Vec<PreppedIs<'src>>,
     prepped_matches: Vec<PreppedMatch<'src>>,
@@ -582,11 +589,11 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
 fn flatten_namespace_branch<'src>(
     branch: &ImportBranch<'src>,
     path: Vec<&'src str>,
-    entries: &mut Vec<(Vec<&'src str>, &'src str)>,
+    entries: &mut Vec<(Vec<&'src str>, &'src str, Span)>,
 ) {
     match branch {
-        ImportBranch::Path(name, child_branch) => match child_branch {
-            None => entries.push((path, name)),
+        ImportBranch::Path(name, span, child_branch) => match child_branch {
+            None => entries.push((path, name, *span)),
             Some(child) => {
                 let mut path = path;
                 path.push(name);
@@ -2283,15 +2290,22 @@ impl<'src> Analyzer<'src> {
             Node::Import(root_branch) => {
                 let mut entries = Vec::new();
                 flatten_namespace_branch(root_branch, Vec::new(), &mut entries);
-                for (path, name) in entries {
-                    self.prepped_imports.push((path, name, scope_id, node.1));
+                for (path, name, leaf_span) in entries {
+                    self.prepped_imports.push((
+                        path,
+                        name,
+                        scope_id,
+                        node.1,
+                        leaf_span,
+                        self.current_source_id,
+                    ));
                 }
                 None
             }
             Node::Use(root_branch) => {
                 let mut entries = Vec::new();
                 flatten_namespace_branch(root_branch, Vec::new(), &mut entries);
-                for (path, name) in entries {
+                for (path, name, _leaf_span) in entries {
                     self.prepped_uses.push((path, name, scope_id, node.1));
                 }
                 None
@@ -2894,6 +2908,7 @@ impl<'src> Analyzer<'src> {
                             scope_id,
                             declarations: declarations.clone(),
                             span: trait_.1,
+                            source_id: self.current_source_id,
                             implementation_index,
                         });
                     }
@@ -3085,6 +3100,7 @@ impl<'src> Analyzer<'src> {
             Pattern::Variant(path, payload) => WalkPattern::Variant(
                 path.clone(),
                 pattern.1,
+                self.current_source_id,
                 payload.as_ref().map(|patterns| {
                     patterns
                         .iter()
@@ -3176,8 +3192,9 @@ impl<'src> Analyzer<'src> {
                 self.resolved_types.insert(capture_id, expected_type_id);
                 Some(ExprPattern::Binding(capture_id))
             }
-            WalkPattern::Variant(path, span, payload) => {
+            WalkPattern::Variant(path, span, source_id, payload) => {
                 let span = *span;
+                let source_id = *source_id;
                 let name = path.join("::");
                 let entity =
                     match self.resolve_variant_path(path, lookup_scope_id, expected_type_id) {
@@ -3200,6 +3217,16 @@ impl<'src> Analyzer<'src> {
                         return None;
                     }
                 };
+                // Record the variant reference so the language server can navigate
+                // a pattern like `Some(..)` to its enum. Use just the leading
+                // name's span so a payload capture inside isn't shadowed by it.
+                let variant_name = path.last().copied().unwrap_or("");
+                let name_range = span.into_range();
+                let name_span: Span =
+                    (name_range.start..name_range.start + variant_name.len()).into();
+                let enum_type_id = Type::Enum(enum_id, Vec::new()).get_type_id(self);
+                self.type_references
+                    .push((source_id, name_span, Some(enum_id), enum_type_id));
                 match expected_type_id.get_type(self) {
                     Type::Enum(expected_enum_id, _) if expected_enum_id == enum_id => {}
                     Type::Unknown | Type::Any | Type::Generic(_) => {}
@@ -4394,6 +4421,8 @@ impl<'src> Analyzer<'src> {
         scope_id: Id,
         span: Span,
         report: bool,
+        leaf_span: Span,
+        source_id: SourceId,
     ) -> bool {
         // A `self` leaf re-binds the namespace it sits in under its own name
         // (e.g. `Option::{ self }` binds `Option`); otherwise the leaf is the
@@ -4466,6 +4495,18 @@ impl<'src> Analyzer<'src> {
         }
         let scope = self.mut_scope_for_scope_id(scope_id);
         scope.name_to_id_map.insert(bind_name, target_id);
+        // Record the imported leaf for go-to-definition / hover on the import.
+        let label_type = match self.expr_id_to_expr_map.get(&target_id) {
+            Some(Expr::Enum(id)) | Some(Expr::EnumVariant(id, _)) => Type::Enum(*id, Vec::new()),
+            Some(Expr::Struct(id)) => Type::Struct(*id, Vec::new()),
+            Some(Expr::Trait(id)) => Type::Trait(*id),
+            Some(Expr::Module(id)) => Type::Module(*id),
+            Some(Expr::Function(id)) | Some(Expr::ExternalFunction(id)) => Type::Function(*id),
+            _ => Type::Unknown,
+        };
+        let label_type_id = label_type.get_type_id(self);
+        self.type_references
+            .push((source_id, leaf_span, Some(target_id), label_type_id));
         true
     }
 
@@ -4477,15 +4518,15 @@ impl<'src> Analyzer<'src> {
         let mut remaining = self.prepped_imports.clone();
         loop {
             let before = remaining.len();
-            remaining.retain(|(path, name, scope_id, span)| {
-                !self.resolve_import(path, name, *scope_id, *span, false)
+            remaining.retain(|(path, name, scope_id, span, leaf_span, source_id)| {
+                !self.resolve_import(path, name, *scope_id, *span, false, *leaf_span, *source_id)
             });
             if remaining.len() == before || remaining.is_empty() {
                 break;
             }
         }
-        for (path, name, scope_id, span) in remaining {
-            self.resolve_import(&path, name, scope_id, span, true);
+        for (path, name, scope_id, span, leaf_span, source_id) in remaining {
+            self.resolve_import(&path, name, scope_id, span, true, leaf_span, source_id);
         }
 
         // --- Resolve `use` statements ---
@@ -4864,6 +4905,10 @@ impl<'src> Analyzer<'src> {
             if let Some(implementation) = self.implementations.get_mut(check.implementation_index) {
                 implementation.trait_ids.push(trait_id);
             }
+            // Record the `with <trait>` reference for go-to-definition / hover.
+            let trait_type_id = Type::Trait(trait_id).get_type_id(self);
+            self.type_references
+                .push((check.source_id, check.span, Some(trait_id), trait_type_id));
             // Required members are the signature-only declarations of the trait
             // AND its supertraits (a member with a default body is inherited, so
             // an impl need not provide it). Implementing `X with Ord` thus
@@ -6599,7 +6644,7 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
         if let Some(branch) = branch {
             let mut entries = Vec::new();
             flatten_namespace_branch(branch, Vec::new(), &mut entries);
-            for (path, leaf) in entries {
+            for (path, leaf, _span) in entries {
                 if path.first() != Some(&root) {
                     continue;
                 }

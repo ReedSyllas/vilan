@@ -100,19 +100,31 @@ impl Document {
         if let Some((_, label)) = self.type_reference_at(program, offset) {
             return Some(label);
         }
-        let id = self.entity_at(offset)?;
+        self.hover_label(program, self.entity_at(offset)?)
+    }
+
+    fn hover_label(&self, program: &Program, id: Id) -> Option<String> {
         if let Some(label) = program.expr_types.get(&id) {
             return Some(label.clone());
         }
-        // A bare use carries no type on its own id; resolve through its binding.
+        // A bare use carries no type on its own id; resolve through its binding
+        // (and through that binding's own kind, e.g. an imported enum variant).
         match program.entity_map.get(&id)? {
-            Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => {
-                program.expr_types.get(binding).cloned()
-            }
+            Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => program
+                .expr_types
+                .get(binding)
+                .cloned()
+                .or_else(|| self.hover_label(program, *binding)),
             Expr::EnumVariant(enum_id, _) => program
                 .enums
                 .get(enum_id)
                 .map(|e| format!("enum {}", e.name)),
+            // A constructor / call: hover the thing being called (e.g. `Ok(x)`
+            // shows the enum) when the call's own result type isn't recorded.
+            Expr::Call(call_id) => {
+                let subject = program.function_calls.get(call_id)?.subject_id;
+                self.hover_label(program, subject)
+            }
             _ => None,
         }
     }

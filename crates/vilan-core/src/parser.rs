@@ -333,8 +333,9 @@ where
     // shared by `import` and `use`.
     let namespace_path = recursive(|branch| {
         let path = name
+            .map_with(|name, e| (name, e.span()))
             .then(just(Token::Op("::")).ignore_then(branch).or_not())
-            .map(|(a, b)| ImportBranch::Path(a, b.map(|b| Box::new(b))));
+            .map(|((name, span), b)| ImportBranch::Path(name, span, b.map(|b| Box::new(b))));
 
         path.clone().or(path
             .separated_by(just(Token::Ctrl(',')))
