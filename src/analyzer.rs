@@ -1189,9 +1189,6 @@ impl<'src> Analyzer<'src> {
         let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
             return;
         };
-        let mut recurse = |this: &Self, id: Id, captured: &mut bool, visited: &mut HashSet<Id>| {
-            this.scan_view_param_ref(id, captured, visited);
-        };
         match expr {
             Expr::Local(binding_id) => {
                 if self.parameters.get(&binding_id).is_some_and(|parameter| {
@@ -1205,70 +1202,70 @@ impl<'src> Analyzer<'src> {
             Expr::Closure(_) | Expr::Async(_) => {}
             Expr::Variable(variable_id) => {
                 if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
-                    recurse(self, initial, captured, visited);
+                    self.scan_view_param_ref(initial, captured, visited);
                 }
             }
             Expr::Reference(operand, _) | Expr::Dereference(operand) | Expr::Unary(_, operand) => {
-                recurse(self, operand, captured, visited)
+                self.scan_view_param_ref(operand, captured, visited)
             }
             Expr::Binary(_, lhs, rhs) => {
-                recurse(self, lhs, captured, visited);
-                recurse(self, rhs, captured, visited);
+                self.scan_view_param_ref(lhs, captured, visited);
+                self.scan_view_param_ref(rhs, captured, visited);
             }
             Expr::Assignment(target, value) => {
-                recurse(self, target, captured, visited);
-                recurse(self, value, captured, visited);
+                self.scan_view_param_ref(target, captured, visited);
+                self.scan_view_param_ref(value, captured, visited);
             }
-            Expr::Field(subject, _, _) => recurse(self, subject, captured, visited),
+            Expr::Field(subject, _, _) => self.scan_view_param_ref(subject, captured, visited),
             Expr::FunctionReturn(value) | Expr::Await(value) => {
-                recurse(self, value, captured, visited)
+                self.scan_view_param_ref(value, captured, visited)
             }
             Expr::Call(call_id) => {
                 if let Some(function_call) = self.function_calls.get(&call_id) {
                     for argument in function_call.argument_ids.clone() {
-                        recurse(self, argument, captured, visited);
+                        self.scan_view_param_ref(argument, captured, visited);
                     }
                 }
             }
             Expr::Block((statements, tail)) => {
                 for statement in statements {
-                    recurse(self, statement, captured, visited);
+                    self.scan_view_param_ref(statement, captured, visited);
                 }
-                recurse(self, tail, captured, visited);
+                self.scan_view_param_ref(tail, captured, visited);
             }
             Expr::For(condition, (statements, tail)) => {
                 if let Some(condition) = condition {
-                    recurse(self, condition, captured, visited);
+                    self.scan_view_param_ref(condition, captured, visited);
                 }
                 for statement in statements {
-                    recurse(self, statement, captured, visited);
+                    self.scan_view_param_ref(statement, captured, visited);
                 }
-                recurse(self, tail, captured, visited);
+                self.scan_view_param_ref(tail, captured, visited);
             }
             Expr::ForEach(iterable, _, (statements, tail)) => {
-                recurse(self, iterable, captured, visited);
+                self.scan_view_param_ref(iterable, captured, visited);
                 for statement in statements {
-                    recurse(self, statement, captured, visited);
+                    self.scan_view_param_ref(statement, captured, visited);
                 }
-                recurse(self, tail, captured, visited);
+                self.scan_view_param_ref(tail, captured, visited);
             }
             Expr::Match(subject, legs) => {
-                recurse(self, subject, captured, visited);
+                self.scan_view_param_ref(subject, captured, visited);
                 for leg in legs {
                     if let Some(guard) = leg.guard {
-                        recurse(self, guard, captured, visited);
+                        self.scan_view_param_ref(guard, captured, visited);
                     }
-                    recurse(self, leg.body, captured, visited);
+                    self.scan_view_param_ref(leg.body, captured, visited);
                 }
             }
             Expr::List(ids) | Expr::Tuple(ids) => {
                 for id in ids {
-                    recurse(self, id, captured, visited);
+                    self.scan_view_param_ref(id, captured, visited);
                 }
             }
             Expr::StructInitializer(_, fields) => {
                 for value in fields.values() {
-                    recurse(self, *value, captured, visited);
+                    self.scan_view_param_ref(*value, captured, visited);
                 }
             }
             // `If` is the one branch form left; walk it explicitly.
