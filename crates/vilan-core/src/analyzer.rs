@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
@@ -112,6 +113,9 @@ pub enum ExprPattern {
 pub struct Function<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// The span of the function's name in the source (for go-to-definition and
+    /// rename), distinct from the whole-declaration span in `span_map`.
+    pub name_span: Span,
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
     /// The declared return type, if annotated. Used in preference to inferring
@@ -133,6 +137,8 @@ pub struct Function<'src> {
 pub struct ExternalFunction<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// The span of the name in the source (for go-to-definition / rename).
+    pub name_span: Span,
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
     pub return_type_id: TypeId,
@@ -185,6 +191,9 @@ pub struct Struct<'src> {
 #[derive(Debug, Clone)]
 pub struct Field<'src> {
     pub name: &'src str,
+    /// The span of just the field's name in the source (for go-to-definition and
+    /// rename). Derived from the start of the field declaration.
+    pub name_span: Span,
     pub type_id: TypeId,
 }
 
@@ -416,6 +425,9 @@ pub struct Analyzer<'src> {
     expr_id_to_expr_map: HashMap<Id, Expr<'src>>,
     expr_id_to_scope_id_map: HashMap<Id, Id>,
     expr_id_to_type_id_map: HashMap<Id, TypeId>,
+    // The span of the member identifier in a field access or method call (`.x`),
+    // keyed by the access expr id — the precise use-site span for rename/nav.
+    member_name_spans: HashMap<Id, Span>,
     external_functions: IndexMap<Id, ExternalFunction<'src>>,
     field_accessor_constraints: IndexMap<Id, FieldAccessorConstraint<'src>>,
     function_calls: IndexMap<Id, FunctionCall>,
@@ -593,6 +605,7 @@ impl<'src> Analyzer<'src> {
             expr_id_to_expr_map: HashMap::new(),
             expr_id_to_scope_id_map: HashMap::new(),
             expr_id_to_type_id_map: HashMap::new(),
+            member_name_spans: HashMap::new(),
             external_functions: IndexMap::new(),
             field_accessor_constraints: IndexMap::new(),
             function_calls: IndexMap::new(),
@@ -2208,6 +2221,7 @@ impl<'src> Analyzer<'src> {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 match &member.0 {
                     Node::Accessor(name) => {
+                        self.member_name_spans.insert(id, member.1);
                         self.field_accessor_constraints.insert(
                             id,
                             FieldAccessorConstraint {
@@ -2223,6 +2237,7 @@ impl<'src> Analyzer<'src> {
                     Node::Call(call_subject, call_generic_arguments, call_arguments) => {
                         match &call_subject.0 {
                             Node::Accessor(name) => {
+                                self.member_name_spans.insert(id, call_subject.1);
                                 let argument_ids =
                                     self.walk_expr_nodes(&call_arguments.0, scope_id);
                                 let generic_argument_ids = call_generic_arguments
@@ -2478,6 +2493,7 @@ impl<'src> Analyzer<'src> {
                         ExternalFunction {
                             id,
                             name,
+                            name_span: function.name.1,
                             generic_parameter_constraint_ids,
                             parameters,
                             return_type_id,
@@ -2523,6 +2539,7 @@ impl<'src> Analyzer<'src> {
                         Function {
                             id,
                             name,
+                            name_span: function.name.1,
                             generic_parameter_constraint_ids,
                             parameters,
                             return_type_id,
@@ -2659,13 +2676,21 @@ impl<'src> Analyzer<'src> {
                 let mut fields = Vec::new();
                 for child in body.iter().flat_map(|body| &body.0) {
                     let name = child.0.0;
+                    // The field's name sits at the start of its declaration span.
+                    let field_range = child.1.into_range();
+                    let name_span: Span =
+                        (field_range.start..field_range.start + name.len()).into();
                     let type_id = child
                         .0
                         .1
                         .as_ref()
                         .map(|x| self.walk_type_node(x, body_scope_id))
                         .unwrap_or(Type::Unknown.get_type_id(self));
-                    fields.push(Field { name, type_id });
+                    fields.push(Field {
+                        name,
+                        name_span,
+                        type_id,
+                    });
                 }
                 self.structs.insert(
                     id,
@@ -6195,17 +6220,34 @@ impl<'src> Analyzer<'src> {
                 let generic_name = self
                     .generic_constraint_names
                     .get(constraint_id)
-                    .expect("failed to find generic name");
+                    .copied()
+                    .unwrap_or("?");
                 let concrete_str = self.pretty_print_type(&constraint, substitution);
                 buf.push_str(&format!("generic {} of {}", generic_name, concrete_str));
             }
 
             Type::Function(id) => {
-                let func = self.functions.get(id).unwrap();
-                buf.push_str(&format!("fn {}(", func.name));
+                // The id may name a regular or an `external` function; both
+                // render as `fn name(paramType, ..)`.
+                let signature = self
+                    .functions
+                    .get(id)
+                    .map(|func| (func.name, &func.parameters))
+                    .or_else(|| {
+                        self.external_functions
+                            .get(id)
+                            .map(|external| (external.name, &external.parameters))
+                    });
+                let Some((name, parameter_ids)) = signature else {
+                    buf.push_str("fn");
+                    return;
+                };
+                buf.push_str(&format!("fn {}(", name));
                 let mut first = true;
-                for parameter_id in &func.parameters {
-                    let parameter = self.parameters.get(parameter_id).unwrap();
+                for parameter_id in parameter_ids {
+                    let Some(parameter) = self.parameters.get(parameter_id) else {
+                        continue;
+                    };
                     if !first {
                         buf.push_str(", ");
                     }
@@ -6218,7 +6260,10 @@ impl<'src> Analyzer<'src> {
             }
 
             Type::Struct(id, arguments) => {
-                let struct_ = self.structs.get(id).unwrap();
+                let Some(struct_) = self.structs.get(id) else {
+                    buf.push_str("type");
+                    return;
+                };
                 // Built-in primitive structs read as plain types (`i32`), not
                 // `struct i32`, in diagnostics.
                 if self
@@ -6234,19 +6279,28 @@ impl<'src> Analyzer<'src> {
             }
 
             Type::Trait(id) => {
-                let trait_ = self.traits.get(id).unwrap();
-                buf.push_str(&format!("trait {}", trait_.name));
+                if let Some(trait_) = self.traits.get(id) {
+                    buf.push_str(&format!("trait {}", trait_.name));
+                } else {
+                    buf.push_str("trait");
+                }
             }
 
             Type::Enum(id, arguments) => {
-                let enum_ = self.enums.get(id).unwrap();
+                let Some(enum_) = self.enums.get(id) else {
+                    buf.push_str("enum");
+                    return;
+                };
                 buf.push_str(&format!("enum {}", enum_.name));
                 self.push_type_arguments(buf, arguments, substitution);
             }
 
             Type::Module(id) => {
-                let module = self.modules.get(id).unwrap();
-                buf.push_str(&format!("module {}", module.name));
+                if let Some(module) = self.modules.get(id) {
+                    buf.push_str(&format!("module {}", module.name));
+                } else {
+                    buf.push_str("module");
+                }
             }
 
             Type::Closure(parameters, return_id) => {
@@ -6306,6 +6360,23 @@ pub enum Intrinsic {
     RandomI32,
 }
 
+/// Identifies a source file within a compiled `Program` — an index into
+/// `Program.sources`. `SourceId(0)` is always the entry file; the rest are
+/// `std` package modules pulled in during analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceId(pub u32);
+
+/// The half-open entity-id range `[start, end)` produced while walking one
+/// source file. Since entity ids are minted monotonically and each file is
+/// walked by a single top-level pass, these ranges map an entity back to the
+/// file it came from (see `Program::source_of`).
+#[derive(Debug, Clone, Copy)]
+pub struct SourceRange {
+    pub start: u32,
+    pub end: u32,
+    pub source: SourceId,
+}
+
 #[derive(Debug)]
 pub struct Program<'src> {
     pub closures: IndexMap<Id, Closure>,
@@ -6352,6 +6423,23 @@ pub struct Program<'src> {
     pub structs: IndexMap<Id, Struct<'src>>,
     pub type_id_to_type_map: HashMap<TypeId, Type>,
     pub variables: IndexMap<Id, Variable<'src>>,
+    pub parameters: IndexMap<Id, Parameter<'src>>,
+    // The source files that make up this program: `sources[0]` is the entry
+    // file, the rest are `std` modules. `source_ranges` maps each entity id to
+    // its file (see `source_of`); both drive cross-file navigation in the LSP.
+    pub sources: Vec<PathBuf>,
+    pub source_ranges: Vec<SourceRange>,
+    // Use-site identifier spans for field accesses / method calls (`.x`), keyed
+    // by the access expr id — drives rename and go-to-definition on members.
+    pub member_name_spans: HashMap<Id, Span>,
+    // Maps a struct initializer expr id to the struct definition it constructs,
+    // so go-to-definition on `Point { .. }` reaches the `struct` declaration.
+    pub struct_initializer_to_def: HashMap<Id, Id>,
+    // A human-readable type label for every typed expression (e.g. `struct
+    // Point`, `type i32`, `enum Option<i32>`), pre-rendered during analysis for
+    // language-server hover. Keyed by expr id; `expr_id_to_type_id_map` wins
+    // over `resolved_types` where both apply (matching `type_of_expr`).
+    pub expr_types: HashMap<Id, String>,
     // The next unused entity id. Post-analysis passes (the context threading
     // pass) mint fresh entities — synthetic parameters and references — from
     // here without colliding with analyzed ones.
@@ -6370,6 +6458,23 @@ pub struct Program<'src> {
     pub boxed_locals: HashSet<Id>,
     // View bindings whose target is a boxed scalar local; `*v` lowers to `v[0]`.
     pub primitive_views: HashSet<Id>,
+}
+
+impl<'src> Program<'src> {
+    /// The source file an entity originated from, by locating the walk range
+    /// that produced its id. `None` for synthetic entities minted outside any
+    /// file walk (e.g. during post-analysis passes).
+    pub fn source_of(&self, id: Id) -> Option<SourceId> {
+        self.source_ranges
+            .iter()
+            .find(|range| id.0 >= range.start && id.0 < range.end)
+            .map(|range| range.source)
+    }
+
+    /// The filesystem path of a source file.
+    pub fn source_path(&self, source: SourceId) -> Option<&Path> {
+        self.sources.get(source.0 as usize).map(PathBuf::as_path)
+    }
 }
 
 /// Lexes and parses a Vilan source file into an AST, leaking the source and the
@@ -6395,13 +6500,9 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
     Some(Box::leak(Box::new(root)))
 }
 
-/// Builds the path to a module file in the hardcoded `std` package.
-fn std_module_path(file: &str) -> String {
-    format!(
-        "{}/src/vilan-source/std/src/{}",
-        env!("CARGO_MANIFEST_DIR"),
-        file
-    )
+/// Builds the path to a module file under the `std` package's source root.
+fn std_module_path(std_root: &Path, file: &str) -> String {
+    std_root.join(file).to_string_lossy().into_owned()
 }
 
 /// Collects the names of package modules referenced via `<root>::<module>::..`
@@ -6440,7 +6541,15 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
     modules
 }
 
-pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
+pub fn analyze<'src>(
+    nodes: &'src Spanned<NodeList<'src>>,
+    std_root: &Path,
+    entry_path: &Path,
+) -> Program<'src> {
+    // `sources[0]` is the entry file; std modules are appended as they load.
+    // `source_ranges` records the entity-id span each file's walk produced.
+    let mut sources: Vec<PathBuf> = vec![entry_path.to_path_buf()];
+    let mut source_ranges: Vec<SourceRange> = Vec::new();
     let mut analyzer = Analyzer::new();
     let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
@@ -6500,9 +6609,12 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     // transitively. Each becomes a module registered in the `pkg` namespace;
     // bodies are walked after all are registered so cross-module references
     // resolve during `build()`.
-    let lib_ast = load_package_module(&std_module_path("lib.vl"));
+    let lib_path = std_module_path(std_root, "lib.vl");
+    let lib_ast = load_package_module(&lib_path);
+    sources.push(PathBuf::from(&lib_path));
+    let lib_source_id = SourceId((sources.len() - 1) as u32);
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
-    let mut loaded: Vec<(&str, &Spanned<NodeList>, Id)> = Vec::new();
+    let mut loaded: Vec<(&str, &Spanned<NodeList>, Id, SourceId)> = Vec::new();
     let mut to_load: Vec<&str> = lib_ast
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
         .unwrap_or_default();
@@ -6520,9 +6632,12 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         if module_scopes.contains_key(name) {
             continue;
         }
-        let Some(ast) = load_package_module(&std_module_path(&format!("{name}.vl"))) else {
+        let module_path = std_module_path(std_root, &format!("{name}.vl"));
+        let Some(ast) = load_package_module(&module_path) else {
             continue;
         };
+        sources.push(PathBuf::from(&module_path));
+        let module_source_id = SourceId((sources.len() - 1) as u32);
         let module_scope = analyzer.create_scope(Some(global_scope_id));
         let module_scope_id = analyzer.push_scope(module_scope);
         let module_id = analyzer.new_entity_id();
@@ -6550,13 +6665,25 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .insert(name, module_id);
         module_scopes.insert(name, module_scope_id);
         to_load.extend(collect_module_refs(&ast.0, "pkg"));
-        loaded.push((name, ast, module_scope_id));
+        loaded.push((name, ast, module_scope_id, module_source_id));
     }
-    for (_name, ast, module_scope_id) in &loaded {
+    for (_name, ast, module_scope_id, source_id) in &loaded {
+        let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
+        source_ranges.push(SourceRange {
+            start,
+            end: analyzer.entity_id,
+            source: *source_id,
+        });
     }
     if let Some(lib_ast) = lib_ast {
+        let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, std_scope_id);
+        source_ranges.push(SourceRange {
+            start,
+            end: analyzer.entity_id,
+            source: lib_source_id,
+        });
     }
     // Remember `panic` so its calls can be typed as never and lowered to a throw.
     if let Some(io_scope_id) = module_scopes.get("io") {
@@ -6649,7 +6776,13 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
             .insert("Promise", promise_struct_id);
     }
 
+    let entry_walk_start = analyzer.entity_id;
     analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
+    source_ranges.push(SourceRange {
+        start: entry_walk_start,
+        end: analyzer.entity_id,
+        source: SourceId(0),
+    });
     analyzer.build();
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
@@ -6752,6 +6885,40 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
     let boxed_locals = analyzer.compute_boxed_locals();
     let primitive_views = analyzer.compute_primitive_views(&boxed_locals);
 
+    // Pre-render a type label for every typed expression (for hover). Done here
+    // while the analyzer still holds the type tables; `expr_id_to_type_id_map`
+    // is applied last so it wins over `resolved_types`, matching `type_of_expr`.
+    let empty_substitution = SubstitutionContext::new();
+    let mut expr_types: HashMap<Id, String> = HashMap::new();
+    for (expr_id, type_id) in analyzer
+        .resolved_types
+        .iter()
+        .chain(analyzer.expr_id_to_type_id_map.iter())
+    {
+        let type_ = type_id.get_type(&analyzer);
+        expr_types.insert(
+            *expr_id,
+            analyzer.pretty_print_type(&type_, &empty_substitution),
+        );
+    }
+    // Also label variable and parameter bindings by their own id: a *use* of one
+    // (an `Expr::Local`/`Expr::Parameter`) carries no type on its own expr id, so
+    // hover resolves through the binding.
+    for (binding_id, variable) in &analyzer.variables {
+        let type_ = variable.type_id.get_type(&analyzer);
+        expr_types.insert(
+            *binding_id,
+            analyzer.pretty_print_type(&type_, &empty_substitution),
+        );
+    }
+    for (binding_id, parameter) in &analyzer.parameters {
+        let type_ = parameter.type_id.get_type(&analyzer);
+        expr_types.insert(
+            *binding_id,
+            analyzer.pretty_print_type(&type_, &empty_substitution),
+        );
+    }
+
     Program {
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
@@ -6785,6 +6952,12 @@ pub fn analyze<'src>(nodes: &'src Spanned<NodeList<'src>>) -> Program<'src> {
         structs: analyzer.structs,
         type_id_to_type_map: analyzer.type_id_to_type_map,
         variables: analyzer.variables,
+        parameters: analyzer.parameters,
+        sources,
+        source_ranges,
+        member_name_spans: analyzer.member_name_spans,
+        struct_initializer_to_def: analyzer.struct_initializer_to_def,
+        expr_types,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
         clone_sites,

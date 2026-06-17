@@ -1,25 +1,17 @@
-mod analyzer;
-mod async_infer;
-mod call_graph;
-mod context;
-mod error;
-mod id;
-mod lexer;
-mod node;
-mod parser;
-mod span;
-mod token;
-mod transformer;
-mod type_;
-mod util;
+use vilan_core::analyzer::analyze;
+use vilan_core::async_infer;
+use vilan_core::call_graph::CallGraph;
+use vilan_core::context;
+use vilan_core::lexer::lexer;
+use vilan_core::parser::parser;
+use vilan_core::transformer::transform;
 
-use crate::analyzer::analyze;
-use crate::lexer::lexer;
-use crate::parser::parser;
-use crate::transformer::transform;
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use chumsky::prelude::*;
-use std::{env, fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     // Flags may appear in any position; the file is the first non-flag arg.
@@ -34,6 +26,16 @@ fn main() {
         .cloned()
         .expect("Expected file argument");
     let src = fs::read_to_string(&filename).expect("Failed to read file");
+
+    // The `std` package's source root: `$VILAN_STD` if set, else the in-repo
+    // `vilan/std/src` relative to the crate.
+    let std_root: PathBuf = env::var_os("VILAN_STD")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            // `CARGO_MANIFEST_DIR` is `crates/vilan-cli`; the std sources live at the
+            // workspace root under `vilan/std/src`.
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src")
+        });
 
     let (tokens, mut errs) = lexer().parse(src.as_str()).into_output_errors();
 
@@ -58,15 +60,15 @@ fn main() {
                 });
             }
 
-            let mut program = analyze(&root);
+            let mut program = analyze(&root, &std_root, Path::new(&filename));
 
             // Thread `std::context::Context` values as hidden parameters (a
             // no-op unless the program creates a context).
-            crate::context::thread_contexts(&mut program);
+            context::thread_contexts(&mut program);
 
             // Infer which functions/closures are async (drives `async`/`await`
             // code generation).
-            crate::async_infer::infer(&mut program);
+            async_infer::infer(&mut program);
 
             for error in &program.diagnostics {
                 errs.push(Rich::custom(error.span, error.msg.as_str()));
@@ -81,7 +83,7 @@ fn main() {
                     println!("failed to write analyze.out");
                 });
 
-                let call_graph = crate::call_graph::CallGraph::build(&program);
+                let call_graph = CallGraph::build(&program);
                 fs::write(
                     Path::new(&filename).with_extension("callgraph.out"),
                     call_graph.debug_dump(&program),

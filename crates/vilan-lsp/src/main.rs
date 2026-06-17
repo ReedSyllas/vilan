@@ -1,0 +1,273 @@
+//! The Vilan language server: a thin tower-lsp front-end over `vilan-core`.
+//! Analyzes each open document on change and answers diagnostics, hover,
+//! go-to-definition, find-references, and rename — across files into `std`.
+
+mod document;
+mod line_index;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use dashmap::DashMap;
+use tower_lsp::lsp_types::*;
+use tower_lsp::{Client, LanguageServer, LspService, Server, jsonrpc::Result};
+use vilan_core::Span;
+use vilan_core::analyzer::SourceId;
+
+use crate::document::{Document, Symbol, SymbolKind as VilanSymbolKind};
+use crate::line_index::LineIndex;
+
+/// Convert a Vilan outline node to an LSP `DocumentSymbol`.
+#[allow(deprecated)]
+fn to_lsp_symbol(symbol: Symbol, line_index: &LineIndex) -> DocumentSymbol {
+    let kind = match symbol.kind {
+        VilanSymbolKind::Function => SymbolKind::FUNCTION,
+        VilanSymbolKind::Struct => SymbolKind::STRUCT,
+        VilanSymbolKind::Field => SymbolKind::FIELD,
+        VilanSymbolKind::Enum => SymbolKind::ENUM,
+        VilanSymbolKind::Trait => SymbolKind::INTERFACE,
+    };
+    let children = symbol
+        .children
+        .into_iter()
+        .map(|child| to_lsp_symbol(child, line_index))
+        .collect::<Vec<_>>();
+    DocumentSymbol {
+        name: symbol.name,
+        detail: None,
+        kind,
+        tags: None,
+        deprecated: None,
+        range: line_index.range(&symbol.full),
+        selection_range: line_index.range(&symbol.selection),
+        children: if children.is_empty() {
+            None
+        } else {
+            Some(children)
+        },
+    }
+}
+
+struct Backend {
+    client: Client,
+    documents: DashMap<Url, Document>,
+}
+
+/// Locate the `std` package's source root: `$VILAN_STD`, else the nearest
+/// ancestor of the document containing `vilan/std/src`.
+fn discover_std_root(start: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("VILAN_STD") {
+        return PathBuf::from(path);
+    }
+    let mut directory = start.parent();
+    while let Some(current) = directory {
+        let candidate = current.join("vilan").join("std").join("src");
+        if candidate.is_dir() {
+            return candidate;
+        }
+        directory = current.parent();
+    }
+    PathBuf::from("vilan/std/src")
+}
+
+impl Backend {
+    async fn on_change(&self, uri: Url, text: String) {
+        let path = uri.to_file_path().unwrap_or_default();
+        let std_root = discover_std_root(&path);
+        let document = Document::analyze(&text, &std_root, &path);
+
+        let diagnostics = document
+            .diagnostics
+            .iter()
+            .map(|error| Diagnostic {
+                range: document.line_index.range(&error.span),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("vilan".to_string()),
+                message: error.msg.clone(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+
+        self.documents.insert(uri.clone(), document);
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
+    }
+
+    /// Convert a `(source, span)` from analysis into an LSP `Location`. The entry
+    /// file uses the open document's line index; a `std` file is read from disk.
+    fn location_for(
+        &self,
+        document: &Document,
+        doc_uri: &Url,
+        source: SourceId,
+        span: Span,
+    ) -> Option<Location> {
+        if source == SourceId(0) {
+            return Some(Location {
+                uri: doc_uri.clone(),
+                range: document.line_index.range(&span),
+            });
+        }
+        let program = document.program.as_ref()?;
+        let path = program.source_path(source)?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let line_index = LineIndex::new(&text);
+        let uri = Url::from_file_path(path).ok()?;
+        Some(Location {
+            uri,
+            range: line_index.range(&span),
+        })
+    }
+}
+
+#[tower_lsp::async_trait]
+impl LanguageServer for Backend {
+    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        Ok(InitializeResult {
+            capabilities: ServerCapabilities {
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::FULL,
+                )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                ..Default::default()
+            },
+            server_info: Some(ServerInfo {
+                name: "vilan-lsp".to_string(),
+                version: None,
+            }),
+        })
+    }
+
+    async fn initialized(&self, _: InitializedParams) {
+        self.client
+            .log_message(MessageType::INFO, "vilan-lsp initialized")
+            .await;
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        self.on_change(params.text_document.uri, params.text_document.text)
+            .await;
+    }
+
+    async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
+        if let Some(change) = params.content_changes.pop() {
+            self.on_change(params.text_document.uri, change.text).await;
+        }
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.documents.remove(&params.text_document.uri);
+        self.client
+            .publish_diagnostics(params.text_document.uri, Vec::new(), None)
+            .await;
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let offset = document.line_index.offset(position);
+        Ok(document.hover(offset).map(|label| Hover {
+            contents: HoverContents::Scalar(MarkedString::String(label)),
+            range: None,
+        }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let offset = document.line_index.offset(position);
+        let Some((source, span)) = document.definition(offset) else {
+            return Ok(None);
+        };
+        Ok(self
+            .location_for(&document, &uri, source, span)
+            .map(GotoDefinitionResponse::Scalar))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let offset = document.line_index.offset(position);
+        let locations = document
+            .references(offset)
+            .into_iter()
+            .filter_map(|(source, span)| self.location_for(&document, &uri, source, span))
+            .collect();
+        Ok(Some(locations))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let offset = document.line_index.offset(position);
+        let occurrences = document.references(offset);
+        if occurrences.is_empty() {
+            return Ok(None);
+        }
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for (source, span) in occurrences {
+            if let Some(location) = self.location_for(&document, &uri, source, span) {
+                changes.entry(location.uri).or_default().push(TextEdit {
+                    range: location.range,
+                    new_text: new_name.clone(),
+                });
+            }
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let symbols = document
+            .document_symbols()
+            .into_iter()
+            .map(|symbol| to_lsp_symbol(symbol, &document.line_index))
+            .collect::<Vec<_>>();
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let (service, socket) = LspService::new(|client| Backend {
+        client,
+        documents: DashMap::new(),
+    });
+    Server::new(stdin, stdout, socket).serve(service).await;
+}
