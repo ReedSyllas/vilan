@@ -11,4 +11,4 @@ Rust project: a compiler/interpreter for the "vilan" language.
 
 ## Testing
 
-- Regression test files live in `src/vilan-source/test/`. Run them against the compiler to verify nothing is broken by a change.
+- Regression test files live in `vilan/test/`. Run them against the compiler to verify nothing is broken by a change.

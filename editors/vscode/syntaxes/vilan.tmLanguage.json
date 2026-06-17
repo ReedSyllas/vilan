@@ -74,11 +74,11 @@
         },
         {
           "name": "storage.type.vilan",
-          "match": "\\b(fun|struct|enum|impl|trait|type|mod|async)\\b"
+          "match": "\\b(fun|struct|enum|impl|trait|import|type|mod|async)\\b"
         },
         {
           "name": "storage.modifier.vilan",
-          "match": "\\b(let|mut|own|external|export|import|use)\\b"
+          "match": "\\b(let|mut|own|external|export|use)\\b"
         },
         {
           "name": "constant.language.vilan",
