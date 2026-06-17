@@ -6690,10 +6690,34 @@ impl<'src> Program<'src> {
 /// read or fails to lex/parse.
 fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>> {
     use chumsky::prelude::*;
-    // The source is leaked so the parsed tree (which borrows it) can live for
-    // the whole compilation. The token vector is transient — the AST holds
-    // `&'static str` slices into the source, not into the tokens.
-    let source: &'static str = Box::leak(std::fs::read_to_string(path).ok()?.into_boxed_str());
+    use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+
+    // A process-global, content-addressed parse cache: a hash of the file's
+    // contents maps to its leaked AST. Every analysis re-loads the `std` modules
+    // (and the language server re-analyzes on each keystroke), but their source
+    // rarely changes — so reuse the parse, and leak the source + tree only once
+    // per distinct content instead of once per analysis.
+    static CACHE: OnceLock<Mutex<HashMap<u64, &'static crate::span::Spanned<NodeList<'static>>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let source = std::fs::read_to_string(path).ok()?;
+    let key = {
+        let mut hasher = DefaultHasher::new();
+        source.hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some(ast) = cache.lock().unwrap().get(&key) {
+        return Some(*ast);
+    }
+
+    // Cache miss: lex and parse. The source is leaked so the parsed tree (which
+    // borrows it) can live for the whole compilation. The token vector is
+    // transient — the AST holds `&'static str` slices into the source.
+    let source: &'static str = Box::leak(source.into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;
     let end = source.len();
     let (root, _file_span) = crate::parser::parser()
@@ -6704,7 +6728,9 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
                 .map((end..end).into(), |(token, span)| (token, span)),
         )
         .into_output()?;
-    Some(Box::leak(Box::new(root)))
+    let ast = Box::leak(Box::new(root));
+    cache.lock().unwrap().insert(key, ast);
+    Some(ast)
 }
 
 /// Builds the path to a module file under the `std` package's source root.
