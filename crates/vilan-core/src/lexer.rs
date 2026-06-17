@@ -154,14 +154,27 @@ pub fn lexer<'src>()
         .then(any().and_is(just('\n').not()).repeated())
         .padded();
 
+    // Comments and whitespace are trivia, normally consumed as padding around
+    // tokens. A file that is *only* trivia (blank lines, a lone comment) has no
+    // token for that padding to attach to, so consume a leading run of trivia up
+    // front — leaving a clean, possibly empty, token stream rather than leaking
+    // the trivia into the parser.
+    let trivia = comment
+        .clone()
+        .ignored()
+        .or(any().filter(|c: &char| c.is_whitespace()).ignored())
+        .repeated();
+
     // Each lexeme produces one or more tokens — interpolated strings expand to
     // several — which are flattened into a single token stream.
-    choice((interpolated, single.map(|token| vec![token])))
-        .padded_by(comment.repeated())
-        .padded()
-        // If we encounter an error, skip and attempt to lex the next character as a token instead
-        .recover_with(skip_then_retry_until(any().ignored(), end()))
-        .repeated()
-        .collect::<Vec<_>>()
-        .map(|chunks: Vec<Vec<_>>| chunks.into_iter().flatten().collect())
+    trivia.ignore_then(
+        choice((interpolated, single.map(|token| vec![token])))
+            .padded_by(comment.repeated())
+            .padded()
+            // If we encounter an error, skip and attempt to lex the next character as a token instead
+            .recover_with(skip_then_retry_until(any().ignored(), end()))
+            .repeated()
+            .collect::<Vec<_>>()
+            .map(|chunks: Vec<Vec<_>>| chunks.into_iter().flatten().collect()),
+    )
 }
