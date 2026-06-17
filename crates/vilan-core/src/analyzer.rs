@@ -6172,8 +6172,21 @@ impl<'src> Analyzer<'src> {
     /// Pretty-prints a type for diagnostics, resolving generic names
     /// with their substitution context when available.
     fn pretty_print_type(&self, type_: &Type, substitution: &SubstitutionContext) -> String {
+        self.pretty_print_type_at(type_, substitution, 0)
+    }
+
+    /// Render a type at a given recursion depth. The depth is bounded so a cyclic
+    /// type can't overflow the stack — e.g. `random.vl`'s `external fun i32`,
+    /// whose name collides with the `i32` type, so a parameter type can resolve
+    /// back to the function and recurse forever.
+    fn pretty_print_type_at(
+        &self,
+        type_: &Type,
+        substitution: &SubstitutionContext,
+        depth: usize,
+    ) -> String {
         let mut buf = String::new();
-        self.pretty_print_type_inner(type_, substitution, &mut buf, 0);
+        self.pretty_print_type_inner(type_, substitution, &mut buf, depth);
         buf
     }
 
@@ -6184,6 +6197,7 @@ impl<'src> Analyzer<'src> {
         buf: &mut String,
         arguments: &[TypeId],
         substitution: &SubstitutionContext,
+        depth: usize,
     ) {
         if arguments.is_empty() {
             return;
@@ -6194,7 +6208,7 @@ impl<'src> Analyzer<'src> {
                 buf.push_str(", ");
             }
             let argument_type = argument.get_type(self);
-            self.pretty_print_type_inner(&argument_type, substitution, buf, 0);
+            self.pretty_print_type_inner(&argument_type, substitution, buf, depth + 1);
         }
         buf.push('>');
     }
@@ -6204,8 +6218,13 @@ impl<'src> Analyzer<'src> {
         type_: &Type,
         substitution: &SubstitutionContext,
         buf: &mut String,
-        _depth: usize,
+        depth: usize,
     ) {
+        const MAX_DEPTH: usize = 24;
+        if depth > MAX_DEPTH {
+            buf.push('…');
+            return;
+        }
         match type_ {
             Type::Any => buf.push_str("type any"),
             Type::Unknown => buf.push_str("type unknown"),
@@ -6222,7 +6241,7 @@ impl<'src> Analyzer<'src> {
                     .get(constraint_id)
                     .copied()
                     .unwrap_or("?");
-                let concrete_str = self.pretty_print_type(&constraint, substitution);
+                let concrete_str = self.pretty_print_type_at(&constraint, substitution, depth + 1);
                 buf.push_str(&format!("generic {} of {}", generic_name, concrete_str));
             }
 
@@ -6252,7 +6271,8 @@ impl<'src> Analyzer<'src> {
                         buf.push_str(", ");
                     }
                     let parameter_type = parameter.type_id.get_type(self);
-                    let parameter_type_str = self.pretty_print_type(&parameter_type, substitution);
+                    let parameter_type_str =
+                        self.pretty_print_type_at(&parameter_type, substitution, depth + 1);
                     buf.push_str(&parameter_type_str);
                     first = false;
                 }
@@ -6275,7 +6295,7 @@ impl<'src> Analyzer<'src> {
                 } else {
                     buf.push_str(&format!("struct {}", struct_.name));
                 }
-                self.push_type_arguments(buf, arguments, substitution);
+                self.push_type_arguments(buf, arguments, substitution, depth);
             }
 
             Type::Trait(id) => {
@@ -6292,7 +6312,7 @@ impl<'src> Analyzer<'src> {
                     return;
                 };
                 buf.push_str(&format!("enum {}", enum_.name));
-                self.push_type_arguments(buf, arguments, substitution);
+                self.push_type_arguments(buf, arguments, substitution, depth);
             }
 
             Type::Module(id) => {
@@ -6310,11 +6330,15 @@ impl<'src> Analyzer<'src> {
                         buf.push_str(", ");
                     }
                     let parameter_type = parameter_id.get_type(self);
-                    buf.push_str(&self.pretty_print_type(&parameter_type, substitution));
+                    buf.push_str(&self.pretty_print_type_at(
+                        &parameter_type,
+                        substitution,
+                        depth + 1,
+                    ));
                 }
                 buf.push_str("| ");
                 let return_type = return_id.get_type(self);
-                buf.push_str(&self.pretty_print_type(&return_type, substitution));
+                buf.push_str(&self.pretty_print_type_at(&return_type, substitution, depth + 1));
             }
 
             Type::Tuple(items) => {
@@ -6324,7 +6348,7 @@ impl<'src> Analyzer<'src> {
                         buf.push_str(", ");
                     }
                     let item_type = item_id.get_type(self);
-                    let item_str = self.pretty_print_type(&item_type, substitution);
+                    let item_str = self.pretty_print_type_at(&item_type, substitution, depth + 1);
                     buf.push_str(&item_str);
                 }
                 buf.push(')');
