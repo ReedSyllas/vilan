@@ -1,0 +1,32 @@
+import std::{ print, option::Option::{ self, Some, None }, result::Result::{ self, Ok, Err } };
+import std::compare::PartialEq;
+
+struct Point { x: i32, y: i32 }
+
+impl Point with PartialEq {
+	fun eq(self, b: Point): bool {
+		self.x == b.x && self.y == b.y
+	}
+}
+
+fun main() {
+	let p1 = Point { x = 1, y = 2 };
+	let p2 = Point { x = 1, y = 2 };
+	let p3 = Point { x = 3, y = 4 };
+	print(p1 == p2);        // true  (dispatches to Point::eq)
+	print(p1 == p3);        // false
+	print(p1 != p3);        // true
+
+	let a: Option<i32> = Some(5);
+	print(a == Some(5));    // true  (conditional impl, needs i32: PartialEq)
+	print(a == None);       // false
+	print(a != Some(7));    // true
+
+	let r: Result<i32, str> = Ok(1);
+	print(r == Ok(1));      // true
+	print(r == Err("x"));   // false
+
+	print(5 == 5);          // true  (native)
+	print("a" == "b");      // false (native)
+	print(true == true);    // true  (native)
+}

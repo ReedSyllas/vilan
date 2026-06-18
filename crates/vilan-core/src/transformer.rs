@@ -683,10 +683,14 @@ impl<'src> Transformer<'src> {
                 if let Some(&method_id) = self.program.binary_op_dispatch.get(&id) {
                     self.ensure_function_emitted(method_id);
                     let name = self.ng.name_for(method_id);
-                    return Some(js::Node::Call(
-                        Box::new(js::Node::Local(name)),
-                        vec![lhs, rhs],
-                    ));
+                    let call = js::Node::Call(Box::new(js::Node::Local(name)), vec![lhs, rhs]);
+                    // `a != b` dispatches to `eq` and negates — the impl provides
+                    // `eq`, and `ne` is just its `!eq` default.
+                    return Some(if matches!(*op, BinaryOp::NotEq) {
+                        js::Node::Unary('!', Box::new(call))
+                    } else {
+                        call
+                    });
                 }
                 binary(*op, lhs, rhs)
             }

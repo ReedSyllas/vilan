@@ -590,6 +590,9 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
         BinaryOp::Sub => Some(("Sub", "sub")),
         BinaryOp::Mul => Some(("Mul", "mul")),
         BinaryOp::Div => Some(("Div", "div")),
+        // `!=` dispatches to `eq` too; the transformer negates it. (Resolving the
+        // `ne` default here would miss impls that only provide `eq`.)
+        BinaryOp::Eq | BinaryOp::NotEq => Some(("PartialEq", "eq")),
         _ => None,
     }
 }
@@ -775,9 +778,27 @@ impl<'src> Analyzer<'src> {
     /// Resolves the operator method for `op` on a value of `subject_type` — the
     /// `add`/`sub`/`mul`/`div` declared by an `impl Subject with Add/...`. Used to
     /// dispatch `a + b` to `Add::add(a, b)` when the left operand's type
+    /// Whether an operator (`==`, `<`, `+`, ...) on this type must lower to a
+    /// native JS operator: the scalar primitives and `bool`. They may carry a
+    /// `PartialEq`/`Ord` impl to satisfy a generic bound, but dispatching the
+    /// operator to that impl would recurse (its body uses the same operator).
+    fn is_primitive_operator_type(&self, type_: &Type) -> bool {
+        match type_ {
+            Type::Struct(id, _) => ["i32", "u32", "f64", "BigInt", "str"]
+                .iter()
+                .any(|name| self.primitive_struct_ids.get(*name).copied() == Some(*id)),
+            Type::Enum(id, _) => self.bool_enum_id == Some(*id),
+            _ => false,
+        }
+    }
+
     /// overloads the operator; returns `None` (so codegen keeps native JS
-    /// arithmetic) for numbers and any type without the matching operator impl.
+    /// arithmetic) for the primitives and any type without the matching operator
+    /// impl.
     fn operator_method(&self, op: BinaryOp, subject_type: &Type) -> Option<Id> {
+        if self.is_primitive_operator_type(subject_type) {
+            return None;
+        }
         let (trait_name, method_name) = operator_trait_method(op)?;
         self.implementations
             .iter()
@@ -4352,6 +4373,13 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or_else(|| constraint_id.get_type(self));
                 return self.compare_type(a, &r, substitution_context);
             }
+            // A concrete type satisfies a trait-typed slot (a generic bound like
+            // `T: PartialEq`, or a trait-typed parameter) when it implements the
+            // trait — so a conditional impl `impl Option<T: PartialEq>` matches a
+            // concrete `Option<i32>`. (Mirrors the same arm in `reconcile_type`.)
+            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id)) => {
+                self.type_implements_trait(a, *trait_id)
+            }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 l_items
                     .iter()
@@ -6279,12 +6307,10 @@ impl<'src> Analyzer<'src> {
             if let Some(method_id) = self.operator_method(op, &lhs_type) {
                 self.binary_op_dispatch.insert(binary_id, method_id);
             } else if let Some((trait_name, method_name)) = operator_trait_method(op) {
-                // An arithmetic operator applied to a non-scalar struct/enum that
-                // doesn't overload it (scalars use native arithmetic; comparisons
-                // aren't overloadable, so `operator_trait_method` excludes them).
-                let is_scalar =
-                    matches!(&lhs_type, Type::Struct(id, _) if self.is_scalar_primitive(*id));
-                if !is_scalar {
+                // The operator maps to a trait but this operand doesn't provide
+                // it. Primitives (the scalars and `bool`) use native operators, so
+                // skip them; a non-primitive type genuinely needs the impl.
+                if !self.is_primitive_operator_type(&lhs_type) {
                     let type_name = match &lhs_type {
                         Type::Struct(id, _) => self.structs.get(id).map(|s| s.name),
                         Type::Enum(id, _) => self.enums.get(id).map(|e| e.name),
