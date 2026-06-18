@@ -27,10 +27,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile a source file to JavaScript, writing `<file>.js`.
+    /// Compile to JavaScript, writing `<file>.js`. With no path, compiles the
+    /// project entry from the nearest `vilan.toml`.
     Build {
-        /// The `.vl` source file to compile.
-        file: PathBuf,
+        /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
+        file: Option<PathBuf>,
         /// Print the JavaScript to stdout instead of writing `<file>.js`.
         #[arg(long)]
         stdout: bool,
@@ -38,18 +39,19 @@ enum Command {
         #[arg(short, long)]
         debug: bool,
     },
-    /// Type-check a source file, reporting diagnostics without writing output.
+    /// Type-check, reporting diagnostics without writing output. With no path,
+    /// checks the project entry from the nearest `vilan.toml`.
     Check {
-        /// The `.vl` source file to check.
-        file: PathBuf,
+        /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
+        file: Option<PathBuf>,
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
     },
     /// Build and run a source file. (Not implemented yet.)
     Run {
-        /// The `.vl` source file to run.
-        file: PathBuf,
+        /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
+        file: Option<PathBuf>,
     },
     /// Format vilan source files. (Not implemented yet.)
     Fmt {
@@ -76,12 +78,75 @@ fn main() -> ExitCode {
             file,
             stdout,
             debug,
-        } => compile(&file, Mode::Build { stdout }, debug),
-        Command::Check { file, debug } => compile(&file, Mode::Check, debug),
+        } => with_entry(file, |entry| compile(entry, Mode::Build { stdout }, debug)),
+        Command::Check { file, debug } => {
+            with_entry(file, |entry| compile(entry, Mode::Check, debug))
+        }
         // `run`/`fmt`/`test` await the project model, formatter, and test runner.
         Command::Run { .. } => unimplemented_command("run"),
         Command::Fmt { .. } => unimplemented_command("fmt"),
         Command::Test { .. } => unimplemented_command("test"),
+    }
+}
+
+/// Resolves the entry source file from an optional path argument, then runs
+/// `action` on it. A file path is compiled directly; a directory (or no path, via
+/// the working directory) resolves the entry through its `vilan.toml`.
+fn with_entry(path: Option<PathBuf>, action: impl FnOnce(&Path) -> ExitCode) -> ExitCode {
+    match resolve_entry(path) {
+        Ok(entry) => action(&entry),
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn resolve_entry(path: Option<PathBuf>) -> Result<PathBuf, String> {
+    match path {
+        // An explicit directory: compile the project rooted there.
+        Some(path) if path.is_dir() => project_entry(&path),
+        // An explicit file (or a not-yet-existing path, so `compile` can report
+        // the read error): compile it directly.
+        Some(path) => Ok(path),
+        // No path: find the enclosing project from the working directory.
+        None => {
+            let working_dir = env::current_dir()
+                .map_err(|error| format!("cannot read the working directory: {error}"))?;
+            let root = find_project_root(&working_dir).ok_or_else(|| {
+                "no `vilan.toml` found here or in any parent directory; \
+                 pass a source file to compile it directly"
+                    .to_string()
+            })?;
+            project_entry(&root)
+        }
+    }
+}
+
+/// The entry file a project's `vilan.toml` declares: `[package] entry` (relative
+/// to the project root), defaulting to `main.vl`.
+fn project_entry(root: &Path) -> Result<PathBuf, String> {
+    let manifest = root.join("vilan.toml");
+    let contents = fs::read_to_string(&manifest)
+        .map_err(|error| format!("cannot read {}: {error}", manifest.display()))?;
+    let table: toml::Table = toml::from_str(&contents)
+        .map_err(|error| format!("invalid {}: {error}", manifest.display()))?;
+    let entry = table
+        .get("package")
+        .and_then(|package| package.get("entry"))
+        .and_then(|entry| entry.as_str())
+        .unwrap_or("main.vl");
+    Ok(root.join(entry))
+}
+
+/// Walks up from `start` for the nearest directory containing a `vilan.toml`.
+fn find_project_root(start: &Path) -> Option<PathBuf> {
+    let mut directory = start;
+    loop {
+        if directory.join("vilan.toml").is_file() {
+            return Some(directory.to_path_buf());
+        }
+        directory = directory.parent()?;
     }
 }
 

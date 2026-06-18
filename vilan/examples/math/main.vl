@@ -1,0 +1,6 @@
+import std::print;
+import pkg::square::sum_of_squares;
+
+fun main() {
+	print(sum_of_squares(3, 4)); // 25
+}
