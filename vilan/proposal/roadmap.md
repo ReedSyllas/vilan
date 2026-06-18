@@ -25,11 +25,13 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
 2. **Compiler-core robustness** (S, high trust — esp. for the LSP)
    - ✅ Internal `panic!`s converted to diagnostics (commit bf434eb) — malformed input now
      degrades gracefully instead of "no program"; `catch_unwind` stays as a `.unwrap()` backstop.
-   - Remaining (low value): remove dead `prepped_struct_initializers`; decide the fate of the
-     skeletal `interpreter.rs`; address `TODO: interning` (analyzer.rs:960).
+   - ✅ Cleanup (commit 8fa1c1e): removed dead `prepped_struct_initializers`; deleted the
+     orphaned (uncompiled) `interpreter.rs`; documented the `type_id_for_type` interning decision
+     (deferred — in-place type mutation would alias shared ids; needs `Type: Hash + Eq`).
    - **Parser gaps**: (a) ✅ unary minus (`-1`, `-x`, `f(-1)`) now parses (commit ac9e26e);
-     (b) a struct literal still can't be a binary operand — `Point { .. } == x` fails (bind it
-     to a variable first); risky to fix (block vs. struct-literal ambiguity), so deferred.
+     (b) a struct literal still can't be an operator operand — `Point { .. } == x` fails (bind it
+     to a variable first); needs a `no-struct-literal` expression mode for conditions (à la Rust),
+     so deferred — now documented at the parser site. Degrades to a clean parse error.
    - **Generic-dispatch gaps** (M–L; partially fixed):
      - ✅ **Closure params** now type from the concrete receiver (commit 4960aab): a closure
        passed to a generic method types its param to the element type, so `Option<Struct>` and
