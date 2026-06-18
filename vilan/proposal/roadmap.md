@@ -91,10 +91,13 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    generation and derives (`PartialEq`/`Debug`/constructors). Needs a macro-expansion phase
    + struct reflection.
 10. **LSP semantic highlighting** (M) — semantic tokens, precision over the TextMate grammar.
-11. **More stdlib** (M, incremental) — 🚧 in progress. Done: math methods on `i32`/`f64`
-    (`abs`/`sqrt`/`pow`/`floor`/`ceil`/`round`/`min`/`max`, `@extern("Math.*")` wrappers — 6fc6eea,
-    number-math.vl). Remaining: `Display`/`Debug` + `format`, JSON, time/date, env/process,
-    `fs`/`http` expansion, `parse_f64`. Some derives want #9.
+11. **More stdlib** (M, incremental) — ✅ essentially done. Landed: math methods on `i32`/`f64`
+    (`abs`/`sqrt`/`pow`/`floor`/`ceil`/`round`/`min`/`max`, `@extern("Math.*")` — 6fc6eea); `Range`
+    + custom-iterator `next(): Option<T>` for-loops (4b3833d); `Display::to_string` (480dc77);
+    `time::now` (480dc77); `process::exit` (480dc77) + `process::args`/`env` (6e6a1e0); `str.parse_f64`;
+    `fs`/`http` already complete. **JSON deferred to #9 (derives):** structs compile to field-less
+    positional arrays (`Point{x,y}` → `[x,y]`), so faithful object serialization needs derive-based
+    field-name reflection, not a host-`JSON` bridge. `Debug` + `format` still want #9 too.
 
 ## Tier 4 — Perf, advanced, cleanup
 
