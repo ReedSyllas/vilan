@@ -1969,9 +1969,8 @@ impl<'src> Analyzer<'src> {
 
     /// Resolves a name in type position, walking outward to the nearest binding
     /// that denotes a *type* (a struct/enum/trait/module/generic, or `Self`),
-    /// skipping value bindings. So in `random.vl`'s `external fun i32(low: i32)`,
-    /// the parameter type `i32` resolves to the global `i32` struct rather than
-    /// the enclosing `i32` function that shares its name.
+    /// skipping value bindings — so a parameter type that shares its name with a
+    /// value in scope (e.g. a function) still resolves to the type, not the value.
     fn try_get_type_id_by_name(&self, name: &str, scope_id: Id) -> Option<Id> {
         let mut current = Some(scope_id);
         while let Some(scope_id) = current {
@@ -6357,9 +6356,9 @@ impl<'src> Analyzer<'src> {
 
     /// Render a type at a given recursion depth. `visiting` holds the function
     /// ids currently being expanded, so a self-referential signature stops at the
-    /// cycle instead of recursing forever — e.g. `random.vl`'s `external fun i32`,
-    /// whose name collides with the `i32` type, so a parameter type can resolve
-    /// back to the function. `depth` is a coarse backstop for any other cycle.
+    /// cycle instead of recursing forever — e.g. a function whose parameter type
+    /// shares its name and resolves back to the function. `depth` is a coarse
+    /// backstop for any other cycle.
     fn pretty_print_type_at(
         &self,
         type_: &Type,
@@ -6447,9 +6446,9 @@ impl<'src> Analyzer<'src> {
                     return;
                 };
                 // A function whose own signature refers back to it would recurse
-                // forever — e.g. `random.vl`'s `i32`, whose parameter type can
-                // resolve to the function itself (its name collides with the
-                // `i32` type). If it's already on the path, render the name alone.
+                // forever — e.g. a parameter type that shares the function's name
+                // and resolves back to it. If it's already on the path, render the
+                // name alone.
                 if visiting.contains(id) {
                     buf.push_str(&format!("fn {}", name));
                     return;
@@ -6586,7 +6585,7 @@ pub enum Intrinsic {
     StrToLowercaseAscii,
     // `str.parse_i32(): Option<i32>` -> a runtime helper returning the enum form.
     ParseI32,
-    // `random::i32(low, high): i32` -> a runtime helper over `Math.random`.
+    // `random::range_i32(low, high): i32` -> a runtime helper over `Math.random`.
     RandomI32,
 }
 
@@ -6640,7 +6639,7 @@ pub struct Program<'src> {
     pub context_run_fn_id: Option<Id>,
     pub context_get_fn_id: Option<Id>,
     // `external` std functions the transformer lowers to native JS or a runtime
-    // helper (`str.trim()`, `scan()`, `random::i32(..)`, ...), keyed by fn id.
+    // helper (`str.trim()`, `scan()`, `random::range_i32(..)`, ...), keyed by fn id.
     pub intrinsics: HashMap<Id, Intrinsic>,
     // The source `enum bool`; the transformer lowers its variants/patterns to
     // native JS booleans rather than the array form used by other enums.
@@ -7149,7 +7148,7 @@ pub fn analyze<'src>(
 
     // Capture the external std functions with built-in JS lowerings: `str`'s
     // methods (across every `impl str` block), and the module-level `scan` /
-    // `random::i32`.
+    // `random::range_i32`.
     let mut intrinsics: HashMap<Id, Intrinsic> = HashMap::new();
     if let Some(str_struct_id) = analyzer.primitive_struct_ids.get("str").copied() {
         for implementation in &analyzer.implementations {
@@ -7179,7 +7178,7 @@ pub fn analyze<'src>(
     if let Some(scan_id) = module_member("io", "scan") {
         intrinsics.insert(scan_id, Intrinsic::Scan);
     }
-    if let Some(random_id) = module_member("random", "i32") {
+    if let Some(random_id) = module_member("random", "range_i32") {
         intrinsics.insert(random_id, Intrinsic::RandomI32);
     }
 

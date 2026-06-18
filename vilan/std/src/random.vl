@@ -1,4 +1,2 @@
-// A random integer in `[low, high]` (inclusive). `i32` is the global scalar
-// type; the function shares its name, so its own signature resolves `i32` in
-// type position to the type (not this function).
-external fun i32(low: i32, high: i32): i32;
+// A random integer in `[low, high]` (inclusive).
+external fun range_i32(low: i32, high: i32): i32;
