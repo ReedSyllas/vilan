@@ -1217,6 +1217,11 @@ where
             just(Token::Op("!"))
                 .ignore_then(unary.clone())
                 .map_with(|expr, e| (Node::Unary('!', Box::new(expr)), e.span())),
+            // Prefix `-` (negation). Binary subtract lives in `sum` below, applied
+            // after this, so `a - b` is still a subtraction and `-1` / `f(-x)` parse.
+            just(Token::Op("-"))
+                .ignore_then(unary.clone())
+                .map_with(|expr, e| (Node::Unary('-', Box::new(expr)), e.span())),
             just(Token::Await)
                 .ignore_then(unary.clone())
                 .map_with(|expr, e| (Node::Await(Box::new(expr)), e.span())),

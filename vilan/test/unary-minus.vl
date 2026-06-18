@@ -1,0 +1,17 @@
+import std::print;
+
+fun id(n: i32): i32 {
+	n
+}
+
+fun main() {
+	let x = -1;
+	print(x);            // -1
+	print(-5);           // -5
+	print(id(-3));       // -3 (argument position)
+	let y = 10;
+	print(-y);           // -10
+	print(7 - 9);        // -2  (binary subtract still works)
+	print(3 - -2);       // 5   (subtract a negative)
+	print(-(2 + 3));     // -5  (negate a parenthesized expression)
+}
