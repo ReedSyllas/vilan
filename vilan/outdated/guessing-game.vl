@@ -33,7 +33,7 @@ fun main() {
 }
 
 fun play(): Signal {
-	let secret = random::range_i32(1, 100);
+	let secret = random::range(1, 100);
 	print("I have chosen a secret number from 1 to 100.");
 	print("Take a guess!");
 	for {

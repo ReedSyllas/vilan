@@ -68,9 +68,14 @@ fn helper_source(name: &str) -> &'static str {
              \treturn Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
              }"
         }
-        "__random_i32" => {
-            "function __random_i32(low, high) {\n\
+        "__random_int" => {
+            "function __random_int(low, high) {\n\
              \treturn Math.floor(Math.random() * (high - low + 1)) + low;\n\
+             }"
+        }
+        "__random_float" => {
+            "function __random_float(low, high) {\n\
+             \treturn Math.random() * (high - low) + low;\n\
              }"
         }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays, so
@@ -136,7 +141,7 @@ struct Transformer<'src> {
     // Captures introduced by an `is` test, aliased to the subject's payload
     // slots (e.g. `t[1]`) since they can't be JS bindings in expression position.
     is_bindings: HashMap<Id, js::Node<'src>>,
-    // Runtime helper functions (`__scan`, `__parse_i32`, `__random_i32`) an
+    // Runtime helper functions (`__scan`, `__parse_i32`, `__random_int`) an
     // intrinsic call needs; emitted as a prelude only when used.
     used_helpers: BTreeSet<&'static str>,
     // Host imports an `@extern` call needs, as module -> imported symbols;
@@ -1298,10 +1303,17 @@ impl<'src> Transformer<'src> {
                     vec![args.next().unwrap_or(js::Node::Void)],
                 )
             }
-            Intrinsic::RandomI32 => {
-                self.used_helpers.insert("__random_i32");
+            Intrinsic::RandomInt => {
+                self.used_helpers.insert("__random_int");
                 js::Node::Call(
-                    Box::new(js::Node::Local("__random_i32".to_string())),
+                    Box::new(js::Node::Local("__random_int".to_string())),
+                    args.collect(),
+                )
+            }
+            Intrinsic::RandomFloat => {
+                self.used_helpers.insert("__random_float");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__random_float".to_string())),
                     args.collect(),
                 )
             }

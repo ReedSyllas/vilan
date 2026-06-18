@@ -6159,6 +6159,20 @@ impl<'src> Analyzer<'src> {
                                     );
                                     self.expr_id_to_expr_map
                                         .insert(call_id, Expr::Call(call_id));
+                                    // Record the generic bindings for a generic
+                                    // function call so the transformer can
+                                    // monomorphize it even when the type arguments
+                                    // were inferred from the arguments rather than
+                                    // written explicitly (e.g. `range(0, 9)` binds
+                                    // `T = i32`). Explicit-argument calls take the
+                                    // earlier path in the transformer; this fills
+                                    // the inferred gap.
+                                    if !generic_parameter_constraint_ids.is_empty()
+                                        && !substitution_context.is_empty()
+                                    {
+                                        self.method_call_substitution
+                                            .insert(call_id, substitution_context.clone());
+                                    }
                                 }
                             }
                         } else if !matches!(target, Expr::Error) {
@@ -6585,8 +6599,10 @@ pub enum Intrinsic {
     StrToLowercaseAscii,
     // `str.parse_i32(): Option<i32>` -> a runtime helper returning the enum form.
     ParseI32,
-    // `random::range_i32(low, high): i32` -> a runtime helper over `Math.random`.
-    RandomI32,
+    // `random::range_i32`/`range_u32` -> an integer range helper over `Math.random`.
+    RandomInt,
+    // `random::range_f64` -> a float range helper over `Math.random`.
+    RandomFloat,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -6640,6 +6656,7 @@ pub struct Program<'src> {
     pub context_get_fn_id: Option<Id>,
     // `external` std functions the transformer lowers to native JS or a runtime
     // helper (`str.trim()`, `scan()`, `random::range_i32(..)`, ...), keyed by fn id.
+    // (The per-type `range_*` are forwarded to by the `Random` trait impls.)
     pub intrinsics: HashMap<Id, Intrinsic>,
     // The source `enum bool`; the transformer lowers its variants/patterns to
     // native JS booleans rather than the array form used by other enums.
@@ -7148,7 +7165,7 @@ pub fn analyze<'src>(
 
     // Capture the external std functions with built-in JS lowerings: `str`'s
     // methods (across every `impl str` block), and the module-level `scan` /
-    // `random::range_i32`.
+    // `random::range_{i32,u32,f64}` (the `Random` trait impls forward to these).
     let mut intrinsics: HashMap<Id, Intrinsic> = HashMap::new();
     if let Some(str_struct_id) = analyzer.primitive_struct_ids.get("str").copied() {
         for implementation in &analyzer.implementations {
@@ -7178,8 +7195,14 @@ pub fn analyze<'src>(
     if let Some(scan_id) = module_member("io", "scan") {
         intrinsics.insert(scan_id, Intrinsic::Scan);
     }
-    if let Some(random_id) = module_member("random", "range_i32") {
-        intrinsics.insert(random_id, Intrinsic::RandomI32);
+    for (name, intrinsic) in [
+        ("range_i32", Intrinsic::RandomInt),
+        ("range_u32", Intrinsic::RandomInt),
+        ("range_f64", Intrinsic::RandomFloat),
+    ] {
+        if let Some(id) = module_member("random", name) {
+            intrinsics.insert(id, intrinsic);
+        }
     }
 
     let clone_sites = analyzer.compute_clone_sites();

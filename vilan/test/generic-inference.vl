@@ -1,0 +1,36 @@
+import std::print;
+
+// A generic function whose type argument is inferred from its arguments (no
+// explicit `<T>`) must monomorphize per concrete type and dispatch `T::pick` to
+// that type's impl. This previously emitted a single shared, empty-bodied copy.
+
+trait Pick {
+	fun pick(a: Self, b: Self): Self;
+}
+
+struct Pair {
+	x: i32
+}
+
+impl i32 with Pick {
+	fun pick(a: i32, b: i32): i32 {
+		a + b
+	}
+}
+
+impl Pair with Pick {
+	fun pick(a: Pair, b: Pair): Pair {
+		Pair { x = a.x + b.x }
+	}
+}
+
+fun pick<T: Pick>(a: T, b: T): T {
+	T::pick(a, b)
+}
+
+fun main() {
+	// `T` is inferred from the argument types — a primitive and a struct in the
+	// same program, so two distinct monomorphizations are required.
+	print(pick(2, 3));
+	print(pick(Pair { x = 10 }, Pair { x = 20 }));
+}
