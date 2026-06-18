@@ -6597,6 +6597,24 @@ pub enum Intrinsic {
     StrTrim,
     // `str.to_lowercase_ascii()` -> native `.toLowerCase()`.
     StrToLowercaseAscii,
+    // `str.to_uppercase()` -> native `.toUpperCase()`.
+    StrToUppercase,
+    // `str.len(): i32` -> native `.length` (property read).
+    StrLen,
+    // `str.contains(needle): bool` -> native `.includes(..)`.
+    StrContains,
+    // `str.starts_with(prefix): bool` -> native `.startsWith(..)`.
+    StrStartsWith,
+    // `str.ends_with(suffix): bool` -> native `.endsWith(..)`.
+    StrEndsWith,
+    // `str.replace(from, to): str` -> native `.replaceAll(..)`.
+    StrReplace,
+    // `str.repeat(count): str` -> native `.repeat(..)`.
+    StrRepeat,
+    // `str.split(sep): List<str>` -> native `.split(..)` (returns a JS array).
+    StrSplit,
+    // `str.substring(start, end): str` -> native `.substring(..)`.
+    StrSubstring,
     // `str.parse_i32(): Option<i32>` -> a runtime helper returning the enum form.
     ParseI32,
     // `random::range_i32`/`range_u32` -> an integer range helper over `Math.random`.
@@ -7177,6 +7195,15 @@ pub fn analyze<'src>(
                 for (name, intrinsic) in [
                     ("trim", Intrinsic::StrTrim),
                     ("to_lowercase_ascii", Intrinsic::StrToLowercaseAscii),
+                    ("to_uppercase", Intrinsic::StrToUppercase),
+                    ("len", Intrinsic::StrLen),
+                    ("contains", Intrinsic::StrContains),
+                    ("starts_with", Intrinsic::StrStartsWith),
+                    ("ends_with", Intrinsic::StrEndsWith),
+                    ("replace", Intrinsic::StrReplace),
+                    ("repeat", Intrinsic::StrRepeat),
+                    ("split", Intrinsic::StrSplit),
+                    ("substring", Intrinsic::StrSubstring),
                     ("parse_i32", Intrinsic::ParseI32),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {

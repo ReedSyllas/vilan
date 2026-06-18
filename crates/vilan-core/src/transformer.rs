@@ -1280,22 +1280,38 @@ impl<'src> Transformer<'src> {
         intrinsic: Intrinsic,
         args: Vec<js::Node<'src>>,
     ) -> js::Node<'src> {
-        let method_call = |receiver: js::Node<'src>, method: &str| {
+        // A `str` method that maps directly onto a native JS method: the receiver
+        // is `self` (the first argument), the rest pass through as call args.
+        fn str_method<'a, I: Iterator<Item = js::Node<'a>>>(
+            args: &mut I,
+            native: &str,
+        ) -> js::Node<'a> {
+            let receiver = args.next().unwrap_or(js::Node::Void);
             js::Node::Call(
-                Box::new(js::Node::Property(Box::new(receiver), method.to_string())),
-                Vec::new(),
+                Box::new(js::Node::Property(Box::new(receiver), native.to_string())),
+                args.collect(),
             )
-        };
+        }
         let mut args = args.into_iter();
         match intrinsic {
             Intrinsic::Scan => {
                 self.used_helpers.insert("__scan");
                 js::Node::Call(Box::new(js::Node::Local("__scan".to_string())), Vec::new())
             }
-            Intrinsic::StrTrim => method_call(args.next().unwrap_or(js::Node::Void), "trim"),
-            Intrinsic::StrToLowercaseAscii => {
-                method_call(args.next().unwrap_or(js::Node::Void), "toLowerCase")
-            }
+            Intrinsic::StrTrim => str_method(&mut args, "trim"),
+            Intrinsic::StrToLowercaseAscii => str_method(&mut args, "toLowerCase"),
+            Intrinsic::StrToUppercase => str_method(&mut args, "toUpperCase"),
+            Intrinsic::StrContains => str_method(&mut args, "includes"),
+            Intrinsic::StrStartsWith => str_method(&mut args, "startsWith"),
+            Intrinsic::StrEndsWith => str_method(&mut args, "endsWith"),
+            Intrinsic::StrReplace => str_method(&mut args, "replaceAll"),
+            Intrinsic::StrRepeat => str_method(&mut args, "repeat"),
+            Intrinsic::StrSplit => str_method(&mut args, "split"),
+            Intrinsic::StrSubstring => str_method(&mut args, "substring"),
+            Intrinsic::StrLen => js::Node::Property(
+                Box::new(args.next().unwrap_or(js::Node::Void)),
+                "length".to_string(),
+            ),
             Intrinsic::ParseI32 => {
                 self.used_helpers.insert("__parse_i32");
                 js::Node::Call(

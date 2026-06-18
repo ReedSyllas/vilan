@@ -1,0 +1,18 @@
+import std::print;
+
+fun main() {
+	let s: str = "Hello, World";
+	print(s.len());                       // 12
+	print(s.contains("World"));           // true
+	print(s.starts_with("Hello"));        // true
+	print(s.ends_with("!"));              // false
+	print(s.to_uppercase());              // HELLO, WORLD
+	print(s.replace("o", "0"));           // Hell0, W0rld
+	print(s.substring(0, 5));             // Hello
+	print("ab".repeat(3));                // ababab
+	print("  hi  ".trim().is_empty());    // false
+	print("".is_empty());                 // true
+	for part in "a,b,c".split(",") {
+		print(part);                      // a / b / c
+	}
+}

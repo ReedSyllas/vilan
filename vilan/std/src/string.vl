@@ -2,7 +2,32 @@
 external struct str;
 
 impl str {
+	external fun len(self): i32;
+
 	external fun trim(self): str;
 
+	external fun to_uppercase(self): str;
+
 	external fun to_lowercase_ascii(self): str;
+
+	external fun contains(self, needle: str): bool;
+
+	external fun starts_with(self, prefix: str): bool;
+
+	external fun ends_with(self, suffix: str): bool;
+
+	// Replaces every occurrence of `from` with `to`.
+	external fun replace(self, from: str, to: str): str;
+
+	external fun repeat(self, count: i32): str;
+
+	// Splits on each occurrence of `separator`, returning the pieces.
+	external fun split(self, separator: str): List<str>;
+
+	// The substring in `[start, end)` (zero-based, by UTF-16 code unit).
+	external fun substring(self, start: i32, end: i32): str;
+
+	fun is_empty(self): bool {
+		self.len() == 0
+	}
 }
