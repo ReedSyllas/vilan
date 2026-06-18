@@ -538,8 +538,6 @@ pub struct Analyzer<'src> {
     // monomorphized instance of the method body (e.g. `T::default()` -> `0`).
     method_call_substitution: HashMap<Id, SubstitutionContext>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
-    prepped_struct_initializers:
-        Vec<(Id, &'src str, Vec<TypeId>, Vec<(&'src str, Id, Span)>, Span)>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
     // Deferred named type references: (target type id, name, scope, span, the
     // walked generic argument type ids). The arguments parameterize the resolved
@@ -672,7 +670,6 @@ impl<'src> Analyzer<'src> {
             binary_op_dispatch: HashMap::new(),
             method_call_substitution: HashMap::new(),
             prepped_static_accessors: Vec::new(),
-            prepped_struct_initializers: Vec::new(),
             prepped_trait_impls: Vec::new(),
             prepped_type_locals: Vec::new(),
             prepped_type_static_accessors: Vec::new(),
@@ -994,7 +991,13 @@ impl<'src> Analyzer<'src> {
     }
 
     fn type_id_for_type(&mut self, type_: Type) -> TypeId {
-        // TODO: Implement interning.
+        // Each call mints a fresh id; types are intentionally *not* interned.
+        // Interning (a `Type -> TypeId` reverse map deduping e.g. every `i32`) is a
+        // deferred, low-value optimization with a sharp edge: inference resolves a
+        // type *in place* by mutating `type_id_to_type_map[id]` — an `Unknown` slot
+        // becoming concrete, a deferred accessor id resolving — so any mutated id
+        // must stay unshared. A correct interner would have to exclude `Unknown` /
+        // `Unresolved` (and anything else later mutated) and require `Type: Hash + Eq`.
         let type_id = self.new_type_id();
         self.type_id_to_type_map.insert(type_id, type_);
         type_id

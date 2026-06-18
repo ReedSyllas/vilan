@@ -971,6 +971,12 @@ where
     // `if Foo { .. }` stays unambiguous); this folds any trailing member chain
     // onto the literal there. Each member is a field name or a call, mirroring
     // the postfix shape `MemberAccessor` resolves.
+    //
+    // Consequence: a struct literal can't be an operator operand
+    // (`Point { .. } == x`) — bind it to a variable first. Lifting that needs a
+    // `no-struct-literal` expression mode for condition positions (as in Rust),
+    // i.e. a second binary/operator chain that excludes struct literals — a larger
+    // change, deferred.
     let struct_member = identifier
         .map_with(|name, e| (Node::Accessor(name), e.span()))
         .then(
