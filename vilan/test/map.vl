@@ -38,6 +38,23 @@ fun main() {
 	print(names.get(1).unwrap_or("?")); // one
 	print(names.get(9).unwrap_or("?")); // ?
 
+	// Iteration via `keys()`/`values()` (insertion order).
+	mut letters: Map<str, i32> = Map::new();
+	letters.insert("a", 10);
+	letters.insert("b", 20);
+	letters.insert("c", 30);
+	mut key_count = 0;
+	for key in letters.keys() {
+		key_count = key_count + 1;
+	}
+	print(key_count); // 3
+	mut sum = 0;
+	for value in letters.values() {
+		sum = sum + value;
+	}
+	print(sum); // 60
+	print(letters.keys().len()); // 3
+
 	mut empty: Map<str, i32> = Map::new();
 	print(empty.is_empty()); // true
 }

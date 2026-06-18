@@ -94,6 +94,12 @@ fn helper_source(name: &str) -> &'static str {
         "__map_get" => {
             "function __map_get(map, key) {\n\treturn map.has(key) ? [ 0, __clone(map.get(key)) ] : [ 1 ];\n}"
         }
+        // `Map.keys()`/`Map.values(): List<_>` — a fresh array snapshot (cloned, so
+        // it can't alias the map's stored entries) in insertion order.
+        "__map_keys" => "function __map_keys(map) {\n\treturn [ ...map.keys() ].map(__clone);\n}",
+        "__map_values" => {
+            "function __map_values(map) {\n\treturn [ ...map.values() ].map(__clone);\n}"
+        }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays and a
         // `Set`/`Map` is a JS `Set`/`Map`, so recurse into them; everything else —
         // primitives and closures — is returned by reference (a closure is
@@ -1461,6 +1467,22 @@ impl<'src> Transformer<'src> {
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 "size".to_string(),
             ),
+            Intrinsic::MapKeys => {
+                self.used_helpers.insert("__map_keys");
+                self.used_helpers.insert("__clone");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__map_keys".to_string())),
+                    args.collect(),
+                )
+            }
+            Intrinsic::MapValues => {
+                self.used_helpers.insert("__map_values");
+                self.used_helpers.insert("__clone");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__map_values".to_string())),
+                    args.collect(),
+                )
+            }
         }
     }
 

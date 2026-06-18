@@ -6797,6 +6797,10 @@ pub enum Intrinsic {
     MapRemove,
     // `Map.len(): i32` -> native `.size` (property read).
     MapLen,
+    // `Map.keys(): List<K>` -> a runtime helper snapshotting the keys to an array.
+    MapKeys,
+    // `Map.values(): List<V>` -> a runtime helper snapshotting the values.
+    MapValues,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -7464,6 +7468,8 @@ pub fn analyze<'src>(
                     ("contains_key", Intrinsic::MapContainsKey),
                     ("remove", Intrinsic::MapRemove),
                     ("len", Intrinsic::MapLen),
+                    ("keys", Intrinsic::MapKeys),
+                    ("values", Intrinsic::MapValues),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);
