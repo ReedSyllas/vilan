@@ -2310,10 +2310,22 @@ impl<'src> Analyzer<'src> {
                                     call_arguments.1,
                                 ));
                             }
-                            _ => panic!("expected identifier"),
+                            _ => {
+                                self.diagnostics.push(Error {
+                                    span: call_subject.1,
+                                    msg: "expected a method name after `.`".to_string(),
+                                });
+                                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                            }
                         }
                     }
-                    _ => panic!("expected identifier"),
+                    _ => {
+                        self.diagnostics.push(Error {
+                            span: member.1,
+                            msg: "expected a field or method name after `.`".to_string(),
+                        });
+                        self.expr_id_to_expr_map.insert(id, Expr::Error);
+                    }
                 }
                 None
             }
@@ -3093,7 +3105,13 @@ impl<'src> Analyzer<'src> {
                 let inner_id = self.walk_expr_node(inner, scope_id);
                 Some(Expr::Await(inner_id))
             }
-            Node::ClosureType(_, _) => panic!("found a type in the expression context"),
+            Node::ClosureType(_, _) => {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "a closure type is not valid here (expected an expression)".to_string(),
+                });
+                Some(Expr::Error)
+            }
             Node::Module(name, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
@@ -4086,7 +4104,11 @@ impl<'src> Analyzer<'src> {
                         }
                         return_type
                     }
-                    x => panic!("type is not callable: {:?}", x),
+                    // Not callable. The user-facing "cannot call a non-function
+                    // value" diagnostic is emitted once during call-subject
+                    // resolution; this runs on every inference pass, so just yield
+                    // an unknown type rather than re-erroring (or panicking).
+                    _ => Type::Unknown,
                 }
             }
             Expr::Variable(variable_id) => {
