@@ -1,0 +1,43 @@
+import std::print;
+import std::map::Map;
+
+fun main() {
+	// `Map<str, i32>`: insert, lookup, overwrite, removal, size.
+	mut scores: Map<str, i32> = Map::new();
+	scores.insert("alice", 1);
+	scores.insert("bob", 2);
+	scores.insert("carol", 3);
+	print(scores.len()); // 3
+	print(scores.contains_key("bob")); // true
+	print(scores.contains_key("dave")); // false
+
+	// `get` returns `Option<V>`.
+	print(scores.get("bob").unwrap_or(0)); // 2
+	print(scores.get("dave").unwrap_or(-1)); // -1
+	print(scores.get("alice").is_some()); // true
+
+	scores.insert("bob", 22); // overwrite, not a new entry
+	print(scores.get("bob").unwrap_or(0)); // 22
+	print(scores.len()); // 3
+
+	scores.remove("bob");
+	print(scores.contains_key("bob")); // false
+	print(scores.len()); // 2
+	print(scores.is_empty()); // false
+
+	// Value semantics: a copy is independent of the original.
+	mut copy = scores;
+	copy.insert("dave", 4);
+	print(scores.contains_key("dave")); // false — original untouched
+	print(copy.contains_key("dave")); // true
+
+	// `Map<i32, str>`: integer keys, string values.
+	mut names: Map<i32, str> = Map::new();
+	names.insert(1, "one");
+	names.insert(2, "two");
+	print(names.get(1).unwrap_or("?")); // one
+	print(names.get(9).unwrap_or("?")); // ?
+
+	mut empty: Map<str, i32> = Map::new();
+	print(empty.is_empty()); // true
+}

@@ -6785,6 +6785,18 @@ pub enum Intrinsic {
     SetRemove,
     // `Set.len(): i32` -> native `.size` (property read).
     SetLen,
+    // `Map::new(): Map<K, V>` -> `new Map()`.
+    MapNew,
+    // `Map.insert(key, value)` -> native `.set(key, value)`.
+    MapInsert,
+    // `Map.get(key): Option<V>` -> a runtime helper returning the Option form.
+    MapGet,
+    // `Map.contains_key(key): bool` -> native `.has(key)`.
+    MapContainsKey,
+    // `Map.remove(key)` -> native `.delete(key)`.
+    MapRemove,
+    // `Map.len(): i32` -> native `.size` (property read).
+    MapLen,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -7252,6 +7264,15 @@ pub fn analyze<'src>(
         analyzer.primitive_struct_ids.insert("Set", set_struct_id);
     }
 
+    // The `std::map` `Map` struct, if `map.vl` loaded — same treatment as `Set`.
+    let map_struct_id = module_scopes
+        .get("map")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Map").copied());
+    if let Some(map_struct_id) = map_struct_id {
+        analyzer.primitive_struct_ids.insert("Map", map_struct_id);
+    }
+
     // The `std::context` `Context` struct, if `context.vl` loaded. Its
     // `new`/`run`/`get` method ids are captured after `build()`, once impl
     // subjects resolve. `Context` is reached only by path (`std::context::..`),
@@ -7421,6 +7442,28 @@ pub fn analyze<'src>(
                     ("contains", Intrinsic::SetContains),
                     ("remove", Intrinsic::SetRemove),
                     ("len", Intrinsic::SetLen),
+                ] {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(map_struct_id) = analyzer.primitive_struct_ids.get("Map").copied() {
+        for implementation in &analyzer.implementations {
+            let subject_is_map = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == map_struct_id
+            );
+            if subject_is_map {
+                for (name, intrinsic) in [
+                    ("new", Intrinsic::MapNew),
+                    ("insert", Intrinsic::MapInsert),
+                    ("get", Intrinsic::MapGet),
+                    ("contains_key", Intrinsic::MapContainsKey),
+                    ("remove", Intrinsic::MapRemove),
+                    ("len", Intrinsic::MapLen),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

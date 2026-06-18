@@ -89,15 +89,21 @@ fn helper_source(name: &str) -> &'static str {
         "__list_pop" => {
             "function __list_pop(list) {\n\treturn list.length === 0 ? [ 1 ] : [ 0, list.pop() ];\n}"
         }
+        // `Map.get(key): Option<V>` — returns the `Option` array form, cloning the
+        // value so the result can't alias the map (value semantics).
+        "__map_get" => {
+            "function __map_get(map, key) {\n\treturn map.has(key) ? [ 0, __clone(map.get(key)) ] : [ 1 ];\n}"
+        }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays and a
-        // `Set` is a JS `Set`, so recurse into them; everything else — primitives
-        // and closures — is returned by reference (a closure is immutable, so
-        // sharing it is a copy). Unlike `structuredClone`, this doesn't throw on
-        // functions.
+        // `Set`/`Map` is a JS `Set`/`Map`, so recurse into them; everything else —
+        // primitives and closures — is returned by reference (a closure is
+        // immutable, so sharing it is a copy). Unlike `structuredClone`, this
+        // doesn't throw on functions.
         "__clone" => {
             "function __clone(value) {\n\
              \tif (Array.isArray(value)) return value.map(__clone);\n\
              \tif (value instanceof Set) return new Set([ ...value ].map(__clone));\n\
+             \tif (value instanceof Map) return new Map([ ...value ].map(([ k, v ]) => [ __clone(k), __clone(v) ]));\n\
              \treturn value;\n\
              }"
         }
@@ -1433,6 +1439,25 @@ impl<'src> Transformer<'src> {
             Intrinsic::SetContains => native_method(&mut args, "has"),
             Intrinsic::SetRemove => native_method(&mut args, "delete"),
             Intrinsic::SetLen => js::Node::Property(
+                Box::new(args.next().unwrap_or(js::Node::Void)),
+                "size".to_string(),
+            ),
+            // `Map::new()` -> `new Map()` (no constructor args).
+            Intrinsic::MapNew => {
+                js::Node::Call(Box::new(js::Node::Local("new Map".to_string())), Vec::new())
+            }
+            Intrinsic::MapInsert => native_method(&mut args, "set"),
+            Intrinsic::MapGet => {
+                self.used_helpers.insert("__map_get");
+                self.used_helpers.insert("__clone");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__map_get".to_string())),
+                    args.collect(),
+                )
+            }
+            Intrinsic::MapContainsKey => native_method(&mut args, "has"),
+            Intrinsic::MapRemove => native_method(&mut args, "delete"),
+            Intrinsic::MapLen => js::Node::Property(
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 "size".to_string(),
             ),
