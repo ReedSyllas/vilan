@@ -2,10 +2,12 @@
 //! handlers run against it: position→entity lookup, hover, go-to-definition,
 //! find-references, and rename.
 
+use std::collections::HashSet;
 use std::path::Path;
 
-use vilan_core::analyzer::{Expr, SourceId};
+use vilan_core::analyzer::{Expr, Implementation, SourceId};
 use vilan_core::id::Id;
+use vilan_core::type_::Type;
 use vilan_core::{Error, Program, Span, analyze_source};
 
 use crate::line_index::LineIndex;
@@ -51,6 +53,34 @@ pub struct Symbol {
     pub selection: Span,
     pub children: Vec<Symbol>,
 }
+
+/// A completion candidate offered at the cursor (mapped to an LSP `CompletionItem`
+/// by the server).
+pub struct Completion {
+    pub label: String,
+    pub kind: CompletionKind,
+}
+
+/// The category of a completion, for its editor icon.
+pub enum CompletionKind {
+    Function,
+    Method,
+    Field,
+    Struct,
+    Enum,
+    EnumVariant,
+    Trait,
+    Variable,
+    Module,
+    Keyword,
+}
+
+/// The language keywords offered in scope-position completion.
+const KEYWORDS: &[&str] = &[
+    "fun", "struct", "enum", "impl", "trait", "let", "mut", "own", "import", "use", "mod", "for",
+    "in", "is", "match", "if", "else", "async", "await", "return", "ret", "jump", "type", "with",
+    "export", "external", "true", "false", "null",
+];
 
 pub struct Document {
     pub line_index: LineIndex,
@@ -549,5 +579,364 @@ impl Document {
             });
         }
         symbols
+    }
+
+    /// Completion candidates at `offset`, dispatched by the syntax just before the
+    /// cursor: members after `.`, path items after `::`, else names in scope plus
+    /// keywords. The editor filters the list by whatever prefix is being typed.
+    pub fn completion(&self, offset: usize) -> Vec<Completion> {
+        let Some(program) = self.program.as_ref() else {
+            return Vec::new();
+        };
+        let text = self.line_index.text();
+        let bytes = text.as_bytes();
+        // Scan back over the partial identifier the user is typing to reach the
+        // syntactic context (`.`, `::`, or open scope) that drives the candidates.
+        let mut start = offset.min(bytes.len());
+        while start > 0 && is_identifier_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        if start >= 1 && bytes[start - 1] == b'.' {
+            return self.member_completions(program, start - 1);
+        }
+        if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
+            return self.path_completions(program, text, start - 2);
+        }
+        self.scope_completions(program, offset)
+    }
+
+    /// Fields and methods of the receiver value ending just before the `.` at
+    /// `dot_offset`.
+    fn member_completions(&self, program: &Program, dot_offset: usize) -> Vec<Completion> {
+        let Some(type_id) = self.receiver_nominal_id(program, dot_offset) else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        if let Some(structure) = program.structs.get(&type_id) {
+            for field in &structure.fields {
+                items.push(Completion {
+                    label: field.name.to_string(),
+                    kind: CompletionKind::Field,
+                });
+            }
+        }
+        self.push_methods(program, type_id, &mut items);
+        items
+    }
+
+    /// The nominal struct/enum id of the receiver value ending just before the `.`
+    /// at `dot_offset`.
+    fn receiver_nominal_id(&self, program: &Program, dot_offset: usize) -> Option<Id> {
+        // A bare name (`p.`): resolve through scope, or — when the cursor's own
+        // statement failed to parse and dropped its local scope — the nearest
+        // same-file binding of that name, then read its declared type. Robust while
+        // the buffer is mid-edit, which is exactly when completion fires.
+        if let Some(name) = identifier_ending_at(self.line_index.text(), dot_offset) {
+            let binding = self
+                .binding_in_scope(program, name, dot_offset)
+                .or_else(|| self.same_file_variable(program, name, dot_offset));
+            if let Some(nominal) = binding.and_then(|id| self.binding_nominal_id(program, id)) {
+                return Some(nominal);
+            }
+        }
+        // A complex receiver (`foo().`, `a.b.`): the parsed entity's rendered type.
+        dot_offset
+            .checked_sub(1)
+            .and_then(|offset| self.entity_at(offset))
+            .and_then(|receiver| self.hover_label(program, receiver))
+            .and_then(|label| self.nominal_id_by_name(program, base_type_name(&label)))
+    }
+
+    /// The nominal struct/enum id a `let`/parameter binding's declared type names.
+    fn binding_nominal_id(&self, program: &Program, binding: Id) -> Option<Id> {
+        let type_id = program
+            .variables
+            .get(&binding)
+            .map(|variable| variable.type_id)
+            .or_else(|| {
+                program
+                    .parameters
+                    .get(&binding)
+                    .map(|parameter| parameter.type_id)
+            })?;
+        match program.type_id_to_type_map.get(&type_id)? {
+            Type::Struct(id, _) | Type::Enum(id, _) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The nearest same-file `let`/`mut` binding named `name` declared before
+    /// `offset` — a fallback for when the cursor's statement failed to parse and so
+    /// dropped its enclosing scope from the analysis.
+    fn same_file_variable(&self, program: &Program, name: &str, offset: usize) -> Option<Id> {
+        let mut best: Option<(usize, Id)> = None;
+        for (id, variable) in &program.variables {
+            let start = variable.name_span.into_range().start;
+            if variable.name == name
+                && start < offset
+                && program.source_of(*id) == Some(SourceId(0))
+                && best.is_none_or(|(best_start, _)| start > best_start)
+            {
+                best = Some((start, *id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// Items reachable through `left::` — an enum's variants and methods, a
+    /// struct's methods, or a module's members — where `left` is the identifier
+    /// ending just before the `::` at `colon_offset`.
+    fn path_completions(
+        &self,
+        program: &Program,
+        text: &str,
+        colon_offset: usize,
+    ) -> Vec<Completion> {
+        let Some(left) = identifier_ending_at(text, colon_offset) else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        for (enum_id, enumeration) in &program.enums {
+            if enumeration.name == left {
+                for variant in &enumeration.variants {
+                    items.push(Completion {
+                        label: variant.name.to_string(),
+                        kind: CompletionKind::EnumVariant,
+                    });
+                }
+                self.push_methods(program, *enum_id, &mut items);
+            }
+        }
+        for (struct_id, structure) in &program.structs {
+            if structure.name == left {
+                self.push_methods(program, *struct_id, &mut items);
+            }
+        }
+        for module in program.modules.values() {
+            if module.name == left {
+                if let Some(scope) = program.scopes.get(&module.body.1) {
+                    for (name, id) in &scope.name_to_id_map {
+                        items.push(Completion {
+                            label: name.to_string(),
+                            kind: self.kind_of(program, *id),
+                        });
+                    }
+                }
+            }
+        }
+        items
+    }
+
+    /// Names visible at `offset` (the cursor's scope, then each enclosing scope up
+    /// to global) plus the language keywords.
+    fn scope_completions(&self, program: &Program, offset: usize) -> Vec<Completion> {
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        let mut scope_id = self.scope_at(program, offset);
+        while let Some(id) = scope_id {
+            let Some(scope) = program.scopes.get(&id) else {
+                break;
+            };
+            for (name, entity_id) in &scope.name_to_id_map {
+                if seen.insert(*name) {
+                    items.push(Completion {
+                        label: name.to_string(),
+                        kind: self.kind_of(program, *entity_id),
+                    });
+                }
+            }
+            scope_id = scope.parent_id;
+        }
+        for keyword in KEYWORDS {
+            items.push(Completion {
+                label: keyword.to_string(),
+                kind: CompletionKind::Keyword,
+            });
+        }
+        items
+    }
+
+    /// The scope of the entity at — or nearest before — the cursor, so the current
+    /// function's locals are in scope even when the cursor sits in fresh text.
+    fn scope_at(&self, program: &Program, offset: usize) -> Option<Id> {
+        let entity = self.entity_at(offset).or_else(|| {
+            self.entity_spans
+                .iter()
+                .filter(|(_, end, _)| *end <= offset)
+                .max_by_key(|(_, end, _)| *end)
+                .map(|(_, _, id)| *id)
+        })?;
+        program.entity_scope_map.get(&entity).copied()
+    }
+
+    /// The binding `name` resolves to in the scope at `offset` (searching the
+    /// enclosing scopes up to global) — a local, parameter, or top-level item.
+    fn binding_in_scope(&self, program: &Program, name: &str, offset: usize) -> Option<Id> {
+        let mut scope_id = self.scope_at(program, offset);
+        while let Some(id) = scope_id {
+            let scope = program.scopes.get(&id)?;
+            if let Some(binding) = scope.name_to_id_map.get(name) {
+                return Some(*binding);
+            }
+            scope_id = scope.parent_id;
+        }
+        None
+    }
+
+    /// Appends the method names declared in `type_id`'s impl blocks.
+    fn push_methods(&self, program: &Program, type_id: Id, items: &mut Vec<Completion>) {
+        for implementation in &program.implementations {
+            if self.impl_subject_id(program, implementation) == Some(type_id) {
+                for name in implementation.declarations.keys() {
+                    items.push(Completion {
+                        label: name.to_string(),
+                        kind: CompletionKind::Method,
+                    });
+                }
+            }
+        }
+    }
+
+    /// The nominal struct/enum id an impl's subject names, ignoring type arguments.
+    fn impl_subject_id(&self, program: &Program, implementation: &Implementation) -> Option<Id> {
+        match program.type_id_to_type_map.get(&implementation.subject)? {
+            Type::Struct(id, _) | Type::Enum(id, _) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The struct or enum named `name` (type arguments already stripped).
+    fn nominal_id_by_name(&self, program: &Program, name: &str) -> Option<Id> {
+        program
+            .structs
+            .iter()
+            .find(|(_, structure)| structure.name == name)
+            .map(|(id, _)| *id)
+            .or_else(|| {
+                program
+                    .enums
+                    .iter()
+                    .find(|(_, enumeration)| enumeration.name == name)
+                    .map(|(id, _)| *id)
+            })
+    }
+
+    /// The completion category for a name bound in a scope.
+    fn kind_of(&self, program: &Program, id: Id) -> CompletionKind {
+        if program.functions.contains_key(&id) || program.external_functions.contains_key(&id) {
+            CompletionKind::Function
+        } else if program.structs.contains_key(&id) {
+            CompletionKind::Struct
+        } else if program.enums.contains_key(&id) {
+            CompletionKind::Enum
+        } else if program.traits.contains_key(&id) {
+            CompletionKind::Trait
+        } else if program.modules.contains_key(&id) {
+            CompletionKind::Module
+        } else {
+            CompletionKind::Variable
+        }
+    }
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The nominal name in a rendered type label: `struct Point` -> `Point`,
+/// `enum Option<i32>` -> `Option` (drops the `struct`/`enum`/`trait` prefix the
+/// type renderer adds, plus any type arguments and surrounding whitespace).
+fn base_type_name(label: &str) -> &str {
+    let label = label.trim();
+    let label = ["struct ", "enum ", "trait "]
+        .iter()
+        .find_map(|prefix| label.strip_prefix(prefix))
+        .unwrap_or(label);
+    label.split('<').next().unwrap_or(label).trim()
+}
+
+/// The identifier ending at byte `end` in `text`, if any.
+fn identifier_ending_at(text: &str, end: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut start = end.min(bytes.len());
+    while start > 0 && is_identifier_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    (start < end).then(|| &text[start..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn std_root() -> PathBuf {
+        std::env::var_os("VILAN_STD")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src"))
+    }
+
+    /// The completion labels offered at the cursor marked `|` in `src`.
+    fn completions_at_cursor(src: &str) -> Vec<String> {
+        let offset = src
+            .find('|')
+            .expect("test source needs a `|` cursor marker");
+        let text = src.replace('|', "");
+        let document = Document::analyze(&text, &std_root(), Path::new("test.vl"));
+        document
+            .completion(offset)
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect()
+    }
+
+    #[test]
+    fn member_completion_lists_fields_and_methods() {
+        let labels = completions_at_cursor(
+            "struct Point { x: i32, y: i32 }\n\
+             impl Point { fun sum(self): i32 { self.x + self.y } }\n\
+             fun main() {\n\tlet p = Point { x = 1, y = 2 };\n\tp.|x\n}\n",
+        );
+        assert!(labels.contains(&"x".to_string()), "fields: {labels:?}");
+        assert!(labels.contains(&"y".to_string()), "fields: {labels:?}");
+        assert!(labels.contains(&"sum".to_string()), "methods: {labels:?}");
+    }
+
+    #[test]
+    fn member_completion_on_incomplete_receiver() {
+        // The realistic moment: `p.` typed with nothing after it yet.
+        let labels = completions_at_cursor(
+            "struct Point { x: i32, y: i32 }\n\
+             fun main() {\n\tlet p = Point { x = 1, y = 2 };\n\tp.|\n}\n",
+        );
+        assert!(
+            labels.contains(&"x".to_string()),
+            "incomplete member: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn scope_completion_includes_top_level_and_keywords() {
+        let labels = completions_at_cursor(
+            "fun helper(): i32 { 42 }\nfun main() {\n\tlet value = hel|\n}\n",
+        );
+        assert!(
+            labels.contains(&"helper".to_string()),
+            "top-level: {labels:?}"
+        );
+        assert!(labels.contains(&"fun".to_string()), "keyword: {labels:?}");
+    }
+
+    #[test]
+    fn path_completion_lists_enum_variants() {
+        let labels = completions_at_cursor(
+            "enum Color { Red, Green, Blue }\nfun main() {\n\tlet c = Color::|\n}\n",
+        );
+        assert!(labels.contains(&"Red".to_string()), "variants: {labels:?}");
+        assert!(
+            labels.contains(&"Green".to_string()),
+            "variants: {labels:?}"
+        );
+        assert!(labels.contains(&"Blue".to_string()), "variants: {labels:?}");
     }
 }

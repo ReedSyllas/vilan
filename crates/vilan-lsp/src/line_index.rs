@@ -42,6 +42,12 @@ impl LineIndex {
         }
     }
 
+    /// The document's source text (for completion's backward scan over the
+    /// characters preceding the cursor).
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// The byte offset for an LSP position.
     pub fn offset(&self, position: Position) -> usize {
         let line_start = self

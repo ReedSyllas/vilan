@@ -16,12 +16,36 @@ use tower_lsp::{Client, LanguageServer, LspService, Server, jsonrpc::Result};
 use vilan_core::Span;
 use vilan_core::analyzer::SourceId;
 
-use crate::document::{Document, Symbol, SymbolKind as VilanSymbolKind, hash_text};
+use crate::document::{
+    Completion, CompletionKind as VilanCompletionKind, Document, Symbol,
+    SymbolKind as VilanSymbolKind, hash_text,
+};
 use crate::line_index::LineIndex;
 
 /// How long to wait after the last edit before re-analyzing, so a burst of
 /// keystrokes collapses to a single analysis instead of one per character.
 const DEBOUNCE_MS: u64 = 150;
+
+/// Convert a Vilan completion candidate to an LSP `CompletionItem`.
+fn to_completion_item(completion: Completion) -> CompletionItem {
+    let kind = match completion.kind {
+        VilanCompletionKind::Function => CompletionItemKind::FUNCTION,
+        VilanCompletionKind::Method => CompletionItemKind::METHOD,
+        VilanCompletionKind::Field => CompletionItemKind::FIELD,
+        VilanCompletionKind::Struct => CompletionItemKind::STRUCT,
+        VilanCompletionKind::Enum => CompletionItemKind::ENUM,
+        VilanCompletionKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
+        VilanCompletionKind::Trait => CompletionItemKind::INTERFACE,
+        VilanCompletionKind::Variable => CompletionItemKind::VARIABLE,
+        VilanCompletionKind::Module => CompletionItemKind::MODULE,
+        VilanCompletionKind::Keyword => CompletionItemKind::KEYWORD,
+    };
+    CompletionItem {
+        label: completion.label,
+        kind: Some(kind),
+        ..Default::default()
+    }
+}
 
 /// Convert a Vilan outline node to an LSP `DocumentSymbol`.
 #[allow(deprecated)]
@@ -198,6 +222,12 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    // `.` and `:` (the second `:` of `::`) re-trigger completion so
+                    // member/path candidates appear without a manual invoke.
+                    trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -259,6 +289,21 @@ impl LanguageServer for Backend {
             contents: HoverContents::Scalar(MarkedString::String(label)),
             range: None,
         }))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let offset = document.line_index.offset(position);
+        let items = document
+            .completion(offset)
+            .into_iter()
+            .map(to_completion_item)
+            .collect();
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn goto_definition(
