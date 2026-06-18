@@ -1,0 +1,16 @@
+import std::print;
+
+fun main() {
+	mut xs = List::new();
+	xs.push(1);
+	xs.push(2);
+	xs.push(3);
+	xs.push(4);
+
+	print(xs.len());                                 // 4
+	print(xs.is_empty());                            // false
+	print(xs.map(|n| n * 10).fold(0, |a, b| a + b)); // 100
+	print(xs.filter(|n| n > 2).len());               // 2
+	print(xs.filter(|n| n > 5).len());               // 0
+	xs.for_each(|n| print(n));                       // 1 2 3 4
+}

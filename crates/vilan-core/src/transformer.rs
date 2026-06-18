@@ -1308,7 +1308,7 @@ impl<'src> Transformer<'src> {
             Intrinsic::StrRepeat => str_method(&mut args, "repeat"),
             Intrinsic::StrSplit => str_method(&mut args, "split"),
             Intrinsic::StrSubstring => str_method(&mut args, "substring"),
-            Intrinsic::StrLen => js::Node::Property(
+            Intrinsic::StrLen | Intrinsic::ListLen => js::Node::Property(
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 "length".to_string(),
             ),

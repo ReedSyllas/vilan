@@ -10,6 +10,47 @@ impl List<type T> {
 	external fun new(): List<T>;
 
 	external fun push(&mut self, item: T): void;
+
+	external fun len(self): i32;
+
+	fun is_empty(self): bool {
+		self.len() == 0
+	}
+
+	// A new list with `fn` applied to every element.
+	fun map<U>(self, fn: |T| U): List<U> {
+		mut result = List::new();
+		for item in self {
+			result.push(fn(item));
+		}
+		result
+	}
+
+	// A new list of the elements for which `predicate` holds.
+	fun filter(self, predicate: |T| bool): List<T> {
+		mut result = List::new();
+		for item in self {
+			if predicate(item) {
+				result.push(item);
+			}
+		}
+		result
+	}
+
+	// Combines the elements left-to-right, starting from `init`.
+	fun fold<B>(self, init: B, fn: |B, T| B): B {
+		mut accumulator = init;
+		for item in self {
+			accumulator = fn(accumulator, item);
+		}
+		accumulator
+	}
+
+	fun for_each(self, fn: |T| void): void {
+		for item in self {
+			fn(item);
+		}
+	}
 }
 
 // `sum`/`product` seed with the first element and fall back to `T::default()`
@@ -49,6 +90,6 @@ impl List<type T: Mul + Default> {
 }
 
 // DEFERRED: `iter` (the `Iterable` trait) needs a concrete `List` iterator
-// (returning `ListIterator<T>`, not the abstract `Iterator<T>`) plus `length`/
-// `get` array intrinsics and mutable iterator state. `for x in myList` and
-// `sum`/`product` work today via native `for...of` without it.
+// (returning `ListIterator<T>`, not the abstract `Iterator<T>`) plus a `get`
+// intrinsic and mutable iterator state. `for x in myList`, `len`/`map`/`filter`/
+// `fold`/`for_each`, and `sum`/`product` work today via native `for...of`.

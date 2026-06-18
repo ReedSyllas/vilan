@@ -6621,6 +6621,8 @@ pub enum Intrinsic {
     RandomInt,
     // `random::range_f64` -> a float range helper over `Math.random`.
     RandomFloat,
+    // `List.len(): i32` -> native `.length` (property read).
+    ListLen,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -7206,6 +7208,21 @@ pub fn analyze<'src>(
                     ("substring", Intrinsic::StrSubstring),
                     ("parse_i32", Intrinsic::ParseI32),
                 ] {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(list_struct_id) = analyzer.primitive_struct_ids.get("List").copied() {
+        for implementation in &analyzer.implementations {
+            let subject_is_list = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == list_struct_id
+            );
+            if subject_is_list {
+                for (name, intrinsic) in [("len", Intrinsic::ListLen)] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);
                     }
