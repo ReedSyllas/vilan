@@ -48,10 +48,14 @@ enum Command {
         #[arg(short, long)]
         debug: bool,
     },
-    /// Build and run a source file. (Not implemented yet.)
+    /// Build and run a source file, forwarding any trailing arguments to the
+    /// program (reach them with `process::args()`).
     Run {
         /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
         file: Option<PathBuf>,
+        /// Arguments passed through to the running program (after the file).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Format vilan source files. (Not implemented yet.)
     Fmt {
@@ -73,7 +77,7 @@ fn main() -> ExitCode {
             debug,
         } => with_entry(file, |entry| build(entry, stdout, debug)),
         Command::Check { file, debug } => with_entry(file, |entry| check(entry, debug)),
-        Command::Run { file } => with_entry(file, run),
+        Command::Run { file, args } => with_entry(file, |entry| run(entry, &args)),
         Command::Test { path } => test(path),
         // `fmt` awaits the formatter.
         Command::Fmt { .. } => unimplemented_command("fmt"),
@@ -362,8 +366,9 @@ fn check(file: &Path, emit_debug: bool) -> ExitCode {
 }
 
 /// Compiles `file`, then executes the JavaScript with Node.js — propagating its
-/// exit code, with stdin/stdout/stderr connected to the terminal.
-fn run(file: &Path) -> ExitCode {
+/// exit code, with stdin/stdout/stderr connected to the terminal. `args` are
+/// forwarded to the program, reachable through `process::args()`.
+fn run(file: &Path, args: &[String]) -> ExitCode {
     let javascript = match compile_to_js(file, false) {
         Ok(javascript) => javascript,
         Err(code) => return code,
@@ -375,7 +380,12 @@ fn run(file: &Path) -> ExitCode {
         eprintln!("error: cannot write {}: {error}", script.display());
         return ExitCode::FAILURE;
     }
-    let status = std::process::Command::new("node").arg(&script).status();
+    // `node <script> <args...>` — `process.argv` becomes `[node, script, ...args]`,
+    // so the program's `args()` (argv.slice(2)) sees exactly `args`.
+    let status = std::process::Command::new("node")
+        .arg(&script)
+        .args(args)
+        .status();
     let _ = fs::remove_file(&script);
     match status {
         Ok(status) => match status.code() {
