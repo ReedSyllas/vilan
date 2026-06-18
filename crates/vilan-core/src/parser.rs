@@ -1205,7 +1205,16 @@ where
     let member_accessor = call
         .clone()
         .foldl_with(
-            just(Token::Ctrl('.')).ignore_then(call).repeated(),
+            // A trailing `.` with no member yet (`p.`, mid-edit) recovers to an
+            // `Error` member rather than failing the whole statement — so the
+            // receiver still analyzes, which the language server's member
+            // completion relies on. A complete `a.b` always takes the `Some` path,
+            // so valid programs parse identically.
+            just(Token::Ctrl('.'))
+                .map_with(|_, e| e.span())
+                .then(call.or_not())
+                .map(|(dot_span, member)| member.unwrap_or((Node::Error, dot_span)))
+                .repeated(),
             |subject, member, e| {
                 (
                     Node::MemberAccessor(Box::new(subject), Box::new(member)),
