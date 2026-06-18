@@ -7,6 +7,7 @@ pub mod async_infer;
 pub mod call_graph;
 pub mod context;
 pub mod error;
+pub mod formatter;
 pub mod id;
 pub mod lexer;
 pub mod node;
