@@ -1,0 +1,18 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::process::{ args, env };
+
+fun main() {
+	// `args()` is the invocation tail; print how many were passed.
+	let arguments = args();
+	print(arguments.len());
+
+	// A set variable reads back as `Some`.
+	match env("VILAN_TEST_VAR") {
+		Some(let value) => print(value),
+		None => print("unset"),
+	}
+
+	// An unset variable is `None`.
+	print(env("DEFINITELY_NOT_SET_XYZ").unwrap_or("unset"));
+}

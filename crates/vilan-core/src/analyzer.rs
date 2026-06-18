@@ -6850,6 +6850,10 @@ pub enum Intrinsic {
     RandomInt,
     // `random::range_f64` -> a float range helper over `Math.random`.
     RandomFloat,
+    // `process::args(): List<str>` -> the script's arguments (`process.argv` tail).
+    Args,
+    // `process::env(key): Option<str>` -> a runtime helper returning the enum form.
+    Env,
     // `List.len(): i32` -> native `.length` (property read).
     ListLen,
     // `List.get(i): Option<T>` -> a bounds-checked runtime helper (Option form).
@@ -7638,6 +7642,12 @@ pub fn analyze<'src>(
         if let Some(id) = module_member("random", name) {
             intrinsics.insert(id, intrinsic);
         }
+    }
+    if let Some(args_id) = module_member("process", "args") {
+        intrinsics.insert(args_id, Intrinsic::Args);
+    }
+    if let Some(env_id) = module_member("process", "env") {
+        intrinsics.insert(env_id, Intrinsic::Env);
     }
 
     let clone_sites = analyzer.compute_clone_sites();

@@ -84,6 +84,23 @@ fn helper_source(name: &str) -> &'static str {
              \treturn Math.random() * (high - low) + low;\n\
              }"
         }
+        // `process::args()` — the script's own arguments: `process.argv` is
+        // `[node, script, ...args]`, so the tail past index 2 is what the program
+        // was invoked with. `slice` returns a fresh array (no aliasing the live
+        // `argv`), matching `List` value semantics.
+        "__args" => {
+            "function __args() {\n\
+             \treturn process.argv.slice(2);\n\
+             }"
+        }
+        // `process::env(key): Option<str>` — a missing variable reads back
+        // `undefined`, which becomes `None`; otherwise `Some(value)`.
+        "__env" => {
+            "function __env(key) {\n\
+             \tconst value = process.env[key];\n\
+             \treturn value === undefined ? [ 1 ] : [ 0, value ];\n\
+             }"
+        }
         // `List.get(i): Option<T>` — bounds-checked, returning the `Option` array
         // form. Clones the element so the returned value can't alias the list
         // (value semantics; views are second-class and can't escape).
@@ -1448,6 +1465,17 @@ impl<'src> Transformer<'src> {
                 js::Node::Call(
                     Box::new(js::Node::Local("__random_float".to_string())),
                     args.collect(),
+                )
+            }
+            Intrinsic::Args => {
+                self.used_helpers.insert("__args");
+                js::Node::Call(Box::new(js::Node::Local("__args".to_string())), Vec::new())
+            }
+            Intrinsic::Env => {
+                self.used_helpers.insert("__env");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__env".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
                 )
             }
             // `Set::new()` -> `new Set()` (no constructor args).
