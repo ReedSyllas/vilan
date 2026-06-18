@@ -1170,12 +1170,30 @@ impl<'src> Analyzer<'src> {
         view_bindings
     }
 
+    /// Whether a call is an enum-variant constructor (`Some(x)`, `Ok(x)`) rather
+    /// than an ordinary function call — its arguments become the payload of a
+    /// value-semantics enum, so a view among them escapes. The callee resolves to
+    /// an `EnumVariant`, directly or through a `Local` name reference.
+    fn call_is_variant_constructor(&self, call_id: Id) -> bool {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return false;
+        };
+        let mut subject = function_call.subject_id;
+        if let Some(Expr::Local(target)) = self.expr_id_to_expr_map.get(&subject) {
+            subject = *target;
+        }
+        matches!(
+            self.expr_id_to_expr_map.get(&subject),
+            Some(Expr::EnumVariant(..))
+        )
+    }
+
     /// Rule 3 (second-class): a view may not escape its scope — it cannot be
-    /// returned, stored in a struct field, or placed in a collection. (Passing a
-    /// view as an argument, or binding it to a local, is fine.) This is what
-    /// removes lifetimes: a view structurally cannot outlive its target.
-    /// Returning a borrow derived from an argument is recovered later by
-    /// `borrows` (Phase 5).
+    /// returned, stored in a struct field, placed in a collection, or carried in
+    /// an enum payload. (Passing a view as an argument, or binding it to a local,
+    /// is fine.) This is what removes lifetimes: a view structurally cannot
+    /// outlive its target. Returning a borrow derived from an argument is
+    /// recovered later by `borrows` (Phase 5).
     fn check_view_escape(&mut self) {
         let view_bindings = self.compute_view_bindings();
         // A closure that captures a view is itself second-class (P4c): it cannot
@@ -1204,6 +1222,21 @@ impl<'src> Analyzer<'src> {
                         .copied()
                         .filter(|id| self.escapes_as_view(*id, &view_bindings, &capturing)),
                 ),
+                // A view passed to an enum-variant constructor (`Some(&mut x)`) is
+                // stored in the payload by value, so it escapes — the same as a
+                // struct field. (A view passed to an ordinary function is fine; the
+                // callee only borrows it for the call, so those calls are skipped.)
+                Expr::Call(call_id) if self.call_is_variant_constructor(*call_id) => {
+                    if let Some(function_call) = self.function_calls.get(call_id) {
+                        escapes.extend(
+                            function_call
+                                .argument_ids
+                                .iter()
+                                .copied()
+                                .filter(|id| self.escapes_as_view(*id, &view_bindings, &capturing)),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -1225,7 +1258,7 @@ impl<'src> Analyzer<'src> {
         for expr_id in escapes {
             self.diagnostics.push(Error {
                 span: **self.span_map.get(&expr_id).unwrap_or(&&EMPTY_SPAN),
-                msg: "a view cannot escape its scope: it may not be returned, stored in a field, or placed in a collection. Return an owned value or a handle instead.".to_string(),
+                msg: "a view cannot escape its scope: it may not be returned, stored in a field, placed in a collection, or carried in an enum payload. Return an owned value or a handle instead.".to_string(),
             });
         }
     }
