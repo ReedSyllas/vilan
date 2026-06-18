@@ -7093,34 +7093,77 @@ pub fn analyze<'src>(
     let lib_source_id = SourceId((sources.len() - 1) as u32);
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
     let mut loaded: Vec<(&str, &Spanned<NodeList>, Id, SourceId)> = Vec::new();
-    let mut to_load: Vec<&str> = lib_ast
+    // A module's package: `Std` modules resolve under `std_root` and are
+    // addressable as both `std::name` and `pkg::name`; `Pkg` modules — the entry
+    // program's own multi-file siblings — resolve under `pkg_root` (the entry's
+    // directory) and are addressable only as `pkg::name`.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Origin {
+        Std,
+        Pkg,
+    }
+    // The entry program's package root: the directory its `import pkg::..` siblings
+    // live in. When it equals `std_root` we're compiling std itself (or a std file
+    // opened in an editor), so every module is `Std` and the original single-root
+    // behavior is preserved exactly.
+    let pkg_root = entry_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let compiling_std = match (
+        std::fs::canonicalize(pkg_root),
+        std::fs::canonicalize(std_root),
+    ) {
+        (Ok(pkg_canonical), Ok(std_canonical)) => pkg_canonical == std_canonical,
+        _ => pkg_root == std_root,
+    };
+    let entry_pkg_origin = if compiling_std {
+        Origin::Std
+    } else {
+        Origin::Pkg
+    };
+
+    let mut to_load: Vec<(Origin, &str)> = lib_ast
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
-        .unwrap_or_default();
-    // The entry program addresses std submodules by path (`std::option::..`),
-    // so its imports also seed the reachable set. Names that aren't modules
-    // (e.g. the `print` in `std::print`) simply find no file and are skipped.
-    to_load.extend(collect_module_refs(&nodes.0, "std"));
-    // When the entry file *is* a std module (e.g. opened directly in an editor),
-    // it references its siblings via the internal `pkg::` root; seed those too so
-    // its imports resolve. A normal program uses no `pkg::` paths, so this is a
-    // no-op for it.
-    to_load.extend(collect_module_refs(&nodes.0, "pkg"));
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| (Origin::Std, name))
+        .collect();
+    // The entry program addresses std submodules by path (`std::option::..`), so
+    // its imports also seed the reachable set. Names that aren't modules (e.g. the
+    // `print` in `std::print`) simply find no file and are skipped.
+    to_load.extend(
+        collect_module_refs(&nodes.0, "std")
+            .into_iter()
+            .map(|name| (Origin::Std, name)),
+    );
+    // The entry's `pkg::sibling` references pull in its own package's modules from
+    // `pkg_root`. When the entry is itself a std file (`compiling_std`) these are
+    // std siblings, so the origin stays `Std` and the load is unchanged.
+    to_load.extend(
+        collect_module_refs(&nodes.0, "pkg")
+            .into_iter()
+            .map(|name| (entry_pkg_origin, name)),
+    );
     // `bool`, `List`, and `null` are core primitives, so their (dependency-free)
     // modules are always loaded even when not imported.
-    to_load.push("boolean");
-    to_load.push("list");
-    to_load.push("null");
-    to_load.push("promise");
+    for core in ["boolean", "list", "null", "promise"] {
+        to_load.push((Origin::Std, core));
+    }
     // Set when the entry file is itself a std module (a std file opened directly
     // in an editor): it is then analyzed *as* that module from the editor's
     // buffer rather than loaded a second time from disk, which would create
     // duplicate, non-unifiable types. The separate entry walk is skipped below.
     let mut entry_is_module = false;
-    while let Some(name) = to_load.pop() {
+    while let Some((origin, name)) = to_load.pop() {
         if module_scopes.contains_key(name) {
             continue;
         }
-        let module_path = std_module_path(std_root, &format!("{name}.vl"));
+        let root = match origin {
+            Origin::Std => std_root,
+            Origin::Pkg => pkg_root,
+        };
+        let module_path = std_module_path(root, &format!("{name}.vl"));
         let is_entry_module = match (
             std::fs::canonicalize(&module_path),
             std::fs::canonicalize(entry_path),
@@ -7168,15 +7211,32 @@ pub fn analyze<'src>(
             .mut_scope_for_scope_id(pkg_scope_id)
             .name_to_id_map
             .insert(name, module_id);
-        // Also expose the module under the `std` package root so it is
-        // addressable by path from outside (`std::<module>::item`), mirroring
-        // the internal `pkg::<module>` reference.
-        analyzer
-            .mut_scope_for_scope_id(std_scope_id)
-            .name_to_id_map
-            .insert(name, module_id);
+        // A std module is also exposed under the `std` root so it's addressable by
+        // path from outside (`std::<module>::item`), mirroring its internal
+        // `pkg::<module>` reference. A user (`Pkg`) module lives only in `pkg::`.
+        if origin == Origin::Std {
+            analyzer
+                .mut_scope_for_scope_id(std_scope_id)
+                .name_to_id_map
+                .insert(name, module_id);
+        }
         module_scopes.insert(name, module_scope_id);
-        to_load.extend(collect_module_refs(&ast.0, "pkg"));
+        // A module's `pkg::` siblings inherit its package; a user module's `std::`
+        // imports are std. (Std modules reference each other via `pkg::` only, so
+        // collecting their `std::` imports would be a no-op — skip it to keep the
+        // std load byte-for-byte unchanged.)
+        to_load.extend(
+            collect_module_refs(&ast.0, "pkg")
+                .into_iter()
+                .map(|sibling| (origin, sibling)),
+        );
+        if origin == Origin::Pkg {
+            to_load.extend(
+                collect_module_refs(&ast.0, "std")
+                    .into_iter()
+                    .map(|module| (Origin::Std, module)),
+            );
+        }
         loaded.push((name, ast, module_scope_id, module_source_id));
     }
     for (_name, ast, module_scope_id, source_id) in &loaded {
