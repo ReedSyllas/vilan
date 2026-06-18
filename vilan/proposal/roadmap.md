@@ -65,14 +65,18 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    `check` are real; `run`/`fmt`/`test` are placeholders pending their features (#6/#7).
    `vilan.toml` manifest + project discovery (d0b530f): `build`/`check` resolve the entry from
    the nearest `vilan.toml` (or a project dir), `[package] entry` defaulting to `main.vl`. Multi-
-   file `import pkg::<module>` resolves to the entry's package siblings (366eee5). Example:
-   `vilan/examples/math`. Remaining (hangs off this): implement `run` (build + node), and `fmt`/
-   `test` land with #6/#7.
+   file `import pkg::<module>` resolves to the entry's package siblings (366eee5). `run`
+   implemented (47beac6: build + `node`, propagates exit code). Example: `vilan/examples/math`.
 5. **LSP autocomplete** (M–L) — highest-value editor feature; tiered plan already drafted
    (member `x.`, path `::`, scope/keyword).
 6. **Code formatter** (`vilan fmt` + LSP formatting) (M–L) — needs comment-preserving
-   formatting (the parser drops comments as trivia), not naive AST print-back.
-7. **Test runner** (`vilan test`) (S–M) — replaces the shell-driven corpus check.
+   formatting (the parser drops comments as trivia), not naive AST print-back. The `fmt`
+   subcommand is still a placeholder, gated on this.
+7. ✅ **Test runner** (`vilan test`) (commit 7a18546) — runs `*_test.vl` tests (Go-style,
+   alongside source so `pkg::` resolves); pass = exit 0, fail = compile error / non-zero
+   (a failed `assert` panics). Reports `N passed, M failed`. Added `std::assert`. NOTE: this is a
+   *behavior* runner for user code — the compiler's own `.js` codegen-snapshot corpus (vilan/test/)
+   is a separate dev-time check, not yet migrated to it.
 
 ## Tier 3 — Strategic reach
 
