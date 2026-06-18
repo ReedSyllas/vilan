@@ -5,3 +5,11 @@ external fun print(message: any): void;
 external fun panic(message: str): void;
 
 external fun scan(): str;
+
+// Aborts with `message` (a `panic`) unless `condition` holds. A failed assertion
+// exits non-zero, which is how `vilan test` detects a failing test.
+fun assert(condition: bool, message: str): void {
+	if !condition {
+		panic(message)
+	}
+}

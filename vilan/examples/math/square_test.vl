@@ -1,0 +1,8 @@
+import std::assert;
+import pkg::square::{ square, sum_of_squares };
+
+fun main() {
+	assert(square(5) == 25, "square(5) should be 25");
+	assert(square(0) == 0, "square(0) should be 0");
+	assert(sum_of_squares(3, 4) == 25, "sum_of_squares(3, 4) should be 25");
+}

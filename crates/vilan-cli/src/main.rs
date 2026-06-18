@@ -58,10 +58,10 @@ enum Command {
         /// Files or directories to format.
         paths: Vec<PathBuf>,
     },
-    /// Run a project's tests. (Not implemented yet.)
+    /// Run `*_test.vl` tests (each passes by exiting 0; a failed `assert` panics).
     Test {
-        /// An optional name or path filter.
-        filter: Option<String>,
+        /// A test file, a directory of tests, or omitted to use the project root.
+        path: Option<PathBuf>,
     },
 }
 
@@ -74,9 +74,9 @@ fn main() -> ExitCode {
         } => with_entry(file, |entry| build(entry, stdout, debug)),
         Command::Check { file, debug } => with_entry(file, |entry| check(entry, debug)),
         Command::Run { file } => with_entry(file, run),
-        // `fmt`/`test` await the formatter and test runner.
+        Command::Test { path } => test(path),
+        // `fmt` awaits the formatter.
         Command::Fmt { .. } => unimplemented_command("fmt"),
-        Command::Test { .. } => unimplemented_command("test"),
     }
 }
 
@@ -139,6 +139,99 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         }
         directory = directory.parent()?;
     }
+}
+
+/// Runs the package's `*_test.vl` tests: each is compiled and executed, passing if
+/// it exits 0 (a failed `assert` panics -> non-zero). Reports a pass/fail summary
+/// and exits non-zero if any test fails.
+fn test(path: Option<PathBuf>) -> ExitCode {
+    let tests = match discover_tests(path) {
+        Ok(tests) => tests,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if tests.is_empty() {
+        println!("no `*_test.vl` tests found");
+        return ExitCode::SUCCESS;
+    }
+    println!("running {} test(s)", tests.len());
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    for test in &tests {
+        match run_test(test) {
+            Ok(()) => {
+                passed += 1;
+                println!("  ok    {}", test.display());
+            }
+            Err(detail) => {
+                failed += 1;
+                println!("  FAIL  {}", test.display());
+                for line in detail.lines() {
+                    println!("        {line}");
+                }
+            }
+        }
+    }
+    println!("\n{passed} passed, {failed} failed");
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Compiles and executes one test. `Ok` if it exits 0; otherwise `Err(detail)`
+/// with the captured runtime output (empty for a compile error, which
+/// `compile_to_js` has already reported to stderr).
+fn run_test(file: &Path) -> Result<(), String> {
+    let javascript = compile_to_js(file, false).map_err(|_| String::new())?;
+    let script = env::temp_dir().join(format!("vilan-test-{}.js", std::process::id()));
+    if let Err(error) = fs::write(&script, javascript) {
+        return Err(format!("cannot write {}: {error}", script.display()));
+    }
+    let output = std::process::Command::new("node").arg(&script).output();
+    let _ = fs::remove_file(&script);
+    match output {
+        Ok(result) if result.status.success() => Ok(()),
+        Ok(result) => {
+            let mut detail = String::from_utf8_lossy(&result.stdout).into_owned();
+            detail.push_str(&String::from_utf8_lossy(&result.stderr));
+            Err(detail.trim_end().to_string())
+        }
+        Err(error) => Err(format!("failed to launch `node`: {error}")),
+    }
+}
+
+/// The `*_test.vl` files to run: a single file, the test files directly in a given
+/// directory, or — with no path — those in the project root (nearest `vilan.toml`).
+fn discover_tests(path: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    let directory = match path {
+        Some(path) if path.is_file() => return Ok(vec![path]),
+        Some(path) if path.is_dir() => path,
+        Some(path) => return Err(format!("{} does not exist", path.display())),
+        None => {
+            let working_dir = env::current_dir()
+                .map_err(|error| format!("cannot read the working directory: {error}"))?;
+            find_project_root(&working_dir).ok_or_else(|| {
+                "no `vilan.toml` found here or in any parent directory; \
+                 pass a test file or directory"
+                    .to_string()
+            })?
+        }
+    };
+    let mut tests: Vec<PathBuf> = fs::read_dir(&directory)
+        .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("_test.vl"))
+        })
+        .collect();
+    tests.sort();
+    Ok(tests)
 }
 
 /// A recognized subcommand whose implementation is still pending.
