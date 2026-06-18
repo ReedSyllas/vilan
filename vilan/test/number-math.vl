@@ -1,0 +1,22 @@
+import std::print;
+
+fun main() {
+	// i32 math: the `Math.*` wrappers plus the existing `diff`.
+	let n: i32 = -5;
+	print(n.abs()); // 5
+	print(n.diff(3)); // 8
+	let b: i32 = 2;
+	print(b.pow(10)); // 1024
+	print(b.min(7)); // 2
+	print(b.max(7)); // 7
+
+	// f64 math.
+	let x: f64 = 16f;
+	print(x.sqrt()); // 4
+	let y: f64 = 3.7f;
+	print(y.floor()); // 3
+	print(y.ceil()); // 4
+	print(y.round()); // 4
+	print(y.min(2f)); // 2
+	print(y.max(10f)); // 10
+}
