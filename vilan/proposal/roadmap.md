@@ -27,9 +27,10 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
      the reason a `catch_unwind` net exists.
    - Remove dead `prepped_struct_initializers`; decide the fate of the skeletal
      `interpreter.rs`; address `TODO: interning` (analyzer.rs:960).
-   - **Parser bug** (found while testing): unary minus on a literal/expression (`-1`, `-x`)
-     fails to parse in value and argument position — `let x = -1` and `f(-1)` both error;
-     only binary `a - b` works. Needs a prefix-minus rule in the expression parser.
+   - **Parser gaps** (found while testing): (a) unary minus on a literal/expression
+     (`-1`, `-x`) doesn't parse in value/argument position — only binary `a - b` works;
+     (b) a struct literal can't be a binary operand — `Point { .. } == x` fails to parse,
+     bind it to a variable first.
    - **Type-inference gap** (found while testing, M effort — arguably promote): field access
      on a value whose type is a generic parameter bound to a concrete struct fails —
      `list.map(|p| p.x)` and `list.get(i).unwrap().field` on a `List<Struct>` both error
@@ -37,7 +38,11 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
      closure-param / unwrapped site. **Gates collections (and `Option`) of structs with
      higher-order methods** — the Tier-1 `map`/`filter`/`get` work over primitive element
      types but not struct fields. This undercuts the stdlib for a common case (a list of
-     records), so consider doing it before the rest of Tier 1.
+     records), so consider doing it before the rest of Tier 1. **Same root** affects
+     operators inside a generic body: `==` on a generic-typed value doesn't dispatch (uses
+     native `===`), so `Option<Struct>`/`List<Struct>` equality compares inner structs by
+     reference. Concrete `==`/`!=` (structs, `Option<primitive>`, `Result<primitive,..>`)
+     works (see equality.vl); the generic-element case needs this fix.
 
 3. **Collections: `Map`/`Set` + `Hash`** (M; needs a small compiler `Hash`/equality story)
 
