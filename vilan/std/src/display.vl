@@ -1,0 +1,31 @@
+import pkg::string::str;
+
+// Convert a value to a string. Implement `Display` for your own types so
+// `value.to_string()` — and generic `T: Display` code — works for them.
+trait Display {
+	fun to_string(self): str;
+}
+
+impl str with Display {
+	fun to_string(self): str {
+		self
+	}
+}
+
+impl i32 with Display {
+	fun to_string(self): str {
+		i"{self}"
+	}
+}
+
+impl f64 with Display {
+	fun to_string(self): str {
+		i"{self}"
+	}
+}
+
+impl bool with Display {
+	fun to_string(self): str {
+		i"{self}"
+	}
+}

@@ -1,0 +1,3 @@
+// Milliseconds since the Unix epoch, read from the host clock (`Date.now`).
+@extern("Date.now")
+external fun now(): f64;
