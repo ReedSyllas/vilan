@@ -38,21 +38,23 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
      - Remaining (S–M): an **inferred** List element (`List::new()`+`push`, or a chained
        `filter().map()` whose intermediate element is inferred) is typed too late for the
        closure inference, so field access still fails — workaround: annotate `mut xs: List<T>`.
-     - Remaining (**DEEP**, gates a lot): a **method/operator call on a generic-bounded value**
-       resolves to the *abstract* trait method, not the concrete impl, at monomorphization.
-       `a.eq(b)` and `x == y` where `a`/`x: T: PartialEq` emit a call to the empty trait `eq`
-       (→ `undefined`). So `Option<Struct> ==`, generic equality, and **Map/Set over struct
-       keys** are blocked. Concrete `==`/`!=` works (equality.vl). Fix: extend the
-       generic_static_accessors monomorphization (which re-resolves `T::method`) to instance
-       method calls on a generic receiver.
+     - ✅ **M2 (the deep one)**: a method/operator call on a generic-bounded value now
+       dispatches to the concrete impl per monomorphization (commit 099d908). `a.eq(b)`,
+       `x == y`, `x != y` where `x: T: PartialEq` re-resolve via the receiver's constraint
+       (new `generic_method_dispatch` map, mirroring `generic_static_accessors`). `Option<Struct>
+       ==` works too — the operator method monomorphizes against the operand's type args so its
+       inner element compare dispatches concretely; a native-equality element (primitive / numeric
+       enum) stays native. Also fixed a 7da43bf regression where a C-like (numeric) enum's `==`
+       errored (`is_native_operator_type` now covers numeric enums). See generic-equality.vl.
 
 3. **Collections: `Map`/`Set`** (M) — external wrappers over JS Map/Set. Over **primitive**
    keys/elements they work directly (JS uses value equality). Design weight to handle: (i)
    value semantics — `__clone` must learn Map/Set (else they alias on copy); (ii) generic K/V
    inference — annotate `mut m: Map<str, i32>` (binds K/V via `method_call_substitution` like
-   Option; there's no List-style element-slot machinery); (iii) **struct keys need `Hash` +
-   structural equality**, blocked by the deep generic-dispatch gap (#2). Ship primitive-key
-   Map/Set first; struct keys after the generic-dispatch fix.
+   Option; there's no List-style element-slot machinery); (iii) **struct keys**: M2 (done) gives
+   value `==` dispatch, but JS `Map`/`Set` key by *reference* (SameValueZero) for objects, so by-
+   value struct keys still need a representation strategy (serialize the key to a string, or a
+   custom hash table) — not free from M2. Ship primitive-key Map/Set first; struct keys later.
 
 ## Tier 2 — Toolchain & daily DX
 
