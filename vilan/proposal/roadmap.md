@@ -47,14 +47,15 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
        enum) stays native. Also fixed a 7da43bf regression where a C-like (numeric) enum's `==`
        errored (`is_native_operator_type` now covers numeric enums). See generic-equality.vl.
 
-3. **Collections: `Map`/`Set`** (M) — external wrappers over JS Map/Set. Over **primitive**
-   keys/elements they work directly (JS uses value equality). Design weight to handle: (i)
-   value semantics — `__clone` must learn Map/Set (else they alias on copy); (ii) generic K/V
-   inference — annotate `mut m: Map<str, i32>` (binds K/V via `method_call_substitution` like
-   Option; there's no List-style element-slot machinery); (iii) **struct keys**: M2 (done) gives
-   value `==` dispatch, but JS `Map`/`Set` key by *reference* (SameValueZero) for objects, so by-
-   value struct keys still need a representation strategy (serialize the key to a string, or a
-   custom hash table) — not free from M2. Ship primitive-key Map/Set first; struct keys later.
+3. ✅ **Collections: `Map`/`Set`** (primitive keys) — external wrappers over JS Map/Set, loaded
+   on import (commits 586d581 Set, 58afcec Map, be66d0c Map iteration). `Set<T>`:
+   new/insert/contains/remove/len/is_empty + `for x in set`. `Map<K, V>`:
+   new/insert/get(→`Option<V>`)/contains_key/remove/len/is_empty + keys()/values()(→`List`) for
+   iteration. (i) `__clone` now recurses into JS Set/Map (else they alias on copy); (ii) K/V/T bind
+   from an explicit annotation (`mut m: Map<str, i32> = Map::new()`) — no List-style element-slot
+   inference; (iii) **struct keys deferred**: M2 gives value `==`, but JS Map/Set key objects by
+   *reference*, so by-value aggregate keys still need a key-serialization / custom-table strategy.
+   Tests: set.vl, map.vl.
 
 ## Tier 2 — Toolchain & daily DX
 
