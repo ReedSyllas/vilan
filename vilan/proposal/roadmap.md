@@ -31,18 +31,21 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
      (`-1`, `-x`) doesn't parse in value/argument position — only binary `a - b` works;
      (b) a struct literal can't be a binary operand — `Point { .. } == x` fails to parse,
      bind it to a variable first.
-   - **Type-inference gap** (found while testing, M effort — arguably promote): field access
-     on a value whose type is a generic parameter bound to a concrete struct fails —
-     `list.map(|p| p.x)` and `list.get(i).unwrap().field` on a `List<Struct>` both error
-     "cannot access field on generic T". The concrete element type isn't propagated to the
-     closure-param / unwrapped site. **Gates collections (and `Option`) of structs with
-     higher-order methods** — the Tier-1 `map`/`filter`/`get` work over primitive element
-     types but not struct fields. This undercuts the stdlib for a common case (a list of
-     records), so consider doing it before the rest of Tier 1. **Same root** affects
-     operators inside a generic body: `==` on a generic-typed value doesn't dispatch (uses
-     native `===`), so `Option<Struct>`/`List<Struct>` equality compares inner structs by
-     reference. Concrete `==`/`!=` (structs, `Option<primitive>`, `Result<primitive,..>`)
-     works (see equality.vl); the generic-element case needs this fix.
+   - **Generic-dispatch gaps** (M–L; partially fixed):
+     - ✅ **Closure params** now type from the concrete receiver (commit 4960aab): a closure
+       passed to a generic method types its param to the element type, so `Option<Struct>` and
+       explicitly-typed `List<Struct>` higher-order methods (`map`/`filter`/`is_some_and`) work
+       (closure-param-inference.vl).
+     - Remaining (S–M): an **inferred** List element (`List::new()`+`push`, or a chained
+       `filter().map()` whose intermediate element is inferred) is typed too late for the
+       closure inference, so field access still fails — workaround: annotate `mut xs: List<T>`.
+     - Remaining (**DEEP**, gates a lot): a **method/operator call on a generic-bounded value**
+       resolves to the *abstract* trait method, not the concrete impl, at monomorphization.
+       `a.eq(b)` and `x == y` where `a`/`x: T: PartialEq` emit a call to the empty trait `eq`
+       (→ `undefined`). So `Option<Struct> ==`, generic equality, and **Map/Set over struct
+       keys** are blocked. Concrete `==`/`!=` works (equality.vl). Fix: extend the
+       generic_static_accessors monomorphization (which re-resolves `T::method`) to instance
+       method calls on a generic receiver.
 
 3. **Collections: `Map`/`Set` + `Hash`** (M; needs a small compiler `Hash`/equality story)
 
