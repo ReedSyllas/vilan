@@ -30,6 +30,14 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    - **Parser bug** (found while testing): unary minus on a literal/expression (`-1`, `-x`)
      fails to parse in value and argument position — `let x = -1` and `f(-1)` both error;
      only binary `a - b` works. Needs a prefix-minus rule in the expression parser.
+   - **Type-inference gap** (found while testing, M effort — arguably promote): field access
+     on a value whose type is a generic parameter bound to a concrete struct fails —
+     `list.map(|p| p.x)` and `list.get(i).unwrap().field` on a `List<Struct>` both error
+     "cannot access field on generic T". The concrete element type isn't propagated to the
+     closure-param / unwrapped site. **Gates collections (and `Option`) of structs with
+     higher-order methods** — the Tier-1 `map`/`filter`/`get` work over primitive element
+     types but not struct fields. This undercuts the stdlib for a common case (a list of
+     records), so consider doing it before the rest of Tier 1.
 
 3. **Collections: `Map`/`Set` + `Hash`** (M; needs a small compiler `Hash`/equality story)
 
