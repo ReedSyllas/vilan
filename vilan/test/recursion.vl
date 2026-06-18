@@ -1,0 +1,41 @@
+import std::print;
+
+// Codegen emits a function body on demand and memoizes it. A function that calls
+// itself (or a mutually recursive partner) must be recorded as "in progress"
+// *before* its body is walked — otherwise the recursive call re-enters and the
+// body is emitted forever. These exercise both shapes; the result is used so the
+// function is actually live (an unused call is dead-code-eliminated and never
+// emitted, which is why this gap stayed hidden).
+
+// Self-recursion.
+fun fact(n: i32): i32 {
+	if n <= 1 {
+		1
+	} else {
+		n * fact(n - 1)
+	}
+}
+
+// Mutual recursion: each is required while the other is mid-emit.
+fun is_even(n: i32): bool {
+	if n == 0 {
+		true
+	} else {
+		is_odd(n - 1)
+	}
+}
+
+fun is_odd(n: i32): bool {
+	if n == 0 {
+		false
+	} else {
+		is_even(n - 1)
+	}
+}
+
+fun main() {
+	print(fact(5)); // 120
+	print(fact(10)); // 3628800
+	print(is_even(10)); // true
+	print(is_odd(7)); // true
+}

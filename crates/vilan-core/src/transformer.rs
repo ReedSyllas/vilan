@@ -6,7 +6,7 @@ use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
     Transformer::new(program, true).transform_entry()
@@ -174,6 +174,12 @@ struct Transformer<'src> {
     panic_fn_id: Option<Id>,
     program: &'src Program<'src>,
     required_functions: IndexMap<Id, js::Node<'src>>,
+    // Functions whose body is currently being walked. A recursive (or mutually
+    // recursive) call inside that body must not re-enter and re-emit it — the
+    // call site only needs the function's name, which is available regardless.
+    // Kept separate from `required_functions` (which records *finished* bodies)
+    // so the callee-before-caller insertion order is preserved.
+    emitting: HashSet<Id>,
     // The active generic-parameter substitution while emitting a monomorphized
     // function body (constraint id -> concrete type id).
     current_substitution: HashMap<TypeId, TypeId>,
@@ -244,6 +250,7 @@ impl<'src> Transformer<'src> {
             panic_fn_id: program.panic_fn_id,
             program,
             required_functions: IndexMap::new(),
+            emitting: HashSet::new(),
             current_substitution: HashMap::new(),
             instances: HashMap::new(),
             current_self_type: None,
@@ -1667,6 +1674,12 @@ impl<'src> Transformer<'src> {
         if self.required_functions.contains_key(&function_id) {
             return;
         }
+        // Already walking this body higher up the stack (a recursive call): the
+        // call site just needs the name, so don't re-enter — otherwise a recursive
+        // function would emit its body forever. The outer call records it below.
+        if !self.emitting.insert(function_id) {
+            return;
+        }
         if let Some(function) = self.program.functions.get(&function_id) {
             let saved = std::mem::take(&mut self.current_substitution);
             let saved_self = self.current_self_type.take();
@@ -1675,6 +1688,7 @@ impl<'src> Transformer<'src> {
             self.current_self_type = saved_self;
             self.required_functions.insert(function_id, js_function);
         }
+        self.emitting.remove(&function_id);
     }
 
     /// Re-dispatches a trait method call to the receiver's concrete `type_id`,
