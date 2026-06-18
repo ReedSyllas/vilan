@@ -224,6 +224,8 @@ impl bool {
 // `impl` block does not need to share a module with the type it extends.
 impl str {
 	external fun parse_i32(self): Option<i32>;
+
+	external fun parse_f64(self): Option<f64>;
 }
 
 // `List`'s `Option`-returning methods live here (not `list.vl`) so the

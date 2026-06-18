@@ -68,6 +68,12 @@ fn helper_source(name: &str) -> &'static str {
              \treturn Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
              }"
         }
+        "__parse_f64" => {
+            "function __parse_f64(text) {\n\
+             \tconst value = Number.parseFloat(text);\n\
+             \treturn Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
+             }"
+        }
         "__random_int" => {
             "function __random_int(low, high) {\n\
              \treturn Math.floor(Math.random() * (high - low + 1)) + low;\n\
@@ -1420,6 +1426,13 @@ impl<'src> Transformer<'src> {
                 self.used_helpers.insert("__parse_i32");
                 js::Node::Call(
                     Box::new(js::Node::Local("__parse_i32".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
+                )
+            }
+            Intrinsic::ParseF64 => {
+                self.used_helpers.insert("__parse_f64");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__parse_f64".to_string())),
                     vec![args.next().unwrap_or(js::Node::Void)],
                 )
             }

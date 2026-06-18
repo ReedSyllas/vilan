@@ -3611,7 +3611,11 @@ impl<'src> Analyzer<'src> {
                 else {
                     return None;
                 };
-                let return_type = self.functions.get(function_id)?.return_type_id?.get_type(self);
+                let return_type = self
+                    .functions
+                    .get(function_id)?
+                    .return_type_id?
+                    .get_type(self);
                 match return_type {
                     Type::Enum(enum_id, arguments)
                         if self.enums.get(&enum_id).map(|enumeration| enumeration.name)
@@ -6840,6 +6844,8 @@ pub enum Intrinsic {
     StrSubstring,
     // `str.parse_i32(): Option<i32>` -> a runtime helper returning the enum form.
     ParseI32,
+    // `str.parse_f64(): Option<f64>` -> a runtime helper returning the enum form.
+    ParseF64,
     // `random::range_i32`/`range_u32` -> an integer range helper over `Math.random`.
     RandomInt,
     // `random::range_f64` -> a float range helper over `Math.random`.
@@ -7542,6 +7548,7 @@ pub fn analyze<'src>(
                     ("split", Intrinsic::StrSplit),
                     ("substring", Intrinsic::StrSubstring),
                     ("parse_i32", Intrinsic::ParseI32),
+                    ("parse_f64", Intrinsic::ParseF64),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

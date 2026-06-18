@@ -1,0 +1,11 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+fun main() {
+	print("3.14".parse_f64().unwrap_or(0f)); // 3.14
+	print("42".parse_f64().unwrap_or(0f)); // 42
+	print("-2.5".parse_f64().unwrap_or(0f)); // -2.5
+	print("nope".parse_f64().unwrap_or(-1f)); // -1
+	print("3.14".parse_f64().is_some()); // true
+	print("abc".parse_f64().is_some()); // false
+}
