@@ -6623,6 +6623,10 @@ pub enum Intrinsic {
     RandomFloat,
     // `List.len(): i32` -> native `.length` (property read).
     ListLen,
+    // `List.get(i): Option<T>` -> a bounds-checked runtime helper (Option form).
+    ListGet,
+    // `List.pop(): Option<T>` -> a runtime helper that removes the last element.
+    ListPop,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -7222,7 +7226,11 @@ pub fn analyze<'src>(
                 Some(Type::Struct(id, _)) if *id == list_struct_id
             );
             if subject_is_list {
-                for (name, intrinsic) in [("len", Intrinsic::ListLen)] {
+                for (name, intrinsic) in [
+                    ("len", Intrinsic::ListLen),
+                    ("get", Intrinsic::ListGet),
+                    ("pop", Intrinsic::ListPop),
+                ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);
                     }

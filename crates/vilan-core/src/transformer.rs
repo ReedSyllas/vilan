@@ -78,6 +78,17 @@ fn helper_source(name: &str) -> &'static str {
              \treturn Math.random() * (high - low) + low;\n\
              }"
         }
+        // `List.get(i): Option<T>` — bounds-checked, returning the `Option` array
+        // form. Clones the element so the returned value can't alias the list
+        // (value semantics; views are second-class and can't escape).
+        "__list_get" => {
+            "function __list_get(list, index) {\n\treturn index >= 0 && index < list.length ? [ 0, __clone(list[index]) ] : [ 1 ];\n}"
+        }
+        // `List.pop(): Option<T>` — removes and returns the last element (no clone:
+        // the element leaves the list), or `None` when empty.
+        "__list_pop" => {
+            "function __list_pop(list) {\n\treturn list.length === 0 ? [ 1 ] : [ 0, list.pop() ];\n}"
+        }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays, so
         // recurse into them; everything else — primitives and closures — is
         // returned by reference (a closure is immutable, so sharing it is a
@@ -1312,6 +1323,21 @@ impl<'src> Transformer<'src> {
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 "length".to_string(),
             ),
+            Intrinsic::ListGet => {
+                self.used_helpers.insert("__list_get");
+                self.used_helpers.insert("__clone");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__list_get".to_string())),
+                    args.collect(),
+                )
+            }
+            Intrinsic::ListPop => {
+                self.used_helpers.insert("__list_pop");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__list_pop".to_string())),
+                    args.collect(),
+                )
+            }
             Intrinsic::ParseI32 => {
                 self.used_helpers.insert("__parse_i32");
                 js::Node::Call(

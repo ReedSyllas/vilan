@@ -1,0 +1,23 @@
+import std::{ print, option::Option::{ self, Some, None } };
+
+fun main() {
+	mut xs = List::new();
+	xs.push(10);
+	xs.push(20);
+	xs.push(30);
+
+	print(xs.get(0).unwrap_or(0));    // 10
+	print(xs.get(2).unwrap_or(0));    // 30
+	print(xs.get(5).unwrap_or(0));    // 0  (out of bounds -> None)
+	print(xs.get(9).is_none());       // true
+	print(xs.first().unwrap_or(0));   // 10
+	print(xs.last().unwrap_or(0));    // 30
+	print(xs.pop().unwrap_or(0));     // 30 (removes last)
+	print(xs.len());                  // 2
+	print(xs.last().unwrap_or(0));    // 20
+
+	mut single = List::new();
+	single.push(7);
+	print(single.pop().unwrap_or(0)); // 7
+	print(single.pop().is_none());    // true
+}

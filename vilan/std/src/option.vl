@@ -225,3 +225,22 @@ impl bool {
 impl str {
 	external fun parse_i32(self): Option<i32>;
 }
+
+// `List`'s `Option`-returning methods live here (not `list.vl`) so the
+// always-loaded core stays off the `option`/`result` chain — same reason as
+// `then_some`/`parse_i32` above. `get` returns a copy of the element.
+impl List<type T> {
+	external fun get(self, index: i32): Option<T>;
+
+	external fun pop(&mut self): Option<T>;
+
+	fun first(self): Option<T> {
+		self.get(0)
+	}
+
+	// `get(len - 1)`: for an empty list `len - 1` is `-1`, which `get` reports as
+	// `None`.
+	fun last(self): Option<T> {
+		self.get(self.len() - 1)
+	}
+}
