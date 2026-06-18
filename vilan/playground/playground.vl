@@ -1,19 +1,22 @@
-import std::{ print, random::{ range } };
-
-enum Foo {
-	One,
-	Two,
-	Three,
-}
+import std::{ print, random };
 
 fun main() {
-	let a = Foo::Three;
+	let low = 1u;
+	let high = 10u;
 	
-	let b = match a {
-		Foo::One => 1,
-		Foo::Two => 2,
-		Foo::Three => 3,
-	};
+	mut distribution: List<u32> = [];
 	
-	print(b);
+	mut i = 0;
+	for i < low.diff(high) {
+		distribution.push(0);
+		i += 1;
+	}
+	
+	mut iteration = 0;
+	for iteration < 1000 {
+		let number = random::range(low, high);
+		*distribution.at(number) += 1;
+	}
+	
+	print(distribution);
 }
