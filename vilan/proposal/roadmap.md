@@ -23,14 +23,13 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    - `PartialEq`/`Eq` impls for primitives (traits exist; no impls).
 
 2. **Compiler-core robustness** (S, high trust — esp. for the LSP)
-   - Convert internal `panic!`s to diagnostics (analyzer.rs:2292/2295/3075/4063); they're
-     the reason a `catch_unwind` net exists.
-   - Remove dead `prepped_struct_initializers`; decide the fate of the skeletal
-     `interpreter.rs`; address `TODO: interning` (analyzer.rs:960).
-   - **Parser gaps** (found while testing): (a) unary minus on a literal/expression
-     (`-1`, `-x`) doesn't parse in value/argument position — only binary `a - b` works;
-     (b) a struct literal can't be a binary operand — `Point { .. } == x` fails to parse,
-     bind it to a variable first.
+   - ✅ Internal `panic!`s converted to diagnostics (commit bf434eb) — malformed input now
+     degrades gracefully instead of "no program"; `catch_unwind` stays as a `.unwrap()` backstop.
+   - Remaining (low value): remove dead `prepped_struct_initializers`; decide the fate of the
+     skeletal `interpreter.rs`; address `TODO: interning` (analyzer.rs:960).
+   - **Parser gaps**: (a) ✅ unary minus (`-1`, `-x`, `f(-1)`) now parses (commit ac9e26e);
+     (b) a struct literal still can't be a binary operand — `Point { .. } == x` fails (bind it
+     to a variable first); risky to fix (block vs. struct-literal ambiguity), so deferred.
    - **Generic-dispatch gaps** (M–L; partially fixed):
      - ✅ **Closure params** now type from the concrete receiver (commit 4960aab): a closure
        passed to a generic method types its param to the element type, so `Option<Struct>` and
@@ -47,7 +46,13 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
        generic_static_accessors monomorphization (which re-resolves `T::method`) to instance
        method calls on a generic receiver.
 
-3. **Collections: `Map`/`Set` + `Hash`** (M; needs a small compiler `Hash`/equality story)
+3. **Collections: `Map`/`Set`** (M) — external wrappers over JS Map/Set. Over **primitive**
+   keys/elements they work directly (JS uses value equality). Design weight to handle: (i)
+   value semantics — `__clone` must learn Map/Set (else they alias on copy); (ii) generic K/V
+   inference — annotate `mut m: Map<str, i32>` (binds K/V via `method_call_substitution` like
+   Option; there's no List-style element-slot machinery); (iii) **struct keys need `Hash` +
+   structural equality**, blocked by the deep generic-dispatch gap (#2). Ship primitive-key
+   Map/Set first; struct keys after the generic-dispatch fix.
 
 ## Tier 2 — Toolchain & daily DX
 
