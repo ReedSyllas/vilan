@@ -130,6 +130,15 @@ impl Document {
         }
     }
 
+    /// Updates the document's text (its line index) without re-analyzing — applied
+    /// on every edit so position-based queries (notably completion's context scan)
+    /// see the just-typed character immediately, while the heavier re-analysis
+    /// stays debounced. `text_hash` is deliberately left at the last *analyzed*
+    /// text so the pending re-analysis still fires.
+    pub fn set_text(&mut self, text: &str) {
+        self.line_index = LineIndex::new(text);
+    }
+
     /// The innermost entry-file entity whose span contains `offset`.
     fn entity_at(&self, offset: usize) -> Option<Id> {
         self.entity_spans
@@ -620,7 +629,7 @@ impl Document {
                 });
             }
         }
-        self.push_methods(program, type_id, &mut items);
+        self.push_methods(program, type_id, true, &mut items);
         items
     }
 
@@ -704,12 +713,12 @@ impl Document {
                         kind: CompletionKind::EnumVariant,
                     });
                 }
-                self.push_methods(program, *enum_id, &mut items);
+                self.push_methods(program, *enum_id, false, &mut items);
             }
         }
         for (struct_id, structure) in &program.structs {
             if structure.name == left {
-                self.push_methods(program, *struct_id, &mut items);
+                self.push_methods(program, *struct_id, false, &mut items);
             }
         }
         for module in program.modules.values() {
@@ -783,18 +792,48 @@ impl Document {
         None
     }
 
-    /// Appends the method names declared in `type_id`'s impl blocks.
-    fn push_methods(&self, program: &Program, type_id: Id, items: &mut Vec<Completion>) {
+    /// Appends `type_id`'s impl methods, restricted to either instance methods
+    /// (`want_self`, for `value.`) or static/associated ones (for `Type::`). A
+    /// `value.default()` (a static method with no `self`) would not type-check, so
+    /// member completion must not offer it.
+    fn push_methods(
+        &self,
+        program: &Program,
+        type_id: Id,
+        want_self: bool,
+        items: &mut Vec<Completion>,
+    ) {
         for implementation in &program.implementations {
             if self.impl_subject_id(program, implementation) == Some(type_id) {
-                for name in implementation.declarations.keys() {
-                    items.push(Completion {
-                        label: name.to_string(),
-                        kind: CompletionKind::Method,
-                    });
+                for (name, member_id) in &implementation.declarations {
+                    if self.is_self_method(program, *member_id) == want_self {
+                        items.push(Completion {
+                            label: name.to_string(),
+                            kind: CompletionKind::Method,
+                        });
+                    }
                 }
             }
         }
+    }
+
+    /// Whether a method's first parameter is `self` — i.e. it is called on a value
+    /// (`v.method()`) rather than on the type (`Type::method()`).
+    fn is_self_method(&self, program: &Program, member_id: Id) -> bool {
+        let first_parameter = match program.entity_map.get(&member_id) {
+            Some(Expr::Function(function_id)) => program
+                .functions
+                .get(function_id)
+                .and_then(|function| function.parameters.first()),
+            Some(Expr::ExternalFunction(external_id)) => program
+                .external_functions
+                .get(external_id)
+                .and_then(|external| external.parameters.first()),
+            _ => None,
+        };
+        first_parameter
+            .and_then(|parameter_id| program.parameters.get(parameter_id))
+            .is_some_and(|parameter| parameter.name == "self")
     }
 
     /// The nominal struct/enum id an impl's subject names, ignoring type arguments.
@@ -938,5 +977,44 @@ mod tests {
             "variants: {labels:?}"
         );
         assert!(labels.contains(&"Blue".to_string()), "variants: {labels:?}");
+    }
+
+    const COUNTER: &str = "struct Counter { n: i32 }\n\
+         impl Counter {\n\
+         \tfun new(): Counter { Counter { n = 0 } }\n\
+         \tfun bump(self): i32 { self.n + 1 }\n\
+         }\n";
+
+    #[test]
+    fn member_completion_excludes_static_methods() {
+        // `b.new()` would not type-check (`new` has no `self`), so it must not be
+        // offered on `b.` — only `bump` (a `self` method) and the field `n`.
+        let labels = completions_at_cursor(&format!(
+            "{COUNTER}fun main() {{\n\tlet b = Counter {{ n = 0 }};\n\tb.|\n}}\n"
+        ));
+        assert!(
+            labels.contains(&"bump".to_string()),
+            "instance method: {labels:?}"
+        );
+        assert!(labels.contains(&"n".to_string()), "field: {labels:?}");
+        assert!(
+            !labels.contains(&"new".to_string()),
+            "static excluded: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn path_completion_lists_static_methods_not_instance() {
+        let labels = completions_at_cursor(&format!(
+            "{COUNTER}fun main() {{\n\tlet c = Counter::|\n}}\n"
+        ));
+        assert!(
+            labels.contains(&"new".to_string()),
+            "static method: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"bump".to_string()),
+            "instance excluded: {labels:?}"
+        );
     }
 }

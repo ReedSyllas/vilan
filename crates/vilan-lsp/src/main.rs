@@ -265,7 +265,14 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.pop() {
-            self.on_change(params.text_document.uri, change.text);
+            let uri = params.text_document.uri;
+            // Apply the new text to the open document immediately so a completion
+            // request arriving before the debounced re-analysis still sees the
+            // just-typed character (e.g. the `.` that selects member completion).
+            if let Some(mut document) = self.documents.get_mut(&uri) {
+                document.set_text(&change.text);
+            }
+            self.on_change(uri, change.text);
         }
     }
 
