@@ -63,6 +63,13 @@ where
 
     let mut block = Recursive::declare();
 
+    // The operand of a `*` assignment target (`*<operand> = …`). Declared here and
+    // defined as `member_accessor` once that exists, so a view-returning call can
+    // sit under the `*` (`*node.slot() = 10`) with the same postfix shape a method
+    // call parses to — while a bare name / `.field` chain lowers to the identical
+    // place nodes the non-deref target uses.
+    let mut place_operand = Recursive::declare();
+
     let identifier = select! { Token::Ident(text) => text }.labelled("identifier");
 
     // A name in a declaration or path position. Accepts the boolean literals so
@@ -426,26 +433,29 @@ where
     // An assignment target is an lvalue: a local (`x`), a field place (`self.n`,
     // `a.b.c`), or a deref through a view (`*v`). A `.field` chain folds into
     // `MemberAccessor`s, the same shape a field read parses to.
-    let assignment_target = just(Token::Op("*"))
-        .or_not()
-        .then(
-            identifier
-                .map_with(|name, e| (Node::Accessor(name), e.span()))
-                .foldl_with(
-                    just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
-                    |subject, field, e| {
-                        let field = (Node::Accessor(field), e.span());
-                        (
-                            Node::MemberAccessor(Box::new(subject), Box::new(field)),
-                            e.span(),
-                        )
-                    },
-                ),
-        )
-        .map_with(|(deref, place), e| match deref {
-            Some(_) => (Node::Dereference(Box::new(place)), e.span()),
-            None => place,
-        });
+    let assignment_target = choice((
+        // `*<operand> = …` — write through a view: a view variable (`*v`), a field
+        // of one (`*v.field`), or a view-returning call (`*node.slot()`). The
+        // operand is the postfix level, so a method call is recognized; a bare name
+        // / `.field` chain lowers to the same `Accessor`/`MemberAccessor` nodes as
+        // the non-deref place below (`local` also produces `Accessor`).
+        just(Token::Op("*"))
+            .ignore_then(place_operand.clone())
+            .map_with(|place, e| (Node::Dereference(Box::new(place)), e.span())),
+        // A bare place (no deref): a local (`x`) or a `.field` chain (`a.b.c`).
+        identifier
+            .map_with(|name, e| (Node::Accessor(name), e.span()))
+            .foldl_with(
+                just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
+                |subject, field, e| {
+                    let field = (Node::Accessor(field), e.span());
+                    (
+                        Node::MemberAccessor(Box::new(subject), Box::new(field)),
+                        e.span(),
+                    )
+                },
+            ),
+    ));
     let assignment = assignment_target
         .then(choice((
             just(Token::Op("=")).to(None),
@@ -930,6 +940,11 @@ where
             .clone()
             .map(|(x, span)| (Node::Block((x, span)), span)),
     );
+    // The `*` assignment-target operand is the postfix/precedence expression, so a
+    // view-returning call (`*node.slot() = 10`) is recognized; a bare name or
+    // `.field` chain still produces the same `Accessor`/`MemberAccessor` nodes as
+    // the non-deref place (`local` is `Accessor`), keeping codegen byte-identical.
+    place_operand.define(chained.clone());
     let is_expression = chained
         .then(just(Token::Is).ignore_then(pattern.clone()).or_not())
         .map_with(|(subject, matched), e| match matched {
