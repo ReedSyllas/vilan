@@ -1,0 +1,32 @@
+import std::print;
+import std::range::Range;
+
+fun main() {
+	// Sum 1..9.
+	mut sum = 0;
+	for i in Range::new(1, 10) {
+		sum = sum + i;
+	}
+	print(sum); // 45
+
+	// Count 0..4.
+	mut count = 0;
+	for j in Range::new(0, 5) {
+		count = count + 1;
+	}
+	print(count); // 5
+
+	// An empty range yields nothing.
+	mut empty = 0;
+	for k in Range::new(3, 3) {
+		empty = empty + 1;
+	}
+	print(empty); // 0
+
+	// Build a list of squares over a range.
+	mut squares = List::new();
+	for n in Range::new(1, 5) {
+		squares.push(n.pow(2));
+	}
+	print(squares.len()); // 4
+}

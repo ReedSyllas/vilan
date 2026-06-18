@@ -1,0 +1,25 @@
+import pkg::option::Option::{ self, Some, None };
+
+// A half-open integer range `[start, end)`. Iterate it with
+// `for i in Range::new(start, end)`, which yields `start, start + 1, ..., end - 1`
+// lazily — `next` advances the internal cursor rather than materializing a list.
+struct Range {
+	current: i32,
+	end: i32,
+}
+
+impl Range {
+	fun new(start: i32, end: i32): Range {
+		Range { current = start, end = end }
+	}
+
+	fun next(&mut self): Option<i32> {
+		if self.current < self.end {
+			let value = self.current;
+			self.current = self.current + 1;
+			Some(value)
+		} else {
+			None
+		}
+	}
+}

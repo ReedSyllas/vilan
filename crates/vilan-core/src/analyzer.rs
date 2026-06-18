@@ -3603,6 +3603,25 @@ impl<'src> Analyzer<'src> {
                     .first()
                     .map(|element_type_id| element_type_id.get_type(self))
             }
+            // A custom iterator (e.g. `Range`): its element is the payload of
+            // `next(self): Option<T>`, so a `for i in it` binding gets type `T`.
+            Type::Struct(_, _) | Type::Enum(_, _) => {
+                let next_id = self.method_member_in_impls(iterable_type, "next")?;
+                let Some(Expr::Function(function_id)) = self.expr_id_to_expr_map.get(&next_id)
+                else {
+                    return None;
+                };
+                let return_type = self.functions.get(function_id)?.return_type_id?.get_type(self);
+                match return_type {
+                    Type::Enum(enum_id, arguments)
+                        if self.enums.get(&enum_id).map(|enumeration| enumeration.name)
+                            == Some("Option") =>
+                    {
+                        arguments.first().map(|element| element.get_type(self))
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
