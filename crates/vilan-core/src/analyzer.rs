@@ -460,6 +460,11 @@ pub struct Analyzer<'src> {
     // recorded as `accessor_id -> (constraint_id, member_name)` so the
     // transformer can re-resolve them per monomorphized instantiation.
     generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
+    // `a.member()` where `a`'s type is a trait-bounded generic `T` — the instance
+    // analogue of `generic_static_accessors`. A required trait method has no body
+    // to run abstractly, so the call is re-dispatched per monomorphization to the
+    // concrete type `T` is bound to. Keyed by the call id, value `(constraint, member)`.
+    generic_method_dispatch: HashMap<Id, (TypeId, &'src str)>,
     // Method calls (by call id) that must re-dispatch to the receiver's concrete
     // type at codegen, by member name: a trait default called on a concrete value
     // (`Some(type)`) — Gap E — or a `self`/trait-typed call inside a default body
@@ -640,6 +645,7 @@ impl<'src> Analyzer<'src> {
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
             generic_static_accessors: HashMap::new(),
+            generic_method_dispatch: HashMap::new(),
             trait_method_dispatch: HashMap::new(),
             generic_bounds: HashMap::new(),
             impl_subject_args: HashMap::new(),
@@ -775,28 +781,32 @@ impl<'src> Analyzer<'src> {
             })
     }
 
-    /// Resolves the operator method for `op` on a value of `subject_type` — the
-    /// `add`/`sub`/`mul`/`div` declared by an `impl Subject with Add/...`. Used to
-    /// dispatch `a + b` to `Add::add(a, b)` when the left operand's type
-    /// Whether an operator (`==`, `<`, `+`, ...) on this type must lower to a
-    /// native JS operator: the scalar primitives and `bool`. They may carry a
-    /// `PartialEq`/`Ord` impl to satisfy a generic bound, but dispatching the
-    /// operator to that impl would recurse (its body uses the same operator).
-    fn is_primitive_operator_type(&self, type_: &Type) -> bool {
+    /// Whether an operator (`==`, `<`, `+`, ...) on this type lowers to a native JS
+    /// operator: the scalar primitives, `bool`, and numeric (C-like) enums (which
+    /// lower to their integer discriminant). Such a type needs no trait dispatch
+    /// for its operators, and a missing operator impl is not an error for it —
+    /// dispatching would recurse anyway, since the impl body uses the same operator.
+    fn is_native_operator_type(&self, type_: &Type) -> bool {
         match type_ {
             Type::Struct(id, _) => ["i32", "u32", "f64", "BigInt", "str"]
                 .iter()
                 .any(|name| self.primitive_struct_ids.get(*name).copied() == Some(*id)),
-            Type::Enum(id, _) => self.bool_enum_id == Some(*id),
+            Type::Enum(id, _) => {
+                self.bool_enum_id == Some(*id)
+                    || self.enums.get(id).is_some_and(|enum_| enum_.is_numeric)
+            }
             _ => false,
         }
     }
 
-    /// overloads the operator; returns `None` (so codegen keeps native JS
-    /// arithmetic) for the primitives and any type without the matching operator
-    /// impl.
-    fn operator_method(&self, op: BinaryOp, subject_type: &Type) -> Option<Id> {
-        if self.is_primitive_operator_type(subject_type) {
+    /// Resolves the operator method for `op` on `subject_type` — the `add`/`sub`/
+    /// `mul`/`div`/`eq` declared by an `impl Subject with Add`/`PartialEq`/... —
+    /// returning `(method id, impl subject type)`. The subject lets the caller bind
+    /// the impl's generics from the operand (`Option<Point>` against the impl's
+    /// `Option<T>`) so the method monomorphizes. `None` for native-operator types
+    /// (kept as native JS) and any type without the matching impl.
+    fn operator_method(&self, op: BinaryOp, subject_type: &Type) -> Option<(Id, TypeId)> {
+        if self.is_native_operator_type(subject_type) {
             return None;
         }
         let (trait_name, method_name) = operator_trait_method(op)?;
@@ -817,7 +827,13 @@ impl<'src> Analyzer<'src> {
                         .unwrap_or(false)
                 })
             })
-            .find_map(|implementation| implementation.declarations.get(method_name).copied())
+            .find_map(|implementation| {
+                implementation
+                    .declarations
+                    .get(method_name)
+                    .copied()
+                    .map(|method_id| (method_id, implementation.subject))
+            })
     }
 
     /// Resolves a method `member_name` declared by `trait_id` — a default method
@@ -5647,9 +5663,19 @@ impl<'src> Analyzer<'src> {
                                 }
                             } else {
                                 // Search every bound trait (`T: A + B`) for the method.
-                                found(bound_trait_ids.iter().find_map(|trait_id| {
+                                let member = bound_trait_ids.iter().find_map(|trait_id| {
                                     self.method_member_in_trait(*trait_id, member_name)
-                                }))
+                                });
+                                // The resolved member may be an abstract (bodyless)
+                                // required method, so record the call for codegen to
+                                // re-dispatch to the concrete type `T` is bound to at
+                                // each monomorphization — the instance analogue of the
+                                // `T::member` static-accessor path.
+                                if member.is_some() {
+                                    self.generic_method_dispatch
+                                        .insert(id, (*constraint_id, member_name));
+                                }
+                                found(member)
                             }
                         }
                         Type::Unresolved => MethodLookup::Defer,
@@ -6357,16 +6383,53 @@ impl<'src> Analyzer<'src> {
         // else (numbers, strings) keeps native JS arithmetic.
         for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {
             let lhs_type = self.infer_type(lhs_id, &Type::Unknown, &HashMap::new());
+            // A generic-bounded operand (`x == y` where `x: T: PartialEq`, e.g. the
+            // element compare inside `Option<T>::eq`) dispatches to the operator
+            // trait method, re-resolved to T's concrete impl at each monomorphization
+            // — the operator analogue of an instance method call on a generic
+            // receiver, recorded in the same `generic_method_dispatch` map.
+            if let Type::Generic(constraint_id) = lhs_type {
+                if let Some((_, method_name)) = operator_trait_method(op) {
+                    let bound_trait_ids = self.generic_bound_trait_ids(constraint_id);
+                    let provides = bound_trait_ids.iter().any(|trait_id| {
+                        self.method_member_in_trait(*trait_id, method_name)
+                            .is_some()
+                    });
+                    if provides {
+                        self.generic_method_dispatch
+                            .insert(binary_id, (constraint_id, method_name));
+                    }
+                }
+                continue;
+            }
             if !matches!(lhs_type, Type::Struct(_, _) | Type::Enum(_, _)) {
                 continue;
             }
-            if let Some(method_id) = self.operator_method(op, &lhs_type) {
+            if let Some((method_id, impl_subject_id)) = self.operator_method(op, &lhs_type) {
                 self.binary_op_dispatch.insert(binary_id, method_id);
+                // Monomorphize the operator method against the operand's type args
+                // (`Option<Point> ==` binds the impl's `Option<T>` to `T = Point`) so
+                // a generic element comparison inside the body — e.g. `Option<T>::eq`'s
+                // `x == y` — dispatches to the concrete impl. Only needed when a bound
+                // type is a non-native aggregate; for all-native bindings (e.g.
+                // `Option<i32>`) the generic emission already lowers `==` to native JS.
+                let impl_subject = impl_subject_id.get_type(self);
+                if let Some((_, bindings)) =
+                    self.reconcile_type(&impl_subject, &lhs_type, &HashMap::new())
+                {
+                    let needs_specialization = bindings.iter().any(|(_, concrete)| {
+                        !self.is_native_operator_type(&concrete.get_type(self))
+                    });
+                    if needs_specialization {
+                        self.method_call_substitution
+                            .insert(binary_id, bindings.into_iter().collect());
+                    }
+                }
             } else if let Some((trait_name, method_name)) = operator_trait_method(op) {
-                // The operator maps to a trait but this operand doesn't provide
-                // it. Primitives (the scalars and `bool`) use native operators, so
-                // skip them; a non-primitive type genuinely needs the impl.
-                if !self.is_primitive_operator_type(&lhs_type) {
+                // The operator maps to a trait but this operand doesn't provide it.
+                // Native-operator types (the scalars, `bool`, numeric enums) use
+                // native JS, so skip them; any other type genuinely needs the impl.
+                if !self.is_native_operator_type(&lhs_type) {
                     let type_name = match &lhs_type {
                         Type::Struct(id, _) => self.structs.get(id).map(|s| s.name),
                         Type::Enum(id, _) => self.enums.get(id).map(|e| e.name),
@@ -6740,6 +6803,7 @@ pub struct Program<'src> {
     pub external_functions: IndexMap<Id, ExternalFunction<'src>>,
     pub traits: IndexMap<Id, Trait<'src>>,
     pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
+    pub generic_method_dispatch: HashMap<Id, (TypeId, &'src str)>,
     pub trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
     pub for_each_next: HashMap<Id, Id>,
     pub binary_op_dispatch: HashMap<Id, Id>,
@@ -7425,6 +7489,7 @@ pub fn analyze<'src>(
         external_functions: analyzer.external_functions,
         traits: analyzer.traits,
         generic_static_accessors: analyzer.generic_static_accessors,
+        generic_method_dispatch: analyzer.generic_method_dispatch,
         trait_method_dispatch: analyzer.trait_method_dispatch,
         for_each_next: analyzer.for_each_next,
         binary_op_dispatch: analyzer.binary_op_dispatch,

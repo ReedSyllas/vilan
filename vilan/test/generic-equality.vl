@@ -1,0 +1,50 @@
+import std::{ print, option::Option::{ self, Some, None } };
+import std::compare::PartialEq;
+
+struct Point { x: i32, y: i32 }
+
+impl Point with PartialEq {
+	fun eq(self, b: Point): bool {
+		self.x == b.x && self.y == b.y
+	}
+}
+
+// A method/operator call on a trait-bounded generic value resolves to the
+// concrete impl at each monomorphization, not the abstract trait method.
+fun equal<T: PartialEq>(a: T, b: T): bool {
+	a == b
+}
+
+fun equal_method<T: PartialEq>(a: T, b: T): bool {
+	a.eq(b)
+}
+
+fun not_equal<T: PartialEq>(a: T, b: T): bool {
+	a != b
+}
+
+fun main() {
+	let p1 = Point { x = 1, y = 2 };
+	let p2 = Point { x = 1, y = 2 };
+	let p3 = Point { x = 3, y = 4 };
+
+	// Generic dispatch specializes to Point::eq:
+	print(equal(p1, p2)); // true
+	print(equal(p1, p3)); // false
+	print(equal_method(p1, p2)); // true
+	print(not_equal(p1, p3)); // true
+
+	// The same generic functions monomorphized to a primitive stay native:
+	print(equal(5, 5)); // true
+	print(equal(5, 9)); // false
+	print(not_equal(5, 9)); // true
+
+	// `Option<Struct> ==` dispatches its inner element compare to Point::eq:
+	let some_a: Option<Point> = Some(p1);
+	let some_b: Option<Point> = Some(p2);
+	let some_c: Option<Point> = Some(p3);
+	print(some_a == some_b); // true
+	print(some_a == some_c); // false
+	print(some_a != some_c); // true
+	print(some_a == None); // false
+}

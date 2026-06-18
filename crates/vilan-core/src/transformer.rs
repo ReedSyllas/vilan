@@ -509,6 +509,28 @@ impl<'src> Transformer<'src> {
                     }
                 }
 
+                // `a.member()` where `a`'s type is a trait-bounded generic `T`:
+                // dispatch to the member of the concrete type `T` is bound to at this
+                // monomorphization (the instance analogue of the `T::member()` path
+                // above). The trait member may be abstract (bodyless), so this can't
+                // fall through to a normal emit.
+                if let Some(&(constraint_id, member_name)) =
+                    self.program.generic_method_dispatch.get(id)
+                {
+                    if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
+                        if let Some((name, is_async)) =
+                            self.emit_dispatched_method(concrete_type_id, member_name)
+                        {
+                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                            return Some(if is_async {
+                                js::Node::Await(Box::new(call))
+                            } else {
+                                call
+                            });
+                        }
+                    }
+                }
+
                 // A trait method re-dispatched to the receiver's concrete type: an
                 // inherited default called on a concrete value (Gap E, with the
                 // type recorded), or a `self`-call inside a default body (no type,
@@ -678,11 +700,48 @@ impl<'src> Transformer<'src> {
             Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.walk_entity(*lhs, block).unwrap_or(js::Node::Void);
                 let rhs = self.walk_entity(*rhs, block).unwrap_or(js::Node::Void);
+                // `x op y` where `x: T` is a trait-bounded generic: dispatch to T's
+                // concrete operator impl at this monomorphization, re-resolved like
+                // the instance-method generic dispatch. (`!=` negates `eq`, as below.)
+                if let Some(&(constraint_id, member_name)) =
+                    self.program.generic_method_dispatch.get(&id)
+                {
+                    let concrete = self
+                        .current_substitution
+                        .get(&constraint_id)
+                        .map(|type_id| self.resolve_type_id(*type_id));
+                    // A native-equality concrete type (`Option<i32>`'s element) keeps
+                    // native `===`/`!==`; only an aggregate (`Option<Point>`)
+                    // dispatches to its `eq` impl.
+                    if let Some(concrete_type_id) = concrete.filter(|t| !self.compares_natively(*t))
+                    {
+                        if let Some((name, _)) =
+                            self.emit_dispatched_method(concrete_type_id, member_name)
+                        {
+                            let call =
+                                js::Node::Call(Box::new(js::Node::Local(name)), vec![lhs, rhs]);
+                            return Some(if matches!(*op, BinaryOp::NotEq) {
+                                js::Node::Unary('!', Box::new(call))
+                            } else {
+                                call
+                            });
+                        }
+                    }
+                }
                 // An overloaded operator (`a + b` where `a`'s type implements
-                // `Add`) compiles to the trait method call `add(a, b)`.
+                // `Add`) compiles to the trait method call `add(a, b)`. On a generic
+                // receiver (`Option<Point> ==`) the method is monomorphized against
+                // the recorded type-arg substitution so its body specializes.
                 if let Some(&method_id) = self.program.binary_op_dispatch.get(&id) {
-                    self.ensure_function_emitted(method_id);
-                    let name = self.ng.name_for(method_id);
+                    let name = if let Some(substitution) =
+                        self.program.method_call_substitution.get(&id)
+                    {
+                        let substitution = substitution.clone();
+                        self.emit_method_instance(method_id, &substitution)
+                    } else {
+                        self.ensure_function_emitted(method_id);
+                        self.ng.name_for(method_id)
+                    };
                     let call = js::Node::Call(Box::new(js::Node::Local(name)), vec![lhs, rhs]);
                     // `a != b` dispatches to `eq` and negates — the impl provides
                     // `eq`, and `ne` is just its `!eq` default.
@@ -1710,6 +1769,28 @@ impl<'src> Transformer<'src> {
                 .map(|type_id| self.resolve_type_id(*type_id))
                 .unwrap_or(type_id),
             _ => type_id,
+        }
+    }
+
+    /// A type whose `==`/`!=` compares by value in native JS — the scalar
+    /// primitives (`i32`/…/`str`), `bool`, and numeric (C-like) enums, all lowered
+    /// to JS numbers/strings/booleans. A generic `==` monomorphized to one of these
+    /// stays native rather than dispatching to a `PartialEq` impl (which for a
+    /// primitive is native `===` anyway), keeping codegen identical to a direct `==`.
+    fn compares_natively(&self, type_id: TypeId) -> bool {
+        match self.program.type_id_to_type_map.get(&type_id) {
+            Some(Type::Struct(id, _)) => self.program.structs.get(id).is_some_and(|struct_| {
+                matches!(struct_.name, "i32" | "u32" | "f64" | "BigInt" | "str")
+            }),
+            Some(Type::Enum(id, _)) => {
+                Some(*id) == self.program.bool_enum_id
+                    || self
+                        .program
+                        .enums
+                        .get(id)
+                        .is_some_and(|enum_| enum_.is_numeric)
+            }
+            _ => false,
         }
     }
 
