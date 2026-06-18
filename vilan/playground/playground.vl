@@ -1,0 +1,19 @@
+import std::{ print, random::{ range } };
+
+enum Foo {
+	One,
+	Two,
+	Three,
+}
+
+fun main() {
+	let a = Foo::Three;
+	
+	let b = match a {
+		Foo::One => 1,
+		Foo::Two => 2,
+		Foo::Three => 3,
+	};
+	
+	print(b);
+}
