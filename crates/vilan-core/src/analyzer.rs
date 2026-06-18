@@ -519,8 +519,9 @@ pub struct Analyzer<'src> {
     // as (member id, explicit argument ids). A wired method call isn't checked by
     // the free-call machinery, so this is a dedicated deferred pass (no subject
     // re-resolution — that recurses); it also drives bidirectional closure-arg
-    // inference. The method's first parameter is `self`, so args align at +1.
-    prepped_method_arg_checks: Vec<(Id, Vec<Id>)>,
+    // inference. The method's first parameter is `self`, so args align at +1. The
+    // `Span` is the call's argument list, for the arity diagnostic.
+    prepped_method_arg_checks: Vec<(Id, Vec<Id>, Span)>,
     // For-each loops whose iterable is a custom iterator: the resolved `next`
     // method id, so codegen emits a `next()`/`Some`-matching loop instead.
     for_each_next: HashMap<Id, Id>,
@@ -5714,8 +5715,11 @@ impl<'src> Analyzer<'src> {
                                 &argument_ids,
                                 &substitution,
                             );
-                            self.prepped_method_arg_checks
-                                .push((member_id, argument_ids.clone()));
+                            self.prepped_method_arg_checks.push((
+                                member_id,
+                                argument_ids.clone(),
+                                arguments_span,
+                            ));
                             self.wire_method_call(
                                 id,
                                 subject_id,
@@ -5823,7 +5827,7 @@ impl<'src> Analyzer<'src> {
             // subject re-resolution, which would recurse.)
             if !self.prepped_method_arg_checks.is_empty() {
                 let mut remaining = Vec::new();
-                'checks: for (member_id, argument_ids) in
+                'checks: for (member_id, argument_ids, arguments_span) in
                     std::mem::take(&mut self.prepped_method_arg_checks)
                 {
                     let parameter_ids = match self.expr_id_to_expr_map.get(&member_id) {
@@ -5840,6 +5844,24 @@ impl<'src> Analyzer<'src> {
                     let Some(parameter_ids) = parameter_ids else {
                         continue;
                     };
+                    // The receiver supplies `self` (parameter 0), so the call must
+                    // pass one argument per remaining parameter. The count is known
+                    // immediately (no inference), so check it before the per-argument
+                    // type checks below and skip them on a mismatch.
+                    let expected = parameter_ids.len().saturating_sub(1);
+                    if argument_ids.len() != expected {
+                        self.diagnostics.push(Error {
+                            span: arguments_span,
+                            msg: format!(
+                                "Expected {} {}, but got {} instead.",
+                                expected,
+                                plural(expected, "argument", "arguments"),
+                                argument_ids.len()
+                            ),
+                        });
+                        progress = true;
+                        continue;
+                    }
                     // Infer every argument first; defer the whole check until they
                     // all resolve, so errors aren't reported against partial types.
                     let mut argument_types = Vec::with_capacity(argument_ids.len());
@@ -5853,7 +5875,7 @@ impl<'src> Analyzer<'src> {
                         let argument_type =
                             self.infer_type(*argument_id, &parameter_type, &HashMap::new());
                         if matches!(argument_type, Type::Unresolved) {
-                            remaining.push((member_id, argument_ids.clone()));
+                            remaining.push((member_id, argument_ids.clone(), arguments_span));
                             continue 'checks;
                         }
                         argument_types.push(argument_type);
