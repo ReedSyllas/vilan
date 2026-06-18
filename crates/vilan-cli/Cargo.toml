@@ -2,6 +2,7 @@
 name = "vilan-cli"
 version = "0.1.0"
 edition = "2024"
+description = "The vilan language toolchain"
 
 [[bin]]
 name = "vilan"
@@ -11,3 +12,4 @@ path = "src/main.rs"
 vilan-core = { path = "../vilan-core" }
 ariadne = "0.6.0"
 chumsky = "0.12.0"
+clap = { version = "4", features = ["derive"] }
