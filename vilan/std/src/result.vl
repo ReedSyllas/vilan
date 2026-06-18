@@ -1,16 +1,195 @@
+import pkg::io::panic;
+import pkg::option::Option::{ self, Some, None };
+import pkg::compare::PartialEq;
+import pkg::default::Default;
+
 enum Result<T, E> {
 	Ok(T),
 	Err(E),
 }
 
+use Result::{ Ok, Err };
+
 impl Result<type T, type E> {
 	fun is_ok(self): bool {
 		self is Ok(_)
 	}
-	
+
+	fun is_ok_and(self, fn: |T| bool): bool {
+		match self {
+			Ok(let x) => fn(x),
+			_ => false,
+		}
+	}
+
 	fun is_err(self): bool {
 		self is Err(_)
 	}
+
+	fun is_err_and(self, fn: |E| bool): bool {
+		match self {
+			Err(let e) => fn(e),
+			_ => false,
+		}
+	}
+
+	// `Ok(x)` -> `Some(x)`, discarding the error; `Err(_)` -> `None`.
+	fun ok(self): Option<T> {
+		match self {
+			Ok(let x) => Some(x),
+			_ => None,
+		}
+	}
+
+	// `Err(e)` -> `Some(e)`, discarding the value; `Ok(_)` -> `None`.
+	fun err(self): Option<E> {
+		match self {
+			Err(let e) => Some(e),
+			_ => None,
+		}
+	}
+
+	fun unwrap(self): T {
+		match self {
+			Ok(let x) => x,
+			_ => panic("called `unwrap` on an `Err` value"),
+		}
+	}
+
+	fun unwrap_err(self): E {
+		match self {
+			Err(let e) => e,
+			_ => panic("called `unwrap_err` on an `Ok` value"),
+		}
+	}
+
+	fun unwrap_or(self, fallback: T): T {
+		match self {
+			Ok(let x) => x,
+			_ => fallback,
+		}
+	}
+
+	fun unwrap_or_else(self, fn: |E| T): T {
+		match self {
+			Ok(let x) => x,
+			Err(let e) => fn(e),
+		}
+	}
+
+	fun expect(self, message: str): T {
+		match self {
+			Ok(let x) => x,
+			_ => panic(message),
+		}
+	}
+
+	fun expect_err(self, message: str): E {
+		match self {
+			Err(let e) => e,
+			_ => panic(message),
+		}
+	}
+
+	fun map<U>(self, fn: |T| U): Result<U, E> {
+		match self {
+			Ok(let x) => Ok(fn(x)),
+			Err(let e) => Err(e),
+		}
+	}
+
+	fun map_err<F>(self, fn: |E| F): Result<T, F> {
+		match self {
+			Ok(let x) => Ok(x),
+			Err(let e) => Err(fn(e)),
+		}
+	}
+
+	fun map_or<U>(self, fn: |T| U, fallback: U): U {
+		match self {
+			Ok(let x) => fn(x),
+			_ => fallback,
+		}
+	}
+
+	fun map_or_else<U>(self, fn: |T| U, fallback: |E| U): U {
+		match self {
+			Ok(let x) => fn(x),
+			Err(let e) => fallback(e),
+		}
+	}
+
+	fun inspect(self, fn: |T| void): Self {
+		match self {
+			Ok(let x) => fn(x),
+			_ => {}
+		}
+		self
+	}
+
+	fun inspect_err(self, fn: |E| void): Self {
+		match self {
+			Err(let e) => fn(e),
+			_ => {}
+		}
+		self
+	}
+
+	fun and<U>(self, b: Result<U, E>): Result<U, E> {
+		match self {
+			Ok(_) => b,
+			Err(let e) => Err(e),
+		}
+	}
+
+	fun and_then<U>(self, fn: |T| Result<U, E>): Result<U, E> {
+		match self {
+			Ok(let x) => fn(x),
+			Err(let e) => Err(e),
+		}
+	}
+
+	fun or<F>(self, b: Result<T, F>): Result<T, F> {
+		match self {
+			Ok(let x) => Ok(x),
+			_ => b,
+		}
+	}
+
+	fun or_else<F>(self, fn: |E| Result<T, F>): Result<T, F> {
+		match self {
+			Ok(let x) => Ok(x),
+			Err(let e) => fn(e),
+		}
+	}
 }
 
-use Result::{ Ok, Err };
+impl Result<type T: Default, type E> {
+	fun unwrap_or_default(self): T {
+		match self {
+			Ok(let x) => x,
+			_ => T::default(),
+		}
+	}
+}
+
+impl Result<Option<type T>, type E> {
+	// `Result<Option<T>, E>` -> `Option<Result<T, E>>`, swapping the layers.
+	fun transpose(self): Option<Result<T, E>> {
+		match self {
+			Ok(Some(let x)) => Some(Ok(x)),
+			Ok(None) => None,
+			Err(let e) => Some(Err(e)),
+		}
+	}
+}
+
+impl Result<type T: PartialEq, type E: PartialEq> with PartialEq {
+	fun eq(self, b: Result<T, E>): bool {
+		match (self, b) {
+			(Ok(let x), Ok(let y)) => x == y,
+			(Err(let x), Err(let y)) => x == y,
+			_ => false,
+		}
+	}
+}

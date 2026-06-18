@@ -1,0 +1,22 @@
+import std::{ print, option::Option::{ self, Some, None }, result::Result::{ self, Ok, Err } };
+
+fun main() {
+	let ok: Result<i32, str> = Ok(10);
+	let err: Result<i32, str> = Err("boom");
+
+	print(ok.map(|n| n + 1).unwrap_or(0));          // 11
+	print(err.map_err(|e| e).unwrap_or(0));         // 0
+	print(ok.is_ok_and(|n| n > 5));                 // true
+	print(err.is_err_and(|e| true));               // true
+	print(ok.and_then(|n| Ok(n * 2)).unwrap_or(0)); // 20
+	print(err.or_else(|e| Ok(7)).unwrap_or(0));     // 7
+	print(err.unwrap_or_else(|e| 99));              // 99
+	print(ok.ok().is_some());                       // true
+	print(err.err().unwrap_or("none"));             // boom
+	print(err.unwrap_or_default());                 // 0
+	print(ok.and(Ok(5)).unwrap_or(0));              // 5
+	print(err.or(Ok(3)).unwrap_or(0));              // 3
+
+	let ro: Result<Option<i32>, str> = Ok(Some(42));
+	print(ro.transpose().is_some());                // true
+}
