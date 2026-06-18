@@ -65,25 +65,16 @@ enum Command {
     },
 }
 
-/// What `compile` does once a program type-checks: emit JavaScript (`build`) or
-/// nothing (`check`). Both run the full pipeline so both surface every error.
-enum Mode {
-    Build { stdout: bool },
-    Check,
-}
-
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Build {
             file,
             stdout,
             debug,
-        } => with_entry(file, |entry| compile(entry, Mode::Build { stdout }, debug)),
-        Command::Check { file, debug } => {
-            with_entry(file, |entry| compile(entry, Mode::Check, debug))
-        }
-        // `run`/`fmt`/`test` await the project model, formatter, and test runner.
-        Command::Run { .. } => unimplemented_command("run"),
+        } => with_entry(file, |entry| build(entry, stdout, debug)),
+        Command::Check { file, debug } => with_entry(file, |entry| check(entry, debug)),
+        Command::Run { file } => with_entry(file, run),
+        // `fmt`/`test` await the formatter and test runner.
         Command::Fmt { .. } => unimplemented_command("fmt"),
         Command::Test { .. } => unimplemented_command("test"),
     }
@@ -170,19 +161,19 @@ fn std_root() -> PathBuf {
 }
 
 /// Runs the full pipeline (lex -> parse -> analyze -> contexts -> async infer ->
-/// transform) over `file`, reports any diagnostics, and — when clean — emits per
-/// `mode`. Returns a failure exit code if anything went wrong.
-fn compile(file: &Path, mode: Mode, emit_debug: bool) -> ExitCode {
+/// transform) over `file` and reports any diagnostics. Returns the JavaScript on
+/// success, or a failure exit code (after reporting) on any error.
+fn compile_to_js(file: &Path, emit_debug: bool) -> Result<String, ExitCode> {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(error) => {
             eprintln!("error: cannot read {}: {error}", file.display());
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     let filename = file.to_string_lossy().into_owned();
     let std_root = std_root();
-    let mut emit_failed = false;
+    let mut output = None;
 
     let (tokens, mut errs) = lexer().parse(src.as_str()).into_output_errors();
 
@@ -223,7 +214,7 @@ fn compile(file: &Path, mode: Mode, emit_debug: bool) -> ExitCode {
 
             if errs.is_empty() {
                 match transform(&program) {
-                    Ok(output) => emit_failed = !emit(file, &mode, output),
+                    Ok(javascript) => output = Some(javascript),
                     Err(error) => errs.push(Rich::custom(error.span, error.msg)),
                 }
             }
@@ -237,37 +228,73 @@ fn compile(file: &Path, mode: Mode, emit_debug: bool) -> ExitCode {
     let clean = errs.is_empty() && parse_errs.is_empty();
     report(&filename, &src, errs, parse_errs);
 
-    if clean && !emit_failed {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    match output {
+        Some(javascript) if clean => Ok(javascript),
+        _ => Err(ExitCode::FAILURE),
     }
 }
 
-/// Emits a successfully-transformed program per `mode`. Returns `false` if a file
-/// write failed.
-fn emit(file: &Path, mode: &Mode, output: String) -> bool {
-    match mode {
-        Mode::Build { stdout: true } => {
-            print!("{output}");
-            true
+/// Compiles `file` and writes `<file>.js` (or prints to stdout).
+fn build(file: &Path, stdout: bool, emit_debug: bool) -> ExitCode {
+    let javascript = match compile_to_js(file, emit_debug) {
+        Ok(javascript) => javascript,
+        Err(code) => return code,
+    };
+    if stdout {
+        print!("{javascript}");
+        return ExitCode::SUCCESS;
+    }
+    let output_path = file.with_extension("js");
+    match fs::write(&output_path, javascript) {
+        Ok(()) => {
+            println!("Compiled {} -> {}", file.display(), output_path.display());
+            ExitCode::SUCCESS
         }
-        Mode::Build { stdout: false } => {
-            let output_path = file.with_extension("js");
-            match fs::write(&output_path, output) {
-                Ok(()) => {
-                    println!("Compiled {} -> {}", file.display(), output_path.display());
-                    true
-                }
-                Err(error) => {
-                    eprintln!("error: cannot write {}: {error}", output_path.display());
-                    false
-                }
-            }
+        Err(error) => {
+            eprintln!("error: cannot write {}: {error}", output_path.display());
+            ExitCode::FAILURE
         }
-        Mode::Check => {
+    }
+}
+
+/// Compiles `file` and reports diagnostics, writing no output.
+fn check(file: &Path, emit_debug: bool) -> ExitCode {
+    match compile_to_js(file, emit_debug) {
+        Ok(_) => {
             println!("{}: no errors", file.display());
-            true
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+/// Compiles `file`, then executes the JavaScript with Node.js — propagating its
+/// exit code, with stdin/stdout/stderr connected to the terminal.
+fn run(file: &Path) -> ExitCode {
+    let javascript = match compile_to_js(file, false) {
+        Ok(javascript) => javascript,
+        Err(code) => return code,
+    };
+    // Run from a temp file rather than piping the script via stdin, so the program
+    // keeps its own stdin (a piped script would consume it, breaking `scan()`).
+    let script = env::temp_dir().join(format!("vilan-run-{}.js", std::process::id()));
+    if let Err(error) = fs::write(&script, javascript) {
+        eprintln!("error: cannot write {}: {error}", script.display());
+        return ExitCode::FAILURE;
+    }
+    let status = std::process::Command::new("node").arg(&script).status();
+    let _ = fs::remove_file(&script);
+    match status {
+        Ok(status) => match status.code() {
+            Some(code) => ExitCode::from(code as u8),
+            None => ExitCode::FAILURE, // terminated by a signal
+        },
+        Err(error) => {
+            eprintln!(
+                "error: failed to launch `node`: {error} \
+                 (is Node.js installed and on your PATH?)"
+            );
+            ExitCode::FAILURE
         }
     }
 }
