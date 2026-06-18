@@ -67,8 +67,12 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    the nearest `vilan.toml` (or a project dir), `[package] entry` defaulting to `main.vl`. Multi-
    file `import pkg::<module>` resolves to the entry's package siblings (366eee5). `run`
    implemented (47beac6: build + `node`, propagates exit code). Example: `vilan/examples/math`.
-5. **LSP autocomplete** (M–L) — highest-value editor feature; tiered plan already drafted
-   (member `x.`, path `::`, scope/keyword).
+5. ✅ **LSP autocomplete** (commit 01ff369) — `textDocument/completion` dispatched by context:
+   `receiver.` → fields + methods (receiver resolved by name through scope, with a same-file
+   fallback for mid-edit), `Path::` → enum variants / struct methods / module members, open scope
+   → visible names + keywords. Self-contained in vilan-lsp over existing `Program` data; unit-
+   tested per context. Relied on a core parser fix (72f76cd): an incomplete `p.` now recovers to
+   `MemberAccessor(_, Error)` (clearer error + receiver still analyzes), corpus byte-identical.
 6. **Code formatter** (`vilan fmt` + LSP formatting) (M–L) — needs comment-preserving
    formatting (the parser drops comments as trivia), not naive AST print-back. The `fmt`
    subcommand is still a placeholder, gated on this.
