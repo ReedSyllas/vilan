@@ -91,8 +91,10 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    generation and derives (`PartialEq`/`Debug`/constructors). Needs a macro-expansion phase
    + struct reflection.
 10. **LSP semantic highlighting** (M) — semantic tokens, precision over the TextMate grammar.
-11. **More stdlib** (M, incremental) — `Display`/`Debug` + `format`, JSON, time/date,
-    env/process, `fs`/`http` expansion. Some derives want #9.
+11. **More stdlib** (M, incremental) — 🚧 in progress. Done: math methods on `i32`/`f64`
+    (`abs`/`sqrt`/`pow`/`floor`/`ceil`/`round`/`min`/`max`, `@extern("Math.*")` wrappers — 6fc6eea,
+    number-math.vl). Remaining: `Display`/`Debug` + `format`, JSON, time/date, env/process,
+    `fs`/`http` expansion, `parse_f64`. Some derives want #9.
 
 ## Tier 4 — Perf, advanced, cleanup
 
