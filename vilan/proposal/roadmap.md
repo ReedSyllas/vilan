@@ -61,9 +61,13 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
 
 ## Tier 2 — Toolchain & daily DX
 
-4. **CLI subcommands + project model** (M) — `build`/`run`/`check`/`test`/`fmt`, a
-   `vilan.toml` manifest, and multi-file project resolution (today: single entry file +
-   special-cased std). Foundational: `fmt`/`test` hang off it.
+4. ✅ **CLI subcommands + project model** — clap subcommands (commit 9a6dd18): `build` and
+   `check` are real; `run`/`fmt`/`test` are placeholders pending their features (#6/#7).
+   `vilan.toml` manifest + project discovery (d0b530f): `build`/`check` resolve the entry from
+   the nearest `vilan.toml` (or a project dir), `[package] entry` defaulting to `main.vl`. Multi-
+   file `import pkg::<module>` resolves to the entry's package siblings (366eee5). Example:
+   `vilan/examples/math`. Remaining (hangs off this): implement `run` (build + node), and `fmt`/
+   `test` land with #6/#7.
 5. **LSP autocomplete** (M–L) — highest-value editor feature; tiered plan already drafted
    (member `x.`, path `::`, scope/keyword).
 6. **Code formatter** (`vilan fmt` + LSP formatting) (M–L) — needs comment-preserving
