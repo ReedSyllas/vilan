@@ -3585,7 +3585,12 @@ impl<'src> Analyzer<'src> {
     /// bidirectionally (`builder.on_start(|s| ..)` types `s` from `|Server|
     /// void`). `argument_ids` are the explicit args (no receiver); the method's
     /// first parameter is `self`, so they align at offset 1.
-    fn infer_closure_args_against_params(&mut self, member_id: Id, argument_ids: &[Id]) {
+    fn infer_closure_args_against_params(
+        &mut self,
+        member_id: Id,
+        argument_ids: &[Id],
+        substitution: &SubstitutionContext,
+    ) {
         let parameter_ids = match self.expr_id_to_expr_map.get(&member_id) {
             Some(Expr::Function(function_id)) => self
                 .functions
@@ -3616,7 +3621,7 @@ impl<'src> Analyzer<'src> {
                 .get(parameter_id)
                 .map(|parameter| parameter.type_id.get_type(self));
             if let Some(parameter_type) = parameter_type {
-                self.infer_type(*argument_id, &parameter_type, &HashMap::new());
+                self.infer_type(*argument_id, &parameter_type, substitution);
             }
         }
     }
@@ -4184,8 +4189,20 @@ impl<'src> Analyzer<'src> {
                                 Type::Unknown | Type::Unresolved
                             );
                             if is_unknown && expected_known {
+                                // Resolve the expected parameter type through the
+                                // active substitution, so a generic method param
+                                // (`|T| U`) types the closure parameter with the
+                                // concrete receiver binding (`T = Point`) rather
+                                // than the abstract `T`.
+                                let resolved = match expected_type_id.get_type(self) {
+                                    Type::Generic(constraint_id) => substitution_context
+                                        .get(&constraint_id)
+                                        .copied()
+                                        .unwrap_or(expected_type_id),
+                                    _ => expected_type_id,
+                                };
                                 if let Some(parameter) = self.parameters.get_mut(parameter_id) {
-                                    parameter.type_id = expected_type_id;
+                                    parameter.type_id = resolved;
                                 }
                             }
                         }
@@ -5283,6 +5300,14 @@ impl<'src> Analyzer<'src> {
                         }
                     }
                     subject_type => {
+                        // A closure parameter still awaiting bidirectional
+                        // inference — typed when the enclosing method call resolves
+                        // (a later iteration, since method calls are solved after
+                        // field accessors). Defer rather than error.
+                        if self.is_unknown_closure_parameter(subject_id) {
+                            remaining_accessors.insert(id, constraint);
+                            continue;
+                        }
                         let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                         self.diagnostics.push(Error {
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
@@ -5625,7 +5650,16 @@ impl<'src> Analyzer<'src> {
                             // call, so `builder.on_start(|s| ..)` would otherwise
                             // leave `s` untyped), and defer a full argument
                             // type-check against the parameters.
-                            self.infer_closure_args_against_params(member_id, &argument_ids);
+                            let substitution = self
+                                .method_call_substitution
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_default();
+                            self.infer_closure_args_against_params(
+                                member_id,
+                                &argument_ids,
+                                &substitution,
+                            );
                             self.prepped_method_arg_checks
                                 .push((member_id, argument_ids.clone()));
                             self.wire_method_call(

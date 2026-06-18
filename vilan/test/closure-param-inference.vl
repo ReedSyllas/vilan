@@ -1,0 +1,17 @@
+import std::{ print, option::Option::{ self, Some, None } };
+
+struct Point { x: i32, y: i32 }
+
+fun main() {
+	// A closure passed to a generic method now types its parameter from the
+	// concrete receiver, so field access on the element works.
+	let p: Option<Point> = Some(Point { x = 3, y = 4 });
+	print(p.map(|q| q.x + q.y).unwrap_or(0));   // 7
+	print(p.is_some_and(|q| q.x == 3));          // true
+
+	mut pts: List<Point> = List::new();
+	pts.push(Point { x = 1, y = 10 });
+	pts.push(Point { x = 2, y = 20 });
+	print(pts.map(|pt| pt.x).fold(0, |a, b| a + b));   // 3
+	print(pts.filter(|pt| pt.y > 15).len());            // 1
+}
