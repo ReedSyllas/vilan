@@ -3558,8 +3558,11 @@ impl<'src> Analyzer<'src> {
     /// `any`.
     fn iterable_element_type(&self, iterable_type: &Type) -> Option<Type> {
         match iterable_type {
+            // `List<T>` and `Set<T>` both iterate their single element type `T`
+            // (a JS array / `Set` are natively iterable, yielding elements).
             Type::Struct(id, arguments)
-                if Some(*id) == self.primitive_struct_ids.get("List").copied() =>
+                if Some(*id) == self.primitive_struct_ids.get("List").copied()
+                    || Some(*id) == self.primitive_struct_ids.get("Set").copied() =>
             {
                 arguments
                     .first()
@@ -6772,6 +6775,16 @@ pub enum Intrinsic {
     ListGet,
     // `List.pop(): Option<T>` -> a runtime helper that removes the last element.
     ListPop,
+    // `Set::new(): Set<T>` -> `new Set()`.
+    SetNew,
+    // `Set.insert(value)` -> native `.add(value)`.
+    SetInsert,
+    // `Set.contains(value): bool` -> native `.has(value)`.
+    SetContains,
+    // `Set.remove(value)` -> native `.delete(value)`.
+    SetRemove,
+    // `Set.len(): i32` -> native `.size` (property read).
+    SetLen,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -7228,6 +7241,17 @@ pub fn analyze<'src>(
             .insert("List", list_struct_id);
     }
 
+    // The `std::set` `Set` struct, if `set.vl` loaded. Its `new`/`insert`/... method
+    // ids are captured below after `build()`. `Set` is imported explicitly (not an
+    // always-loaded core module), so it isn't bound into the global scope.
+    let set_struct_id = module_scopes
+        .get("set")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Set").copied());
+    if let Some(set_struct_id) = set_struct_id {
+        analyzer.primitive_struct_ids.insert("Set", set_struct_id);
+    }
+
     // The `std::context` `Context` struct, if `context.vl` loaded. Its
     // `new`/`run`/`get` method ids are captured after `build()`, once impl
     // subjects resolve. `Context` is reached only by path (`std::context::..`),
@@ -7376,6 +7400,27 @@ pub fn analyze<'src>(
                     ("len", Intrinsic::ListLen),
                     ("get", Intrinsic::ListGet),
                     ("pop", Intrinsic::ListPop),
+                ] {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(set_struct_id) = analyzer.primitive_struct_ids.get("Set").copied() {
+        for implementation in &analyzer.implementations {
+            let subject_is_set = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == set_struct_id
+            );
+            if subject_is_set {
+                for (name, intrinsic) in [
+                    ("new", Intrinsic::SetNew),
+                    ("insert", Intrinsic::SetInsert),
+                    ("contains", Intrinsic::SetContains),
+                    ("remove", Intrinsic::SetRemove),
+                    ("len", Intrinsic::SetLen),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

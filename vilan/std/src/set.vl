@@ -1,0 +1,26 @@
+// `Set<T>` is the built-in hash set, backed by a native JS `Set`. It holds
+// unique values compared by JS value-equality, so primitive elements (`i32`,
+// `str`, `bool`, …) work directly. Struct/enum elements compare by reference
+// (JS `Set` keys objects by identity), so by-value membership of aggregates is
+// not supported yet — see proposal/roadmap.md.
+//
+// `Set` is `external` (an opaque intrinsic): `Set::new()` is `new Set()`,
+// `insert` is the native `.add`, and a `for x in set` iterates natively.
+
+external struct Set<T>;
+
+impl Set<type T> {
+	external fun new(): Set<T>;
+
+	external fun insert(&mut self, value: T): void;
+
+	external fun contains(self, value: T): bool;
+
+	external fun remove(&mut self, value: T): void;
+
+	external fun len(self): i32;
+
+	fun is_empty(self): bool {
+		self.len() == 0
+	}
+}

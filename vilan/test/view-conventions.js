@@ -1,5 +1,7 @@
 function __clone(value) {
-	return Array.isArray(value) ? value.map(__clone) : value;
+	if (Array.isArray(value)) return value.map(__clone);
+	if (value instanceof Set) return new Set([ ...value ].map(__clone));
+	return value;
 }
 function b/*bump*/(c) {
 	c[0] = c[0] + 1;

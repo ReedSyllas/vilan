@@ -89,13 +89,16 @@ fn helper_source(name: &str) -> &'static str {
         "__list_pop" => {
             "function __list_pop(list) {\n\treturn list.length === 0 ? [ 1 ] : [ 0, list.pop() ];\n}"
         }
-        // Value-semantics deep clone. Structs/lists/enums/tuples are arrays, so
-        // recurse into them; everything else — primitives and closures — is
-        // returned by reference (a closure is immutable, so sharing it is a
-        // copy). Unlike `structuredClone`, this doesn't throw on functions.
+        // Value-semantics deep clone. Structs/lists/enums/tuples are arrays and a
+        // `Set` is a JS `Set`, so recurse into them; everything else — primitives
+        // and closures — is returned by reference (a closure is immutable, so
+        // sharing it is a copy). Unlike `structuredClone`, this doesn't throw on
+        // functions.
         "__clone" => {
             "function __clone(value) {\n\
-             \treturn Array.isArray(value) ? value.map(__clone) : value;\n\
+             \tif (Array.isArray(value)) return value.map(__clone);\n\
+             \tif (value instanceof Set) return new Set([ ...value ].map(__clone));\n\
+             \treturn value;\n\
              }"
         }
         _ => "",
@@ -1354,9 +1357,9 @@ impl<'src> Transformer<'src> {
         intrinsic: Intrinsic,
         args: Vec<js::Node<'src>>,
     ) -> js::Node<'src> {
-        // A `str` method that maps directly onto a native JS method: the receiver
-        // is `self` (the first argument), the rest pass through as call args.
-        fn str_method<'a, I: Iterator<Item = js::Node<'a>>>(
+        // A method that maps directly onto a native JS method (`str`, `Set`, `Map`):
+        // the receiver is `self` (the first argument), the rest pass through as args.
+        fn native_method<'a, I: Iterator<Item = js::Node<'a>>>(
             args: &mut I,
             native: &str,
         ) -> js::Node<'a> {
@@ -1372,16 +1375,16 @@ impl<'src> Transformer<'src> {
                 self.used_helpers.insert("__scan");
                 js::Node::Call(Box::new(js::Node::Local("__scan".to_string())), Vec::new())
             }
-            Intrinsic::StrTrim => str_method(&mut args, "trim"),
-            Intrinsic::StrToLowercaseAscii => str_method(&mut args, "toLowerCase"),
-            Intrinsic::StrToUppercase => str_method(&mut args, "toUpperCase"),
-            Intrinsic::StrContains => str_method(&mut args, "includes"),
-            Intrinsic::StrStartsWith => str_method(&mut args, "startsWith"),
-            Intrinsic::StrEndsWith => str_method(&mut args, "endsWith"),
-            Intrinsic::StrReplace => str_method(&mut args, "replaceAll"),
-            Intrinsic::StrRepeat => str_method(&mut args, "repeat"),
-            Intrinsic::StrSplit => str_method(&mut args, "split"),
-            Intrinsic::StrSubstring => str_method(&mut args, "substring"),
+            Intrinsic::StrTrim => native_method(&mut args, "trim"),
+            Intrinsic::StrToLowercaseAscii => native_method(&mut args, "toLowerCase"),
+            Intrinsic::StrToUppercase => native_method(&mut args, "toUpperCase"),
+            Intrinsic::StrContains => native_method(&mut args, "includes"),
+            Intrinsic::StrStartsWith => native_method(&mut args, "startsWith"),
+            Intrinsic::StrEndsWith => native_method(&mut args, "endsWith"),
+            Intrinsic::StrReplace => native_method(&mut args, "replaceAll"),
+            Intrinsic::StrRepeat => native_method(&mut args, "repeat"),
+            Intrinsic::StrSplit => native_method(&mut args, "split"),
+            Intrinsic::StrSubstring => native_method(&mut args, "substring"),
             Intrinsic::StrLen | Intrinsic::ListLen => js::Node::Property(
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 "length".to_string(),
@@ -1422,6 +1425,17 @@ impl<'src> Transformer<'src> {
                     args.collect(),
                 )
             }
+            // `Set::new()` -> `new Set()` (no constructor args).
+            Intrinsic::SetNew => {
+                js::Node::Call(Box::new(js::Node::Local("new Set".to_string())), Vec::new())
+            }
+            Intrinsic::SetInsert => native_method(&mut args, "add"),
+            Intrinsic::SetContains => native_method(&mut args, "has"),
+            Intrinsic::SetRemove => native_method(&mut args, "delete"),
+            Intrinsic::SetLen => js::Node::Property(
+                Box::new(args.next().unwrap_or(js::Node::Void)),
+                "size".to_string(),
+            ),
         }
     }
 

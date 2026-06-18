@@ -1,5 +1,7 @@
 function __clone(value) {
-	return Array.isArray(value) ? value.map(__clone) : value;
+	if (Array.isArray(value)) return value.map(__clone);
+	if (value instanceof Set) return new Set([ ...value ].map(__clone));
+	return value;
 }
 let a/*a*/ = [ 0, 0 ];
 let b/*total*/ = 0;

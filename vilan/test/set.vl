@@ -1,0 +1,42 @@
+import std::print;
+import std::set::Set;
+
+fun main() {
+	// `Set<i32>`: insert (deduping), membership, removal, size.
+	mut numbers: Set<i32> = Set::new();
+	numbers.insert(1);
+	numbers.insert(2);
+	numbers.insert(2); // duplicate — no effect
+	numbers.insert(3);
+	print(numbers.len()); // 3
+	print(numbers.contains(2)); // true
+	print(numbers.contains(9)); // false
+	numbers.remove(2);
+	print(numbers.contains(2)); // false
+	print(numbers.len()); // 2
+	print(numbers.is_empty()); // false
+
+	// Native `for x in set` iteration (insertion order).
+	mut total = 0;
+	for value in numbers {
+		total = total + value;
+	}
+	print(total); // 4
+
+	// Value semantics: a copy is independent of the original.
+	mut copy = numbers;
+	copy.insert(100);
+	print(numbers.contains(100)); // false — original untouched
+	print(copy.contains(100)); // true
+
+	// `Set<str>`: string elements compare by value too.
+	mut words: Set<str> = Set::new();
+	words.insert("hi");
+	words.insert("hi");
+	words.insert("bye");
+	print(words.len()); // 2
+	print(words.contains("hi")); // true
+
+	mut empty: Set<i32> = Set::new();
+	print(empty.is_empty()); // true
+}
