@@ -1,17 +1,17 @@
-function j/*is_empty*/(k) {
-	return b(k) === 0;
+function b/*is_empty*/(c) {
+	return c.length === 0;
 }
 const a/*s*/ = "Hello, World";
-console.log(b(a/*s*/));
-console.log(c(a/*s*/, "World"));
-console.log(d(a/*s*/, "Hello"));
-console.log(e(a/*s*/, "!"));
-console.log(f(a/*s*/));
-console.log(g(a/*s*/, "o", "0"));
-console.log(h(a/*s*/, 0, 5));
-console.log(i("ab", 3));
-console.log(j/*is_empty*/("  hi  ".trim()));
-console.log(j/*is_empty*/(""));
-for (const m/*part*/ of l("a,b,c", ",")) {
-	console.log(m/*part*/);
+console.log(a/*s*/.length);
+console.log(a/*s*/.includes("World"));
+console.log(a/*s*/.startsWith("Hello"));
+console.log(a/*s*/.endsWith("!"));
+console.log(a/*s*/.toUpperCase());
+console.log(a/*s*/.replaceAll("o", "0"));
+console.log(a/*s*/.substring(0, 5));
+console.log("ab".repeat(3));
+console.log(b/*is_empty*/("  hi  ".trim()));
+console.log(b/*is_empty*/(""));
+for (const d/*part*/ of "a,b,c".split(",")) {
+	console.log(d/*part*/);
 }
