@@ -1731,6 +1731,37 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Forming a writable view `&mut place` requires the place to be mutable —
+    /// you cannot get a `&mut` to an immutable `let` local or through a readonly
+    /// (bare / `&`) parameter. Complements `check_mutable_arguments`, which only
+    /// sees bare-place arguments; an *explicit* `&mut a` argument (or any other
+    /// `&mut a`, e.g. `let v = &mut a`) is caught here.
+    fn check_mutable_references(&mut self) {
+        let references: Vec<(Id, Id)> = self
+            .expr_id_to_expr_map
+            .iter()
+            .filter_map(|(reference_id, expr)| match expr {
+                Expr::Reference(operand_id, true) => Some((*reference_id, *operand_id)),
+                _ => None,
+            })
+            .collect();
+        for (reference_id, operand_id) in references {
+            if let Some((name, fix)) = self.readonly_root(operand_id) {
+                let advice = if fix == "`&mut`" {
+                    format!("declare it `&mut {name}`")
+                } else {
+                    "declare it `mut`".to_string()
+                };
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&reference_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!(
+                        "cannot take a writable view of immutable '{name}'; {advice} to allow mutation."
+                    ),
+                });
+            }
+        }
+    }
+
     /// Rule 1 (value semantics): the value expressions that must be deep-copied
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
@@ -7408,6 +7439,7 @@ pub fn analyze<'src>(
     analyzer.build();
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
+    analyzer.check_mutable_references();
     analyzer.check_view_escape();
     analyzer.check_invalidation();
 
