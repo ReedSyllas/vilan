@@ -624,9 +624,15 @@ where
     let match_ = just(Token::Match)
         .ignore_then(secondary_expression.clone().labelled("match subject"))
         .then(
+            // Each arm may be followed by a comma; it's optional, so the idiomatic
+            // no-comma-after-a-`{ }`-block style (`Some(x) => { .. } None => 0`)
+            // parses as well as the comma-separated one. An ambiguous omission —
+            // an expression-bodied arm whose value would absorb the next arm's
+            // pattern as a postfix (`=> f(a) (b) => ..`) — still errors, so a
+            // missing comma is never a silent mis-parse.
             match_leg
-                .separated_by(just(Token::Ctrl(',')))
-                .allow_trailing()
+                .then_ignore(just(Token::Ctrl(',')).or_not())
+                .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
                 .map_with(|legs, e| (legs, e.span())),

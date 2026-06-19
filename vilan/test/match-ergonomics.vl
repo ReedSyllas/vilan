@@ -1,0 +1,33 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+// Match arms need no comma after a `{ }` block body (the idiomatic style);
+// struct initializers accept field shorthand (`{ x, y }` = `{ x = x, y = y }`).
+struct Point {
+	x: i32,
+	y: i32,
+}
+
+fun classify(p: Point): i32 {
+	// No-comma block arms, mixed with a comma'd one.
+	match p.x {
+		0 => {
+			let base = p.y;
+			base
+		}
+		1 => {
+			p.y * 10
+		}
+		let other => other + p.y,
+	}
+}
+
+fun main() {
+	let x = 2;
+	let y = 5;
+	let p = Point { x, y }; // field shorthand
+	print(classify(p)); // other(2) + 5 = 7
+
+	print(classify(Point { x = 0, y = 9 })); // base = 9
+	print(classify(Point { x = 1, y = 4 })); // 4 * 10 = 40
+}
