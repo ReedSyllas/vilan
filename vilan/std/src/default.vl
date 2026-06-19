@@ -2,3 +2,18 @@
 trait Default {
 	fun default(): Self;
 }
+
+// Default values for the core scalar primitives that don't define one in their
+// own module (numbers do, in `number.vl`). An empty string and `false` mirror
+// the zero/identity each takes.
+impl str with Default {
+	fun default(): str {
+		""
+	}
+}
+
+impl bool with Default {
+	fun default(): bool {
+		false
+	}
+}

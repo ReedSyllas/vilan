@@ -1,0 +1,20 @@
+import std::print;
+
+// `@derive(Default)` synthesizes `default()`, building the struct from each
+// field type's own `default()`. Combines with other derives.
+@derive(PartialEq, Default)
+struct Config {
+	count: i32,
+	name: str,
+	enabled: bool,
+}
+
+fun main() {
+	let d = Config::default();
+	print(d.count); // 0
+	print(d.name); // (empty line)
+	print(d.enabled); // false
+
+	let d2 = Config::default();
+	print(d == d2); // true — both are the default
+}

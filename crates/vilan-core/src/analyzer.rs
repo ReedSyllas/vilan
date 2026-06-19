@@ -7438,33 +7438,83 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
 /// with a field body are handled; each supported trait name emits its impl,
 /// built from the struct's field names. Unknown trait names are skipped (the
 /// missing-impl error surfaces naturally at the use site).
+/// Renders a (field) type node back to source for use in generated code — a
+/// name (`i32`/`Point`) or a generic application (`List<i32>`). Other forms fall
+/// back to `_`, which surfaces a clear error at the generated use site.
+fn render_type(node: &Node<'_>) -> String {
+    match node {
+        Node::Accessor(name) => name.to_string(),
+        Node::AccessorWithGenerics(name, arguments) => {
+            let arguments = arguments
+                .0
+                .iter()
+                .map(|argument| render_type(&argument.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}<{arguments}>")
+        }
+        _ => "_".to_string(),
+    }
+}
+
 fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
     let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
         return String::new();
     };
     let struct_name = name.0;
-    let field_names: Vec<&str> = fields.0.iter().map(|field| field.0.0).collect();
+    let fields: Vec<(&str, String)> = fields
+        .0
+        .iter()
+        .map(|field| {
+            let field_name = field.0.0;
+            let field_type = field
+                .0
+                .1
+                .as_ref()
+                .map(|type_| render_type(&type_.0))
+                .unwrap_or_else(|| "_".to_string());
+            (field_name, field_type)
+        })
+        .collect();
     let mut out = String::new();
     for derive in derives {
-        if *derive == "PartialEq" {
-            // `self.a == other.a && self.b == other.b` (a field-less struct is
-            // always equal).
-            let comparison = if field_names.is_empty() {
-                "true".to_string()
-            } else {
-                field_names
+        match *derive {
+            "PartialEq" => {
+                // `self.a == other.a && self.b == other.b` (a field-less struct is
+                // always equal).
+                let comparison = if fields.is_empty() {
+                    "true".to_string()
+                } else {
+                    fields
+                        .iter()
+                        .map(|(field, _)| format!("self.{field} == other.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(" && ")
+                };
+                out.push_str(&format!(
+                    "impl {struct_name} with PartialEq {{\n\
+                     \tfun eq(self, other: {struct_name}): bool {{\n\
+                     \t\t{comparison}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
+            "Default" => {
+                // `{ a = i32::default(), b = Point::default() }`.
+                let initializers = fields
                     .iter()
-                    .map(|field| format!("self.{field} == other.{field}"))
+                    .map(|(field, type_)| format!("{field} = {type_}::default()"))
                     .collect::<Vec<_>>()
-                    .join(" && ")
-            };
-            out.push_str(&format!(
-                "impl {struct_name} with PartialEq {{\n\
-                 \tfun eq(self, other: {struct_name}): bool {{\n\
-                 \t\t{comparison}\n\
-                 \t}}\n\
-                 }}\n"
-            ));
+                    .join(", ");
+                out.push_str(&format!(
+                    "impl {struct_name} with Default {{\n\
+                     \tfun default(): {struct_name} {{\n\
+                     \t\t{struct_name} {{ {initializers} }}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
+            _ => {}
         }
     }
     out
@@ -7491,6 +7541,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     let mut prelude = String::new();
     if traits.contains("PartialEq") {
         prelude.push_str("import std::compare::PartialEq;\n");
+    }
+    if traits.contains("Default") {
+        prelude.push_str("import std::default::Default;\n");
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;
