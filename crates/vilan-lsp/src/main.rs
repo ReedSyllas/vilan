@@ -222,6 +222,7 @@ impl LanguageServer for Backend {
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     // `.` and `:` (the second `:` of `::`) re-trigger completion so
                     // member/path candidates appear without a manual invoke.
@@ -387,6 +388,28 @@ impl LanguageServer for Backend {
             .map(|symbol| to_lsp_symbol(symbol, &document.line_index))
             .collect::<Vec<_>>();
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let source = document.line_index.text();
+        let formatted = vilan_core::formatter::format(source);
+        // `format` returns the input unchanged when the file is already canonical
+        // or hits a construct it can't print (it never produces non-round-tripping
+        // output) — either way there is nothing to edit.
+        if formatted == source {
+            return Ok(None);
+        }
+        // Replace the whole document in one edit, from the start to the end
+        // position the line index reports for the final byte.
+        let end = document.line_index.position(source.len());
+        Ok(Some(vec![TextEdit {
+            range: Range::new(Position::new(0, 0), end),
+            new_text: formatted,
+        }]))
     }
 }
 
