@@ -1,0 +1,37 @@
+import std::print;
+
+// Phase 5: the `borrows` effect is *inferred*. A method that returns a view
+// projecting one of its parameters borrows that parameter automatically — no
+// `borrows` clause needed. (A returned view of a local still dangles and is
+// rejected; only parameter projections are admitted.)
+struct Wrapper { value: i32 }
+
+impl Wrapper {
+	// `&mut` return → a writable projection, inferred `borrows self`.
+	fun slot(&mut self): &mut i32 {
+		&mut self.value
+	}
+
+	// `&` return → a readonly projection, also inferred.
+	fun peek(&self): &i32 {
+		&self.value
+	}
+}
+
+fun main() {
+	mut w = Wrapper { value = 1 };
+
+	// Write through the inferred-borrows projection.
+	*w.slot() = 10;
+	print(w.value); // 10
+
+	// Bind it, then read and write through it.
+	let v = w.slot();
+	print(*v); // 10
+	*v = 25;
+	print(w.value); // 25
+
+	// A readonly projection reads through but can't be written.
+	let r = w.peek();
+	print(*r); // 25
+}

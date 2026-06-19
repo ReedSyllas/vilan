@@ -1232,6 +1232,46 @@ impl<'src> Analyzer<'src> {
     /// an enum payload. (Passing a view as an argument, or binding it to a local,
     /// is fine.) This is what removes lifetimes: a view structurally cannot
     /// outlive its target. Returning a borrow derived from an argument is
+    /// Phase 5 — infer the `borrows` effect. A function whose returned view
+    /// projects a `&`/`&mut` parameter borrows that parameter: the caller's
+    /// argument outlives the call, so the view is sound, whether or not the
+    /// signature spells `borrows` out. (A returned view of a *local* still
+    /// dangles, and `derives_from_view_param` excludes it, so it stays rejected
+    /// by `check_view_escape`.) An inferred function is then indistinguishable
+    /// from an explicit `borrows` one for escape, scalar-view lowering, and
+    /// binding writability — they all read `Function.borrows`.
+    ///
+    /// Runs before `check_view_escape` (and the scalar-view-call analysis) so the
+    /// flipped flag is visible to every consumer. The passing corpus is
+    /// unaffected: a function that returns such a view today *must* already say
+    /// `borrows` or it fails to compile, so this only newly admits programs that
+    /// previously errored.
+    fn infer_borrows(&mut self) {
+        let view_bindings = self.compute_view_bindings();
+        let capturing: HashSet<Id> = self
+            .closures
+            .keys()
+            .copied()
+            .filter(|closure_id| self.closure_captures_view_param(*closure_id))
+            .collect();
+        let inferred: Vec<Id> = self
+            .functions
+            .values()
+            .filter(|function| {
+                function.has_body
+                    && !function.borrows
+                    && self.escapes_as_view(function.body.1, &view_bindings, &capturing)
+                    && self.derives_from_view_param(function.body.1)
+            })
+            .map(|function| function.id)
+            .collect();
+        for function_id in inferred {
+            if let Some(function) = self.functions.get_mut(&function_id) {
+                function.borrows = true;
+            }
+        }
+    }
+
     /// recovered later by `borrows` (Phase 5).
     fn check_view_escape(&mut self) {
         let view_bindings = self.compute_view_bindings();
@@ -8172,6 +8212,9 @@ pub fn analyze<'src>(
         });
     }
     analyzer.build();
+    // Infer the `borrows` effect before any check reads it (readonly-mutation
+    // and the scalar-view lowering both consult `Function.borrows`).
+    analyzer.infer_borrows();
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
     analyzer.check_mutable_references();
