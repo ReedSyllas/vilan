@@ -30,6 +30,34 @@ pub use transformer::transform;
 
 use std::path::Path;
 
+use node::{ImportBranch, Node, NodeList};
+use target::Platform;
+
+/// Infers a compilation target for editor analysis (which has no `--target`) from
+/// a file's top-level imports: a file importing the browser DOM layer
+/// (`std::dom`) is a browser file, otherwise Node. This lets the language server
+/// analyze a `std::dom` client without the platform gate false-flagging it.
+fn infer_target(root: &NodeList) -> Target {
+    fn std_child_is_browser(branch: &ImportBranch) -> bool {
+        match branch {
+            ImportBranch::Path(module, _, _) => {
+                Platform::of_std_module(module) == Platform::Browser
+            }
+            ImportBranch::Set(branches) => branches.iter().any(std_child_is_browser),
+        }
+    }
+    let imports_browser_layer = |branch: &ImportBranch| matches!(branch, ImportBranch::Path("std", _, Some(child)) if std_child_is_browser(child));
+    let references_browser = root.iter().any(|(node, _)| match node {
+        Node::Import(branch) | Node::Use(branch) => imports_browser_layer(branch),
+        _ => false,
+    });
+    if references_browser {
+        Target::Browser
+    } else {
+        Target::Node
+    }
+}
+
 /// Lex, parse, and fully analyze a source string. The source must already be
 /// leaked to `'static` so the returned `Program` (which borrows it) can outlive
 /// this call — the front-end that owns the document lifecycle does the leak.
@@ -77,9 +105,14 @@ pub fn analyze_source(
     };
 
     let root = Box::leak(Box::new(root));
+    // The editor has no `--target`, so infer one from the file's own imports: a
+    // file importing the browser DOM layer is a browser file, otherwise Node.
+    // This keeps the platform gate from false-flagging valid `std::dom` usage
+    // while still catching a genuine cross-target import (e.g. `std::http` in a
+    // file that also reaches for `std::dom`).
+    let target = infer_target(&root.0);
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // The language server analyzes for editing, which is always a Node build.
-        let mut program = analyze(root, std_root, entry_path, target::Target::Node);
+        let mut program = analyze(root, std_root, entry_path, target);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program
