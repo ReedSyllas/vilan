@@ -4408,6 +4408,17 @@ impl<'src> Analyzer<'src> {
                             return self.freshen_list_element_slots(return_type, id);
                         };
                         let mut substitution_context = substitution_context.clone();
+                        // A method on a concrete generic instance (`box.unwrap()`
+                        // where `box: Box2<Node>`) binds the impl's type parameters
+                        // from the receiver; apply them so a return type mentioning
+                        // them (`T`, `Option<T>`) resolves to the concrete argument.
+                        if let Some(method_substitution) =
+                            self.method_call_substitution.get(&id).cloned()
+                        {
+                            for (constraint_id, type_id) in method_substitution {
+                                substitution_context.insert(constraint_id, type_id);
+                            }
+                        }
                         for (i, constraint_id) in generic_constraint_ids.iter().enumerate() {
                             if let Some(argument_id) = generic_argument_ids.get(i) {
                                 substitution_context.insert(*constraint_id, *argument_id);

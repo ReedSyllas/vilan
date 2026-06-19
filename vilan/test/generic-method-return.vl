@@ -1,0 +1,32 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+// A generic method returning `T` / `Option<T>` resolves `T` from the receiver's
+// concrete type argument (`Box<Node>` → `T = Node`), so the result's fields are
+// accessible without any downstream type annotation.
+struct Box<T> {
+	value: T,
+}
+
+impl Box<type T> {
+	fun unwrap(self): T {
+		self.value
+	}
+
+	fun peek(self): Option<T> {
+		Some(self.value)
+	}
+}
+
+struct Node {
+	v: i32,
+}
+
+fun main() {
+	let b: Box<Node> = Box { value = Node { v = 5 } };
+	print(b.unwrap().v); // 5
+	match b.peek() {
+		Some(let n) => print(n.v), // 5
+		None => print(-1),
+	}
+}
