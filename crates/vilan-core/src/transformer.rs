@@ -1708,6 +1708,11 @@ impl<'src> Transformer<'src> {
                     args.collect(),
                 )
             }
+            Intrinsic::JsonField => {
+                let receiver = args.next().unwrap_or(js::Node::Void);
+                let key = args.next().unwrap_or(js::Node::Void);
+                js::Node::PropertyIndex(Box::new(receiver), Box::new(key))
+            }
         }
     }
 

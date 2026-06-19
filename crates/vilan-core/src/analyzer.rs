@@ -7631,6 +7631,9 @@ pub enum Intrinsic {
     MapKeys,
     // `Map.values(): List<V>` -> a runtime helper snapshotting the values.
     MapValues,
+    // `JsonValue.field(name): JsonValue` -> native `self[name]` (a dynamic
+    // property read on a `JSON.parse` result, for which there is no host fn).
+    JsonField,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -8068,6 +8071,26 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
                      \t}}\n\
                      }}\n"
                 ));
+                // The reverse direction: parse a document into the struct, reading
+                // each field by name from the host value and coercing it back via
+                // the field type's own `from_json_value` (nested structs recurse).
+                let initializers = fields
+                    .iter()
+                    .map(|(field, type_)| {
+                        format!("{field} = {type_}::from_json_value(value.field(\"{field}\"))")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "impl {struct_name} with FromJson {{\n\
+                     \tfun from_json(text: str): {struct_name} {{\n\
+                     \t\t{struct_name}::from_json_value(parse_json_value(text))\n\
+                     \t}}\n\
+                     \tfun from_json_value(value: JsonValue): {struct_name} {{\n\
+                     \t\t{struct_name} {{ {initializers} }}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
             }
             _ => {}
         }
@@ -8082,9 +8105,16 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     use chumsky::prelude::*;
     let mut source = String::new();
     let mut traits: HashSet<&str> = HashSet::new();
+    // `@derive(Json)` on a struct also synthesizes the reverse `FromJson` impl,
+    // which references `FromJson`/`JsonValue`/`parse_json_value` (enums get only
+    // the one-way `to_json`, so they don't pull these in).
+    let mut struct_derives_json = false;
     for (node, _span) in nodes {
         if let Node::Derive(derives, item) = node {
             traits.extend(derives.iter().copied());
+            if derives.contains(&"Json") && matches!(item.0, Node::Struct(..)) {
+                struct_derives_json = true;
+            }
             source.push_str(&derive_impl_source(derives, item));
         }
     }
@@ -8100,7 +8130,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     if traits.contains("Default") {
         prelude.push_str("import std::default::Default;\n");
     }
-    if traits.contains("Json") {
+    if struct_derives_json {
+        prelude.push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
+    } else if traits.contains("Json") {
         prelude.push_str("import std::json::Json;\n");
     }
     if traits.contains("Debug") {
@@ -8526,6 +8558,18 @@ pub fn analyze<'src>(
             .insert("Shared", shared_struct_id);
     }
 
+    // The `std::json` `JsonValue` struct, if `json.vl` loaded — same treatment.
+    // Its `field` method id is captured after `build()` to lower to `self[name]`.
+    let json_value_struct_id = module_scopes
+        .get("json")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("JsonValue").copied());
+    if let Some(json_value_struct_id) = json_value_struct_id {
+        analyzer
+            .primitive_struct_ids
+            .insert("JsonValue", json_value_struct_id);
+    }
+
     // The `std::context` `Context` struct, if `context.vl` loaded. Its
     // `new`/`run`/`get` method ids are captured after `build()`, once impl
     // subjects resolve. `Context` is reached only by path (`std::context::..`),
@@ -8738,6 +8782,19 @@ pub fn analyze<'src>(
                         intrinsics.insert(id, intrinsic);
                     }
                 }
+            }
+        }
+    }
+    if let Some(json_value_struct_id) = analyzer.primitive_struct_ids.get("JsonValue").copied() {
+        for implementation in &analyzer.implementations {
+            let subject_is_json_value = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == json_value_struct_id
+            );
+            if subject_is_json_value
+                && let Some(id) = implementation.declarations.get("field").copied()
+            {
+                intrinsics.insert(id, Intrinsic::JsonField);
             }
         }
     }

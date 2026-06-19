@@ -1,8 +1,12 @@
-// `std::json` — `to_json` serialization. `@derive(Json)` on a struct synthesizes
-// its impl from the fields: a faithful JSON object with real field names (which
-// a bare host-`JSON.stringify` of a vilan struct can't produce, since structs
-// lower to field-less arrays). The scalar impls bind directly to the host
-// `JSON.stringify`, which formats numbers/bools and quotes + escapes strings.
+// `std::json` — JSON serialization (`to_json`) and parsing (`from_json`).
+//
+// `@derive(Json)` on a struct synthesizes BOTH directions from its fields: a
+// faithful JSON object with real field names (which a bare host-`JSON.stringify`
+// of a vilan struct can't produce, since structs lower to field-less arrays) and
+// a `from_json` that rebuilds the struct from that object. The scalar impls bind
+// to the host `JSON.stringify`/`JSON.parse` and the host coercions.
+
+// --- Serialization (`to_json`) ------------------------------------------------
 
 trait Json {
 	fun to_json(self): str;
@@ -31,4 +35,64 @@ impl f64 with Json {
 impl bool with Json {
 	@extern("JSON.stringify")
 	external fun to_json(self): str;
+}
+
+// --- Parsing (`from_json`) ----------------------------------------------------
+
+// An opaque handle to a host value produced by `JSON.parse` — a number, string,
+// bool, or object. `from_json` parses a document into one of these once, then
+// `from_json_value` walks it, reading named fields and coercing the leaves back
+// to vilan scalars.
+external struct JsonValue;
+
+// `JSON.parse(text)` — parse a document into a `JsonValue`.
+@extern("JSON.parse")
+external fun parse_json_value(text: str): JsonValue;
+
+impl JsonValue {
+	// `self[name]` — the value at a named object field (an intrinsic: there is no
+	// host function for dynamic property access).
+	external fun field(self, name: str): JsonValue;
+}
+
+trait FromJson {
+	// Parse a JSON document into a value of this type.
+	fun from_json(text: str): FromJson;
+	// Rebuild this type from an already-parsed value (used when nesting).
+	fun from_json_value(value: JsonValue): FromJson;
+}
+
+impl str with FromJson {
+	@extern("JSON.parse")
+	external fun from_json(text: str): str;
+	@extern("String")
+	external fun from_json_value(value: JsonValue): str;
+}
+
+impl i32 with FromJson {
+	@extern("JSON.parse")
+	external fun from_json(text: str): i32;
+	@extern("Number")
+	external fun from_json_value(value: JsonValue): i32;
+}
+
+impl u32 with FromJson {
+	@extern("JSON.parse")
+	external fun from_json(text: str): u32;
+	@extern("Number")
+	external fun from_json_value(value: JsonValue): u32;
+}
+
+impl f64 with FromJson {
+	@extern("JSON.parse")
+	external fun from_json(text: str): f64;
+	@extern("Number")
+	external fun from_json_value(value: JsonValue): f64;
+}
+
+impl bool with FromJson {
+	@extern("JSON.parse")
+	external fun from_json(text: str): bool;
+	@extern("Boolean")
+	external fun from_json_value(value: JsonValue): bool;
 }
