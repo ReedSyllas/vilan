@@ -2782,6 +2782,12 @@ impl<'src> Analyzer<'src> {
                 self.walk_expr_node(inner, scope_id);
                 None
             }
+            // `@derive(..)` is transparent: walk the wrapped item; the synthesized
+            // trait impls are appended separately (see `derive_impl_source`).
+            Node::Derive(_derives, inner) => {
+                self.walk_expr_node(inner, scope_id);
+                None
+            }
             // Only `!` exists today and yields `bool`; full lowering deferred.
             Node::Unary(operator, operand) => {
                 let operand_id = self.walk_expr_node(operand, scope_id);
@@ -7428,6 +7434,78 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
     Some(ast)
 }
 
+/// The synthesized trait-impl source for one `@derive(..)` item. Only structs
+/// with a field body are handled; each supported trait name emits its impl,
+/// built from the struct's field names. Unknown trait names are skipped (the
+/// missing-impl error surfaces naturally at the use site).
+fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
+    let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
+        return String::new();
+    };
+    let struct_name = name.0;
+    let field_names: Vec<&str> = fields.0.iter().map(|field| field.0.0).collect();
+    let mut out = String::new();
+    for derive in derives {
+        if *derive == "PartialEq" {
+            // `self.a == other.a && self.b == other.b` (a field-less struct is
+            // always equal).
+            let comparison = if field_names.is_empty() {
+                "true".to_string()
+            } else {
+                field_names
+                    .iter()
+                    .map(|field| format!("self.{field} == other.{field}"))
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            };
+            out.push_str(&format!(
+                "impl {struct_name} with PartialEq {{\n\
+                 \tfun eq(self, other: {struct_name}): bool {{\n\
+                 \t\t{comparison}\n\
+                 \t}}\n\
+                 }}\n"
+            ));
+        }
+    }
+    out
+}
+
+/// Synthesizes and parses the trait impls for every `@derive(..)` item at the top
+/// level of `nodes`, returning the appended node list (leaked so it lives for the
+/// whole compilation, like a loaded module), or `None` when there are no derives.
+fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
+    use chumsky::prelude::*;
+    let mut source = String::new();
+    let mut traits: HashSet<&str> = HashSet::new();
+    for (node, _span) in nodes {
+        if let Node::Derive(derives, item) = node {
+            traits.extend(derives.iter().copied());
+            source.push_str(&derive_impl_source(derives, item));
+        }
+    }
+    if source.trim().is_empty() {
+        return None;
+    }
+    // Each derived trait lives in a std module; the synthesized impls are walked
+    // in the entry scope, so prepend the imports they reference.
+    let mut prelude = String::new();
+    if traits.contains("PartialEq") {
+        prelude.push_str("import std::compare::PartialEq;\n");
+    }
+    let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
+    let tokens = crate::lexer::lexer().parse(source).into_output()?;
+    let end = source.len();
+    let (root, _span) = crate::parser::parser()
+        .map_with(|ast, e| (ast, e.span()))
+        .parse(
+            tokens
+                .as_slice()
+                .map((end..end).into(), |(token, span)| (token, span)),
+        )
+        .into_output()?;
+    Some(Box::leak(Box::new(root.0)))
+}
+
 /// Builds the path to a module file under the `std` package's source root.
 fn std_module_path(std_root: &Path, file: &str) -> String {
     std_root.join(file).to_string_lossy().into_owned()
@@ -7573,12 +7651,25 @@ pub fn analyze<'src>(
         Origin::Pkg
     };
 
+    // Synthesize `@derive(..)` impls up front: they reference std modules (e.g.
+    // `PartialEq` in `std::compare`) that must be pulled into the reachable set
+    // alongside the user's own imports, and they're walked into the entry scope
+    // later. Computed once and reused.
+    let derived = expand_derives(&nodes.0);
+
     let mut to_load: Vec<(Origin, &str)> = lib_ast
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
         .unwrap_or_default()
         .into_iter()
         .map(|name| (Origin::Std, name))
         .collect();
+    if let Some(derived) = derived {
+        to_load.extend(
+            collect_module_refs(derived, "std")
+                .into_iter()
+                .map(|name| (Origin::Std, name)),
+        );
+    }
     // The entry program addresses std submodules by path (`std::option::..`), so
     // its imports also seed the reachable set. Names that aren't modules (e.g. the
     // `print` in `std::print`) simply find no file and are skipped.
@@ -7838,6 +7929,11 @@ pub fn analyze<'src>(
         analyzer.current_source_id = SourceId(0);
         let entry_walk_start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
+        // Synthesized `@derive(..)` impls are walked into the same (entry) scope,
+        // right after the user's items, so they see the derived types.
+        if let Some(derived) = derived {
+            analyzer.walk_expr_nodes(derived, global_scope_id);
+        }
         source_ranges.push(SourceRange {
             start: entry_walk_start,
             end: analyzer.entity_id,

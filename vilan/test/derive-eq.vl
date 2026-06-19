@@ -1,0 +1,27 @@
+import std::print;
+
+// `@derive(PartialEq)` synthesizes the `eq` impl from a struct's fields, so `==`
+// works without hand-writing it. The compiler generates and parses the impl from
+// the field names, then analyzes it like any other code.
+@derive(PartialEq)
+struct Point {
+	x: i32,
+	y: i32,
+}
+
+@derive(PartialEq)
+struct Unit {}
+
+fun main() {
+	let a = Point { x = 1, y = 2 };
+	let b = Point { x = 1, y = 2 };
+	let c = Point { x = 9, y = 2 };
+	print(a == b); // true — all fields equal
+	print(a == c); // false — x differs
+	print(a != c); // true
+
+	// A field-less struct is always equal.
+	let u1 = Unit {};
+	let u2 = Unit {};
+	print(u1 == u2); // true
+}

@@ -1043,7 +1043,27 @@ where
     // trailing expression and so becomes the block's value (e.g. a function
     // whose body is a single `match`).
     let not_block_end = just(Token::Ctrl('}')).not();
+
+    // `@derive(A, B) struct/enum …` — a derive attribute wrapping a struct or
+    // enum, recorded as `Node::Derive`; a pre-analysis pass synthesizes the named
+    // trait impls from the item's fields.
+    let derive_attribute = just(Token::Ctrl('@'))
+        .ignore_then(select! { Token::Ident("derive") => () }.labelled("`derive`"))
+        .ignore_then(
+            identifier
+                .separated_by(just(Token::Ctrl(',')))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+        )
+        .labelled("derive attribute");
+    let derived_item = derive_attribute
+        .then(choice((struct_.clone(), enum_.clone())))
+        .map_with(|(derives, item), e| (Node::Derive(derives, Box::new(item)), e.span()))
+        .boxed();
+
     statement.define(choice((
+        derived_item,
         export_,
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_.then_ignore(not_block_end.clone()),

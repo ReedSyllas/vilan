@@ -195,6 +195,10 @@ pub enum Node<'src> {
     Import(ImportBranch<'src>),
     // `export <item>` — re-export an import or expose a local declaration.
     Export(Box<Spanned<Self>>),
+    // `@derive(A, B) <struct|enum>` — the derive trait names and the item they
+    // annotate. Transparent to analysis (the inner item is walked normally); a
+    // pre-analysis pass generates the trait impls from the item's fields.
+    Derive(Vec<&'src str>, Box<Spanned<Self>>),
     // `let`/`mut` binding: name, type annotation, value, mutability.
     Let(
         Spanned<&'src str>,
