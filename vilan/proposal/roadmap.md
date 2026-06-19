@@ -4,23 +4,26 @@ A ranked backlog, most-important first, to be tackled roughly in order. Ranked b
 *unblocks real programs* > *cheap correctness* > *daily DX* > *strategic reach* >
 *perf / advanced / cleanup*. Effort is S/M/L. Dependencies are noted inline.
 
-Status note: value semantics + second-class views are substantially landed (the
-memory-management impl plan's Phases 1–4 — `compute_clone_sites`, `is_elidable_copy`,
-and the `view-*` / `value-semantics` tests). The active memory-model frontier is
-Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas).
+Status note (updated): **Tiers 1 and 2 are complete, and most of Tier 3's stdlib/derives.**
+The memory model is done through Phase 5 — value semantics, second-class views, inferred
+`borrows`, `(base,key)` views, subscript/index + element-iteration views, view-returning
+`Option<&T>` (direct/conditional/aggregate — the `Arena::get` shape), `for e in &mut
+container`, plus Phase 6 essentials `Arena`/`Handle` and `Shared<T>`. The **frontier is now
+the two big strategic items: the browser backend (#8) and the general macro engine (#9)** —
+derives already shipped as a special-cased subset of #9. Remaining Phase 6+ memory tail
+(`Weak<T>`, dynamic rule-4, no-view-across-`await`, deterministic destruction) is deferred.
 
 ---
 
 ## Tier 1 — Make it usable & keep it correct
 
-1. **Stdlib essentials** (S–M, high ROI; thin JS wrappers over existing features)
-   - `Result` combinators (`map`/`map_err`/`and_then`/`ok`/`unwrap_or`/…). Today only
-     `is_ok`/`is_err`, while `Option` is rich — cheapest win, mirror `Option`. **(starting here)**
-   - `String`: `len`/`split`/`contains`/`replace`/`starts_with`/`substring`/`to_uppercase`/`is_empty`.
-   - `List`: `len`/`get`/`pop`/`map`/`filter`/`fold`/`contains`/`sort`.
-   - `Iterator` combinators (`map`/`filter`/`fold`/`take`/`enumerate`) + a concrete
-     `ListIterator` — needs an array-length intrinsic.
-   - `PartialEq`/`Eq` impls for primitives (traits exist; no impls).
+1. ✅ **Stdlib essentials** (S–M, high ROI; thin JS wrappers over existing features) — done.
+   - ✅ `Result` combinators (c9fa96f, mirrors `Option`).
+   - ✅ `String`: `len`/`split`/`contains`/`replace`/`starts_with`/`substring`/… (08d4da3).
+   - ✅ `List`: `len`/`get`/`pop`/`map`/`filter`/`fold`/`contains`/`sort` (3018d5d, 4b3b79d).
+   - ✅ `PartialEq`/`Eq` primitive impls + `==`/`!=` dispatch (7da43bf).
+   - `Iterator` combinators **deprioritized** — `List` covers iteration; `for x in <custom>`
+     works via `next(): Option<T>`, and `for e in &mut <custom>` via `next_mut(): Option<&mut T>`.
 
 2. **Compiler-core robustness** (S, high trust — esp. for the LSP)
    - ✅ Internal `panic!`s converted to diagnostics (commit bf434eb) — malformed input now
@@ -73,9 +76,14 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
    → visible names + keywords. Self-contained in vilan-lsp over existing `Program` data; unit-
    tested per context. Relied on a core parser fix (72f76cd): an incomplete `p.` now recovers to
    `MemberAccessor(_, Error)` (clearer error + receiver still analyzes), corpus byte-identical.
-6. **Code formatter** (`vilan fmt` + LSP formatting) (M–L) — needs comment-preserving
-   formatting (the parser drops comments as trivia), not naive AST print-back. The `fmt`
-   subcommand is still a placeholder, gated on this.
+6. ✅ **Code formatter** (`vilan fmt` + LSP formatting) — done (5bf7a3a CLI, 44e23d3/4841223
+   printer, 41294e4 i-strings, 85159de LSP). A whole-AST pretty-printer in
+   `vilan-core/src/formatter.rs` with a token-stream safety net (re-lex output, compare tokens
+   modulo trivia/trailing-commas; on any mismatch return the source unchanged, so a printer bug
+   can't corrupt a file). Comments reattached from source spans; `i"..."` recovered verbatim by
+   span. Handles the whole language; the entire std+test corpus formats with zero bails, all
+   programs recompile byte-identical. `textDocument/formatting` wires it into the LSP (whole-doc
+   edit; the VS Code client auto-enables Format Document + format-on-save).
 7. ✅ **Test runner** (`vilan test`) (commit 7a18546) — runs `*_test.vl` tests (Go-style,
    alongside source so `pkg::` resolves); pass = exit 0, fail = compile error / non-zero
    (a failed `assert` panics). Reports `N passed, M failed`. Added `std::assert`. NOTE: this is a
@@ -84,12 +92,23 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
 
 ## Tier 3 — Strategic reach
 
-8. **Browser backend** (L) — codegen is hardwired to Node (`console.log`, `process.exit`,
-   `node:`). Needs a `Backend` abstraction + DOM intrinsics. Basic DOM codegen is
-   independent; reactive UI also needs memory Phase 6 (`Shared<T>`).
-9. **Compiler bindings / macros** (L) — see proposal/compiler-bindings.md. Unlocks numeric-type
-   generation and derives (`PartialEq`/`Debug`/constructors). Needs a macro-expansion phase
-   + struct reflection.
+8. **Browser backend** (L) — **the top remaining strategic item.** Codegen is hardwired to Node
+   (`console.log`, `process.exit`, `node:` host imports). The goal: one Vilan project where the
+   **server and client are both Vilan**, the Node server serves the compiled client bundle to the
+   browser, and shared modules compile under both targets. Design (full-stack, see notes below):
+   a `--target node|browser` flag threaded through codegen; the std split into a universal **core**
+   layer + platform layers (`node`: fs/http/process; `dom`: document/events/fetch) gated by target;
+   target-aware `@extern` host-import emission (Node `import {x} from "node:.."` vs browser globals);
+   a project model with `[server]`/`[client]` entries (`vilan build` emits `dist/server.js` +
+   `dist/client.js`, server serves the client). Reactive UI uses `Shared<T>` (now landed).
+   First slice — a `--target browser` + minimal `std::dom` — is independent.
+9. **Compiler bindings / macros** (L) — see proposal/compiler-bindings.md. ✅ **Built-in derives
+   done** (0cb21c8 PartialEq, 01918b3 Default, 3b250f2 Json, 691f0b6 Debug, d3409e6 enums): a
+   pre-analysis `expand_derives` generates trait impls as Vilan *source text* from an item's
+   fields, then leaks+lexes+parses+walks it — `@derive(PartialEq, Default, Debug, Json)` on structs
+   and enums (Default skipped for enums). **Remaining (the bigger prize):** the *general* macro
+   engine — user-written macros / compiler bindings (numeric-type generation, custom derives, struct
+   reflection). Still needs a real macro-expansion phase.
 10. **LSP semantic highlighting** (M) — semantic tokens, precision over the TextMate grammar.
 11. **More stdlib** (M, incremental) — ✅ essentially done. Landed: math methods on `i32`/`f64`
     (`abs`/`sqrt`/`pow`/`floor`/`ceil`/`round`/`min`/`max`, `@extern("Math.*")` — 6fc6eea); `Range`
@@ -106,9 +125,13 @@ Phase 5 (projections / `borrows`) and the deferred Phase 6 (`Shared<T>` / arenas
     counters. Debounce masks the latency — measure first. (caching plan Tier 2/3)
 13. **LSP sub-file incremental parsing** (L) — tree-sitter-style reuse; chumsky is a batch
     parser, so this is the largest, lowest-priority LSP item.
-14. **Memory management Phase 5 → 6** (L) — projections/`borrows` (returned views, custom
-    containers), then `Shared<T>`/arenas (signals, cyclic graphs, reactive UI). Prerequisite
-    for #8's reactive path.
+14. ✅ **Memory management Phase 5** (L) — done. Inferred `borrows` (a43d23c); view-returning
+    `Option<&T>` — direct (924d0d7), conditional + aggregate (8b53e53) = the `Arena::get` shape;
+    `for e in &mut container` via `next_mut(): Option<&mut T>` (72d8759). With Phase 6 essentials
+    (`Arena`/`Handle` 75f9529, `Shared<T>` c2d2a25) already landed, the rev-1 escape ladder and
+    view-returning collections are fully expressible. **Phase 6+ tail (deferred):** `Weak<T>`,
+    dynamic rule-4 (write-while-view-live trap), no-view-across-`await`, deterministic destruction.
+    `Shared<T>` already unblocks #8's reactive path.
 15. **Numeric types `u8`…`i64`/`f32`** (S) — low value for a JS target (collapse to
     `f64`/`BigInt`); do via #9's macro or defer to a WASM/native backend. Plus prune
     superseded `vilan/outdated/` sketches.
