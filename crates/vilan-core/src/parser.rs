@@ -434,46 +434,19 @@ where
     // `a.b.c`), or a deref through a view (`*v`). A `.field` chain folds into
     // `MemberAccessor`s, the same shape a field read parses to.
     // A bare assignment-target suffix: `.field` or `[index]`.
-    enum TargetSuffix<'src> {
-        Field(&'src str),
-        Index(Box<Spanned<Node<'src>>>),
-    }
-    let assignment_target = choice((
-        // `*<operand> = …` — write through a view: a view variable (`*v`), a field
-        // of one (`*v.field`), or a view-returning call (`*node.slot()`). The
-        // operand is the postfix level, so a method call is recognized; a bare name
-        // / `.field` chain lowers to the same `Accessor`/`MemberAccessor` nodes as
-        // the non-deref place below (`local` also produces `Accessor`).
-        just(Token::Op("*"))
-            .ignore_then(place_operand.clone())
-            .map_with(|place, e| (Node::Dereference(Box::new(place)), e.span())),
-        // A bare place (no deref): a local (`x`), a `.field` chain (`a.b.c`), or a
-        // `List` subscript (`list[i]`, `a.items[i] = …`).
-        identifier
-            .map_with(|name, e| (Node::Accessor(name), e.span()))
-            .foldl_with(
-                choice((
-                    just(Token::Ctrl('.'))
-                        .ignore_then(identifier)
-                        .map(TargetSuffix::Field),
-                    expression
-                        .clone()
-                        .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
-                        .map(|index| TargetSuffix::Index(Box::new(index))),
-                ))
-                .repeated(),
-                |subject, suffix, e| match suffix {
-                    TargetSuffix::Field(field) => {
-                        let field = (Node::Accessor(field), e.span());
-                        (
-                            Node::MemberAccessor(Box::new(subject), Box::new(field)),
-                            e.span(),
-                        )
-                    }
-                    TargetSuffix::Index(index) => (Node::Index(Box::new(subject), index), e.span()),
-                },
-            ),
-    ));
+    // An assignment target is `(*)? <place>` where the place is the postfix /
+    // precedence expression (`place_operand` = `chained`): a local (`x`), a
+    // `.field` chain (`a.b.c`), a subscript (`list[i]`), or a place reached through
+    // a call (`a.write().count`, `*node.slot()`). A bare name / field chain lowers
+    // to the same `Accessor`/`MemberAccessor`/`Index` nodes as before (`local` is
+    // `Accessor`), so existing targets are byte-identical; `*` derefs the result.
+    let assignment_target = just(Token::Op("*"))
+        .or_not()
+        .then(place_operand.clone())
+        .map_with(|(deref, place), e| match deref {
+            Some(_) => (Node::Dereference(Box::new(place)), e.span()),
+            None => place,
+        });
     let assignment = assignment_target
         .then(choice((
             just(Token::Op("=")).to(None),
