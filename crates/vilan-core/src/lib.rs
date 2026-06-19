@@ -67,10 +67,14 @@ fn infer_target(root: &NodeList) -> Target {
 /// (lexer, parser, and analyzer) for the entry file. Analysis is wrapped so a
 /// panic on malformed input degrades to "no program" rather than taking the
 /// process down, which matters when an editor analyzes on every keystroke.
+/// `target` is the build target to analyze against — pass `Some` when the
+/// front-end knows it (e.g. the language server resolved it from the project's
+/// `vilan.toml`), or `None` to infer it from the file's imports.
 pub fn analyze_source(
     source: &'static str,
     std_root: &Path,
     entry_path: &Path,
+    target: Option<Target>,
 ) -> (Option<Program<'static>>, Vec<Error>) {
     use chumsky::prelude::*;
 
@@ -105,12 +109,13 @@ pub fn analyze_source(
     };
 
     let root = Box::leak(Box::new(root));
-    // The editor has no `--target`, so infer one from the file's own imports: a
-    // file importing the browser DOM layer is a browser file, otherwise Node.
-    // This keeps the platform gate from false-flagging valid `std::dom` usage
-    // while still catching a genuine cross-target import (e.g. `std::http` in a
-    // file that also reaches for `std::dom`).
-    let target = infer_target(&root.0);
+    // Use the front-end's resolved target (e.g. from `vilan.toml`), else infer one
+    // from the file's own imports: a file importing the browser DOM layer is a
+    // browser file, otherwise Node. This keeps the platform gate from
+    // false-flagging valid `std::dom` usage while still catching a genuine
+    // cross-target import (e.g. `std::http` in a file that also reaches for
+    // `std::dom`).
+    let target = target.unwrap_or_else(|| infer_target(&root.0));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut program = analyze(root, std_root, entry_path, target);
         context::thread_contexts(&mut program);

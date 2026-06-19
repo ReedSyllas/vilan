@@ -3,14 +3,59 @@
 //! find-references, and rename.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use vilan_core::analyzer::{Expr, Implementation, SourceId};
 use vilan_core::id::Id;
 use vilan_core::type_::Type;
-use vilan_core::{Error, Program, Span, analyze_source};
+use vilan_core::{Error, Program, Span, Target as BuildTarget, analyze_source};
 
 use crate::line_index::LineIndex;
+
+/// The build target for a file, resolved from its project's `vilan.toml` when the
+/// file is a declared entry: the `[client]` entry is a browser build, a
+/// `[server]`/`[package]` entry a Node build. `None` if there's no project or the
+/// file isn't an entry (a module / shared file) — analysis then infers the target
+/// from the file's own imports.
+fn resolve_manifest_target(entry_path: &Path) -> Option<BuildTarget> {
+    // The nearest ancestor directory holding a `vilan.toml`.
+    let mut directory = entry_path.parent();
+    let (manifest, root) = loop {
+        let current = directory?;
+        let candidate = current.join("vilan.toml");
+        if candidate.is_file() {
+            break (candidate, current);
+        }
+        directory = current.parent();
+    };
+    let table: toml::Table = std::fs::read_to_string(&manifest).ok()?.parse().ok()?;
+    let entry = |section: &str, default: Option<&str>| -> Option<PathBuf> {
+        table
+            .get(section)
+            .and_then(|section| section.get("entry"))
+            .and_then(|entry| entry.as_str())
+            .or(default)
+            .map(|entry| root.join(entry))
+    };
+    let is = |entry: Option<PathBuf>| {
+        entry.is_some_and(|entry| {
+            match (
+                std::fs::canonicalize(&entry),
+                std::fs::canonicalize(entry_path),
+            ) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => entry == entry_path,
+            }
+        })
+    };
+    if is(entry("client", None)) {
+        Some(BuildTarget::Browser)
+    } else if is(entry("server", None)) || is(entry("package", Some("main.vl"))) {
+        Some(BuildTarget::Node)
+    } else {
+        None
+    }
+}
 
 /// A content hash of a document's text, used to skip re-analysis when an edit
 /// leaves the buffer byte-for-byte unchanged (undo/redo, a cursor-only change).
@@ -106,7 +151,10 @@ impl Document {
         // The program borrows its source for `'static`, so leak a copy (the
         // editor re-analyzes on change; see the known leak tradeoff).
         let leaked: &'static str = Box::leak(text.to_string().into_boxed_str());
-        let (program, diagnostics) = analyze_source(leaked, std_root, entry_path);
+        // Prefer the project's declared target (the file's role in its
+        // `vilan.toml`); fall back to inferring from imports for a non-entry file.
+        let target = resolve_manifest_target(entry_path);
+        let (program, diagnostics) = analyze_source(leaked, std_root, entry_path, target);
 
         let mut entity_spans = Vec::new();
         if let Some(program) = &program {
