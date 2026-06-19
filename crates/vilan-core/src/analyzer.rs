@@ -3893,7 +3893,10 @@ impl<'src> Analyzer<'src> {
                         let subject_str = self.pretty_print_type(&other, &HashMap::new());
                         self.diagnostics.push(Error {
                             span,
-                            msg: format!("cannot match an enum variant against {}", subject_str),
+                            msg: format!(
+                                "cannot match an enum variant against type {}",
+                                subject_str
+                            ),
                         });
                         return None;
                     }
@@ -3980,7 +3983,10 @@ impl<'src> Analyzer<'src> {
                     let got = self.pretty_print_type(&literal_type, &HashMap::new());
                     self.diagnostics.push(Error {
                         span: **self.span_map.get(&literal_id).unwrap_or(&&EMPTY_SPAN),
-                        msg: format!("literal pattern of type {} cannot match {}", got, expected),
+                        msg: format!(
+                            "literal pattern of type {} cannot match type {}",
+                            got, expected
+                        ),
                     });
                     return None;
                 }
@@ -5519,7 +5525,10 @@ impl<'src> Analyzer<'src> {
                     let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                     self.diagnostics.push(Error {
                         span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                        msg: format!("cannot access field '{}' on {}", member_name, subject_str),
+                        msg: format!(
+                            "cannot access field '{}' on type {}",
+                            member_name, subject_str
+                        ),
                     });
                     self.expr_id_to_expr_map.insert(id, Expr::Error);
                 }
@@ -5951,7 +5960,7 @@ impl<'src> Analyzer<'src> {
                         self.diagnostics.push(Error {
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
-                                "cannot access field '{}' on {}",
+                                "cannot access field '{}' on type {}",
                                 member_name, subject_str
                             ),
                         });
@@ -7231,6 +7240,75 @@ impl<'src> Analyzer<'src> {
         buf.push('>');
     }
 
+    /// The generics a function signature exposes, in display order: the
+    /// function's own parameters first (positional), then any inherited from an
+    /// enclosing impl that appear in the signature (paired with `true`, shown
+    /// `?`). A generic the `substitution` has bound to a concrete type is omitted
+    /// — it renders concretely, not as a parameter.
+    fn signature_generics(
+        &self,
+        own: &[TypeId],
+        parameter_types: &[Type],
+        return_type: Option<&Type>,
+        substitution: &SubstitutionContext,
+    ) -> Vec<(TypeId, bool)> {
+        let mut found = Vec::new();
+        for parameter_type in parameter_types {
+            self.collect_generics(parameter_type, 0, &mut found);
+        }
+        if let Some(return_type) = return_type {
+            self.collect_generics(return_type, 0, &mut found);
+        }
+        let mut generics: Vec<(TypeId, bool)> = Vec::new();
+        let mut seen: HashSet<TypeId> = HashSet::new();
+        for constraint_id in own {
+            if !substitution.contains_key(constraint_id) && seen.insert(*constraint_id) {
+                generics.push((*constraint_id, false));
+            }
+        }
+        for constraint_id in found {
+            if !own.contains(&constraint_id)
+                && !substitution.contains_key(&constraint_id)
+                && seen.insert(constraint_id)
+            {
+                generics.push((constraint_id, true));
+            }
+        }
+        generics
+    }
+
+    /// Collects the generic constraint ids appearing in `type_` — through nominal
+    /// arguments, closures, and tuples — in first-seen order.
+    fn collect_generics(&self, type_: &Type, depth: usize, out: &mut Vec<TypeId>) {
+        if depth > 24 {
+            return;
+        }
+        match type_ {
+            Type::Generic(constraint_id) => {
+                if !out.contains(constraint_id) {
+                    out.push(*constraint_id);
+                }
+            }
+            Type::Struct(_, arguments) | Type::Enum(_, arguments) => {
+                for argument in arguments {
+                    self.collect_generics(&argument.get_type(self), depth + 1, out);
+                }
+            }
+            Type::Closure(parameters, return_id) => {
+                for parameter in parameters {
+                    self.collect_generics(&parameter.get_type(self), depth + 1, out);
+                }
+                self.collect_generics(&return_id.get_type(self), depth + 1, out);
+            }
+            Type::Tuple(items) => {
+                for item in items {
+                    self.collect_generics(&item.get_type(self), depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn pretty_print_type_inner(
         &self,
         type_: &Type,
@@ -7245,39 +7323,56 @@ impl<'src> Analyzer<'src> {
             return;
         }
         match type_ {
-            Type::Any => buf.push_str("type any"),
-            Type::Unknown => buf.push_str("type unknown"),
-            Type::Unresolved => buf.push_str("type unresolved"),
-            Type::Void => buf.push_str("type void"),
+            // Type names render bare (Rust/TypeScript style) — `i32`, not `type
+            // i32`; `Option<i32>`, not `enum Option<type i32>`. A diagnostic that
+            // needs the word "type" adds it in its own message.
+            Type::Any => buf.push_str("any"),
+            Type::Unknown => buf.push_str("unknown"),
+            Type::Unresolved => buf.push_str("unresolved"),
+            Type::Void => buf.push_str("void"),
 
             Type::Generic(constraint_id) => {
-                let constraint = substitution
-                    .get(constraint_id)
-                    .map(|x| x.get_type(self))
-                    .unwrap_or_else(|| constraint_id.get_type(self));
-                let generic_name = self
-                    .generic_constraint_names
-                    .get(constraint_id)
-                    .copied()
-                    .unwrap_or("?");
-                let concrete_str =
-                    self.pretty_print_type_at(&constraint, substitution, depth + 1, visiting);
-                buf.push_str(&format!("generic {} of {}", generic_name, concrete_str));
+                // A generic resolved to a concrete type (in a monomorphization)
+                // renders as that type; otherwise as its name (`T`). Its bound is
+                // shown only where it's declared — the signature's `<…>` list.
+                if let Some(concrete_id) = substitution.get(constraint_id) {
+                    let concrete = concrete_id.get_type(self);
+                    self.pretty_print_type_inner(&concrete, substitution, buf, depth + 1, visiting);
+                } else {
+                    let generic_name = self
+                        .generic_constraint_names
+                        .get(constraint_id)
+                        .copied()
+                        .unwrap_or("?");
+                    buf.push_str(generic_name);
+                }
             }
 
             Type::Function(id) => {
-                // The id may name a regular or an `external` function; both
-                // render as `fn name(paramType, ..)`.
+                // The id may name a regular or an `external` function; both render
+                // as `fn name<generics>(paramType, ..): return`.
                 let signature = self
                     .functions
                     .get(id)
-                    .map(|func| (func.name, &func.parameters))
+                    .map(|func| {
+                        (
+                            func.name,
+                            &func.parameters,
+                            &func.generic_parameter_constraint_ids,
+                            func.return_type_id,
+                        )
+                    })
                     .or_else(|| {
-                        self.external_functions
-                            .get(id)
-                            .map(|external| (external.name, &external.parameters))
+                        self.external_functions.get(id).map(|external| {
+                            (
+                                external.name,
+                                &external.parameters,
+                                &external.generic_parameter_constraint_ids,
+                                Some(external.return_type_id),
+                            )
+                        })
                     });
-                let Some((name, parameter_ids)) = signature else {
+                let Some((name, parameter_ids, own_generics, return_type_id)) = signature else {
                     buf.push_str("fn");
                     return;
                 };
@@ -7290,62 +7385,109 @@ impl<'src> Analyzer<'src> {
                     return;
                 }
                 visiting.push(*id);
-                buf.push_str(&format!("fn {}(", name));
-                let mut first = true;
-                for parameter_id in parameter_ids {
-                    let Some(parameter) = self.parameters.get(parameter_id) else {
-                        continue;
-                    };
-                    if !first {
+                buf.push_str(&format!("fn {}", name));
+
+                // `<U, T?>` — the generics the signature uses: the function's own
+                // parameters first, then any inherited from an enclosing impl
+                // (marked `?`, addressable by name). Each carries its bound when it
+                // isn't the open `any`. Generics bound to a concrete type by the
+                // `substitution` are omitted (they render concretely below).
+                let parameter_types: Vec<Type> = parameter_ids
+                    .iter()
+                    .filter_map(|parameter_id| self.parameters.get(parameter_id))
+                    .map(|parameter| parameter.type_id.get_type(self))
+                    .collect();
+                let return_type = return_type_id.map(|type_id| type_id.get_type(self));
+                let generics = self.signature_generics(
+                    own_generics,
+                    &parameter_types,
+                    return_type.as_ref(),
+                    substitution,
+                );
+                if !generics.is_empty() {
+                    buf.push('<');
+                    for (index, (constraint_id, inherited)) in generics.iter().enumerate() {
+                        if index > 0 {
+                            buf.push_str(", ");
+                        }
+                        let generic_name = self
+                            .generic_constraint_names
+                            .get(constraint_id)
+                            .copied()
+                            .unwrap_or("?");
+                        buf.push_str(generic_name);
+                        if *inherited {
+                            buf.push('?');
+                        }
+                        let bound = constraint_id.get_type(self);
+                        if !matches!(bound, Type::Any) {
+                            buf.push_str(" of ");
+                            self.pretty_print_type_inner(
+                                &bound,
+                                substitution,
+                                buf,
+                                depth + 1,
+                                visiting,
+                            );
+                        }
+                    }
+                    buf.push('>');
+                }
+
+                buf.push('(');
+                for (index, parameter_type) in parameter_types.iter().enumerate() {
+                    if index > 0 {
                         buf.push_str(", ");
                     }
-                    let parameter_type = parameter.type_id.get_type(self);
-                    let parameter_type_str = self.pretty_print_type_at(
-                        &parameter_type,
+                    self.pretty_print_type_inner(
+                        parameter_type,
                         substitution,
+                        buf,
                         depth + 1,
                         visiting,
                     );
-                    buf.push_str(&parameter_type_str);
-                    first = false;
                 }
                 buf.push(')');
+
+                // The return type, unless it's `void` (as Rust omits `-> ()`).
+                if let Some(return_type) = return_type
+                    && !matches!(return_type, Type::Void)
+                {
+                    buf.push_str(": ");
+                    self.pretty_print_type_inner(
+                        &return_type,
+                        substitution,
+                        buf,
+                        depth + 1,
+                        visiting,
+                    );
+                }
                 visiting.pop();
             }
 
             Type::Struct(id, arguments) => {
                 let Some(struct_) = self.structs.get(id) else {
-                    buf.push_str("type");
+                    buf.push('?');
                     return;
                 };
-                // Built-in primitive structs read as plain types (`i32`), not
-                // `struct i32`, in diagnostics.
-                if self
-                    .primitive_struct_ids
-                    .values()
-                    .any(|prim_id| prim_id == id)
-                {
-                    buf.push_str(&format!("type {}", struct_.name));
-                } else {
-                    buf.push_str(&format!("struct {}", struct_.name));
-                }
+                buf.push_str(struct_.name);
                 self.push_type_arguments(buf, arguments, substitution, depth, visiting);
             }
 
             Type::Trait(id) => {
                 if let Some(trait_) = self.traits.get(id) {
-                    buf.push_str(&format!("trait {}", trait_.name));
+                    buf.push_str(trait_.name);
                 } else {
-                    buf.push_str("trait");
+                    buf.push('?');
                 }
             }
 
             Type::Enum(id, arguments) => {
                 let Some(enum_) = self.enums.get(id) else {
-                    buf.push_str("enum");
+                    buf.push('?');
                     return;
                 };
-                buf.push_str(&format!("enum {}", enum_.name));
+                buf.push_str(enum_.name);
                 self.push_type_arguments(buf, arguments, substitution, depth, visiting);
             }
 
@@ -7382,7 +7524,7 @@ impl<'src> Analyzer<'src> {
             }
 
             Type::Tuple(items) => {
-                buf.push_str("type (");
+                buf.push('(');
                 for (i, item_id) in items.iter().enumerate() {
                     if i > 0 {
                         buf.push_str(", ");
