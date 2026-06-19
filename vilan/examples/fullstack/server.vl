@@ -20,6 +20,12 @@ async fun main() {
 					.set_header("Content-Type", "text/javascript")
 					.body(client_js)
 					.build(),
+				// An API route the client calls with `fetch`. Its body uses the
+				// same shared `greeting` the client does.
+				"/api/hello" => Response::builder()
+					.set_header("Content-Type", "text/plain")
+					.body(greeting("the API"))
+					.build(),
 				_ => Response::builder()
 					.set_header("Content-Type", "text/html")
 					.body(page())

@@ -3,6 +3,7 @@
 // server does (proof the shared module compiled into both bundles).
 
 import std::dom::{ Element, get_element_by_id, create_element };
+import std::fetch::{ fetch, Response };
 import pkg::shared::greeting;
 
 fun main() {
@@ -15,4 +16,19 @@ fun main() {
 	let note = create_element("p");
 	note.set_text("Served by a Vilan server, rendered by a Vilan client.");
 	app.append(note);
+
+	// A live round-trip: the button fetches the server's `/api/hello` route and
+	// shows the reply. The click handler is an async closure (it awaits `fetch`).
+	let result = create_element("p");
+	result.set_text("(click to call the server)");
+	app.append(result);
+
+	let button = create_element("button");
+	button.set_text("Call /api/hello");
+	button.on("click", || {
+		let response = fetch("/api/hello");
+		let body = response.text();
+		result.set_text(body);
+	});
+	app.append(button);
 }

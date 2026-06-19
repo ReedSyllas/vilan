@@ -13,9 +13,10 @@ entry = "client.vl"
 
 - `server.vl` — a Node program (`std::http` + `std::fs`). It reads the compiled
   client bundle once at startup and serves the HTML shell on every path, the
-  bundle at `/client.js`.
-- `client.vl` — a browser program (`std::dom`). It mounts into the server's
-  `<div id="app">`.
+  bundle at `/client.js`, and a small JSON-less API at `/api/hello`.
+- `client.vl` — a browser program (`std::dom` + `std::fetch`). It mounts into the
+  server's `<div id="app">` and has a button that `fetch`es `/api/hello` and shows
+  the reply — a live client→server round-trip.
 - `shared.vl` — `pkg::shared`, imported by **both** entries. It uses only core
   std, so it compiles for `--target node` and `--target browser` alike; the
   platform gate rejects it if it ever reaches for a Node- or browser-only module.
