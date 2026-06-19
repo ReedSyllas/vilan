@@ -433,6 +433,11 @@ where
     // An assignment target is an lvalue: a local (`x`), a field place (`self.n`,
     // `a.b.c`), or a deref through a view (`*v`). A `.field` chain folds into
     // `MemberAccessor`s, the same shape a field read parses to.
+    // A bare assignment-target suffix: `.field` or `[index]`.
+    enum TargetSuffix<'src> {
+        Field(&'src str),
+        Index(Box<Spanned<Node<'src>>>),
+    }
     let assignment_target = choice((
         // `*<operand> = …` — write through a view: a view variable (`*v`), a field
         // of one (`*v.field`), or a view-returning call (`*node.slot()`). The
@@ -442,17 +447,30 @@ where
         just(Token::Op("*"))
             .ignore_then(place_operand.clone())
             .map_with(|place, e| (Node::Dereference(Box::new(place)), e.span())),
-        // A bare place (no deref): a local (`x`) or a `.field` chain (`a.b.c`).
+        // A bare place (no deref): a local (`x`), a `.field` chain (`a.b.c`), or a
+        // `List` subscript (`list[i]`, `a.items[i] = …`).
         identifier
             .map_with(|name, e| (Node::Accessor(name), e.span()))
             .foldl_with(
-                just(Token::Ctrl('.')).ignore_then(identifier).repeated(),
-                |subject, field, e| {
-                    let field = (Node::Accessor(field), e.span());
-                    (
-                        Node::MemberAccessor(Box::new(subject), Box::new(field)),
-                        e.span(),
-                    )
+                choice((
+                    just(Token::Ctrl('.'))
+                        .ignore_then(identifier)
+                        .map(TargetSuffix::Field),
+                    expression
+                        .clone()
+                        .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+                        .map(|index| TargetSuffix::Index(Box::new(index))),
+                ))
+                .repeated(),
+                |subject, suffix, e| match suffix {
+                    TargetSuffix::Field(field) => {
+                        let field = (Node::Accessor(field), e.span());
+                        (
+                            Node::MemberAccessor(Box::new(subject), Box::new(field)),
+                            e.span(),
+                        )
+                    }
+                    TargetSuffix::Index(index) => (Node::Index(Box::new(subject), index), e.span()),
                 },
             ),
     ));
@@ -947,6 +965,7 @@ where
         identifier,
         generic_arguments.clone(),
         expression_list.clone(),
+        expression.clone(),
         atom.clone(),
         block
             .clone()
@@ -1172,6 +1191,14 @@ fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
         extra::Err<Rich<'tokens, Token<'src>, Span>>,
     > + Clone
     + 'tokens,
+    // A single expression, for a subscript index (`list[i]`).
+    expression: impl Parser<
+        'tokens,
+        I,
+        Spanned<Node<'src>>,
+        extra::Err<Rich<'tokens, Token<'src>, Span>>,
+    > + Clone
+    + 'tokens,
     atom: impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>>
     + Clone
     + 'tokens,
@@ -1229,24 +1256,41 @@ where
         )
         .boxed();
 
+    // A postfix suffix: `.member` or `[index]`, folded left onto the subject.
+    enum Postfix<'src> {
+        Member(Spanned<Node<'src>>),
+        Index(Spanned<Node<'src>>),
+    }
     let member_accessor = call
         .clone()
         .foldl_with(
-            // A trailing `.` with no member yet (`p.`, mid-edit) recovers to an
-            // `Error` member rather than failing the whole statement — so the
-            // receiver still analyzes, which the language server's member
-            // completion relies on. A complete `a.b` always takes the `Some` path,
-            // so valid programs parse identically.
-            just(Token::Ctrl('.'))
-                .map_with(|_, e| e.span())
-                .then(call.or_not())
-                .map(|(dot_span, member)| member.unwrap_or((Node::Error, dot_span)))
-                .repeated(),
-            |subject, member, e| {
-                (
+            choice((
+                // A trailing `.` with no member yet (`p.`, mid-edit) recovers to an
+                // `Error` member rather than failing the whole statement — so the
+                // receiver still analyzes, which the language server's member
+                // completion relies on. A complete `a.b` always takes the `Some`
+                // path, so valid programs parse identically.
+                just(Token::Ctrl('.'))
+                    .map_with(|_, e| e.span())
+                    .then(call.or_not())
+                    .map(|(dot_span, member)| {
+                        Postfix::Member(member.unwrap_or((Node::Error, dot_span)))
+                    }),
+                // `[index]` — a `List` subscript.
+                expression
+                    .clone()
+                    .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+                    .map(Postfix::Index),
+            ))
+            .repeated(),
+            |subject, postfix, e| match postfix {
+                Postfix::Member(member) => (
                     Node::MemberAccessor(Box::new(subject), Box::new(member)),
                     e.span(),
-                )
+                ),
+                Postfix::Index(index) => {
+                    (Node::Index(Box::new(subject), Box::new(index)), e.span())
+                }
             },
         )
         .boxed();

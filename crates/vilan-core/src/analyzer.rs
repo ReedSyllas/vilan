@@ -36,6 +36,9 @@ pub enum Expr<'src> {
     Error,
     ExternalFunction(Id),
     Field(Id, Id, usize),
+    // `subject[index]` — a `List` element place: subject and index expr ids. Its
+    // type is the list's element type (resolved like a field accessor).
+    Index(Id, Id),
     // A loop: the optional condition and the body (statements, trailing expr).
     For(Option<Id>, (Vec<Id>, Id)),
     // `for item in iterable` — the iterable, the optional element binding (None
@@ -460,6 +463,10 @@ pub struct Analyzer<'src> {
     type_references: Vec<(SourceId, Span, Option<Id>, TypeId)>,
     external_functions: IndexMap<Id, ExternalFunction<'src>>,
     field_accessor_constraints: IndexMap<Id, FieldAccessorConstraint<'src>>,
+    // `subject[index]` subscripts awaiting type resolution: index expr id ->
+    // (subject expr id, index expr id). Resolved once the subject's `List<T>`
+    // type is known, like a field accessor.
+    index_constraints: IndexMap<Id, (Id, Id)>,
     function_calls: IndexMap<Id, FunctionCall>,
     functions: IndexMap<Id, Function<'src>>,
     generic_constraint_names: HashMap<TypeId, &'src str>,
@@ -647,6 +654,7 @@ impl<'src> Analyzer<'src> {
             type_references: Vec::new(),
             external_functions: IndexMap::new(),
             field_accessor_constraints: IndexMap::new(),
+            index_constraints: IndexMap::new(),
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
@@ -1090,7 +1098,7 @@ impl<'src> Analyzer<'src> {
     fn is_place_expr(&self, expr_id: Id) -> bool {
         matches!(
             self.expr_id_to_expr_map.get(&expr_id),
-            Some(Expr::Local(_)) | Some(Expr::Field(_, _, _))
+            Some(Expr::Local(_)) | Some(Expr::Field(_, _, _)) | Some(Expr::Index(_, _))
         )
     }
 
@@ -1102,6 +1110,7 @@ impl<'src> Analyzer<'src> {
     fn readonly_root(&self, expr_id: Id) -> Option<(&'src str, &'static str)> {
         match self.expr_id_to_expr_map.get(&expr_id)? {
             Expr::Field(subject_id, _, _) => self.readonly_root(*subject_id),
+            Expr::Index(subject_id, _) => self.readonly_root(*subject_id),
             Expr::Dereference(operand_id) => self.readonly_root(*operand_id),
             Expr::Local(binding_id) => {
                 if let Some(parameter) = self.parameters.get(binding_id) {
@@ -1449,6 +1458,7 @@ impl<'src> Analyzer<'src> {
         match self.expr_id_to_expr_map.get(&expr_id)? {
             Expr::Local(binding_id) => Some(*binding_id),
             Expr::Field(subject_id, _, _) => self.place_root(*subject_id),
+            Expr::Index(subject_id, _) => self.place_root(*subject_id),
             Expr::Dereference(operand_id) => self.place_root(*operand_id),
             _ => None,
         }
@@ -2534,6 +2544,12 @@ impl<'src> Analyzer<'src> {
             }
             // `type X` binders only appear in type position (impl subjects).
             Node::TypeBinder(..) => Some(Expr::Error),
+            Node::Index(subject, index) => {
+                let subject_id = self.walk_expr_node(subject, scope_id);
+                let index_id = self.walk_expr_node(index, scope_id);
+                self.index_constraints.insert(id, (subject_id, index_id));
+                None
+            }
             Node::MemberAccessor(subject, member) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 match &member.0 {
@@ -5639,6 +5655,50 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.field_accessor_constraints = remaining_accessors;
+
+            // --- Resolve `list[index]` subscripts ---
+            // Once the subject's `List<T>` type is known, the subscript's type is
+            // the element type `T`; record the resolved `Expr::Index`.
+            let index_constraints: Vec<_> = std::mem::take(&mut self.index_constraints)
+                .into_iter()
+                .collect();
+            let mut remaining_indexes = IndexMap::new();
+            for (id, (subject_id, index_id)) in index_constraints {
+                if !self.expr_id_to_expr_map.contains_key(&subject_id) {
+                    remaining_indexes.insert(id, (subject_id, index_id));
+                    continue;
+                }
+                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                let list_id = self.primitive_struct_ids.get("List").copied();
+                match subject_type {
+                    Type::Unresolved => {
+                        remaining_indexes.insert(id, (subject_id, index_id));
+                    }
+                    Type::Struct(struct_id, arguments)
+                        if Some(struct_id) == list_id && arguments.len() == 1 =>
+                    {
+                        let element_type = arguments[0];
+                        self.expr_id_to_expr_map
+                            .insert(id, Expr::Index(subject_id, index_id));
+                        self.expr_id_to_type_id_map.insert(id, element_type);
+                        self.resolved_types.insert(id, element_type);
+                        progress = true;
+                    }
+                    subject_type => {
+                        let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "cannot index {} (only a `List` is indexable)",
+                                subject_str
+                            ),
+                        });
+                        self.expr_id_to_expr_map.insert(id, Expr::Error);
+                        progress = true;
+                    }
+                }
+            }
+            self.index_constraints = remaining_indexes;
 
             // --- Resolve `is` pattern tests ---
             // Once the subject type is known, resolve the pattern (typing its

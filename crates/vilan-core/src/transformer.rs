@@ -521,6 +521,14 @@ impl<'src> Transformer<'src> {
                     Box::new(js::Node::Number(field_index.to_string(), None)),
                 )
             }
+            // `list[i]` — a List is a JS array, so a subscript is a native index.
+            Expr::Index(subject_id, index_id) => {
+                let subject = self
+                    .walk_entity(*subject_id, block)
+                    .unwrap_or(js::Node::Void);
+                let index = self.walk_entity(*index_id, block).unwrap_or(js::Node::Void);
+                js::Node::PropertyIndex(Box::new(subject), Box::new(index))
+            }
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap().clone();
                 let args = function_call
@@ -811,6 +819,11 @@ impl<'src> Transformer<'src> {
                         Some(Expr::Field(subject, _, field_index)) => (
                             self.walk_entity(*subject, block).unwrap_or(js::Node::Void),
                             js::Node::Number(field_index.to_string(), None),
+                        ),
+                        // `&mut list[i]` — base is the list, key is the index.
+                        Some(Expr::Index(subject, index)) => (
+                            self.walk_entity(*subject, block).unwrap_or(js::Node::Void),
+                            self.walk_entity(*index, block).unwrap_or(js::Node::Void),
                         ),
                         // A boxed scalar local: the cell itself (slot 0 holds the
                         // value), not the `[0]` read `walk_entity` would produce.

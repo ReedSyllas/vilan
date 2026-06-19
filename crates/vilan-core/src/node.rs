@@ -206,6 +206,9 @@ pub enum Node<'src> {
     // A match expression: subject and legs of `patterns (if guard)? => body`.
     Match(Box<Spanned<Self>>, Spanned<Vec<MatchLeg<'src>>>),
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
+    // `subject[index]` — a subscript into a `List` (element access / assignment,
+    // and `&mut list[i]` element views). Subject and index expressions.
+    Index(Box<Spanned<Self>>, Box<Spanned<Self>>),
     Module(&'src str, Spanned<NodeList<'src>>),
     Null,
     // The whole part, an optional fractional part, and an optional type suffix.

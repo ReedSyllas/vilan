@@ -1,0 +1,41 @@
+import std::print;
+
+// `list[i]` indexes a List (read, in-place write, and `&mut list[i]` element
+// views via the (base, key) representation). A List is a JS array, so a scalar
+// subscript is a native index; an aggregate element read copies (value
+// semantics), and an aggregate element view aliases.
+struct Point { x: i32, y: i32 }
+
+fun bump(slot: &mut i32) {
+	*slot = *slot + 100;
+}
+
+fun main() {
+	// Scalar read, arithmetic, in-place write.
+	mut xs: List<i32> = List::new();
+	xs.push(10);
+	xs.push(20);
+	print(xs[0] + xs[1]); // 30
+	xs[1] = 99;
+	print(xs[1]); // 99
+
+	// Index by an expression, and a scalar element view passed to a function.
+	let i = 0;
+	bump(&mut xs[i + 0]);
+	print(xs[0]); // 110
+
+	// Aggregate element read copies (value semantics).
+	mut ps: List<Point> = List::new();
+	ps.push(Point { x = 1, y = 2 });
+	mut copy = ps[0];
+	copy.x = 7;
+	print(ps[0].x); // 1 — the copy didn't alias
+
+	// Aggregate element write-through (the element is a JS reference).
+	let view = &mut ps[0];
+	view.y = 50;
+	print(ps[0].y); // 50
+
+	// Chained: a subscript through a field.
+	print(xs[xs.len() - 1]); // 99
+}
