@@ -207,15 +207,15 @@ impl<'src> Printer<'src> {
     /// item, for any trailing comments.
     fn print_items(&mut self, items: &[Spanned<Node<'src>>], start_from: usize) -> usize {
         let mut prev_end = start_from;
-        for (node, span) in items {
-            let range = span.into_range();
+        for item in items {
+            let range = item.1.into_range();
             let after_comments = self.flush_comments_before(range.start, prev_end);
             if self.has_blank_between(after_comments, range.start) {
                 self.blank_line();
             }
             self.line();
-            self.print_item(node);
-            if Self::needs_semicolon(node) {
+            self.print_item(item);
+            if Self::needs_semicolon(&item.0) {
                 self.out.push(';');
             }
             self.flush_trailing_comment(range.end);
@@ -251,8 +251,8 @@ impl<'src> Printer<'src> {
 
     /// Prints one top-level / block item. Sets `bailed` for anything not yet
     /// handled, so `format` falls back to the original source.
-    fn print_item(&mut self, node: &Node<'src>) {
-        match node {
+    fn print_item(&mut self, item: &Spanned<Node<'src>>) {
+        match &item.0 {
             // `[external ]struct Name[<…>][;|{ fields }]`.
             Node::Struct(name, generics, external, body) => {
                 if *external {
@@ -363,16 +363,16 @@ impl<'src> Printer<'src> {
                 self.print_braced_items(body);
             }
             // `@derive(A, B)` sits on its own line above the item it annotates.
-            Node::Derive(names, item) => {
+            Node::Derive(names, derived) => {
                 self.out.push_str("@derive(");
                 self.out.push_str(&names.join(", "));
                 self.out.push(')');
                 self.line();
-                self.print_item(&item.0);
+                self.print_item(derived);
             }
-            Node::Export(item) => {
+            Node::Export(exported) => {
                 self.out.push_str("export ");
-                self.print_item(&item.0);
+                self.print_item(exported);
             }
             // `mod name { items }`.
             Node::Module(name, body) => {
@@ -382,7 +382,7 @@ impl<'src> Printer<'src> {
                 self.print_braced_items(body);
             }
             // Anything else is an expression appearing as a statement.
-            _ => self.print_expr(node),
+            _ => self.print_expr(item),
         }
     }
 
@@ -680,7 +680,7 @@ impl<'src> Printer<'src> {
                 self.blank_line();
             }
             self.line();
-            self.print_expr(&tail.0);
+            self.print_expr(tail);
             self.flush_trailing_comment(tail_range.end);
             prev_end = tail_range.end;
         }
@@ -761,22 +761,26 @@ impl<'src> Printer<'src> {
         }
     }
 
-    /// Prints `node` as an operand, wrapping it in parentheses when its precedence
-    /// is below `minimum` (so the reprint reparses to the same tree).
-    fn print_operand(&mut self, node: &Node<'src>, minimum: u8) {
-        if Self::expression_precedence(node) < minimum {
+    /// Prints `expr` as an operand, wrapping it in parentheses when its precedence
+    /// is below `minimum` (so the reprint reparses to the same tree). An
+    /// interpolated string is reprinted verbatim and never wrapped — it already
+    /// carries its own parentheses in the expanded token stream.
+    fn print_operand(&mut self, expr: &Spanned<Node<'src>>, minimum: u8) {
+        if self.interpolated_source(expr).is_some() {
+            self.print_expr(expr);
+        } else if Self::expression_precedence(&expr.0) < minimum {
             self.out.push('(');
-            self.print_expr(node);
+            self.print_expr(expr);
             self.out.push(')');
         } else {
-            self.print_expr(node);
+            self.print_expr(expr);
         }
     }
 
     /// Prints a comma-separated expression list (call arguments, list/tuple
     /// elements) inline.
     fn print_expression_list(&mut self, elements: &[Spanned<Node<'src>>]) {
-        for (index, (element, _)) in elements.iter().enumerate() {
+        for (index, element) in elements.iter().enumerate() {
             if index > 0 {
                 self.out.push_str(", ");
             }
@@ -784,9 +788,35 @@ impl<'src> Printer<'src> {
         }
     }
 
+    /// If `expr`'s source span is an `i"..."` interpolated string — which the
+    /// lexer rewrites into a parenthesized `("" + parts..)` concatenation before
+    /// parsing, with every produced token sharing the literal's span — return the
+    /// literal's original source text. Reprinting that verbatim is exact;
+    /// rebuilding it from the expanded AST would have to re-derive the lexer's
+    /// brace/quote escaping.
+    fn interpolated_source(&self, expr: &Spanned<Node<'src>>) -> Option<&'src str> {
+        let range = expr.1.into_range();
+        if self.source.get(range.start..range.start + 2) != Some("i\"") {
+            return None;
+        }
+        // The lexer reports an i-string's span ending *at* its closing quote
+        // rather than after it, so the recovered slice would drop the quote (and
+        // swallow the rest of the file into one string). Include it when present.
+        let end = if self.source.as_bytes().get(range.end) == Some(&b'"') {
+            range.end + 1
+        } else {
+            range.end
+        };
+        self.source.get(range.start..end)
+    }
+
     /// Prints any expression. Sets `bailed` for forms not yet handled.
-    fn print_expr(&mut self, node: &Node<'src>) {
-        match node {
+    fn print_expr(&mut self, expr: &Spanned<Node<'src>>) {
+        if let Some(interpolated) = self.interpolated_source(expr) {
+            self.out.push_str(interpolated);
+            return;
+        }
+        match &expr.0 {
             Node::Number(whole, fraction, suffix) => {
                 self.out.push_str(whole);
                 if let Some(fraction) = fraction {
@@ -818,19 +848,19 @@ impl<'src> Printer<'src> {
                 self.out.push('>');
             }
             Node::MemberAccessor(subject, member) => {
-                self.print_operand(&subject.0, 100);
+                self.print_operand(subject, 100);
                 self.out.push('.');
-                self.print_expr(&member.0);
+                self.print_expr(member);
             }
             Node::StaticAccessor(subject, member) => {
-                self.print_operand(&subject.0, 100);
+                self.print_operand(subject, 100);
                 self.out.push_str("::");
                 self.out.push_str(member);
             }
             Node::Index(subject, index) => {
-                self.print_operand(&subject.0, 100);
+                self.print_operand(subject, 100);
                 self.out.push('[');
-                self.print_expr(&index.0);
+                self.print_expr(index);
                 self.out.push(']');
             }
             Node::Call(callee, generic_arguments, arguments) => {
@@ -839,10 +869,10 @@ impl<'src> Printer<'src> {
                 // callee must be parenthesized — `(a.b)(c)` — or it reparses wrong.
                 if matches!(callee.0, Node::MemberAccessor(_, _) | Node::Index(_, _)) {
                     self.out.push('(');
-                    self.print_expr(&callee.0);
+                    self.print_expr(callee);
                     self.out.push(')');
                 } else {
-                    self.print_operand(&callee.0, 100);
+                    self.print_operand(callee, 100);
                 }
                 if let Some((generic_arguments, _)) = generic_arguments {
                     self.out.push('<');
@@ -860,34 +890,34 @@ impl<'src> Printer<'src> {
             }
             Node::Binary(operator, left, right) => {
                 let precedence = Self::binary_precedence(*operator);
-                self.print_operand(&left.0, precedence);
+                self.print_operand(left, precedence);
                 self.out.push(' ');
                 self.out.push_str(binary_operator_symbol(*operator));
                 self.out.push(' ');
-                self.print_operand(&right.0, precedence + 1);
+                self.print_operand(right, precedence + 1);
             }
             Node::Unary(operator, operand) => {
                 self.out.push(*operator);
-                self.print_operand(&operand.0, 6);
+                self.print_operand(operand, 6);
             }
             Node::Reference(mutable, operand) => {
                 self.out.push('&');
                 if *mutable {
                     self.out.push_str("mut ");
                 }
-                self.print_operand(&operand.0, 6);
+                self.print_operand(operand, 6);
             }
             Node::Dereference(operand) => {
                 self.out.push('*');
-                self.print_operand(&operand.0, 6);
+                self.print_operand(operand, 6);
             }
             Node::Await(operand) => {
                 self.out.push_str("await ");
-                self.print_operand(&operand.0, 6);
+                self.print_operand(operand, 6);
             }
             Node::Async(operand) => {
                 self.out.push_str("async ");
-                self.print_expr(&operand.0);
+                self.print_expr(operand);
             }
             Node::Let(name, declared_type, value, mutable) => {
                 self.out.push_str(if *mutable { "mut " } else { "let " });
@@ -898,22 +928,22 @@ impl<'src> Printer<'src> {
                 }
                 if let Some(value) = value {
                     self.out.push_str(" = ");
-                    self.print_expr(&value.0);
+                    self.print_expr(value);
                 }
             }
             Node::Assign(target, operator, value) => {
-                self.print_expr(&target.0);
+                self.print_expr(target);
                 self.out.push(' ');
                 if let Some(operator) = operator {
                     self.out.push_str(binary_operator_symbol(*operator));
                 }
                 self.out.push_str("= ");
-                self.print_expr(&value.0);
+                self.print_expr(value);
             }
             Node::If(branch) => self.print_if_branch(branch),
             Node::Match(subject, legs) => {
                 self.out.push_str("match ");
-                self.print_expr(&subject.0);
+                self.print_expr(subject);
                 self.out.push_str(" {");
                 self.indent += 1;
                 let mut prev_end = legs.1.into_range().start + 1;
@@ -948,7 +978,7 @@ impl<'src> Printer<'src> {
                 self.out.push_str("for");
                 if let Some(condition) = condition {
                     self.out.push(' ');
-                    self.print_expr(&condition.0);
+                    self.print_expr(condition);
                 }
                 self.out.push(' ');
                 self.print_block(body);
@@ -957,13 +987,13 @@ impl<'src> Printer<'src> {
                 self.out.push_str("for ");
                 self.out.push_str(variable);
                 self.out.push_str(" in ");
-                self.print_expr(&iterable.0);
+                self.print_expr(iterable);
                 self.out.push(' ');
                 self.print_block(body);
             }
             Node::FuncReturn(value) => {
                 self.out.push_str("ret ");
-                self.print_expr(&value.0);
+                self.print_expr(value);
             }
             Node::Jump(target) => {
                 self.out.push_str("jump ");
@@ -993,7 +1023,7 @@ impl<'src> Printer<'src> {
                         self.out.push_str(field_name);
                         if let Some(value) = value {
                             self.out.push_str(" = ");
-                            self.print_expr(&value.0);
+                            self.print_expr(value);
                         }
                     }
                     self.out.push_str(" }");
@@ -1016,10 +1046,10 @@ impl<'src> Printer<'src> {
                     self.print_type(&return_type.0);
                 }
                 self.out.push(' ');
-                self.print_expr(&closure.return_value.0);
+                self.print_expr(&closure.return_value);
             }
             Node::Is(subject, pattern) => {
-                self.print_operand(&subject.0, 3);
+                self.print_operand(subject, 3);
                 self.out.push_str(" is ");
                 self.print_pattern(&pattern.0);
             }
@@ -1045,7 +1075,7 @@ impl<'src> Printer<'src> {
         match branch {
             NodeIfBranch::If(if_) => {
                 self.out.push_str("if ");
-                self.print_expr(&if_.condition.0);
+                self.print_expr(&if_.condition);
                 self.out.push(' ');
                 self.print_block(&if_.then);
                 if let Some((else_branch, _)) = &if_.else_ {
@@ -1071,10 +1101,10 @@ impl<'src> Printer<'src> {
         }
         if let Some(guard) = guard {
             self.out.push_str(" if ");
-            self.print_expr(&guard.0);
+            self.print_expr(guard);
         }
         self.out.push_str(" => ");
-        self.print_expr(&body.0);
+        self.print_expr(body);
     }
 
     /// Prints a match pattern.
@@ -1113,7 +1143,7 @@ impl<'src> Printer<'src> {
                 }
                 self.out.push(')');
             }
-            Pattern::Literal(literal) => self.print_expr(&literal.0),
+            Pattern::Literal(literal) => self.print_expr(literal),
         }
     }
 }
@@ -1244,6 +1274,24 @@ mod reformats {
     }
 
     #[test]
+    fn interpolated_string_is_reprinted_verbatim() {
+        // The lexer expands `i"..."` to `("" + ..)` before parsing; the printer
+        // recovers the original literal from the source rather than the AST.
+        assert_formats(
+            "fun f(self){print(i\"hi {self.name}!\")}\n",
+            "fun f(self) {\n\tprint(i\"hi {self.name}!\")\n}\n",
+        );
+    }
+
+    #[test]
+    fn interpolated_string_with_escaped_braces() {
+        assert_formats(
+            "fun f(){let x=i\"a \\{b\\} c\";x}\n",
+            "fun f() {\n\tlet x = i\"a \\{b\\} c\";\n\tx\n}\n",
+        );
+    }
+
+    #[test]
     fn impl_with_match_and_closure() {
         // `fn: |T| U` keeps the space after `:` — `:|` would lex as one operator.
         // The last arm has no source comma, so the faithful output keeps none.
@@ -1290,5 +1338,6 @@ mod idempotency {
         iterator_vl => "iterator.vl",
         arena_vl => "arena.vl",
         shared_vl => "shared.vl",
+        display_vl => "display.vl",
     }
 }
