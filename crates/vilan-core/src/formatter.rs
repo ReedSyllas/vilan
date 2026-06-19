@@ -54,6 +54,26 @@ fn code_tokens(source: &str) -> Option<Vec<Token<'_>>> {
         .map(|tokens| tokens.into_iter().map(|(token, _)| token).collect())
 }
 
+/// Drops every comma that sits immediately before a closing `}`, `)`, or `]`.
+/// Vilan treats such a trailing comma as insignificant (tuples need two or more
+/// elements, so there is no `(a,)` one-tuple to confuse it with), which lets the
+/// safety check accept the formatter normalizing trailing commas in or out.
+fn normalize(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
+    let mut result: Vec<Token<'_>> = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        if matches!(
+            token,
+            Token::Ctrl('}') | Token::Ctrl(')') | Token::Ctrl(']')
+        ) {
+            while let Some(Token::Ctrl(',')) = result.last() {
+                result.pop();
+            }
+        }
+        result.push(token);
+    }
+    result
+}
+
 /// Parses `source` into its top-level item list, or `None` if it doesn't parse.
 fn parse(source: &str) -> Option<NodeList<'_>> {
     let tokens = lexer().parse(source).into_output()?;
@@ -89,9 +109,12 @@ pub fn format(source: &str) -> String {
     if printer.bailed {
         return source.to_string();
     }
-    match code_tokens(&printer.out) {
-        Some(reprinted) if reprinted == original => printer.out,
-        _ => source.to_string(),
+    let matches = code_tokens(&printer.out)
+        .is_some_and(|reprinted| normalize(reprinted) == normalize(original));
+    if matches {
+        printer.out
+    } else {
+        source.to_string()
     }
 }
 
@@ -187,6 +210,32 @@ impl<'src> Printer<'src> {
                 self.out.push_str(name.0);
                 self.out.push(';');
             }
+            // `struct Name { field: Type, ... }` (no generics yet).
+            Node::Struct(name, None, external, Some(fields)) => {
+                if *external {
+                    self.out.push_str("external ");
+                }
+                self.out.push_str("struct ");
+                self.out.push_str(name.0);
+                if fields.0.is_empty() {
+                    self.out.push_str(" {}");
+                } else {
+                    self.out.push_str(" {");
+                    self.indent += 1;
+                    for ((field_name, field_type), _) in &fields.0 {
+                        self.line();
+                        self.out.push_str(field_name);
+                        if let Some(field_type) = field_type {
+                            self.out.push_str(": ");
+                            self.print_type(&field_type.0);
+                        }
+                        self.out.push(',');
+                    }
+                    self.indent -= 1;
+                    self.line();
+                    self.out.push('}');
+                }
+            }
             // `enum Name { variants }` — simple (no generics, no payload/discriminant).
             Node::Enum(name, None, variants)
                 if variants
@@ -243,6 +292,33 @@ impl<'src> Printer<'src> {
             }
         }
     }
+
+    /// Prints a type expression: `i32`, `List<T>`, `Map<str, i32>`, `&mut T`.
+    /// Bails (falling `format` back to the source) on any type form not yet handled.
+    fn print_type(&mut self, node: &Node<'src>) {
+        match node {
+            Node::Accessor(name) => self.out.push_str(name),
+            Node::AccessorWithGenerics(name, arguments) => {
+                self.out.push_str(name);
+                self.out.push('<');
+                for (index, (argument, _)) in arguments.0.iter().enumerate() {
+                    if index > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.print_type(argument);
+                }
+                self.out.push('>');
+            }
+            Node::Reference(mutable, inner) => {
+                self.out.push('&');
+                if *mutable {
+                    self.out.push_str("mut ");
+                }
+                self.print_type(&inner.0);
+            }
+            _ => self.bailed = true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +343,43 @@ mod tests {
         let range = span.into_range();
         assert!(range.start <= range.end);
         assert_eq!(&source[range.start..range.end], "// trailing");
+    }
+}
+
+#[cfg(test)]
+mod reformats {
+    use super::format;
+
+    fn assert_formats(source: &str, expected: &str) {
+        assert_eq!(format(source), expected);
+        // The output must be a fixed point — formatting it again is a no-op.
+        assert_eq!(format(expected), expected, "output is not idempotent");
+    }
+
+    #[test]
+    fn struct_fields_onto_their_own_lines() {
+        assert_formats(
+            "struct Point{x:i32,y:i32}\n",
+            "struct Point {\n\tx: i32,\n\ty: i32,\n}\n",
+        );
+    }
+
+    #[test]
+    fn generic_and_reference_field_types() {
+        assert_formats(
+            "struct Boxed { item :  List<i32> , next : &mut Node }\n",
+            "struct Boxed {\n\titem: List<i32>,\n\tnext: &mut Node,\n}\n",
+        );
+    }
+
+    #[test]
+    fn empty_struct_body_stays_inline() {
+        assert_formats("struct Unit{\n}\n", "struct Unit {}\n");
+    }
+
+    #[test]
+    fn enum_variants_onto_their_own_lines() {
+        assert_formats("enum E{A,B}\n", "enum E {\n\tA,\n\tB,\n}\n");
     }
 }
 
