@@ -1,0 +1,28 @@
+import std::print;
+
+// `borrows`: a method may return a view that projects one of its parameters —
+// rule 3's one sanctioned escape. The view is a `(base, key)` pair into the
+// borrowed value, so `*obj.slot() = x` writes through to the original and
+// `let v = obj.slot()` binds it. (`*obj.slot()` evaluates the call twice — fine
+// for a pure projection; bind it first to evaluate once.)
+struct Wrapper { value: i32 }
+
+impl Wrapper {
+	fun slot(&mut self): &mut i32 borrows self {
+		&mut self.value
+	}
+}
+
+fun main() {
+	mut w = Wrapper { value = 1 };
+
+	// Write through the projection the method returns.
+	*w.slot() = 10;
+	print(w.value); // 10
+
+	// Bind the projection, then read and write through it.
+	let v = w.slot();
+	print(*v); // 10
+	*v = 25;
+	print(w.value); // 25
+}

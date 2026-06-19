@@ -732,6 +732,14 @@ where
                 .or_not(),
         )
         .then(
+            // `borrows <param>` — the returned view is a projection of that
+            // parameter, so it may escape (rule 3's one sanctioned case).
+            just(Token::Borrows)
+                .ignore_then(identifier)
+                .labelled("borrows clause")
+                .or_not(),
+        )
+        .then(
             // A function either has a block body or, for a signature-only
             // declaration (e.g. a required trait method), ends with `;`.
             block
@@ -744,10 +752,13 @@ where
             |(
                 (
                     (
-                        ((((extern_binding, is_async), external), name), generic_parameters),
-                        parameters,
+                        (
+                            ((((extern_binding, is_async), external), name), generic_parameters),
+                            parameters,
+                        ),
+                        return_type,
                     ),
-                    return_type,
+                    borrows,
                 ),
                 body,
             ),
@@ -761,6 +772,7 @@ where
                         generic_parameters,
                         parameters,
                         return_type,
+                        borrows,
                         body,
                     }),
                     e.span(),

@@ -60,6 +60,7 @@ pub fn lexer<'src>()
         "mut" => Token::Mut,
         "null" => Token::Null,
         "own" => Token::Own,
+        "borrows" => Token::Borrows,
         "ret" => Token::Ret,
         "struct" => Token::Struct,
         "trait" => Token::Trait,

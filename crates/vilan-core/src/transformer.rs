@@ -438,6 +438,8 @@ impl<'src> Transformer<'src> {
         match self.program.entity_map.get(&operand) {
             Some(Expr::Local(binding)) => self.program.primitive_views.contains(binding),
             Some(Expr::Reference(..)) => self.program.scalar_view_refs.contains(&operand),
+            // `*obj.slot()` — a `borrows` call returning a scalar view.
+            Some(Expr::Call(..)) => self.program.scalar_view_calls.contains(&operand),
             _ => false,
         }
     }

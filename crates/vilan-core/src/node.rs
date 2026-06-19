@@ -61,6 +61,10 @@ pub struct Func<'src> {
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<Parameter<'src>>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
+    // The `borrows <param>` clause on a view-returning function
+    // (`fun slot(&mut self): &mut i32 borrows self`): the returned view is a
+    // projection of that parameter, so it may escape (rule 3's sanctioned case).
+    pub borrows: Option<&'src str>,
     // `None` for a function signature without a body: a required trait method
     // declaration (`fun default(): Self;`) or an `external` intrinsic.
     pub body: Option<Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>>,

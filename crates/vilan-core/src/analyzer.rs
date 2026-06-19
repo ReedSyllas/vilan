@@ -131,6 +131,13 @@ pub struct Function<'src> {
     /// compiles to a JS `async function`, and calls to it are implicitly
     /// awaited. Set by the async inference pass.
     pub is_async: bool,
+    /// Set when the signature has a `borrows <param>` clause: the returned view
+    /// is a projection of an argument, so it is permitted to escape (rule 3's
+    /// sanctioned case) rather than being rejected by `check_view_escape`.
+    pub borrows: bool,
+    /// Whether the (view) return type is `&mut` rather than `&` — so a binding of
+    /// the call (`let v = obj.slot()`) is writable through `*v`.
+    pub returns_mut_view: bool,
 }
 
 #[derive(Debug)]
@@ -1125,6 +1132,18 @@ impl<'src> Analyzer<'src> {
         match self.expr_id_to_expr_map.get(&initial)? {
             Expr::Reference(_, mutable) => Some(*mutable),
             Expr::Local(source_id) => self.view_binding_mutability(*source_id),
+            // `let v = obj.slot()` borrows a view; its writability is the borrows
+            // function's return convention (`&mut` vs `&`).
+            Expr::Call(call_id) => {
+                let function_call = self.function_calls.get(call_id)?;
+                match self.expr_id_to_expr_map.get(&function_call.subject_id)? {
+                    Expr::Local(function_id) => {
+                        let function = self.functions.get(function_id)?;
+                        function.borrows.then_some(function.returns_mut_view)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -1241,10 +1260,13 @@ impl<'src> Analyzer<'src> {
             }
         }
         // A function or closure body whose trailing expression escapes a view
-        // returns it implicitly.
+        // returns it implicitly. A `borrows` function may return one — but only a
+        // projection of a (view) parameter, whose target the caller keeps alive;
+        // a view of a local still dangles and is rejected.
         for function in self.functions.values() {
             if function.has_body
                 && self.escapes_as_view(function.body.1, &view_bindings, &capturing)
+                && !(function.borrows && self.derives_from_view_param(function.body.1))
             {
                 escapes.push(function.body.1);
             }
@@ -1279,6 +1301,16 @@ impl<'src> Analyzer<'src> {
             Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id))
                 if capturing.contains(closure_id)
         )
+    }
+
+    /// Whether an expression (a `borrows` function's returned view) projects a
+    /// `&`/`&mut` parameter — the caller's argument, which outlives the call, so
+    /// the returned view is sound. A view of a local would dangle, so it isn't.
+    fn derives_from_view_param(&self, expr_id: Id) -> bool {
+        let mut found = false;
+        let mut visited = HashSet::new();
+        self.scan_view_param_ref(expr_id, &mut found, &mut visited);
+        found
     }
 
     /// Whether a closure body references a `&` / `&mut` parameter — necessarily
@@ -1485,6 +1517,41 @@ impl<'src> Analyzer<'src> {
         )
     }
 
+    /// Whether a function returns a scalar `(base, key)` view: it has a `borrows`
+    /// clause and its return type's pointee is a scalar (`&mut i32` collapses to
+    /// `i32`, so the scalar check is on the collapsed `return_type_id`).
+    fn function_returns_scalar_view(&self, function_id: Id) -> bool {
+        self.functions.get(&function_id).is_some_and(|function| {
+            function.borrows
+                && matches!(
+                    function.return_type_id.map(|type_id| type_id.get_type(self)),
+                    Some(Type::Struct(id, _)) if self.is_scalar_primitive(id)
+                )
+        })
+    }
+
+    /// Whether a call resolves to a `borrows` function returning a scalar view —
+    /// so `*call` / a binding of it derefs through `(base, key)`.
+    fn call_returns_scalar_view(&self, call_id: Id) -> bool {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return false;
+        };
+        matches!(
+            self.expr_id_to_expr_map.get(&function_call.subject_id),
+            Some(Expr::Local(function_id)) if self.function_returns_scalar_view(*function_id)
+        )
+    }
+
+    /// Call exprs that resolve to a `borrows` function returning a scalar view, so
+    /// `*call` reads/writes through `call[0][call[1]]`.
+    fn compute_scalar_view_calls(&self) -> HashSet<Id> {
+        self.function_calls
+            .keys()
+            .copied()
+            .filter(|call_id| self.call_returns_scalar_view(*call_id))
+            .collect()
+    }
+
     /// `Reference` exprs (`&place` / `&mut place`) whose target is a scalar — the
     /// ones that lower to a `[base, key]` pair (a boxed local's cell at slot 0, or
     /// a struct's field slot) rather than to the aggregate's own JS reference.
@@ -1516,6 +1583,8 @@ impl<'src> Analyzer<'src> {
                 let is_scalar = match self.expr_id_to_expr_map.get(&initial) {
                     Some(Expr::Reference(operand, _)) => self.place_is_scalar(*operand),
                     Some(Expr::Local(source)) => views.contains(source),
+                    // `let v = obj.slot()` — a `borrows` call returning a scalar view.
+                    Some(Expr::Call(call_id)) => self.call_returns_scalar_view(*call_id),
                     _ => false,
                 };
                 if is_scalar {
@@ -2759,6 +2828,11 @@ impl<'src> Analyzer<'src> {
                             has_body: function.body.is_some(),
                             call_count: 0,
                             is_async: function.is_async,
+                            borrows: function.borrows.is_some(),
+                            returns_mut_view: matches!(
+                                function.return_type.as_deref().map(|spanned| &spanned.0),
+                                Some(Node::Reference(true, _))
+                            ),
                         },
                     );
                     Some(Expr::Function(id))
@@ -7070,6 +7144,9 @@ pub struct Program<'src> {
     // `&place`/`&mut place` exprs whose target is scalar, so the view lowers to a
     // `[base, key]` pair rather than the aggregate's own reference.
     pub scalar_view_refs: HashSet<Id>,
+    // Call exprs resolving to a `borrows` function that returns a scalar view, so
+    // `*call` derefs through `call[0][call[1]]`.
+    pub scalar_view_calls: HashSet<Id>,
 }
 
 impl<'src> Program<'src> {
@@ -7732,6 +7809,7 @@ pub fn analyze<'src>(
     let boxed_locals = analyzer.compute_boxed_locals();
     let primitive_views = analyzer.compute_primitive_views();
     let scalar_view_refs = analyzer.compute_scalar_view_refs();
+    let scalar_view_calls = analyzer.compute_scalar_view_calls();
 
     // Pre-render a type label for every typed expression (for hover). Done here
     // while the analyzer still holds the type tables; `expr_id_to_type_id_map`
@@ -7851,5 +7929,6 @@ pub fn analyze<'src>(
         boxed_locals,
         primitive_views,
         scalar_view_refs,
+        scalar_view_calls,
     }
 }
