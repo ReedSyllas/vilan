@@ -1713,6 +1713,18 @@ impl<'src> Transformer<'src> {
                 let key = args.next().unwrap_or(js::Node::Void);
                 js::Node::PropertyIndex(Box::new(receiver), Box::new(key))
             }
+            // `Array.from(document.querySelectorAll(selector))` — the NodeList as a
+            // real array, so `List` operations (`map`/`push`/…) behave.
+            Intrinsic::QuerySelectorAll => {
+                let query = js::Node::Call(
+                    Box::new(js::Node::Local("document.querySelectorAll".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
+                );
+                js::Node::Call(
+                    Box::new(js::Node::Local("Array.from".to_string())),
+                    vec![query],
+                )
+            }
         }
     }
 

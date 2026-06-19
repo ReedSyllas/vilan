@@ -22,6 +22,10 @@ external fun create_element(tag: str): Element;
 @extern("document.querySelector")
 external fun query_selector(selector: str): Element;
 
+// `document.querySelectorAll(selector)` — every element matching a CSS selector,
+// as a `List` (a real array, so `map`/`for`-in/`len` all work).
+external fun query_selector_all(selector: str): List<Element>;
+
 impl Element {
 	// Sets the element's text content (`element.textContent = text`).
 	@extern(set, "textContent")

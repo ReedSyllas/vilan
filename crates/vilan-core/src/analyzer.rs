@@ -7634,6 +7634,10 @@ pub enum Intrinsic {
     // `JsonValue.field(name): JsonValue` -> native `self[name]` (a dynamic
     // property read on a `JSON.parse` result, for which there is no host fn).
     JsonField,
+    // `dom::query_selector_all(selector): List<Element>` -> the matches as a real
+    // array, `Array.from(document.querySelectorAll(selector))` (querySelectorAll
+    // yields a NodeList, which a `List` would otherwise mishandle).
+    QuerySelectorAll,
 }
 
 /// Identifies a source file within a compiled `Program` — an index into
@@ -8841,6 +8845,9 @@ pub fn analyze<'src>(
     }
     if let Some(env_id) = module_member("process", "env") {
         intrinsics.insert(env_id, Intrinsic::Env);
+    }
+    if let Some(id) = module_member("dom", "query_selector_all") {
+        intrinsics.insert(id, Intrinsic::QuerySelectorAll);
     }
 
     let clone_sites = analyzer.compute_clone_sites();
