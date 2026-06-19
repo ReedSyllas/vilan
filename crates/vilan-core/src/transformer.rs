@@ -1021,6 +1021,52 @@ impl<'src> Transformer<'src> {
                     return Some(js::Node::Void);
                 }
 
+                // `for e in &mut list` / `&list` — an indexed loop binding each
+                // element as a view: a scalar element pairs to `[list, i]`, an
+                // aggregate is `list[i]` (its own reference). `list.keys()` yields
+                // the indices. The list is bound to a temp so it's evaluated once.
+                if let Some(item_id) = *item_id
+                    && self.program.for_each_views.contains_key(&item_id)
+                {
+                    let list_name = self.ng.next_name();
+                    block.push(js::Node::ConstVariable(js::Variable {
+                        name: list_name.clone(),
+                        value: Box::new(t_iterable),
+                    }));
+                    let index_name = self.ng.next_name();
+                    let element = if self.program.primitive_views.contains(&item_id) {
+                        js::Node::Array(vec![
+                            js::Node::Local(list_name.clone()),
+                            js::Node::Local(index_name.clone()),
+                        ])
+                    } else {
+                        js::Node::PropertyIndex(
+                            Box::new(js::Node::Local(list_name.clone())),
+                            Box::new(js::Node::Local(index_name.clone())),
+                        )
+                    };
+                    let mut loop_body = vec![js::Node::ConstVariable(js::Variable {
+                        name: self.ng.name_for(item_id),
+                        value: Box::new(element),
+                    })];
+                    loop_body.extend(self.walk_list(&body.0));
+                    if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
+                    } else if let Some(node) = self.walk_entity(body.1, &mut loop_body)
+                        && !matches!(node, js::Node::Void)
+                    {
+                        loop_body.push(node);
+                    }
+                    let keys = js::Node::Call(
+                        Box::new(js::Node::Property(
+                            Box::new(js::Node::Local(list_name)),
+                            "keys".to_string(),
+                        )),
+                        Vec::new(),
+                    );
+                    block.push(js::Node::ForOf(index_name, Box::new(keys), loop_body));
+                    return Some(js::Node::Void);
+                }
+
                 // Otherwise a native `for...of` (a `List` is a JS array).
                 let binding = item_id
                     .map(|item_id| self.ng.name_for(item_id))

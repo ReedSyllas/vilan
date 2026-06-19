@@ -539,6 +539,10 @@ pub struct Analyzer<'src> {
     // For-each loops whose iterable is a custom iterator: the resolved `next`
     // method id, so codegen emits a `next()`/`Some`-matching loop instead.
     for_each_next: HashMap<Id, Id>,
+    // `for e in &mut list` / `for e in &list` — the loop binding is a view of each
+    // element rather than a copy. Maps the binding id to whether the view is
+    // writable (`&mut`). Drives the indexed-loop lowering + view classification.
+    for_each_views: HashMap<Id, bool>,
     // Arithmetic binary expressions (`a + b`), as (binary id, op, lhs id),
     // resolved after typing to decide native JS arithmetic vs an operator-trait
     // method call (`Add::add`, ...).
@@ -682,6 +686,7 @@ impl<'src> Analyzer<'src> {
             prepped_for_each_items: Vec::new(),
             prepped_method_arg_checks: Vec::new(),
             for_each_next: HashMap::new(),
+            for_each_views: HashMap::new(),
             prepped_binary_ops: Vec::new(),
             binary_op_dispatch: HashMap::new(),
             method_call_substitution: HashMap::new(),
@@ -1137,6 +1142,11 @@ impl<'src> Analyzer<'src> {
     /// → `Some(true)`, `&` → `Some(false)`, an owned value → `None`. Follows
     /// copies between locals (`let w = v`).
     fn view_binding_mutability(&self, binding_id: Id) -> Option<bool> {
+        // A `for e in &mut list` binding has no initial; its writability is the
+        // iterable view's `&mut`/`&`.
+        if let Some(&mutable) = self.for_each_views.get(&binding_id) {
+            return Some(mutable);
+        }
         let initial = self.variables.get(&binding_id)?.initial?;
         match self.expr_id_to_expr_map.get(&initial)? {
             Expr::Reference(_, mutable) => Some(*mutable),
@@ -1177,7 +1187,8 @@ impl<'src> Analyzer<'src> {
     /// Local bindings that hold a view (`let v = &x`, or `let w = v` where `v`
     /// is one) — a greatest fixpoint, since a view can be copied between locals.
     fn compute_view_bindings(&self) -> HashSet<Id> {
-        let mut view_bindings = HashSet::new();
+        // A `for e in &mut list` binding holds an element view (no `initial`).
+        let mut view_bindings: HashSet<Id> = self.for_each_views.keys().copied().collect();
         loop {
             let mut changed = false;
             for variable in self.variables.values() {
@@ -1585,6 +1596,16 @@ impl<'src> Analyzer<'src> {
     /// parameter (which receives such a pair from its caller).
     fn compute_primitive_views(&self) -> HashSet<Id> {
         let mut views: HashSet<Id> = HashSet::new();
+        // A `for e in &mut list` over a scalar element binds `e` as a `(base, key)`
+        // pair into the list, so `*e` derefs through it.
+        for binding_id in self.for_each_views.keys() {
+            let is_scalar = self.variables.get(binding_id).is_some_and(|variable| {
+                matches!(variable.type_id.get_type(self), Type::Struct(id, _) if self.is_scalar_primitive(id))
+            });
+            if is_scalar {
+                views.insert(*binding_id);
+            }
+        }
         loop {
             let mut changed = false;
             for variable in self.variables.values() {
@@ -2721,6 +2742,15 @@ impl<'src> Analyzer<'src> {
                     self.mut_scope_for_scope_id(body_scope_id)
                         .name_to_id_map
                         .insert(variable, variable_id);
+                    // `for e in &mut list` / `&list` — the iterable is a view, so
+                    // each binding is a view of the element (write-through), not a
+                    // copy. The element type still resolves below (a view is
+                    // identity-typed).
+                    if let Some(Expr::Reference(_, mutable)) =
+                        self.expr_id_to_expr_map.get(&iterable_id)
+                    {
+                        self.for_each_views.insert(variable_id, *mutable);
+                    }
                     self.prepped_for_each_items.push((variable_id, iterable_id));
                     variable_id
                 });
@@ -7210,6 +7240,8 @@ pub struct Program<'src> {
     pub generic_method_dispatch: HashMap<Id, (TypeId, &'src str)>,
     pub trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
     pub for_each_next: HashMap<Id, Id>,
+    // `for e in &mut list` loop bindings → whether the element view is `&mut`.
+    pub for_each_views: HashMap<Id, bool>,
     pub binary_op_dispatch: HashMap<Id, Id>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
     pub global_scope_id: Id,
@@ -8039,6 +8071,7 @@ pub fn analyze<'src>(
         generic_method_dispatch: analyzer.generic_method_dispatch,
         trait_method_dispatch: analyzer.trait_method_dispatch,
         for_each_next: analyzer.for_each_next,
+        for_each_views: analyzer.for_each_views,
         binary_op_dispatch: analyzer.binary_op_dispatch,
         method_call_substitution: analyzer.method_call_substitution,
         intrinsics,

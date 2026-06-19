@@ -1,0 +1,37 @@
+import std::print;
+
+// Iterating a list *view* binds each element as a view rather than a copy:
+// `&mut list` yields writable element views (`*e = …` / `e.field = …` writes
+// through), `&list` yields readonly ones. A scalar element pairs to `[list, i]`;
+// an aggregate is its own reference. Plain `for x in list` still copies.
+struct P { v: i32 }
+
+fun main() {
+	// `&mut` scalar elements: double each in place.
+	mut xs: List<i32> = List::new();
+	xs.push(1);
+	xs.push(2);
+	xs.push(3);
+	for e in &mut xs {
+		*e = *e * 10;
+	}
+	print(xs[0]); // 10
+	print(xs[2]); // 30
+
+	// `&mut` aggregate elements: mutate a field of each.
+	mut ps: List<P> = List::new();
+	ps.push(P { v = 1 });
+	ps.push(P { v = 2 });
+	for p in &mut ps {
+		p.v = p.v + 100;
+	}
+	print(ps[0].v); // 101
+	print(ps[1].v); // 102
+
+	// `&` readonly view: sum without copying.
+	mut sum = 0;
+	for e in &xs {
+		sum = sum + *e;
+	}
+	print(sum); // 10 + 20 + 30 = 60
+}
