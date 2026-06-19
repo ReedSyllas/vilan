@@ -1,0 +1,16 @@
+import std::print;
+
+// An unused `let` binding is dropped from codegen — but a side-effecting
+// initializer (here a call that mutates through `&mut`) must still run.
+fun bump(xs: &mut List<i32>): i32 {
+	xs.push(1);
+	xs.len()
+}
+
+fun main() {
+	mut xs: List<i32> = List::new();
+	let a = bump(xs); // used below
+	let b = bump(xs); // UNUSED — its push must still happen
+	print(a); // 1
+	print(xs.len()); // 2
+}

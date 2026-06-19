@@ -431,6 +431,33 @@ impl<'src> Transformer<'src> {
         }
     }
 
+    /// Whether an expression may have a side effect — a call, an `await`, or an
+    /// assignment, or anything containing one. An unused `let` binding can be
+    /// dropped only if its initializer is side-effect-free; a side-effecting one
+    /// (e.g. a call that mutates through `&mut self`) must still run.
+    fn expr_has_side_effects(&self, expr_id: Id) -> bool {
+        match self.program.entity_map.get(&expr_id) {
+            Some(Expr::Call(_)) | Some(Expr::Await(_)) | Some(Expr::Assignment(_, _)) => true,
+            Some(Expr::Binary(_, lhs, rhs)) => {
+                self.expr_has_side_effects(*lhs) || self.expr_has_side_effects(*rhs)
+            }
+            Some(Expr::Unary(_, operand))
+            | Some(Expr::Reference(operand, _))
+            | Some(Expr::Dereference(operand)) => self.expr_has_side_effects(*operand),
+            Some(Expr::Field(subject, _, _)) => self.expr_has_side_effects(*subject),
+            Some(Expr::Index(subject, index)) => {
+                self.expr_has_side_effects(*subject) || self.expr_has_side_effects(*index)
+            }
+            Some(Expr::List(ids)) | Some(Expr::Tuple(ids)) => {
+                ids.iter().any(|id| self.expr_has_side_effects(*id))
+            }
+            Some(Expr::StructInitializer(_, fields)) => {
+                fields.values().any(|id| self.expr_has_side_effects(*id))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a deref operand is a scalar `(base, key)` view — so `*operand`
     /// reads or writes `operand[0][operand[1]]`. True for a scalar-view binding /
     /// parameter, or `&place` of a scalar place directly.
@@ -877,6 +904,15 @@ impl<'src> Transformer<'src> {
                     .map(|x| *x < 1)
                     .unwrap_or(true)
                 {
+                    // An unused binding is dropped — but a side-effecting
+                    // initializer (a call mutating through `&mut`, say) must still
+                    // run; emit it as a bare statement, discarding the value.
+                    let initial = self.program.variables.get(id).and_then(|v| v.initial);
+                    if let Some(value_id) = initial
+                        && self.expr_has_side_effects(value_id)
+                    {
+                        return self.walk_entity(value_id, block);
+                    }
                     return None;
                 }
                 let name = self.ng.name_for(*id);
