@@ -1,0 +1,55 @@
+import std::print;
+import std::arena::{ Arena, Handle };
+import std::option::Option::{ self, Some, None };
+
+// `Arena<T>` + `Handle<T>`: stable, deletion-safe identities. A handle is two
+// integers, so — unlike a view — it is storable in a struct field, which is what
+// lets a node hold its edges and express a graph.
+struct Node {
+	value: i32,
+	edges: List<Handle<Node>>,
+}
+
+// Walk the graph by re-`get` on each handle.
+fun sum_from(arena: Arena<Node>, handle: Handle<Node>): i32 {
+	match arena.get(handle) {
+		Some(let node) => {
+			mut total = node.value;
+			for edge in node.edges {
+				total = total + sum_from(arena, edge);
+			}
+			total
+		},
+		None => 0,
+	}
+}
+
+fun main() {
+	// Basic insert / get / set / remove + generational staleness.
+	mut numbers: Arena<i32> = Arena::new();
+	let a = numbers.insert(10);
+	let b = numbers.insert(20);
+	print(numbers.len()); // 2
+	print(numbers.get(a).unwrap_or(-1)); // 10
+
+	numbers.set(b, 99);
+	print(numbers.get(b).unwrap_or(-1)); // 99
+
+	print(numbers.remove(b).unwrap_or(-1)); // 99
+	print(numbers.get(b).is_some()); // false (handle is stale)
+
+	let c = numbers.insert(30); // reuses b's slot under a new generation
+	print(numbers.get(c).unwrap_or(-1)); // 30
+	print(numbers.get(b).is_some()); // false — the old handle stays stale
+	print(numbers.get(a).unwrap_or(-1)); // 10 (unaffected)
+
+	// A graph: nodes hold their edges as handles (a field of views is forbidden).
+	mut graph: Arena<Node> = Arena::new();
+	let leaf1 = graph.insert(Node { value = 2, edges = List::new() });
+	let leaf2 = graph.insert(Node { value = 3, edges = List::new() });
+	mut root_edges: List<Handle<Node>> = List::new();
+	root_edges.push(leaf1);
+	root_edges.push(leaf2);
+	let root = graph.insert(Node { value = 1, edges = root_edges });
+	print(sum_from(graph, root)); // 1 + 2 + 3 = 6
+}

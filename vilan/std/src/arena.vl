@@ -1,0 +1,107 @@
+import pkg::option::Option::{ self, Some, None };
+
+// `std::arena` — a generational arena: stable, deletion-safe identities for
+// values of any type `T`, with no per-type bookkeeping.
+//
+// A `Handle<T>` is two integers, so — unlike a view — it is storable in struct
+// fields and collections. That is the entire point: it lets a `Node` hold its
+// edges as `List<Handle<Node>>`, expressing graphs/cycles that value semantics
+// and second-class views otherwise forbid. You traverse by re-`get`, so the
+// container stays mutable while you walk it; a removed-then-reused slot bumps
+// its generation, so an old handle to it surfaces as `None` rather than aliasing
+// the new occupant.
+
+// A first-class key into an `Arena<T>`: the slot index plus the generation it
+// was issued at. Copied freely; storable anywhere a plain value is.
+struct Handle<T> {
+	index: i32,
+	generation: i32,
+}
+
+// One arena slot: a generation counter (bumped on removal so stale handles go
+// `None`) and the value while occupied.
+struct Slot<T> {
+	generation: i32,
+	value: Option<T>,
+}
+
+// A generational arena over `T`. `free` holds emptied indices, reused on the
+// next insert.
+struct Arena<T> {
+	slots: List<Slot<T>>,
+	free: List<i32>,
+}
+
+impl Arena<type T> {
+	fun new(): Arena<T> {
+		Arena { slots = List::new(), free = List::new() }
+	}
+
+	// Store `value`, returning a handle to it. Reuses a freed slot when one is
+	// available, otherwise appends a new one.
+	fun insert(&mut self, value: T): Handle<T> {
+		match self.free.pop() {
+			Some(let index) => {
+				self.slots[index].value = Some(value);
+				Handle { index = index, generation = self.slots[index].generation }
+			},
+			None => {
+				let index = self.slots.len();
+				self.slots.push(Slot { generation = 0, value = Some(value) });
+				Handle { index = index, generation = 0 }
+			},
+		}
+	}
+
+	// Whether `handle` still refers to a live value: in range, the slot's
+	// generation matches, and the slot is occupied.
+	fun contains(self, handle: Handle<T>): bool {
+		handle.index < self.slots.len()
+			&& self.slots[handle.index].generation == handle.generation
+			&& self.slots[handle.index].value.is_some()
+	}
+
+	// A copy of the value `handle` refers to, or `None` if the handle is stale
+	// (its slot was removed, or reused under a newer generation).
+	fun get(self, handle: Handle<T>): Option<T> {
+		if self.contains(handle) {
+			self.slots[handle.index].value
+		} else {
+			None
+		}
+	}
+
+	// Overwrite the value a live handle refers to, in place. Returns whether the
+	// handle was valid (a stale handle changes nothing).
+	fun set(&mut self, handle: Handle<T>, value: T): bool {
+		if self.contains(handle) {
+			self.slots[handle.index].value = Some(value);
+			true
+		} else {
+			false
+		}
+	}
+
+	// Remove and return the value `handle` refers to, freeing its slot and
+	// bumping the slot's generation so every existing handle to it goes stale.
+	fun remove(&mut self, handle: Handle<T>): Option<T> {
+		if self.contains(handle) {
+			let removed = self.slots[handle.index].value;
+			self.slots[handle.index].generation = self.slots[handle.index].generation + 1;
+			self.slots[handle.index].value = None;
+			self.free.push(handle.index);
+			removed
+		} else {
+			None
+		}
+	}
+
+	// The number of live values (occupied slots).
+	fun len(self): i32 {
+		self.slots.len() - self.free.len()
+	}
+
+	fun is_empty(self): bool {
+		self.len() == 0
+	}
+}
