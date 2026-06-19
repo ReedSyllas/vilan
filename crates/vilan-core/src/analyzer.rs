@@ -7514,6 +7514,27 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
                      }}\n"
                 ));
             }
+            "Debug" => {
+                // `"T { " + "a = " + self.a.debug() + ", " + … + " }"`; a
+                // field-less struct is just its name.
+                let body = if fields.is_empty() {
+                    format!("\"{struct_name}\"")
+                } else {
+                    let parts = fields
+                        .iter()
+                        .map(|(field, _)| format!("\"{field} = \" + self.{field}.debug()"))
+                        .collect::<Vec<_>>()
+                        .join(" + \", \" + ");
+                    format!("\"{struct_name} {{ \" + {parts} + \" }}\"")
+                };
+                out.push_str(&format!(
+                    "impl {struct_name} with Debug {{\n\
+                     \tfun debug(self): str {{\n\
+                     \t\t{body}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
             "Json" => {
                 // `"{" + "\"a\":" + self.a.to_json() + "," + "\"b\":" +
                 // self.b.to_json() + "}"` — a JSON object with the real field
@@ -7571,6 +7592,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     }
     if traits.contains("Json") {
         prelude.push_str("import std::json::Json;\n");
+    }
+    if traits.contains("Debug") {
+        prelude.push_str("import std::debug::Debug;\n");
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;

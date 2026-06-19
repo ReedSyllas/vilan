@@ -1,0 +1,27 @@
+import std::print;
+
+// `@derive(Debug)` synthesizes `debug(self): str` — a `Type { field = value, … }`
+// representation. Scalars format via `JSON.stringify` (numbers raw, strings
+// quoted); nested derived structs recurse; a field-less struct is just its name.
+@derive(Debug)
+struct Point {
+	x: i32,
+	y: i32,
+}
+
+@derive(Debug)
+struct Tagged {
+	label: str,
+	at: Point,
+	on: bool,
+}
+
+@derive(Debug)
+struct Empty {}
+
+fun main() {
+	print(Point { x = 1, y = 2 }.debug()); // Point { x = 1, y = 2 }
+	let t = Tagged { label = "hi", at = Point { x = 3, y = 4 }, on = true };
+	print(t.debug()); // Tagged { label = "hi", at = Point { x = 3, y = 4 }, on = true }
+	print(Empty {}.debug()); // Empty
+}

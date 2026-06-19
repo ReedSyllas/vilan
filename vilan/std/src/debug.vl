@@ -1,0 +1,33 @@
+// `std::debug` — `@derive(Debug)` synthesizes `debug(self): str`, a developer
+// representation `Type { field = value, … }` built from the fields. Scalars
+// format via the host `JSON.stringify` (numbers/bools raw, strings quoted and
+// escaped); nested derived structs recurse through their own `debug`.
+
+trait Debug {
+	fun debug(self): str;
+}
+
+impl str with Debug {
+	@extern("JSON.stringify")
+	external fun debug(self): str;
+}
+
+impl i32 with Debug {
+	@extern("JSON.stringify")
+	external fun debug(self): str;
+}
+
+impl u32 with Debug {
+	@extern("JSON.stringify")
+	external fun debug(self): str;
+}
+
+impl f64 with Debug {
+	@extern("JSON.stringify")
+	external fun debug(self): str;
+}
+
+impl bool with Debug {
+	@extern("JSON.stringify")
+	external fun debug(self): str;
+}
