@@ -2,7 +2,7 @@ import pkg::option::Option::{ self, Some };
 
 trait PartialEq<B = Self> {
 	fun eq(self, b: B): bool;
-	
+
 	fun ne(self, b: B): bool {
 		!self.eq(b)
 	}
@@ -18,7 +18,7 @@ enum Ordering {
 
 trait PartialOrd<B = Self> with PartialEq<B> {
 	fun partial_compare(self, b: B): Option<Ordering>;
-	
+
 	fun lt(self, b: B): bool {
 		self.partial_compare(b) is Some(let x) && x < Ordering::Equal
 	}
@@ -38,7 +38,7 @@ trait PartialOrd<B = Self> with PartialEq<B> {
 
 trait Ord with Eq + PartialOrd {
 	fun compare(self, b: Self): Ordering;
-	
+
 	fun min(self, b: Self): Self {
 		if self.compare(b) <= Ordering::Equal {
 			self
@@ -46,7 +46,7 @@ trait Ord with Eq + PartialOrd {
 			b
 		}
 	}
-	
+
 	fun max(self, b: Self): Self {
 		if self.compare(b) >= Ordering::Equal {
 			self
@@ -54,7 +54,7 @@ trait Ord with Eq + PartialOrd {
 			b
 		}
 	}
-	
+
 	fun clamp(self, min: Self, max: Self): Self {
 		self.min(max).max(min)
 	}

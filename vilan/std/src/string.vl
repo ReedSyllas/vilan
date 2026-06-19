@@ -1,4 +1,3 @@
-
 external struct str;
 
 impl str {

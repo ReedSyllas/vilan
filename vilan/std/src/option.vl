@@ -14,74 +14,74 @@ impl Option<type T> {
 	fun is_some(self): bool {
 		self is Some(_)
 	}
-	
+
 	fun is_some_and(self, fn: |T| bool): bool {
 		match self {
 			Some(let x) => fn(x),
 			_ => false,
 		}
 	}
-	
+
 	fun is_none(self): bool {
 		self is None
 	}
-	
+
 	fun is_none_or(self, fn: |T| bool): bool {
 		match self {
 			Some(let x) => fn(x),
 			_ => true,
 		}
 	}
-	
+
 	fun unwrap(self): T {
 		match self {
 			Some(let x) => x,
 			_ => panic("expected Some but got None"),
 		}
 	}
-	
+
 	fun unwrap_or(self, fallback: T): T {
 		match self {
 			Some(let x) => x,
 			_ => fallback,
 		}
 	}
-	
+
 	fun unwrap_or_else(self, fn: || T): T {
 		match self {
 			Some(let x) => x,
 			_ => fn(),
 		}
 	}
-	
+
 	fun map<U>(self, fn: |T| U): Option<U> {
 		match self {
 			Some(let x) => Some(fn(x)),
 			None => None,
 		}
 	}
-	
+
 	fun map_or<U>(self, fn: |T| U, fallback: U): U {
 		match self {
 			Some(let x) => fn(x),
 			_ => fallback,
 		}
 	}
-	
+
 	fun map_or_else<U>(self, fn: |T| U, fallback: || U): U {
 		match self {
 			Some(let x) => fn(x),
 			_ => fallback(),
 		}
 	}
-	
+
 	fun map_or_default<U: Default>(self, fn: |T| U): U {
 		match self {
 			Some(let x) => fn(x),
 			_ => U::default(),
 		}
 	}
-	
+
 	fun inspect(self, fn: |T| void): Self {
 		match self {
 			Some(let x) => fn(x),
@@ -89,53 +89,53 @@ impl Option<type T> {
 		}
 		self
 	}
-	
+
 	fun ok_or<E>(self, err: E): Result<T, E> {
 		match self {
 			Some(let x) => Ok(x),
 			_ => Err(err),
 		}
 	}
-	
+
 	fun ok_or_else<E>(self, err: || E): Result<T, E> {
 		match self {
 			Some(let x) => Ok(x),
 			_ => Err(err()),
 		}
 	}
-	
+
 	fun and<U>(self, b: Option<U>): Option<U> {
 		match self {
 			Some(_) => b,
 			_ => None,
 		}
 	}
-	
+
 	fun and_then<U>(self, fn: |T| Option<U>): Option<U> {
 		match self {
 			Some(let x) => fn(x),
 			_ => None,
 		}
 	}
-	
+
 	fun filter(self, predicate: |T| bool): Option<T> {
 		self.and_then(|x| predicate(x).then_some(x))
 	}
-	
+
 	fun or(self, b: Option<T>): Option<T> {
 		match self {
 			Some(_) => self,
 			_ => b,
 		}
 	}
-	
+
 	fun or_else(self, fn: || Option<T>): Option<T> {
 		match self {
 			Some(_) => self,
 			_ => fn(),
 		}
 	}
-	
+
 	fun xor(self, b: Option<T>): Option<T> {
 		match (self, b) {
 			(Some(_), None) => self,
@@ -143,7 +143,7 @@ impl Option<type T> {
 			_ => None,
 		}
 	}
-	
+
 	fun zip<U>(self, peer: Option<U>): Option<(T, U)> {
 		match (self, peer) {
 			(Some(let x), Some(let y)) => Some((x, y)),

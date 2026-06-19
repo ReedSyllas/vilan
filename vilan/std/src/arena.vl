@@ -56,9 +56,7 @@ impl Arena<type T> {
 	// Whether `handle` still refers to a live value: in range, the slot's
 	// generation matches, and the slot is occupied.
 	fun contains(self, handle: Handle<T>): bool {
-		handle.index < self.slots.len()
-			&& self.slots[handle.index].generation == handle.generation
-			&& self.slots[handle.index].value.is_some()
+		handle.index < self.slots.len() && self.slots[handle.index].generation == handle.generation && self.slots[handle.index].value.is_some()
 	}
 
 	// A copy of the value `handle` refers to, or `None` if the handle is stale

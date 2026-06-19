@@ -1,4 +1,3 @@
-
 @extern("console.log")
 external fun print(message: any): void;
 
