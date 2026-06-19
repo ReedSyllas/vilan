@@ -1,0 +1,34 @@
+// `std::json` — `to_json` serialization. `@derive(Json)` on a struct synthesizes
+// its impl from the fields: a faithful JSON object with real field names (which
+// a bare host-`JSON.stringify` of a vilan struct can't produce, since structs
+// lower to field-less arrays). The scalar impls bind directly to the host
+// `JSON.stringify`, which formats numbers/bools and quotes + escapes strings.
+
+trait Json {
+	fun to_json(self): str;
+}
+
+impl str with Json {
+	@extern("JSON.stringify")
+	external fun to_json(self): str;
+}
+
+impl i32 with Json {
+	@extern("JSON.stringify")
+	external fun to_json(self): str;
+}
+
+impl u32 with Json {
+	@extern("JSON.stringify")
+	external fun to_json(self): str;
+}
+
+impl f64 with Json {
+	@extern("JSON.stringify")
+	external fun to_json(self): str;
+}
+
+impl bool with Json {
+	@extern("JSON.stringify")
+	external fun to_json(self): str;
+}

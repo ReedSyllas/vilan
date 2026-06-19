@@ -1,0 +1,33 @@
+import std::print;
+
+// `@derive(Json)` synthesizes `to_json` — a faithful JSON object with real field
+// names (which a bare `JSON.stringify` of a vilan struct can't produce). Scalars
+// serialize via the host `JSON.stringify` (numbers/bools raw, strings quoted and
+// escaped); nested derived structs recurse.
+@derive(Json)
+struct Point {
+	x: i32,
+	y: i32,
+}
+
+@derive(Json)
+struct Person {
+	name: str,
+	age: i32,
+	active: bool,
+	home: Point,
+}
+
+fun main() {
+	let p = Point { x = 1, y = 2 };
+	print(p.to_json()); // {"x":1,"y":2}
+
+	let person = Person {
+		name = "Ada \"A\"",
+		age = 36,
+		active = true,
+		home = Point { x = 3, y = 4 },
+	};
+	// Escaped string, bool, and a nested object — all faithful.
+	print(person.to_json());
+}

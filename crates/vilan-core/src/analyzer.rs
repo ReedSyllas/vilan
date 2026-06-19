@@ -7514,6 +7514,30 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
                      }}\n"
                 ));
             }
+            "Json" => {
+                // `"{" + "\"a\":" + self.a.to_json() + "," + "\"b\":" +
+                // self.b.to_json() + "}"` — a JSON object with the real field
+                // names; each value serializes via its own `to_json`.
+                let mut body = String::from("\"{\"");
+                for (index, (field, _)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        body.push_str(" + \",\"");
+                    }
+                    body.push_str(" + \"\\\"");
+                    body.push_str(field);
+                    body.push_str("\\\":\" + self.");
+                    body.push_str(field);
+                    body.push_str(".to_json()");
+                }
+                body.push_str(" + \"}\"");
+                out.push_str(&format!(
+                    "impl {struct_name} with Json {{\n\
+                     \tfun to_json(self): str {{\n\
+                     \t\t{body}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
             _ => {}
         }
     }
@@ -7544,6 +7568,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     }
     if traits.contains("Default") {
         prelude.push_str("import std::default::Default;\n");
+    }
+    if traits.contains("Json") {
+        prelude.push_str("import std::json::Json;\n");
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;
