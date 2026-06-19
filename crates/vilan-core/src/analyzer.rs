@@ -1370,6 +1370,10 @@ impl<'src> Analyzer<'src> {
                 self.scan_view_param_ref(value, captured, visited);
             }
             Expr::Field(subject, _, _) => self.scan_view_param_ref(subject, captured, visited),
+            Expr::Index(subject, index) => {
+                self.scan_view_param_ref(subject, captured, visited);
+                self.scan_view_param_ref(index, captured, visited);
+            }
             Expr::FunctionReturn(value) | Expr::Await(value) => {
                 self.scan_view_param_ref(value, captured, visited)
             }
@@ -1820,6 +1824,10 @@ impl<'src> Analyzer<'src> {
             Expr::Field(subject, _, _) => {
                 self.scan_invalidation(subject, view_origins, live, violations)
             }
+            Expr::Index(subject, index) => {
+                self.scan_invalidation(subject, view_origins, live, violations);
+                self.scan_invalidation(index, view_origins, live, violations);
+            }
             Expr::FunctionReturn(value) | Expr::Await(value) => {
                 self.scan_invalidation(value, view_origins, live, violations)
             }
@@ -2145,6 +2153,10 @@ impl<'src> Analyzer<'src> {
             }
             Expr::Field(subject_id, _, _) => {
                 self.mark_repeatable(*subject_id, depth, interior, visited)
+            }
+            Expr::Index(subject_id, index_id) => {
+                self.mark_repeatable(*subject_id, depth, interior, visited);
+                self.mark_repeatable(*index_id, depth, interior, visited);
             }
             Expr::FunctionReturn(value_id) => {
                 self.mark_repeatable(*value_id, depth, interior, visited)
