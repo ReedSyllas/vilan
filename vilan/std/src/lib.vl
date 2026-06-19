@@ -1,10 +1,12 @@
 // The `std` package root. A `lib.vl` is integrated with its directory's
 // module, so these re-exports are reachable as `std::print`, `std::panic`, ...
 // More items are added here as their modules become loadable from source.
+// The prelude is universal (core) — every entry is `std::print`/`std::panic`/…,
+// reachable on any target. Platform I/O (`scan`) lives in `std::process` (Node)
+// and is imported explicitly, so it is gated when building for the browser.
 export import pkg::io::print;
 export import pkg::io::panic;
 export import pkg::io::assert;
 export import pkg::string::str;
 export import pkg::number::{ u32, i32, f64, BigInt };
 export import pkg::default::Default;
-export import pkg::io::scan;

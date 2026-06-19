@@ -1,9 +1,11 @@
+// `std::io` — the universal (core) I/O surface: `print` (the host console) and
+// `panic`/`assert`, available on every target. Process-level and stdin I/O
+// (`scan`, `args`, `env`, `exit`) live in the Node platform layer `std::process`.
+
 @extern("console.log")
 external fun print(message: any): void;
 
 external fun panic(message: str): void;
-
-external fun scan(): str;
 
 // Aborts with `message` (a `panic`) unless `condition` holds. A failed assertion
 // exits non-zero, which is how `vilan test` detects a failing test.

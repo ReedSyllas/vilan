@@ -9,6 +9,7 @@ use chumsky::prelude::*;
 // `clap::Parser` collides with `chumsky`'s `Parser` trait (glob-imported above),
 // so bring it in anonymously — enough for `Cli::parse()` — and derive by path.
 use clap::{Parser as _, Subcommand};
+use vilan_core::Target;
 use vilan_core::analyzer::analyze;
 use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
@@ -35,6 +36,9 @@ enum Command {
         /// Print the JavaScript to stdout instead of writing `<file>.js`.
         #[arg(long)]
         stdout: bool,
+        /// The host to compile for: `node` (default) or `browser`.
+        #[arg(long, default_value = "node")]
+        target: String,
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
@@ -44,6 +48,9 @@ enum Command {
     Check {
         /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
         file: Option<PathBuf>,
+        /// The host to check for: `node` (default) or `browser`.
+        #[arg(long, default_value = "node")]
+        target: String,
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
@@ -78,13 +85,31 @@ fn main() -> ExitCode {
         Command::Build {
             file,
             stdout,
+            target,
             debug,
-        } => with_entry(file, |entry| build(entry, stdout, debug)),
-        Command::Check { file, debug } => with_entry(file, |entry| check(entry, debug)),
+        } => match Target::parse(&target) {
+            Some(target) => with_entry(file, |entry| build(entry, stdout, target, debug)),
+            None => unknown_target(&target),
+        },
+        Command::Check {
+            file,
+            target,
+            debug,
+        } => match Target::parse(&target) {
+            Some(target) => with_entry(file, |entry| check(entry, target, debug)),
+            None => unknown_target(&target),
+        },
+        // `run`/`test` execute with `node`, so they are always Node builds.
         Command::Run { file, args } => with_entry(file, |entry| run(entry, &args)),
         Command::Test { path } => test(path),
         Command::Fmt { paths, check } => fmt(&paths, check),
     }
+}
+
+/// Reports an unrecognized `--target` value.
+fn unknown_target(name: &str) -> ExitCode {
+    eprintln!("error: unknown target `{name}` (expected `node` or `browser`)");
+    ExitCode::FAILURE
 }
 
 /// Formats every `.vl` file under `paths` (a file, a directory walked
@@ -256,7 +281,7 @@ fn test(path: Option<PathBuf>) -> ExitCode {
 /// with the captured runtime output (empty for a compile error, which
 /// `compile_to_js` has already reported to stderr).
 fn run_test(file: &Path) -> Result<(), String> {
-    let javascript = compile_to_js(file, false).map_err(|_| String::new())?;
+    let javascript = compile_to_js(file, Target::Node, false).map_err(|_| String::new())?;
     let script = env::temp_dir().join(format!("vilan-test-{}.js", std::process::id()));
     if let Err(error) = fs::write(&script, javascript) {
         return Err(format!("cannot write {}: {error}", script.display()));
@@ -317,7 +342,7 @@ fn std_root() -> PathBuf {
 /// Runs the full pipeline (lex -> parse -> analyze -> contexts -> async infer ->
 /// transform) over `file` and reports any diagnostics. Returns the JavaScript on
 /// success, or a failure exit code (after reporting) on any error.
-fn compile_to_js(file: &Path, emit_debug: bool) -> Result<String, ExitCode> {
+fn compile_to_js(file: &Path, target: Target, emit_debug: bool) -> Result<String, ExitCode> {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(error) => {
@@ -346,7 +371,7 @@ fn compile_to_js(file: &Path, emit_debug: bool) -> Result<String, ExitCode> {
                 write_debug(file, "parse.out", &format!("{root:#?}"));
             }
 
-            let mut program = analyze(&root, &std_root, file);
+            let mut program = analyze(&root, &std_root, file, target);
 
             // Thread `std::context::Context` values as hidden parameters (a no-op
             // unless the program creates a context).
@@ -389,8 +414,8 @@ fn compile_to_js(file: &Path, emit_debug: bool) -> Result<String, ExitCode> {
 }
 
 /// Compiles `file` and writes `<file>.js` (or prints to stdout).
-fn build(file: &Path, stdout: bool, emit_debug: bool) -> ExitCode {
-    let javascript = match compile_to_js(file, emit_debug) {
+fn build(file: &Path, stdout: bool, target: Target, emit_debug: bool) -> ExitCode {
+    let javascript = match compile_to_js(file, target, emit_debug) {
         Ok(javascript) => javascript,
         Err(code) => return code,
     };
@@ -412,8 +437,8 @@ fn build(file: &Path, stdout: bool, emit_debug: bool) -> ExitCode {
 }
 
 /// Compiles `file` and reports diagnostics, writing no output.
-fn check(file: &Path, emit_debug: bool) -> ExitCode {
-    match compile_to_js(file, emit_debug) {
+fn check(file: &Path, target: Target, emit_debug: bool) -> ExitCode {
+    match compile_to_js(file, target, emit_debug) {
         Ok(_) => {
             println!("{}: no errors", file.display());
             ExitCode::SUCCESS
@@ -426,7 +451,7 @@ fn check(file: &Path, emit_debug: bool) -> ExitCode {
 /// exit code, with stdin/stdout/stderr connected to the terminal. `args` are
 /// forwarded to the program, reachable through `process::args()`.
 fn run(file: &Path, args: &[String]) -> ExitCode {
-    let javascript = match compile_to_js(file, false) {
+    let javascript = match compile_to_js(file, Target::Node, false) {
         Ok(javascript) => javascript,
         Err(code) => return code,
     };

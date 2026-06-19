@@ -1,8 +1,14 @@
+// `std::process` — the Node platform layer's process surface (stdin, arguments,
+// environment, exit). Not available when building for the browser.
+
 import pkg::option::Option;
 
 // Terminate the process with `code` (0 = success). Never returns.
 @extern("process.exit")
 external fun exit(code: i32): void;
+
+// Reads the next line from standard input (empty string at EOF).
+external fun scan(): str;
 
 // The arguments the program was invoked with, excluding the runtime and script
 // path — e.g. `vilan run prog.vl a b` yields `["a", "b"]`.

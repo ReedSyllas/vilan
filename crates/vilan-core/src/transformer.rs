@@ -2,6 +2,7 @@ use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Intrinsic, Prog
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::{BinaryOp, ExternBinding};
+use crate::target::Target;
 use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
@@ -299,19 +300,24 @@ impl<'src> Transformer<'src> {
 
         let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
 
-        // Emit main's trailing expression (and any statements it expands to).
-        // Only a non-void result is forwarded to `process.exit`; a tail that
-        // evaluates to void (e.g. a block ending in a loop) exits normally.
+        // Emit main's trailing expression (and any statements it expands to). On
+        // Node a non-void result is forwarded to `process.exit` (the exit code); a
+        // void tail (e.g. a block ending in a loop) exits normally. The browser has
+        // no exit code, so the tail is emitted as a plain statement — its side
+        // effects still run (a `main` that ends in `render()`), the value discarded.
         if let Some(value) = self.walk_entity(main_fn.body.1, &mut t_main_fn_body) {
             if !matches!(value, js::Node::Void) {
-                let t_exit = js::Node::Call(
-                    Box::new(js::Node::Property(
-                        Box::new(js::Node::Local("process".to_string())),
-                        "exit".to_string(),
-                    )),
-                    vec![value],
-                );
-                t_main_fn_body.push(t_exit);
+                let statement = match self.program.target {
+                    Target::Node => js::Node::Call(
+                        Box::new(js::Node::Property(
+                            Box::new(js::Node::Local("process".to_string())),
+                            "exit".to_string(),
+                        )),
+                        vec![value],
+                    ),
+                    Target::Browser => value,
+                };
+                t_main_fn_body.push(statement);
             }
         }
 

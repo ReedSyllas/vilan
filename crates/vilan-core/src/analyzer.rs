@@ -10,6 +10,7 @@ use crate::node::{
     NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
+use crate::target::{Platform, Target};
 use crate::type_::{SubstitutionContext, Type, TypeId};
 use crate::util::plural;
 
@@ -7509,6 +7510,9 @@ pub struct SourceRange {
 
 #[derive(Debug)]
 pub struct Program<'src> {
+    /// The host the emitted JS targets (Node / browser) — gates the platform std
+    /// layer at load time and host-binding emission in the transformer.
+    pub target: Target,
     pub closures: IndexMap<Id, Closure>,
     pub diagnostics: Vec<Error>,
     pub enums: IndexMap<Id, Enum<'src>>,
@@ -8019,6 +8023,7 @@ pub fn analyze<'src>(
     nodes: &'src Spanned<NodeList<'src>>,
     std_root: &Path,
     entry_path: &Path,
+    target: Target,
 ) -> Program<'src> {
     // `sources[0]` is the entry file; std modules are appended as they load.
     // `source_ranges` records the entity-id span each file's walk produced.
@@ -8172,6 +8177,25 @@ pub fn analyze<'src>(
             Origin::Std => std_root,
             Origin::Pkg => pkg_root,
         };
+        // Gate the platform std layer by target: a browser build can't load the
+        // Node layer (`std::http`, `std::fs`, `std::process`), and vice versa. A
+        // clear diagnostic beats the downstream "cannot find" once the symbols go
+        // missing. (Pkg modules are the user's own — never platform-gated.)
+        if origin == Origin::Std {
+            let platform = Platform::of_std_module(name);
+            if !platform.is_available_for(target) {
+                analyzer.diagnostics.push(Error {
+                    span: EMPTY_SPAN,
+                    msg: format!(
+                        "`std::{name}` is part of the {} platform layer and is not available \
+                         when building for `{}`",
+                        platform.name(),
+                        target.name()
+                    ),
+                });
+                continue;
+            }
+        }
         let module_path = std_module_path(root, &format!("{name}.vl"));
         let is_entry_module = match (
             std::fs::canonicalize(&module_path),
@@ -8601,7 +8625,7 @@ pub fn analyze<'src>(
             .and_then(|scope_id| analyzer.scopes.get(scope_id))
             .and_then(|scope| scope.name_to_id_map.get(name).copied())
     };
-    if let Some(scan_id) = module_member("io", "scan") {
+    if let Some(scan_id) = module_member("process", "scan") {
         intrinsics.insert(scan_id, Intrinsic::Scan);
     }
     for (name, intrinsic) in [
@@ -8698,6 +8722,7 @@ pub fn analyze<'src>(
         .collect::<Vec<_>>();
 
     Program {
+        target,
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
         enums: analyzer.enums,

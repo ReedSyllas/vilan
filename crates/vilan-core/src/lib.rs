@@ -13,6 +13,7 @@ pub mod lexer;
 pub mod node;
 pub mod parser;
 pub mod span;
+pub mod target;
 pub mod token;
 pub mod transformer;
 pub mod type_;
@@ -24,6 +25,7 @@ pub use error::Error;
 pub use lexer::lexer;
 pub use parser::parser;
 pub use span::{Span, Spanned};
+pub use target::Target;
 pub use transformer::transform;
 
 use std::path::Path;
@@ -76,7 +78,8 @@ pub fn analyze_source(
 
     let root = Box::leak(Box::new(root));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut program = analyze(root, std_root, entry_path);
+        // The language server analyzes for editing, which is always a Node build.
+        let mut program = analyze(root, std_root, entry_path, target::Target::Node);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program
