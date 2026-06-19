@@ -832,7 +832,18 @@ impl<'src> Transformer<'src> {
             Expr::Dereference(operand) => {
                 let value = self.walk_entity(*operand, block);
                 if self.derefs_scalar_view(*operand) {
-                    let view = value.unwrap_or(js::Node::Void);
+                    let mut view = value.unwrap_or(js::Node::Void);
+                    // A view produced by a call (`*obj.slot()`) is bound to a temp
+                    // first, so the `[0]` and `[1]` reads don't evaluate the call
+                    // twice; a plain binding / reference is cheap to repeat.
+                    if matches!(self.program.entity_map.get(operand), Some(Expr::Call(..))) {
+                        let name = self.ng.next_name();
+                        block.push(js::Node::ConstVariable(js::Variable {
+                            name: name.clone(),
+                            value: Box::new(view),
+                        }));
+                        view = js::Node::Local(name);
+                    }
                     let base = js::Node::PropertyIndex(
                         Box::new(view.clone()),
                         Box::new(js::Node::Number("0".to_string(), None)),
