@@ -1,0 +1,37 @@
+import std::print;
+
+// A view of a scalar *field* lowers to a `[base, key]` pair, so writes go
+// through to the struct's slot (previously this silently copied the value out
+// and the write was a no-op). A whole-aggregate view still writes in place.
+struct Counter { value: i32 }
+struct Pair { first: i32, second: i32 }
+
+fun bump(slot: &mut i32) {
+	*slot = *slot + 1;
+}
+
+fun main() {
+	// Write through a field view.
+	mut c = Counter { value = 1 };
+	let v = &mut c.value;
+	*v = 10;
+	print(c.value); // 10
+
+	// A field view passed to a `&mut` parameter.
+	mut p = Pair { first = 5, second = 7 };
+	bump(&mut p.second);
+	print(p.second); // 8
+
+	// Read and read-modify-write through a field view.
+	let r = &mut p.first;
+	print(*r); // 5
+	*r = *r * 3;
+	print(p.first); // 15
+
+	// Whole-aggregate view: `*v = whole` still copies fields in place.
+	mut q = Pair { first = 1, second = 2 };
+	let w = &mut q;
+	*w = Pair { first = 7, second = 8 };
+	print(q.first); // 7
+	print(q.second); // 8
+}

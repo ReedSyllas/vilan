@@ -1476,16 +1476,57 @@ impl<'src> Analyzer<'src> {
         boxed
     }
 
-    /// Bindings whose deref reads/writes a boxed scalar cell's slot 0: a view
-    /// binding of a boxed local, or a `&`/`&mut` parameter of scalar type (which
-    /// receives a cell from the boxed local the caller views).
-    fn compute_primitive_views(&self, boxed_locals: &HashSet<Id>) -> HashSet<Id> {
-        let mut views: HashSet<Id> = self
-            .compute_view_origins()
-            .into_iter()
-            .filter(|(_, root)| boxed_locals.contains(root))
-            .map(|(view, _)| view)
-            .collect();
+    /// Whether a place is a scalar primitive — the case that needs a `(base, key)`
+    /// view, since a JS number/string isn't addressable on its own.
+    fn place_is_scalar(&self, expr_id: Id) -> bool {
+        matches!(
+            self.place_value_type(expr_id),
+            Some(Type::Struct(id, _)) if self.is_scalar_primitive(id)
+        )
+    }
+
+    /// `Reference` exprs (`&place` / `&mut place`) whose target is a scalar — the
+    /// ones that lower to a `[base, key]` pair (a boxed local's cell at slot 0, or
+    /// a struct's field slot) rather than to the aggregate's own JS reference.
+    fn compute_scalar_view_refs(&self) -> HashSet<Id> {
+        self.expr_id_to_expr_map
+            .iter()
+            .filter_map(|(expr_id, expr)| match expr {
+                Expr::Reference(operand, _) if self.place_is_scalar(*operand) => Some(*expr_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Bindings/parameters whose deref reads/writes a scalar slot through a
+    /// `(base, key)` view: a view of a scalar place (a boxed local *or* a scalar
+    /// field), copied between locals (`let w = v`), or a scalar `&`/`&mut`
+    /// parameter (which receives such a pair from its caller).
+    fn compute_primitive_views(&self) -> HashSet<Id> {
+        let mut views: HashSet<Id> = HashSet::new();
+        loop {
+            let mut changed = false;
+            for variable in self.variables.values() {
+                if views.contains(&variable.id) {
+                    continue;
+                }
+                let Some(initial) = variable.initial else {
+                    continue;
+                };
+                let is_scalar = match self.expr_id_to_expr_map.get(&initial) {
+                    Some(Expr::Reference(operand, _)) => self.place_is_scalar(*operand),
+                    Some(Expr::Local(source)) => views.contains(source),
+                    _ => false,
+                };
+                if is_scalar {
+                    views.insert(variable.id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         for parameter in self.parameters.values() {
             let is_scalar_view =
                 matches!(parameter.convention, Convention::Ref | Convention::RefMut)
@@ -7023,8 +7064,12 @@ pub struct Program<'src> {
     // Slice 4: scalar locals boxed into a `[value]` cell because a view is taken
     // of them; their reads/writes lower through `[0]`.
     pub boxed_locals: HashSet<Id>,
-    // View bindings whose target is a boxed scalar local; `*v` lowers to `v[0]`.
+    // View bindings/params holding a scalar `(base, key)` view; `*v` lowers to
+    // `v[0][v[1]]` (covers both a boxed local and a scalar field).
     pub primitive_views: HashSet<Id>,
+    // `&place`/`&mut place` exprs whose target is scalar, so the view lowers to a
+    // `[base, key]` pair rather than the aggregate's own reference.
+    pub scalar_view_refs: HashSet<Id>,
 }
 
 impl<'src> Program<'src> {
@@ -7685,7 +7730,8 @@ pub fn analyze<'src>(
 
     let clone_sites = analyzer.compute_clone_sites();
     let boxed_locals = analyzer.compute_boxed_locals();
-    let primitive_views = analyzer.compute_primitive_views(&boxed_locals);
+    let primitive_views = analyzer.compute_primitive_views();
+    let scalar_view_refs = analyzer.compute_scalar_view_refs();
 
     // Pre-render a type label for every typed expression (for hover). Done here
     // while the analyzer still holds the type tables; `expr_id_to_type_id_map`
@@ -7804,5 +7850,6 @@ pub fn analyze<'src>(
         clone_sites,
         boxed_locals,
         primitive_views,
+        scalar_view_refs,
     }
 }
