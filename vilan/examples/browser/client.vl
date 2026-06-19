@@ -3,10 +3,11 @@
 // then open index.html (which mounts `<div id="app">` and loads the bundle).
 //
 // Demonstrates the `std::dom` layer: looking up the mount point, building
-// elements, setting text, and wiring an event handler (a closure) — all lowered
+// elements, setting text, wiring event handlers (closures), and a live form —
+// reading an `<input>`'s value and reflecting it on each keystroke — all lowered
 // to DOM globals, with no Node host imports.
 
-import std::dom::{ Element, get_element_by_id, create_element };
+import std::dom::{ Element, get_element_by_id, query_selector, create_element };
 
 fun main() {
 	let app = get_element_by_id("app");
@@ -15,13 +16,35 @@ fun main() {
 	heading.set_text("Hello from Vilan, in the browser.");
 	app.append(heading);
 
+	// A live greeting: read the input's value on every keystroke and echo it.
+	let name_input = query_selector("#name");
+	let greeting = create_element("p");
+	greeting.set_text("Hello, stranger.");
+	app.append(greeting);
+	name_input.on("input", || {
+		let name = name_input.value();
+		greeting.set_text("Hello, " + name + ".");
+	});
+
+	// A reset button writes the input's value back to empty and clears the echo.
+	let clear = create_element("button");
+	clear.set_text("Clear");
+	clear.on("click", || {
+		name_input.set_value("");
+		greeting.set_text("Hello, stranger.");
+	});
+	app.append(clear);
+
 	let button = create_element("button");
 	button.set_text("Add a note");
 	// The click handler is an ordinary closure; it captures `app` and appends a
-	// fresh paragraph each time the button is pressed.
+	// fresh, self-removing paragraph each time the button is pressed.
 	button.on("click", || {
 		let note = create_element("p");
-		note.set_text("clicked!");
+		note.set_text("clicked! (click me to remove)");
+		note.on("click", || {
+			note.remove();
+		});
 		app.append(note);
 	});
 	app.append(button);
