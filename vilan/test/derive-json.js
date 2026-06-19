@@ -1,10 +1,10 @@
-function b/*to_json*/(c) {
-	return "{\"x\":" + JSON.stringify(c[0]) + "," + "\"y\":" + JSON.stringify(c[1]) + "}";
+function to_json(self) {
+	return "{\"x\":" + JSON.stringify(self[0]) + "," + "\"y\":" + JSON.stringify(self[1]) + "}";
 }
-function e/*to_json*/(f) {
-	return "{\"name\":" + JSON.stringify(f[0]) + "," + "\"age\":" + JSON.stringify(f[1]) + "," + "\"active\":" + JSON.stringify(f[2]) + "," + "\"home\":" + b/*to_json*/(f[3]) + "}";
+function to_json2(self2) {
+	return "{\"name\":" + JSON.stringify(self2[0]) + "," + "\"age\":" + JSON.stringify(self2[1]) + "," + "\"active\":" + JSON.stringify(self2[2]) + "," + "\"home\":" + to_json(self2[3]) + "}";
 }
-const a/*p*/ = [ 1, 2 ];
-console.log(b/*to_json*/(a/*p*/));
-const d/*person*/ = [ "Ada \"A\"", 36, true, [ 3, 4 ] ];
-console.log(e/*to_json*/(d/*person*/));
+const p = [ 1, 2 ];
+console.log(to_json(p));
+const person = [ "Ada \"A\"", 36, true, [ 3, 4 ] ];
+console.log(to_json2(person));

@@ -1,11 +1,11 @@
-function d/*new*/(e) {
-	return [ e ];
+function new2(n) {
+	return [ n ];
 }
-function c/*default*/() {
-	return d/*new*/(0);
+function default2() {
+	return new2(0);
 }
-function b() {
-	return c/*default*/();
+function $a() {
+	return default2();
 }
-const a/*some_id*/ = b();
-console.log(a/*some_id*/);
+const some_id = $a();
+console.log(some_id);

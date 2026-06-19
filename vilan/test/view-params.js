@@ -1,10 +1,10 @@
-function b/*increment*/(c) {
-	c[0] = c[0] + 1;
+function increment(self) {
+	self[0] = self[0] + 1;
 }
-function d/*bump*/(e) {
-	e[0] = e[0] + 10;
+function bump(c2) {
+	c2[0] = c2[0] + 10;
 }
-let a/*c*/ = [ 10 ];
-b/*increment*/(a/*c*/);
-d/*bump*/(a/*c*/);
-console.log(a/*c*/[0]);
+let c = [ 10 ];
+increment(c);
+bump(c);
+console.log(c[0]);

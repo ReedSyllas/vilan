@@ -1,15 +1,15 @@
-function d/*eq*/(e, f) {
-	return e[0] === f[0] && e[1] === f[1];
+function eq(self, other) {
+	return self[0] === other[0] && self[1] === other[1];
 }
-function i/*eq*/(j, k) {
+function eq2(self2, other2) {
 	return true;
 }
-const a/*a*/ = [ 1, 2 ];
-const b/*b*/ = [ 1, 2 ];
-const c/*c*/ = [ 9, 2 ];
-console.log(d/*eq*/(a/*a*/, b/*b*/));
-console.log(d/*eq*/(a/*a*/, c/*c*/));
-console.log(!(d/*eq*/(a/*a*/, c/*c*/)));
-const g/*u1*/ = [  ];
-const h/*u2*/ = [  ];
-console.log(i/*eq*/(g/*u1*/, h/*u2*/));
+const a = [ 1, 2 ];
+const b = [ 1, 2 ];
+const c = [ 9, 2 ];
+console.log(eq(a, b));
+console.log(eq(a, c));
+console.log(!(eq(a, c)));
+const u1 = [  ];
+const u2 = [  ];
+console.log(eq2(u1, u2));

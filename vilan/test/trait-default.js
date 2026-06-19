@@ -1,42 +1,42 @@
-function f/*compare*/(g, h) {
-	let i = null;
-	if (g[0] < h[0]) {
-		i = -1;
-	} else if (g[0] > h[0]) {
-		i = 1;
+function compare(self2, b2) {
+	let $b = null;
+	if (self2[0] < b2[0]) {
+		$b = -1;
+	} else if (self2[0] > b2[0]) {
+		$b = 1;
 	} else {
-		i = 0;
+		$b = 0;
 	}
-	return i;
+	return $b;
 }
-function c(d, e) {
-	let j = null;
-	if (f/*compare*/(d, e) <= 0) {
-		j = d;
+function $a(self, b) {
+	let $c = null;
+	if (compare(self, b) <= 0) {
+		$c = self;
 	} else {
-		j = e;
+		$c = b;
 	}
-	return j;
+	return $c;
 }
-function k(l, m) {
-	let n = null;
-	if (f/*compare*/(l, m) >= 0) {
-		n = l;
+function $d(self3, b3) {
+	let $e = null;
+	if (compare(self3, b3) >= 0) {
+		$e = self3;
 	} else {
-		n = m;
+		$e = b3;
 	}
-	return n;
+	return $e;
 }
-function r(s, t, u) {
-	return k(c(s, u), t);
+function $f(self4, min, max) {
+	return $d($a(self4, max), min);
 }
-const a/*low*/ = [ 3 ];
-const b/*high*/ = [ 7 ];
-console.log(c(a/*low*/, b/*high*/));
-console.log(k(a/*low*/, b/*high*/));
-const o/*below*/ = [ 1 ];
-const p/*above*/ = [ 9 ];
-const q/*within*/ = [ 5 ];
-console.log(r(o/*below*/, a/*low*/, b/*high*/));
-console.log(r(p/*above*/, a/*low*/, b/*high*/));
-console.log(r(q/*within*/, a/*low*/, b/*high*/));
+const low = [ 3 ];
+const high = [ 7 ];
+console.log($a(low, high));
+console.log($d(low, high));
+const below = [ 1 ];
+const above = [ 9 ];
+const within = [ 5 ];
+console.log($f(below, low, high));
+console.log($f(above, low, high));
+console.log($f(within, low, high));

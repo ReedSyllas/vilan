@@ -216,7 +216,19 @@ struct Transformer<'src> {
 
 impl<'src> Transformer<'src> {
     fn new(program: &'src Program<'src>, options: &BuildOptions) -> Self {
-        let debug_names = if options.debug_names {
+        let style = if options.readable_names {
+            NameStyle::Readable
+        } else if options.debug_names {
+            NameStyle::Annotated
+        } else {
+            NameStyle::Plain
+        };
+        // Source names for functions, variables, and parameters — what `Readable`
+        // names identifiers after and `Annotated` annotates them with. `Plain`
+        // needs none.
+        let source_names = if matches!(style, NameStyle::Plain) {
+            HashMap::new()
+        } else {
             program
                 .variables
                 .iter()
@@ -227,9 +239,18 @@ impl<'src> Transformer<'src> {
                         .iter()
                         .map(|(id, function)| (*id, function.name.to_string())),
                 )
+                .chain(
+                    program
+                        .parameters
+                        .iter()
+                        .map(|(id, parameter)| (*id, parameter.name.to_string())),
+                )
                 .collect::<HashMap<Id, String>>()
+        };
+        let reserved = if options.readable_names {
+            collect_reserved_names(program)
         } else {
-            HashMap::new()
+            HashSet::new()
         };
 
         let print_fn_id = {
@@ -249,7 +270,7 @@ impl<'src> Transformer<'src> {
 
         Self {
             formatter: Formatter::from_options(options.indent, options.spaces),
-            ng: NameGenerator::new_simple(debug_names),
+            ng: NameGenerator::new(style, source_names, reserved),
             print_fn_id,
             list_new_fn_id: program.list_new_fn_id,
             list_push_fn_id: program.list_push_fn_id,
@@ -2455,39 +2476,213 @@ pub mod js {
     }
 }
 
+/// JavaScript reserved words, the globals the runtime/codegen reference, and the
+/// `__`-prefixed runtime helpers — names a readable identifier must avoid. Per-
+/// program `@extern` symbols are added on top (see `collect_reserved_names`).
+const RESERVED_NAMES: &[&str] = &[
+    // Reserved words (a binding can't use these).
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+    "let",
+    "static",
+    "enum",
+    "await",
+    "async",
+    "implements",
+    "interface",
+    "package",
+    "private",
+    "protected",
+    "public",
+    // Globals the runtime helpers / codegen reference as free identifiers.
+    "console",
+    "process",
+    "Math",
+    "JSON",
+    "Number",
+    "BigInt",
+    "Boolean",
+    "String",
+    "Array",
+    "Object",
+    "Set",
+    "Map",
+    "Promise",
+    "Symbol",
+    "Date",
+    "Error",
+    "RegExp",
+    "undefined",
+    "NaN",
+    "Infinity",
+    "globalThis",
+    "require",
+    "module",
+    "exports",
+    "structuredClone",
+    "setTimeout",
+    "setInterval",
+    "fetch",
+    "document",
+    "window",
+    "Response",
+    "Request",
+    // Runtime helpers (emitted as `function __clone(..)`, etc.).
+    "__clone",
+    "__scan",
+    "__parse_i32",
+    "__parse_f64",
+    "__random_int",
+    "__random_float",
+    "__args",
+    "__env",
+    "__shared_new",
+    "__list_get",
+    "__list_pop",
+    "__map_get",
+    "__map_keys",
+    "__map_values",
+];
+
+/// The free identifiers a program's `@extern`s introduce — an imported symbol
+/// (`createServer`) or a global root (`console` from `console.log`) — which a
+/// readable name must not shadow.
+fn collect_reserved_names(program: &Program) -> HashSet<String> {
+    let mut reserved: HashSet<String> =
+        RESERVED_NAMES.iter().map(|name| name.to_string()).collect();
+    for external in program.external_functions.values() {
+        if let Some(ExternBinding::Function { symbol, .. }) = &external.extern_binding {
+            if let Some(root) = symbol.split('.').next() {
+                reserved.insert(root.to_string());
+            }
+        }
+    }
+    reserved
+}
+
+/// Turns a source name into a valid JS identifier — Vilan identifiers already are
+/// (besides reserved words, handled at disambiguation), so this only guards the
+/// degenerate cases.
+fn sanitize_identifier(name: &str) -> String {
+    let mut result: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if result.is_empty() || result.starts_with(|c: char| c.is_ascii_digit()) {
+        result.insert(0, '_');
+    }
+    result
+}
+
+/// How generated identifiers are named.
+enum NameStyle {
+    /// After the source (`greet`), disambiguated on collision — most debuggable.
+    Readable,
+    /// Obfuscated short name with a source annotation (`a/*greet*/`).
+    Annotated,
+    /// Obfuscated short name only (`a`).
+    Plain,
+}
+
 struct NameGenerator {
     chars: Vec<char>,
     counter: u64,
     names: HashMap<Id, String>,
-    debug_names: HashMap<Id, String>,
+    /// Source names by id (functions, variables, parameters) — empty for `Plain`.
+    source_names: HashMap<Id, String>,
+    style: NameStyle,
+    /// Names already in use (readable mode): the reserved set plus every readable
+    /// name assigned so far, so the next is disambiguated against them.
+    taken: HashSet<String>,
 }
 
 impl NameGenerator {
-    fn new(chars: &str, debug_names: HashMap<Id, String>) -> Self {
+    fn new(style: NameStyle, source_names: HashMap<Id, String>, reserved: HashSet<String>) -> Self {
         Self {
-            chars: chars.chars().collect(),
+            chars: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                .chars()
+                .collect(),
             counter: 0,
             names: HashMap::new(),
-            debug_names,
+            source_names,
+            style,
+            taken: reserved,
         }
     }
 
-    fn new_simple(debug_names: HashMap<Id, String>) -> Self {
-        Self::new(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            debug_names,
-        )
+    fn name_for(&mut self, id: Id) -> String {
+        if let Some(name) = self.names.get(&id) {
+            return name.clone();
+        }
+        let name = match self.style {
+            // Name after the source; an entity with no source name (an anonymous
+            // temp) gets a `$`-prefixed fresh name, which no source name can be.
+            NameStyle::Readable => match self.source_names.get(&id).cloned() {
+                Some(source) => self.unique_readable(&source),
+                None => self.next_name(),
+            },
+            NameStyle::Annotated => match self.source_names.get(&id).cloned() {
+                Some(source) => format!("{}/*{}*/", self.next_name(), source),
+                None => self.next_name(),
+            },
+            NameStyle::Plain => self.next_name(),
+        };
+        self.names.insert(id, name.clone());
+        name
     }
 
-    fn name_for(&mut self, id: Id) -> String {
-        self.names.get(&id).map(|x| x.clone()).unwrap_or_else(|| {
-            let debug_name = self.debug_names.get(&id).map(|x| x.clone());
-            let name = debug_name
-                .map(|x| format!("{}/*{}*/", self.next_name(), x))
-                .unwrap_or_else(|| self.next_name());
-            self.names.insert(id, name.clone());
-            name
-        })
+    /// A readable identifier from `source`, suffixed (`greet2`, `greet3`, ...) until
+    /// it collides with neither a reserved name nor a previously assigned one.
+    fn unique_readable(&mut self, source: &str) -> String {
+        let base = sanitize_identifier(source);
+        let mut candidate = base.clone();
+        let mut suffix = 2;
+        while self.taken.contains(&candidate) {
+            candidate = format!("{base}{suffix}");
+            suffix += 1;
+        }
+        self.taken.insert(candidate.clone());
+        candidate
     }
 
     fn next_idx(&mut self) -> u64 {
@@ -2498,7 +2693,13 @@ impl NameGenerator {
 
     fn next_name(&mut self) -> String {
         let c = self.next_idx();
-        self.name_from_idx(c)
+        let short = self.name_from_idx(c);
+        // In readable mode, temps are `$`-prefixed so they can't collide with a
+        // readable (source-derived) name, which never contains `$`.
+        match self.style {
+            NameStyle::Readable => format!("${short}"),
+            _ => short,
+        }
     }
 
     fn name_from_idx(&self, n: u64) -> String {

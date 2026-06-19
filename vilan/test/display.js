@@ -1,23 +1,23 @@
-function i/*to_string*/(j) {
-	return j;
+function to_string4(self4) {
+	return self4;
 }
-function b/*to_string*/(c) {
-	return "" + c;
+function to_string(self) {
+	return "" + self;
 }
-function e/*to_string*/(f) {
-	return "" + f;
+function to_string2(self2) {
+	return "" + self2;
 }
-function g/*to_string*/(h) {
-	return "" + h;
+function to_string3(self3) {
+	return "" + self3;
 }
-function l/*to_string*/(m) {
-	return "(" + m[0] + ", " + m[1] + ")";
+function to_string5(self5) {
+	return "(" + self5[0] + ", " + self5[1] + ")";
 }
-const a/*n*/ = 42;
-console.log(b/*to_string*/(a/*n*/));
-const d/*x*/ = 3.5;
-console.log(e/*to_string*/(d/*x*/));
-console.log(g/*to_string*/(true));
-console.log(i/*to_string*/("hi"));
-const k/*p*/ = [ 1, 2 ];
-console.log(l/*to_string*/(k/*p*/));
+const n = 42;
+console.log(to_string(n));
+const x = 3.5;
+console.log(to_string2(x));
+console.log(to_string3(true));
+console.log(to_string4("hi"));
+const p = [ 1, 2 ];
+console.log(to_string5(p));

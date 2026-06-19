@@ -1,49 +1,49 @@
-function g/*eq*/(h, i) {
-	return h[0] === i[0] && h[1] === i[1];
+function eq(self, b2) {
+	return self[0] === b2[0] && self[1] === b2[1];
 }
-function d(e, f) {
-	return g/*eq*/(e, f);
+function $a(a, b) {
+	return eq(a, b);
 }
-function j(k, l) {
-	return g/*eq*/(k, l);
+function $b(a2, b3) {
+	return eq(a2, b3);
 }
-function m(n, o) {
-	return !(g/*eq*/(n, o));
+function $c(a3, b4) {
+	return !(eq(a3, b4));
 }
-function p(e, f) {
-	return e === f;
+function $d(a, b) {
+	return a === b;
 }
-function q(n, o) {
-	return n !== o;
+function $e(a3, b4) {
+	return a3 !== b4;
 }
-function u(v, w) {
-	const x = [ v, w ];
-	let y = null;
-	if (x[0][0] === 0 && x[1][0] === 0) {
-		const z/*x*/ = x[0][1];
-		const A/*y*/ = x[1][1];
-		y = g/*eq*/(z/*x*/, A/*y*/);
-	} else if (x[0][0] === 1 && x[1][0] === 1) {
-		y = true;
+function $f(self2, b5) {
+	const $g = [ self2, b5 ];
+	let $h = null;
+	if ($g[0][0] === 0 && $g[1][0] === 0) {
+		const x = $g[0][1];
+		const y = $g[1][1];
+		$h = eq(x, y);
+	} else if ($g[0][0] === 1 && $g[1][0] === 1) {
+		$h = true;
 	} else {
-		y = false;
+		$h = false;
 	}
-	return y;
+	return $h;
 }
-const a/*p1*/ = [ 1, 2 ];
-const b/*p2*/ = [ 1, 2 ];
-const c/*p3*/ = [ 3, 4 ];
-console.log(d(a/*p1*/, b/*p2*/));
-console.log(d(a/*p1*/, c/*p3*/));
-console.log(j(a/*p1*/, b/*p2*/));
-console.log(m(a/*p1*/, c/*p3*/));
-console.log(p(5, 5));
-console.log(p(5, 9));
-console.log(q(5, 9));
-const r/*some_a*/ = [ 0, a/*p1*/ ];
-const s/*some_b*/ = [ 0, b/*p2*/ ];
-const t/*some_c*/ = [ 0, c/*p3*/ ];
-console.log(u(r/*some_a*/, s/*some_b*/));
-console.log(u(r/*some_a*/, t/*some_c*/));
-console.log(!(u(r/*some_a*/, t/*some_c*/)));
-console.log(u(r/*some_a*/, [ 1 ]));
+const p1 = [ 1, 2 ];
+const p2 = [ 1, 2 ];
+const p3 = [ 3, 4 ];
+console.log($a(p1, p2));
+console.log($a(p1, p3));
+console.log($b(p1, p2));
+console.log($c(p1, p3));
+console.log($d(5, 5));
+console.log($d(5, 9));
+console.log($e(5, 9));
+const some_a = [ 0, p1 ];
+const some_b = [ 0, p2 ];
+const some_c = [ 0, p3 ];
+console.log($f(some_a, some_b));
+console.log($f(some_a, some_c));
+console.log(!($f(some_a, some_c)));
+console.log($f(some_a, [ 1 ]));

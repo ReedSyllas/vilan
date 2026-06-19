@@ -1,20 +1,20 @@
-function c/*describe*/(d) {
-	const e = d;
-	let f = null;
-	if (e === true) {
-		f = "yes";
+function describe(flag2) {
+	const $a = flag2;
+	let $b = null;
+	if ($a === true) {
+		$b = "yes";
 	} else {
-		f = "no";
+		$b = "no";
 	}
-	return f;
+	return $b;
 }
-const a/*flag*/ = true;
-const b/*computed*/ = 3 < 5;
-console.log(a/*flag*/);
-console.log(a/*flag*/ && b/*computed*/);
-console.log(!(a/*flag*/));
+const flag = true;
+const computed = 3 < 5;
+console.log(flag);
+console.log(flag && computed);
+console.log(!(flag));
 console.log(!(9 > 5));
-console.log(c/*describe*/(a/*flag*/));
-console.log(c/*describe*/(9 > 5));
-const g = a/*flag*/;
-console.log(g === true);
+console.log(describe(flag));
+console.log(describe(9 > 5));
+const $c = flag;
+console.log($c === true);

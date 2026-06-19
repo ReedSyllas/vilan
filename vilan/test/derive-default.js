@@ -1,21 +1,21 @@
-function d/*default*/() {
+function default4() {
 	return "";
 }
-function e/*default*/() {
+function default5() {
 	return false;
 }
-function c/*default*/() {
+function default3() {
 	return 0;
 }
-function g/*eq*/(h, i) {
-	return h[0] === i[0] && h[1] === i[1] && h[2] === i[2];
+function eq(self, other) {
+	return self[0] === other[0] && self[1] === other[1] && self[2] === other[2];
 }
-function b/*default*/() {
-	return [ c/*default*/(), d/*default*/(), e/*default*/() ];
+function default2() {
+	return [ default3(), default4(), default5() ];
 }
-const a/*d*/ = b/*default*/();
-console.log(a/*d*/[0]);
-console.log(a/*d*/[1]);
-console.log(a/*d*/[2]);
-const f/*d2*/ = b/*default*/();
-console.log(g/*eq*/(a/*d*/, f/*d2*/));
+const d = default2();
+console.log(d[0]);
+console.log(d[1]);
+console.log(d[2]);
+const d2 = default2();
+console.log(eq(d, d2));

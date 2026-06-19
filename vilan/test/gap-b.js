@@ -1,16 +1,16 @@
-function b(c) {
-	const d = c;
-	let e = null;
-	if (d[0] === 0) {
-		const f/*x*/ = d[1][0];
-		const g/*y*/ = d[1][1];
-		e = [ [ 0, f/*x*/ ], [ 0, g/*y*/ ] ];
+function $a(self) {
+	const $b = self;
+	let $c = null;
+	if ($b[0] === 0) {
+		const x = $b[1][0];
+		const y = $b[1][1];
+		$c = [ [ 0, x ], [ 0, y ] ];
 	} else {
-		e = [ [ 1 ], [ 1 ] ];
+		$c = [ [ 1 ], [ 1 ] ];
 	}
-	return e;
+	return $c;
 }
-const a/*pair*/ = [ 0, [ 3, 7 ] ];
-console.log(b(a/*pair*/));
-const h/*empty*/ = [ 1 ];
-console.log(b(h/*empty*/));
+const pair = [ 0, [ 3, 7 ] ];
+console.log($a(pair));
+const empty = [ 1 ];
+console.log($a(empty));

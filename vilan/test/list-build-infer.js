@@ -1,30 +1,30 @@
-function f/*sum*/(g) {
-	let h/*total*/ = i/*default*/();
-	let j/*seeded*/ = false;
-	for (const k/*item*/ of g) {
-		if (j/*seeded*/) {
-			h/*total*/ = h/*total*/ + k/*item*/;
+function sum2(self2) {
+	let total = default2();
+	let seeded = false;
+	for (const item of self2) {
+		if (seeded) {
+			total = total + item;
 		} else {
-			h/*total*/ = k/*item*/;
-			j/*seeded*/ = true;
+			total = item;
+			seeded = true;
 		}
 	}
-	return h/*total*/;
+	return total;
 }
-function i/*default*/() {
+function default2() {
 
 }
-function c/*sum*/(d) {
-	return d[0] + d[1];
+function sum(self) {
+	return self[0] + self[1];
 }
-let a/*points*/ = [  ];
-a/*points*/.push([ 1, 2 ]);
-a/*points*/.push([ 3, 4 ]);
-for (const b/*point*/ of a/*points*/) {
-	console.log(c/*sum*/(b/*point*/));
+let points = [  ];
+points.push([ 1, 2 ]);
+points.push([ 3, 4 ]);
+for (const point of points) {
+	console.log(sum(point));
 }
-let e/*numbers*/ = [  ];
-e/*numbers*/.push(10);
-e/*numbers*/.push(20);
-e/*numbers*/.push(30);
-console.log(f/*sum*/(e/*numbers*/));
+let numbers = [  ];
+numbers.push(10);
+numbers.push(20);
+numbers.push(30);
+console.log(sum2(numbers));

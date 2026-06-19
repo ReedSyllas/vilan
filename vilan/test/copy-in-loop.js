@@ -4,11 +4,11 @@ function __clone(value) {
 	if (value instanceof Map) return new Map([ ...value ].map(([ k, v ]) => [ __clone(k), __clone(v) ]));
 	return value;
 }
-let a/*a*/ = [ 0, 0 ];
-let b/*total*/ = 0;
-for (const c/*n*/ of [ 1, 2, 3 ]) {
-	let d/*b*/ = __clone(a/*a*/);
-	d/*b*/[0] = d/*b*/[0] + 1;
-	b/*total*/ = b/*total*/ + d/*b*/[0];
+let a = [ 0, 0 ];
+let total = 0;
+for (const n of [ 1, 2, 3 ]) {
+	let b = __clone(a);
+	b[0] = b[0] + 1;
+	total = total + b[0];
 }
-console.log(b/*total*/);
+console.log(total);

@@ -1,269 +1,269 @@
-function aR/*default*/() {
+function default2() {
 	return 0;
 }
-function d(e, f) {
-	const g = e;
-	let h = null;
-	if (g[0] === 0) {
-		const i/*x*/ = g[1];
-		h = [ 0, f(i/*x*/) ];
+function $a(self, fn) {
+	const $b = self;
+	let $c = null;
+	if ($b[0] === 0) {
+		const x = $b[1];
+		$c = [ 0, fn(x) ];
 	} else {
-		const j/*e*/ = g[1];
-		h = [ 1, j/*e*/ ];
+		const e = $b[1];
+		$c = [ 1, e ];
 	}
-	return h;
+	return $c;
 }
-function k(l, m) {
-	const n = l;
-	let o = null;
-	if (n[0] === 0) {
-		const p/*x*/ = n[1];
-		o = p/*x*/;
+function $d(self2, fallback) {
+	const $e = self2;
+	let $f = null;
+	if ($e[0] === 0) {
+		const x2 = $e[1];
+		$f = x2;
 	} else {
-		o = m;
+		$f = fallback;
 	}
-	return o;
+	return $f;
 }
-function r(s, t) {
-	const u = s;
-	let v = null;
-	if (u[0] === 0) {
-		const w/*x*/ = u[1];
-		v = [ 0, w/*x*/ ];
+function $g(self3, fn2) {
+	const $h = self3;
+	let $i = null;
+	if ($h[0] === 0) {
+		const x3 = $h[1];
+		$i = [ 0, x3 ];
 	} else {
-		const x/*e*/ = u[1];
-		v = [ 1, t(x/*e*/) ];
+		const e3 = $h[1];
+		$i = [ 1, fn2(e3) ];
 	}
-	return v;
+	return $i;
 }
-function y(l, m) {
-	const z = l;
-	let A = null;
-	if (z[0] === 0) {
-		const p/*x*/ = z[1];
-		A = p/*x*/;
+function $j(self2, fallback) {
+	const $k = self2;
+	let $l = null;
+	if ($k[0] === 0) {
+		const x2 = $k[1];
+		$l = x2;
 	} else {
-		A = m;
+		$l = fallback;
 	}
-	return A;
+	return $l;
 }
-function C(D, E) {
-	const F = D;
-	let G = null;
-	if (F[0] === 0) {
-		const H/*x*/ = F[1];
-		G = E(H/*x*/);
+function $m(self4, fn3) {
+	const $n = self4;
+	let $o = null;
+	if ($n[0] === 0) {
+		const x4 = $n[1];
+		$o = fn3(x4);
 	} else {
-		G = false;
+		$o = false;
 	}
-	return G;
+	return $o;
 }
-function J(K, L) {
-	const M = K;
-	let N = null;
-	if (M[0] === 1) {
-		const O/*e*/ = M[1];
-		N = L(O/*e*/);
+function $p(self5, fn4) {
+	const $q = self5;
+	let $r = null;
+	if ($q[0] === 1) {
+		const e5 = $q[1];
+		$r = fn4(e5);
 	} else {
-		N = false;
+		$r = false;
 	}
-	return N;
+	return $r;
 }
-function Q(R, S) {
-	const T = R;
-	let U = null;
-	if (T[0] === 0) {
-		const V/*x*/ = T[1];
-		U = S(V/*x*/);
+function $s(self6, fn5) {
+	const $t = self6;
+	let $u = null;
+	if ($t[0] === 0) {
+		const x5 = $t[1];
+		$u = fn5(x5);
 	} else {
-		const W/*e*/ = T[1];
-		U = [ 1, W/*e*/ ];
+		const e6 = $t[1];
+		$u = [ 1, e6 ];
 	}
-	return U;
+	return $u;
 }
-function X(l, m) {
-	const Y = l;
-	let Z = null;
-	if (Y[0] === 0) {
-		const p/*x*/ = Y[1];
-		Z = p/*x*/;
+function $v(self2, fallback) {
+	const $w = self2;
+	let $x = null;
+	if ($w[0] === 0) {
+		const x2 = $w[1];
+		$x = x2;
 	} else {
-		Z = m;
+		$x = fallback;
 	}
-	return Z;
+	return $x;
 }
-function ab(ac, ad) {
-	const ae = ac;
-	let af = null;
-	if (ae[0] === 0) {
-		const ag/*x*/ = ae[1];
-		af = [ 0, ag/*x*/ ];
+function $y(self7, fn6) {
+	const $z = self7;
+	let $A = null;
+	if ($z[0] === 0) {
+		const x6 = $z[1];
+		$A = [ 0, x6 ];
 	} else {
-		const ah/*e*/ = ae[1];
-		af = ad(ah/*e*/);
+		const e8 = $z[1];
+		$A = fn6(e8);
 	}
-	return af;
+	return $A;
 }
-function ai(l, m) {
-	const aj = l;
-	let ak = null;
-	if (aj[0] === 0) {
-		const p/*x*/ = aj[1];
-		ak = p/*x*/;
+function $B(self2, fallback) {
+	const $C = self2;
+	let $D = null;
+	if ($C[0] === 0) {
+		const x2 = $C[1];
+		$D = x2;
 	} else {
-		ak = m;
+		$D = fallback;
 	}
-	return ak;
+	return $D;
 }
-function am(an, ao) {
-	const ap = an;
-	let aq = null;
-	if (ap[0] === 0) {
-		const ar/*x*/ = ap[1];
-		aq = ar/*x*/;
+function $E(self8, fn7) {
+	const $F = self8;
+	let $G = null;
+	if ($F[0] === 0) {
+		const x7 = $F[1];
+		$G = x7;
 	} else {
-		const as/*e*/ = ap[1];
-		aq = ao(as/*e*/);
+		const e10 = $F[1];
+		$G = fn7(e10);
 	}
-	return aq;
+	return $G;
 }
-function at(au) {
-	const av = au;
-	let aw = null;
-	if (av[0] === 0) {
-		const ax/*x*/ = av[1];
-		aw = [ 0, ax/*x*/ ];
+function $H(self9) {
+	const $I = self9;
+	let $J = null;
+	if ($I[0] === 0) {
+		const x8 = $I[1];
+		$J = [ 0, x8 ];
 	} else {
-		aw = [ 1 ];
+		$J = [ 1 ];
 	}
-	return aw;
+	return $J;
 }
-function ay(az) {
-	const aA = az;
-	return aA[0] === 0;
+function $K(self10) {
+	const $L = self10;
+	return $L[0] === 0;
 }
-function aB(aC) {
-	const aD = aC;
-	let aE = null;
-	if (aD[0] === 1) {
-		const aF/*e*/ = aD[1];
-		aE = [ 0, aF/*e*/ ];
+function $M(self11) {
+	const $N = self11;
+	let $O = null;
+	if ($N[0] === 1) {
+		const e11 = $N[1];
+		$O = [ 0, e11 ];
 	} else {
-		aE = [ 1 ];
+		$O = [ 1 ];
 	}
-	return aE;
+	return $O;
 }
-function aG(aH, aI) {
-	const aJ = aH;
-	let aK = null;
-	if (aJ[0] === 0) {
-		const aL/*x*/ = aJ[1];
-		aK = aL/*x*/;
+function $P(self12, fallback2) {
+	const $Q = self12;
+	let $R = null;
+	if ($Q[0] === 0) {
+		const x9 = $Q[1];
+		$R = x9;
 	} else {
-		aK = aI;
+		$R = fallback2;
 	}
-	return aK;
+	return $R;
 }
-function aM(aN) {
-	const aO = aN;
-	let aP = null;
-	if (aO[0] === 0) {
-		const aQ/*x*/ = aO[1];
-		aP = aQ/*x*/;
+function $S(self13) {
+	const $T = self13;
+	let $U = null;
+	if ($T[0] === 0) {
+		const x10 = $T[1];
+		$U = x10;
 	} else {
-		aP = aR/*default*/();
+		$U = default2();
 	}
-	return aP;
+	return $U;
 }
-function aS(aT, aU) {
-	const aV = aT;
-	let aW = null;
-	if (aV[0] === 0) {
-		aW = aU;
+function $V(self14, b) {
+	const $W = self14;
+	let $X = null;
+	if ($W[0] === 0) {
+		$X = b;
 	} else {
-		const aX/*e*/ = aV[1];
-		aW = [ 1, aX/*e*/ ];
+		const e12 = $W[1];
+		$X = [ 1, e12 ];
 	}
-	return aW;
+	return $X;
 }
-function aY(l, m) {
-	const aZ = l;
-	let ba = null;
-	if (aZ[0] === 0) {
-		const p/*x*/ = aZ[1];
-		ba = p/*x*/;
+function $Y(self2, fallback) {
+	const $Z = self2;
+	let $aa = null;
+	if ($Z[0] === 0) {
+		const x2 = $Z[1];
+		$aa = x2;
 	} else {
-		ba = m;
+		$aa = fallback;
 	}
-	return ba;
+	return $aa;
 }
-function bb(bc, bd) {
-	const be = bc;
-	let bf = null;
-	if (be[0] === 0) {
-		const bg/*x*/ = be[1];
-		bf = [ 0, bg/*x*/ ];
+function $ab(self15, b2) {
+	const $ac = self15;
+	let $ad = null;
+	if ($ac[0] === 0) {
+		const x11 = $ac[1];
+		$ad = [ 0, x11 ];
 	} else {
-		bf = bd;
+		$ad = b2;
 	}
-	return bf;
+	return $ad;
 }
-function bh(l, m) {
-	const bi = l;
-	let bj = null;
-	if (bi[0] === 0) {
-		const p/*x*/ = bi[1];
-		bj = p/*x*/;
+function $ae(self2, fallback) {
+	const $af = self2;
+	let $ag = null;
+	if ($af[0] === 0) {
+		const x2 = $af[1];
+		$ag = x2;
 	} else {
-		bj = m;
+		$ag = fallback;
 	}
-	return bj;
+	return $ag;
 }
-function bl(bm) {
-	const bn = bm;
-	let bo = null;
-	if (bn[0] === 0 && bn[1][0] === 0) {
-		const bp/*x*/ = bn[1][1];
-		bo = [ 0, [ 0, bp/*x*/ ] ];
-	} else if (bn[0] === 0 && bn[1][0] === 1) {
-		bo = [ 1 ];
+function $ah(self16) {
+	const $ai = self16;
+	let $aj = null;
+	if ($ai[0] === 0 && $ai[1][0] === 0) {
+		const x12 = $ai[1][1];
+		$aj = [ 0, [ 0, x12 ] ];
+	} else if ($ai[0] === 0 && $ai[1][0] === 1) {
+		$aj = [ 1 ];
 	} else {
-		const bq/*e*/ = bn[1];
-		bo = [ 0, [ 1, bq/*e*/ ] ];
+		const e13 = $ai[1];
+		$aj = [ 0, [ 1, e13 ] ];
 	}
-	return bo;
+	return $aj;
 }
-function br(az) {
-	const bs = az;
-	return bs[0] === 0;
+function $ak(self10) {
+	const $al = self10;
+	return $al[0] === 0;
 }
-const a/*ok*/ = [ 0, 10 ];
-const b/*err*/ = [ 1, "boom" ];
-console.log(k(d(a/*ok*/, (c) => {
-	return c + 1;
+const ok = [ 0, 10 ];
+const err = [ 1, "boom" ];
+console.log($d($a(ok, (n) => {
+	return n + 1;
 }), 0));
-console.log(y(r(b/*err*/, (q) => {
-	return q;
+console.log($j($g(err, (e2) => {
+	return e2;
 }), 0));
-console.log(C(a/*ok*/, (B) => {
-	return B > 5;
+console.log($m(ok, (n2) => {
+	return n2 > 5;
 }));
-console.log(J(b/*err*/, (I) => {
+console.log($p(err, (e4) => {
 	return true;
 }));
-console.log(X(Q(a/*ok*/, (P) => {
-	return [ 0, P * 2 ];
+console.log($v($s(ok, (n3) => {
+	return [ 0, n3 * 2 ];
 }), 0));
-console.log(ai(ab(b/*err*/, (aa) => {
+console.log($B($y(err, (e7) => {
 	return [ 0, 7 ];
 }), 0));
-console.log(am(b/*err*/, (al) => {
+console.log($E(err, (e9) => {
 	return 99;
 }));
-console.log(ay(at(a/*ok*/)));
-console.log(aG(aB(b/*err*/), "none"));
-console.log(aM(b/*err*/));
-console.log(aY(aS(a/*ok*/, [ 0, 5 ]), 0));
-console.log(bh(bb(b/*err*/, [ 0, 3 ]), 0));
-const bk/*ro*/ = [ 0, [ 0, 42 ] ];
-console.log(br(bl(bk/*ro*/)));
+console.log($K($H(ok)));
+console.log($P($M(err), "none"));
+console.log($S(err));
+console.log($Y($V(ok, [ 0, 5 ]), 0));
+console.log($ae($ab(err, [ 0, 3 ]), 0));
+const ro = [ 0, [ 0, 42 ] ];
+console.log($ak($ah(ro)));

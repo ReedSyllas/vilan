@@ -1,9 +1,9 @@
-function c/*bump*/(d) {
-	d.push(1);
-	return d.length;
+function bump(xs2) {
+	xs2.push(1);
+	return xs2.length;
 }
-let a/*xs*/ = [  ];
-const b/*a*/ = c/*bump*/(a/*xs*/);
-c/*bump*/(a/*xs*/);
-console.log(b/*a*/);
-console.log(a/*xs*/.length);
+let xs = [  ];
+const a = bump(xs);
+bump(xs);
+console.log(a);
+console.log(xs.length);

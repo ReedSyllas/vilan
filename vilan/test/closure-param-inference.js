@@ -1,74 +1,74 @@
-function E/*fold*/(F, G, H) {
-	let I/*accumulator*/ = G;
-	for (const J/*item*/ of F) {
-		I/*accumulator*/ = H(I/*accumulator*/, J/*item*/);
+function fold(self5, init, fn4) {
+	let accumulator = init;
+	for (const item2 of self5) {
+		accumulator = fn4(accumulator, item2);
 	}
-	return I/*accumulator*/;
+	return accumulator;
 }
-function c(d, e) {
-	const f = d;
-	let g = null;
-	if (f[0] === 0) {
-		const h/*x*/ = f[1];
-		g = [ 0, e(h/*x*/) ];
+function $a(self, fn) {
+	const $b = self;
+	let $c = null;
+	if ($b[0] === 0) {
+		const x = $b[1];
+		$c = [ 0, fn(x) ];
 	} else {
-		g = [ 1 ];
+		$c = [ 1 ];
 	}
-	return g;
+	return $c;
 }
-function i(j, k) {
-	const l = j;
-	let m = null;
-	if (l[0] === 0) {
-		const n/*x*/ = l[1];
-		m = n/*x*/;
+function $d(self2, fallback) {
+	const $e = self2;
+	let $f = null;
+	if ($e[0] === 0) {
+		const x2 = $e[1];
+		$f = x2;
 	} else {
-		m = k;
+		$f = fallback;
 	}
-	return m;
+	return $f;
 }
-function p(q, r) {
-	const s = q;
-	let t = null;
-	if (s[0] === 0) {
-		const u/*x*/ = s[1];
-		t = r(u/*x*/);
+function $g(self3, fn2) {
+	const $h = self3;
+	let $i = null;
+	if ($h[0] === 0) {
+		const x3 = $h[1];
+		$i = fn2(x3);
 	} else {
-		t = false;
+		$i = false;
 	}
-	return t;
+	return $i;
 }
-function x(y, z) {
-	let A/*result*/ = [  ];
-	for (const B/*item*/ of y) {
-		A/*result*/.push(z(B/*item*/));
+function $j(self4, fn3) {
+	let result = [  ];
+	for (const item of self4) {
+		result.push(fn3(item));
 	}
-	return A/*result*/;
+	return result;
 }
-function L(M, N) {
-	let O/*result*/ = [  ];
-	for (const P/*item*/ of M) {
-		if (N(P/*item*/)) {
-			O/*result*/.push(P/*item*/);
+function $k(self6, predicate) {
+	let result2 = [  ];
+	for (const item3 of self6) {
+		if (predicate(item3)) {
+			result2.push(item3);
 		}
 	}
-	return O/*result*/;
+	return result2;
 }
-const a/*p*/ = [ 0, [ 3, 4 ] ];
-console.log(i(c(a/*p*/, (b) => {
-	return b[0] + b[1];
+const p = [ 0, [ 3, 4 ] ];
+console.log($d($a(p, (q) => {
+	return q[0] + q[1];
 }), 0));
-console.log(p(a/*p*/, (o) => {
-	return o[0] === 3;
+console.log($g(p, (q2) => {
+	return q2[0] === 3;
 }));
-let v/*pts*/ = [  ];
-v/*pts*/.push([ 1, 10 ]);
-v/*pts*/.push([ 2, 20 ]);
-console.log(E/*fold*/(x(v/*pts*/, (w) => {
-	return w[0];
-}), 0, (C, D) => {
-	return C + D;
+let pts = [  ];
+pts.push([ 1, 10 ]);
+pts.push([ 2, 20 ]);
+console.log(fold($j(pts, (pt) => {
+	return pt[0];
+}), 0, (a, b) => {
+	return a + b;
 }));
-console.log(L(v/*pts*/, (K) => {
-	return K[1] > 15;
+console.log($k(pts, (pt2) => {
+	return pt2[1] > 15;
 }).length);

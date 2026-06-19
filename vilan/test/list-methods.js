@@ -1,52 +1,52 @@
-function b/*is_empty*/(c) {
-	return c.length === 0;
+function is_empty(self) {
+	return self.length === 0;
 }
-function e/*map*/(f, g) {
-	let h/*result*/ = [  ];
-	for (const i/*item*/ of f) {
-		h/*result*/.push(g(i/*item*/));
+function map(self2, fn) {
+	let result = [  ];
+	for (const item of self2) {
+		result.push(fn(item));
 	}
-	return h/*result*/;
+	return result;
 }
-function s/*filter*/(t, u) {
-	let v/*result*/ = [  ];
-	for (const w/*item*/ of t) {
-		if (u(w/*item*/)) {
-			v/*result*/.push(w/*item*/);
+function filter(self4, predicate) {
+	let result2 = [  ];
+	for (const item3 of self4) {
+		if (predicate(item3)) {
+			result2.push(item3);
 		}
 	}
-	return v/*result*/;
+	return result2;
 }
-function l/*fold*/(m, n, o) {
-	let p/*accumulator*/ = n;
-	for (const q/*item*/ of m) {
-		p/*accumulator*/ = o(p/*accumulator*/, q/*item*/);
+function fold(self3, init, fn2) {
+	let accumulator = init;
+	for (const item2 of self3) {
+		accumulator = fn2(accumulator, item2);
 	}
-	return p/*accumulator*/;
+	return accumulator;
 }
-function z/*for_each*/(A, B) {
-	for (const C/*item*/ of A) {
-		B(C/*item*/);
+function for_each(self5, fn3) {
+	for (const item4 of self5) {
+		fn3(item4);
 	}
 }
-let a/*xs*/ = [  ];
-a/*xs*/.push(1);
-a/*xs*/.push(2);
-a/*xs*/.push(3);
-a/*xs*/.push(4);
-console.log(a/*xs*/.length);
-console.log(b/*is_empty*/(a/*xs*/));
-console.log(l/*fold*/(e/*map*/(a/*xs*/, (d) => {
-	return d * 10;
-}), 0, (j, k) => {
-	return j + k;
+let xs = [  ];
+xs.push(1);
+xs.push(2);
+xs.push(3);
+xs.push(4);
+console.log(xs.length);
+console.log(is_empty(xs));
+console.log(fold(map(xs, (n) => {
+	return n * 10;
+}), 0, (a, b) => {
+	return a + b;
 }));
-console.log(s/*filter*/(a/*xs*/, (r) => {
-	return r > 2;
+console.log(filter(xs, (n2) => {
+	return n2 > 2;
 }).length);
-console.log(s/*filter*/(a/*xs*/, (x) => {
-	return x > 5;
+console.log(filter(xs, (n3) => {
+	return n3 > 5;
 }).length);
-z/*for_each*/(a/*xs*/, (y) => {
-	return console.log(y);
+for_each(xs, (n4) => {
+	return console.log(n4);
 });

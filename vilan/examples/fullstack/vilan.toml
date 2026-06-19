@@ -12,10 +12,12 @@ entry = "client.vl"
 
 # Code-generation options. `preset` ("debug" — the default — or "release")
 # initializes every option; individual keys then override it. The knobs:
-#   indent       lay out across lines with indentation (vs one flat line)
-#   spaces       pad tokens — `a + b`, `[ 1, 2 ]` (vs tight `a+b`, `[1,2]`)
-#   debug-names  annotate identifiers with their source name (`a/*name*/`)
-# Debug turns all on; release turns all off.
+#   indent          lay out across lines with indentation (vs one flat line)
+#   spaces          pad tokens — `a + b`, `[ 1, 2 ]` (vs tight `a+b`, `[1,2]`)
+#   readable-names  name identifiers after the source (`greet`) — most debuggable
+#   debug-names     when readable-names is off, annotate short names (`a/*greet*/`)
+# Debug turns indent/spaces/readable-names on; release turns everything off
+# (minified, obfuscated short names).
 # [build]
 # preset = "release"
-# debug-names = true   # e.g. minified but still annotated, for profiling
+# readable-names = true   # e.g. minified layout but with readable names

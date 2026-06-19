@@ -1,56 +1,56 @@
-function b/*sum*/(c) {
-	let d/*total*/ = e/*default*/();
-	let f/*seeded*/ = false;
-	for (const g/*item*/ of c) {
-		if (f/*seeded*/) {
-			d/*total*/ = d/*total*/ + g/*item*/;
+function sum(self) {
+	let total = default2();
+	let seeded = false;
+	for (const item of self) {
+		if (seeded) {
+			total = total + item;
 		} else {
-			d/*total*/ = g/*item*/;
-			f/*seeded*/ = true;
+			total = item;
+			seeded = true;
 		}
 	}
-	return d/*total*/;
+	return total;
 }
-function h/*product*/(i) {
-	let j/*total*/ = e/*default*/();
-	let k/*seeded*/ = false;
-	for (const l/*item*/ of i) {
-		if (k/*seeded*/) {
-			j/*total*/ = j/*total*/ * l/*item*/;
+function product(self2) {
+	let total2 = default2();
+	let seeded2 = false;
+	for (const item2 of self2) {
+		if (seeded2) {
+			total2 = total2 * item2;
 		} else {
-			j/*total*/ = l/*item*/;
-			k/*seeded*/ = true;
+			total2 = item2;
+			seeded2 = true;
 		}
 	}
-	return j/*total*/;
+	return total2;
 }
-function e/*default*/() {
+function default2() {
 
 }
-function o/*default*/() {
+function default3() {
 	return 0;
 }
-function n(c) {
-	let d/*total*/ = o/*default*/();
-	let f/*seeded*/ = false;
-	for (const g/*item*/ of c) {
-		if (f/*seeded*/) {
-			d/*total*/ = d/*total*/ + g/*item*/;
+function $a(self) {
+	let total = default3();
+	let seeded = false;
+	for (const item of self) {
+		if (seeded) {
+			total = total + item;
 		} else {
-			d/*total*/ = g/*item*/;
-			f/*seeded*/ = true;
+			total = item;
+			seeded = true;
 		}
 	}
-	return d/*total*/;
+	return total;
 }
-let a/*numbers*/ = [  ];
-a/*numbers*/.push(2);
-a/*numbers*/.push(3);
-a/*numbers*/.push(4);
-console.log(b/*sum*/(a/*numbers*/));
-console.log(h/*product*/(a/*numbers*/));
-const m/*empty*/ = [  ];
-console.log(n(m/*empty*/));
-for (const p/*n*/ of a/*numbers*/) {
-	console.log(p/*n*/);
+let numbers = [  ];
+numbers.push(2);
+numbers.push(3);
+numbers.push(4);
+console.log(sum(numbers));
+console.log(product(numbers));
+const empty = [  ];
+console.log($a(empty));
+for (const n of numbers) {
+	console.log(n);
 }

@@ -1,24 +1,24 @@
 console.log("Basic loop with break");
-let a/*i*/ = 0;
+let i = 0;
 while (true) {
-	if (a/*i*/ >= 10) {
+	if (i >= 10) {
 		break;
 	}
-	console.log(a/*i*/);
-	a/*i*/ = a/*i*/ + 1;
+	console.log(i);
+	i = i + 1;
 }
 console.log("While loop with condition");
-let b/*i*/ = 0;
-while (b/*i*/ < 10) {
-	console.log(b/*i*/);
-	b/*i*/ = b/*i*/ + 1;
+let i2 = 0;
+while (i2 < 10) {
+	console.log(i2);
+	i2 = i2 + 1;
 }
 console.log("Basic loop with continue and break");
-let c/*i*/ = 0;
+let i3 = 0;
 while (true) {
-	console.log(c/*i*/);
-	c/*i*/ = c/*i*/ + 1;
-	if (c/*i*/ < 10) {
+	console.log(i3);
+	i3 = i3 + 1;
+	if (i3 < 10) {
 		continue;
 	}
 	break;

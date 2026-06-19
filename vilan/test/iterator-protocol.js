@@ -1,56 +1,56 @@
-function j/*sum*/(k) {
-	let l/*total*/ = m/*default*/();
-	let n/*seeded*/ = false;
-	for (const o/*item*/ of k) {
-		if (n/*seeded*/) {
-			l/*total*/ = l/*total*/ + o/*item*/;
+function sum(self2) {
+	let total = default2();
+	let seeded = false;
+	for (const item of self2) {
+		if (seeded) {
+			total = total + item;
 		} else {
-			l/*total*/ = o/*item*/;
-			n/*seeded*/ = true;
+			total = item;
+			seeded = true;
 		}
 	}
-	return l/*total*/;
+	return total;
 }
-function p/*product*/(q) {
-	let r/*total*/ = m/*default*/();
-	let s/*seeded*/ = false;
-	for (const t/*item*/ of q) {
-		if (s/*seeded*/) {
-			r/*total*/ = r/*total*/ * t/*item*/;
+function product(self3) {
+	let total2 = default2();
+	let seeded2 = false;
+	for (const item2 of self3) {
+		if (seeded2) {
+			total2 = total2 * item2;
 		} else {
-			r/*total*/ = t/*item*/;
-			s/*seeded*/ = true;
+			total2 = item2;
+			seeded2 = true;
 		}
 	}
-	return r/*total*/;
+	return total2;
 }
-function m/*default*/() {
+function default2() {
 
 }
-function c/*next*/(d) {
-	a/*produced*/ = a/*produced*/ + 1;
-	let e = null;
-	if (a/*produced*/ <= d[0]) {
-		e = [ 0, a/*produced*/ ];
+function next(self) {
+	produced = produced + 1;
+	let $a = null;
+	if (produced <= self[0]) {
+		$a = [ 0, produced ];
 	} else {
-		e = [ 1 ];
+		$a = [ 1 ];
 	}
-	return e;
+	return $a;
 }
-let a/*produced*/ = 0;
-const b/*naturals*/ = [ 3 ];
-const f = b/*naturals*/;
+let produced = 0;
+const naturals = [ 3 ];
+const $b = naturals;
 while (true) {
-	const g = c/*next*/(f);
-	if (g[0] !== 0) {
+	const $c = next($b);
+	if ($c[0] !== 0) {
 		break;
 	}
-	const h/*n*/ = g[1];
-	console.log(h/*n*/);
+	const n = $c[1];
+	console.log(n);
 }
-let i/*numbers*/ = [  ];
-i/*numbers*/.push(2);
-i/*numbers*/.push(3);
-i/*numbers*/.push(4);
-console.log(j/*sum*/(i/*numbers*/));
-console.log(p/*product*/(i/*numbers*/));
+let numbers = [  ];
+numbers.push(2);
+numbers.push(3);
+numbers.push(4);
+console.log(sum(numbers));
+console.log(product(numbers));

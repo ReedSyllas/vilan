@@ -1,9 +1,9 @@
-function f/*value_of*/(g) {
-	return g[0];
+function value_of(self2) {
+	return self2[0];
 }
-function c(d, e) {
-	return f/*value_of*/(d) + f/*value_of*/(e);
+function $a(self, b2) {
+	return value_of(self) + value_of(b2);
 }
-const a/*a*/ = [ 4 ];
-const b/*b*/ = [ 6 ];
-console.log(c(a/*a*/, b/*b*/));
+const a = [ 4 ];
+const b = [ 6 ];
+console.log($a(a, b));

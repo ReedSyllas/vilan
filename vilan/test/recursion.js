@@ -1,31 +1,31 @@
-function a/*fact*/(b) {
-	let c = null;
-	if (b <= 1) {
-		c = 1;
+function fact(n) {
+	let $a = null;
+	if (n <= 1) {
+		$a = 1;
 	} else {
-		c = b * a/*fact*/(b - 1);
+		$a = n * fact(n - 1);
 	}
-	return c;
+	return $a;
 }
-function d/*is_even*/(e) {
-	let f = null;
-	if (e === 0) {
-		f = true;
+function is_even(n2) {
+	let $b = null;
+	if (n2 === 0) {
+		$b = true;
 	} else {
-		f = g/*is_odd*/(e - 1);
+		$b = is_odd(n2 - 1);
 	}
-	return f;
+	return $b;
 }
-function g/*is_odd*/(h) {
-	let i = null;
-	if (h === 0) {
-		i = false;
+function is_odd(n3) {
+	let $c = null;
+	if (n3 === 0) {
+		$c = false;
 	} else {
-		i = d/*is_even*/(h - 1);
+		$c = is_even(n3 - 1);
 	}
-	return i;
+	return $c;
 }
-console.log(a/*fact*/(5));
-console.log(a/*fact*/(10));
-console.log(d/*is_even*/(10));
-console.log(g/*is_odd*/(7));
+console.log(fact(5));
+console.log(fact(10));
+console.log(is_even(10));
+console.log(is_odd(7));

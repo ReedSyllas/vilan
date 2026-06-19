@@ -4,24 +4,24 @@ function __clone(value) {
 	if (value instanceof Map) return new Map([ ...value ].map(([ k, v ]) => [ __clone(k), __clone(v) ]));
 	return value;
 }
-function c/*bump*/(d) {
-	d[0][d[1]] = d[0][d[1]] + 100;
+function bump(slot) {
+	slot[0][slot[1]] = slot[0][slot[1]] + 100;
 }
-let a/*xs*/ = [  ];
-a/*xs*/.push(10);
-a/*xs*/.push(20);
-console.log(a/*xs*/[0] + a/*xs*/[1]);
-a/*xs*/[1] = 99;
-console.log(a/*xs*/[1]);
-const b/*i*/ = 0;
-c/*bump*/([ a/*xs*/, b/*i*/ + 0 ]);
-console.log(a/*xs*/[0]);
-let e/*ps*/ = [  ];
-e/*ps*/.push([ 1, 2 ]);
-let f/*copy*/ = __clone(e/*ps*/[0]);
-f/*copy*/[0] = 7;
-console.log(e/*ps*/[0][0]);
-const g/*view*/ = e/*ps*/[0];
-g/*view*/[1] = 50;
-console.log(e/*ps*/[0][1]);
-console.log(a/*xs*/[a/*xs*/.length - 1]);
+let xs = [  ];
+xs.push(10);
+xs.push(20);
+console.log(xs[0] + xs[1]);
+xs[1] = 99;
+console.log(xs[1]);
+const i = 0;
+bump([ xs, i + 0 ]);
+console.log(xs[0]);
+let ps = [  ];
+ps.push([ 1, 2 ]);
+let copy = __clone(ps[0]);
+copy[0] = 7;
+console.log(ps[0][0]);
+const view = ps[0];
+view[1] = 50;
+console.log(ps[0][1]);
+console.log(xs[xs.length - 1]);

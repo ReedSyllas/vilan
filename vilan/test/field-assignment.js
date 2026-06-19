@@ -1,17 +1,17 @@
-function b/*increment*/(c) {
-	c[0] = c[0] + 1;
+function increment(self) {
+	self[0] = self[0] + 1;
 }
-function d/*bump*/(e, f) {
-	e[0] = e[0] + f;
+function bump(self2, by) {
+	self2[0] = self2[0] + by;
 }
-let a/*c*/ = [ 10 ];
-a/*c*/[0] = 5;
-console.log(a/*c*/[0]);
-b/*increment*/(a/*c*/);
-console.log(a/*c*/[0]);
-d/*bump*/(a/*c*/, 100);
-console.log(a/*c*/[0]);
-let g/*x*/ = 1;
-g/*x*/ = 2;
-g/*x*/ = g/*x*/ + 3;
-console.log(g/*x*/);
+let c = [ 10 ];
+c[0] = 5;
+console.log(c[0]);
+increment(c);
+console.log(c[0]);
+bump(c, 100);
+console.log(c[0]);
+let x = 1;
+x = 2;
+x = x + 3;
+console.log(x);

@@ -1,13 +1,13 @@
-function a/*debug*/(b) {
-	return "Point { x = " + JSON.stringify(b[0]) + ", " + "y = " + JSON.stringify(b[1]) + " }";
+function debug(self) {
+	return "Point { x = " + JSON.stringify(self[0]) + ", " + "y = " + JSON.stringify(self[1]) + " }";
 }
-function d/*debug*/(e) {
-	return "Tagged { label = " + JSON.stringify(e[0]) + ", " + "at = " + a/*debug*/(e[1]) + ", " + "on = " + JSON.stringify(e[2]) + " }";
+function debug2(self2) {
+	return "Tagged { label = " + JSON.stringify(self2[0]) + ", " + "at = " + debug(self2[1]) + ", " + "on = " + JSON.stringify(self2[2]) + " }";
 }
-function f/*debug*/(g) {
+function debug3(self3) {
 	return "Empty";
 }
-console.log(a/*debug*/([ 1, 2 ]));
-const c/*t*/ = [ "hi", [ 3, 4 ], true ];
-console.log(d/*debug*/(c/*t*/));
-console.log(f/*debug*/([  ]));
+console.log(debug([ 1, 2 ]));
+const t = [ "hi", [ 3, 4 ], true ];
+console.log(debug2(t));
+console.log(debug3([  ]));

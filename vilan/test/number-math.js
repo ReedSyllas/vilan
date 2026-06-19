@@ -1,24 +1,24 @@
-function b/*diff*/(c, d) {
-	let e = null;
-	if (c > d) {
-		e = c - d;
+function diff(self, other) {
+	let $a = null;
+	if (self > other) {
+		$a = self - other;
 	} else {
-		e = d - c;
+		$a = other - self;
 	}
-	return e;
+	return $a;
 }
-const a/*n*/ = -(5);
-console.log(Math.abs(a/*n*/));
-console.log(b/*diff*/(a/*n*/, 3));
-const f/*b*/ = 2;
-console.log(Math.pow(f/*b*/, 10));
-console.log(Math.min(f/*b*/, 7));
-console.log(Math.max(f/*b*/, 7));
-const g/*x*/ = 16;
-console.log(Math.sqrt(g/*x*/));
-const h/*y*/ = 3.7;
-console.log(Math.floor(h/*y*/));
-console.log(Math.ceil(h/*y*/));
-console.log(Math.round(h/*y*/));
-console.log(Math.min(h/*y*/, 2));
-console.log(Math.max(h/*y*/, 10));
+const n = -(5);
+console.log(Math.abs(n));
+console.log(diff(n, 3));
+const b = 2;
+console.log(Math.pow(b, 10));
+console.log(Math.min(b, 7));
+console.log(Math.max(b, 7));
+const x = 16;
+console.log(Math.sqrt(x));
+const y = 3.7;
+console.log(Math.floor(y));
+console.log(Math.ceil(y));
+console.log(Math.round(y));
+console.log(Math.min(y, 2));
+console.log(Math.max(y, 10));

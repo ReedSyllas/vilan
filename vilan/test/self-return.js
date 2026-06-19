@@ -1,8 +1,8 @@
-function d/*combine*/(e, f) {
-	return [ e[0] + f[0] ];
+function combine(self2, b) {
+	return [ self2[0] + b[0] ];
 }
-function b(c) {
-	return d/*combine*/(d/*combine*/(c, c), c);
+function $a(self) {
+	return combine(combine(self, self), self);
 }
-const a/*c*/ = [ 5 ];
-console.log(b(a/*c*/)[0]);
+const c = [ 5 ];
+console.log($a(c)[0]);

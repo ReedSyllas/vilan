@@ -1,45 +1,45 @@
-function a/*classify*/(b) {
-	const c = b;
-	let d = null;
-	if (c === "quit") {
-		d = "leaving";
-	} else if (c === "y") {
-		d = "affirmative";
-	} else if (c === "") {
-		d = "affirmative";
+function classify(s) {
+	const $a = s;
+	let $b = null;
+	if ($a === "quit") {
+		$b = "leaving";
+	} else if ($a === "y") {
+		$b = "affirmative";
+	} else if ($a === "") {
+		$b = "affirmative";
 	} else {
-		d = "other";
+		$b = "other";
 	}
-	return d;
+	return $b;
 }
-function e/*describe*/(f) {
-	const g = f;
-	let h = null;
-	if (g[0] === 0) {
-		h = "quit";
+function describe(signal) {
+	const $c = signal;
+	let $d = null;
+	if ($c[0] === 0) {
+		$d = "quit";
 	} else {
-		h = "finished";
+		$d = "finished";
 	}
-	return h;
+	return $d;
 }
-function i/*temperature*/(j) {
-	const k = j;
-	let l = null;
-	if (k <= 2) {
-		l = "very hot";
-	} else if (k <= 10) {
-		l = "warm";
+function temperature(distance) {
+	const $e = distance;
+	let $f = null;
+	if ($e <= 2) {
+		$f = "very hot";
+	} else if ($e <= 10) {
+		$f = "warm";
 	} else {
-		l = "cold";
+		$f = "cold";
 	}
-	return l;
+	return $f;
 }
-console.log(a/*classify*/("quit"));
-console.log(a/*classify*/("y"));
-console.log(a/*classify*/(""));
-console.log(a/*classify*/("maybe"));
-console.log(e/*describe*/([ 0 ]));
-console.log(e/*describe*/([ 1 ]));
-console.log(i/*temperature*/(1));
-console.log(i/*temperature*/(7));
-console.log(i/*temperature*/(40));
+console.log(classify("quit"));
+console.log(classify("y"));
+console.log(classify(""));
+console.log(classify("maybe"));
+console.log(describe([ 0 ]));
+console.log(describe([ 1 ]));
+console.log(temperature(1));
+console.log(temperature(7));
+console.log(temperature(40));

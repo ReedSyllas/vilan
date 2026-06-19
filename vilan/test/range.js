@@ -1,58 +1,58 @@
-function b/*new*/(c, d) {
-	return [ c, d ];
+function new2(start, end) {
+	return [ start, end ];
 }
-function e/*next*/(f) {
-	let h = null;
-	if (f[0] < f[1]) {
-		const g/*value*/ = f[0];
-		f[0] = f[0] + 1;
-		h = [ 0, g/*value*/ ];
+function next(self) {
+	let $a = null;
+	if (self[0] < self[1]) {
+		const value = self[0];
+		self[0] = self[0] + 1;
+		$a = [ 0, value ];
 	} else {
-		h = [ 1 ];
+		$a = [ 1 ];
 	}
-	return h;
+	return $a;
 }
-let a/*sum*/ = 0;
-const i = b/*new*/(1, 10);
+let sum = 0;
+const $b = new2(1, 10);
 while (true) {
-	const j = e/*next*/(i);
-	if (j[0] !== 0) {
+	const $c = next($b);
+	if ($c[0] !== 0) {
 		break;
 	}
-	const k/*i*/ = j[1];
-	a/*sum*/ = a/*sum*/ + k/*i*/;
+	const i = $c[1];
+	sum = sum + i;
 }
-console.log(a/*sum*/);
-let l/*count*/ = 0;
-const m = b/*new*/(0, 5);
+console.log(sum);
+let count = 0;
+const $d = new2(0, 5);
 while (true) {
-	const n = e/*next*/(m);
-	if (n[0] !== 0) {
+	const $e = next($d);
+	if ($e[0] !== 0) {
 		break;
 	}
-	const o/*j*/ = n[1];
-	l/*count*/ = l/*count*/ + 1;
+	const j = $e[1];
+	count = count + 1;
 }
-console.log(l/*count*/);
-let p/*empty*/ = 0;
-const q = b/*new*/(3, 3);
+console.log(count);
+let empty = 0;
+const $f = new2(3, 3);
 while (true) {
-	const r = e/*next*/(q);
-	if (r[0] !== 0) {
+	const $g = next($f);
+	if ($g[0] !== 0) {
 		break;
 	}
-	const s/*k*/ = r[1];
-	p/*empty*/ = p/*empty*/ + 1;
+	const k = $g[1];
+	empty = empty + 1;
 }
-console.log(p/*empty*/);
-let t/*squares*/ = [  ];
-const u = b/*new*/(1, 5);
+console.log(empty);
+let squares = [  ];
+const $h = new2(1, 5);
 while (true) {
-	const v = e/*next*/(u);
-	if (v[0] !== 0) {
+	const $i = next($h);
+	if ($i[0] !== 0) {
 		break;
 	}
-	const w/*n*/ = v[1];
-	t/*squares*/.push(Math.pow(w/*n*/, 2));
+	const n = $i[1];
+	squares.push(Math.pow(n, 2));
 }
-console.log(t/*squares*/.length);
+console.log(squares.length);

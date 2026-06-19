@@ -1,4 +1,4 @@
-const a/*name*/ = "John";
+const name = "John";
 console.log("Hello, {name}!");
-console.log("Hello, " + a/*name*/ + "!");
+console.log("Hello, " + name + "!");
 console.log("Hello, {name}!");

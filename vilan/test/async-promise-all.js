@@ -1,21 +1,21 @@
 import { setTimeout } from "node:timers/promises";
-async function b/*delayed*/(c, d) {
-	await (setTimeout(d));
-	return c;
+async function delayed(label, ms) {
+	await (setTimeout(ms));
+	return label;
 }
 (async () => {
-	let a/*promises*/ = [  ];
-	a/*promises*/.push((async () => {
-		return await (b/*delayed*/("a", 20));
+	let promises = [  ];
+	promises.push((async () => {
+		return await (delayed("a", 20));
 	})());
-	a/*promises*/.push((async () => {
-		return await (b/*delayed*/("b", 10));
+	promises.push((async () => {
+		return await (delayed("b", 10));
 	})());
-	a/*promises*/.push((async () => {
-		return await (b/*delayed*/("c", 30));
+	promises.push((async () => {
+		return await (delayed("c", 30));
 	})());
-	const e/*results*/ = await (Promise.all(a/*promises*/));
-	for (const f/*result*/ of e/*results*/) {
-		console.log(f/*result*/);
+	const results = await (Promise.all(promises));
+	for (const result of results) {
+		console.log(result);
 	}
 })();

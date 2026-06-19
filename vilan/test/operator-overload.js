@@ -1,14 +1,14 @@
-function d/*add*/(e, f) {
-	return [ e[0] + f[0], e[1] + f[1] ];
+function add(self, b2) {
+	return [ self[0] + b2[0], self[1] + b2[1] ];
 }
-function h/*mul*/(i, j) {
-	return [ i[0] * j[0], i[1] * j[1] ];
+function mul(self2, b3) {
+	return [ self2[0] * b3[0], self2[1] * b3[1] ];
 }
-const a/*a*/ = [ 1, 2 ];
-const b/*b*/ = [ 3, 4 ];
-const c/*sum*/ = d/*add*/(a/*a*/, b/*b*/);
-console.log(c/*sum*/[0]);
-console.log(c/*sum*/[1]);
-const g/*product*/ = h/*mul*/(a/*a*/, b/*b*/);
-console.log(g/*product*/[0]);
-console.log(g/*product*/[1]);
+const a = [ 1, 2 ];
+const b = [ 3, 4 ];
+const sum = add(a, b);
+console.log(sum[0]);
+console.log(sum[1]);
+const product = mul(a, b);
+console.log(product[0]);
+console.log(product[1]);

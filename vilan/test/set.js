@@ -4,35 +4,35 @@ function __clone(value) {
 	if (value instanceof Map) return new Map([ ...value ].map(([ k, v ]) => [ __clone(k), __clone(v) ]));
 	return value;
 }
-function b(c) {
-	return c.size === 0;
+function $a(self) {
+	return self.size === 0;
 }
-let a/*numbers*/ = new Set();
-a/*numbers*/.add(1);
-a/*numbers*/.add(2);
-a/*numbers*/.add(2);
-a/*numbers*/.add(3);
-console.log(a/*numbers*/.size);
-console.log(a/*numbers*/.has(2));
-console.log(a/*numbers*/.has(9));
-a/*numbers*/.delete(2);
-console.log(a/*numbers*/.has(2));
-console.log(a/*numbers*/.size);
-console.log(b(a/*numbers*/));
-let d/*total*/ = 0;
-for (const e/*value*/ of a/*numbers*/) {
-	d/*total*/ = d/*total*/ + e/*value*/;
+let numbers = new Set();
+numbers.add(1);
+numbers.add(2);
+numbers.add(2);
+numbers.add(3);
+console.log(numbers.size);
+console.log(numbers.has(2));
+console.log(numbers.has(9));
+numbers.delete(2);
+console.log(numbers.has(2));
+console.log(numbers.size);
+console.log($a(numbers));
+let total = 0;
+for (const value of numbers) {
+	total = total + value;
 }
-console.log(d/*total*/);
-let f/*copy*/ = __clone(a/*numbers*/);
-f/*copy*/.add(100);
-console.log(a/*numbers*/.has(100));
-console.log(f/*copy*/.has(100));
-let g/*words*/ = new Set();
-g/*words*/.add("hi");
-g/*words*/.add("hi");
-g/*words*/.add("bye");
-console.log(g/*words*/.size);
-console.log(g/*words*/.has("hi"));
-let h/*empty*/ = new Set();
-console.log(b(h/*empty*/));
+console.log(total);
+let copy = __clone(numbers);
+copy.add(100);
+console.log(numbers.has(100));
+console.log(copy.has(100));
+let words = new Set();
+words.add("hi");
+words.add("hi");
+words.add("bye");
+console.log(words.size);
+console.log(words.has("hi"));
+let empty = new Set();
+console.log($a(empty));

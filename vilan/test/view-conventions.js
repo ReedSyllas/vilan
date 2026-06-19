@@ -4,13 +4,13 @@ function __clone(value) {
 	if (value instanceof Map) return new Map([ ...value ].map(([ k, v ]) => [ __clone(k), __clone(v) ]));
 	return value;
 }
-function b/*bump*/(c) {
-	c[0] = c[0] + 1;
+function bump(c2) {
+	c2[0] = c2[0] + 1;
 }
-function d/*peek*/(e) {
-	return e[0];
+function peek(c3) {
+	return c3[0];
 }
-let a/*c*/ = [ 10 ];
-b/*bump*/(a/*c*/);
-console.log(a/*c*/[0]);
-console.log(d/*peek*/(__clone(a/*c*/)));
+let c = [ 10 ];
+bump(c);
+console.log(c[0]);
+console.log(peek(__clone(c)));

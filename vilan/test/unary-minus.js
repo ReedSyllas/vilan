@@ -1,12 +1,12 @@
-function b/*id*/(c) {
-	return c;
+function id(n) {
+	return n;
 }
-const a/*x*/ = -(1);
-console.log(a/*x*/);
+const x = -(1);
+console.log(x);
 console.log(-(5));
-console.log(b/*id*/(-(3)));
-const d/*y*/ = 10;
-console.log(-(d/*y*/));
+console.log(id(-(3)));
+const y = 10;
+console.log(-(y));
 console.log(7 - 9);
 console.log(3 - -(2));
 console.log(-(2 + 3));

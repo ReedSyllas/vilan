@@ -45,8 +45,12 @@ pub struct BuildOptions {
     /// Pad tokens with spaces — around operators, after commas, inside array
     /// brackets (`a + b`, `[ 1, 2 ]`). Off: tight (`a+b`, `[1,2]`).
     pub spaces: bool,
-    /// Annotate generated identifiers with their source name (`a/*count*/`) so the
-    /// output is debuggable. Off: obfuscated short names only.
+    /// Name generated identifiers after their source (a function `greet` becomes
+    /// `greet`, disambiguated on collision) — the most debuggable output. Off: see
+    /// `debug_names`. Takes precedence over `debug_names` when on.
+    pub readable_names: bool,
+    /// When `readable_names` is off, still annotate the obfuscated short names with
+    /// their source (`a/*count*/`). Off: obfuscated short names only.
     pub debug_names: bool,
 }
 
@@ -57,11 +61,13 @@ impl BuildOptions {
             Preset::Debug => Self {
                 indent: true,
                 spaces: true,
-                debug_names: true,
+                readable_names: true,
+                debug_names: false,
             },
             Preset::Release => Self {
                 indent: false,
                 spaces: false,
+                readable_names: false,
                 debug_names: false,
             },
         }

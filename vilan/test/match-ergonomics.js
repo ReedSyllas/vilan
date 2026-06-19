@@ -1,20 +1,20 @@
-function d/*classify*/(e) {
-	const f = e[0];
-	let g = null;
-	if (f === 0) {
-		const h/*base*/ = e[1];
-		g = h/*base*/;
-	} else if (f === 1) {
-		g = e[1] * 10;
+function classify(p2) {
+	const $a = p2[0];
+	let $b = null;
+	if ($a === 0) {
+		const base = p2[1];
+		$b = base;
+	} else if ($a === 1) {
+		$b = p2[1] * 10;
 	} else {
-		const i/*other*/ = f;
-		g = i/*other*/ + e[1];
+		const other = $a;
+		$b = other + p2[1];
 	}
-	return g;
+	return $b;
 }
-const a/*x*/ = 2;
-const b/*y*/ = 5;
-const c/*p*/ = [ a/*x*/, b/*y*/ ];
-console.log(d/*classify*/(c/*p*/));
-console.log(d/*classify*/([ 0, 9 ]));
-console.log(d/*classify*/([ 1, 4 ]));
+const x = 2;
+const y = 5;
+const p = [ x, y ];
+console.log(classify(p));
+console.log(classify([ 0, 9 ]));
+console.log(classify([ 1, 4 ]));

@@ -1,63 +1,63 @@
-function d/*eq*/(e, f) {
-	const g = [ e, f ];
-	let h = null;
-	if (g[0][0] === 0 && g[1][0] === 0) {
-		const i/*s0*/ = g[0][1];
-		const j/*o0*/ = g[1][1];
-		h = i/*s0*/ === j/*o0*/;
-	} else if (g[0][0] === 1 && g[1][0] === 1) {
-		const k/*s0*/ = g[0][1];
-		const l/*s1*/ = g[0][2];
-		const m/*o0*/ = g[1][1];
-		const n/*o1*/ = g[1][2];
-		h = k/*s0*/ === m/*o0*/ && l/*s1*/ === n/*o1*/;
-	} else if (g[0][0] === 2 && g[1][0] === 2) {
-		h = true;
+function eq(self, other) {
+	const $a = [ self, other ];
+	let $b = null;
+	if ($a[0][0] === 0 && $a[1][0] === 0) {
+		const s0 = $a[0][1];
+		const o0 = $a[1][1];
+		$b = s0 === o0;
+	} else if ($a[0][0] === 1 && $a[1][0] === 1) {
+		const s02 = $a[0][1];
+		const s1 = $a[0][2];
+		const o02 = $a[1][1];
+		const o1 = $a[1][2];
+		$b = s02 === o02 && s1 === o1;
+	} else if ($a[0][0] === 2 && $a[1][0] === 2) {
+		$b = true;
 	} else {
-		h = false;
+		$b = false;
 	}
-	return h;
+	return $b;
 }
-function o/*debug*/(p) {
-	const q = p;
-	let r = null;
-	if (q[0] === 0) {
-		const s/*p0*/ = q[1];
-		r = "Circle(" + JSON.stringify(s/*p0*/) + ")";
-	} else if (q[0] === 1) {
-		const t/*p0*/ = q[1];
-		const u/*p1*/ = q[2];
-		r = "Rect(" + JSON.stringify(t/*p0*/) + ", " + JSON.stringify(u/*p1*/) + ")";
+function debug(self2) {
+	const $c = self2;
+	let $d = null;
+	if ($c[0] === 0) {
+		const p0 = $c[1];
+		$d = "Circle(" + JSON.stringify(p0) + ")";
+	} else if ($c[0] === 1) {
+		const p02 = $c[1];
+		const p1 = $c[2];
+		$d = "Rect(" + JSON.stringify(p02) + ", " + JSON.stringify(p1) + ")";
 	} else {
-		r = "Empty";
+		$d = "Empty";
 	}
-	return r;
+	return $d;
 }
-function v/*to_json*/(w) {
-	const x = w;
-	let y = null;
-	if (x[0] === 0) {
-		const z/*p0*/ = x[1];
-		y = "{\"Circle\":" + JSON.stringify(z/*p0*/) + "}";
-	} else if (x[0] === 1) {
-		const A/*p0*/ = x[1];
-		const B/*p1*/ = x[2];
-		y = "{\"Rect\":[" + JSON.stringify(A/*p0*/) + "," + JSON.stringify(B/*p1*/) + "]}";
+function to_json(self3) {
+	const $e = self3;
+	let $f = null;
+	if ($e[0] === 0) {
+		const p03 = $e[1];
+		$f = "{\"Circle\":" + JSON.stringify(p03) + "}";
+	} else if ($e[0] === 1) {
+		const p04 = $e[1];
+		const p12 = $e[2];
+		$f = "{\"Rect\":[" + JSON.stringify(p04) + "," + JSON.stringify(p12) + "]}";
 	} else {
-		y = "\"Empty\"";
+		$f = "\"Empty\"";
 	}
-	return y;
+	return $f;
 }
-const a/*c*/ = [ 0, 3 ];
-const b/*r*/ = [ 1, 4, 5 ];
-const c/*e*/ = [ 2 ];
-console.log(d/*eq*/(a/*c*/, [ 0, 3 ]));
-console.log(d/*eq*/(a/*c*/, [ 0, 9 ]));
-console.log(d/*eq*/(a/*c*/, b/*r*/));
-console.log(d/*eq*/(c/*e*/, [ 2 ]));
-console.log(o/*debug*/(a/*c*/));
-console.log(o/*debug*/(b/*r*/));
-console.log(o/*debug*/(c/*e*/));
-console.log(v/*to_json*/(a/*c*/));
-console.log(v/*to_json*/(b/*r*/));
-console.log(v/*to_json*/(c/*e*/));
+const c = [ 0, 3 ];
+const r = [ 1, 4, 5 ];
+const e = [ 2 ];
+console.log(eq(c, [ 0, 3 ]));
+console.log(eq(c, [ 0, 9 ]));
+console.log(eq(c, r));
+console.log(eq(e, [ 2 ]));
+console.log(debug(c));
+console.log(debug(r));
+console.log(debug(e));
+console.log(to_json(c));
+console.log(to_json(r));
+console.log(to_json(e));

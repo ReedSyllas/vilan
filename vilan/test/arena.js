@@ -1,139 +1,139 @@
 function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
-function b/*new*/() {
+function new2() {
 	return [ [  ], [  ] ];
 }
-function Y/*sum_from*/(Z, aa) {
-	const ae = ab(Z, aa);
-	let af = null;
-	if (ae[0] === 0) {
-		const ag/*node*/ = ae[1];
-		let ah/*total*/ = ag/*node*/[0];
-		for (const ai/*edge*/ of ag/*node*/[1]) {
-			ah/*total*/ = ah/*total*/ + Y/*sum_from*/(Z, ai/*edge*/);
+function sum_from(arena, handle5) {
+	const $y = $v(arena, handle5);
+	let $z = null;
+	if ($y[0] === 0) {
+		const node = $y[1];
+		let total = node[0];
+		for (const edge of node[1]) {
+			total = total + sum_from(arena, edge);
 		}
-		af = ah/*total*/;
+		$z = total;
 	} else {
-		af = 0;
+		$z = 0;
 	}
-	return af;
+	return $z;
 }
-function d(e, f) {
-	const g = __list_pop(e[1]);
-	let h = null;
-	if (g[0] === 0) {
-		const i/*index*/ = g[1];
-		e[0][i/*index*/][1] = [ 0, f ];
-		h = [ i/*index*/, e[0][i/*index*/][0] ];
+function $a(self, value) {
+	const $b = __list_pop(self[1]);
+	let $c = null;
+	if ($b[0] === 0) {
+		const index = $b[1];
+		self[0][index][1] = [ 0, value ];
+		$c = [ index, self[0][index][0] ];
 	} else {
-		const j/*index*/ = e[0].length;
-		e[0].push([ 0, [ 0, f ] ]);
-		h = [ j/*index*/, 0 ];
+		const index2 = self[0].length;
+		self[0].push([ 0, [ 0, value ] ]);
+		$c = [ index2, 0 ];
 	}
-	return h;
+	return $c;
 }
-function l(m) {
-	return m[0].length - m[1].length;
+function $d(self2) {
+	return self2[0].length - self2[1].length;
 }
-function t(u) {
-	const v = u;
-	return v[0] === 0;
+function $g(self5) {
+	const $h = self5;
+	return $h[0] === 0;
 }
-function q(r, s) {
-	return s[0] < r[0].length && r[0][s[0]][0] === s[1] && t(r[0][s[0]][1]);
+function $f(self4, handle2) {
+	return handle2[0] < self4[0].length && self4[0][handle2[0]][0] === handle2[1] && $g(self4[0][handle2[0]][1]);
 }
-function n(o, p) {
-	let w = null;
-	if (q(o, p)) {
-		w = o[0][p[0]][1];
+function $e(self3, handle) {
+	let $i = null;
+	if ($f(self3, handle)) {
+		$i = self3[0][handle[0]][1];
 	} else {
-		w = [ 1 ];
+		$i = [ 1 ];
 	}
-	return w;
+	return $i;
 }
-function x(y, z) {
-	const A = y;
-	let B = null;
-	if (A[0] === 0) {
-		const C/*x*/ = A[1];
-		B = C/*x*/;
+function $j(self6, fallback) {
+	const $k = self6;
+	let $l = null;
+	if ($k[0] === 0) {
+		const x = $k[1];
+		$l = x;
 	} else {
-		B = z;
+		$l = fallback;
 	}
-	return B;
+	return $l;
 }
-function D(E, F, G) {
-	let H = null;
-	if (q(E, F)) {
-		E[0][F[0]][1] = [ 0, G ];
-		H = true;
+function $m(self7, handle3, value2) {
+	let $n = null;
+	if ($f(self7, handle3)) {
+		self7[0][handle3[0]][1] = [ 0, value2 ];
+		$n = true;
 	} else {
-		H = false;
+		$n = false;
 	}
-	return H;
+	return $n;
 }
-function I(J, K) {
-	let M = null;
-	if (q(J, K)) {
-		const L/*removed*/ = J[0][K[0]][1];
-		J[0][K[0]][0] = J[0][K[0]][0] + 1;
-		J[0][K[0]][1] = [ 1 ];
-		J[1].push(K[0]);
-		M = L/*removed*/;
+function $o(self8, handle4) {
+	let $p = null;
+	if ($f(self8, handle4)) {
+		const removed = self8[0][handle4[0]][1];
+		self8[0][handle4[0]][0] = self8[0][handle4[0]][0] + 1;
+		self8[0][handle4[0]][1] = [ 1 ];
+		self8[1].push(handle4[0]);
+		$p = removed;
 	} else {
-		M = [ 1 ];
+		$p = [ 1 ];
 	}
-	return M;
+	return $p;
 }
-function N(u) {
-	const O = u;
-	return O[0] === 0;
+function $q(self5) {
+	const $r = self5;
+	return $r[0] === 0;
 }
-function S(e, f) {
-	const T = __list_pop(e[1]);
-	let U = null;
-	if (T[0] === 0) {
-		const i/*index*/ = T[1];
-		e[0][i/*index*/][1] = [ 0, f ];
-		U = [ i/*index*/, e[0][i/*index*/][0] ];
+function $s(self, value) {
+	const $t = __list_pop(self[1]);
+	let $u = null;
+	if ($t[0] === 0) {
+		const index = $t[1];
+		self[0][index][1] = [ 0, value ];
+		$u = [ index, self[0][index][0] ];
 	} else {
-		const j/*index*/ = e[0].length;
-		e[0].push([ 0, [ 0, f ] ]);
-		U = [ j/*index*/, 0 ];
+		const index2 = self[0].length;
+		self[0].push([ 0, [ 0, value ] ]);
+		$u = [ index2, 0 ];
 	}
-	return U;
+	return $u;
 }
-function ac(r, s) {
-	return s[0] < r[0].length && r[0][s[0]][0] === s[1] && t(r[0][s[0]][1]);
+function $w(self4, handle2) {
+	return handle2[0] < self4[0].length && self4[0][handle2[0]][0] === handle2[1] && $g(self4[0][handle2[0]][1]);
 }
-function ab(o, p) {
-	let ad = null;
-	if (ac(o, p)) {
-		ad = o[0][p[0]][1];
+function $v(self3, handle) {
+	let $x = null;
+	if ($w(self3, handle)) {
+		$x = self3[0][handle[0]][1];
 	} else {
-		ad = [ 1 ];
+		$x = [ 1 ];
 	}
-	return ad;
+	return $x;
 }
-let a/*numbers*/ = b/*new*/();
-const c/*a*/ = d(a/*numbers*/, 10);
-const k/*b*/ = d(a/*numbers*/, 20);
-console.log(l(a/*numbers*/));
-console.log(x(n(a/*numbers*/, c/*a*/), -(1)));
-D(a/*numbers*/, k/*b*/, 99);
-console.log(x(n(a/*numbers*/, k/*b*/), -(1)));
-console.log(x(I(a/*numbers*/, k/*b*/), -(1)));
-console.log(N(n(a/*numbers*/, k/*b*/)));
-const P/*c*/ = d(a/*numbers*/, 30);
-console.log(x(n(a/*numbers*/, P/*c*/), -(1)));
-console.log(N(n(a/*numbers*/, k/*b*/)));
-console.log(x(n(a/*numbers*/, c/*a*/), -(1)));
-let Q/*graph*/ = b/*new*/();
-const R/*leaf1*/ = S(Q/*graph*/, [ 2, [  ] ]);
-const V/*leaf2*/ = S(Q/*graph*/, [ 3, [  ] ]);
-let W/*root_edges*/ = [  ];
-W/*root_edges*/.push(R/*leaf1*/);
-W/*root_edges*/.push(V/*leaf2*/);
-const X/*root*/ = S(Q/*graph*/, [ 1, W/*root_edges*/ ]);
-console.log(Y/*sum_from*/(Q/*graph*/, X/*root*/));
+let numbers = new2();
+const a = $a(numbers, 10);
+const b = $a(numbers, 20);
+console.log($d(numbers));
+console.log($j($e(numbers, a), -(1)));
+$m(numbers, b, 99);
+console.log($j($e(numbers, b), -(1)));
+console.log($j($o(numbers, b), -(1)));
+console.log($q($e(numbers, b)));
+const c = $a(numbers, 30);
+console.log($j($e(numbers, c), -(1)));
+console.log($q($e(numbers, b)));
+console.log($j($e(numbers, a), -(1)));
+let graph = new2();
+const leaf1 = $s(graph, [ 2, [  ] ]);
+const leaf2 = $s(graph, [ 3, [  ] ]);
+let root_edges = [  ];
+root_edges.push(leaf1);
+root_edges.push(leaf2);
+const root = $s(graph, [ 1, root_edges ]);
+console.log(sum_from(graph, root));

@@ -5,26 +5,26 @@ function __env(key) {
 	const value = process.env[key];
 	return value === undefined ? [ 1 ] : [ 0, value ];
 }
-function e(f, g) {
-	const h = f;
-	let i = null;
-	if (h[0] === 0) {
-		const j/*x*/ = h[1];
-		i = j/*x*/;
+function $c(self, fallback) {
+	const $d = self;
+	let $e = null;
+	if ($d[0] === 0) {
+		const x = $d[1];
+		$e = x;
 	} else {
-		i = g;
+		$e = fallback;
 	}
-	return i;
+	return $e;
 }
-const a/*arguments*/ = __args();
-console.log(a/*arguments*/.length);
-const b = __env("VILAN_TEST_VAR");
-let c = null;
-if (b[0] === 0) {
-	const d/*value*/ = b[1];
-	c = console.log(d/*value*/);
+const arguments = __args();
+console.log(arguments.length);
+const $a = __env("VILAN_TEST_VAR");
+let $b = null;
+if ($a[0] === 0) {
+	const value = $a[1];
+	$b = console.log(value);
 } else {
-	c = console.log("unset");
+	$b = console.log("unset");
 }
-c;
-console.log(e(__env("DEFINITELY_NOT_SET_XYZ"), "unset"));
+$b;
+console.log($c(__env("DEFINITELY_NOT_SET_XYZ"), "unset"));

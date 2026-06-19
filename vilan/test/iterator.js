@@ -1,14 +1,14 @@
-function c/*from_fn*/(d) {
-	return [ d ];
+function from_fn(fn) {
+	return [ fn ];
 }
-function e(f) {
-	return f[0]();
+function $a(self) {
+	return self[0]();
 }
-let a/*i*/ = 0;
-const b/*naturals*/ = c/*from_fn*/(() => {
-	a/*i*/ = a/*i*/ + 1;
-	return a/*i*/;
+let i = 0;
+const naturals = from_fn(() => {
+	i = i + 1;
+	return i;
 });
-console.log(e(b/*naturals*/));
-console.log(e(b/*naturals*/));
-console.log(e(b/*naturals*/));
+console.log($a(naturals));
+console.log($a(naturals));
+console.log($a(naturals));

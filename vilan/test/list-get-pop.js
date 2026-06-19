@@ -10,41 +10,41 @@ function __list_get(list, index) {
 function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
-function k/*first*/(l) {
-	return __list_get(l, 0);
+function first(self3) {
+	return __list_get(self3, 0);
 }
-function m/*last*/(n) {
-	return __list_get(n, n.length - 1);
+function last(self4) {
+	return __list_get(self4, self4.length - 1);
 }
-function b(c, d) {
-	const e = c;
-	let f = null;
-	if (e[0] === 0) {
-		const g/*x*/ = e[1];
-		f = g/*x*/;
+function $a(self, fallback) {
+	const $b = self;
+	let $c = null;
+	if ($b[0] === 0) {
+		const x = $b[1];
+		$c = x;
 	} else {
-		f = d;
+		$c = fallback;
 	}
-	return f;
+	return $c;
 }
-function h(i) {
-	const j = i;
-	return j[0] === 1;
+function $d(self2) {
+	const $e = self2;
+	return $e[0] === 1;
 }
-let a/*xs*/ = [  ];
-a/*xs*/.push(10);
-a/*xs*/.push(20);
-a/*xs*/.push(30);
-console.log(b(__list_get(a/*xs*/, 0), 0));
-console.log(b(__list_get(a/*xs*/, 2), 0));
-console.log(b(__list_get(a/*xs*/, 5), 0));
-console.log(h(__list_get(a/*xs*/, 9)));
-console.log(b(k/*first*/(a/*xs*/), 0));
-console.log(b(m/*last*/(a/*xs*/), 0));
-console.log(b(__list_pop(a/*xs*/), 0));
-console.log(a/*xs*/.length);
-console.log(b(m/*last*/(a/*xs*/), 0));
-let o/*single*/ = [  ];
-o/*single*/.push(7);
-console.log(b(__list_pop(o/*single*/), 0));
-console.log(h(__list_pop(o/*single*/)));
+let xs = [  ];
+xs.push(10);
+xs.push(20);
+xs.push(30);
+console.log($a(__list_get(xs, 0), 0));
+console.log($a(__list_get(xs, 2), 0));
+console.log($a(__list_get(xs, 5), 0));
+console.log($d(__list_get(xs, 9)));
+console.log($a(first(xs), 0));
+console.log($a(last(xs), 0));
+console.log($a(__list_pop(xs), 0));
+console.log(xs.length);
+console.log($a(last(xs), 0));
+let single = [  ];
+single.push(7);
+console.log($a(__list_pop(single), 0));
+console.log($d(__list_pop(single)));
