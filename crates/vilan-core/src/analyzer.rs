@@ -4087,7 +4087,18 @@ impl<'src> Analyzer<'src> {
     /// `T`. Returns `None` for an erased `List` (no arguments) or a non-list
     /// iterable (e.g. a custom iterator), whose element the caller treats as
     /// `any`.
-    fn iterable_element_type(&self, iterable_type: &Type) -> Option<Type> {
+    /// The iterator-protocol method a `for` loop drives an iterable with:
+    /// `next_mut` for a `for e in &mut container` (each binding a writable view),
+    /// otherwise `next` (a copying iterator, or a readonly view). A built-in
+    /// `List`/`Set` view loop ignores this — it lowers to an indexed loop.
+    fn for_each_next_method(&self, item_id: Option<Id>) -> &'static str {
+        match item_id.and_then(|id| self.for_each_views.get(&id)) {
+            Some(true) => "next_mut",
+            _ => "next",
+        }
+    }
+
+    fn iterable_element_type(&self, iterable_type: &Type, next_method: &str) -> Option<Type> {
         match iterable_type {
             // `List<T>` and `Set<T>` both iterate their single element type `T`
             // (a JS array / `Set` are natively iterable, yielding elements).
@@ -4100,9 +4111,10 @@ impl<'src> Analyzer<'src> {
                     .map(|element_type_id| element_type_id.get_type(self))
             }
             // A custom iterator (e.g. `Range`): its element is the payload of
-            // `next(self): Option<T>`, so a `for i in it` binding gets type `T`.
+            // `next(self): Option<T>` (or `next_mut(&mut self): Option<&mut T>` for
+            // a `&mut` view loop), so the binding gets type `T`.
             Type::Struct(_, _) | Type::Enum(_, _) => {
-                let next_id = self.method_member_in_impls(iterable_type, "next")?;
+                let next_id = self.method_member_in_impls(iterable_type, next_method)?;
                 let Some(Expr::Function(function_id)) = self.expr_id_to_expr_map.get(&next_id)
                 else {
                     return None;
@@ -6426,7 +6438,8 @@ impl<'src> Analyzer<'src> {
                 for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
                     let iterable_type =
                         self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
-                    let element_type = self.iterable_element_type(&iterable_type);
+                    let next_method = self.for_each_next_method(Some(item_id));
+                    let element_type = self.iterable_element_type(&iterable_type, next_method);
                     // Defer while the iterable or its element is still unresolved
                     // (an element slot a later `push` may yet fill); a post-loop
                     // pass commits whatever remains to `any`.
@@ -7006,8 +7019,9 @@ impl<'src> Analyzer<'src> {
         // slot never resolved — an empty, never-pushed list): the item is `any`.
         for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
             let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
+            let next_method = self.for_each_next_method(Some(item_id));
             let element_type = self
-                .iterable_element_type(&iterable_type)
+                .iterable_element_type(&iterable_type, next_method)
                 .filter(|element| !matches!(element, Type::Unknown | Type::Unresolved))
                 .unwrap_or(Type::Any);
             let element_type_id = element_type.get_type_id(self);
@@ -7024,7 +7038,16 @@ impl<'src> Analyzer<'src> {
         for (for_each_id, iterable_id) in std::mem::take(&mut self.prepped_for_each) {
             let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
             if matches!(iterable_type, Type::Struct(_, _) | Type::Enum(_, _)) {
-                if let Some(next_id) = self.method_member_in_impls(&iterable_type, "next") {
+                // `for e in &mut container` drives a `next_mut(&mut self): Option<&mut
+                // T>` iterator (each binding a writable view); a plain `for x in
+                // container` drives `next`. A built-in `List`/`Set` has neither and
+                // falls through to the indexed/native loop.
+                let item_id = match self.expr_id_to_expr_map.get(&for_each_id) {
+                    Some(Expr::ForEach(_, item_id, _)) => *item_id,
+                    _ => None,
+                };
+                let next_method = self.for_each_next_method(item_id);
+                if let Some(next_id) = self.method_member_in_impls(&iterable_type, next_method) {
                     self.for_each_next.insert(for_each_id, next_id);
                 }
             }
