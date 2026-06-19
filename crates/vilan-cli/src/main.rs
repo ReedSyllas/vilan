@@ -57,10 +57,14 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Format vilan source files. (Not implemented yet.)
+    /// Format vilan source files in place. Already-formatted (and any not-yet
+    /// formattable) files are left untouched.
     Fmt {
-        /// Files or directories to format.
+        /// Files or directories to format. Defaults to the current directory.
         paths: Vec<PathBuf>,
+        /// Report files that would change without rewriting them (exit 1 if any).
+        #[arg(long)]
+        check: bool,
     },
     /// Run `*_test.vl` tests (each passes by exiting 0; a failed `assert` panics).
     Test {
@@ -79,8 +83,70 @@ fn main() -> ExitCode {
         Command::Check { file, debug } => with_entry(file, |entry| check(entry, debug)),
         Command::Run { file, args } => with_entry(file, |entry| run(entry, &args)),
         Command::Test { path } => test(path),
-        // `fmt` awaits the formatter.
-        Command::Fmt { .. } => unimplemented_command("fmt"),
+        Command::Fmt { paths, check } => fmt(&paths, check),
+    }
+}
+
+/// Formats every `.vl` file under `paths` (a file, a directory walked
+/// recursively, or the working directory when empty). In `--check` mode it only
+/// reports files that would change; otherwise it rewrites them in place. The
+/// formatter leaves a file untouched when it's already formatted or contains a
+/// construct it can't yet print (it never produces non-round-tripping output).
+fn fmt(paths: &[PathBuf], check: bool) -> ExitCode {
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.to_vec()
+    };
+    let mut files = Vec::new();
+    for root in &roots {
+        collect_vl_files(root, &mut files);
+    }
+    let mut changed = 0;
+    let mut failed = false;
+    for file in &files {
+        let source = match fs::read_to_string(file) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("error: cannot read {}: {error}", file.display());
+                failed = true;
+                continue;
+            }
+        };
+        let formatted = vilan_core::formatter::format(&source);
+        if formatted == source {
+            continue;
+        }
+        if check {
+            println!("would reformat {}", file.display());
+            changed += 1;
+        } else if let Err(error) = fs::write(file, &formatted) {
+            eprintln!("error: cannot write {}: {error}", file.display());
+            failed = true;
+        } else {
+            println!("formatted {}", file.display());
+        }
+    }
+    if failed || (check && changed > 0) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Collects every `.vl` file under `path` (recursing into directories), in a
+/// stable (sorted) order.
+fn collect_vl_files(path: &Path, out: &mut Vec<PathBuf>) {
+    if path.is_dir() {
+        if let Ok(entries) = fs::read_dir(path) {
+            let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+            paths.sort();
+            for entry in paths {
+                collect_vl_files(&entry, out);
+            }
+        }
+    } else if path.extension().and_then(|extension| extension.to_str()) == Some("vl") {
+        out.push(path.to_path_buf());
     }
 }
 
@@ -236,15 +302,6 @@ fn discover_tests(path: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
         .collect();
     tests.sort();
     Ok(tests)
-}
-
-/// A recognized subcommand whose implementation is still pending.
-fn unimplemented_command(name: &str) -> ExitCode {
-    eprintln!(
-        "`vilan {name}` is not implemented yet — the toolchain currently supports \
-         `build` and `check`."
-    );
-    ExitCode::FAILURE
 }
 
 /// The `std` package source root: `$VILAN_STD` if set, else the in-repo
