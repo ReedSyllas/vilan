@@ -1656,6 +1656,76 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Whether `ancestor` is a strict (proper) ancestor scope of `descendant` —
+    /// i.e. `descendant` is lexically nested inside `ancestor`, so it ends first.
+    fn scope_is_strict_ancestor(&self, ancestor: Id, descendant: Id) -> bool {
+        let mut current = self
+            .scopes
+            .get(&descendant)
+            .and_then(|scope| scope.parent_id);
+        while let Some(scope_id) = current {
+            if scope_id == ancestor {
+                return true;
+            }
+            current = self.scopes.get(&scope_id).and_then(|scope| scope.parent_id);
+        }
+        false
+    }
+
+    /// Rule 3 (lifetime): a view binding may not be reseated to view a place that
+    /// goes out of scope before the binding does — `mut axis = &mut a; { mut local
+    /// = …; axis = &mut local; } axis.value = 99` leaves `axis` dangling once the
+    /// inner block ends. Caught lexically: a reseat `view = &place` is rejected
+    /// when `place`'s root local is declared in a strictly inner scope, so it dies
+    /// first. Reseating to another view binding (`axis = parent`), or to a
+    /// same/outer-scope place, is fine. Conservative: it fires even when the
+    /// binding isn't read after the inner scope — reseating an outer view to a
+    /// block-local place serves no purpose anyway.
+    fn check_reseat_escape(&mut self) {
+        let view_bindings = self.compute_view_bindings();
+        if view_bindings.is_empty() {
+            return;
+        }
+        let mut violations: Vec<(Id, &'src str)> = Vec::new();
+        for (assignment_id, expr) in &self.expr_id_to_expr_map {
+            let Expr::Assignment(target_id, value_id) = expr else {
+                continue;
+            };
+            // A reseat targets the view binding itself (`view = …`), not `*view`.
+            let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(target_id) else {
+                continue;
+            };
+            if !view_bindings.contains(binding) {
+                continue;
+            }
+            // …reseated to a freshly-taken view of a place (`&mut local`).
+            let Some(Expr::Reference(operand, _)) = self.expr_id_to_expr_map.get(value_id) else {
+                continue;
+            };
+            let Some(root) = self.place_root(*operand) else {
+                continue;
+            };
+            let (Some(&binding_scope), Some(&root_scope)) = (
+                self.expr_id_to_scope_id_map.get(binding),
+                self.expr_id_to_scope_id_map.get(&root),
+            ) else {
+                continue;
+            };
+            if self.scope_is_strict_ancestor(binding_scope, root_scope) {
+                let name = self.variables.get(&root).map(|v| v.name).unwrap_or("value");
+                violations.push((*assignment_id, name));
+            }
+        }
+        for (reseat_id, name) in violations {
+            self.diagnostics.push(Error {
+                span: **self.span_map.get(&reseat_id).unwrap_or(&&EMPTY_SPAN),
+                msg: format!(
+                    "cannot reseat a view to '{name}', which goes out of scope before the view; the view would dangle. Reseat to a place that outlives the view, or use a handle."
+                ),
+            });
+        }
+    }
+
     /// Scans a block's statements in order, tracking live view bindings.
     /// `live` carries views from enclosing blocks in; views declared here die at
     /// the block's end.
@@ -7626,6 +7696,7 @@ pub fn analyze<'src>(
     analyzer.check_mutable_references();
     analyzer.check_view_escape();
     analyzer.check_invalidation();
+    analyzer.check_reseat_escape();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.
