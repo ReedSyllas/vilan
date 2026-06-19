@@ -1,8 +1,8 @@
 function increment(self) {
 	self[0] = self[0] + 1;
 }
-function bump(self2, by) {
-	self2[0] = self2[0] + by;
+function bump(self, by) {
+	self[0] = self[0] + by;
 }
 let c = [ 10 ];
 c[0] = 5;

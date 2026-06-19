@@ -1,8 +1,8 @@
 function slot(self) {
 	return [ self, 0 ];
 }
-function peek(self2) {
-	return [ self2, 0 ];
+function peek(self) {
+	return [ self, 0 ];
 }
 let w = [ 1 ];
 const $a = slot(w);

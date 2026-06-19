@@ -1,32 +1,32 @@
 function is_empty(self) {
 	return self.length === 0;
 }
-function map(self2, fn) {
+function map(self, fn) {
 	let result = [  ];
-	for (const item of self2) {
+	for (const item of self) {
 		result.push(fn(item));
 	}
 	return result;
 }
-function filter(self4, predicate) {
-	let result2 = [  ];
-	for (const item3 of self4) {
-		if (predicate(item3)) {
-			result2.push(item3);
+function filter(self, predicate) {
+	let result = [  ];
+	for (const item of self) {
+		if (predicate(item)) {
+			result.push(item);
 		}
 	}
-	return result2;
+	return result;
 }
-function fold(self3, init, fn2) {
+function fold(self, init, fn) {
 	let accumulator = init;
-	for (const item2 of self3) {
-		accumulator = fn2(accumulator, item2);
+	for (const item of self) {
+		accumulator = fn(accumulator, item);
 	}
 	return accumulator;
 }
-function for_each(self5, fn3) {
-	for (const item4 of self5) {
-		fn3(item4);
+function for_each(self, fn) {
+	for (const item of self) {
+		fn(item);
 	}
 }
 let xs = [  ];
@@ -41,12 +41,12 @@ console.log(fold(map(xs, (n) => {
 }), 0, (a, b) => {
 	return a + b;
 }));
-console.log(filter(xs, (n2) => {
-	return n2 > 2;
+console.log(filter(xs, (n) => {
+	return n > 2;
 }).length);
-console.log(filter(xs, (n3) => {
-	return n3 > 5;
+console.log(filter(xs, (n) => {
+	return n > 5;
 }).length);
-for_each(xs, (n4) => {
-	return console.log(n4);
+for_each(xs, (n) => {
+	return console.log(n);
 });

@@ -18,8 +18,8 @@ function eq(self, other) {
 	}
 	return $b;
 }
-function debug(self2) {
-	const $c = self2;
+function debug(self) {
+	const $c = self;
 	let $d = null;
 	if ($c[0] === 0) {
 		const p0 = $c[1];
@@ -33,16 +33,16 @@ function debug(self2) {
 	}
 	return $d;
 }
-function to_json(self3) {
-	const $e = self3;
+function to_json(self) {
+	const $e = self;
 	let $f = null;
 	if ($e[0] === 0) {
-		const p03 = $e[1];
-		$f = "{\"Circle\":" + JSON.stringify(p03) + "}";
+		const p0 = $e[1];
+		$f = "{\"Circle\":" + JSON.stringify(p0) + "}";
 	} else if ($e[0] === 1) {
-		const p04 = $e[1];
-		const p12 = $e[2];
-		$f = "{\"Rect\":[" + JSON.stringify(p04) + "," + JSON.stringify(p12) + "]}";
+		const p02 = $e[1];
+		const p1 = $e[2];
+		$f = "{\"Rect\":[" + JSON.stringify(p02) + "," + JSON.stringify(p1) + "]}";
 	} else {
 		$f = "\"Empty\"";
 	}

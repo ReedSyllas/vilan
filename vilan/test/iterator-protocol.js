@@ -1,7 +1,7 @@
-function sum(self2) {
+function sum(self) {
 	let total = default2();
 	let seeded = false;
-	for (const item of self2) {
+	for (const item of self) {
 		if (seeded) {
 			total = total + item;
 		} else {
@@ -11,18 +11,18 @@ function sum(self2) {
 	}
 	return total;
 }
-function product(self3) {
-	let total2 = default2();
-	let seeded2 = false;
-	for (const item2 of self3) {
-		if (seeded2) {
-			total2 = total2 * item2;
+function product(self) {
+	let total = default2();
+	let seeded = false;
+	for (const item of self) {
+		if (seeded) {
+			total = total * item;
 		} else {
-			total2 = item2;
-			seeded2 = true;
+			total = item;
+			seeded = true;
 		}
 	}
-	return total2;
+	return total;
 }
 function default2() {
 

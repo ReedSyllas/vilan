@@ -1,5 +1,5 @@
-function combine(self2, b) {
-	return [ self2[0] + b[0] ];
+function combine(self, b) {
+	return [ self[0] + b[0] ];
 }
 function $a(self) {
 	return combine(combine(self, self), self);

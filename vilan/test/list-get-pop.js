@@ -10,11 +10,11 @@ function __list_get(list, index) {
 function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
-function first(self3) {
-	return __list_get(self3, 0);
+function first(self) {
+	return __list_get(self, 0);
 }
-function last(self4) {
-	return __list_get(self4, self4.length - 1);
+function last(self) {
+	return __list_get(self, self.length - 1);
 }
 function $a(self, fallback) {
 	const $b = self;
@@ -27,8 +27,8 @@ function $a(self, fallback) {
 	}
 	return $c;
 }
-function $d(self2) {
-	const $e = self2;
+function $d(self) {
+	const $e = self;
 	return $e[0] === 1;
 }
 let xs = [  ];

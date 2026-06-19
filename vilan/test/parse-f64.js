@@ -13,8 +13,8 @@ function $a(self, fallback) {
 	}
 	return $c;
 }
-function $d(self2) {
-	const $e = self2;
+function $d(self) {
+	const $e = self;
 	return $e[0] === 0;
 }
 console.log($a(__parse_f64("3.14"), 0));

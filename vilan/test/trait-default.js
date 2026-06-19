@@ -1,8 +1,8 @@
-function compare(self2, b2) {
+function compare(self, b) {
 	let $b = null;
-	if (self2[0] < b2[0]) {
+	if (self[0] < b[0]) {
 		$b = -1;
-	} else if (self2[0] > b2[0]) {
+	} else if (self[0] > b[0]) {
 		$b = 1;
 	} else {
 		$b = 0;
@@ -18,17 +18,17 @@ function $a(self, b) {
 	}
 	return $c;
 }
-function $d(self3, b3) {
+function $d(self, b) {
 	let $e = null;
-	if (compare(self3, b3) >= 0) {
-		$e = self3;
+	if (compare(self, b) >= 0) {
+		$e = self;
 	} else {
-		$e = b3;
+		$e = b;
 	}
 	return $e;
 }
-function $f(self4, min, max) {
-	return $d($a(self4, max), min);
+function $f(self, min, max) {
+	return $d($a(self, max), min);
 }
 const low = [ 3 ];
 const high = [ 7 ];

@@ -13,228 +13,228 @@ function $a(self, fn) {
 	}
 	return $c;
 }
-function $d(self2, fallback) {
-	const $e = self2;
+function $d(self, fallback) {
+	const $e = self;
 	let $f = null;
 	if ($e[0] === 0) {
-		const x2 = $e[1];
-		$f = x2;
+		const x = $e[1];
+		$f = x;
 	} else {
 		$f = fallback;
 	}
 	return $f;
 }
-function $g(self3, fn2) {
-	const $h = self3;
+function $g(self, fn) {
+	const $h = self;
 	let $i = null;
 	if ($h[0] === 0) {
-		const x3 = $h[1];
-		$i = [ 0, x3 ];
+		const x = $h[1];
+		$i = [ 0, x ];
 	} else {
-		const e3 = $h[1];
-		$i = [ 1, fn2(e3) ];
+		const e = $h[1];
+		$i = [ 1, fn(e) ];
 	}
 	return $i;
 }
-function $j(self2, fallback) {
-	const $k = self2;
+function $j(self, fallback) {
+	const $k = self;
 	let $l = null;
 	if ($k[0] === 0) {
-		const x2 = $k[1];
-		$l = x2;
+		const x = $k[1];
+		$l = x;
 	} else {
 		$l = fallback;
 	}
 	return $l;
 }
-function $m(self4, fn3) {
-	const $n = self4;
+function $m(self, fn) {
+	const $n = self;
 	let $o = null;
 	if ($n[0] === 0) {
-		const x4 = $n[1];
-		$o = fn3(x4);
+		const x = $n[1];
+		$o = fn(x);
 	} else {
 		$o = false;
 	}
 	return $o;
 }
-function $p(self5, fn4) {
-	const $q = self5;
+function $p(self, fn) {
+	const $q = self;
 	let $r = null;
 	if ($q[0] === 1) {
-		const e5 = $q[1];
-		$r = fn4(e5);
+		const e = $q[1];
+		$r = fn(e);
 	} else {
 		$r = false;
 	}
 	return $r;
 }
-function $s(self6, fn5) {
-	const $t = self6;
+function $s(self, fn) {
+	const $t = self;
 	let $u = null;
 	if ($t[0] === 0) {
-		const x5 = $t[1];
-		$u = fn5(x5);
+		const x = $t[1];
+		$u = fn(x);
 	} else {
-		const e6 = $t[1];
-		$u = [ 1, e6 ];
+		const e = $t[1];
+		$u = [ 1, e ];
 	}
 	return $u;
 }
-function $v(self2, fallback) {
-	const $w = self2;
+function $v(self, fallback) {
+	const $w = self;
 	let $x = null;
 	if ($w[0] === 0) {
-		const x2 = $w[1];
-		$x = x2;
+		const x = $w[1];
+		$x = x;
 	} else {
 		$x = fallback;
 	}
 	return $x;
 }
-function $y(self7, fn6) {
-	const $z = self7;
+function $y(self, fn) {
+	const $z = self;
 	let $A = null;
 	if ($z[0] === 0) {
-		const x6 = $z[1];
-		$A = [ 0, x6 ];
+		const x = $z[1];
+		$A = [ 0, x ];
 	} else {
-		const e8 = $z[1];
-		$A = fn6(e8);
+		const e = $z[1];
+		$A = fn(e);
 	}
 	return $A;
 }
-function $B(self2, fallback) {
-	const $C = self2;
+function $B(self, fallback) {
+	const $C = self;
 	let $D = null;
 	if ($C[0] === 0) {
-		const x2 = $C[1];
-		$D = x2;
+		const x = $C[1];
+		$D = x;
 	} else {
 		$D = fallback;
 	}
 	return $D;
 }
-function $E(self8, fn7) {
-	const $F = self8;
+function $E(self, fn) {
+	const $F = self;
 	let $G = null;
 	if ($F[0] === 0) {
-		const x7 = $F[1];
-		$G = x7;
+		const x = $F[1];
+		$G = x;
 	} else {
-		const e10 = $F[1];
-		$G = fn7(e10);
+		const e = $F[1];
+		$G = fn(e);
 	}
 	return $G;
 }
-function $H(self9) {
-	const $I = self9;
+function $H(self) {
+	const $I = self;
 	let $J = null;
 	if ($I[0] === 0) {
-		const x8 = $I[1];
-		$J = [ 0, x8 ];
+		const x = $I[1];
+		$J = [ 0, x ];
 	} else {
 		$J = [ 1 ];
 	}
 	return $J;
 }
-function $K(self10) {
-	const $L = self10;
+function $K(self) {
+	const $L = self;
 	return $L[0] === 0;
 }
-function $M(self11) {
-	const $N = self11;
+function $M(self) {
+	const $N = self;
 	let $O = null;
 	if ($N[0] === 1) {
-		const e11 = $N[1];
-		$O = [ 0, e11 ];
+		const e = $N[1];
+		$O = [ 0, e ];
 	} else {
 		$O = [ 1 ];
 	}
 	return $O;
 }
-function $P(self12, fallback2) {
-	const $Q = self12;
+function $P(self, fallback) {
+	const $Q = self;
 	let $R = null;
 	if ($Q[0] === 0) {
-		const x9 = $Q[1];
-		$R = x9;
+		const x = $Q[1];
+		$R = x;
 	} else {
-		$R = fallback2;
+		$R = fallback;
 	}
 	return $R;
 }
-function $S(self13) {
-	const $T = self13;
+function $S(self) {
+	const $T = self;
 	let $U = null;
 	if ($T[0] === 0) {
-		const x10 = $T[1];
-		$U = x10;
+		const x = $T[1];
+		$U = x;
 	} else {
 		$U = default2();
 	}
 	return $U;
 }
-function $V(self14, b) {
-	const $W = self14;
+function $V(self, b) {
+	const $W = self;
 	let $X = null;
 	if ($W[0] === 0) {
 		$X = b;
 	} else {
-		const e12 = $W[1];
-		$X = [ 1, e12 ];
+		const e = $W[1];
+		$X = [ 1, e ];
 	}
 	return $X;
 }
-function $Y(self2, fallback) {
-	const $Z = self2;
+function $Y(self, fallback) {
+	const $Z = self;
 	let $aa = null;
 	if ($Z[0] === 0) {
-		const x2 = $Z[1];
-		$aa = x2;
+		const x = $Z[1];
+		$aa = x;
 	} else {
 		$aa = fallback;
 	}
 	return $aa;
 }
-function $ab(self15, b2) {
-	const $ac = self15;
+function $ab(self, b) {
+	const $ac = self;
 	let $ad = null;
 	if ($ac[0] === 0) {
-		const x11 = $ac[1];
-		$ad = [ 0, x11 ];
+		const x = $ac[1];
+		$ad = [ 0, x ];
 	} else {
-		$ad = b2;
+		$ad = b;
 	}
 	return $ad;
 }
-function $ae(self2, fallback) {
-	const $af = self2;
+function $ae(self, fallback) {
+	const $af = self;
 	let $ag = null;
 	if ($af[0] === 0) {
-		const x2 = $af[1];
-		$ag = x2;
+		const x = $af[1];
+		$ag = x;
 	} else {
 		$ag = fallback;
 	}
 	return $ag;
 }
-function $ah(self16) {
-	const $ai = self16;
+function $ah(self) {
+	const $ai = self;
 	let $aj = null;
 	if ($ai[0] === 0 && $ai[1][0] === 0) {
-		const x12 = $ai[1][1];
-		$aj = [ 0, [ 0, x12 ] ];
+		const x = $ai[1][1];
+		$aj = [ 0, [ 0, x ] ];
 	} else if ($ai[0] === 0 && $ai[1][0] === 1) {
 		$aj = [ 1 ];
 	} else {
-		const e13 = $ai[1];
-		$aj = [ 0, [ 1, e13 ] ];
+		const e = $ai[1];
+		$aj = [ 0, [ 1, e ] ];
 	}
 	return $aj;
 }
-function $ak(self10) {
-	const $al = self10;
+function $ak(self) {
+	const $al = self;
 	return $al[0] === 0;
 }
 const ok = [ 0, 10 ];
@@ -242,22 +242,22 @@ const err = [ 1, "boom" ];
 console.log($d($a(ok, (n) => {
 	return n + 1;
 }), 0));
-console.log($j($g(err, (e2) => {
-	return e2;
+console.log($j($g(err, (e) => {
+	return e;
 }), 0));
-console.log($m(ok, (n2) => {
-	return n2 > 5;
+console.log($m(ok, (n) => {
+	return n > 5;
 }));
-console.log($p(err, (e4) => {
+console.log($p(err, (e) => {
 	return true;
 }));
-console.log($v($s(ok, (n3) => {
-	return [ 0, n3 * 2 ];
+console.log($v($s(ok, (n) => {
+	return [ 0, n * 2 ];
 }), 0));
-console.log($B($y(err, (e7) => {
+console.log($B($y(err, (e) => {
 	return [ 0, 7 ];
 }), 0));
-console.log($E(err, (e9) => {
+console.log($E(err, (e) => {
 	return 99;
 }));
 console.log($K($H(ok)));

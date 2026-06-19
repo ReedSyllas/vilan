@@ -1,21 +1,21 @@
-function default4() {
+function default2() {
 	return "";
 }
-function default5() {
+function default3() {
 	return false;
 }
-function default3() {
+function default4() {
 	return 0;
 }
 function eq(self, other) {
 	return self[0] === other[0] && self[1] === other[1] && self[2] === other[2];
 }
-function default2() {
-	return [ default3(), default4(), default5() ];
+function default5() {
+	return [ default4(), default2(), default3() ];
 }
-const d = default2();
+const d = default5();
 console.log(d[0]);
 console.log(d[1]);
 console.log(d[2]);
-const d2 = default2();
+const d2 = default5();
 console.log(eq(d, d2));

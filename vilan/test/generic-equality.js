@@ -1,23 +1,23 @@
-function eq(self, b2) {
-	return self[0] === b2[0] && self[1] === b2[1];
+function eq(self, b) {
+	return self[0] === b[0] && self[1] === b[1];
 }
 function $a(a, b) {
 	return eq(a, b);
 }
-function $b(a2, b3) {
-	return eq(a2, b3);
+function $b(a, b) {
+	return eq(a, b);
 }
-function $c(a3, b4) {
-	return !(eq(a3, b4));
+function $c(a, b) {
+	return !(eq(a, b));
 }
 function $d(a, b) {
 	return a === b;
 }
-function $e(a3, b4) {
-	return a3 !== b4;
+function $e(a, b) {
+	return a !== b;
 }
-function $f(self2, b5) {
-	const $g = [ self2, b5 ];
+function $f(self, b) {
+	const $g = [ self, b ];
 	let $h = null;
 	if ($g[0][0] === 0 && $g[1][0] === 0) {
 		const x = $g[0][1];

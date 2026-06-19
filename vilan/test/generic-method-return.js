@@ -1,8 +1,8 @@
 function $a(self) {
 	return self[0];
 }
-function $b(self2) {
-	return [ 0, self2[0] ];
+function $b(self) {
+	return [ 0, self[0] ];
 }
 const b = [ [ 5 ] ];
 console.log($a(b)[0]);

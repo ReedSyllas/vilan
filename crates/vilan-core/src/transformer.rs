@@ -389,13 +389,16 @@ impl<'src> Transformer<'src> {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let body = self.formatter.file(
-            &t_functions
-                .chain(t_instances)
-                .chain(t_global_variables.into_iter())
-                .chain(t_main_fn_body.into_iter())
-                .collect::<Vec<_>>(),
-        );
+        let mut nodes = t_functions
+            .chain(t_instances)
+            .chain(t_global_variables)
+            .chain(t_main_fn_body)
+            .collect::<Vec<_>>();
+        // Re-allocate names over the JS scope tree so disjoint scopes share them
+        // (readable: both sibling `value`s stay `value`; release: reuse short
+        // names per function).
+        rename_for_scopes(&self.ng, self.program, &mut nodes);
+        let body = self.formatter.file(&nodes);
         let output = if prelude.is_empty() {
             body
         } else {
@@ -2719,4 +2722,349 @@ impl NameGenerator {
 
         s.chars().rev().collect()
     }
+}
+
+// --- Scope-aware name allocation --------------------------------------------
+//
+// The transform assigns each binding a globally-unique name. That's correct but
+// not optimal: two locals named `value` in sibling functions become `value` and
+// `value2`, and obfuscated names never reuse a letter across functions. This
+// post-pass re-allocates names over the *JavaScript* scope tree so disjoint
+// scopes share names: in readable mode both `value`s stay `value`; in release a
+// short name is reused in every function.
+//
+// It runs on the assembled node tree, where the real lexical scopes are visible,
+// so it's decoupled from any Vilan/JS scope mismatch. Scopes are function-grained
+// (a block's `let`s belong to the enclosing function — safe, just less reuse).
+// The collect walk may be incomplete (a missed binding just keeps its unique
+// name); the rename walk must be exhaustive, so every node variant is handled.
+
+/// The bindings declared directly in one JS function scope, plus its child
+/// scopes (nested functions/closures). Names are the binding's current (unique)
+/// output name, the key for the rename.
+struct JsScope {
+    declarations: Vec<String>,
+    children: Vec<JsScope>,
+}
+
+/// `idx`th obfuscated short name (`a`, `b`, …, `aa`, …) — the release sequence.
+fn short_name_from_idx(idx: u64) -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let base = CHARS.len() as u64;
+    let mut bytes = Vec::new();
+    let mut num = idx;
+    loop {
+        bytes.push(CHARS[(num % base) as usize]);
+        num /= base;
+        if num < 1 {
+            break;
+        }
+        num -= 1;
+    }
+    bytes.reverse();
+    String::from_utf8(bytes).unwrap()
+}
+
+/// The shortest obfuscated name not already in `used` (release allocation).
+fn shortest_available(used: &HashSet<String>) -> String {
+    let mut idx = 0;
+    loop {
+        let name = short_name_from_idx(idx);
+        if !used.contains(&name) {
+            return name;
+        }
+        idx += 1;
+    }
+}
+
+/// `base`, or `base2`/`base3`/… if taken (readable allocation).
+fn disambiguated(base: &str, used: &HashSet<String>) -> String {
+    let base = sanitize_identifier(base);
+    if !used.contains(&base) {
+        return base;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base}{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+/// The scope rooted at a function/closure: its parameters, then everything its
+/// body declares.
+fn function_scope(
+    parameters: &[js::Parameter],
+    body: &[js::Node],
+    renameable: &HashSet<String>,
+) -> JsScope {
+    let mut declarations: Vec<String> = parameters
+        .iter()
+        .filter(|parameter| renameable.contains(&parameter.name))
+        .map(|parameter| parameter.name.clone())
+        .collect();
+    let mut children = Vec::new();
+    collect_declarations(body, renameable, &mut declarations, &mut children);
+    JsScope {
+        declarations,
+        children,
+    }
+}
+
+/// Collects, from a run of statements at one function level, the bindings
+/// declared directly here (into `declarations`) and the nested function/closure
+/// scopes (into `children`). Block bodies (`if`/`while`/`for`) are part of this
+/// scope; functions and closures start child scopes.
+fn collect_declarations(
+    nodes: &[js::Node],
+    renameable: &HashSet<String>,
+    declarations: &mut Vec<String>,
+    children: &mut Vec<JsScope>,
+) {
+    for node in nodes {
+        collect_node(node, renameable, declarations, children);
+    }
+}
+
+fn collect_node(
+    node: &js::Node,
+    renameable: &HashSet<String>,
+    declarations: &mut Vec<String>,
+    children: &mut Vec<JsScope>,
+) {
+    match node {
+        js::Node::Function(function) => {
+            if renameable.contains(&function.name) {
+                declarations.push(function.name.clone());
+            }
+            children.push(function_scope(
+                &function.parameters,
+                &function.body,
+                renameable,
+            ));
+        }
+        js::Node::Closure(closure) => {
+            children.push(function_scope(
+                &closure.parameters,
+                &closure.body,
+                renameable,
+            ));
+        }
+        js::Node::ConstVariable(variable) | js::Node::LetVariable(variable) => {
+            if renameable.contains(&variable.name) {
+                declarations.push(variable.name.clone());
+            }
+            collect_node(&variable.value, renameable, declarations, children);
+        }
+        js::Node::ForOf(binding, iterable, body) => {
+            if renameable.contains(binding) {
+                declarations.push(binding.clone());
+            }
+            collect_node(iterable, renameable, declarations, children);
+            collect_declarations(body, renameable, declarations, children);
+        }
+        js::Node::While(condition, body) => {
+            collect_node(condition, renameable, declarations, children);
+            collect_declarations(body, renameable, declarations, children);
+        }
+        js::Node::If(branch) => collect_if(branch, renameable, declarations, children),
+        js::Node::Call(subject, arguments) => {
+            collect_node(subject, renameable, declarations, children);
+            collect_declarations(arguments, renameable, declarations, children);
+        }
+        js::Node::Assignment(left, right)
+        | js::Node::Binary(_, left, right)
+        | js::Node::PropertyIndex(left, right) => {
+            collect_node(left, renameable, declarations, children);
+            collect_node(right, renameable, declarations, children);
+        }
+        js::Node::Await(inner)
+        | js::Node::Unary(_, inner)
+        | js::Node::Return(inner)
+        | js::Node::Throw(inner)
+        | js::Node::Property(inner, _) => collect_node(inner, renameable, declarations, children),
+        js::Node::Array(items) => collect_declarations(items, renameable, declarations, children),
+        js::Node::Local(_)
+        | js::Node::String(_)
+        | js::Node::Number(_, _)
+        | js::Node::Bool(_)
+        | js::Node::Null
+        | js::Node::Void
+        | js::Node::Break
+        | js::Node::Continue => {}
+    }
+}
+
+fn collect_if(
+    branch: &js::IfBranch,
+    renameable: &HashSet<String>,
+    declarations: &mut Vec<String>,
+    children: &mut Vec<JsScope>,
+) {
+    match branch {
+        js::IfBranch::If(condition, body, else_branch) => {
+            collect_node(condition, renameable, declarations, children);
+            collect_declarations(body, renameable, declarations, children);
+            if let Some(else_branch) = else_branch {
+                collect_if(else_branch, renameable, declarations, children);
+            }
+        }
+        js::IfBranch::Else(body) => collect_declarations(body, renameable, declarations, children),
+    }
+}
+
+/// Allocates names over the scope tree, top-down. A scope's bindings get names
+/// not used by an ancestor (no shadowing) or a same-scope sibling; disjoint
+/// scopes (passed the same inherited set) reuse freely. `release` picks the
+/// shortest obfuscated name; otherwise the binding's source name, disambiguated.
+fn allocate_scope(
+    scope: &JsScope,
+    inherited: &HashSet<String>,
+    release: bool,
+    source_of: &HashMap<String, String>,
+    rename: &mut HashMap<String, String>,
+) {
+    let mut used = inherited.clone();
+    for old in &scope.declarations {
+        let new = if release {
+            shortest_available(&used)
+        } else {
+            // Readable: `renameable` only holds source-named bindings, so this is
+            // always present.
+            disambiguated(source_of.get(old).unwrap_or(old), &used)
+        };
+        rename.insert(old.clone(), new.clone());
+        used.insert(new);
+    }
+    for child in &scope.children {
+        allocate_scope(child, &used, release, source_of, rename);
+    }
+}
+
+/// Applies the rename map to every binding and reference in the tree. Property
+/// names and untouched identifiers (externs, helpers — never in the map) are left
+/// as-is. Must be exhaustive: a missed reference would dangle.
+fn rename_nodes(nodes: &mut [js::Node], rename: &HashMap<String, String>) {
+    for node in nodes {
+        rename_node(node, rename);
+    }
+}
+
+fn rename_one(name: &mut String, rename: &HashMap<String, String>) {
+    if let Some(new) = rename.get(name) {
+        *name = new.clone();
+    }
+}
+
+fn rename_node(node: &mut js::Node, rename: &HashMap<String, String>) {
+    match node {
+        js::Node::Local(name) => rename_one(name, rename),
+        js::Node::Function(function) => {
+            rename_one(&mut function.name, rename);
+            for parameter in &mut function.parameters {
+                rename_one(&mut parameter.name, rename);
+            }
+            rename_nodes(&mut function.body, rename);
+        }
+        js::Node::Closure(closure) => {
+            for parameter in &mut closure.parameters {
+                rename_one(&mut parameter.name, rename);
+            }
+            rename_nodes(&mut closure.body, rename);
+        }
+        js::Node::ConstVariable(variable) | js::Node::LetVariable(variable) => {
+            rename_one(&mut variable.name, rename);
+            rename_node(&mut variable.value, rename);
+        }
+        js::Node::ForOf(binding, iterable, body) => {
+            rename_one(binding, rename);
+            rename_node(iterable, rename);
+            rename_nodes(body, rename);
+        }
+        js::Node::While(condition, body) => {
+            rename_node(condition, rename);
+            rename_nodes(body, rename);
+        }
+        js::Node::If(branch) => rename_if(branch, rename),
+        js::Node::Call(subject, arguments) => {
+            rename_node(subject, rename);
+            rename_nodes(arguments, rename);
+        }
+        js::Node::Assignment(left, right)
+        | js::Node::Binary(_, left, right)
+        | js::Node::PropertyIndex(left, right) => {
+            rename_node(left, rename);
+            rename_node(right, rename);
+        }
+        js::Node::Await(inner)
+        | js::Node::Unary(_, inner)
+        | js::Node::Return(inner)
+        | js::Node::Throw(inner)
+        // `Property`'s member is a property name, not a binding — recurse only the subject.
+        | js::Node::Property(inner, _) => rename_node(inner, rename),
+        js::Node::Array(items) => rename_nodes(items, rename),
+        js::Node::String(_)
+        | js::Node::Number(_, _)
+        | js::Node::Bool(_)
+        | js::Node::Null
+        | js::Node::Void
+        | js::Node::Break
+        | js::Node::Continue => {}
+    }
+}
+
+fn rename_if(branch: &mut js::IfBranch, rename: &HashMap<String, String>) {
+    match branch {
+        js::IfBranch::If(condition, body, else_branch) => {
+            rename_node(condition, rename);
+            rename_nodes(body, rename);
+            if let Some(else_branch) = else_branch {
+                rename_if(else_branch, rename);
+            }
+        }
+        js::IfBranch::Else(body) => rename_nodes(body, rename),
+    }
+}
+
+/// Re-allocates the program's binding names over its JS scope tree (see the
+/// machinery above) and rewrites the node tree. A no-op for the annotated style
+/// (its names carry `/*source*/` comments the rename can't cleanly reuse).
+fn rename_for_scopes(ng: &NameGenerator, program: &Program, nodes: &mut Vec<js::Node>) {
+    let release = match ng.style {
+        NameStyle::Annotated => return,
+        NameStyle::Readable => false,
+        NameStyle::Plain => true,
+    };
+    // Each renameable binding's current (unique) name -> its source name.
+    let mut source_of: HashMap<String, String> = HashMap::new();
+    for (id, name) in &ng.names {
+        if let Some(source) = ng.source_names.get(id) {
+            source_of.insert(name.clone(), source.clone());
+        }
+    }
+    // Readable reuses only source-named bindings (anonymous temps keep their
+    // unique `$`-name); release reuses every generated name.
+    let renameable: HashSet<String> = if release {
+        ng.names.values().cloned().collect()
+    } else {
+        source_of.keys().cloned().collect()
+    };
+    if renameable.is_empty() {
+        return;
+    }
+    // The reserved set (keywords, referenced globals, `__`-helpers, the program's
+    // `@extern` symbols) counts as used in every scope, so nothing collides.
+    let reserved = collect_reserved_names(program);
+    let mut declarations = Vec::new();
+    let mut children = Vec::new();
+    collect_declarations(nodes, &renameable, &mut declarations, &mut children);
+    let global = JsScope {
+        declarations,
+        children,
+    };
+    let mut rename = HashMap::new();
+    allocate_scope(&global, &reserved, release, &source_of, &mut rename);
+    rename_nodes(nodes, &rename);
 }

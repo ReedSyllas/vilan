@@ -1,8 +1,8 @@
 function to_json(self) {
 	return "{\"x\":" + JSON.stringify(self[0]) + "," + "\"y\":" + JSON.stringify(self[1]) + "}";
 }
-function to_json2(self2) {
-	return "{\"name\":" + JSON.stringify(self2[0]) + "," + "\"age\":" + JSON.stringify(self2[1]) + "," + "\"active\":" + JSON.stringify(self2[2]) + "," + "\"home\":" + to_json(self2[3]) + "}";
+function to_json2(self) {
+	return "{\"name\":" + JSON.stringify(self[0]) + "," + "\"age\":" + JSON.stringify(self[1]) + "," + "\"active\":" + JSON.stringify(self[2]) + "," + "\"home\":" + to_json(self[3]) + "}";
 }
 const p = [ 1, 2 ];
 console.log(to_json(p));

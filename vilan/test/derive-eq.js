@@ -1,7 +1,7 @@
 function eq(self, other) {
 	return self[0] === other[0] && self[1] === other[1];
 }
-function eq2(self2, other2) {
+function eq2(self, other) {
 	return true;
 }
 const a = [ 1, 2 ];

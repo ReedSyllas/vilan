@@ -7,21 +7,21 @@ function fact(n) {
 	}
 	return $a;
 }
-function is_even(n2) {
+function is_even(n) {
 	let $b = null;
-	if (n2 === 0) {
+	if (n === 0) {
 		$b = true;
 	} else {
-		$b = is_odd(n2 - 1);
+		$b = is_odd(n - 1);
 	}
 	return $b;
 }
-function is_odd(n3) {
+function is_odd(n) {
 	let $c = null;
-	if (n3 === 0) {
+	if (n === 0) {
 		$c = false;
 	} else {
-		$c = is_even(n3 - 1);
+		$c = is_even(n - 1);
 	}
 	return $c;
 }

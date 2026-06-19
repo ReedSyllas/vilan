@@ -1,5 +1,5 @@
-function value_of(self2) {
-	return self2[0];
+function value_of(self) {
+	return self[0];
 }
 function $a(self, b2) {
 	return value_of(self) + value_of(b2);

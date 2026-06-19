@@ -24,12 +24,12 @@ function $a(self, fallback) {
 	}
 	return $c;
 }
-function $d(self2) {
-	const $e = self2;
+function $d(self) {
+	const $e = self;
 	return $e[0] === 0;
 }
-function $f(self3) {
-	return self3.size === 0;
+function $f(self) {
+	return self.size === 0;
 }
 function $g(self, fallback) {
 	const $h = self;

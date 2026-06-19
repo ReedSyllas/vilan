@@ -1,16 +1,16 @@
 function get_mut(self) {
 	return [ 0, [ self, 0 ] ];
 }
-function get(self2) {
-	return [ 0, [ self2, 0 ] ];
+function get(self) {
+	return [ 0, [ self, 0 ] ];
 }
-function inner_mut(self3) {
-	return [ 0, self3[0] ];
+function inner_mut(self) {
+	return [ 0, self[0] ];
 }
-function item_mut(self4, index) {
+function item_mut(self, index) {
 	let $g = null;
-	if (index < self4[1].length) {
-		$g = [ 0, [ self4[1], index ] ];
+	if (index < self[1].length) {
+		$g = [ 0, [ self[1], index ] ];
 	} else {
 		$g = [ 1 ];
 	}

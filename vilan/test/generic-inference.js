@@ -1,8 +1,8 @@
-function pick(a2, b2) {
-	return a2 + b2;
+function pick(a, b) {
+	return a + b;
 }
-function pick2(a3, b3) {
-	return [ a3[0] + b3[0] ];
+function pick2(a, b) {
+	return [ a[0] + b[0] ];
 }
 function $a(a, b) {
 	return pick(a, b);

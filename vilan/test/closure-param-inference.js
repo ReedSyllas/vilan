@@ -1,7 +1,7 @@
-function fold(self5, init, fn4) {
+function fold(self, init, fn) {
 	let accumulator = init;
-	for (const item2 of self5) {
-		accumulator = fn4(accumulator, item2);
+	for (const item of self) {
+		accumulator = fn(accumulator, item);
 	}
 	return accumulator;
 }
@@ -16,50 +16,50 @@ function $a(self, fn) {
 	}
 	return $c;
 }
-function $d(self2, fallback) {
-	const $e = self2;
+function $d(self, fallback) {
+	const $e = self;
 	let $f = null;
 	if ($e[0] === 0) {
-		const x2 = $e[1];
-		$f = x2;
+		const x = $e[1];
+		$f = x;
 	} else {
 		$f = fallback;
 	}
 	return $f;
 }
-function $g(self3, fn2) {
-	const $h = self3;
+function $g(self, fn) {
+	const $h = self;
 	let $i = null;
 	if ($h[0] === 0) {
-		const x3 = $h[1];
-		$i = fn2(x3);
+		const x = $h[1];
+		$i = fn(x);
 	} else {
 		$i = false;
 	}
 	return $i;
 }
-function $j(self4, fn3) {
+function $j(self, fn) {
 	let result = [  ];
-	for (const item of self4) {
-		result.push(fn3(item));
+	for (const item of self) {
+		result.push(fn(item));
 	}
 	return result;
 }
-function $k(self6, predicate) {
-	let result2 = [  ];
-	for (const item3 of self6) {
-		if (predicate(item3)) {
-			result2.push(item3);
+function $k(self, predicate) {
+	let result = [  ];
+	for (const item of self) {
+		if (predicate(item)) {
+			result.push(item);
 		}
 	}
-	return result2;
+	return result;
 }
 const p = [ 0, [ 3, 4 ] ];
 console.log($d($a(p, (q) => {
 	return q[0] + q[1];
 }), 0));
-console.log($g(p, (q2) => {
-	return q2[0] === 3;
+console.log($g(p, (q) => {
+	return q[0] === 3;
 }));
 let pts = [  ];
 pts.push([ 1, 10 ]);
@@ -69,6 +69,6 @@ console.log(fold($j(pts, (pt) => {
 }), 0, (a, b) => {
 	return a + b;
 }));
-console.log($k(pts, (pt2) => {
-	return pt2[1] > 15;
+console.log($k(pts, (pt) => {
+	return pt[1] > 15;
 }).length);

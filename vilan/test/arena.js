@@ -4,8 +4,8 @@ function __list_pop(list) {
 function new2() {
 	return [ [  ], [  ] ];
 }
-function sum_from(arena, handle5) {
-	const $y = $v(arena, handle5);
+function sum_from(arena, handle) {
+	const $y = $v(arena, handle);
 	let $z = null;
 	if ($y[0] === 0) {
 		const node = $y[1];
@@ -33,27 +33,27 @@ function $a(self, value) {
 	}
 	return $c;
 }
-function $d(self2) {
-	return self2[0].length - self2[1].length;
+function $d(self) {
+	return self[0].length - self[1].length;
 }
-function $g(self5) {
-	const $h = self5;
+function $g(self) {
+	const $h = self;
 	return $h[0] === 0;
 }
-function $f(self4, handle2) {
-	return handle2[0] < self4[0].length && self4[0][handle2[0]][0] === handle2[1] && $g(self4[0][handle2[0]][1]);
+function $f(self, handle) {
+	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $g(self[0][handle[0]][1]);
 }
-function $e(self3, handle) {
+function $e(self, handle) {
 	let $i = null;
-	if ($f(self3, handle)) {
-		$i = self3[0][handle[0]][1];
+	if ($f(self, handle)) {
+		$i = self[0][handle[0]][1];
 	} else {
 		$i = [ 1 ];
 	}
 	return $i;
 }
-function $j(self6, fallback) {
-	const $k = self6;
+function $j(self, fallback) {
+	const $k = self;
 	let $l = null;
 	if ($k[0] === 0) {
 		const x = $k[1];
@@ -63,31 +63,31 @@ function $j(self6, fallback) {
 	}
 	return $l;
 }
-function $m(self7, handle3, value2) {
+function $m(self, handle, value) {
 	let $n = null;
-	if ($f(self7, handle3)) {
-		self7[0][handle3[0]][1] = [ 0, value2 ];
+	if ($f(self, handle)) {
+		self[0][handle[0]][1] = [ 0, value ];
 		$n = true;
 	} else {
 		$n = false;
 	}
 	return $n;
 }
-function $o(self8, handle4) {
+function $o(self, handle) {
 	let $p = null;
-	if ($f(self8, handle4)) {
-		const removed = self8[0][handle4[0]][1];
-		self8[0][handle4[0]][0] = self8[0][handle4[0]][0] + 1;
-		self8[0][handle4[0]][1] = [ 1 ];
-		self8[1].push(handle4[0]);
+	if ($f(self, handle)) {
+		const removed = self[0][handle[0]][1];
+		self[0][handle[0]][0] = self[0][handle[0]][0] + 1;
+		self[0][handle[0]][1] = [ 1 ];
+		self[1].push(handle[0]);
 		$p = removed;
 	} else {
 		$p = [ 1 ];
 	}
 	return $p;
 }
-function $q(self5) {
-	const $r = self5;
+function $q(self) {
+	const $r = self;
 	return $r[0] === 0;
 }
 function $s(self, value) {
@@ -104,13 +104,13 @@ function $s(self, value) {
 	}
 	return $u;
 }
-function $w(self4, handle2) {
-	return handle2[0] < self4[0].length && self4[0][handle2[0]][0] === handle2[1] && $g(self4[0][handle2[0]][1]);
+function $w(self, handle) {
+	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $g(self[0][handle[0]][1]);
 }
-function $v(self3, handle) {
+function $v(self, handle) {
 	let $x = null;
-	if ($w(self3, handle)) {
-		$x = self3[0][handle[0]][1];
+	if ($w(self, handle)) {
+		$x = self[0][handle[0]][1];
 	} else {
 		$x = [ 1 ];
 	}
