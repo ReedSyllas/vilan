@@ -1,0 +1,40 @@
+// `std::dom` — the browser (DOM) platform layer: a minimal binding to the host
+// document, elements, and events. Only available when building for the browser
+// (`vilan build --target browser`).
+//
+// An `Element` is an opaque handle to a live DOM node — like `Shared`, it is a
+// reference, not a value: methods mutate the node in place and binding/passing it
+// shares the one node rather than snapshotting it.
+
+external struct Element;
+
+// `document.getElementById(id)` — the element with that id (the mount point a
+// page provides, e.g. `<div id="app">`).
+@extern("document.getElementById")
+external fun get_element_by_id(id: str): Element;
+
+// `document.createElement(tag)` — a fresh, unattached element of that tag.
+@extern("document.createElement")
+external fun create_element(tag: str): Element;
+
+impl Element {
+	// Sets the element's text content (`element.textContent = text`).
+	@extern(set, "textContent")
+	external fun set_text(self, text: str): void;
+
+	// Sets the element's CSS class (`element.className = name`).
+	@extern(set, "className")
+	external fun set_class(self, name: str): void;
+
+	// Sets an attribute (`element.setAttribute(name, value)`).
+	@extern(method, "setAttribute")
+	external fun set_attribute(self, name: str, value: str): void;
+
+	// Appends `child` as the element's last child.
+	@extern(method, "appendChild")
+	external fun append(self, child: Element): void;
+
+	// Registers `handler` to run on `event` (e.g. `"click"`).
+	@extern(method, "addEventListener")
+	external fun on(self, event: str, handler: || void): void;
+}

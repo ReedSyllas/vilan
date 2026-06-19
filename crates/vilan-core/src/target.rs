@@ -49,8 +49,8 @@ impl Platform {
         match name {
             // The Node layer: filesystem, process, and the HTTP server.
             "fs" | "http" | "process" => Platform::Node,
-            // The browser (DOM) layer is populated by the browser-backend work;
-            // its module names are listed here as they land.
+            // The browser (DOM) layer.
+            "dom" => Platform::Browser,
             _ => Platform::Core,
         }
     }

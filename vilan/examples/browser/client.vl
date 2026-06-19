@@ -1,0 +1,28 @@
+// A browser client written in Vilan — compile it with
+//   vilan build --target browser client.vl
+// then open index.html (which mounts `<div id="app">` and loads the bundle).
+//
+// Demonstrates the `std::dom` layer: looking up the mount point, building
+// elements, setting text, and wiring an event handler (a closure) — all lowered
+// to DOM globals, with no Node host imports.
+
+import std::dom::{ Element, get_element_by_id, create_element };
+
+fun main() {
+	let app = get_element_by_id("app");
+
+	let heading = create_element("h1");
+	heading.set_text("Hello from Vilan, in the browser.");
+	app.append(heading);
+
+	let button = create_element("button");
+	button.set_text("Add a note");
+	// The click handler is an ordinary closure; it captures `app` and appends a
+	// fresh paragraph each time the button is pressed.
+	button.on("click", || {
+		let note = create_element("p");
+		note.set_text("clicked!");
+		app.append(note);
+	});
+	app.append(button);
+}
