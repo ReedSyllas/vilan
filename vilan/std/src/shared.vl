@@ -1,0 +1,27 @@
+// `std::shared` — `Shared<T>`, reference-counted shared mutable state for when
+// ownership is genuinely diffuse (several independent subjects holding the *same*
+// mutable value, with no natural arena owner). This is the one place reference
+// identity and shared mutation are explicit in the type, so the cost is legible
+// at the use site — prefer an `Arena` + `Handle` whenever an owner exists.
+//
+// `Shared` is `external` (an opaque cell): unlike an ordinary aggregate it is
+// *not* deep-copied, so `clone()` and ordinary binding share the one underlying
+// cell rather than snapshotting it. `read()`/`write()` project the cell's value;
+// a write through one is visible through every other handle to the same cell.
+
+external struct Shared<T>;
+
+impl Shared<type T> {
+	// Wrap `value` in a fresh shared cell.
+	external fun new(value: T): Shared<T>;
+
+	// Another handle to the *same* cell (shared, not copied).
+	external fun clone(self): Shared<T>;
+
+	// The cell's value for reading.
+	external fun read(self): T;
+
+	// The cell's value for in-place mutation — `a.write().field = …` is visible
+	// through every handle to the cell.
+	external fun write(self): T;
+}

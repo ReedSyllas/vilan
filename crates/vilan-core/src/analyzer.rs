@@ -4405,6 +4405,20 @@ impl<'src> Analyzer<'src> {
                                 .get(&function_id)
                                 .map(|f| f.return_type_id.get_type(self))
                                 .unwrap_or(Type::Void);
+                            // Substitute the receiver's impl bindings into a generic
+                            // external return type — `shared.read(): T` on a
+                            // `Shared<Counter>` yields `Counter`, not abstract `T`.
+                            let return_type = if let Some(method_substitution) =
+                                self.method_call_substitution.get(&id).cloned()
+                            {
+                                let mut context = substitution_context.clone();
+                                for (constraint_id, type_id) in method_substitution {
+                                    context.insert(constraint_id, type_id);
+                                }
+                                self.substitute_type(&return_type, &context)
+                            } else {
+                                return_type
+                            };
                             return self.freshen_list_element_slots(return_type, id);
                         };
                         let mut substitution_context = substitution_context.clone();
@@ -4864,7 +4878,13 @@ impl<'src> Analyzer<'src> {
                 .get(constraint_id)
                 .map(|type_id| {
                     let resolved = type_id.get_type(self);
-                    self.substitute_type(&resolved, substitution_context)
+                    // Guard against a self-mapping (`T -> T`), which the receiver's
+                    // own impl parameter can produce, so substitution terminates.
+                    if matches!(&resolved, Type::Generic(c) if c == constraint_id) {
+                        resolved
+                    } else {
+                        self.substitute_type(&resolved, substitution_context)
+                    }
                 })
                 .unwrap_or_else(|| type_.clone()),
             // A nominal type substitutes its arguments (`Option<T>` -> `Option<i32>`
@@ -7191,6 +7211,14 @@ pub enum Intrinsic {
     ListGet,
     // `List.pop(): Option<T>` -> a runtime helper that removes the last element.
     ListPop,
+    // `Shared::new(value)` -> a `{ v: value }` cell (a JS object, so `__clone`
+    // shares it by reference instead of deep-copying — that is what makes a
+    // `Shared` co-owned rather than snapshotted).
+    SharedNew,
+    // `Shared.clone()` -> the same cell (identity): just the receiver.
+    SharedClone,
+    // `Shared.read()`/`write()` -> the cell's value, `self.v`.
+    SharedValue,
     // `Set::new(): Set<T>` -> `new Set()`.
     SetNew,
     // `Set.insert(value)` -> native `.add(value)`.
@@ -7762,6 +7790,17 @@ pub fn analyze<'src>(
         analyzer.primitive_struct_ids.insert("Map", map_struct_id);
     }
 
+    // The `std::shared` `Shared` struct, if `shared.vl` loaded — same treatment.
+    let shared_struct_id = module_scopes
+        .get("shared")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Shared").copied());
+    if let Some(shared_struct_id) = shared_struct_id {
+        analyzer
+            .primitive_struct_ids
+            .insert("Shared", shared_struct_id);
+    }
+
     // The `std::context` `Context` struct, if `context.vl` loaded. Its
     // `new`/`run`/`get` method ids are captured after `build()`, once impl
     // subjects resolve. `Context` is reached only by path (`std::context::..`),
@@ -7958,6 +7997,26 @@ pub fn analyze<'src>(
                     ("len", Intrinsic::MapLen),
                     ("keys", Intrinsic::MapKeys),
                     ("values", Intrinsic::MapValues),
+                ] {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(shared_struct_id) = analyzer.primitive_struct_ids.get("Shared").copied() {
+        for implementation in &analyzer.implementations {
+            let subject_is_shared = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == shared_struct_id
+            );
+            if subject_is_shared {
+                for (name, intrinsic) in [
+                    ("new", Intrinsic::SharedNew),
+                    ("clone", Intrinsic::SharedClone),
+                    ("read", Intrinsic::SharedValue),
+                    ("write", Intrinsic::SharedValue),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

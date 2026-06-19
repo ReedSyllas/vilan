@@ -1,0 +1,27 @@
+import std::print;
+import std::shared::Shared;
+
+// `Shared<T>` is co-owned mutable state: `clone()` (and ordinary binding) share
+// the one underlying cell rather than copying it, so a write through any handle
+// is visible through all of them. Distinct `new` cells stay independent.
+struct Counter {
+	count: i32,
+}
+
+fun main() {
+	let s: Shared<Counter> = Shared::new(Counter { count = 0 });
+	let a = s.clone();
+	let b = s.clone();
+
+	a.write().count = a.write().count + 1;
+	a.write().count = a.write().count + 1;
+
+	print(b.read().count); // 2 — the write through `a` is shared
+	print(s.read().count); // 2 — same cell
+
+	// A second, independent cell.
+	let other: Shared<Counter> = Shared::new(Counter { count = 100 });
+	other.write().count = 50;
+	print(other.read().count); // 50
+	print(s.read().count); // 2 — unchanged; separate cell
+}

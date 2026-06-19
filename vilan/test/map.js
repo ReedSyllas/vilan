@@ -31,6 +31,17 @@ function h(i) {
 function k(l) {
 	return l.size === 0;
 }
+function o(c, d) {
+	const p = c;
+	let q = null;
+	if (p[0] === 0) {
+		const g/*x*/ = p[1];
+		q = g/*x*/;
+	} else {
+		q = d;
+	}
+	return q;
+}
 let a/*scores*/ = new Map();
 a/*scores*/.set("alice", 1);
 a/*scores*/.set("bob", 2);
@@ -55,22 +66,22 @@ console.log(m/*copy*/.has("dave"));
 let n/*names*/ = new Map();
 n/*names*/.set(1, "one");
 n/*names*/.set(2, "two");
-console.log(b(__map_get(n/*names*/, 1), "?"));
-console.log(b(__map_get(n/*names*/, 9), "?"));
-let o/*letters*/ = new Map();
-o/*letters*/.set("a", 10);
-o/*letters*/.set("b", 20);
-o/*letters*/.set("c", 30);
-let p/*key_count*/ = 0;
-for (const q/*key*/ of __map_keys(o/*letters*/)) {
-	p/*key_count*/ = p/*key_count*/ + 1;
+console.log(o(__map_get(n/*names*/, 1), "?"));
+console.log(o(__map_get(n/*names*/, 9), "?"));
+let r/*letters*/ = new Map();
+r/*letters*/.set("a", 10);
+r/*letters*/.set("b", 20);
+r/*letters*/.set("c", 30);
+let s/*key_count*/ = 0;
+for (const t/*key*/ of __map_keys(r/*letters*/)) {
+	s/*key_count*/ = s/*key_count*/ + 1;
 }
-console.log(p/*key_count*/);
-let r/*sum*/ = 0;
-for (const s/*value*/ of __map_values(o/*letters*/)) {
-	r/*sum*/ = r/*sum*/ + s/*value*/;
+console.log(s/*key_count*/);
+let u/*sum*/ = 0;
+for (const v/*value*/ of __map_values(r/*letters*/)) {
+	u/*sum*/ = u/*sum*/ + v/*value*/;
 }
-console.log(r/*sum*/);
-console.log(__map_keys(o/*letters*/).length);
-let t/*empty*/ = new Map();
-console.log(k(t/*empty*/));
+console.log(u/*sum*/);
+console.log(__map_keys(r/*letters*/).length);
+let w/*empty*/ = new Map();
+console.log(k(w/*empty*/));

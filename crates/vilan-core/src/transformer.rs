@@ -93,6 +93,14 @@ fn helper_source(name: &str) -> &'static str {
              \treturn process.argv.slice(2);\n\
              }"
         }
+        // `Shared::new(value)` — a one-field object cell. An object (not an array)
+        // is returned by reference from `__clone`, so the cell is shared, not
+        // snapshotted — exactly the `Shared` semantics.
+        "__shared_new" => {
+            "function __shared_new(value) {\n\
+             \treturn { v: value };\n\
+             }"
+        }
         // `process::env(key): Option<str>` — a missing variable reads back
         // `undefined`, which becomes `None`; otherwise `Some(value)`.
         "__env" => {
@@ -1611,6 +1619,22 @@ impl<'src> Transformer<'src> {
                     vec![args.next().unwrap_or(js::Node::Void)],
                 )
             }
+            // `Shared::new(value)` -> a `{ v: value }` cell (a JS object, so
+            // `__clone` shares it by reference rather than deep-copying).
+            Intrinsic::SharedNew => {
+                self.used_helpers.insert("__shared_new");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__shared_new".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
+                )
+            }
+            // `shared.clone()` -> the same cell (the receiver, unchanged).
+            Intrinsic::SharedClone => args.next().unwrap_or(js::Node::Void),
+            // `shared.read()` / `shared.write()` -> the cell's value, `self.v`.
+            Intrinsic::SharedValue => js::Node::Property(
+                Box::new(args.next().unwrap_or(js::Node::Void)),
+                "v".to_string(),
+            ),
             // `Set::new()` -> `new Set()` (no constructor args).
             Intrinsic::SetNew => {
                 js::Node::Call(Box::new(js::Node::Local("new Set".to_string())), Vec::new())
