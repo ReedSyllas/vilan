@@ -1,0 +1,41 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+// Phase 5: a view may be returned wrapped in an enum payload — `Option<&mut T>`
+// — when it projects a parameter. The caller unwraps it with `match`, binding
+// the `(base, key)` pair directly, so `*v` reads and writes through to the
+// original. This is the shape behind a view-returning `Arena::get`.
+struct Slot { value: i32 }
+
+impl Slot {
+	// A writable projection, wrapped in `Some`.
+	fun get_mut(&mut self): Option<&mut i32> {
+		Some(&mut self.value)
+	}
+
+	// A readonly projection.
+	fun get(&self): Option<&i32> {
+		Some(&self.value)
+	}
+}
+
+fun main() {
+	mut slot = Slot { value = 1 };
+
+	// Write through the unwrapped view.
+	match slot.get_mut() {
+		Some(let v) => {
+			*v = 42;
+		}
+		None => {}
+	}
+	print(slot.value); // 42
+
+	// Read through a readonly view.
+	match slot.get() {
+		Some(let v) => {
+			print(*v); // 42
+		}
+		None => {}
+	}
+}
