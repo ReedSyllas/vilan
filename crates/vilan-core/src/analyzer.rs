@@ -543,12 +543,14 @@ pub struct Analyzer<'src> {
     // element rather than a copy. Maps the binding id to whether the view is
     // writable (`&mut`). Drives the indexed-loop lowering + view classification.
     for_each_views: HashMap<Id, bool>,
-    // `match opt { Some(let v) => .. }` where `opt` is a call returning a scalar
-    // view wrapped in an enum payload (`fun get(..): Option<&mut i32> { Some(&mut
-    // self.x) }`). The capture `v` binds the `(base, key)` pair directly, so it is
-    // a scalar view binding; maps it to whether that view is writable (`&mut`).
-    // Computed post-build by `compute_wrapped_view_captures`.
-    wrapped_view_captures: HashMap<Id, bool>,
+    // `match opt { Some(let v) => .. }` where `opt` is a call returning a view
+    // wrapped in an enum payload (`fun get(..): Option<&mut i32> { Some(&mut
+    // self.x) }`, or `Option<&mut Node>` for an aggregate). The capture `v` binds
+    // the view directly (a scalar `(base, key)` pair, or an aggregate's JS
+    // reference), so it is a view binding. Maps it to `(mutable, scalar)`:
+    // `mutable` is `&mut` vs `&`; `scalar` distinguishes a `*v`-deref pair from an
+    // aggregate accessed via `.field`. Computed by `compute_wrapped_view_captures`.
+    wrapped_view_captures: HashMap<Id, (bool, bool)>,
     // Arithmetic binary expressions (`a + b`), as (binary id, op, lhs id),
     // resolved after typing to decide native JS arithmetic vs an operator-trait
     // method call (`Add::add`, ...).
@@ -1154,7 +1156,7 @@ impl<'src> Analyzer<'src> {
         if let Some(&mutable) = self.for_each_views.get(&binding_id) {
             return Some(mutable);
         }
-        if let Some(&mutable) = self.wrapped_view_captures.get(&binding_id) {
+        if let Some(&(mutable, _scalar)) = self.wrapped_view_captures.get(&binding_id) {
             return Some(mutable);
         }
         let initial = self.variables.get(&binding_id)?.initial?;
@@ -1294,22 +1296,14 @@ impl<'src> Analyzer<'src> {
             .into_iter()
             .filter(|closure_id| self.closure_captures_view_param(*closure_id))
             .collect();
-        // Variant constructors that *are* a function's `Some(&mut self.x)` return:
-        // the wrapped view projects a parameter, so the pair is a sanctioned
+        // Variant constructors that *are* a function's `Some(&mut self.x)` return
+        // (including each branch of a conditional `if live { Some(..) } else { None
+        // }`): the wrapped view projects a parameter, so the pair is a sanctioned
         // borrow the caller unwraps via `match`, not an escape.
-        let sanctioned_wrapped: HashSet<Id> = self
-            .functions
-            .values()
-            .filter(|function| {
-                self.function_returns_wrapped_scalar_view(function.id)
-                    .is_some()
-            })
-            .filter_map(
-                |function| match self.expr_id_to_expr_map.get(&function.body.1) {
-                    Some(Expr::Call(call_id)) => Some(*call_id),
-                    _ => None,
-                },
-            )
+        let function_ids: Vec<Id> = self.functions.keys().copied().collect();
+        let sanctioned_wrapped: HashSet<Id> = function_ids
+            .into_iter()
+            .flat_map(|function_id| self.wrapped_view_return_calls(function_id))
             .collect();
         let mut escapes: Vec<Id> = Vec::new();
         for expr in self.expr_id_to_expr_map.values() {
@@ -1627,17 +1621,41 @@ impl<'src> Analyzer<'src> {
         })
     }
 
-    /// If a function returns a scalar view wrapped in a single-payload enum
-    /// variant (`fun get(&mut self): Option<&mut i32> { Some(&mut self.x) }`), the
-    /// mutability of that view. The view must project a parameter — the borrows
-    /// condition — so the `(base, key)` pair the variant carries stays valid for
-    /// the caller. `None` if the body isn't exactly such a wrapped view return.
-    fn function_returns_wrapped_scalar_view(&self, function_id: Id) -> Option<bool> {
-        let function = self.functions.get(&function_id)?;
-        if !function.has_body {
-            return None;
+    /// The tail-position leaf expressions an expression can evaluate to: an
+    /// `if`/`match`/block contributes each branch's tail, anything else is itself.
+    /// Used to look through a conditional wrapped-view return (`if live { Some(&mut
+    /// self.items[i]) } else { None }`).
+    fn collect_tail_leaves(&self, expr_id: Id, leaves: &mut Vec<Id>) {
+        match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::If(branch)) => self.collect_tail_leaves_if(branch, leaves),
+            Some(Expr::Match(_, legs)) => {
+                for leg in legs {
+                    self.collect_tail_leaves(leg.body, leaves);
+                }
+            }
+            Some(Expr::Block((_, tail))) => self.collect_tail_leaves(*tail, leaves),
+            _ => leaves.push(expr_id),
         }
-        let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(&function.body.1) else {
+    }
+
+    fn collect_tail_leaves_if(&self, branch: &ExprIfBranch, leaves: &mut Vec<Id>) {
+        match branch {
+            ExprIfBranch::If(_, (_, tail), else_branch) => {
+                self.collect_tail_leaves(*tail, leaves);
+                if let Some(else_branch) = else_branch {
+                    self.collect_tail_leaves_if(else_branch, leaves);
+                }
+            }
+            ExprIfBranch::Else((_, tail)) => self.collect_tail_leaves(*tail, leaves),
+        }
+    }
+
+    /// If `leaf_id` is `Some(&[mut] place-projecting-a-parameter)`, the view's
+    /// `(mutable, scalar)` and the constructor call's id. `scalar` distinguishes a
+    /// `(base, key)` pair (`&mut self.value: i32`) from an aggregate view that is
+    /// just the projected reference (`&mut self.node: Node`).
+    fn leaf_wrapped_view(&self, leaf_id: Id) -> Option<(bool, bool, Id)> {
+        let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(&leaf_id) else {
             return None;
         };
         if !self.call_is_variant_constructor(*call_id) {
@@ -1649,28 +1667,75 @@ impl<'src> Analyzer<'src> {
         };
         match self.expr_id_to_expr_map.get(argument_id) {
             Some(Expr::Reference(operand, mutable))
-                if self.place_is_scalar(*operand) && self.derives_from_view_param(*argument_id) =>
+                if self.derives_from_view_param(*argument_id) =>
             {
-                Some(*mutable)
+                Some((*mutable, self.place_is_scalar(*operand), *call_id))
             }
             _ => None,
         }
     }
 
-    /// If a call resolves to a function returning a wrapped scalar view, that
-    /// view's mutability (see `function_returns_wrapped_scalar_view`).
-    fn call_returns_wrapped_scalar_view(&self, call_id: Id) -> Option<bool> {
+    /// If a function returns a view wrapped in a single-payload enum variant
+    /// (`fun get(&mut self): Option<&mut i32> { Some(&mut self.x) }`, the aggregate
+    /// `Option<&mut Node>`, or the conditional `{ if live { Some(&mut self.items[i])
+    /// } else { None } }` behind a real `Arena::get`), the view's `(mutable,
+    /// scalar)`. Every wrapped-view tail leaf must project a parameter and agree on
+    /// `(mutable, scalar)`; the other leaves (`None`) carry no view. `None` if no
+    /// leaf returns such a view, or they disagree. (A leaf returning a
+    /// non-projecting view is left for `check_view_escape` to reject — it isn't in
+    /// the sanctioned set below.)
+    fn function_returns_wrapped_view(&self, function_id: Id) -> Option<(bool, bool)> {
+        let function = self.functions.get(&function_id)?;
+        if !function.has_body {
+            return None;
+        }
+        let mut leaves = Vec::new();
+        self.collect_tail_leaves(function.body.1, &mut leaves);
+        let mut shape = None;
+        for leaf in leaves {
+            if let Some((mutable, scalar, _)) = self.leaf_wrapped_view(leaf) {
+                match shape {
+                    None => shape = Some((mutable, scalar)),
+                    Some(previous) if previous != (mutable, scalar) => return None,
+                    _ => {}
+                }
+            }
+        }
+        shape
+    }
+
+    /// The variant-constructor call ids of a function's sanctioned wrapped-view
+    /// tail leaves — the `Some(&mut ..)` sites `check_view_escape` must not reject.
+    fn wrapped_view_return_calls(&self, function_id: Id) -> Vec<Id> {
+        if self.function_returns_wrapped_view(function_id).is_none() {
+            return Vec::new();
+        }
+        let Some(function) = self.functions.get(&function_id) else {
+            return Vec::new();
+        };
+        let mut leaves = Vec::new();
+        self.collect_tail_leaves(function.body.1, &mut leaves);
+        leaves
+            .into_iter()
+            .filter_map(|leaf| self.leaf_wrapped_view(leaf).map(|(_, _, call_id)| call_id))
+            .collect()
+    }
+
+    /// If a call resolves to a function returning a wrapped view, that view's
+    /// `(mutable, scalar)` (see `function_returns_wrapped_view`).
+    fn call_returns_wrapped_view(&self, call_id: Id) -> Option<(bool, bool)> {
         let function_call = self.function_calls.get(&call_id)?;
         match self.expr_id_to_expr_map.get(&function_call.subject_id)? {
-            Expr::Local(function_id) => self.function_returns_wrapped_scalar_view(*function_id),
+            Expr::Local(function_id) => self.function_returns_wrapped_view(*function_id),
             _ => None,
         }
     }
 
     /// Match captures (`Some(let v)`) whose subject is a call returning a wrapped
-    /// scalar view: the capture binds the `(base, key)` pair directly, so it is a
-    /// scalar view binding. Maps each such capture to the view's mutability.
-    fn compute_wrapped_view_captures(&self) -> HashMap<Id, bool> {
+    /// view: the capture binds the view directly (the `(base, key)` pair, or an
+    /// aggregate's reference), so it is a view binding. Maps each such capture to
+    /// the view's `(mutable, scalar)`.
+    fn compute_wrapped_view_captures(&self) -> HashMap<Id, (bool, bool)> {
         let mut captures = HashMap::new();
         for expr in self.expr_id_to_expr_map.values() {
             let Expr::Match(subject_id, legs) = expr else {
@@ -1679,7 +1744,7 @@ impl<'src> Analyzer<'src> {
             let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(subject_id) else {
                 continue;
             };
-            let Some(mutable) = self.call_returns_wrapped_scalar_view(*call_id) else {
+            let Some(shape) = self.call_returns_wrapped_view(*call_id) else {
                 continue;
             };
             for leg in legs {
@@ -1687,7 +1752,7 @@ impl<'src> Analyzer<'src> {
                 if let ExprPattern::Variant(_, _, sub_patterns) = &leg.pattern
                     && let [ExprPattern::Binding(capture_id)] = sub_patterns.as_slice()
                 {
-                    captures.insert(*capture_id, mutable);
+                    captures.insert(*capture_id, shape);
                 }
             }
         }
@@ -1735,9 +1800,16 @@ impl<'src> Analyzer<'src> {
     /// parameter (which receives such a pair from its caller).
     fn compute_primitive_views(&self) -> HashSet<Id> {
         let mut views: HashSet<Id> = HashSet::new();
-        // A `Some(let v)` capture over a wrapped-scalar-view call binds the
-        // `(base, key)` pair directly, so `*v` derefs through it.
-        views.extend(self.wrapped_view_captures.keys().copied());
+        // A `Some(let v)` capture over a wrapped-*scalar*-view call binds the
+        // `(base, key)` pair directly, so `*v` derefs through it. (An aggregate
+        // wrapped-view capture is the reference itself, accessed via `.field` —
+        // not a `(base, key)` pair — so it is excluded here.)
+        views.extend(
+            self.wrapped_view_captures
+                .iter()
+                .filter(|(_, shape)| shape.1)
+                .map(|(capture_id, _)| *capture_id),
+        );
         // A `for e in &mut list` over a scalar element binds `e` as a `(base, key)`
         // pair into the list, so `*e` derefs through it.
         for binding_id in self.for_each_views.keys() {

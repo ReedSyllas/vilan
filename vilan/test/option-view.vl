@@ -3,12 +3,15 @@ import std::option::Option::{ self, Some, None };
 
 // Phase 5: a view may be returned wrapped in an enum payload — `Option<&mut T>`
 // — when it projects a parameter. The caller unwraps it with `match`, binding
-// the `(base, key)` pair directly, so `*v` reads and writes through to the
-// original. This is the shape behind a view-returning `Arena::get`.
+// the view directly, so it reads and writes through to the original. This is
+// the shape behind a view-returning `Arena::get`.
 struct Slot { value: i32 }
 
+struct Inner { n: i32 }
+struct Outer { inner: Inner, items: List<i32> }
+
 impl Slot {
-	// A writable projection, wrapped in `Some`.
+	// A direct writable projection, wrapped in `Some`.
 	fun get_mut(&mut self): Option<&mut i32> {
 		Some(&mut self.value)
 	}
@@ -19,10 +22,27 @@ impl Slot {
 	}
 }
 
+impl Outer {
+	// An aggregate view wrapped in `Some` — the capture binds the reference.
+	fun inner_mut(&mut self): Option<&mut Inner> {
+		Some(&mut self.inner)
+	}
+
+	// A conditional element view — the `Arena::get` shape: `Some(..)` in one
+	// branch, `None` in the other.
+	fun item_mut(&mut self, index: i32): Option<&mut i32> {
+		if index < self.items.len() {
+			Some(&mut self.items[index])
+		} else {
+			None
+		}
+	}
+}
+
 fun main() {
 	mut slot = Slot { value = 1 };
 
-	// Write through the unwrapped view.
+	// Write through a direct scalar projection.
 	match slot.get_mut() {
 		Some(let v) => {
 			*v = 42;
@@ -31,11 +51,40 @@ fun main() {
 	}
 	print(slot.value); // 42
 
-	// Read through a readonly view.
+	// Read through a readonly projection.
 	match slot.get() {
 		Some(let v) => {
 			print(*v); // 42
 		}
 		None => {}
+	}
+
+	mut outer = Outer { inner = Inner { n = 1 }, items = [10, 20, 30] };
+
+	// Write through an aggregate view (`.field`, not `*v`).
+	match outer.inner_mut() {
+		Some(let v) => {
+			v.n = 77;
+		}
+		None => {}
+	}
+	print(outer.inner.n); // 77
+
+	// Write through a conditional element view; the out-of-bounds index is None.
+	match outer.item_mut(1) {
+		Some(let v) => {
+			*v = 99;
+		}
+		None => {}
+	}
+	print(outer.items[1]); // 99
+
+	match outer.item_mut(9) {
+		Some(let v) => {
+			*v = 0;
+		}
+		None => {
+			print(0); // 0 (out of bounds)
+		}
 	}
 }

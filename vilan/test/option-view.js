@@ -4,6 +4,18 @@ function b/*get_mut*/(c) {
 function g/*get*/(h) {
 	return [ 0, [ h, 0 ] ];
 }
+function m/*inner_mut*/(n) {
+	return [ 0, n[0] ];
+}
+function r/*item_mut*/(s, t) {
+	let u = null;
+	if (t < s[1].length) {
+		u = [ 0, [ s[1], t ] ];
+	} else {
+		u = [ 1 ];
+	}
+	return u;
+}
 let a/*slot*/ = [ 1 ];
 const d = b/*get_mut*/(a/*slot*/);
 let e = null;
@@ -25,4 +37,38 @@ if (i[0] === 0) {
 } else {
 	j = undefined;
 }
-process.exit(j);
+j;
+let l/*outer*/ = [ [ 1 ], [ 10, 20, 30 ] ];
+const o = m/*inner_mut*/(l/*outer*/);
+let p = null;
+if (o[0] === 0) {
+	const q/*v*/ = o[1];
+	q/*v*/[0] = 77;
+	p = undefined;
+} else {
+	p = undefined;
+}
+p;
+console.log(l/*outer*/[0][0]);
+const v = r/*item_mut*/(l/*outer*/, 1);
+let w = null;
+if (v[0] === 0) {
+	const x/*v*/ = v[1];
+	x/*v*/[0][x/*v*/[1]] = 99;
+	w = undefined;
+} else {
+	w = undefined;
+}
+w;
+console.log(l/*outer*/[1][1]);
+const y = r/*item_mut*/(l/*outer*/, 9);
+let z = null;
+if (y[0] === 0) {
+	const A/*v*/ = y[1];
+	A/*v*/[0][A/*v*/[1]] = 0;
+	z = undefined;
+} else {
+	console.log(0);
+	z = undefined;
+}
+process.exit(z);
