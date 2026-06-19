@@ -2128,20 +2128,26 @@ impl Formatter {
         self.sequence(list, ";", 0)
     }
 
-    fn sequence(
-        &self,
-        list: &Vec<js::Node>,
-        terminator: &'static str,
-        indentation: usize,
-    ) -> String {
+    /// Renders a sequence of statements, one per line, each indented to `level`.
+    /// The per-statement indent lives here (not in `node`) so `node` can render a
+    /// sub-expression inline — without a leading indent — while still passing the
+    /// current `level` down, so a block nested inside an expression (a closure
+    /// argument, a function-valued binding) indents to its true depth.
+    fn sequence(&self, list: &[js::Node], terminator: &'static str, level: usize) -> String {
+        let indent = self.indentation.repeat(level);
         list.iter()
-            .map(|node| self.node(node, terminator, indentation))
+            .map(|node| format!("{}{}", indent, self.node(node, terminator, level)))
             .collect::<Vec<_>>()
             .join(self.line_break)
     }
 
-    fn node(&self, node: &js::Node, terminator: &'static str, indentation: usize) -> String {
-        let text = match node {
+    /// Renders one JavaScript node at block-nesting `level` (used to indent the
+    /// bodies of any nested blocks). It emits no leading indent of its own — a
+    /// statement's indent is added by `sequence`, an expression is rendered inline
+    /// — and passes `level` down to its sub-expressions, so a block nested inside
+    /// an expression indents to its true depth.
+    fn node(&self, node: &js::Node, terminator: &'static str, level: usize) -> String {
+        match node {
             js::Node::Void => format!("undefined{}", terminator),
             js::Node::Null => format!("null{}", terminator),
             js::Node::String(x) => format!("\"{}\"{}", x.escape_default(), terminator),
@@ -2158,7 +2164,7 @@ impl Formatter {
             js::Node::Array(items) => {
                 let s_items = items
                     .iter()
-                    .map(|x| self.node(x, "", 0))
+                    .map(|x| self.node(x, "", level))
                     .collect::<Vec<_>>()
                     .join(format!(",{}", self.space).as_str());
                 format!(
@@ -2166,19 +2172,6 @@ impl Formatter {
                     self.array_surround, s_items, self.array_surround, terminator
                 )
             }
-            // js::Node::Object(members) => {
-            //     let s_members = members
-            //         .iter()
-            //         .map(|(key, value)| {
-            //             format!("{}:{}{}", key, self.space, self.node(value, "", 0))
-            //         })
-            //         .collect::<Vec<_>>()
-            //         .join(format!(",{}", self.space).as_str());
-            //     format!(
-            //         "{{{}{}{}}}{}",
-            //         self.object_surround, s_members, self.object_surround, terminator
-            //     )
-            // }
             js::Node::Function(function) => {
                 let name = function.name.as_str();
                 let parameters = function
@@ -2187,12 +2180,7 @@ impl Formatter {
                     .map(|x| x.name.as_str())
                     .collect::<Vec<_>>()
                     .join(format!(",{}", self.space).as_str());
-                let body = function
-                    .body
-                    .iter()
-                    .map(|x| self.node(x, ";", indentation + 1))
-                    .collect::<Vec<_>>()
-                    .join(self.line_break);
+                let body = self.sequence(&function.body, ";", level + 1);
                 format!(
                     "{}function {}({}){}{{{}{}{}{}}}{}",
                     if function.is_async { "async " } else { "" },
@@ -2202,7 +2190,7 @@ impl Formatter {
                     self.line_break,
                     body,
                     self.line_break,
-                    self.indentation.repeat(indentation),
+                    self.indentation.repeat(level),
                     match terminator {
                         ";" => "",
                         x => x,
@@ -2212,21 +2200,21 @@ impl Formatter {
             js::Node::Local(name) => format!("{}{}", name, terminator),
             js::Node::Assignment(subject, value) => format!(
                 "{}{}={}{}{}",
-                self.node(subject, "", 0),
+                self.node(subject, "", level),
                 self.space,
                 self.space,
-                self.node(value, "", 0),
+                self.node(value, "", level),
                 terminator
             ),
             js::Node::Return(value) => match &**value {
                 js::Node::Void => format!("return{}", terminator),
-                x => format!("return {}{}", self.node(x, "", 0), terminator),
+                x => format!("return {}{}", self.node(x, "", level), terminator),
             },
             js::Node::Throw(value) => {
-                format!("throw {}{}", self.node(value, "", 0), terminator)
+                format!("throw {}{}", self.node(value, "", level), terminator)
             }
             js::Node::Call(subject, args) => {
-                let s_subject = self.node(subject, "", 0);
+                let s_subject = self.node(subject, "", level);
                 // A closure called directly must be parenthesised: `(() => …)()`.
                 let s_subject = if matches!(&**subject, js::Node::Closure(_)) {
                     format!("({s_subject})")
@@ -2235,7 +2223,7 @@ impl Formatter {
                 };
                 let s_args = args
                     .iter()
-                    .map(|x| self.node(x, "", 0))
+                    .map(|x| self.node(x, "", level))
                     .collect::<Vec<_>>()
                     .join(format!(",{}", self.space).as_str());
                 format!("{}({}){}", s_subject, s_args, terminator)
@@ -2256,65 +2244,66 @@ impl Formatter {
                 };
                 format!(
                     "{}{}{}{}{}{}",
-                    self.node(lhs, "", 0),
+                    self.node(lhs, "", level),
                     self.space,
                     s_op,
                     self.space,
-                    self.node(rhs, "", 0),
+                    self.node(rhs, "", level),
                     terminator
                 )
             }
             js::Node::Unary(operator, operand) => {
                 // Parenthesise the operand so precedence is preserved — e.g.
                 // `!(a < b)` must not render as `!a < b`.
-                format!("{}({}){}", operator, self.node(operand, "", 0), terminator)
+                format!(
+                    "{}({}){}",
+                    operator,
+                    self.node(operand, "", level),
+                    terminator
+                )
             }
             js::Node::LetVariable(variable) => {
-                let value = self.node(&variable.value, "", 0);
+                let value = self.node(&variable.value, "", level);
                 format!(
                     "let {}{}={}{}{}",
                     variable.name, self.space, self.space, value, terminator
                 )
             }
             js::Node::ConstVariable(variable) => {
-                let value = self.node(&variable.value, "", 0);
+                let value = self.node(&variable.value, "", level);
                 format!(
                     "const {}{}={}{}{}",
                     variable.name, self.space, self.space, value, terminator
                 )
             }
             js::Node::Property(subject, member) => {
-                let s_subject = self.node(subject, "", 0);
+                let s_subject = self.node(subject, "", level);
                 format!("{}.{}{}", s_subject, member, terminator)
             }
             js::Node::PropertyIndex(subject, member) => {
-                let s_subject = self.node(subject, "", 0);
-                let s_member = self.node(member, "", 0);
+                let s_subject = self.node(subject, "", level);
+                let s_member = self.node(member, "", level);
                 format!("{}[{}]{}", s_subject, s_member, terminator)
             }
             js::Node::If(branch) => {
                 fn walk_branch(
                     f: &Formatter,
                     branch: &js::IfBranch,
-                    indentation: usize,
-                    level: u32,
+                    level: usize,
+                    else_depth: u32,
                 ) -> String {
                     match branch {
                         js::IfBranch::If(condition, body, else_) => {
-                            let s_prefix = if level > 0 { "else " } else { "" };
-                            let s_condition = f.node(condition, "", 0);
-                            let s_body = body
-                                .iter()
-                                .map(|x| f.node(x, ";", indentation + 1))
-                                .collect::<Vec<_>>()
-                                .join(f.line_break);
+                            let s_prefix = if else_depth > 0 { "else " } else { "" };
+                            let s_condition = f.node(condition, "", level);
+                            let s_body = f.sequence(body, ";", level + 1);
                             let s_else = else_
                                 .as_ref()
                                 .map(|x| {
                                     format!(
                                         "{}{}",
                                         f.space,
-                                        walk_branch(f, x, indentation, level + 1)
+                                        walk_branch(f, x, level, else_depth + 1)
                                     )
                                 })
                                 .unwrap_or("".to_string());
@@ -2327,36 +2316,28 @@ impl Formatter {
                                 f.line_break,
                                 s_body,
                                 f.line_break,
-                                f.indentation.repeat(indentation),
+                                f.indentation.repeat(level),
                                 s_else
                             )
                         }
                         js::IfBranch::Else(body) => {
-                            let s_body = body
-                                .iter()
-                                .map(|x| f.node(x, ";", indentation + 1))
-                                .collect::<Vec<_>>()
-                                .join(f.line_break);
+                            let s_body = f.sequence(body, ";", level + 1);
                             format!(
                                 "else{}{{{}{}{}{}}}",
                                 f.space,
                                 f.line_break,
                                 s_body,
                                 f.line_break,
-                                f.indentation.repeat(indentation)
+                                f.indentation.repeat(level)
                             )
                         }
                     }
                 }
-                walk_branch(self, branch, indentation, 0)
+                walk_branch(self, branch, level, 0)
             }
             js::Node::While(condition, body) => {
-                let s_condition = self.node(condition, "", 0);
-                let s_body = body
-                    .iter()
-                    .map(|x| self.node(x, ";", indentation + 1))
-                    .collect::<Vec<_>>()
-                    .join(self.line_break);
+                let s_condition = self.node(condition, "", level);
+                let s_body = self.sequence(body, ";", level + 1);
                 format!(
                     "while{}({}){}{{{}{}{}{}}}",
                     self.space,
@@ -2365,16 +2346,12 @@ impl Formatter {
                     self.line_break,
                     s_body,
                     self.line_break,
-                    self.indentation.repeat(indentation),
+                    self.indentation.repeat(level),
                 )
             }
             js::Node::ForOf(binding, iterable, body) => {
-                let s_iterable = self.node(iterable, "", 0);
-                let s_body = body
-                    .iter()
-                    .map(|x| self.node(x, ";", indentation + 1))
-                    .collect::<Vec<_>>()
-                    .join(self.line_break);
+                let s_iterable = self.node(iterable, "", level);
+                let s_body = self.sequence(body, ";", level + 1);
                 format!(
                     "for{}(const {} of {}){}{{{}{}{}{}}}",
                     self.space,
@@ -2384,7 +2361,7 @@ impl Formatter {
                     self.line_break,
                     s_body,
                     self.line_break,
-                    self.indentation.repeat(indentation),
+                    self.indentation.repeat(level),
                 )
             }
             js::Node::Break => format!("break{}", terminator),
@@ -2396,12 +2373,7 @@ impl Formatter {
                     .map(|x| x.name.as_str())
                     .collect::<Vec<_>>()
                     .join(format!(",{}", self.space).as_str());
-                let s_body = closure
-                    .body
-                    .iter()
-                    .map(|x| self.node(x, ";", indentation + 1))
-                    .collect::<Vec<_>>()
-                    .join(self.line_break);
+                let s_body = self.sequence(&closure.body, ";", level + 1);
                 format!(
                     "{}({}){}=>{}{{{}{}{}{}}}{}",
                     if closure.is_async { "async " } else { "" },
@@ -2411,18 +2383,16 @@ impl Formatter {
                     self.line_break,
                     s_body,
                     self.line_break,
-                    self.indentation.repeat(indentation),
+                    self.indentation.repeat(level),
                     terminator
                 )
             }
             js::Node::Await(operand) => {
                 // Parenthesise so `await` doesn't bind too loosely (e.g.
                 // `await (a + b)`), mirroring the unary `!` rendering.
-                format!("await ({}){}", self.node(operand, "", 0), terminator)
+                format!("await ({}){}", self.node(operand, "", level), terminator)
             }
-        };
-
-        format!("{}{}", self.indentation.repeat(indentation), text)
+        }
     }
 }
 

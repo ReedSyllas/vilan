@@ -6,12 +6,12 @@ async function a/*labelled*/(b) {
 (async () => {
 	console.log(await (a/*labelled*/("first")));
 	const c/*pending*/ = (async () => {
-	return await (a/*labelled*/("second"));
-})();
+		return await (a/*labelled*/("second"));
+	})();
 	console.log(await (c/*pending*/));
 	const d/*block*/ = (async () => {
-	await (setTimeout(0));
-	return "third";
-})();
+		await (setTimeout(0));
+		return "third";
+	})();
 	console.log(await (d/*block*/));
 })();
