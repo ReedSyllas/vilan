@@ -319,6 +319,7 @@ fn parse_build_options(table: &toml::Table) -> Result<BuildOptions, String> {
         }
     };
     options.indent = flag("indent", options.indent)?;
+    options.spaces = flag("spaces", options.spaces)?;
     options.debug_names = flag("debug-names", options.debug_names)?;
     Ok(options)
 }

@@ -248,11 +248,7 @@ impl<'src> Transformer<'src> {
         };
 
         Self {
-            formatter: if options.indent {
-                Formatter::new_pretty()
-            } else {
-                Formatter::new_compact()
-            },
+            formatter: Formatter::from_options(options.indent, options.spaces),
             ng: NameGenerator::new_simple(debug_names),
             print_fn_id,
             list_new_fn_id: program.list_new_fn_id,
@@ -2105,23 +2101,15 @@ struct Formatter {
 }
 
 impl Formatter {
-    fn new_pretty() -> Self {
+    /// Builds the whitespace style from the two formatting options: `indent` gives
+    /// line breaks + leading indentation, `spaces` gives inter-token padding. They
+    /// are independent — `indent && !spaces` is multi-line but tight, for example.
+    fn from_options(indent: bool, spaces: bool) -> Self {
         Self {
-            line_break: "\n",
-            indentation: "\t",
-            space: " ",
-            array_surround: " ",
-            // object_surround: " ",
-        }
-    }
-
-    fn new_compact() -> Self {
-        Self {
-            line_break: "",
-            indentation: "",
-            space: "",
-            array_surround: "",
-            // object_surround: "",
+            line_break: if indent { "\n" } else { "" },
+            indentation: if indent { "\t" } else { "" },
+            space: if spaces { " " } else { "" },
+            array_surround: if spaces { " " } else { "" },
         }
     }
 

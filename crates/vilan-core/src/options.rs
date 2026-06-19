@@ -39,8 +39,12 @@ impl Preset {
 /// The resolved set of code-generation options for a build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildOptions {
-    /// Indent and space the output for readability. Off: a minified one-liner.
+    /// Lay the output out across lines with indentation (vs one flat line). Off:
+    /// no line breaks, no leading indent.
     pub indent: bool,
+    /// Pad tokens with spaces — around operators, after commas, inside array
+    /// brackets (`a + b`, `[ 1, 2 ]`). Off: tight (`a+b`, `[1,2]`).
+    pub spaces: bool,
     /// Annotate generated identifiers with their source name (`a/*count*/`) so the
     /// output is debuggable. Off: obfuscated short names only.
     pub debug_names: bool,
@@ -52,10 +56,12 @@ impl BuildOptions {
         match preset {
             Preset::Debug => Self {
                 indent: true,
+                spaces: true,
                 debug_names: true,
             },
             Preset::Release => Self {
                 indent: false,
+                spaces: false,
                 debug_names: false,
             },
         }
