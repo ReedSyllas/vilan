@@ -1,0 +1,34 @@
+import std::print;
+
+// Derives extend to enums via a `match` over the variants. `Json` is externally
+// tagged: a payload-less variant is a string `"V"`, a single payload is
+// `{"V":<x>}`, and several are `{"V":[<x>,<y>]}`. `Default` is skipped for enums
+// (no unambiguous default variant).
+@derive(PartialEq, Debug, Json)
+enum Shape {
+	Circle(i32),
+	Rect(i32, i32),
+	Empty,
+}
+
+fun main() {
+	let c = Shape::Circle(3);
+	let r = Shape::Rect(4, 5);
+	let e = Shape::Empty;
+
+	// PartialEq: same variant + equal payloads.
+	print(c == Shape::Circle(3)); // true
+	print(c == Shape::Circle(9)); // false
+	print(c == r); // false (different variant)
+	print(e == Shape::Empty); // true
+
+	// Debug.
+	print(c.debug()); // Circle(3)
+	print(r.debug()); // Rect(4, 5)
+	print(e.debug()); // Empty
+
+	// Json (externally tagged).
+	print(c.to_json()); // {"Circle":3}
+	print(r.to_json()); // {"Rect":[4,5]}
+	print(e.to_json()); // "Empty"
+}

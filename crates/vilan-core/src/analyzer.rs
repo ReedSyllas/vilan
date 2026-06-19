@@ -7457,7 +7457,134 @@ fn render_type(node: &Node<'_>) -> String {
     }
 }
 
+/// The synthesized trait impls for a `@derive(..)` enum. Each derive is built
+/// from the variants (their names and payload arities) via a `match`. `Default`
+/// is skipped — an enum has no unambiguous default variant. (Generic enums are
+/// not yet handled; the missing impl surfaces naturally at the use site.)
+fn derive_enum_impls(
+    derives: &[&str],
+    enum_name: &str,
+    variants: &Spanned<Vec<Spanned<crate::node::EnumVariant<'_>>>>,
+) -> String {
+    // (variant name, payload arity).
+    let variants: Vec<(&str, usize)> = variants
+        .0
+        .iter()
+        .map(|variant| (variant.0.0, variant.0.1.len()))
+        .collect();
+    let mut out = String::new();
+    for derive in derives {
+        match *derive {
+            "PartialEq" => {
+                // `match (self, other) { (E::V(let s0,..), E::V(let o0,..)) => s0
+                // == o0 && .., (E::W, E::W) => true, _ => false }`.
+                let mut arms = String::new();
+                for (name, arity) in &variants {
+                    if *arity == 0 {
+                        arms.push_str(&format!(
+                            "\t\t\t({enum_name}::{name}, {enum_name}::{name}) => true,\n"
+                        ));
+                    } else {
+                        let bind = |prefix: char| {
+                            (0..*arity)
+                                .map(|i| format!("let {prefix}{i}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let comparison = (0..*arity)
+                            .map(|i| format!("s{i} == o{i}"))
+                            .collect::<Vec<_>>()
+                            .join(" && ");
+                        arms.push_str(&format!(
+                            "\t\t\t({enum_name}::{name}({}), {enum_name}::{name}({})) => {comparison},\n",
+                            bind('s'),
+                            bind('o'),
+                        ));
+                    }
+                }
+                arms.push_str("\t\t\t_ => false,\n");
+                out.push_str(&format!(
+                    "impl {enum_name} with PartialEq {{\n\
+                     \tfun eq(self, other: {enum_name}): bool {{\n\
+                     \t\tmatch (self, other) {{\n{arms}\t\t}}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
+            "Debug" => {
+                // `match self { E::V(let p0,..) => "V(" + p0.debug() + ", " + .. +
+                // ")", E::W => "W" }`.
+                let mut arms = String::new();
+                for (name, arity) in &variants {
+                    if *arity == 0 {
+                        arms.push_str(&format!("\t\t\t{enum_name}::{name} => \"{name}\",\n"));
+                    } else {
+                        let binds = (0..*arity)
+                            .map(|i| format!("let p{i}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let parts = (0..*arity)
+                            .map(|i| format!("p{i}.debug()"))
+                            .collect::<Vec<_>>()
+                            .join(" + \", \" + ");
+                        arms.push_str(&format!(
+                            "\t\t\t{enum_name}::{name}({binds}) => \"{name}(\" + {parts} + \")\",\n"
+                        ));
+                    }
+                }
+                out.push_str(&format!(
+                    "impl {enum_name} with Debug {{\n\
+                     \tfun debug(self): str {{\n\
+                     \t\tmatch self {{\n{arms}\t\t}}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
+            "Json" => {
+                // Externally tagged: no payload -> `"V"`; one -> `{"V":<p>}`;
+                // many -> `{"V":[<p0>,<p1>]}`.
+                let mut arms = String::new();
+                for (name, arity) in &variants {
+                    if *arity == 0 {
+                        arms.push_str(&format!(
+                            "\t\t\t{enum_name}::{name} => \"\\\"{name}\\\"\",\n"
+                        ));
+                    } else if *arity == 1 {
+                        arms.push_str(&format!(
+                            "\t\t\t{enum_name}::{name}(let p0) => \"{{\\\"{name}\\\":\" + p0.to_json() + \"}}\",\n"
+                        ));
+                    } else {
+                        let binds = (0..*arity)
+                            .map(|i| format!("let p{i}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let parts = (0..*arity)
+                            .map(|i| format!("p{i}.to_json()"))
+                            .collect::<Vec<_>>()
+                            .join(" + \",\" + ");
+                        arms.push_str(&format!(
+                            "\t\t\t{enum_name}::{name}({binds}) => \"{{\\\"{name}\\\":[\" + {parts} + \"]}}\",\n"
+                        ));
+                    }
+                }
+                out.push_str(&format!(
+                    "impl {enum_name} with Json {{\n\
+                     \tfun to_json(self): str {{\n\
+                     \t\tmatch self {{\n{arms}\t\t}}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
+    if let Node::Enum(name, _generics, variants) = &item.0 {
+        return derive_enum_impls(derives, name.0, variants);
+    }
     let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
         return String::new();
     };
