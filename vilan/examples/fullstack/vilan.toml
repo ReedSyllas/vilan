@@ -1,0 +1,11 @@
+name = "fullstack"
+
+# A full-stack project: a Node server and a browser client, both written in
+# Vilan. `vilan build` compiles each for its own target into `dist/`
+# (`dist/server.js` for Node, `dist/client.js` for the browser); `vilan run`
+# builds both and starts the server, which serves the client bundle.
+[server]
+entry = "server.vl"
+
+[client]
+entry = "client.vl"

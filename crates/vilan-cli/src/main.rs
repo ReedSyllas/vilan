@@ -88,7 +88,14 @@ fn main() -> ExitCode {
             target,
             debug,
         } => match Target::parse(&target) {
-            Some(target) => with_entry(file, |entry| build(entry, stdout, target, debug)),
+            Some(target) => with_project(file, |project| match project {
+                Project::Single(entry) => build(&entry, stdout, target, debug),
+                Project::FullStack {
+                    root,
+                    server,
+                    client,
+                } => build_fullstack(&root, &server, &client, debug),
+            }),
             None => unknown_target(&target),
         },
         Command::Check {
@@ -96,11 +103,23 @@ fn main() -> ExitCode {
             target,
             debug,
         } => match Target::parse(&target) {
-            Some(target) => with_entry(file, |entry| check(entry, target, debug)),
+            Some(target) => with_project(file, |project| match project {
+                Project::Single(entry) => check(&entry, target, debug),
+                Project::FullStack { server, client, .. } => {
+                    check_fullstack(&server, &client, debug)
+                }
+            }),
             None => unknown_target(&target),
         },
         // `run`/`test` execute with `node`, so they are always Node builds.
-        Command::Run { file, args } => with_entry(file, |entry| run(entry, &args)),
+        Command::Run { file, args } => with_project(file, |project| match project {
+            Project::Single(entry) => run(&entry, &args),
+            Project::FullStack {
+                root,
+                server,
+                client,
+            } => run_fullstack(&root, &server, &client, &args),
+        }),
         Command::Test { path } => test(path),
         Command::Fmt { paths, check } => fmt(&paths, check),
     }
@@ -175,12 +194,23 @@ fn collect_vl_files(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Resolves the entry source file from an optional path argument, then runs
-/// `action` on it. A file path is compiled directly; a directory (or no path, via
-/// the working directory) resolves the entry through its `vilan.toml`.
-fn with_entry(path: Option<PathBuf>, action: impl FnOnce(&Path) -> ExitCode) -> ExitCode {
-    match resolve_entry(path) {
-        Ok(entry) => action(&entry),
+/// A project to act on: a single entry, or a full-stack pair — a Node server plus
+/// a browser client, declared by `[server]`/`[client]` in `vilan.toml`.
+enum Project {
+    Single(PathBuf),
+    FullStack {
+        root: PathBuf,
+        server: PathBuf,
+        client: PathBuf,
+    },
+}
+
+/// Resolves the project from an optional path, then runs `action`. An explicit
+/// file is a single entry; a directory (or no path, via the working directory)
+/// is read from its `vilan.toml`.
+fn with_project(path: Option<PathBuf>, action: impl FnOnce(Project) -> ExitCode) -> ExitCode {
+    match resolve_project(path) {
+        Ok(project) => action(project),
         Err(message) => {
             eprintln!("error: {message}");
             ExitCode::FAILURE
@@ -188,13 +218,13 @@ fn with_entry(path: Option<PathBuf>, action: impl FnOnce(&Path) -> ExitCode) -> 
     }
 }
 
-fn resolve_entry(path: Option<PathBuf>) -> Result<PathBuf, String> {
+fn resolve_project(path: Option<PathBuf>) -> Result<Project, String> {
     match path {
-        // An explicit directory: compile the project rooted there.
-        Some(path) if path.is_dir() => project_entry(&path),
+        // An explicit directory: the project rooted there.
+        Some(path) if path.is_dir() => project_from_manifest(&path),
         // An explicit file (or a not-yet-existing path, so `compile` can report
-        // the read error): compile it directly.
-        Some(path) => Ok(path),
+        // the read error): a single entry, compiled directly.
+        Some(path) => Ok(Project::Single(path)),
         // No path: find the enclosing project from the working directory.
         None => {
             let working_dir = env::current_dir()
@@ -204,25 +234,120 @@ fn resolve_entry(path: Option<PathBuf>) -> Result<PathBuf, String> {
                  pass a source file to compile it directly"
                     .to_string()
             })?;
-            project_entry(&root)
+            project_from_manifest(&root)
         }
     }
 }
 
-/// The entry file a project's `vilan.toml` declares: `[package] entry` (relative
-/// to the project root), defaulting to `main.vl`.
-fn project_entry(root: &Path) -> Result<PathBuf, String> {
+/// Reads a project's `vilan.toml`. `[server]` + `[client]` entries make a
+/// full-stack project (a Node server + a browser client); otherwise `[package]
+/// entry` (default `main.vl`) is a single entry. Entry paths are relative to the
+/// project root.
+fn project_from_manifest(root: &Path) -> Result<Project, String> {
     let manifest = root.join("vilan.toml");
     let contents = fs::read_to_string(&manifest)
         .map_err(|error| format!("cannot read {}: {error}", manifest.display()))?;
     let table: toml::Table = toml::from_str(&contents)
         .map_err(|error| format!("invalid {}: {error}", manifest.display()))?;
-    let entry = table
-        .get("package")
-        .and_then(|package| package.get("entry"))
-        .and_then(|entry| entry.as_str())
-        .unwrap_or("main.vl");
-    Ok(root.join(entry))
+    let entry = |section: &str| {
+        table
+            .get(section)
+            .and_then(|section| section.get("entry"))
+            .and_then(|entry| entry.as_str())
+            .map(|entry| root.join(entry))
+    };
+    match (entry("server"), entry("client")) {
+        (Some(server), Some(client)) => Ok(Project::FullStack {
+            root: root.to_path_buf(),
+            server,
+            client,
+        }),
+        _ => {
+            let single = table
+                .get("package")
+                .and_then(|package| package.get("entry"))
+                .and_then(|entry| entry.as_str())
+                .unwrap_or("main.vl");
+            Ok(Project::Single(root.join(single)))
+        }
+    }
+}
+
+/// Builds a full-stack project into `<root>/dist/`: the client for the browser
+/// (`dist/client.js`) and the server for Node (`dist/server.js`). The client is
+/// built first since the server serves `dist/client.js`. `--target`/`--stdout`
+/// don't apply — each entry has its own target and output.
+fn build_fullstack(root: &Path, server: &Path, client: &Path, debug: bool) -> ExitCode {
+    match build_fullstack_artifacts(root, server, client, debug) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
+}
+
+fn build_fullstack_artifacts(
+    root: &Path,
+    server: &Path,
+    client: &Path,
+    debug: bool,
+) -> Result<(), ExitCode> {
+    let dist = root.join("dist");
+    if let Err(error) = fs::create_dir_all(&dist) {
+        eprintln!("error: cannot create {}: {error}", dist.display());
+        return Err(ExitCode::FAILURE);
+    }
+    for (entry, target, output_name) in [
+        (client, Target::Browser, "client.js"),
+        (server, Target::Node, "server.js"),
+    ] {
+        let javascript = compile_to_js(entry, target, debug)?;
+        let output = dist.join(output_name);
+        if let Err(error) = fs::write(&output, javascript) {
+            eprintln!("error: cannot write {}: {error}", output.display());
+            return Err(ExitCode::FAILURE);
+        }
+        println!("Compiled {} -> {}", entry.display(), output.display());
+    }
+    Ok(())
+}
+
+/// Type-checks both entries of a full-stack project (the client for the browser,
+/// the server for Node).
+fn check_fullstack(server: &Path, client: &Path, debug: bool) -> ExitCode {
+    let client_ok = compile_to_js(client, Target::Browser, debug).is_ok();
+    let server_ok = compile_to_js(server, Target::Node, debug).is_ok();
+    if client_ok && server_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Builds a full-stack project, then runs its server with `node` from the project
+/// root (so it can read `dist/client.js`). `args` are forwarded to the server.
+fn run_fullstack(root: &Path, server: &Path, client: &Path, args: &[String]) -> ExitCode {
+    if let Err(code) = build_fullstack_artifacts(root, server, client, false) {
+        return code;
+    }
+    // Run from the project root so the server reads `dist/client.js`; the script
+    // path is relative to that working directory.
+    let status = std::process::Command::new("node")
+        .arg(Path::new("dist").join("server.js"))
+        .args(args)
+        .current_dir(root)
+        .status();
+    match status {
+        Ok(status) => match status.code() {
+            Some(code) => ExitCode::from(code as u8),
+            None => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!(
+                "error: failed to launch `node`: {error} \
+                 (is Node.js installed and on your PATH?)"
+            );
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Walks up from `start` for the nearest directory containing a `vilan.toml`.

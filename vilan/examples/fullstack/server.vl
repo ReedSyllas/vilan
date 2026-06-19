@@ -1,0 +1,40 @@
+// The server — a Node program. It reads the compiled client bundle once at
+// startup, then serves the HTML shell on every path and the bundle at
+// `/client.js`. It shares `pkg::shared::greeting` with the client.
+
+import std::print;
+import std::http::{ Server, Response, Request };
+import std::fs::read_file_to_str;
+import pkg::shared::greeting;
+
+async fun main() {
+	// Read the browser bundle once (async — `vilan build`/`run` writes it to
+	// `dist/client.js`, and the server runs from the project root).
+	let client_js = read_file_to_str("dist/client.js");
+
+	let server = Server::builder()
+		.port(3000)
+		.on_request(|request| {
+			match request.path() {
+				"/client.js" => Response::builder()
+					.set_header("Content-Type", "text/javascript")
+					.body(client_js)
+					.build(),
+				_ => Response::builder()
+					.set_header("Content-Type", "text/html")
+					.body(page())
+					.build(),
+			}
+		})
+		.on_start(|server| {
+			print(greeting("server"));
+			print(server.url());
+		})
+		.build();
+
+	server.start();
+}
+
+fun page(): str {
+	i"<!doctype html><html><head><meta charset=\"utf-8\"><title>Vilan full-stack</title></head><body><div id=\"app\"></div><script type=\"module\" src=\"/client.js\"></script></body></html>"
+}

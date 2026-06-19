@@ -16,6 +16,14 @@ impl NodeServer {
 
 external struct NodeRequest;
 
+impl NodeRequest {
+	@extern(get, "url")
+	external fun url(self): str;
+
+	@extern(get, "method")
+	external fun method(self): str;
+}
+
 external struct NodeResponse;
 
 impl NodeResponse {
@@ -33,6 +41,18 @@ impl NodeResponse {
 
 struct Request {
 	node: NodeRequest,
+}
+
+impl Request {
+	// The request target (path + query), e.g. `/client.js`.
+	fun path(self): str {
+		self.node.url()
+	}
+
+	// The HTTP method, e.g. `GET`.
+	fun method(self): str {
+		self.node.method()
+	}
 }
 
 // --- Response ---
