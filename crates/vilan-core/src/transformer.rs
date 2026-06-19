@@ -2,6 +2,7 @@ use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Intrinsic, Prog
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::{BinaryOp, ExternBinding};
+use crate::options::BuildOptions;
 use crate::target::Target;
 use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
@@ -9,8 +10,8 @@ use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub fn transform<'src>(program: &Program<'src>) -> Result<String, Error> {
-    Transformer::new(program, true).transform_entry()
+pub fn transform<'src>(program: &Program<'src>, options: &BuildOptions) -> Result<String, Error> {
+    Transformer::new(program, options).transform_entry()
 }
 
 /// Interprets a string literal's backslash escapes into the characters they
@@ -214,8 +215,8 @@ struct Transformer<'src> {
 }
 
 impl<'src> Transformer<'src> {
-    fn new(program: &'src Program<'src>, should_pretty_print: bool) -> Self {
-        let debug_names = if should_pretty_print {
+    fn new(program: &'src Program<'src>, options: &BuildOptions) -> Self {
+        let debug_names = if options.debug_names {
             program
                 .variables
                 .iter()
@@ -247,7 +248,7 @@ impl<'src> Transformer<'src> {
         };
 
         Self {
-            formatter: if should_pretty_print {
+            formatter: if options.indent {
                 Formatter::new_pretty()
             } else {
                 Formatter::new_compact()

@@ -9,7 +9,6 @@ use chumsky::prelude::*;
 // `clap::Parser` collides with `chumsky`'s `Parser` trait (glob-imported above),
 // so bring it in anonymously — enough for `Cli::parse()` — and derive by path.
 use clap::{Parser as _, Subcommand};
-use vilan_core::Target;
 use vilan_core::analyzer::analyze;
 use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
@@ -17,6 +16,7 @@ use vilan_core::context;
 use vilan_core::lexer::lexer;
 use vilan_core::parser::parser;
 use vilan_core::transformer::transform;
+use vilan_core::{BuildOptions, Preset, Target};
 
 /// The vilan language toolchain.
 #[derive(clap::Parser)]
@@ -89,12 +89,15 @@ fn main() -> ExitCode {
             debug,
         } => match Target::parse(&target) {
             Some(target) => with_project(file, |project| match project {
-                Project::Single(entry) => build(&entry, stdout, target, debug),
+                Project::Single { entry, options } => {
+                    build(&entry, stdout, target, &options, debug)
+                }
                 Project::FullStack {
                     root,
                     server,
                     client,
-                } => build_fullstack(&root, &server, &client, debug),
+                    options,
+                } => build_fullstack(&root, &server, &client, &options, debug),
             }),
             None => unknown_target(&target),
         },
@@ -104,21 +107,25 @@ fn main() -> ExitCode {
             debug,
         } => match Target::parse(&target) {
             Some(target) => with_project(file, |project| match project {
-                Project::Single(entry) => check(&entry, target, debug),
-                Project::FullStack { server, client, .. } => {
-                    check_fullstack(&server, &client, debug)
-                }
+                Project::Single { entry, options } => check(&entry, target, &options, debug),
+                Project::FullStack {
+                    server,
+                    client,
+                    options,
+                    ..
+                } => check_fullstack(&server, &client, &options, debug),
             }),
             None => unknown_target(&target),
         },
         // `run`/`test` execute with `node`, so they are always Node builds.
         Command::Run { file, args } => with_project(file, |project| match project {
-            Project::Single(entry) => run(&entry, &args),
+            Project::Single { entry, options } => run(&entry, &options, &args),
             Project::FullStack {
                 root,
                 server,
                 client,
-            } => run_fullstack(&root, &server, &client, &args),
+                options,
+            } => run_fullstack(&root, &server, &client, &options, &args),
         }),
         Command::Test { path } => test(path),
         Command::Fmt { paths, check } => fmt(&paths, check),
@@ -195,13 +202,18 @@ fn collect_vl_files(path: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// A project to act on: a single entry, or a full-stack pair — a Node server plus
-/// a browser client, declared by `[server]`/`[client]` in `vilan.toml`.
+/// a browser client, declared by `[server]`/`[client]` in `vilan.toml`. Both
+/// carry the code-generation options resolved from the manifest's `[build]`.
 enum Project {
-    Single(PathBuf),
+    Single {
+        entry: PathBuf,
+        options: BuildOptions,
+    },
     FullStack {
         root: PathBuf,
         server: PathBuf,
         client: PathBuf,
+        options: BuildOptions,
     },
 }
 
@@ -223,8 +235,12 @@ fn resolve_project(path: Option<PathBuf>) -> Result<Project, String> {
         // An explicit directory: the project rooted there.
         Some(path) if path.is_dir() => project_from_manifest(&path),
         // An explicit file (or a not-yet-existing path, so `compile` can report
-        // the read error): a single entry, compiled directly.
-        Some(path) => Ok(Project::Single(path)),
+        // the read error): a single entry, compiled directly with default options
+        // (there's no manifest to read `[build]` from).
+        Some(path) => Ok(Project::Single {
+            entry: path,
+            options: BuildOptions::default(),
+        }),
         // No path: find the enclosing project from the working directory.
         None => {
             let working_dir = env::current_dir()
@@ -249,6 +265,8 @@ fn project_from_manifest(root: &Path) -> Result<Project, String> {
         .map_err(|error| format!("cannot read {}: {error}", manifest.display()))?;
     let table: toml::Table = toml::from_str(&contents)
         .map_err(|error| format!("invalid {}: {error}", manifest.display()))?;
+    let options = parse_build_options(&table)
+        .map_err(|error| format!("invalid {}: {error}", manifest.display()))?;
     let entry = |section: &str| {
         table
             .get(section)
@@ -261,6 +279,7 @@ fn project_from_manifest(root: &Path) -> Result<Project, String> {
             root: root.to_path_buf(),
             server,
             client,
+            options,
         }),
         _ => {
             let single = table
@@ -268,17 +287,54 @@ fn project_from_manifest(root: &Path) -> Result<Project, String> {
                 .and_then(|package| package.get("entry"))
                 .and_then(|entry| entry.as_str())
                 .unwrap_or("main.vl");
-            Ok(Project::Single(root.join(single)))
+            Ok(Project::Single {
+                entry: root.join(single),
+                options,
+            })
         }
     }
+}
+
+/// Resolves the `[build]` code-generation options: a `preset` (default `debug`)
+/// initializes every option, then individual keys override it.
+fn parse_build_options(table: &toml::Table) -> Result<BuildOptions, String> {
+    let Some(build) = table.get("build") else {
+        return Ok(BuildOptions::default());
+    };
+    let mut options = match build.get("preset") {
+        Some(value) => {
+            let name = value.as_str().ok_or("`build.preset` must be a string")?;
+            BuildOptions::from_preset(Preset::parse(name).ok_or_else(|| {
+                format!("unknown build preset `{name}` (expected `debug` or `release`)")
+            })?)
+        }
+        None => BuildOptions::default(),
+    };
+    let flag = |key: &str, current: bool| -> Result<bool, String> {
+        match build.get(key) {
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("`build.{key}` must be a boolean")),
+            None => Ok(current),
+        }
+    };
+    options.indent = flag("indent", options.indent)?;
+    options.debug_names = flag("debug-names", options.debug_names)?;
+    Ok(options)
 }
 
 /// Builds a full-stack project into `<root>/dist/`: the client for the browser
 /// (`dist/client.js`) and the server for Node (`dist/server.js`). The client is
 /// built first since the server serves `dist/client.js`. `--target`/`--stdout`
 /// don't apply — each entry has its own target and output.
-fn build_fullstack(root: &Path, server: &Path, client: &Path, debug: bool) -> ExitCode {
-    match build_fullstack_artifacts(root, server, client, debug) {
+fn build_fullstack(
+    root: &Path,
+    server: &Path,
+    client: &Path,
+    options: &BuildOptions,
+    debug: bool,
+) -> ExitCode {
+    match build_fullstack_artifacts(root, server, client, options, debug) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => code,
     }
@@ -288,6 +344,7 @@ fn build_fullstack_artifacts(
     root: &Path,
     server: &Path,
     client: &Path,
+    options: &BuildOptions,
     debug: bool,
 ) -> Result<(), ExitCode> {
     let dist = root.join("dist");
@@ -299,7 +356,7 @@ fn build_fullstack_artifacts(
         (client, Target::Browser, "client.js"),
         (server, Target::Node, "server.js"),
     ] {
-        let javascript = compile_to_js(entry, target, debug)?;
+        let javascript = compile_to_js(entry, target, options, debug)?;
         let output = dist.join(output_name);
         if let Err(error) = fs::write(&output, javascript) {
             eprintln!("error: cannot write {}: {error}", output.display());
@@ -312,9 +369,9 @@ fn build_fullstack_artifacts(
 
 /// Type-checks both entries of a full-stack project (the client for the browser,
 /// the server for Node).
-fn check_fullstack(server: &Path, client: &Path, debug: bool) -> ExitCode {
-    let client_ok = compile_to_js(client, Target::Browser, debug).is_ok();
-    let server_ok = compile_to_js(server, Target::Node, debug).is_ok();
+fn check_fullstack(server: &Path, client: &Path, options: &BuildOptions, debug: bool) -> ExitCode {
+    let client_ok = compile_to_js(client, Target::Browser, options, debug).is_ok();
+    let server_ok = compile_to_js(server, Target::Node, options, debug).is_ok();
     if client_ok && server_ok {
         ExitCode::SUCCESS
     } else {
@@ -324,8 +381,14 @@ fn check_fullstack(server: &Path, client: &Path, debug: bool) -> ExitCode {
 
 /// Builds a full-stack project, then runs its server with `node` from the project
 /// root (so it can read `dist/client.js`). `args` are forwarded to the server.
-fn run_fullstack(root: &Path, server: &Path, client: &Path, args: &[String]) -> ExitCode {
-    if let Err(code) = build_fullstack_artifacts(root, server, client, false) {
+fn run_fullstack(
+    root: &Path,
+    server: &Path,
+    client: &Path,
+    options: &BuildOptions,
+    args: &[String],
+) -> ExitCode {
+    if let Err(code) = build_fullstack_artifacts(root, server, client, options, false) {
         return code;
     }
     // Run from the project root so the server reads `dist/client.js`; the script
@@ -406,7 +469,8 @@ fn test(path: Option<PathBuf>) -> ExitCode {
 /// with the captured runtime output (empty for a compile error, which
 /// `compile_to_js` has already reported to stderr).
 fn run_test(file: &Path) -> Result<(), String> {
-    let javascript = compile_to_js(file, Target::Node, false).map_err(|_| String::new())?;
+    let javascript = compile_to_js(file, Target::Node, &BuildOptions::default(), false)
+        .map_err(|_| String::new())?;
     let script = env::temp_dir().join(format!("vilan-test-{}.js", std::process::id()));
     if let Err(error) = fs::write(&script, javascript) {
         return Err(format!("cannot write {}: {error}", script.display()));
@@ -467,7 +531,12 @@ fn std_root() -> PathBuf {
 /// Runs the full pipeline (lex -> parse -> analyze -> contexts -> async infer ->
 /// transform) over `file` and reports any diagnostics. Returns the JavaScript on
 /// success, or a failure exit code (after reporting) on any error.
-fn compile_to_js(file: &Path, target: Target, emit_debug: bool) -> Result<String, ExitCode> {
+fn compile_to_js(
+    file: &Path,
+    target: Target,
+    options: &BuildOptions,
+    emit_debug: bool,
+) -> Result<String, ExitCode> {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(error) => {
@@ -517,7 +586,7 @@ fn compile_to_js(file: &Path, target: Target, emit_debug: bool) -> Result<String
             }
 
             if errs.is_empty() {
-                match transform(&program) {
+                match transform(&program, options) {
                     Ok(javascript) => output = Some(javascript),
                     Err(error) => errs.push(Rich::custom(error.span, error.msg)),
                 }
@@ -539,8 +608,14 @@ fn compile_to_js(file: &Path, target: Target, emit_debug: bool) -> Result<String
 }
 
 /// Compiles `file` and writes `<file>.js` (or prints to stdout).
-fn build(file: &Path, stdout: bool, target: Target, emit_debug: bool) -> ExitCode {
-    let javascript = match compile_to_js(file, target, emit_debug) {
+fn build(
+    file: &Path,
+    stdout: bool,
+    target: Target,
+    options: &BuildOptions,
+    emit_debug: bool,
+) -> ExitCode {
+    let javascript = match compile_to_js(file, target, options, emit_debug) {
         Ok(javascript) => javascript,
         Err(code) => return code,
     };
@@ -562,8 +637,8 @@ fn build(file: &Path, stdout: bool, target: Target, emit_debug: bool) -> ExitCod
 }
 
 /// Compiles `file` and reports diagnostics, writing no output.
-fn check(file: &Path, target: Target, emit_debug: bool) -> ExitCode {
-    match compile_to_js(file, target, emit_debug) {
+fn check(file: &Path, target: Target, options: &BuildOptions, emit_debug: bool) -> ExitCode {
+    match compile_to_js(file, target, options, emit_debug) {
         Ok(_) => {
             println!("{}: no errors", file.display());
             ExitCode::SUCCESS
@@ -575,8 +650,8 @@ fn check(file: &Path, target: Target, emit_debug: bool) -> ExitCode {
 /// Compiles `file`, then executes the JavaScript with Node.js — propagating its
 /// exit code, with stdin/stdout/stderr connected to the terminal. `args` are
 /// forwarded to the program, reachable through `process::args()`.
-fn run(file: &Path, args: &[String]) -> ExitCode {
-    let javascript = match compile_to_js(file, Target::Node, false) {
+fn run(file: &Path, options: &BuildOptions, args: &[String]) -> ExitCode {
+    let javascript = match compile_to_js(file, Target::Node, options, false) {
         Ok(javascript) => javascript,
         Err(code) => return code,
     };

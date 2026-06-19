@@ -9,3 +9,11 @@ entry = "server.vl"
 
 [client]
 entry = "client.vl"
+
+# Code-generation options. `preset` ("debug" — the default — or "release")
+# initializes every option; individual keys then override it. Debug is readable
+# (indented, with `a/*name*/` source annotations); release is minified and
+# obfuscated.
+# [build]
+# preset = "release"
+# debug-names = true   # e.g. minified but still annotated, for profiling
