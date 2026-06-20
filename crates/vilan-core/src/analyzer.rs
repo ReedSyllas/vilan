@@ -6971,9 +6971,18 @@ impl<'src> Analyzer<'src> {
                                         all_args_ok = false;
                                         break;
                                     }
+                                    // Reconcile parameter-first so the bindings key
+                                    // on the *callee's* generics (the ones being
+                                    // solved), not the argument's. It matters only
+                                    // when the argument is itself generic — passing
+                                    // a `T`-typed value to `f<U>(u: U)` must bind
+                                    // `U = T`, not `T = U` — so that `f` monomorphizes
+                                    // against the caller's instantiation rather than
+                                    // staying abstract. For a concrete argument the
+                                    // direction is irrelevant (same single binding).
                                     match self.reconcile_type(
-                                        &argument_type,
                                         &parameter_type,
+                                        &argument_type,
                                         &substitution_context,
                                     ) {
                                         Some((_unified, bindings)) => {

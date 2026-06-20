@@ -275,26 +275,53 @@ fn generic_call_on_closure_parameter() {
     );
 }
 
-// --- Known bugs (tracked; remove `#[ignore]` when fixed) --------------------
-
 #[test]
-#[ignore = "Bug C: a free generic function called with a trait-bound generic \
-            argument doesn't propagate the dispatch through the nested call. \
-            `fun show<T: Display>(x: T): str { format(x) }` emits `undefined` at \
-            runtime — `format`'s inner `value.to_string()` isn't monomorphized to \
-            `T`'s impl when `T` is itself still generic at the call site (it only \
-            binds once `show` is monomorphized). A method call (`x.to_string()`) \
-            dispatches fine; only the free-function wrapper (`format(x)`) loses \
-            it. Distinct from Bug B (which was generic-struct construction). \
-            Surfaces as `count.derive(|n| format(n))` printing `undefined`."]
 fn format_through_nested_generic() {
+    // Bug C (fixed): a generic function passing its type parameter to another
+    // generic call (`show<T: Display>(x) { format(x) }`) used to leave the nested
+    // `format` un-monomorphized — its `value.to_string()` resolved to the empty
+    // abstract `Display::to_string`, printing `undefined`. The cause was a binding
+    // direction: the call reconciled argument-against-parameter, so a generic
+    // argument bound *its own* constraint instead of the callee's. Reconciling
+    // parameter-first binds `format`'s `U = T`, so it monomorphizes per `show`
+    // instantiation.
     assert_compiles_and_runs(
         r#"
         import std::print;
         import std::display::{ Display, format };
         fun show<T: Display>(x: T): str { format(x) }
-        fun main() { print(show(7)); }
+        fun main() { print(show(7)); print(show("hi")); }
         "#,
-        "7\n",
+        "7\nhi\n",
+    );
+}
+
+// --- Known bugs (tracked; remove `#[ignore]` when fixed) --------------------
+
+#[test]
+#[ignore = "A free generic function called with a *closure parameter* argument \
+            (`count.derive(|n| format(n))`, count: Signal<i32>) emits `undefined`: \
+            no substitution is recorded for the `format(n)` call because `n`'s \
+            type isn't concrete when the closure body is resolved, and the call \
+            isn't re-queued once it lands. The closure also isn't monomorphized, \
+            so even a recorded `{U -> n}` would stay abstract at emission. A \
+            *method* call on the same `n` (`n.to_string()`) works — it uses the \
+            generic-dispatch channel, which a free function can't. This is the \
+            closure-parameter-typing + dependency-re-queue issue (analyzer-refactor \
+            items 2/5), distinct from Bug C (the `show` case above, now fixed)."]
+fn format_in_closure_argument() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::Signal;
+        import std::display::format;
+        fun main() {
+            let count = Signal::new(0);
+            let label = count.derive(|n| format(n));
+            label.sub(|s| print(s));
+            count.set(5);
+        }
+        "#,
+        "0\n5\n",
     );
 }
