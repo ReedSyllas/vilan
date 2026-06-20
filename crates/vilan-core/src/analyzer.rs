@@ -404,6 +404,9 @@ enum Constraint<'src> {
     /// `subject is Pattern` — resolves the pattern (typing its captures) once the
     /// subject type is known; the expression itself is `bool`.
     Is(PreppedIs<'src>),
+    /// `subject.field` — resolves to the named field's type once the subject
+    /// resolves to a struct.
+    FieldAccessor(FieldAccessorConstraint<'src>),
 }
 
 impl Constraint<'_> {
@@ -412,6 +415,7 @@ impl Constraint<'_> {
     /// it always did relative to the not-yet-migrated ones.
     fn priority(&self) -> u8 {
         match self {
+            Constraint::FieldAccessor(_) => 2,
             Constraint::Subscript { .. } => 3,
             Constraint::Is(_) => 4,
         }
@@ -508,7 +512,6 @@ pub struct Analyzer<'src> {
     // all referenced types are resolved). Drives go-to-definition / hover.
     type_references: Vec<(SourceId, Span, Option<Id>, TypeId)>,
     external_functions: IndexMap<Id, ExternalFunction<'src>>,
-    field_accessor_constraints: IndexMap<Id, FieldAccessorConstraint<'src>>,
     // `subject[index]` subscripts awaiting type resolution: index expr id ->
     // The unified constraint queue (replacing the per-kind `prepped_*` worklists,
     // one kind migrated at a time). Drained and re-queued by `resolve_constraints`
@@ -705,7 +708,6 @@ impl<'src> Analyzer<'src> {
             current_source_id: SourceId(0),
             type_references: Vec::new(),
             external_functions: IndexMap::new(),
-            field_accessor_constraints: IndexMap::new(),
             constraints: Vec::new(),
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
@@ -2844,14 +2846,12 @@ impl<'src> Analyzer<'src> {
                 match &member.0 {
                     Node::Accessor(name) => {
                         self.member_name_spans.insert(id, member.1);
-                        self.field_accessor_constraints.insert(
-                            id,
-                            FieldAccessorConstraint {
+                        self.constraints
+                            .push(Constraint::FieldAccessor(FieldAccessorConstraint {
                                 id,
                                 subject_id,
                                 member_name: name,
-                            },
-                        );
+                            }));
                     }
                     Node::Number(name, _, _) => {
                         self.prepped_field_accessors.push((id, subject_id, *name));
@@ -5417,6 +5417,78 @@ impl<'src> Analyzer<'src> {
                 index_id,
             } => self.resolve_subscript(*id, *subject_id, *index_id),
             Constraint::Is(prepped) => self.resolve_is(prepped),
+            Constraint::FieldAccessor(constraint) => self.resolve_field_accessor(constraint),
+        }
+    }
+
+    /// `subject.field`: once the subject resolves to a struct, the accessor's type
+    /// is the named field's. Defers while the subject is unresolved (or an
+    /// unknown closure parameter awaiting bidirectional inference).
+    fn resolve_field_accessor(&mut self, constraint: &FieldAccessorConstraint<'src>) -> Resolution {
+        let id = constraint.id;
+        let subject_id = constraint.subject_id;
+        let member_name = constraint.member_name;
+        if !self.expr_id_to_expr_map.contains_key(&subject_id) {
+            return Resolution::Deferred;
+        }
+        let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+        match subject_type {
+            Type::Unresolved => Resolution::Deferred,
+            Type::Struct(struct_id, _) => {
+                let struct_ = match self.structs.get(&struct_id) {
+                    Some(struct_) => struct_,
+                    None => {
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&id).unwrap(),
+                            msg: format!("subject is not a struct: {}", struct_id.0),
+                        });
+                        return Resolution::Failed;
+                    }
+                };
+                let struct_name = struct_.name;
+                let field = struct_
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, field)| {
+                        (field.name == member_name).then_some((index, field.type_id))
+                    });
+                match field {
+                    Some((field_index, field_type)) => {
+                        self.expr_id_to_expr_map
+                            .insert(id, Expr::Field(subject_id, struct_id, field_index));
+                        self.expr_id_to_type_id_map.insert(id, field_type);
+                        self.resolved_types.insert(id, field_type);
+                        Resolution::Resolved
+                    }
+                    None => {
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!("struct '{}' has no field '{}'", struct_name, member_name),
+                        });
+                        self.expr_id_to_expr_map.insert(id, Expr::Error);
+                        Resolution::Failed
+                    }
+                }
+            }
+            subject_type => {
+                // A closure parameter still awaiting bidirectional inference —
+                // typed when the enclosing method call resolves (a later pass,
+                // since method calls solve after field accessors). Defer.
+                if self.is_unknown_closure_parameter(subject_id) {
+                    return Resolution::Deferred;
+                }
+                let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!(
+                        "cannot access field '{}' on type {}",
+                        member_name, subject_str
+                    ),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                Resolution::Failed
+            }
         }
     }
 
@@ -6097,89 +6169,6 @@ impl<'src> Analyzer<'src> {
                 self.resolved_types.insert(initializer_id, type_id);
             }
             self.struct_initializer_constraints = unresolved_constraints;
-
-            // --- Resolve field accessor constraints ---
-            let mut remaining_accessors = IndexMap::new();
-            let accessor_constraints: Vec<_> = std::mem::take(&mut self.field_accessor_constraints)
-                .into_iter()
-                .collect();
-            for (id, constraint) in accessor_constraints {
-                let subject_id = constraint.subject_id;
-                let member_name = constraint.member_name;
-
-                // Defer until the subject's entity has been resolved (e.g. a
-                // method-call receiver wired up in a later iteration), then
-                // resolve its type by inference rather than relying on it
-                // having been cached in the type maps — parameters, locals and
-                // calls compute their types through `infer_type`.
-                if !self.expr_id_to_expr_map.contains_key(&subject_id) {
-                    remaining_accessors.insert(id, constraint);
-                    continue;
-                }
-                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-                match subject_type {
-                    Type::Unresolved => {
-                        remaining_accessors.insert(id, constraint);
-                        continue;
-                    }
-                    Type::Struct(struct_id, _) => {
-                        let struct_ = match self.structs.get(&struct_id) {
-                            Some(s) => s,
-                            None => {
-                                self.diagnostics.push(Error {
-                                    span: **self.span_map.get(&id).unwrap(),
-                                    msg: format!("subject is not a struct: {}", struct_id.0),
-                                });
-                                continue;
-                            }
-                        };
-                        let struct_name = struct_.name;
-                        let field =
-                            struct_.fields.iter().enumerate().find_map(|(i, x)| {
-                                (x.name == member_name).then_some((i, x.type_id))
-                            });
-                        match field {
-                            Some((field_index, field_type)) => {
-                                self.expr_id_to_expr_map
-                                    .insert(id, Expr::Field(subject_id, struct_id, field_index));
-                                self.expr_id_to_type_id_map.insert(id, field_type);
-                                self.resolved_types.insert(id, field_type);
-                            }
-                            None => {
-                                self.diagnostics.push(Error {
-                                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                                    msg: format!(
-                                        "struct '{}' has no field '{}'",
-                                        struct_name, member_name
-                                    ),
-                                });
-                                self.expr_id_to_expr_map.insert(id, Expr::Error);
-                            }
-                        }
-                    }
-                    subject_type => {
-                        // A closure parameter still awaiting bidirectional
-                        // inference — typed when the enclosing method call resolves
-                        // (a later iteration, since method calls are solved after
-                        // field accessors). Defer rather than error.
-                        if self.is_unknown_closure_parameter(subject_id) {
-                            remaining_accessors.insert(id, constraint);
-                            continue;
-                        }
-                        let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
-                        self.diagnostics.push(Error {
-                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                            msg: format!(
-                                "cannot access field '{}' on type {}",
-                                member_name, subject_str
-                            ),
-                        });
-                        self.expr_id_to_expr_map.insert(id, Expr::Error);
-                    }
-                }
-                progress = true;
-            }
-            self.field_accessor_constraints = remaining_accessors;
 
             // --- Resolve match expressions ---
             // A match resolves once its subject type is known: the leg
@@ -7365,11 +7354,13 @@ impl<'src> Analyzer<'src> {
                 msg: "type of struct initializer could not be resolved".to_string(),
             });
         }
-        for constraint in self.field_accessor_constraints.values() {
-            self.diagnostics.push(Error {
-                span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
-                msg: "type of accessor subject could not be resolved".to_string(),
-            });
+        for constraint in &self.constraints {
+            if let Constraint::FieldAccessor(constraint) = constraint {
+                self.diagnostics.push(Error {
+                    span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
+                    msg: "type of accessor subject could not be resolved".to_string(),
+                });
+            }
         }
         for constraint in &self.variable_constraints {
             self.diagnostics.push(Error {
@@ -7411,7 +7402,6 @@ impl<'src> Analyzer<'src> {
 
         // Clear processed constraints
         self.struct_initializer_constraints.clear();
-        self.field_accessor_constraints.clear();
         self.variable_constraints.clear();
         self.call_subject_constraints.clear();
         self.prepped_matches.clear();
