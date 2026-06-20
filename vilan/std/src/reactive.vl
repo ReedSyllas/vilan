@@ -1,0 +1,84 @@
+// `std::reactive` — fine-grained reactivity. A `Signal<T>` holds a value;
+// `effect` runs a closure now and re-runs it whenever a signal it read changes.
+// Reading a signal inside an effect subscribes that effect; writing a signal
+// re-runs its subscribers. Built on `Shared` (so a signal is an identity, shared
+// when copied or captured) and uses only core features, so it works on any
+// target — Node or the browser.
+
+import pkg::shared::Shared;
+import pkg::option::Option::{ self, Some, None };
+
+// A re-runnable reactive computation. `id` lets a signal avoid subscribing the
+// same effect twice; `body` is the work to repeat when a dependency changes.
+struct Effect {
+	id: i32,
+	body: || void,
+}
+
+// The effect currently running (so a signal read can subscribe it) and the next
+// effect id — module-level shared state, one tracker for the whole program.
+let running: Shared<Option<Effect>> = Shared::new(None);
+let next_id: Shared<i32> = Shared::new(0);
+
+// Run `e` as the running effect for the duration of its body, so every signal it
+// reads subscribes it; the previous running effect is restored afterward, so a
+// nested effect doesn't clobber its parent's tracking.
+fun run_effect(e: Effect) {
+	let previous = running.read();
+	running.write() = Some(e);
+	let body = e.body;
+	body();
+	running.write() = previous;
+}
+
+// Run `body` now and re-run it whenever a signal it read changes.
+fun effect(body: || void) {
+	let id = next_id.read();
+	next_id.write() = id + 1;
+	run_effect(Effect { id = id, body = body });
+}
+
+// A reactive cell. Read it inside an `effect` to subscribe that effect; write it
+// to re-run every subscribed effect.
+struct Signal<T> {
+	value: Shared<T>,
+	subscribers: Shared<List<Effect>>,
+}
+
+impl Signal<type T> {
+	// A signal seeded with `value`.
+	fun new(value: T): Signal<T> {
+		mut subscribers: List<Effect> = [];
+		Signal { value = Shared::new(value), subscribers = Shared::new(subscribers) }
+	}
+
+	// The current value; subscribes the running effect (if any) to changes. The
+	// dedup scan is inlined rather than a helper method: a generic method calling
+	// a second generic method on `self` inside this reactive graph makes the
+	// analyzer recurse pathologically (a known compiler limitation).
+	fun get(self): T {
+		match running.read() {
+			Some(let e) => {
+				mut already = false;
+				for subscriber in self.subscribers.read() {
+					if subscriber.id == e.id {
+						already = true;
+					}
+				}
+				if !already {
+					self.subscribers.write().push(e);
+				}
+			},
+			None => {},
+		}
+		self.value.read()
+	}
+
+	// Replace the value and re-run every subscribed effect.
+	fun set(self, value: T) {
+		self.value.write() = value;
+		for subscriber in self.subscribers.read() {
+			run_effect(subscriber);
+		}
+	}
+}

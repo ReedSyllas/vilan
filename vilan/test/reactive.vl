@@ -1,0 +1,25 @@
+import std::print;
+import std::reactive::{ Signal, effect };
+
+// `std::reactive` — fine-grained reactivity. An `effect` runs immediately and
+// re-runs whenever a signal it read changes; it tracks exactly the signals it
+// touched, so an unrelated signal's change doesn't re-run it.
+fun main() {
+	let first = Signal::new("Ada");
+	let last = Signal::new("Lovelace");
+
+	// Reads both signals -> subscribed to both.
+	effect(|| {
+		print(first.get() + " " + last.get());
+	});
+
+	// Reads only `first` -> subscribed to `first` alone.
+	effect(|| {
+		print("first: " + first.get());
+	});
+
+	print("---");
+	first.set("Grace"); // re-runs both effects (both read `first`)
+	print("---");
+	last.set("Hopper"); // re-runs only the full-name effect
+}
