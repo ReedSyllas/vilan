@@ -407,6 +407,10 @@ enum Constraint<'src> {
     /// `subject.field` — resolves to the named field's type once the subject
     /// resolves to a struct.
     FieldAccessor(FieldAccessorConstraint<'src>),
+    /// `Struct { field = value, .. }` — checks the fields against the struct
+    /// definition, infers its type arguments from the values, and records the
+    /// initializer once every field value's type is known.
+    StructInitializer(StructInitializerConstraint<'src>),
 }
 
 impl Constraint<'_> {
@@ -415,6 +419,7 @@ impl Constraint<'_> {
     /// it always did relative to the not-yet-migrated ones.
     fn priority(&self) -> u8 {
         match self {
+            Constraint::StructInitializer(_) => 1,
             Constraint::FieldAccessor(_) => 2,
             Constraint::Subscript { .. } => 3,
             Constraint::Is(_) => 4,
@@ -621,7 +626,6 @@ pub struct Analyzer<'src> {
     scope_id: u32,
     scopes: IndexMap<Id, Scope<'src>>,
     span_map: HashMap<Id, &'src Span>,
-    struct_initializer_constraints: Vec<StructInitializerConstraint<'src>>,
     struct_initializer_to_def: HashMap<Id, Id>, // initializer_id -> struct definition id
     structs: IndexMap<Id, Struct<'src>>,
     traits: IndexMap<Id, Trait<'src>>,
@@ -748,7 +752,6 @@ impl<'src> Analyzer<'src> {
             scope_id: 0,
             scopes: IndexMap::new(),
             span_map: HashMap::new(),
-            struct_initializer_constraints: Vec::new(),
             struct_initializer_to_def: HashMap::new(),
             structs: IndexMap::new(),
             traits: IndexMap::new(),
@@ -3512,15 +3515,16 @@ impl<'src> Analyzer<'src> {
                         )
                     })
                     .collect::<Vec<_>>();
-                self.struct_initializer_constraints
-                    .push(StructInitializerConstraint::from_walk(
+                self.constraints.push(Constraint::StructInitializer(
+                    StructInitializerConstraint::from_walk(
                         id,
                         scope_id,
                         name,
                         generic_argument_ids,
                         e_fields,
                         fields.1,
-                    ));
+                    ),
+                ));
                 None
             }
             Node::Impl(subject, traits, body) => {
@@ -5418,6 +5422,142 @@ impl<'src> Analyzer<'src> {
             } => self.resolve_subscript(*id, *subject_id, *index_id),
             Constraint::Is(prepped) => self.resolve_is(prepped),
             Constraint::FieldAccessor(constraint) => self.resolve_field_accessor(constraint),
+            Constraint::StructInitializer(constraint) => {
+                self.resolve_struct_initializer(constraint)
+            }
+        }
+    }
+
+    /// `Struct { field = value, .. }`: resolve the struct by name (lexically),
+    /// check field count, infer each value against its declared field type
+    /// (binding the struct's type arguments), and record the initializer. Defers
+    /// while any field value is unresolved. The initializer expression and type
+    /// are stored on every attempt (the partial store is overwritten on re-run),
+    /// matching the original "always store" behaviour.
+    fn resolve_struct_initializer(
+        &mut self,
+        constraint: &StructInitializerConstraint<'src>,
+    ) -> Resolution {
+        let struct_id =
+            match self.try_get_expr_id_by_name(constraint.struct_name, constraint.scope_id) {
+                Some(expr_id) => expr_id,
+                None => {
+                    self.diagnostics.push(Error {
+                        span: constraint.fields_span.clone(),
+                        msg: format!("unknown struct: {}", constraint.struct_name),
+                    });
+                    return Resolution::Failed;
+                }
+            };
+        let struct_ = match self.structs.get(&struct_id) {
+            Some(struct_) => struct_,
+            None => {
+                self.diagnostics.push(Error {
+                    span: constraint.fields_span.clone(),
+                    msg: format!("cannot initialize a non-struct: {}", constraint.struct_name),
+                });
+                return Resolution::Failed;
+            }
+        };
+        let generic_param_ids = struct_.generic_parameter_constraint_ids.clone();
+        let struct_fields = struct_.fields.clone();
+        if constraint.fields.len() != struct_fields.len() {
+            self.diagnostics.push(Error {
+                span: constraint.fields_span.clone(),
+                msg: format!(
+                    "Expected {} {}, but got {} instead.",
+                    struct_fields.len(),
+                    plural(struct_fields.len(), "field", "fields"),
+                    constraint.fields.len()
+                ),
+            });
+            return Resolution::Failed;
+        }
+        let initializer_id = constraint.initializer_id;
+        let struct_name = constraint.struct_name;
+        let mut initializer_fields = IndexMap::new();
+        let mut substitution_context = HashMap::new();
+        for (index, generic_argument_id) in constraint.generic_argument_ids.iter().enumerate() {
+            if let Some(generic_constraint) = generic_param_ids.get(index) {
+                substitution_context.insert(*generic_constraint, *generic_argument_id);
+            }
+        }
+        let mut deferred = false;
+        for (field_name, field_value, field_value_span) in &constraint.fields {
+            let field = struct_fields
+                .iter()
+                .enumerate()
+                .find(|(_, field)| *field.name == **field_name);
+            let (struct_field_index, struct_field) = match field {
+                Some(field) => field,
+                None => {
+                    self.diagnostics.push(Error {
+                        span: *field_value_span,
+                        msg: format!("struct '{}' has no field '{}'", struct_name, field_name),
+                    });
+                    continue;
+                }
+            };
+            let struct_field_type = struct_field.type_id.get_type(self);
+            // Infer the value against the declared field type so that, e.g., an
+            // integer literal is treated as `f64` when the field is `f64`.
+            let value_type =
+                self.infer_type(*field_value, &struct_field_type, &substitution_context);
+            if let Type::Unresolved = value_type {
+                deferred = true;
+                break;
+            }
+            if let Some((_unified, bindings)) =
+                self.reconcile_type(&value_type, &struct_field_type, &substitution_context)
+            {
+                for (constraint_id, type_id) in bindings {
+                    substitution_context.insert(constraint_id, type_id);
+                }
+                initializer_fields.insert(struct_field_index, *field_value);
+            } else {
+                // Type mismatch: emit a diagnostic but still record the type for
+                // downstream consumers.
+                self.diagnostics.push(Error {
+                    span: constraint.fields_span.clone(),
+                    msg: format!(
+                        "Expected {}, but got {} instead.",
+                        self.pretty_print_type(&struct_field_type, &substitution_context),
+                        self.pretty_print_type(&value_type, &substitution_context),
+                    ),
+                });
+                let type_id = Type::Struct(struct_id, Vec::new()).get_type_id(self);
+                self.resolved_types.insert(initializer_id, type_id);
+                self.struct_initializer_to_def
+                    .insert(initializer_id, struct_id);
+            }
+        }
+        // Always store the initializer expression so `infer_type` can handle it
+        // (a partial store while deferred is overwritten on the resolving run).
+        self.expr_id_to_expr_map.insert(
+            initializer_id,
+            Expr::StructInitializer(initializer_id, initializer_fields),
+        );
+        self.struct_initializer_to_def
+            .insert(initializer_id, struct_id);
+        // Fill the struct's type arguments from the bindings inferred above
+        // (`Box { value = 5 }` -> `Box<i32>`), so methods called on the value
+        // monomorphize against the concrete element type. A parameter no field
+        // constrains stays abstract.
+        let type_arguments = generic_param_ids
+            .iter()
+            .map(|constraint_id| {
+                substitution_context
+                    .get(constraint_id)
+                    .copied()
+                    .unwrap_or(*constraint_id)
+            })
+            .collect();
+        let type_id = Type::Struct(struct_id, type_arguments).get_type_id(self);
+        self.resolved_types.insert(initializer_id, type_id);
+        if deferred {
+            Resolution::Deferred
+        } else {
+            Resolution::Resolved
         }
     }
 
@@ -6024,151 +6164,6 @@ impl<'src> Analyzer<'src> {
             if self.resolve_constraints() {
                 progress = true;
             }
-
-            // --- Resolve struct initializer constraints ---
-            let mut unresolved_constraints = Vec::new();
-            for mut constraint in std::mem::take(&mut self.struct_initializer_constraints) {
-                // struct_id is Id(0) as placeholder; resolve by name across all scopes.
-                // Resolve the struct name from the initializer's own lexical scope
-                // (walking outward to parents). This used to scan *every* scope by
-                // name on the first attempt — O(scopes) per initializer, i.e.
-                // quadratic in a program with many struct literals.
-                let struct_expr_id = match self
-                    .try_get_expr_id_by_name(constraint.struct_name, constraint.scope_id)
-                {
-                    Some(expr_id) => expr_id,
-                    None => {
-                        self.diagnostics.push(Error {
-                            span: constraint.fields_span.clone(),
-                            msg: format!("unknown struct: {}", constraint.struct_name),
-                        });
-                        continue;
-                    }
-                };
-                constraint.struct_id = struct_expr_id;
-                let struct_ = match self.structs.get(&constraint.struct_id) {
-                    Some(s) => s,
-                    None => {
-                        self.diagnostics.push(Error {
-                            span: constraint.fields_span.clone(),
-                            msg: format!(
-                                "cannot initialize a non-struct: {}",
-                                constraint.struct_name
-                            ),
-                        });
-                        continue;
-                    }
-                };
-                let generic_param_ids = struct_.generic_parameter_constraint_ids.clone();
-                let struct_fields = struct_.fields.clone();
-                if constraint.fields.len() != struct_fields.len() {
-                    self.diagnostics.push(Error {
-                        span: constraint.fields_span.clone(),
-                        msg: format!(
-                            "Expected {} {}, but got {} instead.",
-                            struct_fields.len(),
-                            plural(struct_fields.len(), "field", "fields"),
-                            constraint.fields.len()
-                        ),
-                    });
-                    continue;
-                }
-                let mut initializer_fields = IndexMap::new();
-                let mut substitution_context = HashMap::new();
-                for (i, generic_argument_id) in constraint.generic_argument_ids.iter().enumerate() {
-                    let gc = generic_param_ids.get(i);
-                    if let Some(gc) = gc {
-                        substitution_context.insert(*gc, *generic_argument_id);
-                    }
-                }
-                let initializer_id = constraint.initializer_id;
-                let mut defer = None;
-                let fields = constraint.fields.clone();
-                let struct_id = constraint.struct_id;
-                let struct_name = constraint.struct_name;
-                for (field_name, field_value, field_value_span) in &fields {
-                    let field = struct_fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, x)| *x.name == **field_name);
-                    let (struct_field_index, struct_field) = match field {
-                        Some(field) => field,
-                        None => {
-                            self.diagnostics.push(Error {
-                                span: *field_value_span,
-                                msg: format!(
-                                    "struct '{}' has no field '{}'",
-                                    struct_name, field_name
-                                ),
-                            });
-                            continue;
-                        }
-                    };
-                    let struct_field_type = struct_field.type_id.get_type(self);
-                    // Infer the value against the declared field type so that,
-                    // e.g., an integer literal is treated as `f64` when the
-                    // field is `f64`.
-                    let value_type =
-                        self.infer_type(*field_value, &struct_field_type, &substitution_context);
-                    if let Type::Unresolved = value_type {
-                        defer = Some(constraint);
-                        break;
-                    }
-                    if let Some((_unified, bindings)) =
-                        self.reconcile_type(&value_type, &struct_field_type, &substitution_context)
-                    {
-                        for (cid, tid) in bindings {
-                            substitution_context.insert(cid, tid);
-                        }
-                        initializer_fields.insert(struct_field_index, *field_value);
-                    } else {
-                        // Type mismatch: emit diagnostic but still record the type for downstream consumers.
-                        self.diagnostics.push(Error {
-                            span: constraint.fields_span.clone(),
-                            msg: format!(
-                                "Expected {}, but got {} instead.",
-                                self.pretty_print_type(&struct_field_type, &substitution_context),
-                                self.pretty_print_type(&value_type, &substitution_context),
-                            ),
-                        });
-                        let type_id = Type::Struct(struct_id, Vec::new()).get_type_id(self);
-                        self.resolved_types.insert(initializer_id, type_id);
-                        self.struct_initializer_to_def
-                            .insert(initializer_id, struct_id);
-                    }
-                }
-                if let Some(deferred) = defer {
-                    unresolved_constraints.push(deferred);
-                } else {
-                    // The constraint fully resolved this pass.
-                    progress = true;
-                }
-                // Always store the struct initializer expression so infer_type can handle it.
-                self.expr_id_to_expr_map.insert(
-                    initializer_id,
-                    Expr::StructInitializer(initializer_id, initializer_fields),
-                );
-                // Store the mapping from initializer to struct definition.
-                self.struct_initializer_to_def
-                    .insert(initializer_id, struct_id);
-                // Fill the struct's type arguments from the bindings inferred
-                // above (`Box { value = 5 }` -> `Box<i32>`), so methods called on
-                // the value monomorphize against the concrete element type rather
-                // than the struct's abstract parameter. A parameter that no field
-                // constrains stays abstract.
-                let type_arguments = generic_param_ids
-                    .iter()
-                    .map(|constraint_id| {
-                        substitution_context
-                            .get(constraint_id)
-                            .copied()
-                            .unwrap_or(*constraint_id)
-                    })
-                    .collect();
-                let type_id = Type::Struct(struct_id, type_arguments).get_type_id(self);
-                self.resolved_types.insert(initializer_id, type_id);
-            }
-            self.struct_initializer_constraints = unresolved_constraints;
 
             // --- Resolve match expressions ---
             // A match resolves once its subject type is known: the leg
@@ -7348,18 +7343,20 @@ impl<'src> Analyzer<'src> {
         }
 
         // --- Post-solve diagnostics ---
-        for constraint in &self.struct_initializer_constraints {
-            self.diagnostics.push(Error {
-                span: constraint.fields_span,
-                msg: "type of struct initializer could not be resolved".to_string(),
-            });
-        }
+        // Unresolved tasks still on the queue could not be typed (priority order
+        // — struct initializers before field accessors — matches the original
+        // per-list diagnostic order).
         for constraint in &self.constraints {
-            if let Constraint::FieldAccessor(constraint) = constraint {
-                self.diagnostics.push(Error {
+            match constraint {
+                Constraint::StructInitializer(constraint) => self.diagnostics.push(Error {
+                    span: constraint.fields_span,
+                    msg: "type of struct initializer could not be resolved".to_string(),
+                }),
+                Constraint::FieldAccessor(constraint) => self.diagnostics.push(Error {
                     span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
                     msg: "type of accessor subject could not be resolved".to_string(),
-                });
+                }),
+                _ => {}
             }
         }
         for constraint in &self.variable_constraints {
@@ -7401,7 +7398,6 @@ impl<'src> Analyzer<'src> {
         }
 
         // Clear processed constraints
-        self.struct_initializer_constraints.clear();
         self.variable_constraints.clear();
         self.call_subject_constraints.clear();
         self.prepped_matches.clear();
