@@ -394,22 +394,26 @@ pub struct FieldAccessorConstraint<'src> {
 /// over from the old worklists one kind at a time; `priority` reproduces the
 /// original inter-section order so each migration stays corpus-identical.
 #[derive(Debug)]
-enum Constraint {
+enum Constraint<'src> {
     /// `subject[index]` — resolves to the subject `List`'s element type.
     Subscript {
         id: Id,
         subject_id: Id,
         index_id: Id,
     },
+    /// `subject is Pattern` — resolves the pattern (typing its captures) once the
+    /// subject type is known; the expression itself is `bool`.
+    Is(PreppedIs<'src>),
 }
 
-impl Constraint {
+impl Constraint<'_> {
     /// The position this kind resolved at in the original `build()` fixpoint. The
     /// queue is processed in ascending priority, so a migrated section runs where
     /// it always did relative to the not-yet-migrated ones.
     fn priority(&self) -> u8 {
         match self {
             Constraint::Subscript { .. } => 3,
+            Constraint::Is(_) => 4,
         }
     }
 }
@@ -508,8 +512,8 @@ pub struct Analyzer<'src> {
     // `subject[index]` subscripts awaiting type resolution: index expr id ->
     // The unified constraint queue (replacing the per-kind `prepped_*` worklists,
     // one kind migrated at a time). Drained and re-queued by `resolve_constraints`
-    // each fixpoint pass. Currently holds `Subscript` (`subject[index]`).
-    constraints: Vec<Constraint>,
+    // each fixpoint pass.
+    constraints: Vec<Constraint<'src>>,
     function_calls: IndexMap<Id, FunctionCall>,
     functions: IndexMap<Id, Function<'src>>,
     generic_constraint_names: HashMap<TypeId, &'src str>,
@@ -556,7 +560,6 @@ pub struct Analyzer<'src> {
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
-    prepped_is: Vec<PreppedIs<'src>>,
     prepped_matches: Vec<PreppedMatch<'src>>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     // `for x in iterable` expressions, as (for-each id, iterable id), resolved
@@ -722,7 +725,6 @@ impl<'src> Analyzer<'src> {
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
-            prepped_is: Vec::new(),
             prepped_matches: Vec::new(),
             prepped_method_calls: Vec::new(),
             prepped_for_each: Vec::new(),
@@ -3022,12 +3024,12 @@ impl<'src> Analyzer<'src> {
             Node::Is(subject, pattern) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 let walk_pattern = self.walk_pattern(pattern, scope_id);
-                self.prepped_is.push(PreppedIs {
+                self.constraints.push(Constraint::Is(PreppedIs {
                     id,
                     subject_id,
                     scope_id,
                     pattern: walk_pattern,
-                });
+                }));
                 None
             }
             // Re-export visibility is not tracked yet; walking the inner
@@ -5407,13 +5409,33 @@ impl<'src> Analyzer<'src> {
     }
 
     /// Dispatches a constraint to its per-kind resolver.
-    fn try_resolve(&mut self, constraint: &Constraint) -> Resolution {
-        match *constraint {
+    fn try_resolve(&mut self, constraint: &Constraint<'src>) -> Resolution {
+        match constraint {
             Constraint::Subscript {
                 id,
                 subject_id,
                 index_id,
-            } => self.resolve_subscript(id, subject_id, index_id),
+            } => self.resolve_subscript(*id, *subject_id, *index_id),
+            Constraint::Is(prepped) => self.resolve_is(prepped),
+        }
+    }
+
+    /// `subject is Pattern`: once the subject type is known, resolve the pattern
+    /// (typing its captures) and record the `Expr::Is`. `None` from the pattern
+    /// means a diagnostic was already emitted.
+    fn resolve_is(&mut self, prepped: &PreppedIs<'src>) -> Resolution {
+        let subject_type = self.infer_type(prepped.subject_id, &Type::Unknown, &HashMap::new());
+        if matches!(subject_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        let subject_type_id = subject_type.get_type_id(self);
+        match self.resolve_pattern(&prepped.pattern, subject_type_id, prepped.scope_id) {
+            Some(resolved) => {
+                self.expr_id_to_expr_map
+                    .insert(prepped.id, Expr::Is(prepped.subject_id, resolved));
+                Resolution::Resolved
+            }
+            None => Resolution::Failed,
         }
     }
 
@@ -5454,7 +5476,8 @@ impl<'src> Analyzer<'src> {
         // reproduces the original inter-section resolution order. (Tasks are
         // walked in source order; a stable sort by priority groups them by kind
         // without disturbing order within a kind.)
-        self.constraints.sort_by_key(Constraint::priority);
+        self.constraints
+            .sort_by_key(|constraint| constraint.priority());
 
         // Resolve imports/re-exports to a fixpoint: a re-export may name an item
         // bound by another re-export resolved in a later pass (a chain of relay
@@ -6157,30 +6180,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.field_accessor_constraints = remaining_accessors;
-
-            // --- Resolve `is` pattern tests ---
-            // Once the subject type is known, resolve the pattern (typing its
-            // captures) and record the resolved `Expr::Is`. The expression's own
-            // type is always `bool`.
-            let mut remaining_is = Vec::new();
-            for prepped in std::mem::take(&mut self.prepped_is) {
-                let subject_type =
-                    self.infer_type(prepped.subject_id, &Type::Unknown, &HashMap::new());
-                if matches!(subject_type, Type::Unresolved) {
-                    remaining_is.push(prepped);
-                    continue;
-                }
-                let subject_type_id = subject_type.get_type_id(self);
-                match self.resolve_pattern(&prepped.pattern, subject_type_id, prepped.scope_id) {
-                    Some(resolved) => {
-                        self.expr_id_to_expr_map
-                            .insert(prepped.id, Expr::Is(prepped.subject_id, resolved));
-                    }
-                    None => {} // a diagnostic was already emitted
-                }
-                progress = true;
-            }
-            self.prepped_is = remaining_is;
 
             // --- Resolve match expressions ---
             // A match resolves once its subject type is known: the leg
