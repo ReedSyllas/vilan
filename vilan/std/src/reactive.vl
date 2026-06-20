@@ -108,13 +108,9 @@ impl Signal<type T> {
 		self.node.update(value);
 	}
 
-	// Read-modify-write in one step: `count.set_with(|n| n + 1)`. The current
-	// value is read from the cell directly rather than via a second `self.node`
-	// method call — a generic method making two generic-method calls on the same
-	// receiver inside this reactive graph trips a known analyzer recursion.
+	// Read-modify-write in one step: `count.set_with(|n| n + 1)`.
 	fun set_with(self, transform: |T| T) {
-		let current = self.node.value.read();
-		self.node.update(transform(current));
+		self.node.update(transform(self.node.get()));
 	}
 
 	fun derive<U>(self, transform: |T| U): Source<U> {

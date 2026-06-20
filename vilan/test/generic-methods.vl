@@ -1,0 +1,40 @@
+import std::print;
+import std::shared::Shared;
+
+// A generic method that calls other generic methods on `self` — `update` calls
+// both `self.set` and `self.get`. This pattern used to overflow the compiler's
+// stack (a `T -> T` self-mapping looped in the transformer's type resolution);
+// it now compiles. Exercises generic method dispatch across several methods of
+// the same generic impl, instantiated at two element types.
+struct Cell<T> {
+	value: Shared<T>,
+}
+
+impl Cell<type T> {
+	fun new(value: T): Cell<T> {
+		Cell { value = Shared::new(value) }
+	}
+
+	fun get(self): T {
+		self.value.read()
+	}
+
+	fun set(self, value: T) {
+		self.value.write() = value;
+	}
+
+	fun update(self, transform: |T| T) {
+		self.set(transform(self.get()));
+	}
+}
+
+fun main() {
+	let counter = Cell::new(0);
+	counter.update(|n| n + 1);
+	counter.update(|n| n * 10);
+	print(counter.get()); // 10
+
+	let label = Cell::new("a");
+	label.set("hello");
+	print(label.get()); // hello
+}

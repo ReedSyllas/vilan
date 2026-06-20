@@ -4913,6 +4913,7 @@ impl<'src> Analyzer<'src> {
         b: &Type,
         substitution_context: &SubstitutionContext,
     ) -> Option<(Type, Vec<(TypeId, TypeId)>)> {
+        let _guard = crate::util::RecursionGuard::enter()?;
         Some(match (a, b) {
             (Type::Any, _) | (_, Type::Unknown) => (a.clone(), Vec::new()),
             (_, Type::Any) | (Type::Unknown, _) => (b.clone(), Vec::new()),
@@ -5156,6 +5157,9 @@ impl<'src> Analyzer<'src> {
         type_: &Type,
         substitution_context: &SubstitutionContext,
     ) -> Type {
+        let Some(_guard) = crate::util::RecursionGuard::enter() else {
+            return type_.clone();
+        };
         match type_ {
             Type::Generic(constraint_id) => substitution_context
                 .get(constraint_id)

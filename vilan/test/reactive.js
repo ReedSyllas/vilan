@@ -51,14 +51,16 @@ function $e(self, observer) {
 function $f(self, value) {
 	$d(self[0], value);
 }
-function $g(self, transform) {
-	const current = self[0][0].v;
-	$d(self[0], transform(current));
-}
 function $h(self) {
 	return self[0].v;
 }
-function $j(self, observer) {
+function $g(self, transform) {
+	$d(self[0], transform($h(self[0])));
+}
+function $i(self) {
+	return self[0].v;
+}
+function $k(self, observer) {
 	const upstream = __clone(self[0]);
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
@@ -68,8 +70,8 @@ function $j(self, observer) {
 	observer(self[0].v);
 	return [ self[1], id ];
 }
-function $i(self, observer) {
-	return $j(self[0], observer);
+function $j(self, observer) {
+	return $k(self[0], observer);
 }
 const next_subscriber_id = __shared_new(0);
 const count = new2(0);
@@ -83,8 +85,8 @@ $f(count, 1);
 $g(count, (n) => {
 	return n + 4;
 });
-console.log($h(doubled));
-$i(count, (n) => {
+console.log($i(doubled));
+$j(count, (n) => {
 	return console.log(n);
 });
 $f(count, 20);

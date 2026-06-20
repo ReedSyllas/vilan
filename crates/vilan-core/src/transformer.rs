@@ -2225,12 +2225,26 @@ impl<'src> Transformer<'src> {
     /// Resolves a type id to its concrete form under the active substitution,
     /// following generic parameters to the type they're currently bound to.
     fn resolve_type_id(&self, type_id: TypeId) -> TypeId {
+        let Some(_guard) = crate::util::RecursionGuard::enter() else {
+            return type_id;
+        };
         match self.program.type_id_to_type_map.get(&type_id) {
-            Some(Type::Generic(constraint_id)) => self
-                .current_substitution
-                .get(constraint_id)
-                .map(|type_id| self.resolve_type_id(*type_id))
-                .unwrap_or(type_id),
+            Some(Type::Generic(constraint_id)) => {
+                match self.current_substitution.get(constraint_id) {
+                    // Guard a self-mapping (`T -> T`): the substitution binds the
+                    // generic to itself (which reconciling an impl's own parameter
+                    // records), so following it would loop forever — leave it abstract.
+                    Some(bound)
+                        if !matches!(
+                            self.program.type_id_to_type_map.get(bound),
+                            Some(Type::Generic(c)) if c == constraint_id
+                        ) =>
+                    {
+                        self.resolve_type_id(*bound)
+                    }
+                    _ => type_id,
+                }
+            }
             _ => type_id,
         }
     }
