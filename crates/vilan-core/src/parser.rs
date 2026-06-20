@@ -13,6 +13,22 @@ enum ExternArg<'src> {
     Text(&'src str),
 }
 
+/// Stamps a binder pattern's bindings as mutable (or not) — the `let`/`mut` that
+/// introduces a binder applies to all of its names, but the binder grammar can't
+/// see which keyword preceded it, so it parses them immutable and we fix up here.
+fn apply_binding_mutability<'src>(pattern: Pattern<'src>, mutable: bool) -> Pattern<'src> {
+    match pattern {
+        Pattern::Binding(name, _) => Pattern::Binding(name, mutable),
+        Pattern::Tuple(patterns) => Pattern::Tuple(
+            patterns
+                .into_iter()
+                .map(|(pattern, span)| (apply_binding_mutability(pattern, mutable), span))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 /// Interprets a `@extern(..)` attribute's arguments into a host binding.
 fn extern_binding_from_args<'src>(args: &[ExternArg<'src>]) -> ExternBinding<'src> {
     use ExternArg::{Text, Word};
@@ -418,7 +434,7 @@ where
     });
 
     let let_ = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
-        .then(binder)
+        .then(binder.clone())
         .then(
             just(Token::Op(":"))
                 .ignore_then(type_.clone())
@@ -569,9 +585,11 @@ where
     // A match-leg pattern: `_`, `let x` / `mut x`, a literal (`"quit"`, `42`), or
     // a variant (`Some(let x)`, qualified `Signal::Quit`).
     let pattern = recursive(|pattern| {
+        // `let x` / `mut x`, or a destructuring binder `let (a, b)` — the binder
+        // grammar (a name or a tuple of binders) is shared with `let`/parameters.
         let binding = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
-            .then(identifier.labelled("capture name"))
-            .map(|(mutable, name)| Pattern::Binding(name, mutable));
+            .then(binder.clone())
+            .map(|(mutable, (pattern, _))| apply_binding_mutability(pattern, mutable));
         // `(a, b, ...)` — a tuple pattern (at least two elements, to keep a
         // single parenthesised pattern unambiguous as grouping).
         let tuple = pattern
