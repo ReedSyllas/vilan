@@ -439,6 +439,10 @@ enum Constraint<'src> {
         argument_ids: Vec<Id>,
         arguments_span: Span,
     },
+    /// `for item in iterable` — types the loop item from the iterable's element
+    /// type once the iterable resolves (committed to `any` post-fixpoint if it
+    /// never does — an empty, never-pushed list).
+    ForEachItem { item_id: Id, iterable_id: Id },
 }
 
 impl Constraint<'_> {
@@ -454,6 +458,7 @@ impl Constraint<'_> {
             Constraint::Match(_) => 5,
             Constraint::MethodCall { .. } => 6,
             Constraint::SlotUnification { .. } => 7,
+            Constraint::ForEachItem { .. } => 8,
             Constraint::MethodArgCheck { .. } => 9,
             Constraint::Variable(_) => 10,
         }
@@ -606,7 +611,6 @@ pub struct Analyzer<'src> {
     // `for x in iterable` element bindings, as (item variable id, iterable id),
     // resolved in the constraint loop: the item takes the iterable's element
     // type (`List<i32>` -> `i32`), so the body can use it concretely.
-    prepped_for_each_items: Vec<(Id, Id)>,
     // Method calls whose arguments need checking against the method's parameters,
     // as (member id, explicit argument ids). A wired method call isn't checked by
     // the free-call machinery, so this is a dedicated deferred pass (no subject
@@ -759,7 +763,6 @@ impl<'src> Analyzer<'src> {
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
             prepped_for_each: Vec::new(),
-            prepped_for_each_items: Vec::new(),
             for_each_next: HashMap::new(),
             for_each_views: HashMap::new(),
             wrapped_view_captures: HashMap::new(),
@@ -3033,7 +3036,10 @@ impl<'src> Analyzer<'src> {
                     {
                         self.for_each_views.insert(variable_id, *mutable);
                     }
-                    self.prepped_for_each_items.push((variable_id, iterable_id));
+                    self.constraints.push(Constraint::ForEachItem {
+                        item_id: variable_id,
+                        iterable_id,
+                    });
                     variable_id
                 });
                 let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
@@ -5484,7 +5490,31 @@ impl<'src> Analyzer<'src> {
                 argument_ids,
                 arguments_span,
             } => self.resolve_method_arg_check(*member_id, argument_ids, *arguments_span),
+            Constraint::ForEachItem {
+                item_id,
+                iterable_id,
+            } => self.resolve_for_each_item(*item_id, *iterable_id),
         }
+    }
+
+    /// `for item in iterable`: once the iterable's type is known, the item takes
+    /// its element type. Defers while the iterable (or its element slot, which a
+    /// later `push` may fill) is unresolved.
+    fn resolve_for_each_item(&mut self, item_id: Id, iterable_id: Id) -> Resolution {
+        let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
+        let next_method = self.for_each_next_method(Some(item_id));
+        let element_type = self.iterable_element_type(&iterable_type, next_method);
+        if matches!(iterable_type, Type::Unresolved)
+            || matches!(element_type, Some(Type::Unknown | Type::Unresolved))
+        {
+            return Resolution::Deferred;
+        }
+        let element_type_id = element_type.unwrap_or(Type::Any).get_type_id(self);
+        if let Some(variable) = self.variables.get_mut(&item_id) {
+            variable.type_id = element_type_id;
+        }
+        self.resolved_types.insert(item_id, element_type_id);
+        Resolution::Resolved
     }
 
     /// `receiver.method(args)`: resolve the method against the receiver type
@@ -6743,38 +6773,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
 
-            // --- Resolve `for x in iterable` element bindings ---
-            // Once the iterable's type is known, the item takes its element type
-            // (`List<i32>` -> `i32`), falling back to `any` when the element type
-            // can't be recovered (an erased `List`, a custom iterator). Done in
-            // the loop so a method call on the item — deferred while the item is
-            // still `Unknown` — resolves once the element type lands.
-            if !self.prepped_for_each_items.is_empty() {
-                let mut remaining_items = Vec::new();
-                for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
-                    let iterable_type =
-                        self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
-                    let next_method = self.for_each_next_method(Some(item_id));
-                    let element_type = self.iterable_element_type(&iterable_type, next_method);
-                    // Defer while the iterable or its element is still unresolved
-                    // (an element slot a later `push` may yet fill); a post-loop
-                    // pass commits whatever remains to `any`.
-                    if matches!(iterable_type, Type::Unresolved)
-                        || matches!(element_type, Some(Type::Unknown | Type::Unresolved))
-                    {
-                        remaining_items.push((item_id, iterable_id));
-                        continue;
-                    }
-                    let element_type_id = element_type.unwrap_or(Type::Any).get_type_id(self);
-                    if let Some(variable) = self.variables.get_mut(&item_id) {
-                        variable.type_id = element_type_id;
-                    }
-                    self.resolved_types.insert(item_id, element_type_id);
-                    progress = true;
-                }
-                self.prepped_for_each_items = remaining_items;
-            }
-
             // --- Resolve call subject constraints ---
             let mut remaining_calls = Vec::new();
             let call_constraints: Vec<_> = std::mem::take(&mut self.call_subject_constraints)
@@ -7159,7 +7157,18 @@ impl<'src> Analyzer<'src> {
 
         // Commit any `for x in iterable` bindings still deferred (their element
         // slot never resolved — an empty, never-pushed list): the item is `any`.
-        for (item_id, iterable_id) in std::mem::take(&mut self.prepped_for_each_items) {
+        let deferred_for_each: Vec<(Id, Id)> = self
+            .constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                Constraint::ForEachItem {
+                    item_id,
+                    iterable_id,
+                } => Some((*item_id, *iterable_id)),
+                _ => None,
+            })
+            .collect();
+        for (item_id, iterable_id) in deferred_for_each {
             let iterable_type = self.infer_type(iterable_id, &Type::Unknown, &HashMap::new());
             let next_method = self.for_each_next_method(Some(item_id));
             let element_type = self
