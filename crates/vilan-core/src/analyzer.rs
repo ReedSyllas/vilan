@@ -387,6 +387,42 @@ pub struct FieldAccessorConstraint<'src> {
     pub member_name: &'src str,
 }
 
+/// A deferred type-inference task, resolved by `Analyzer::try_resolve`. This is
+/// the unified replacement for the ~25 per-kind `prepped_*`/`*_constraints`
+/// worklists the fixpoint drains today: one queue, resolved in a single explicit
+/// order (and, in a later increment, dependency-driven). Variants are migrated
+/// over from the old worklists one kind at a time; `priority` reproduces the
+/// original inter-section order so each migration stays corpus-identical.
+#[derive(Debug)]
+enum Constraint {
+    /// `subject[index]` — resolves to the subject `List`'s element type.
+    Subscript {
+        id: Id,
+        subject_id: Id,
+        index_id: Id,
+    },
+}
+
+impl Constraint {
+    /// The position this kind resolved at in the original `build()` fixpoint. The
+    /// queue is processed in ascending priority, so a migrated section runs where
+    /// it always did relative to the not-yet-migrated ones.
+    fn priority(&self) -> u8 {
+        match self {
+            Constraint::Subscript { .. } => 3,
+        }
+    }
+}
+
+/// The outcome of resolving a [`Constraint`]. `Failed` has already recorded its
+/// diagnostic. `Resolved` and `Failed` are both progress — the task is done and
+/// dropped from the queue; `Deferred` re-queues it for a later pass.
+enum Resolution {
+    Resolved,
+    Deferred,
+    Failed,
+}
+
 impl<'src> StructInitializerConstraint<'src> {
     fn from_walk(
         initializer_id: Id,
@@ -470,9 +506,10 @@ pub struct Analyzer<'src> {
     external_functions: IndexMap<Id, ExternalFunction<'src>>,
     field_accessor_constraints: IndexMap<Id, FieldAccessorConstraint<'src>>,
     // `subject[index]` subscripts awaiting type resolution: index expr id ->
-    // (subject expr id, index expr id). Resolved once the subject's `List<T>`
-    // type is known, like a field accessor.
-    index_constraints: IndexMap<Id, (Id, Id)>,
+    // The unified constraint queue (replacing the per-kind `prepped_*` worklists,
+    // one kind migrated at a time). Drained and re-queued by `resolve_constraints`
+    // each fixpoint pass. Currently holds `Subscript` (`subject[index]`).
+    constraints: Vec<Constraint>,
     function_calls: IndexMap<Id, FunctionCall>,
     functions: IndexMap<Id, Function<'src>>,
     generic_constraint_names: HashMap<TypeId, &'src str>,
@@ -666,7 +703,7 @@ impl<'src> Analyzer<'src> {
             type_references: Vec::new(),
             external_functions: IndexMap::new(),
             field_accessor_constraints: IndexMap::new(),
-            index_constraints: IndexMap::new(),
+            constraints: Vec::new(),
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
@@ -2793,7 +2830,11 @@ impl<'src> Analyzer<'src> {
             Node::Index(subject, index) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
                 let index_id = self.walk_expr_node(index, scope_id);
-                self.index_constraints.insert(id, (subject_id, index_id));
+                self.constraints.push(Constraint::Subscript {
+                    id,
+                    subject_id,
+                    index_id,
+                });
                 None
             }
             Node::MemberAccessor(subject, member) => {
@@ -5348,7 +5389,73 @@ impl<'src> Analyzer<'src> {
         true
     }
 
+    /// Drains the constraint queue once, attempting each task in priority order
+    /// (the queue is kept sorted, so this preserves the original section order)
+    /// and re-queueing those that defer. Returns whether any task resolved or
+    /// failed — i.e. whether this pass made progress.
+    fn resolve_constraints(&mut self) -> bool {
+        let mut progress = false;
+        let mut deferred = Vec::new();
+        for constraint in std::mem::take(&mut self.constraints) {
+            match self.try_resolve(&constraint) {
+                Resolution::Resolved | Resolution::Failed => progress = true,
+                Resolution::Deferred => deferred.push(constraint),
+            }
+        }
+        self.constraints = deferred;
+        progress
+    }
+
+    /// Dispatches a constraint to its per-kind resolver.
+    fn try_resolve(&mut self, constraint: &Constraint) -> Resolution {
+        match *constraint {
+            Constraint::Subscript {
+                id,
+                subject_id,
+                index_id,
+            } => self.resolve_subscript(id, subject_id, index_id),
+        }
+    }
+
+    /// `subject[index]`: once the subject's `List<T>` type is known, the
+    /// subscript's type is the element `T`; records the resolved `Expr::Index`.
+    fn resolve_subscript(&mut self, id: Id, subject_id: Id, index_id: Id) -> Resolution {
+        if !self.expr_id_to_expr_map.contains_key(&subject_id) {
+            return Resolution::Deferred;
+        }
+        let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+        let list_id = self.primitive_struct_ids.get("List").copied();
+        match subject_type {
+            Type::Unresolved => Resolution::Deferred,
+            Type::Struct(struct_id, arguments)
+                if Some(struct_id) == list_id && arguments.len() == 1 =>
+            {
+                let element_type = arguments[0];
+                self.expr_id_to_expr_map
+                    .insert(id, Expr::Index(subject_id, index_id));
+                self.expr_id_to_type_id_map.insert(id, element_type);
+                self.resolved_types.insert(id, element_type);
+                Resolution::Resolved
+            }
+            subject_type => {
+                let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!("cannot index {} (only a `List` is indexable)", subject_str),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                Resolution::Failed
+            }
+        }
+    }
+
     fn build(&mut self) {
+        // Keep the constraint queue in priority order so `resolve_constraints`
+        // reproduces the original inter-section resolution order. (Tasks are
+        // walked in source order; a stable sort by priority groups them by kind
+        // without disturbing order within a kind.)
+        self.constraints.sort_by_key(Constraint::priority);
+
         // Resolve imports/re-exports to a fixpoint: a re-export may name an item
         // bound by another re-export resolved in a later pass (a chain of relay
         // modules), so keep retrying the unresolved ones until a pass binds
@@ -5816,6 +5923,13 @@ impl<'src> Analyzer<'src> {
         for _ in 0..max_iterations {
             let mut progress = false;
 
+            // The unified constraint queue, resolved in priority order. As
+            // worklists migrate here, their sections below disappear; each
+            // migrated kind keeps its original priority, so order is preserved.
+            if self.resolve_constraints() {
+                progress = true;
+            }
+
             // --- Resolve struct initializer constraints ---
             let mut unresolved_constraints = Vec::new();
             for mut constraint in std::mem::take(&mut self.struct_initializer_constraints) {
@@ -6043,50 +6157,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
             self.field_accessor_constraints = remaining_accessors;
-
-            // --- Resolve `list[index]` subscripts ---
-            // Once the subject's `List<T>` type is known, the subscript's type is
-            // the element type `T`; record the resolved `Expr::Index`.
-            let index_constraints: Vec<_> = std::mem::take(&mut self.index_constraints)
-                .into_iter()
-                .collect();
-            let mut remaining_indexes = IndexMap::new();
-            for (id, (subject_id, index_id)) in index_constraints {
-                if !self.expr_id_to_expr_map.contains_key(&subject_id) {
-                    remaining_indexes.insert(id, (subject_id, index_id));
-                    continue;
-                }
-                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-                let list_id = self.primitive_struct_ids.get("List").copied();
-                match subject_type {
-                    Type::Unresolved => {
-                        remaining_indexes.insert(id, (subject_id, index_id));
-                    }
-                    Type::Struct(struct_id, arguments)
-                        if Some(struct_id) == list_id && arguments.len() == 1 =>
-                    {
-                        let element_type = arguments[0];
-                        self.expr_id_to_expr_map
-                            .insert(id, Expr::Index(subject_id, index_id));
-                        self.expr_id_to_type_id_map.insert(id, element_type);
-                        self.resolved_types.insert(id, element_type);
-                        progress = true;
-                    }
-                    subject_type => {
-                        let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
-                        self.diagnostics.push(Error {
-                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                            msg: format!(
-                                "cannot index {} (only a `List` is indexable)",
-                                subject_str
-                            ),
-                        });
-                        self.expr_id_to_expr_map.insert(id, Expr::Error);
-                        progress = true;
-                    }
-                }
-            }
-            self.index_constraints = remaining_indexes;
 
             // --- Resolve `is` pattern tests ---
             // Once the subject type is known, resolve the pattern (typing its
