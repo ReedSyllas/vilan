@@ -4689,6 +4689,35 @@ impl<'src> Analyzer<'src> {
                                 exprs_seen,
                             ),
                         };
+                        // A generic parameter fixed only by the return type — no
+                        // argument binds it — is inferred by unifying the return
+                        // type against the call's expected type, and recorded so
+                        // the transformer monomorphizes the call. Without this a
+                        // `let n: i32 = make()` for `fun make<T>(): T` (or a static
+                        // method on a generic container, `List::from_json(t):
+                        // List<T>`) leaves `T` unbound and `T::member()` dangling.
+                        // (Argument-bound generics are recorded during call-subject
+                        // resolution; this fills the return-type-only gap.)
+                        if !matches!(constraint, Type::Unknown | Type::Unresolved) {
+                            let mut return_generics = Vec::new();
+                            self.collect_generics(&return_type, 0, &mut return_generics);
+                            if !return_generics.is_empty()
+                                && let Some((_, bindings)) = self.reconcile_type(
+                                    &return_type,
+                                    &constraint,
+                                    &substitution_context,
+                                )
+                            {
+                                for (constraint_id, type_id) in bindings {
+                                    if return_generics.contains(&constraint_id) {
+                                        self.method_call_substitution
+                                            .entry(id)
+                                            .or_default()
+                                            .insert(constraint_id, type_id);
+                                    }
+                                }
+                            }
+                        }
                         let return_type = self.freshen_list_element_slots(return_type, id);
                         // Specialize a `Self` return. When a method's declared
                         // return type is the same as its `self` parameter's type
@@ -7637,6 +7666,12 @@ pub enum Intrinsic {
     // `JsonValue.tag(): str` -> the externally-tagged enum discriminator via a
     // runtime helper (`typeof`/`Object.keys`).
     JsonTag,
+    // `JsonValue.elements(): List<JsonValue>` -> the receiver itself: a parsed
+    // JSON array already IS a JS array, so this is an identity (typed) projection.
+    JsonElements,
+    // `JsonValue.is_null(): bool` -> `self === null` (JSON `null` parses to JS
+    // `null`); the `Option::None` discriminator.
+    JsonIsNull,
     // `dom::query_selector_all(selector): List<Element>` -> the matches as a real
     // array, `Array.from(document.querySelectorAll(selector))` (querySelectorAll
     // yields a NodeList, which a `List` would otherwise mishandle).
@@ -8855,9 +8890,12 @@ pub fn analyze<'src>(
                 Some(Type::Struct(id, _)) if *id == json_value_struct_id
             );
             if subject_is_json_value {
-                for (name, intrinsic) in
-                    [("field", Intrinsic::JsonField), ("tag", Intrinsic::JsonTag)]
-                {
+                for (name, intrinsic) in [
+                    ("field", Intrinsic::JsonField),
+                    ("tag", Intrinsic::JsonTag),
+                    ("elements", Intrinsic::JsonElements),
+                    ("is_null", Intrinsic::JsonIsNull),
+                ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);
                     }

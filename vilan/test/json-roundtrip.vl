@@ -1,0 +1,35 @@
+import std::print;
+import std::json::{ Json, FromJson };
+import std::option::Option::{ self, Some, None };
+
+// `@derive(Json)` gives a struct both directions; `List`/`Option` serialize and
+// parse each element via its own `Json`/`FromJson`. `List::from_json` infers its
+// element type from the binding's annotation (a return-type-only generic), and
+// the derived struct fields parse their `List`/`Option` members in turn.
+@derive(Json)
+struct Team {
+	name: str,
+	members: List<str>,
+	captain: Option<str>,
+}
+
+fun main() {
+	// Collections, both directions.
+	let nums: List<i32> = List::from_json("[1,2,3]");
+	print(nums.to_json()); // [1,2,3]
+
+	let some: Option<i32> = Option::from_json("7");
+	print(some.to_json()); // 7
+	let none: Option<i32> = Option::from_json("null");
+	print(none.to_json()); // null
+
+	// A struct whose fields are themselves a `List` and an `Option`.
+	let json = "{\"name\":\"Reds\",\"members\":[\"Ada\",\"Bob\"],\"captain\":\"Ada\"}";
+	let team: Team = Team::from_json(json);
+	print(team.to_json()); // round-trips to the same document
+	print(team.members.to_json()); // ["Ada","Bob"]
+
+	// A list of those structs.
+	let teams: List<Team> = List::from_json("[" + json + "]");
+	print(teams.to_json());
+}

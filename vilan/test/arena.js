@@ -1,139 +1,142 @@
 function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
-function new2() {
-	return [ [  ], [  ] ];
-}
 function sum_from(arena, handle) {
-	const $y = $v(arena, handle);
-	let $z = null;
-	if ($y[0] === 0) {
-		const node = $y[1];
+	const $A = $x(arena, handle);
+	let $B = null;
+	if ($A[0] === 0) {
+		const node = $A[1];
 		let total = node[0];
 		for (const edge of node[1]) {
 			total = total + sum_from(arena, edge);
 		}
-		$z = total;
+		$B = total;
 	} else {
-		$z = 0;
+		$B = 0;
 	}
-	return $z;
+	return $B;
 }
-function $a(self, value) {
-	const $b = __list_pop(self[1]);
-	let $c = null;
-	if ($b[0] === 0) {
-		const index = $b[1];
+function $a() {
+	return [ [  ], [  ] ];
+}
+function $b(self, value) {
+	const $c = __list_pop(self[1]);
+	let $d = null;
+	if ($c[0] === 0) {
+		const index = $c[1];
 		self[0][index][1] = [ 0, value ];
-		$c = [ index, self[0][index][0] ];
+		$d = [ index, self[0][index][0] ];
 	} else {
 		const index2 = self[0].length;
 		self[0].push([ 0, [ 0, value ] ]);
-		$c = [ index2, 0 ];
+		$d = [ index2, 0 ];
 	}
-	return $c;
+	return $d;
 }
-function $d(self) {
+function $e(self) {
 	return self[0].length - self[1].length;
 }
-function $g(self) {
-	const $h = self;
-	return $h[0] === 0;
+function $h(self) {
+	const $i = self;
+	return $i[0] === 0;
+}
+function $g(self, handle) {
+	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $h(self[0][handle[0]][1]);
 }
 function $f(self, handle) {
-	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $g(self[0][handle[0]][1]);
-}
-function $e(self, handle) {
-	let $i = null;
-	if ($f(self, handle)) {
-		$i = self[0][handle[0]][1];
+	let $j = null;
+	if ($g(self, handle)) {
+		$j = self[0][handle[0]][1];
 	} else {
-		$i = [ 1 ];
+		$j = [ 1 ];
 	}
-	return $i;
+	return $j;
 }
-function $j(self, fallback) {
-	const $k = self;
-	let $l = null;
-	if ($k[0] === 0) {
-		const x = $k[1];
-		$l = x;
+function $k(self, fallback) {
+	const $l = self;
+	let $m = null;
+	if ($l[0] === 0) {
+		const x = $l[1];
+		$m = x;
 	} else {
-		$l = fallback;
+		$m = fallback;
 	}
-	return $l;
+	return $m;
 }
-function $m(self, handle, value) {
-	let $n = null;
-	if ($f(self, handle)) {
+function $n(self, handle, value) {
+	let $o = null;
+	if ($g(self, handle)) {
 		self[0][handle[0]][1] = [ 0, value ];
-		$n = true;
+		$o = true;
 	} else {
-		$n = false;
+		$o = false;
 	}
-	return $n;
+	return $o;
 }
-function $o(self, handle) {
-	let $p = null;
-	if ($f(self, handle)) {
+function $p(self, handle) {
+	let $q = null;
+	if ($g(self, handle)) {
 		const removed = self[0][handle[0]][1];
 		self[0][handle[0]][0] = self[0][handle[0]][0] + 1;
 		self[0][handle[0]][1] = [ 1 ];
 		self[1].push(handle[0]);
-		$p = removed;
+		$q = removed;
 	} else {
-		$p = [ 1 ];
+		$q = [ 1 ];
 	}
-	return $p;
+	return $q;
 }
-function $q(self) {
-	const $r = self;
-	return $r[0] === 0;
+function $r(self) {
+	const $s = self;
+	return $s[0] === 0;
 }
-function $s(self, value) {
-	const $t = __list_pop(self[1]);
-	let $u = null;
-	if ($t[0] === 0) {
-		const index = $t[1];
+function $t() {
+	return [ [  ], [  ] ];
+}
+function $u(self, value) {
+	const $v = __list_pop(self[1]);
+	let $w = null;
+	if ($v[0] === 0) {
+		const index = $v[1];
 		self[0][index][1] = [ 0, value ];
-		$u = [ index, self[0][index][0] ];
+		$w = [ index, self[0][index][0] ];
 	} else {
 		const index2 = self[0].length;
 		self[0].push([ 0, [ 0, value ] ]);
-		$u = [ index2, 0 ];
+		$w = [ index2, 0 ];
 	}
-	return $u;
+	return $w;
 }
-function $w(self, handle) {
-	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $g(self[0][handle[0]][1]);
+function $y(self, handle) {
+	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $h(self[0][handle[0]][1]);
 }
-function $v(self, handle) {
-	let $x = null;
-	if ($w(self, handle)) {
-		$x = self[0][handle[0]][1];
+function $x(self, handle) {
+	let $z = null;
+	if ($y(self, handle)) {
+		$z = self[0][handle[0]][1];
 	} else {
-		$x = [ 1 ];
+		$z = [ 1 ];
 	}
-	return $x;
+	return $z;
 }
-let numbers = new2();
-const a = $a(numbers, 10);
-const b = $a(numbers, 20);
-console.log($d(numbers));
-console.log($j($e(numbers, a), -(1)));
-$m(numbers, b, 99);
-console.log($j($e(numbers, b), -(1)));
-console.log($j($o(numbers, b), -(1)));
-console.log($q($e(numbers, b)));
-const c = $a(numbers, 30);
-console.log($j($e(numbers, c), -(1)));
-console.log($q($e(numbers, b)));
-console.log($j($e(numbers, a), -(1)));
-let graph = new2();
-const leaf1 = $s(graph, [ 2, [  ] ]);
-const leaf2 = $s(graph, [ 3, [  ] ]);
+let numbers = $a();
+const a = $b(numbers, 10);
+const b = $b(numbers, 20);
+console.log($e(numbers));
+console.log($k($f(numbers, a), -(1)));
+$n(numbers, b, 99);
+console.log($k($f(numbers, b), -(1)));
+console.log($k($p(numbers, b), -(1)));
+console.log($r($f(numbers, b)));
+const c = $b(numbers, 30);
+console.log($k($f(numbers, c), -(1)));
+console.log($r($f(numbers, b)));
+console.log($k($f(numbers, a), -(1)));
+let graph = $t();
+const leaf1 = $u(graph, [ 2, [  ] ]);
+const leaf2 = $u(graph, [ 3, [  ] ]);
 let root_edges = [  ];
 root_edges.push(leaf1);
 root_edges.push(leaf2);
-const root = $s(graph, [ 1, root_edges ]);
+const root = $u(graph, [ 1, root_edges ]);
 console.log(sum_from(graph, root));

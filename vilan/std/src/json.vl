@@ -86,6 +86,12 @@ impl JsonValue {
 	// when this is a bare `"Variant"`, else the single key of a `{"Variant":..}`
 	// object (an intrinsic — `typeof`/`Object.keys` have no plain extern shape).
 	external fun tag(self): str;
+
+	// The elements of a parsed JSON array, each a `JsonValue`.
+	external fun elements(self): List<JsonValue>;
+
+	// Whether this value is JSON `null` (the `Option::None` discriminator).
+	external fun is_null(self): bool;
 }
 
 trait FromJson {
@@ -128,4 +134,45 @@ impl bool with FromJson {
 	external fun from_json(text: str): bool;
 	@extern("Boolean")
 	external fun from_json_value(value: JsonValue): bool;
+}
+
+// A JSON `null` is `None`; anything else is `Some` of the parsed value. Both
+// entry points inline the same logic rather than `from_json` delegating to
+// `from_json_value`: a generic method calling another generic method that
+// threads the impl's `T` doesn't yet specialize the inner call (the inner call's
+// `T` stays abstract), so each does its own work over the concrete `T`.
+impl Option<type T: FromJson> with FromJson {
+	fun from_json(text: str): Option<T> {
+		let value = parse_json_value(text);
+		if value.is_null() {
+			Option::None
+		} else {
+			Option::Some(T::from_json_value(value))
+		}
+	}
+	fun from_json_value(value: JsonValue): Option<T> {
+		if value.is_null() {
+			Option::None
+		} else {
+			Option::Some(T::from_json_value(value))
+		}
+	}
+}
+
+// A JSON array rebuilds into a `List`, each element parsed via its own type.
+impl List<type T: FromJson> with FromJson {
+	fun from_json(text: str): List<T> {
+		mut result: List<T> = [];
+		for element in parse_json_value(text).elements() {
+			result.push(T::from_json_value(element));
+		}
+		result
+	}
+	fun from_json_value(value: JsonValue): List<T> {
+		mut result: List<T> = [];
+		for element in value.elements() {
+			result.push(T::from_json_value(element));
+		}
+		result
+	}
 }

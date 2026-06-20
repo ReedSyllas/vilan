@@ -1740,6 +1740,15 @@ impl<'src> Transformer<'src> {
                     args.collect(),
                 )
             }
+            // A parsed JSON array already is a JS array, so `elements` is the
+            // receiver itself (typed as `List<JsonValue>`).
+            Intrinsic::JsonElements => args.next().unwrap_or(js::Node::Void),
+            // `self === null` — the `Option::None` discriminator.
+            Intrinsic::JsonIsNull => js::Node::Binary(
+                BinaryOp::Eq,
+                Box::new(args.next().unwrap_or(js::Node::Void)),
+                Box::new(js::Node::Null),
+            ),
             // `Array.from(document.querySelectorAll(selector))` — the NodeList as a
             // real array, so `List` operations (`map`/`push`/…) behave.
             Intrinsic::QuerySelectorAll => {
