@@ -346,6 +346,9 @@ pub struct Closure {
 pub struct StructInitializerConstraint<'src> {
     pub initializer_id: Id,
     pub struct_id: Id,
+    /// The lexical scope the initializer appears in, so the struct name resolves
+    /// from there (walking parents) rather than scanning every scope by name.
+    pub scope_id: Id,
     pub struct_name: &'src str,
     pub struct_fields: Vec<Field<'src>>,
     pub generic_argument_ids: Vec<TypeId>,
@@ -387,6 +390,7 @@ pub struct FieldAccessorConstraint<'src> {
 impl<'src> StructInitializerConstraint<'src> {
     fn from_walk(
         initializer_id: Id,
+        scope_id: Id,
         name: &'src str,
         generic_argument_ids: Vec<TypeId>,
         e_fields: Vec<(&'src str, Id, Span)>,
@@ -395,6 +399,7 @@ impl<'src> StructInitializerConstraint<'src> {
         Self {
             initializer_id,
             struct_id: Id(0),
+            scope_id,
             struct_name: name,
             struct_fields: Vec::new(),
             generic_argument_ids,
@@ -3467,6 +3472,7 @@ impl<'src> Analyzer<'src> {
                 self.struct_initializer_constraints
                     .push(StructInitializerConstraint::from_walk(
                         id,
+                        scope_id,
                         name,
                         generic_argument_ids,
                         e_fields,
@@ -5802,35 +5808,20 @@ impl<'src> Analyzer<'src> {
             let mut unresolved_constraints = Vec::new();
             for mut constraint in std::mem::take(&mut self.struct_initializer_constraints) {
                 // struct_id is Id(0) as placeholder; resolve by name across all scopes.
-                let struct_expr_id = if constraint.struct_id == Id(0) {
-                    let mut found_id = None;
-                    for scope in self.scopes.values() {
-                        if let Some(expr_id) = scope.name_to_id_map.get(constraint.struct_name) {
-                            found_id = Some(*expr_id);
-                            break;
-                        }
-                    }
-                    match found_id {
-                        Some(expr_id) => expr_id,
-                        None => {
-                            self.diagnostics.push(Error {
-                                span: constraint.fields_span.clone(),
-                                msg: format!("unknown struct: {}", constraint.struct_name),
-                            });
-                            continue;
-                        }
-                    }
-                } else {
-                    let scope_id = self.get_scope_id_for_entity(constraint.struct_id);
-                    match self.try_get_expr_id_by_name(constraint.struct_name, scope_id) {
-                        Some(expr_id) => expr_id,
-                        None => {
-                            self.diagnostics.push(Error {
-                                span: constraint.fields_span.clone(),
-                                msg: format!("unknown struct: {}", constraint.struct_name),
-                            });
-                            continue;
-                        }
+                // Resolve the struct name from the initializer's own lexical scope
+                // (walking outward to parents). This used to scan *every* scope by
+                // name on the first attempt — O(scopes) per initializer, i.e.
+                // quadratic in a program with many struct literals.
+                let struct_expr_id = match self
+                    .try_get_expr_id_by_name(constraint.struct_name, constraint.scope_id)
+                {
+                    Some(expr_id) => expr_id,
+                    None => {
+                        self.diagnostics.push(Error {
+                            span: constraint.fields_span.clone(),
+                            msg: format!("unknown struct: {}", constraint.struct_name),
+                        });
+                        continue;
                     }
                 };
                 constraint.struct_id = struct_expr_id;
