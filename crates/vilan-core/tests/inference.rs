@@ -296,20 +296,15 @@ fn format_through_nested_generic() {
     );
 }
 
-// --- Known bugs (tracked; remove `#[ignore]` when fixed) --------------------
-
 #[test]
-#[ignore = "A free generic function called with a *closure parameter* argument \
-            (`count.derive(|n| format(n))`, count: Signal<i32>) emits `undefined`: \
-            no substitution is recorded for the `format(n)` call because `n`'s \
-            type isn't concrete when the closure body is resolved, and the call \
-            isn't re-queued once it lands. The closure also isn't monomorphized, \
-            so even a recorded `{U -> n}` would stay abstract at emission. A \
-            *method* call on the same `n` (`n.to_string()`) works — it uses the \
-            generic-dispatch channel, which a free function can't. This is the \
-            closure-parameter-typing + dependency-re-queue issue (analyzer-refactor \
-            items 2/5), distinct from Bug C (the `show` case above, now fixed)."]
 fn format_in_closure_argument() {
+    // Bug c′ (fixed): a free generic function called with an unannotated closure
+    // parameter (`count.derive(|n| format(n))`) emitted `undefined`. The call
+    // resolved while `n` was still `Unknown` (its type lands only once `derive`
+    // resolves), committed with no generic binding, and was never revisited.
+    // Fixed by deferring the call while an argument is an unknown closure
+    // parameter — the same rule the method-call resolver already applies to an
+    // unknown closure *receiver* — so it re-resolves once `n` becomes `i32`.
     assert_compiles_and_runs(
         r#"
         import std::print;

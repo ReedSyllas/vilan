@@ -6960,7 +6960,18 @@ impl<'src> Analyzer<'src> {
                                         &parameter_type,
                                         &substitution_context,
                                     );
-                                    if matches!(argument_type, Type::Unresolved) {
+                                    // Defer while an argument is unresolved, or is a
+                                    // closure parameter still awaiting its type from
+                                    // bidirectional inference (`count.derive(|n|
+                                    // format(n))` — `n` is typed `i32` only once the
+                                    // `derive` call resolves). Committing now would
+                                    // bind the callee's generic to `Unknown` and
+                                    // never revisit it. (The method-call resolver
+                                    // defers on an unknown closure *receiver* for
+                                    // the same reason.)
+                                    if matches!(argument_type, Type::Unresolved)
+                                        || self.is_unknown_closure_parameter(argument_id)
+                                    {
                                         remaining_calls.push(CallSubjectConstraint {
                                             call_id,
                                             subject_id,
