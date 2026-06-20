@@ -185,13 +185,23 @@ transformer, and call-graph (corpus byte-identical). `method_call_substitution`
 stays separate — it carries the *bindings*, a distinct concern from *which member
 to dispatch to*. The deeper merge of bindings channels waits on item 5.
 
-### 5. Unified constraint queue — foundational · L · medium
-Replace the ~25 `prepped_*`/`*_constraints` lists in `build()` with one
-`Constraint` enum + `try_resolve` runner. Split into **v1** (uniform abstraction,
-same scheduling — low risk, unblocks item 4's bindings merge) and **v2** (automatic
-dependency capture + dirty re-queue — the structural cure for the (b)/(c′) ordering
-class, and the prerequisite that makes memoization (item 1) safe). Staged so every
-step is corpus-byte-identical. **Full staged plan: `constraint-queue-plan.md`.**
+### 5. Unified constraint queue — **v1 DONE** (2fef2f3 … 79f6f92) · L
+Replaced the per-kind `prepped_*`/`*_constraints` worklists in `build()` with one
+`Constraint` enum + `resolve_constraints` runner. **v1 is complete**: all 11
+fixpoint kinds — subscript, `is`, field accessor, struct initializer, match,
+method call (+ slot unification + method-arg check), for-each item, variable, call
+subject — now live on a single queue, resolved in one explicit priority order; the
+solving loop is just `for _ { if !resolve_constraints() { break } }`. Migrated one
+kind per commit, each corpus-byte-identical, id-minting kinds (method/call) in
+strict priority order; compile time stayed linear. The mid-pass-spawn machinery
+(the runner re-sorts each pass and keeps tasks spawned during a pass) is in place.
+
+**v2 — still to do** (gated, separate): automatic dependency capture + dirty
+re-queue (run only the tasks whose inputs changed, instead of all each pass). This
+is the structural cure for the (b)/(c′) ordering class and the prerequisite that
+makes memoization (item 1) safe. Pursue when an ordering bug recurs that the
+targeted defers don't cover, or when memoization becomes worth having. **Full plan:
+`constraint-queue-plan.md`.**
 
 ### 6. Type interning + stable generic identity — later · M · medium-high
 Give `Type` `Hash + Eq` and intern `Type -> TypeId`, so a generic parameter has
@@ -212,10 +222,9 @@ inference paths are simpler.
    defer on an unknown closure parameter (bug c′) + bind a method's own generics
    from arguments (chained `derive`). Only the *general* re-queue remains, folded
    into item 5.
-7. **Item 5** (unified constraint queue), staged — removes the ordering fragility
-   that breeds (b)/(c′)-like bugs; subsumes item 2's remainder, enables a deeper
-   merge of the *bindings* channels, and makes memoization safe (well-ordered
-   passes). The largest remaining item.
+7. **Item 5 v1** (unified constraint queue) — **done** (2fef2f3 … 79f6f92): all 11
+   fixpoint kinds on one priority-ordered queue. **v2** (dependency-driven re-queue)
+   remains, gated — it subsumes item 2's remainder and makes memoization safe.
 8. **Item 6** (interning) — bounds the ever-growing type-id map (a suspect in the
    former quadratic) and stabilizes generic identity (the multi-id confusion seen
    while debugging bug (c)); pursue with the now-done item 4.
