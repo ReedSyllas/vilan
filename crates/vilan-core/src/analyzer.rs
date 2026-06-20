@@ -4231,6 +4231,10 @@ impl<'src> Analyzer<'src> {
                 .get(parameter_id)
                 .map(|parameter| parameter.type_id.get_type(self));
             if let Some(parameter_type) = parameter_type {
+                // Substitute the receiver's bindings into the parameter type so a
+                // generic `|T| U` is matched as `|i32| U`, typing the closure's
+                // parameter concretely rather than as the abstract `T`.
+                let parameter_type = self.substitute_type(&parameter_type, substitution);
                 self.infer_type(*argument_id, &parameter_type, substitution);
             }
         }
@@ -4897,6 +4901,12 @@ impl<'src> Analyzer<'src> {
         inferred_type
     }
 
+    /// Whether `type_id` resolves to `Generic(constraint_id)` itself — a
+    /// self-mapping a substitution can hold (`T -> T`). Recursing on it loops.
+    fn is_self_generic(&self, type_id: TypeId, constraint_id: TypeId) -> bool {
+        matches!(self.type_id_to_type_map.get(&type_id), Some(Type::Generic(c)) if *c == constraint_id)
+    }
+
     fn reconcile_type(
         &mut self,
         a: &Type,
@@ -4909,28 +4919,33 @@ impl<'src> Analyzer<'src> {
             (Type::Unresolved, _) | (_, Type::Unresolved) => {
                 return None;
             }
+            // A bound generic reconciles its resolved type against the other side.
+            // A self-mapping (`T -> T`, which reconciling an impl's own parameter
+            // against itself records into the context) must NOT recurse on the
+            // same generic, or reconciliation loops forever — the same guard
+            // `substitute_type` already applies.
             (Type::Generic(constraint_id), _) => match substitution_context.get(constraint_id) {
-                Some(resolved_id) => {
+                Some(resolved_id) if !self.is_self_generic(*resolved_id, *constraint_id) => {
                     let resolved = resolved_id.get_type(self);
                     let (unified, mut bindings) =
                         self.reconcile_type(&resolved, b, substitution_context)?;
                     bindings.push((*constraint_id, b.clone().get_type_id(self)));
                     (unified, bindings)
                 }
-                None => {
+                _ => {
                     let bindings = vec![(*constraint_id, b.clone().get_type_id(self))];
                     (a.clone(), bindings)
                 }
             },
             (_, Type::Generic(constraint_id)) => match substitution_context.get(constraint_id) {
-                Some(resolved_id) => {
+                Some(resolved_id) if !self.is_self_generic(*resolved_id, *constraint_id) => {
                     let resolved = resolved_id.get_type(self);
                     let (unified, mut bindings) =
                         self.reconcile_type(a, &resolved, substitution_context)?;
                     bindings.push((*constraint_id, a.clone().get_type_id(self)));
                     (unified, bindings)
                 }
-                None => {
+                _ => {
                     let bindings = vec![(*constraint_id, a.clone().get_type_id(self))];
                     (b.clone(), bindings)
                 }
@@ -5170,6 +5185,19 @@ impl<'src> Analyzer<'src> {
                     *id,
                     self.substitute_argument_types(&arguments, substitution_context),
                 )
+            }
+            // A closure type substitutes its parameter and return types, so a
+            // generic method parameter `|T| U` becomes `|i32| U` under `T = i32` —
+            // without this an unannotated closure argument's parameter stays the
+            // abstract `T`.
+            Type::Closure(parameters, return_type_id) => {
+                let parameters = parameters.clone();
+                let return_type = return_type_id.get_type(self);
+                let parameters = self.substitute_argument_types(&parameters, substitution_context);
+                let return_type = self
+                    .substitute_type(&return_type, substitution_context)
+                    .get_type_id(self);
+                Type::Closure(parameters, return_type)
             }
             _ => type_.clone(),
         }
