@@ -41,16 +41,24 @@ instead of being whack-a-moled.
   call's substitution off the inferred bindings, not the function's own generic
   list, so a static constructor binds the impl's `T`). Lesson: trace the value's
   type to its origin before theorizing about the use site.
-- **Bug (c) — OPEN** (tracked: `inference.rs::format_through_nested_generic`).
-  Repro: `fun show<T: Display>(x: T): str { format(x) }; show(7)` prints
-  `undefined`. A generic function whose body only **forwards** its type parameter
-  to another generic call (`format(x)`, not a direct `x.to_string()`) is **not
-  monomorphized** by the transformer, so the nested call's trait dispatch
-  (`value.to_string()`) resolves to the abstract, empty `Display::to_string`. A
-  *direct* dispatch (`x.to_string()`) monomorphizes fine. This is a **transformer
-  monomorphization-propagation** gap — demand for monomorphization must propagate
-  through call chains — not one of the analyzer items below. Surfaces as
-  `count.derive(|n| format(n))` printing `undefined`.
+- **Bug (c) — FIXED** (commit b9f61e0). Repro: `fun show<T: Display>(x: T): str
+  { format(x) }; show(7)` printed `undefined`. *Initially* theorized as a
+  transformer monomorphization-propagation gap; the real cause was in the
+  **analyzer**: call resolution reconciled `argument`-against-`parameter`, and
+  `reconcile_type`'s generic arm is left-biased, so a generic *argument* (`x: T`)
+  passed to a generic *parameter* (`value: U`) bound the argument's constraint
+  (`T = U`) instead of the callee's (`U = T`). `format`'s substitution keyed on
+  show's `T`, never matched format's own generic, and format monomorphized to
+  nothing. Fix: reconcile parameter-first (bind the callee's generics). A direct
+  `x.to_string()` worked because it uses the `generic_dispatch` channel, not
+  argument reconciliation.
+- **Bug (c′) — OPEN** (tracked: `inference.rs::format_in_closure_argument`). The
+  closure-argument variant `count.derive(|n| format(n))` still prints `undefined`:
+  no substitution is recorded for `format(n)` because `n` isn't concrete when the
+  closure body resolves, and the call isn't re-queued once it lands (and the
+  closure itself isn't monomorphized). A *method* call on `n` (`n.to_string()`)
+  works via `generic_dispatch`. This is the closure-parameter-typing +
+  dependency-re-queue issue — **item 2 / item 5**, below.
 
 ## Root causes (verified)
 
@@ -190,21 +198,17 @@ inference paths are simpler.
 3. ~~**Item 1** (memoization)~~ — **investigated, dropped** (doesn't help; see above).
 4. ~~**The quadratic `analyze`**~~ — **fixed** (fa55979): an eager `{:#?}` in a hot
    accessor, found via `callgrind`. `analyze` is now linear (up to 22× faster).
-5. **Item 5** (unified constraint queue), staged — removes the ordering fragility
-   that breeds (b)-like bugs; subsumes item 2, enables a deeper merge of the
+5. ~~**Bug (c)**~~ — **fixed** (b9f61e0): reconcile call arguments parameter-first.
+6. **Item 2** (closure typing + re-queue) — now has a concrete failing case,
+   bug (c′) `count.derive(|n| format(n))`: a free-function call in a closure body
+   records no substitution because the parameter type isn't concrete when the body
+   resolves. The smallest version of item 5; do it next if a full item 5 is too big.
+7. **Item 5** (unified constraint queue), staged — removes the ordering fragility
+   that breeds (b)/(c′)-like bugs; subsumes item 2, enables a deeper merge of the
    *bindings* channels, and makes memoization safe (well-ordered passes).
-6. **Item 2** (closure typing + re-queue) — only if item 5 is deferred and a
-   concrete ordering bug recurs; otherwise folds into item 5.
-7. **Item 6** (interning) — bounds the ever-growing type-id map (a suspect in the
-   quadratic) and stabilizes generic identity; pursue with item 4.
-
-**Separately, bug (c)** is a transformer concern, independent of the above:
-monomorphization demand must propagate through generic call chains so a generic
-function that forwards its type parameter to a nested generic call (`format(x)`)
-is itself monomorphized. Today only a *direct* trait dispatch (`x.to_string()`)
-triggers it. Investigate `transformer.rs` monomorphization queueing
-(`monomorphized`, `current_substitution`, the generic-call-nested-in-body path
-~line 792).
+8. **Item 6** (interning) — bounds the ever-growing type-id map (a suspect in the
+   former quadratic) and stabilizes generic identity (the multi-id confusion seen
+   while debugging bug (c)); pursue with the now-done item 4.
 
 Items 1–3 are the near-term, contained work that fixes the two open bugs and
 makes the compiler crash-proof. Items 4–6 are the deeper stabilization that
