@@ -1,25 +1,22 @@
 import std::print;
-import std::reactive::{ Signal, effect };
+import std::reactive::Signal;
 
-// `std::reactive` — fine-grained reactivity. An `effect` runs immediately and
-// re-runs whenever a signal it read changes; it tracks exactly the signals it
-// touched, so an unrelated signal's change doesn't re-run it.
+// `std::reactive` — explicit-dependency reactivity. A `Signal` is a writable
+// root; `derive` builds a read-only `Source` whose dependency is structural (no
+// tracking, no `await` hazard); `sub` runs now and on every change. Writing a
+// signal propagates through the derived graph to the subscribers.
 fun main() {
-	let first = Signal::new("Ada");
-	let last = Signal::new("Lovelace");
+	let count = Signal::new(0);
+	let doubled = count.derive(|n| n * 2);
 
-	// Reads both signals -> subscribed to both.
-	effect(|| {
-		print(first.get() + " " + last.get());
-	});
+	// `sub` fires immediately with the current value, then on each change.
+	doubled.sub(|n| print(n)); // 0
 
-	// Reads only `first` -> subscribed to `first` alone.
-	effect(|| {
-		print("first: " + first.get());
-	});
+	count.set(1); // doubled -> 2
+	count.set_with(|n| n + 4); // count 5, doubled -> 10
+	print(doubled.get()); // 10 (a `get` is a non-reactive sample)
 
-	print("---");
-	first.set("Grace"); // re-runs both effects (both read `first`)
-	print("---");
-	last.set("Hopper"); // re-runs only the full-name effect
+	// A second subscriber, on the root this time.
+	count.sub(|n| print(n)); // 5 (current value, now)
+	count.set(20); // doubled -> 40 (its sub), then count's sub -> 20
 }

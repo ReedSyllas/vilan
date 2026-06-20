@@ -49,8 +49,8 @@ impl Platform {
         match name {
             // The Node layer: filesystem, process, and the HTTP server.
             "fs" | "http" | "process" => Platform::Node,
-            // The browser (DOM) layer.
-            "dom" => Platform::Browser,
+            // The browser (DOM) layer, and the reactive UI layer built on it.
+            "dom" | "ui" => Platform::Browser,
             _ => Platform::Core,
         }
     }

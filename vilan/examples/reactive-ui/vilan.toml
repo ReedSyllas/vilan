@@ -1,0 +1,12 @@
+name = "reactive-ui"
+
+# A browser client built on the `std::ui` reactive layer. `app.vl` is the entry;
+# it mounts the `counter` component.
+#
+# A client-only project isn't yet a `vilan build .` shape (that wants a
+# `[server]` + `[client]` pair, or a `[package]`), so build the entry directly,
+# like the `browser` example:
+#
+#   vilan build --target browser app.vl   # emits app.js next to it
+[client]
+entry = "app.vl"

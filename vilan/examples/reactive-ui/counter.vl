@@ -1,0 +1,25 @@
+// counter.vl — the smallest reactive component, on the explicit-dependency core.
+//
+// State is a `Signal`. A derived `Signal` (`count.derive(..)`) is a NEW reactive
+// value whose dependency on `count` is STRUCTURAL — known the moment it's built,
+// not discovered by running it. Bindings take a `Source`, not a tracking
+// closure, so there is nothing to re-discover and an `await` can never hide a
+// dependency.
+
+import std::ui::{ view, View };
+import std::reactive::Signal;
+
+// A component is just a function returning the `View` subtree it owns.
+fun counter(): View {
+	let count = Signal::new(0);
+
+	view("section")
+		.class("counter")
+		.child(view("h2").text("Counter"))
+		// `bind_text` binds to a `Source<str>`; derive one from `count`. The
+		// i-string renders the number directly (host coercion) — see the README
+		// note on calling a generic like `format` inside a binding closure.
+		.child(view("p").bind_text(count.derive(|n| i"Count: {n}")))
+		.child(view("button").text("−").on("click", || count.set_with(|n| n - 1)))
+		.child(view("button").text("+").on("click", || count.set_with(|n| n + 1)))
+}

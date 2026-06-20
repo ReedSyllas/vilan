@@ -1,0 +1,107 @@
+// `std::ui` — a declarative, fine-grained reactive view layer over `std::dom`.
+//
+// A `View` describes a DOM element; methods chain to build it. Plain setters
+// (`text`/`class`/`attr`) set static content; the `bind_*` setters take a
+// reactive `Source` and keep one DOM property in sync — each is just a `sub`, so
+// when the source changes only that property updates, with no re-render.
+//
+// Only available when building for the browser (`vilan build --target browser`).
+
+import pkg::dom::{ Element, get_element_by_id, create_element };
+import pkg::reactive::{ Source, Signal };
+
+// A handle to a DOM element under construction. `View` wraps an `Element` (a
+// reference), so chaining returns the same underlying element.
+struct View {
+	element: Element,
+}
+
+// A fresh element of the given tag (`view("div")`, `view("button")`, …).
+fun view(tag: str): View {
+	View { element = create_element(tag) }
+}
+
+impl View {
+	// Static text content.
+	fun text(self, content: str): View {
+		self.element.set_text(content);
+		self
+	}
+
+	// Static CSS class.
+	fun class(self, name: str): View {
+		self.element.set_class(name);
+		self
+	}
+
+	// A static attribute.
+	fun attr(self, name: str, value: str): View {
+		self.element.set_attribute(name, value);
+		self
+	}
+
+	// An event listener (`"click"`, `"input"`, …).
+	fun on(self, event: str, handler: || void): View {
+		self.element.on(event, handler);
+		self
+	}
+
+	// Append a child view.
+	fun child(self, child: View): View {
+		self.element.append(child.element);
+		self
+	}
+
+	// Append several child views.
+	fun children(self, items: List<View>): View {
+		for item in items {
+			self.element.append(item.element);
+		}
+		self
+	}
+
+	// Reactive text content — re-set whenever `source` changes.
+	fun bind_text(self, source: Source<str>): View {
+		let element = self.element;
+		source.sub(|value| {
+			element.set_text(value);
+		});
+		self
+	}
+
+	// Reactive CSS class.
+	fun bind_class(self, source: Source<str>): View {
+		let element = self.element;
+		source.sub(|value| {
+			element.set_class(value);
+		});
+		self
+	}
+
+	// Reactive attribute.
+	fun bind_attr(self, name: str, source: Source<str>): View {
+		let element = self.element;
+		source.sub(|value| {
+			element.set_attribute(name, value);
+		});
+		self
+	}
+
+	// Two-way bind an `<input>`'s value to a signal: the input shows the signal,
+	// and typing writes it back.
+	fun bind_value(self, signal: Signal<str>): View {
+		let element = self.element;
+		signal.sub(|value| {
+			element.set_value(value);
+		});
+		element.on("input", || {
+			signal.set(element.value());
+		});
+		self
+	}
+}
+
+// Attach a view to the page element with the given id.
+fun mount(id: str, view: View) {
+	get_element_by_id(id).append(view.element);
+}

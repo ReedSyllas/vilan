@@ -1,0 +1,137 @@
+// todos.vl — the fuller picture on the explicit-dependency core: derived signals
+// (`derive`), a two-input dependency (`combine`), a reactive keyed list, and
+// conditional rendering. The dependency graph is literally the combinator tree.
+//
+// NOTE: this is an API design proposal — not implemented yet.
+
+import std::ui::{ view, View };
+import std::reactive::{ Signal, Source, combine };
+import std::display::format;
+
+struct Todo {
+	id: i32,
+	label: str,
+	done: bool,
+}
+
+fun todos(): View {
+	// All state is plain signals. Value semantics means `set_with` hands the body
+	// an owned copy of the current value to mutate and return.
+	let items: Signal<List<Todo>> = Signal::new([]);
+	let draft = Signal::new("");
+	let filter = Signal::new("all"); // "all" | "active" | "done"
+	let next_id = Signal::new(0);
+
+	// `remaining` depends only on `items` — one input, so plain `derive`. The
+	// result is a read-only `Source`; only the root `Signal`s above can be `set`.
+	let remaining: Source<i32> = items.derive(|list| {
+		mut open = 0;
+		for todo in list {
+			if !todo.done {
+				open = open + 1;
+			}
+		}
+		open
+	});
+
+	// `visible` depends on BOTH `items` and `filter`. `combine` is variadic — it
+	// declares the dependencies up front and yields a `Source<(List<Todo>, str)>`;
+	// `derive` then maps the pair. The graph is data: `visible` recomputes exactly
+	// when either input changes — no body is run to "find" the dependencies.
+	let visible: Source<List<Todo>> = combine(items, filter).derive(|(list, filter)| {
+		mut shown: List<Todo> = [];
+		for todo in list {
+			let keep =
+				filter == "all" || (filter == "active" && !todo.done) || (filter == "done" && todo.done);
+			if keep {
+				shown.push(todo);
+			}
+		}
+		shown
+	});
+
+	let add = || {
+		let label = draft.get(); // a one-shot SAMPLE — we want the value, not a dependency
+		if label != "" {
+			let id = next_id.get();
+			next_id.set(id + 1);
+			items.set_with(|list| {
+				mut next = list;
+				next.push(Todo { id = id, label = label, done = false });
+				next
+			});
+			draft.set("");
+		}
+	};
+
+	view("section")
+		.class("todos")
+		.child(view("h2").text("Todos"))
+		.child(
+			view("div")
+				.class("row")
+				// `bind_value` is two-way: the input shows `draft` and writes it on input.
+				.child(view("input").attr("placeholder", "What needs doing?").bind_value(draft))
+				.child(view("button").text("Add").on("click", add))
+		)
+		.child(view("p").bind_text(remaining.derive(|n| format(n) + " remaining")))
+		.child(
+			view("div")
+				.class("filters")
+				.child(filter_button(filter, "all", "All"))
+				.child(filter_button(filter, "active", "Active"))
+				.child(filter_button(filter, "done", "Done"))
+		)
+		// `bind_each` renders one view per element, keyed by `Todo.id`, and
+		// reconciles the DOM against `visible` as it changes.
+		.child(view("ul").bind_each(visible, |todo| todo.id, |todo| todo_row(items, todo)))
+		// `show` includes/removes a node on a reactive condition.
+		.child(view("p").class("empty").text("Nothing here 🎉").show(visible.derive(|list| list.len() == 0)))
+}
+
+// A filter button highlights itself when its value is the active filter — a
+// single-dependency `derive` over `filter`.
+fun filter_button(filter: Signal<str>, value: str, label: str): View {
+	view("button")
+		.text(label)
+		.bind_class(filter.derive(|current| if current == value { "active" } else { "" }))
+		.on("click", || filter.set(value))
+}
+
+// One row. `todo` is a plain value (a snapshot from `bind_each`), so its styling
+// is static for this render; toggling rebuilds `items`, which re-renders the row.
+// It takes the shared `items` signal so the checkbox / remove button can update
+// the list everyone reads from.
+fun todo_row(items: Signal<List<Todo>>, todo: Todo): View {
+	view("li")
+		.class(if todo.done { "done" } else { "" })
+		.child(view("input").attr("type", "checkbox").on("change", || toggle(items, todo.id)))
+		.child(view("span").text(todo.label))
+		.child(view("button").class("remove").text("✕").on("click", || remove(items, todo.id)))
+}
+
+fun toggle(items: Signal<List<Todo>>, id: i32) {
+	items.set_with(|list| {
+		mut next: List<Todo> = [];
+		for todo in list {
+			if todo.id == id {
+				next.push(Todo { id = todo.id, label = todo.label, done = !todo.done });
+			} else {
+				next.push(todo);
+			}
+		}
+		next
+	});
+}
+
+fun remove(items: Signal<List<Todo>>, id: i32) {
+	items.set_with(|list| {
+		mut kept: List<Todo> = [];
+		for todo in list {
+			if todo.id != id {
+				kept.push(todo);
+			}
+		}
+		kept
+	});
+}
