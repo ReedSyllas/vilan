@@ -1,0 +1,38 @@
+import std::print;
+import std::display::{ Display, format };
+
+// `format(value)` renders any `Display` value to its string form, so a complex
+// value logs readably. `print(value)` alone shows the raw runtime form (a struct
+// is a positional array), whereas `format` goes through the type's `Display`.
+struct Id {
+	n: i32,
+}
+
+impl Id with Display {
+	fun to_string(self): str {
+		"Id { n = " + self.n.to_string() + " }"
+	}
+}
+
+struct Point {
+	x: i32,
+	y: i32,
+}
+
+impl Point with Display {
+	fun to_string(self): str {
+		"Point { x = " + self.x.to_string() + ", y = " + self.y.to_string() + " }"
+	}
+}
+
+fun main() {
+	let id = Id { n = 0 };
+	print(id); // the raw form: [ 0 ]
+	print(format(id)); // Id { n = 0 }
+	print(format(Point { x = 1, y = 2 })); // Point { x = 1, y = 2 }
+
+	// `format` works on any `Display`, including the scalar primitives.
+	print(format(42)); // 42
+	print(format("hi")); // hi
+	print(format(true)); // true
+}

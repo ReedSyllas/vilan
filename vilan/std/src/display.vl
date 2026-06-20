@@ -6,6 +6,13 @@ trait Display {
 	fun to_string(self): str;
 }
 
+// Render any `Display` value to its string form. Handy for logging a complex
+// value readably: `print(format(id))` shows however `Id` implements `Display`
+// (e.g. `Id { n = 0 }`), where `print(id)` alone shows the raw runtime form.
+fun format<T: Display>(value: T): str {
+	value.to_string()
+}
+
 impl str with Display {
 	fun to_string(self): str {
 		self
