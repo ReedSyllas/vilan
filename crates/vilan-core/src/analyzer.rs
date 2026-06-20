@@ -723,13 +723,14 @@ impl<'src> Analyzer<'src> {
     }
 
     fn get_entity_by_id(&self, id: Id) -> &Expr<'src> {
-        self.expr_id_to_expr_map.get(&id).expect(
-            format!(
-                "failed to get entity for id: {:?} in {:#?}",
-                id, self.expr_id_to_expr_map
-            )
-            .as_str(),
-        )
+        // `unwrap_or_else(|| panic!(..))`, not `expect(format!(..))`: the latter
+        // builds the message on *every* call, not just the failing one. This is a
+        // hot accessor, so eagerly formatting even `id` — let alone the whole
+        // `expr_id_to_expr_map` it used to dump with `{:#?}` — made resolution
+        // quadratic in program size.
+        self.expr_id_to_expr_map
+            .get(&id)
+            .unwrap_or_else(|| panic!("failed to get entity for id: {id:?}"))
     }
 
     /// Whether `member_id` is callable as a method — a function (or intrinsic)
@@ -971,14 +972,14 @@ impl<'src> Analyzer<'src> {
     fn mut_scope_for_scope_id(&mut self, scope_id: Id) -> &mut Scope<'src> {
         self.scopes
             .get_mut(&scope_id)
-            .expect(format!("failed to get scope for id: {:?}", scope_id.0).as_str())
+            .unwrap_or_else(|| panic!("failed to get scope for id: {}", scope_id.0))
     }
 
     fn get_scope_id_for_entity(&mut self, entity_id: Id) -> Id {
         self.expr_id_to_scope_id_map
             .get(&entity_id)
-            .map(|scope_id| *scope_id)
-            .expect(format!("failed to get scope of entity: {:?}", entity_id.0).as_str())
+            .copied()
+            .unwrap_or_else(|| panic!("failed to get scope of entity: {}", entity_id.0))
     }
 
     fn create_scope(&mut self, parent_id: Option<Id>) -> Scope<'src> {
