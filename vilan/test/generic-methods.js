@@ -1,26 +1,35 @@
 function __shared_new(value) {
 	return { v: value };
 }
-function new2(value) {
+function $a(value) {
 	return [ __shared_new(value) ];
 }
-function $b(self) {
+function $c(self) {
 	return self[0].v;
 }
-function $c(self, value) {
+function $d(self, value) {
 	self[0].v = value;
 }
-function $a(self, transform) {
-	$c(self, transform($b(self)));
+function $b(self, transform) {
+	$d(self, transform($c(self)));
 }
-const counter = new2(0);
-$a(counter, (n) => {
+function $e(value) {
+	return [ __shared_new(value) ];
+}
+function $f(self, value) {
+	self[0].v = value;
+}
+function $g(self) {
+	return self[0].v;
+}
+const counter = $a(0);
+$b(counter, (n) => {
 	return n + 1;
 });
-$a(counter, (n) => {
+$b(counter, (n) => {
 	return n * 10;
 });
-console.log($b(counter));
-const label = new2("a");
-$c(label, "hello");
-console.log($b(label));
+console.log($c(counter));
+const label = $e("a");
+$f(label, "hello");
+console.log($g(label));

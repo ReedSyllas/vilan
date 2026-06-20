@@ -12,33 +12,37 @@ function fresh_id() {
 	next_subscriber_id.v = id + 1;
 	return id;
 }
-function new2(value) {
-	return [ $a(value) ];
-}
-function $a(value) {
+function $b(value) {
 	let subscribers = [  ];
 	return [ __shared_new(value), __shared_new(subscribers) ];
 }
-function $d(self, value) {
+function $a(value) {
+	return [ $b(value) ];
+}
+function $e(value) {
+	let subscribers = [  ];
+	return [ __shared_new(value), __shared_new(subscribers) ];
+}
+function $f(self, value) {
 	self[0].v = value;
 	for (const subscriber of self[1].v) {
 		const notify = subscriber[1];
 		notify();
 	}
 }
-function $c(self, transform) {
-	const derived = $a(transform(self[0].v));
+function $d(self, transform) {
+	const derived = $e(transform(self[0].v));
 	const upstream = __clone(self[0]);
 	self[1].v.push([ fresh_id(), () => {
-		$d(derived, transform(upstream.v));
+		$f(derived, transform(upstream.v));
 		return;
 	} ]);
 	return derived;
 }
-function $b(self, transform) {
-	return $c(self[0], transform);
+function $c(self, transform) {
+	return $d(self[0], transform);
 }
-function $e(self, observer) {
+function $g(self, observer) {
 	const upstream = __clone(self[0]);
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
@@ -48,19 +52,19 @@ function $e(self, observer) {
 	observer(self[0].v);
 	return [ self[1], id ];
 }
-function $f(self, value) {
-	$d(self[0], value);
+function $h(self, value) {
+	$f(self[0], value);
 }
-function $h(self) {
+function $j(self) {
 	return self[0].v;
 }
-function $g(self, transform) {
-	$d(self[0], transform($h(self[0])));
+function $i(self, transform) {
+	$f(self[0], transform($j(self[0])));
 }
-function $i(self) {
+function $k(self) {
 	return self[0].v;
 }
-function $k(self, observer) {
+function $m(self, observer) {
 	const upstream = __clone(self[0]);
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
@@ -70,23 +74,23 @@ function $k(self, observer) {
 	observer(self[0].v);
 	return [ self[1], id ];
 }
-function $j(self, observer) {
-	return $k(self[0], observer);
+function $l(self, observer) {
+	return $m(self[0], observer);
 }
 const next_subscriber_id = __shared_new(0);
-const count = new2(0);
-const doubled = $b(count, (n) => {
+const count = $a(0);
+const doubled = $c(count, (n) => {
 	return n * 2;
 });
-$e(doubled, (n) => {
+$g(doubled, (n) => {
 	return console.log(n);
 });
-$f(count, 1);
-$g(count, (n) => {
+$h(count, 1);
+$i(count, (n) => {
 	return n + 4;
 });
-console.log($i(doubled));
-$j(count, (n) => {
+console.log($k(doubled));
+$l(count, (n) => {
 	return console.log(n);
 });
-$f(count, 20);
+$h(count, 20);

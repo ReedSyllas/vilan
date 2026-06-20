@@ -66,6 +66,38 @@ fn assert_fails(source: &str) {
     );
 }
 
+/// Compile, then execute the emitted JS with `node`, returning its stdout. A
+/// compile failure or a non-zero exit becomes `Err`. This catches *runtime*
+/// miscompiles — a program that type-checks but emits the wrong code (e.g. a
+/// generic dispatch that resolves to `undefined`) — which `assert_compiles`
+/// alone cannot see.
+fn compile_and_run(source: &str) -> Result<String, Vec<String>> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let js = compile(source)?;
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("vilan_test_{}_{unique}.js", std::process::id()));
+    std::fs::write(&path, js).map_err(|error| vec![error.to_string()])?;
+    let output = std::process::Command::new("node").arg(&path).output();
+    let _ = std::fs::remove_file(&path);
+    match output {
+        Ok(output) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+        Ok(output) => Err(vec![String::from_utf8_lossy(&output.stderr).into_owned()]),
+        Err(error) => Err(vec![format!("could not run node: {error}")]),
+    }
+}
+
+#[track_caller]
+fn assert_compiles_and_runs(source: &str, expected_stdout: &str) {
+    match compile_and_run(source) {
+        Ok(stdout) => assert_eq!(stdout, expected_stdout, "stdout mismatch"),
+        Err(errors) => panic!("expected a clean run, got: {errors:#?}"),
+    }
+}
+
 // --- Regression guards (must keep passing) ----------------------------------
 
 #[test]
@@ -185,16 +217,50 @@ fn calling_a_non_function_still_errors() {
     );
 }
 
-// --- Known bugs (tracked; remove `#[ignore]` when fixed) --------------------
+#[test]
+fn generic_struct_infers_type_arg_from_literal() {
+    // A generic struct built by literal infers its parameter from the field
+    // value (`Box { value = 5 }` -> `Box<i32>`), so a later method dispatches
+    // against the concrete element. Previously the initializer dropped the
+    // inferred arg (`Box<>`), leaving `T` abstract.
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::display::Display;
+        struct Box<T> { value: T }
+        impl Box<type T> { fun get(self): T { self.value } }
+        fun main() { let b = Box { value = 5 }; print(b.get().to_string()); }
+        "#,
+    );
+}
 
 #[test]
-#[ignore = "Bug B: a closure parameter passed to a generic method types as a \
-            fresh abstract generic, not the concrete receiver binding, so a \
-            generic call on it (`n.to_string()`) can't dispatch. The impl's `T` \
-            and the method-signature's `T` have diverged into different ids — \
-            the fresh-generic-identity issue (analyzer-refactor.md item 6). \
-            Workaround: annotate (`|n: i32|`) or use an i-string (`i\"{n}\"`)."]
+fn generic_struct_infers_type_arg_from_constructor() {
+    // The same inference through a static constructor: `Box::new(5)` binds the
+    // *impl's* `T` from the argument even though `new` declares no generics of
+    // its own. (Bug B in disguise — `Signal::new(0).derive(|n| ..)` left `n`
+    // abstract only because `count` itself was an abstract `Signal<T>`.)
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::display::Display;
+        struct Box<T> { value: T }
+        impl Box<type T> {
+            fun new(value: T): Box<T> { Box { value = value } }
+            fun get(self): T { self.value }
+        }
+        fun main() { print(Box::new(5).get().to_string()); }
+        "#,
+    );
+}
+
+#[test]
 fn generic_call_on_closure_parameter() {
+    // Bug B (fixed): a closure passed to a generic method (`count.derive(|n|
+    // n.to_string())`) used to type `n` as an abstract generic, so the method
+    // call on it couldn't dispatch. The real cause was that `Signal::new(0)`
+    // left `count` as an abstract `Signal<T>`; with construction now inferring
+    // `Signal<i32>`, `n` is `i32` and `to_string` dispatches.
     assert_compiles(
         r#"
         import std::print;
@@ -206,5 +272,29 @@ fn generic_call_on_closure_parameter() {
             label.sub(|s| print(s));
         }
         "#,
+    );
+}
+
+// --- Known bugs (tracked; remove `#[ignore]` when fixed) --------------------
+
+#[test]
+#[ignore = "Bug C: a free generic function called with a trait-bound generic \
+            argument doesn't propagate the dispatch through the nested call. \
+            `fun show<T: Display>(x: T): str { format(x) }` emits `undefined` at \
+            runtime — `format`'s inner `value.to_string()` isn't monomorphized to \
+            `T`'s impl when `T` is itself still generic at the call site (it only \
+            binds once `show` is monomorphized). A method call (`x.to_string()`) \
+            dispatches fine; only the free-function wrapper (`format(x)`) loses \
+            it. Distinct from Bug B (which was generic-struct construction). \
+            Surfaces as `count.derive(|n| format(n))` printing `undefined`."]
+fn format_through_nested_generic() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::{ Display, format };
+        fun show<T: Display>(x: T): str { format(x) }
+        fun main() { print(show(7)); }
+        "#,
+        "7\n",
     );
 }

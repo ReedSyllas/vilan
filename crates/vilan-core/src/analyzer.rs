@@ -5938,7 +5938,21 @@ impl<'src> Analyzer<'src> {
                 // Store the mapping from initializer to struct definition.
                 self.struct_initializer_to_def
                     .insert(initializer_id, struct_id);
-                let type_id = Type::Struct(struct_id, Vec::new()).get_type_id(self);
+                // Fill the struct's type arguments from the bindings inferred
+                // above (`Box { value = 5 }` -> `Box<i32>`), so methods called on
+                // the value monomorphize against the concrete element type rather
+                // than the struct's abstract parameter. A parameter that no field
+                // constrains stays abstract.
+                let type_arguments = generic_param_ids
+                    .iter()
+                    .map(|constraint_id| {
+                        substitution_context
+                            .get(constraint_id)
+                            .copied()
+                            .unwrap_or(*constraint_id)
+                    })
+                    .collect();
+                let type_id = Type::Struct(struct_id, type_arguments).get_type_id(self);
                 self.resolved_types.insert(initializer_id, type_id);
             }
             self.struct_initializer_constraints = unresolved_constraints;
@@ -7015,10 +7029,13 @@ impl<'src> Analyzer<'src> {
                                     // written explicitly (e.g. `range(0, 9)` binds
                                     // `T = i32`). Explicit-argument calls take the
                                     // earlier path in the transformer; this fills
-                                    // the inferred gap.
-                                    if !generic_parameter_constraint_ids.is_empty()
-                                        && !substitution_context.is_empty()
-                                    {
+                                    // the inferred gap. A static constructor binds
+                                    // the *impl's* parameter from its argument
+                                    // (`Box::new(5)` binds `T = i32`) though `new`
+                                    // declares no generics of its own, so key off
+                                    // the inferred bindings, not the function's own
+                                    // generic list.
+                                    if !substitution_context.is_empty() {
                                         self.method_call_substitution
                                             .insert(call_id, substitution_context.clone());
                                     }
