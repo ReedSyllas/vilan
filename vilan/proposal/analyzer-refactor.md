@@ -96,13 +96,48 @@ Each lists the bug classes it shrinks, scope (S/M/L), risk, and dependencies.
 > inference paths, rather than fixing a specific open bug. The one open bug, (c),
 > lives in the transformer's monomorphization, which none of these items address.
 
-### 1. Inference result memoization — re-inference class · M · medium risk
-Cache `infer_type_inner(expr_id, substitution)` results within a single fixpoint
-pass, keyed by `(expr_id, hash(substitution))`; clear the cache at the start of
-each pass (types mutate between passes, not within a well-ordered one). Collapses
-the combinatorial re-inference into linear, which is the direct cure for the
-deep/exponential recursion. *Risk:* a stale entry within a pass if a type lands
-mid-pass — mitigated by clearing per pass and not caching `Unresolved`.
+### 1. Inference result memoization — investigated, **NOT worth it** · medium risk
+Original idea: cache `infer_type_inner(expr_id, substitution)` keyed by
+`(expr_id, hash(substitution))`, cleared per pass. **Built and measured — it does
+not help, and the premise was wrong:**
+- **Per-call scope** (cleared at each top-level `infer_type` — the only *sound*
+  scope, since `infer_type` is read-only so an entry can't go stale mid-call):
+  **zero cache hits** even on a 1400-line generic-heavy program. The same
+  `(expr, Unknown, substitution)` is never re-queried *within* one top-level
+  inference — the recursion is a tree, not a re-converging DAG. Nothing to collapse.
+- **Per-pass scope** (cleared per fixpoint iteration): ~22% hit rate and
+  corpus-clean, **but theoretically unsound** — a non-`Unresolved`-but-*abstract*
+  type (`Signal<Generic>`) cached early can be refined to concrete
+  (`Signal<i32>`) later in the same pass (the bug-(b) refinement pattern). And it
+  bought only **~3% wall-clock** (912/2793/9217 ms → 882/2589/9132 ms for
+  100/200/400 functions), because the bottleneck is not the infer-call *count*.
+
+Memoization is the wrong tool. It is also only safely cacheable once passes are
+*well-ordered* (no mid-pass refinement) — i.e. after item 5. Revisit only then.
+
+### Performance: `analyze` is quadratic (the real bottleneck)
+Measuring synthetic programs of *independent* functions (each constructing a
+generic `W<T>` and calling a few methods) found `analyze` is **~O(N²)** in program
+size: 882 ms → 2589 → 9132 → ~34 000 ms for 100/200/400/800 functions. The other
+phases are negligible (`context`/`async_infer`/`transform` each ≤ 10 ms even at
+800 functions). Within `analyze`:
+- The fixpoint runs a **constant 6 passes** regardless of N (it breaks on a quiet
+  pass), so this is not pass-count blow-up.
+- ~95% of the time is in two sections — **method-call resolution** and
+  **call-subject resolution** — and both scale quadratically.
+- Yet every discrete operation *count* is **linear**: attempts, `infer_type`
+  calls, `compare_type` calls, `reconcile_type` calls, `implementations` (constant
+  14), and the type-id map size. `infer_type(subject)` itself is cheap (~45 ms).
+
+Linear counts + quadratic wall-clock ⇒ a **per-operation cost that grows with the
+accumulated working set** (the `O(N)` type-id map and friends — allocator/cache
+pressure), or a hidden `O(N)` clone, not an algorithmic count blow-up. Pinpointing
+it needs a sampling profiler (`perf`/flamegraph), unavailable in this environment.
+This quadratic — not memoization — is the highest-value perf target; it likely
+relates to item 5's worklist rework and/or item 6's interning (bounding the
+ever-growing type-id map). One concrete latent `O(N²)` already spotted: a struct
+initializer with a placeholder id scans **all scopes** by name
+(`analyzer.rs`, "Resolve struct initializer constraints").
 
 ### 2. Closure-parameter typing + dependency re-queue — ordering class · M · medium
 Two halves: (i) once a closure parameter's type is inferred from the expected
@@ -150,14 +185,17 @@ inference paths are simpler.
 
 1. ~~**Item 3** (safety net)~~ — **done** (d77c8ef).
 2. ~~**Item 4** (unify dispatch channels)~~ — **done** (77699dc).
-3. **Item 1** (memoization) — speeds the fixpoint and collapses the combinatorial
-   re-inference that made bug (a) un-debuggable; highest remaining value.
-4. **Item 5** (unified constraint queue), staged — removes the ordering fragility
-   that breeds (b)-like bugs; subsumes item 2 and enables a deeper merge of the
-   *bindings* channels.
-5. **Item 2** (closure typing + re-queue) — only if item 5 is deferred and a
+3. ~~**Item 1** (memoization)~~ — **investigated, dropped** (doesn't help; see above).
+4. **The quadratic `analyze`** (see "Performance" above) — now the highest-value
+   target. Profile with a sampling profiler to find the per-operation cost that
+   grows with the working set; likely converges with items 5 and 6.
+5. **Item 5** (unified constraint queue), staged — removes the ordering fragility
+   that breeds (b)-like bugs; subsumes item 2, enables a deeper merge of the
+   *bindings* channels, and makes memoization safe (well-ordered passes).
+6. **Item 2** (closure typing + re-queue) — only if item 5 is deferred and a
    concrete ordering bug recurs; otherwise folds into item 5.
-6. **Item 6** (interning) — only if residual generic-identity bugs justify it.
+7. **Item 6** (interning) — bounds the ever-growing type-id map (a suspect in the
+   quadratic) and stabilizes generic identity; pursue with item 4.
 
 **Separately, bug (c)** is a transformer concern, independent of the above:
 monomorphization demand must propagate through generic call chains so a generic
