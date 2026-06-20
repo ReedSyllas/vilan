@@ -1,20 +1,23 @@
 function to_json(self) {
-	return "{\"name\":" + JSON.stringify(self[0]) + "," + "\"members\":" + $k(self[1]) + "," + "\"captain\":" + $l(self[2]) + "}";
+	return "{\"name\":" + JSON.stringify(self[0]) + "," + "\"members\":" + $m(self[1]) + "," + "\"captain\":" + $n(self[2]) + "}";
 }
 function from_json(text) {
 	return from_json_value(JSON.parse(text));
 }
 function from_json_value(value) {
-	return [ String(value["name"]), $h(value["members"]), $i(value["captain"]) ];
+	return [ String(value["name"]), $j(value["members"]), $k(value["captain"]) ];
 }
-function $a(text) {
+function $b(value) {
 	let result = [  ];
-	for (const element of JSON.parse(text)) {
+	for (const element of value) {
 		result.push(Number(element));
 	}
 	return result;
 }
-function $b(self) {
+function $a(text) {
+	return $b(JSON.parse(text));
+}
+function $c(self) {
 	let result = "[";
 	let first = true;
 	for (const element of self) {
@@ -26,44 +29,46 @@ function $b(self) {
 	}
 	return result + "]";
 }
-function $c(text) {
-	const value = JSON.parse(text);
-	let $d = null;
+function $e(value) {
+	let $f = null;
 	if (value === null) {
-		$d = [ 1 ];
+		$f = [ 1 ];
 	} else {
-		$d = [ 0, Number(value) ];
+		$f = [ 0, Number(value) ];
 	}
-	return $d;
+	return $f;
 }
-function $e(self) {
-	const $f = self;
-	let $g = null;
-	if ($f[0] === 0) {
-		const value = $f[1];
-		$g = JSON.stringify(value);
+function $d(text) {
+	return $e(JSON.parse(text));
+}
+function $g(self) {
+	const $h = self;
+	let $i = null;
+	if ($h[0] === 0) {
+		const value = $h[1];
+		$i = JSON.stringify(value);
 	} else {
-		$g = "null";
+		$i = "null";
 	}
-	return $g;
+	return $i;
 }
-function $h(value) {
+function $j(value) {
 	let result = [  ];
 	for (const element of value) {
 		result.push(String(element));
 	}
 	return result;
 }
-function $i(value) {
-	let $j = null;
+function $k(value) {
+	let $l = null;
 	if (value === null) {
-		$j = [ 1 ];
+		$l = [ 1 ];
 	} else {
-		$j = [ 0, String(value) ];
+		$l = [ 0, String(value) ];
 	}
-	return $j;
+	return $l;
 }
-function $k(self) {
+function $m(self) {
 	let result = "[";
 	let first = true;
 	for (const element of self) {
@@ -75,25 +80,28 @@ function $k(self) {
 	}
 	return result + "]";
 }
-function $l(self) {
-	const $m = self;
-	let $n = null;
-	if ($m[0] === 0) {
-		const value = $m[1];
-		$n = JSON.stringify(value);
+function $n(self) {
+	const $o = self;
+	let $p = null;
+	if ($o[0] === 0) {
+		const value = $o[1];
+		$p = JSON.stringify(value);
 	} else {
-		$n = "null";
+		$p = "null";
 	}
-	return $n;
+	return $p;
 }
-function $o(text) {
+function $r(value) {
 	let result = [  ];
-	for (const element of JSON.parse(text)) {
+	for (const element of value) {
 		result.push(from_json_value(element));
 	}
 	return result;
 }
-function $p(self) {
+function $q(text) {
+	return $r(JSON.parse(text));
+}
+function $s(self) {
 	let result = "[";
 	let first = true;
 	for (const element of self) {
@@ -106,14 +114,14 @@ function $p(self) {
 	return result + "]";
 }
 const nums = $a("[1,2,3]");
-console.log($b(nums));
-const some = $c("7");
-console.log($e(some));
-const none = $c("null");
-console.log($e(none));
+console.log($c(nums));
+const some = $d("7");
+console.log($g(some));
+const none = $d("null");
+console.log($g(none));
 const json = "{\"name\":\"Reds\",\"members\":[\"Ada\",\"Bob\"],\"captain\":\"Ada\"}";
 const team = from_json(json);
 console.log(to_json(team));
-console.log($k(team[1]));
-const teams = $o("[" + json + "]");
-console.log($p(teams));
+console.log($m(team[1]));
+const teams = $q("[" + json + "]");
+console.log($s(teams));

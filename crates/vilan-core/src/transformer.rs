@@ -786,6 +786,20 @@ impl<'src> Transformer<'src> {
                             let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
                             return Some(self.maybe_await(target_id, call));
                         }
+                        // A generic call nested in a monomorphized body that the
+                        // analysis didn't record a substitution for (its type
+                        // arguments come only from the enclosing instantiation, not
+                        // its own arguments) — e.g. `List::from_json_value` inside
+                        // `List::from_json`, both over the impl's `T`. Specialize it
+                        // for whatever signature generics the active substitution
+                        // binds, so the inner call resolves rather than staying
+                        // abstract.
+                        let inherited = self.inherited_substitution(target_id);
+                        if !inherited.is_empty() {
+                            let name = self.emit_method_instance(target_id, &inherited);
+                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                            return Some(self.maybe_await(target_id, call));
+                        }
                         self.ensure_function_emitted(target_id);
                         let name = self.ng.name_for(target_id);
                         let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
@@ -2144,6 +2158,68 @@ impl<'src> Transformer<'src> {
             self.monomorphized.push(js_function);
         }
         name
+    }
+
+    /// The bindings the active substitution provides for the generics a callee's
+    /// signature mentions — used to specialize a generic call whose type
+    /// arguments come only from the enclosing monomorphization (so the analysis
+    /// recorded no substitution of its own). Empty when nothing applies, so the
+    /// caller falls back to a plain (generic) emission.
+    fn inherited_substitution(&self, target_id: Id) -> HashMap<TypeId, TypeId> {
+        if self.current_substitution.is_empty() {
+            return HashMap::new();
+        }
+        let Some(function) = self.program.functions.get(&target_id) else {
+            return HashMap::new();
+        };
+        let mut generics = Vec::new();
+        for parameter_id in &function.parameters {
+            if let Some(parameter) = self.program.parameters.get(parameter_id) {
+                self.collect_type_generics(parameter.type_id, 0, &mut generics);
+            }
+        }
+        if let Some(return_type_id) = function.return_type_id {
+            self.collect_type_generics(return_type_id, 0, &mut generics);
+        }
+        generics
+            .into_iter()
+            .filter_map(|constraint_id| {
+                self.current_substitution
+                    .get(&constraint_id)
+                    .map(|type_id| (constraint_id, *type_id))
+            })
+            .collect()
+    }
+
+    /// Collects the `Generic` constraint ids a type's structure mentions (its own
+    /// id, or those nested in a struct/enum/tuple/closure's arguments).
+    fn collect_type_generics(&self, type_id: TypeId, depth: usize, out: &mut Vec<TypeId>) {
+        if depth > 24 {
+            return;
+        }
+        match self.program.type_id_to_type_map.get(&type_id) {
+            Some(Type::Generic(constraint_id)) => {
+                if !out.contains(constraint_id) {
+                    out.push(*constraint_id);
+                }
+            }
+            Some(
+                Type::Struct(_, arguments) | Type::Enum(_, arguments) | Type::Tuple(arguments),
+            ) => {
+                for argument in arguments.clone() {
+                    self.collect_type_generics(argument, depth + 1, out);
+                }
+            }
+            Some(Type::Closure(parameters, return_type_id)) => {
+                let parameters = parameters.clone();
+                let return_type_id = *return_type_id;
+                for parameter in parameters {
+                    self.collect_type_generics(parameter, depth + 1, out);
+                }
+                self.collect_type_generics(return_type_id, depth + 1, out);
+            }
+            _ => {}
+        }
     }
 
     /// Resolves a type id to its concrete form under the active substitution,
