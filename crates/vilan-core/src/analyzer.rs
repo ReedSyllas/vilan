@@ -411,6 +411,10 @@ enum Constraint<'src> {
     /// definition, infers its type arguments from the values, and records the
     /// initializer once every field value's type is known.
     StructInitializer(StructInitializerConstraint<'src>),
+    /// `match subject { .. }` — once the subject type is known, resolves the leg
+    /// patterns and guards, checks exhaustiveness, and types the match as the
+    /// unification of its leg bodies.
+    Match(PreppedMatch<'src>),
 }
 
 impl Constraint<'_> {
@@ -423,6 +427,7 @@ impl Constraint<'_> {
             Constraint::FieldAccessor(_) => 2,
             Constraint::Subscript { .. } => 3,
             Constraint::Is(_) => 4,
+            Constraint::Match(_) => 5,
         }
     }
 }
@@ -568,7 +573,6 @@ pub struct Analyzer<'src> {
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
-    prepped_matches: Vec<PreppedMatch<'src>>,
     prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     // `for x in iterable` expressions, as (for-each id, iterable id), resolved
     // after typing to decide native `for...of` vs the Iterator-protocol loop.
@@ -731,7 +735,6 @@ impl<'src> Analyzer<'src> {
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
-            prepped_matches: Vec::new(),
             prepped_method_calls: Vec::new(),
             prepped_for_each: Vec::new(),
             prepped_for_each_items: Vec::new(),
@@ -3472,13 +3475,13 @@ impl<'src> Analyzer<'src> {
                         body: body_id,
                     });
                 }
-                self.prepped_matches.push(PreppedMatch {
+                self.constraints.push(Constraint::Match(PreppedMatch {
                     id,
                     subject_id,
                     scope_id,
                     legs: walked_legs,
                     span: node.1,
-                });
+                }));
                 // The entity is inserted once the subject type and the leg
                 // patterns have been resolved.
                 None
@@ -5434,7 +5437,155 @@ impl<'src> Analyzer<'src> {
             Constraint::StructInitializer(constraint) => {
                 self.resolve_struct_initializer(constraint)
             }
+            Constraint::Match(prepped) => self.resolve_match(prepped),
         }
+    }
+
+    /// `match subject { .. }`: once the subject type is known, resolve each leg's
+    /// patterns (typing captures) and guard, check exhaustiveness, and type the
+    /// match as the unification of its leg bodies. Defers while the subject, a
+    /// guard, or a leg body is unresolved.
+    fn resolve_match(&mut self, prepped: &PreppedMatch<'src>) -> Resolution {
+        let subject_type = self.infer_type(prepped.subject_id, &Type::Unknown, &HashMap::new());
+        if matches!(subject_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        let subject_type_id = subject_type.clone().get_type_id(self);
+
+        // Resolve each leg's patterns (an or-pattern has several) and its
+        // optional guard.
+        let mut resolved_legs: Vec<(Vec<ExprPattern>, Option<Id>, Id)> = Vec::new();
+        let mut pattern_error = false;
+        let mut guard_deferred = false;
+        for leg in &prepped.legs {
+            let mut resolved_patterns = Vec::new();
+            for pattern in &leg.patterns {
+                match self.resolve_pattern(pattern, subject_type_id, prepped.scope_id) {
+                    Some(resolved) => resolved_patterns.push(resolved),
+                    None => pattern_error = true,
+                }
+            }
+            if let Some(guard_id) = leg.guard {
+                // A guard must be a resolved `bool`.
+                let guard_type = self.infer_type(guard_id, &Type::Unknown, &HashMap::new());
+                if matches!(guard_type, Type::Unresolved) {
+                    guard_deferred = true;
+                } else if !self.compare_type(&guard_type, &self.bool_type(), &HashMap::new()) {
+                    let got = self.pretty_print_type(&guard_type, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&guard_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!("match guard must be a bool, but got {}", got),
+                    });
+                    pattern_error = true;
+                }
+            }
+            resolved_legs.push((resolved_patterns, leg.guard, leg.body));
+        }
+        if guard_deferred {
+            return Resolution::Deferred;
+        }
+        if pattern_error {
+            // Diagnostics were already emitted; drop the match.
+            return Resolution::Failed;
+        }
+
+        // Exhaustiveness: a leg is an irrefutable catch-all when it is unguarded
+        // and a pattern matches anything (`_`, a binding, or a tuple destructure).
+        let has_catch_all = resolved_legs.iter().any(|(patterns, guard, _)| {
+            guard.is_none()
+                && patterns.iter().any(|pattern| {
+                    matches!(
+                        pattern,
+                        ExprPattern::Wildcard | ExprPattern::Binding(_) | ExprPattern::Tuple(_)
+                    )
+                })
+        });
+        match &subject_type {
+            Type::Enum(enum_id, _) if !has_catch_all => {
+                // Each unguarded variant pattern (in any leg) covers its variant.
+                let covered = resolved_legs
+                    .iter()
+                    .filter(|(_, guard, _)| guard.is_none())
+                    .flat_map(|(patterns, _, _)| patterns)
+                    .filter_map(|pattern| match pattern {
+                        ExprPattern::Variant(_, variant_index, _) => Some(*variant_index),
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let missing = self
+                    .enums
+                    .get(enum_id)
+                    .unwrap()
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .filter(|(variant_index, _)| !covered.contains(variant_index))
+                    .map(|(_, variant)| format!("'{}'", variant.name))
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    self.diagnostics.push(Error {
+                        span: prepped.span,
+                        msg: format!("match is not exhaustive: missing {}", missing.join(", ")),
+                    });
+                }
+            }
+            // A non-enum subject (e.g. a `str` matched with literals) has an
+            // unbounded domain, so it needs an explicit catch-all. Tuples and
+            // not-yet-known types are exempt.
+            Type::Tuple(_) | Type::Unknown | Type::Any | Type::Generic(_) => {}
+            _ if !has_catch_all => {
+                self.diagnostics.push(Error {
+                    span: prepped.span,
+                    msg: "match is not exhaustive: add a catch-all `_` leg".to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        // The match's type unifies the leg body types.
+        let mut unified: Option<Type> = None;
+        for (_, _, body_id) in &resolved_legs {
+            let body_type = self.infer_type(*body_id, &Type::Unknown, &HashMap::new());
+            if matches!(body_type, Type::Unresolved) {
+                return Resolution::Deferred;
+            }
+            unified = Some(match unified {
+                None => body_type,
+                Some(current) => match self.reconcile_type(&current, &body_type, &HashMap::new()) {
+                    Some((unified_type, _)) => unified_type,
+                    None => {
+                        let expected = self.pretty_print_type(&current, &HashMap::new());
+                        let got = self.pretty_print_type(&body_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: prepped.span,
+                            msg: format!(
+                                "match legs have mismatched types: expected {}, but got {} instead.",
+                                expected, got
+                            ),
+                        });
+                        current
+                    }
+                },
+            });
+        }
+        let match_type = unified.unwrap_or(Type::Void);
+        let match_type_id = match_type.get_type_id(self);
+        self.resolved_types.insert(prepped.id, match_type_id);
+        // Expand each or-pattern leg into one leg per alternative, all sharing the
+        // guard and body.
+        let legs = resolved_legs
+            .into_iter()
+            .flat_map(|(patterns, guard, body)| {
+                patterns.into_iter().map(move |pattern| ExprMatchLeg {
+                    pattern,
+                    guard,
+                    body,
+                })
+            })
+            .collect();
+        self.expr_id_to_expr_map
+            .insert(prepped.id, Expr::Match(prepped.subject_id, legs));
+        Resolution::Resolved
     }
 
     /// `Struct { field = value, .. }`: resolve the struct by name (lexically),
@@ -6166,180 +6317,6 @@ impl<'src> Analyzer<'src> {
             if self.resolve_constraints() {
                 progress = true;
             }
-
-            // --- Resolve match expressions ---
-            // A match resolves once its subject type is known: the leg
-            // patterns are checked against the subject's enum (typing any
-            // captures), exhaustiveness is verified, and the match's own type
-            // is the unification of its leg body types.
-            let mut remaining_matches = Vec::new();
-            for prepped in std::mem::take(&mut self.prepped_matches) {
-                let subject_type =
-                    self.infer_type(prepped.subject_id, &Type::Unknown, &HashMap::new());
-                if matches!(subject_type, Type::Unresolved) {
-                    remaining_matches.push(prepped);
-                    continue;
-                }
-                let subject_type_id = subject_type.clone().get_type_id(self);
-
-                // Resolve each leg's patterns (an or-pattern has several) and its
-                // optional guard.
-                let mut resolved_legs: Vec<(Vec<ExprPattern>, Option<Id>, Id)> = Vec::new();
-                let mut pattern_error = false;
-                let mut guard_deferred = false;
-                for leg in &prepped.legs {
-                    let mut resolved_patterns = Vec::new();
-                    for pattern in &leg.patterns {
-                        match self.resolve_pattern(pattern, subject_type_id, prepped.scope_id) {
-                            Some(resolved) => resolved_patterns.push(resolved),
-                            None => pattern_error = true,
-                        }
-                    }
-                    if let Some(guard_id) = leg.guard {
-                        // A guard must be a resolved `bool`.
-                        let guard_type = self.infer_type(guard_id, &Type::Unknown, &HashMap::new());
-                        if matches!(guard_type, Type::Unresolved) {
-                            guard_deferred = true;
-                        } else if !self.compare_type(
-                            &guard_type,
-                            &self.bool_type(),
-                            &HashMap::new(),
-                        ) {
-                            let got = self.pretty_print_type(&guard_type, &HashMap::new());
-                            self.diagnostics.push(Error {
-                                span: **self.span_map.get(&guard_id).unwrap_or(&&EMPTY_SPAN),
-                                msg: format!("match guard must be a bool, but got {}", got),
-                            });
-                            pattern_error = true;
-                        }
-                    }
-                    resolved_legs.push((resolved_patterns, leg.guard, leg.body));
-                }
-                if guard_deferred {
-                    remaining_matches.push(prepped);
-                    continue;
-                }
-                if pattern_error {
-                    // Diagnostics were already emitted; drop the match.
-                    progress = true;
-                    continue;
-                }
-
-                // Exhaustiveness: a leg is an irrefutable catch-all when it is
-                // unguarded and a pattern matches anything (`_`, a binding, or a
-                // tuple destructure).
-                let has_catch_all = resolved_legs.iter().any(|(patterns, guard, _)| {
-                    guard.is_none()
-                        && patterns.iter().any(|pattern| {
-                            matches!(
-                                pattern,
-                                ExprPattern::Wildcard
-                                    | ExprPattern::Binding(_)
-                                    | ExprPattern::Tuple(_)
-                            )
-                        })
-                });
-                match &subject_type {
-                    Type::Enum(enum_id, _) if !has_catch_all => {
-                        // Each unguarded variant pattern (in any leg) covers its
-                        // variant.
-                        let covered = resolved_legs
-                            .iter()
-                            .filter(|(_, guard, _)| guard.is_none())
-                            .flat_map(|(patterns, _, _)| patterns)
-                            .filter_map(|pattern| match pattern {
-                                ExprPattern::Variant(_, variant_index, _) => Some(*variant_index),
-                                _ => None,
-                            })
-                            .collect::<HashSet<_>>();
-                        let missing = self
-                            .enums
-                            .get(enum_id)
-                            .unwrap()
-                            .variants
-                            .iter()
-                            .enumerate()
-                            .filter(|(variant_index, _)| !covered.contains(variant_index))
-                            .map(|(_, variant)| format!("'{}'", variant.name))
-                            .collect::<Vec<_>>();
-                        if !missing.is_empty() {
-                            self.diagnostics.push(Error {
-                                span: prepped.span,
-                                msg: format!(
-                                    "match is not exhaustive: missing {}",
-                                    missing.join(", ")
-                                ),
-                            });
-                        }
-                    }
-                    // A non-enum subject (e.g. a `str` matched with literals) has
-                    // an unbounded domain, so it needs an explicit catch-all. Tuples
-                    // and not-yet-known types are exempt.
-                    Type::Tuple(_) | Type::Unknown | Type::Any | Type::Generic(_) => {}
-                    _ if !has_catch_all => {
-                        self.diagnostics.push(Error {
-                            span: prepped.span,
-                            msg: "match is not exhaustive: add a catch-all `_` leg".to_string(),
-                        });
-                    }
-                    _ => {}
-                }
-
-                // The match's type unifies the leg body types.
-                let mut unified: Option<Type> = None;
-                let mut deferred = false;
-                for (_, _, body_id) in &resolved_legs {
-                    let body_type = self.infer_type(*body_id, &Type::Unknown, &HashMap::new());
-                    if matches!(body_type, Type::Unresolved) {
-                        deferred = true;
-                        break;
-                    }
-                    unified = Some(match unified {
-                        None => body_type,
-                        Some(current) => {
-                            match self.reconcile_type(&current, &body_type, &HashMap::new()) {
-                                Some((unified_type, _)) => unified_type,
-                                None => {
-                                    let expected =
-                                        self.pretty_print_type(&current, &HashMap::new());
-                                    let got = self.pretty_print_type(&body_type, &HashMap::new());
-                                    self.diagnostics.push(Error {
-                                        span: prepped.span,
-                                        msg: format!(
-                                            "match legs have mismatched types: expected {}, but got {} instead.",
-                                            expected, got
-                                        ),
-                                    });
-                                    current
-                                }
-                            }
-                        }
-                    });
-                }
-                if deferred {
-                    remaining_matches.push(prepped);
-                    continue;
-                }
-                let match_type = unified.unwrap_or(Type::Void);
-                let match_type_id = match_type.get_type_id(self);
-                self.resolved_types.insert(prepped.id, match_type_id);
-                // Expand each or-pattern leg into one leg per alternative, all
-                // sharing the guard and body.
-                let legs = resolved_legs
-                    .into_iter()
-                    .flat_map(|(patterns, guard, body)| {
-                        patterns.into_iter().map(move |pattern| ExprMatchLeg {
-                            pattern,
-                            guard,
-                            body,
-                        })
-                    })
-                    .collect();
-                self.expr_id_to_expr_map
-                    .insert(prepped.id, Expr::Match(prepped.subject_id, legs));
-                progress = true;
-            }
-            self.prepped_matches = remaining_matches;
 
             // --- Resolve deferred method calls ---
             if !self.prepped_method_calls.is_empty() {
@@ -7383,9 +7360,12 @@ impl<'src> Analyzer<'src> {
             });
         }
         let unresolved_matches: Vec<(Id, Span)> = self
-            .prepped_matches
+            .constraints
             .iter()
-            .map(|prepped| (prepped.subject_id, prepped.span))
+            .filter_map(|constraint| match constraint {
+                Constraint::Match(prepped) => Some((prepped.subject_id, prepped.span)),
+                _ => None,
+            })
             .collect();
         for (subject_id, span) in unresolved_matches {
             let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
@@ -7402,7 +7382,6 @@ impl<'src> Analyzer<'src> {
         // Clear processed constraints
         self.variable_constraints.clear();
         self.call_subject_constraints.clear();
-        self.prepped_matches.clear();
     }
 
     /// Pretty-prints a type for diagnostics, resolving generic names
