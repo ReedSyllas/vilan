@@ -415,6 +415,9 @@ enum Constraint<'src> {
     /// patterns and guards, checks exhaustiveness, and types the match as the
     /// unification of its leg bodies.
     Match(PreppedMatch<'src>),
+    /// `let v = value` (plus any reassignments) — grounds the variable's type
+    /// from its first value, then checks the reassignments against it.
+    Variable(VariableConstraint),
 }
 
 impl Constraint<'_> {
@@ -428,6 +431,7 @@ impl Constraint<'_> {
             Constraint::Subscript { .. } => 3,
             Constraint::Is(_) => 4,
             Constraint::Match(_) => 5,
+            Constraint::Variable(_) => 10,
         }
     }
 }
@@ -635,7 +639,6 @@ pub struct Analyzer<'src> {
     traits: IndexMap<Id, Trait<'src>>,
     type_id_to_type_map: HashMap<TypeId, Type>,
     type_id: u32,
-    variable_constraints: Vec<VariableConstraint>,
     variables: IndexMap<Id, Variable<'src>>,
     // True while walking a trait body, where a bodyless method is a legitimate
     // requirement; elsewhere a bodyless function must be declared `external`.
@@ -760,7 +763,6 @@ impl<'src> Analyzer<'src> {
             traits: IndexMap::new(),
             type_id_to_type_map: HashMap::new(),
             type_id: 0,
-            variable_constraints: Vec::new(),
             variables: IndexMap::new(),
             walking_trait_body: false,
             panic_fn_id: None,
@@ -3307,8 +3309,10 @@ impl<'src> Analyzer<'src> {
                 // annotation. If not, the value's type becomes the
                 // variable's type once resolved.
                 let value_ids = self.assignment_values.get(&id).cloned().unwrap_or_default();
-                self.variable_constraints
-                    .push(VariableConstraint::from_walk(id, type_id, value_ids));
+                self.constraints
+                    .push(Constraint::Variable(VariableConstraint::from_walk(
+                        id, type_id, value_ids,
+                    )));
                 Some(Expr::Variable(id))
             }
             Node::Assign(target, op, value) => {
@@ -5438,7 +5442,107 @@ impl<'src> Analyzer<'src> {
                 self.resolve_struct_initializer(constraint)
             }
             Constraint::Match(prepped) => self.resolve_match(prepped),
+            Constraint::Variable(constraint) => self.resolve_variable(constraint),
         }
+    }
+
+    /// `let v = value` (plus reassignments): ground the variable's type from its
+    /// first value (which must be ready), then reconcile the reassignments. A
+    /// reassignment that isn't ready re-queues a fresh `Variable` task carrying
+    /// the grounded type and just the still-pending values.
+    fn resolve_variable(&mut self, constraint: &VariableConstraint) -> Resolution {
+        let variable_id = constraint.variable_id;
+        let initial_type_id = constraint.initial_type_id;
+        let value_ids = &constraint.value_ids;
+
+        // The first value (with the annotation) grounds the variable's type and
+        // must be ready. Later values — reassignments — may refer to the variable
+        // itself (e.g. `i += 1`), so they are checked only after grounding.
+        let first_ready = value_ids
+            .first()
+            .map(|&value_id| {
+                self.expr_id_to_expr_map.contains_key(&value_id)
+                    && !matches!(
+                        self.infer_type(value_id, &Type::Unknown, &HashMap::new()),
+                        Type::Unresolved
+                    )
+            })
+            .unwrap_or(true);
+        if !first_ready {
+            return Resolution::Deferred;
+        }
+
+        let mut substitution_context = HashMap::new();
+        let mut variable_type = initial_type_id.get_type(self);
+
+        if let Some(&first_value_id) = value_ids.first() {
+            let value_type = self.infer_type(first_value_id, &variable_type, &substitution_context);
+            match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
+                Some((unified, bindings)) => {
+                    for (constraint_id, type_id) in bindings {
+                        substitution_context.insert(constraint_id, type_id);
+                    }
+                    if let Type::Unknown = variable_type {
+                        variable_type = unified;
+                    }
+                }
+                None => {
+                    let expected_str =
+                        self.pretty_print_type(&variable_type, &substitution_context);
+                    let got_str = self.pretty_print_type(&value_type, &substitution_context);
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&first_value_id).unwrap(),
+                        msg: format!("Expected {}, but got {} instead.", expected_str, got_str),
+                    });
+                }
+            }
+        }
+
+        // Ground the variable's type before checking reassignments so
+        // self-referential values like `i + 1` can resolve.
+        let var_type_id = variable_type.clone().get_type_id(self);
+        self.variables.get_mut(&variable_id).unwrap().type_id = var_type_id;
+        self.resolved_types.insert(variable_id, var_type_id);
+
+        let mut deferred_value_ids = Vec::new();
+        for &value_id in value_ids.iter().skip(1) {
+            if !self.expr_id_to_expr_map.contains_key(&value_id) {
+                deferred_value_ids.push(value_id);
+                continue;
+            }
+            let value_type = self.infer_type(value_id, &variable_type, &substitution_context);
+            if matches!(value_type, Type::Unresolved) {
+                deferred_value_ids.push(value_id);
+                continue;
+            }
+            match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
+                Some((_, bindings)) => {
+                    for (constraint_id, type_id) in bindings {
+                        substitution_context.insert(constraint_id, type_id);
+                    }
+                }
+                None => {
+                    let expected_str =
+                        self.pretty_print_type(&variable_type, &substitution_context);
+                    let got_str = self.pretty_print_type(&value_type, &substitution_context);
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&value_id).unwrap(),
+                        msg: format!("Expected {}, but got {} instead.", expected_str, got_str),
+                    });
+                }
+            }
+        }
+        if !deferred_value_ids.is_empty() {
+            // Re-queue the still-pending reassignments against the now-grounded
+            // type (a fresh task, processed next pass at this kind's priority).
+            self.constraints
+                .push(Constraint::Variable(VariableConstraint {
+                    variable_id,
+                    initial_type_id: var_type_id,
+                    value_ids: deferred_value_ids,
+                }));
+        }
+        Resolution::Resolved
     }
 
     /// `match subject { .. }`: once the subject type is known, resolve each leg's
@@ -5976,10 +6080,10 @@ impl<'src> Analyzer<'src> {
                     continue;
                 }
             }
-            if let Some(constraint) = self
-                .variable_constraints
-                .iter_mut()
-                .find(|constraint| constraint.variable_id == variable_id)
+            if let Some(Constraint::Variable(constraint)) =
+                self.constraints.iter_mut().find(|constraint| {
+                    matches!(constraint, Constraint::Variable(constraint) if constraint.variable_id == variable_id)
+                })
             {
                 constraint.value_ids.push(value_id);
             }
@@ -6717,118 +6821,6 @@ impl<'src> Analyzer<'src> {
                 self.prepped_method_arg_checks = remaining;
             }
 
-            // --- Resolve variable constraints ---
-            let mut remaining_vars = Vec::new();
-            let var_constraints: Vec<_> = std::mem::take(&mut self.variable_constraints)
-                .into_iter()
-                .collect();
-            for constraint in var_constraints {
-                let VariableConstraint {
-                    variable_id,
-                    initial_type_id,
-                    ref value_ids,
-                } = constraint;
-
-                // The first value (with the annotation) grounds the variable's
-                // type and must be ready. Later values — reassignments — may
-                // refer to the variable itself (e.g. `i += 1`), so they are
-                // checked only after the type has been grounded below.
-                let first_ready = value_ids
-                    .first()
-                    .map(|&value_id| {
-                        self.expr_id_to_expr_map.contains_key(&value_id)
-                            && !matches!(
-                                self.infer_type(value_id, &Type::Unknown, &HashMap::new()),
-                                Type::Unresolved
-                            )
-                    })
-                    .unwrap_or(true);
-                if !first_ready {
-                    remaining_vars.push(constraint);
-                    continue;
-                }
-
-                let mut substitution_context = HashMap::new();
-                let mut variable_type = initial_type_id.get_type(self);
-
-                if let Some(&first_value_id) = value_ids.first() {
-                    let value_type =
-                        self.infer_type(first_value_id, &variable_type, &substitution_context);
-                    match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
-                        Some((unified, bindings)) => {
-                            for (cid, tid) in bindings {
-                                substitution_context.insert(cid, tid);
-                            }
-                            if let Type::Unknown = variable_type {
-                                variable_type = unified;
-                            }
-                        }
-                        None => {
-                            let expected_str =
-                                self.pretty_print_type(&variable_type, &substitution_context);
-                            let got_str =
-                                self.pretty_print_type(&value_type, &substitution_context);
-                            self.diagnostics.push(Error {
-                                span: **self.span_map.get(&first_value_id).unwrap(),
-                                msg: format!(
-                                    "Expected {}, but got {} instead.",
-                                    expected_str, got_str
-                                ),
-                            });
-                        }
-                    }
-                }
-
-                // Ground the variable's type before checking reassignments so
-                // self-referential values like `i + 1` can resolve.
-                let var_type_id = variable_type.clone().get_type_id(self);
-                self.variables.get_mut(&variable_id).unwrap().type_id = var_type_id;
-                self.resolved_types.insert(variable_id, var_type_id);
-
-                let mut deferred_value_ids = Vec::new();
-                for &value_id in value_ids.iter().skip(1) {
-                    if !self.expr_id_to_expr_map.contains_key(&value_id) {
-                        deferred_value_ids.push(value_id);
-                        continue;
-                    }
-                    let value_type =
-                        self.infer_type(value_id, &variable_type, &substitution_context);
-                    if matches!(value_type, Type::Unresolved) {
-                        deferred_value_ids.push(value_id);
-                        continue;
-                    }
-                    match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
-                        Some((_, bindings)) => {
-                            for (cid, tid) in bindings {
-                                substitution_context.insert(cid, tid);
-                            }
-                        }
-                        None => {
-                            let expected_str =
-                                self.pretty_print_type(&variable_type, &substitution_context);
-                            let got_str =
-                                self.pretty_print_type(&value_type, &substitution_context);
-                            self.diagnostics.push(Error {
-                                span: **self.span_map.get(&value_id).unwrap(),
-                                msg: format!(
-                                    "Expected {}, but got {} instead.",
-                                    expected_str, got_str
-                                ),
-                            });
-                        }
-                    }
-                }
-                if !deferred_value_ids.is_empty() {
-                    remaining_vars.push(VariableConstraint {
-                        variable_id,
-                        initial_type_id: var_type_id,
-                        value_ids: deferred_value_ids,
-                    });
-                }
-                progress = true;
-            }
-            self.variable_constraints = remaining_vars;
-
             // --- Resolve call subject constraints ---
             let mut remaining_calls = Vec::new();
             let call_constraints: Vec<_> = std::mem::take(&mut self.call_subject_constraints)
@@ -7335,23 +7327,21 @@ impl<'src> Analyzer<'src> {
                     span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
                     msg: "type of accessor subject could not be resolved".to_string(),
                 }),
+                Constraint::Variable(constraint) => self.diagnostics.push(Error {
+                    span: **(self
+                        .span_map
+                        .get(&constraint.variable_id)
+                        .unwrap_or(&&EMPTY_SPAN)),
+                    msg: format!(
+                        "type of variable '{}' could not be resolved",
+                        self.variables
+                            .get(&constraint.variable_id)
+                            .map(|variable| variable.name)
+                            .unwrap_or("unknown")
+                    ),
+                }),
                 _ => {}
             }
-        }
-        for constraint in &self.variable_constraints {
-            self.diagnostics.push(Error {
-                span: **(self
-                    .span_map
-                    .get(&constraint.variable_id)
-                    .unwrap_or(&&EMPTY_SPAN)),
-                msg: format!(
-                    "type of variable '{}' could not be resolved",
-                    self.variables
-                        .get(&constraint.variable_id)
-                        .map(|v| v.name)
-                        .unwrap_or("unknown")
-                ),
-            });
         }
         for constraint in &self.call_subject_constraints {
             self.diagnostics.push(Error {
@@ -7380,7 +7370,6 @@ impl<'src> Analyzer<'src> {
         }
 
         // Clear processed constraints
-        self.variable_constraints.clear();
         self.call_subject_constraints.clear();
     }
 
