@@ -206,6 +206,15 @@ pub enum Node<'src> {
         Option<Box<Spanned<Self>>>,
         bool,
     ),
+    // `let`/`mut` binding with a destructuring pattern: `let (a, b) = pair`. The
+    // pattern is irrefutable (a tuple of names/sub-patterns); the rest mirrors
+    // `Let` (type annotation, value, mutability).
+    LetDestructure(
+        Spanned<Pattern<'src>>,
+        Option<Box<Spanned<Self>>>,
+        Option<Box<Spanned<Self>>>,
+        bool,
+    ),
     List(NodeList<'src>),
     // A match expression: subject and legs of `patterns (if guard)? => body`.
     Match(Box<Spanned<Self>>, Spanned<Vec<MatchLeg<'src>>>),

@@ -402,8 +402,23 @@ where
         .labelled("if block"),
     );
 
+    // A binder in `let`/parameter position: a plain name, or a tuple of binders
+    // (irrefutable destructuring — `let (a, b) = pair`). Distinct from the `match`
+    // pattern grammar (no variants, literals, or guards). Nests via recursion.
+    let binder = recursive(|binder| {
+        let tuple = binder
+            .separated_by(just(Token::Ctrl(',')))
+            .at_least(2)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .map_with(|patterns, e| (Pattern::Tuple(patterns), e.span()));
+        let name = identifier.map_with(|name, e| (Pattern::Binding(name, false), e.span()));
+        choice((tuple, name))
+    });
+
     let let_ = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
-        .then(identifier.map_with(|name, e| (name, e.span())))
+        .then(binder)
         .then(
             just(Token::Op(":"))
                 .ignore_then(type_.clone())
@@ -416,16 +431,15 @@ where
                 .labelled("value")
                 .or_not(),
         )
-        .map_with(|(((mutable, name), type_), val), e| {
-            (
-                Node::Let(
-                    name,
-                    type_.map(|x| Box::new(x)),
-                    val.map(|x| Box::new(x)),
-                    mutable,
-                ),
-                e.span(),
-            )
+        .map_with(|(((mutable, (pattern, pattern_span)), type_), val), e| {
+            let type_ = type_.map(Box::new);
+            let val = val.map(Box::new);
+            // A bare name keeps the simple `Let`; a tuple destructures.
+            let node = match pattern {
+                Pattern::Binding(name, _) => Node::Let((name, pattern_span), type_, val, mutable),
+                pattern => Node::LetDestructure((pattern, pattern_span), type_, val, mutable),
+            };
+            (node, e.span())
         })
         .labelled("let binding")
         .boxed();

@@ -343,3 +343,22 @@ fn format_in_closure_argument() {
         "0\n5\n",
     );
 }
+
+#[test]
+fn let_tuple_destructuring() {
+    // `let (a, b, c) = tuple` destructures, typing each binding from the tuple's
+    // element types (so a method call on a binding dispatches concretely).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun pair(): (i32, str) { (7, "x") }
+        fun main() {
+            let (a, (b, c)) = (1, (2, 3));
+            let (n, label) = pair();
+            print(i"{a} {b} {c} {n.to_string()} {label}");
+        }
+        "#,
+        "1 2 3 7 x\n",
+    );
+}

@@ -1290,6 +1290,30 @@ impl<'src> Transformer<'src> {
                     .reduce(|a, b| js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)))
                     .unwrap_or(js::Node::Bool(true))
             }
+            Expr::Destructure(value_id, pattern) => {
+                // `let (a, b) = value` -> bind the value to a temp (evaluated
+                // once), then declare each binding from a positional slot:
+                // `const __d = value; const a = __d[0]; const b = __d[1];`. An
+                // irrefutable binder produces no conditions.
+                let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
+                let temp_name = self.ng.next_name();
+                block.push(js::Node::ConstVariable(js::Variable {
+                    name: temp_name.clone(),
+                    value: Box::new(value),
+                }));
+                let mut conditions = Vec::new();
+                let mut bindings = Vec::new();
+                self.compile_pattern(
+                    pattern,
+                    js::Node::Local(temp_name),
+                    &mut conditions,
+                    &mut bindings,
+                );
+                for binding in bindings {
+                    block.push(binding);
+                }
+                return None;
+            }
             Expr::Match(subject_id, legs) => {
                 let t_subject = self
                     .walk_entity(*subject_id, block)

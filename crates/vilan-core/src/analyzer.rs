@@ -33,6 +33,9 @@ pub enum Expr<'src> {
     // An enum declaration.
     Enum(Id),
     // A reference to one variant of an enum: the enum and the variant index.
+    // `let (a, b) = value` — destructure `value` (an expr id) by an irrefutable
+    // pattern, declaring its bindings. Lowered to a temp + element bindings.
+    Destructure(Id, ExprPattern),
     EnumVariant(Id, usize),
     Error,
     ExternalFunction(Id),
@@ -275,6 +278,18 @@ struct PreppedMatch<'src> {
     span: Span,
 }
 
+// A `let (a, b) = value` destructuring binding awaiting its value's type, so the
+// pattern's bindings can be typed from the value's (tuple) element types. The
+// bindings are already walked into `scope_id`.
+#[derive(Debug)]
+struct DestructureConstraint<'src> {
+    id: Id,
+    value_id: Id,
+    type_id: Option<TypeId>,
+    scope_id: Id,
+    pattern: WalkPattern<'src>,
+}
+
 // An `is` pattern test awaiting subject and pattern resolution. Its captures are
 // already walked into `scope_id`.
 #[derive(Debug)]
@@ -418,6 +433,9 @@ enum Constraint<'src> {
     /// `let v = value` (plus any reassignments) — grounds the variable's type
     /// from its first value, then checks the reassignments against it.
     Variable(VariableConstraint),
+    /// `let (a, b) = value` — types the pattern's bindings from the value's
+    /// (tuple) element types once the value resolves.
+    Destructure(DestructureConstraint<'src>),
     /// `receiver.method(args)` — resolves the method against the receiver's type
     /// (impl, trait, or bound generic), binds generics, wires the call, and spawns
     /// a `MethodArgCheck` (and a `SlotUnification` for `push`/`run`).
@@ -465,6 +483,7 @@ impl Constraint<'_> {
             Constraint::ForEachItem { .. } => 8,
             Constraint::MethodArgCheck { .. } => 9,
             Constraint::Variable(_) => 10,
+            Constraint::Destructure(_) => 10,
             Constraint::CallSubject(_) => 11,
         }
     }
@@ -3342,6 +3361,41 @@ impl<'src> Analyzer<'src> {
                     )));
                 Some(Expr::Variable(id))
             }
+            Node::LetDestructure(pattern, type_, value, mutable) => {
+                // Walk the value, then the binder pattern (which registers its
+                // bindings in scope as `Unknown`-typed variables); a `Destructure`
+                // constraint types them from the value's element types once it
+                // resolves. The whole `let` lowers to the recorded
+                // `Expr::Destructure`, so the walk inserts nothing now.
+                let value_id = value
+                    .as_ref()
+                    .map(|value| self.walk_expr_node(value, scope_id));
+                let walk_pattern = self.walk_pattern(pattern, scope_id);
+                if *mutable {
+                    self.set_pattern_bindings_mutable(&walk_pattern);
+                }
+                let type_id = type_.as_ref().map(|x| self.walk_type_node(x, scope_id));
+                match value_id {
+                    Some(value_id) => {
+                        self.constraints
+                            .push(Constraint::Destructure(DestructureConstraint {
+                                id,
+                                value_id,
+                                type_id,
+                                scope_id,
+                                pattern: walk_pattern,
+                            }));
+                        None
+                    }
+                    None => {
+                        self.diagnostics.push(Error {
+                            span: node.1,
+                            msg: "a destructuring `let` requires a value".to_string(),
+                        });
+                        Some(Expr::Error)
+                    }
+                }
+            }
             Node::Assign(target, op, value) => {
                 let value_id = self.walk_expr_node(value, scope_id);
                 // The target is an lvalue node — a local (`Accessor`) or a field
@@ -3770,6 +3824,25 @@ impl<'src> Analyzer<'src> {
 
     // Walks a match-leg pattern, creating capture variables in the leg's
     // scope. Variant names stay unresolved until the subject type is known.
+    /// Marks every binding in a walked binder pattern mutable — for `mut (a, b) =
+    /// ..`, where the `mut` applies to all bindings (the pattern parser can't see
+    /// it, so it walks them immutable).
+    fn set_pattern_bindings_mutable(&mut self, pattern: &WalkPattern<'src>) {
+        match pattern {
+            WalkPattern::Binding(capture_id) => {
+                if let Some(variable) = self.variables.get_mut(capture_id) {
+                    variable.mutable = true;
+                }
+            }
+            WalkPattern::Tuple(_, patterns) => {
+                for sub_pattern in patterns {
+                    self.set_pattern_bindings_mutable(sub_pattern);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn walk_pattern(
         &mut self,
         pattern: &'src Spanned<Pattern<'src>>,
@@ -5470,6 +5543,7 @@ impl<'src> Analyzer<'src> {
             }
             Constraint::Match(prepped) => self.resolve_match(prepped),
             Constraint::Variable(constraint) => self.resolve_variable(constraint),
+            Constraint::Destructure(constraint) => self.resolve_destructure(constraint),
             Constraint::MethodCall {
                 id,
                 subject_id,
@@ -6082,6 +6156,30 @@ impl<'src> Analyzer<'src> {
             }
         }
         Resolution::Resolved
+    }
+
+    /// `let (a, b) = value`: once the value's type is known, resolve the pattern
+    /// against it (an explicit annotation takes precedence), typing each binding
+    /// from the corresponding tuple element. Records the `Expr::Destructure` the
+    /// transformer lowers.
+    fn resolve_destructure(&mut self, constraint: &DestructureConstraint<'src>) -> Resolution {
+        let value_type = self.infer_type(constraint.value_id, &Type::Unknown, &HashMap::new());
+        if matches!(value_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        let expected_type_id = constraint
+            .type_id
+            .unwrap_or_else(|| value_type.get_type_id(self));
+        match self.resolve_pattern(&constraint.pattern, expected_type_id, constraint.scope_id) {
+            Some(resolved) => {
+                self.expr_id_to_expr_map.insert(
+                    constraint.id,
+                    Expr::Destructure(constraint.value_id, resolved),
+                );
+                Resolution::Resolved
+            }
+            None => Resolution::Failed,
+        }
     }
 
     /// `let v = value` (plus reassignments): ground the variable's type from its
