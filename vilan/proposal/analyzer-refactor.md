@@ -186,15 +186,12 @@ stays separate — it carries the *bindings*, a distinct concern from *which mem
 to dispatch to*. The deeper merge of bindings channels waits on item 5.
 
 ### 5. Unified constraint queue — foundational · L · medium
-Replace the ~30 `prepped_*`/`*_constraints` lists with one
-`Vec<Constraint>` where each variant implements
-`try_resolve(&mut Analyzer) -> Resolved | Deferred(depends_on)`. The fixpoint
-becomes: resolve in order, and when a constraint resolves, re-queue the ones that
-declared a dependency on what it produced. Makes ordering **explicit and
-testable** instead of emergent, which is the structural cure for the whole
-fragility (bug class (b) and future ones). Large, so stage it: introduce the enum
-alongside the existing lists, migrate worklists one at a time (each migration
-corpus-byte-identical), then delete the old fields.
+Replace the ~25 `prepped_*`/`*_constraints` lists in `build()` with one
+`Constraint` enum + `try_resolve` runner. Split into **v1** (uniform abstraction,
+same scheduling — low risk, unblocks item 4's bindings merge) and **v2** (automatic
+dependency capture + dirty re-queue — the structural cure for the (b)/(c′) ordering
+class, and the prerequisite that makes memoization (item 1) safe). Staged so every
+step is corpus-byte-identical. **Full staged plan: `constraint-queue-plan.md`.**
 
 ### 6. Type interning + stable generic identity — later · M · medium-high
 Give `Type` `Hash + Eq` and intern `Type -> TypeId`, so a generic parameter has
