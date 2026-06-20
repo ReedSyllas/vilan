@@ -301,13 +301,19 @@ impl<'src> Transformer<'src> {
             .get(&self.program.global_scope_id)
             .unwrap();
 
-        let global_variables = self.find_global_variables(
+        let mut global_variables = self.find_global_variables(
             &global_scope
                 .name_to_id_map
                 .iter()
                 .map(|(_, x)| *x)
                 .collect(),
         );
+        // Top-level `let`s declared in a loaded module are globals too. A loaded
+        // (std) module stores its items directly with an empty `Module.body`, so
+        // the name-walk above can't reach them; collect them by scope instead.
+        global_variables.extend(self.module_level_variables());
+        let mut seen = std::collections::HashSet::new();
+        global_variables.retain(|id| seen.insert(*id));
 
         let main_fn = global_scope
             .name_to_id_map
@@ -421,13 +427,28 @@ impl<'src> Transformer<'src> {
             } else if self.program.modules.contains_key(id) {
                 let module = self.program.modules.get(id).unwrap();
                 let mut children = self.find_global_variables(&module.body.0);
-                // println!("x1 {} {:#?} {:#?}", module.name, children, global_variables);
                 global_variables.append(&mut children);
-                // println!("x2 {:#?}", global_variables);
             }
         }
 
         global_variables
+    }
+
+    /// The top-level `let`s of every loaded module — variables whose declaring
+    /// scope is a module's own scope. A loaded (std) module's items are walked
+    /// straight into the program with an empty `Module.body`, so they aren't
+    /// reachable through the name-walk; this finds them by scope.
+    fn module_level_variables(&self) -> Vec<Id> {
+        let mut variables = Vec::new();
+        for module in self.program.modules.values() {
+            let module_scope = module.body.1;
+            for variable_id in self.program.variables.keys() {
+                if self.program.entity_scope_map.get(variable_id) == Some(&module_scope) {
+                    variables.push(*variable_id);
+                }
+            }
+        }
+        variables
     }
 
     fn walk_list(&mut self, list: &Vec<Id>) -> Vec<js::Node<'src>> {

@@ -81,6 +81,21 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Compilation recurses over deeply-nested ASTs and type graphs (e.g. closures
+    // stored in data structures plus generic monomorphization), which can run
+    // past the default main-thread stack on otherwise-valid programs. Do the work
+    // on a worker with a generous stack, as rustc and other compilers do; the
+    // reservation is virtual address space, so it costs nothing unless used.
+    const COMPILER_STACK_SIZE: usize = 256 * 1024 * 1024;
+    std::thread::Builder::new()
+        .stack_size(COMPILER_STACK_SIZE)
+        .spawn(run_cli)
+        .expect("spawn compiler thread")
+        .join()
+        .expect("compiler thread panicked")
+}
+
+fn run_cli() -> ExitCode {
     match Cli::parse().command {
         Command::Build {
             file,
