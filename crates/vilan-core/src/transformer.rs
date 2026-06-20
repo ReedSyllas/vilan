@@ -1,4 +1,6 @@
-use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Function, Intrinsic, Program};
+use crate::analyzer::{
+    Expr, ExprIfBranch, ExprPattern, Function, GenericDispatch, Intrinsic, Program,
+};
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::{BinaryOp, ExternBinding};
@@ -645,10 +647,11 @@ impl<'src> Transformer<'src> {
 
                 // `T::member()` inside a monomorphized body: dispatch directly
                 // to the concrete type's member that `T` is bound to here.
-                if let Some(&(constraint_id, member_name)) = self
+                if let Some(GenericDispatch::OnConstraint(constraint_id, member_name)) = self
                     .program
-                    .generic_static_accessors
+                    .generic_dispatch
                     .get(&function_call.subject_id)
+                    .copied()
                 {
                     if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
                         if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
@@ -663,8 +666,8 @@ impl<'src> Transformer<'src> {
                 // monomorphization (the instance analogue of the `T::member()` path
                 // above). The trait member may be abstract (bodyless), so this can't
                 // fall through to a normal emit.
-                if let Some(&(constraint_id, member_name)) =
-                    self.program.generic_method_dispatch.get(id)
+                if let Some(GenericDispatch::OnConstraint(constraint_id, member_name)) =
+                    self.program.generic_dispatch.get(id).copied()
                 {
                     if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
                         if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
@@ -678,8 +681,8 @@ impl<'src> Transformer<'src> {
                 // inherited default called on a concrete value (Gap E, with the
                 // type recorded), or a `self`-call inside a default body (no type,
                 // dispatched on the type the default is being specialized for).
-                if let Some(&(concrete_type, member_name)) =
-                    self.program.trait_method_dispatch.get(id)
+                if let Some(GenericDispatch::OnType(concrete_type, member_name)) =
+                    self.program.generic_dispatch.get(id).copied()
                 {
                     if let Some(type_id) = concrete_type.or(self.current_self_type) {
                         if let Some(dispatch) = self.resolve_dispatch(type_id, member_name) {
@@ -853,8 +856,8 @@ impl<'src> Transformer<'src> {
                 // `x op y` where `x: T` is a trait-bounded generic: dispatch to T's
                 // concrete operator impl at this monomorphization, re-resolved like
                 // the instance-method generic dispatch. (`!=` negates `eq`, as below.)
-                if let Some(&(constraint_id, member_name)) =
-                    self.program.generic_method_dispatch.get(&id)
+                if let Some(GenericDispatch::OnConstraint(constraint_id, member_name)) =
+                    self.program.generic_dispatch.get(&id).copied()
                 {
                     let concrete = self
                         .current_substitution

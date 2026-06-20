@@ -472,19 +472,13 @@ pub struct Analyzer<'src> {
     functions: IndexMap<Id, Function<'src>>,
     generic_constraint_names: HashMap<TypeId, &'src str>,
     // Static accessors whose subject is a generic parameter (e.g. `T::default`),
-    // recorded as `accessor_id -> (constraint_id, member_name)` so the
-    // transformer can re-resolve them per monomorphized instantiation.
-    generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
-    // `a.member()` where `a`'s type is a trait-bounded generic `T` — the instance
-    // analogue of `generic_static_accessors`. A required trait method has no body
-    // to run abstractly, so the call is re-dispatched per monomorphization to the
-    // concrete type `T` is bound to. Keyed by the call id, value `(constraint, member)`.
-    generic_method_dispatch: HashMap<Id, (TypeId, &'src str)>,
-    // Method calls (by call id) that must re-dispatch to the receiver's concrete
-    // type at codegen, by member name: a trait default called on a concrete value
-    // (`Some(type)`) — Gap E — or a `self`/trait-typed call inside a default body
-    // (`None`, dispatched on the type the default is being specialized for).
-    trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
+    // Calls/accessors the analyzer can't pin to a concrete callee, so codegen
+    // re-resolves them per monomorphization (see `GenericDispatch`). One channel
+    // for all three shapes — `T::member()` and `value.method()` on a generic, and
+    // a trait method re-dispatched to a concrete (or `self`) type. Keyed by the
+    // accessor id for the static form (= the call's `subject_id`), else the call
+    // id; the keys never collide.
+    generic_dispatch: HashMap<Id, GenericDispatch<'src>>,
     // All trait-bound type ids of a generic parameter (`T: A + B` -> [A, B]),
     // keyed by the parameter's constraint id (its first bound, which is its
     // `Type::Generic` identity). Stored unresolved (bounds resolve in `build()`,
@@ -671,9 +665,7 @@ impl<'src> Analyzer<'src> {
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
-            generic_static_accessors: HashMap::new(),
-            generic_method_dispatch: HashMap::new(),
-            trait_method_dispatch: HashMap::new(),
+            generic_dispatch: HashMap::new(),
             generic_bounds: HashMap::new(),
             impl_subject_args: HashMap::new(),
             implementations: Vec::new(),
@@ -5681,8 +5673,10 @@ impl<'src> Analyzer<'src> {
                     } else {
                         // Record the accessor so codegen can monomorphize it to
                         // the concrete type's member at each call site.
-                        self.generic_static_accessors
-                            .insert(id, (constraint_id, member_name));
+                        self.generic_dispatch.insert(
+                            id,
+                            GenericDispatch::OnConstraint(constraint_id, member_name),
+                        );
                         // Search every bound trait (`T: A + B`) for the member.
                         let member_id = bound_trait_ids.iter().find_map(|trait_id| {
                             self.traits
@@ -6350,8 +6344,13 @@ impl<'src> Analyzer<'src> {
                                     Some(member_id) => {
                                         let receiver_type_id =
                                             subject_type.clone().get_type_id(self);
-                                        self.trait_method_dispatch
-                                            .insert(id, (Some(receiver_type_id), member_name));
+                                        self.generic_dispatch.insert(
+                                            id,
+                                            GenericDispatch::OnType(
+                                                Some(receiver_type_id),
+                                                member_name,
+                                            ),
+                                        );
                                         MethodLookup::Found(member_id)
                                     }
                                     None => MethodLookup::NoMethod,
@@ -6365,7 +6364,8 @@ impl<'src> Analyzer<'src> {
                             // it to whatever concrete type the default is
                             // specialized for.
                             if member.is_some() {
-                                self.trait_method_dispatch.insert(id, (None, member_name));
+                                self.generic_dispatch
+                                    .insert(id, GenericDispatch::OnType(None, member_name));
                             }
                             found(member)
                         }
@@ -6387,8 +6387,10 @@ impl<'src> Analyzer<'src> {
                                 // each monomorphization — the instance analogue of the
                                 // `T::member` static-accessor path.
                                 if member.is_some() {
-                                    self.generic_method_dispatch
-                                        .insert(id, (*constraint_id, member_name));
+                                    self.generic_dispatch.insert(
+                                        id,
+                                        GenericDispatch::OnConstraint(*constraint_id, member_name),
+                                    );
                                 }
                                 found(member)
                             }
@@ -7134,7 +7136,7 @@ impl<'src> Analyzer<'src> {
             // element compare inside `Option<T>::eq`) dispatches to the operator
             // trait method, re-resolved to T's concrete impl at each monomorphization
             // — the operator analogue of an instance method call on a generic
-            // receiver, recorded in the same `generic_method_dispatch` map.
+            // receiver, recorded in the same `generic_dispatch` channel.
             if let Type::Generic(constraint_id) = lhs_type {
                 if let Some((_, method_name)) = operator_trait_method(op) {
                     let bound_trait_ids = self.generic_bound_trait_ids(constraint_id);
@@ -7143,8 +7145,10 @@ impl<'src> Analyzer<'src> {
                             .is_some()
                     });
                     if provides {
-                        self.generic_method_dispatch
-                            .insert(binary_id, (constraint_id, method_name));
+                        self.generic_dispatch.insert(
+                            binary_id,
+                            GenericDispatch::OnConstraint(constraint_id, method_name),
+                        );
                     }
                 }
                 continue;
@@ -7613,6 +7617,22 @@ impl Type {
     }
 }
 
+/// A call or accessor that dispatches generically: the analyzer can't pin the
+/// concrete callee, so it records how codegen should re-resolve it at each
+/// monomorphization. Unifies the static-accessor, generic-method, and
+/// trait-method dispatch records into one channel (`generic_dispatch`).
+#[derive(Debug, Clone, Copy)]
+pub enum GenericDispatch<'src> {
+    /// `T::member()`, `value.method()`, or `a op b` on a generic-bounded operand:
+    /// resolve the constraint through the active substitution, then dispatch to
+    /// the concrete type's member.
+    OnConstraint(TypeId, &'src str),
+    /// A trait method re-dispatched to a concrete type — an inherited default
+    /// called on a concrete value (`Some(type)`), or a `self`/trait-typed call
+    /// inside a default body (`None`, dispatched on the type being specialized).
+    OnType(Option<TypeId>, &'src str),
+}
+
 /// An `external` std function with a built-in JS lowering.
 #[derive(Debug, Clone, Copy)]
 pub enum Intrinsic {
@@ -7741,9 +7761,7 @@ pub struct Program<'src> {
     pub functions: IndexMap<Id, Function<'src>>,
     pub external_functions: IndexMap<Id, ExternalFunction<'src>>,
     pub traits: IndexMap<Id, Trait<'src>>,
-    pub generic_static_accessors: HashMap<Id, (TypeId, &'src str)>,
-    pub generic_method_dispatch: HashMap<Id, (TypeId, &'src str)>,
-    pub trait_method_dispatch: HashMap<Id, (Option<TypeId>, &'src str)>,
+    pub generic_dispatch: HashMap<Id, GenericDispatch<'src>>,
     pub for_each_next: HashMap<Id, Id>,
     // `for e in &mut list` loop bindings → whether the element view is `&mut`.
     pub for_each_views: HashMap<Id, bool>,
@@ -9071,9 +9089,7 @@ pub fn analyze<'src>(
         functions: analyzer.functions,
         external_functions: analyzer.external_functions,
         traits: analyzer.traits,
-        generic_static_accessors: analyzer.generic_static_accessors,
-        generic_method_dispatch: analyzer.generic_method_dispatch,
-        trait_method_dispatch: analyzer.trait_method_dispatch,
+        generic_dispatch: analyzer.generic_dispatch,
         for_each_next: analyzer.for_each_next,
         for_each_views: analyzer.for_each_views,
         binary_op_dispatch: analyzer.binary_op_dispatch,

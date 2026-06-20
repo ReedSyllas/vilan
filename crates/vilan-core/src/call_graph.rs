@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, Program};
+use crate::analyzer::{Expr, ExprIfBranch, ExprPattern, GenericDispatch, Program};
 use crate::id::Id;
 
 /// What a single call site resolves to.
@@ -419,13 +419,16 @@ fn resolve_target(program: &Program, call_id: Id) -> CallTarget {
     };
     // Codegen re-dispatches these per monomorphized instance, so the concrete
     // callee isn't fixed at this granularity.
-    if program.trait_method_dispatch.contains_key(&call_id) {
+    if matches!(
+        program.generic_dispatch.get(&call_id),
+        Some(GenericDispatch::OnType(..))
+    ) {
         return CallTarget::Indirect(IndirectReason::TraitDispatch);
     }
-    if program
-        .generic_static_accessors
-        .contains_key(&function_call.subject_id)
-    {
+    if matches!(
+        program.generic_dispatch.get(&function_call.subject_id),
+        Some(GenericDispatch::OnConstraint(..))
+    ) {
         return CallTarget::Indirect(IndirectReason::GenericMember);
     }
     match program.entity_map.get(&function_call.subject_id) {
