@@ -7037,33 +7037,20 @@ impl<'src> Analyzer<'src> {
         }
 
         // --- Constraint solving loop ---
-        // A true fixpoint: each pass resolves at least one deferred item along a
-        // live dependency chain (its blocked dependents resolve on later passes)
-        // and sets `progress`; resolved types never revert. The loop exits the
-        // moment a pass resolves nothing — so it is order-independent: whatever
-        // can resolve eventually does, regardless of which pass reaches it. The
-        // bound below is only a safety net against a non-converging bug; it is
-        // never the reason a well-typed program resolves, so it just has to
-        // exceed any real chain. Each resolution consumes a distinct deferred
-        // item, and the items (including the slot unifications generated
-        // mid-solve while resolving `push`/`run`) are bounded by the entity
-        // count, so twice it is ample.
+        // A true fixpoint: each pass resolves the constraints whose dependencies
+        // have landed (their blocked dependents resolve on later passes), in
+        // priority order; resolved types never revert. The loop exits the moment a
+        // pass resolves nothing — so it is order-independent: whatever can resolve
+        // eventually does, regardless of which pass reaches it. The bound is only a
+        // safety net against a non-converging bug, never the reason a well-typed
+        // program resolves, so it just has to exceed any real dependency chain.
+        // Each resolution consumes a distinct queued task, and the tasks (including
+        // the slot unifications spawned mid-solve while resolving `push`/`run`) are
+        // bounded by the entity count, so twice it is ample.
         let max_iterations = 2 * self.entity_id as usize + 16;
 
         for _ in 0..max_iterations {
-            let mut progress = false;
-
-            // The unified constraint queue, resolved in priority order. As
-            // worklists migrate here, their sections below disappear; each
-            // migrated kind keeps its original priority, so order is preserved.
-            if self.resolve_constraints() {
-                progress = true;
-            }
-
-            // A true fixpoint: a pass that resolves nothing is stuck — every
-            // resolution above sets `progress`, so unresolved work that *could*
-            // make progress would have. Whatever remains is reported below.
-            if !progress {
+            if !self.resolve_constraints() {
                 break;
             }
         }
