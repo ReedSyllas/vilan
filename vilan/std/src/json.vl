@@ -6,10 +6,38 @@
 // a `from_json` that rebuilds the struct from that object. The scalar impls bind
 // to the host `JSON.stringify`/`JSON.parse` and the host coercions.
 
+import pkg::option::Option;
+
 // --- Serialization (`to_json`) ------------------------------------------------
 
 trait Json {
 	fun to_json(self): str;
+}
+
+// An absent `Option` is JSON `null`; a present one serializes its value.
+impl Option<type T: Json> with Json {
+	fun to_json(self): str {
+		match self {
+			Option::Some(let value) => value.to_json(),
+			Option::None => "null",
+		}
+	}
+}
+
+// A `List` is a JSON array — each element serialized via its own `to_json`.
+impl List<type T: Json> with Json {
+	fun to_json(self): str {
+		mut result = "[";
+		mut first = true;
+		for element in self {
+			if !first {
+				result = result + ",";
+			}
+			result = result + element.to_json();
+			first = false;
+		}
+		result + "]"
+	}
 }
 
 impl str with Json {

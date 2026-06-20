@@ -1,0 +1,26 @@
+import std::print;
+import std::json::Json;
+import std::option::Option::{ self, Some, None };
+
+// A generic function dispatching a trait method on its argument. The concrete
+// type may be a primitive whose `Json` impl is an `@extern` host binding
+// (`i32`'s `to_json` is `JSON.stringify`) — generic dispatch lowers that to the
+// host form rather than a dangling call to an unemitted function.
+fun describe<T: Json>(value: T): str {
+	value.to_json()
+}
+
+fun main() {
+	print(describe(42)); // 42
+	print(describe("hi")); // "hi"
+
+	// `List`/`Option` serialize each element via its own `to_json` — which, for a
+	// primitive element, is the same generic-dispatch-to-an-extern case.
+	let nums: List<i32> = [1, 2, 3];
+	print(nums.to_json()); // [1,2,3]
+
+	let maybe: Option<i32> = Some(7);
+	print(maybe.to_json()); // 7
+	let nothing: Option<i32> = None;
+	print(nothing.to_json()); // null
+}

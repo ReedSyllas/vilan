@@ -180,6 +180,19 @@ fn binary<'src>(op: BinaryOp, lhs: js::Node<'src>, rhs: js::Node<'src>) -> js::N
     }
 }
 
+/// How a dispatched trait-member call lowers, once resolved to a concrete type's
+/// member. The member may be an intrinsic or an `@extern` external (a host form),
+/// not just a normal emitted function — so resolution is split from emission, and
+/// `args` is consumed only once the form is known (see `resolve_dispatch`).
+enum Dispatch<'src> {
+    /// A built-in lowering (`str.len()` → `.length`, etc.).
+    Intrinsic(Intrinsic),
+    /// An `@extern`-bound external: the external's id and its host binding.
+    Extern(Id, ExternBinding<'src>),
+    /// A normal emitted function: its JS name and whether it is async.
+    Call(String, bool),
+}
+
 struct Transformer<'src> {
     formatter: Formatter,
     ng: NameGenerator,
@@ -638,13 +651,9 @@ impl<'src> Transformer<'src> {
                     .get(&function_call.subject_id)
                 {
                     if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
-                        if let Some(target_id) =
-                            self.resolve_member_on_type(concrete_type_id, member_name)
+                        if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
                         {
-                            self.ensure_function_emitted(target_id);
-                            let name = self.ng.name_for(target_id);
-                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                            return Some(self.maybe_await(target_id, call));
+                            return Some(self.emit_dispatch(dispatch, args));
                         }
                     }
                 }
@@ -658,15 +667,9 @@ impl<'src> Transformer<'src> {
                     self.program.generic_method_dispatch.get(id)
                 {
                     if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
-                        if let Some((name, is_async)) =
-                            self.emit_dispatched_method(concrete_type_id, member_name)
+                        if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
                         {
-                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                            return Some(if is_async {
-                                js::Node::Await(Box::new(call))
-                            } else {
-                                call
-                            });
+                            return Some(self.emit_dispatch(dispatch, args));
                         }
                     }
                 }
@@ -679,15 +682,8 @@ impl<'src> Transformer<'src> {
                     self.program.trait_method_dispatch.get(id)
                 {
                     if let Some(type_id) = concrete_type.or(self.current_self_type) {
-                        if let Some((name, is_async)) =
-                            self.emit_dispatched_method(type_id, member_name)
-                        {
-                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                            return Some(if is_async {
-                                js::Node::Await(Box::new(call))
-                            } else {
-                                call
-                            });
+                        if let Some(dispatch) = self.resolve_dispatch(type_id, member_name) {
+                            return Some(self.emit_dispatch(dispatch, args));
                         }
                     }
                 }
@@ -855,11 +851,9 @@ impl<'src> Transformer<'src> {
                     // dispatches to its `eq` impl.
                     if let Some(concrete_type_id) = concrete.filter(|t| !self.compares_natively(*t))
                     {
-                        if let Some((name, _)) =
-                            self.emit_dispatched_method(concrete_type_id, member_name)
+                        if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
                         {
-                            let call =
-                                js::Node::Call(Box::new(js::Node::Local(name)), vec![lhs, rhs]);
+                            let call = self.emit_dispatch(dispatch, vec![lhs, rhs]);
                             return Some(if matches!(*op, BinaryOp::NotEq) {
                                 js::Node::Unary('!', Box::new(call))
                             } else {
@@ -1918,22 +1912,63 @@ impl<'src> Transformer<'src> {
         self.emitting.remove(&function_id);
     }
 
-    /// Re-dispatches a trait method call to the receiver's concrete `type_id`,
-    /// returning the JS name to call: the type's own impl member if it declares
-    /// one, otherwise an inherited trait default emitted specialized for the type
-    /// (so the default's inner `self.method()` calls dispatch to this type too).
-    /// Resolves a trait method on a concrete type to its emitted JS name, paired
-    /// with whether that method is async (so the caller can implicitly await it).
-    fn emit_dispatched_method(&mut self, type_id: TypeId, member: &str) -> Option<(String, bool)> {
+    /// Re-dispatches a trait method call to the receiver's concrete `type_id`:
+    /// resolves to the type's own impl member if it declares one, otherwise an
+    /// inherited trait default specialized for the type (so the default's inner
+    /// `self.method()` calls dispatch to this type too). The member may be an
+    /// intrinsic or an `@extern` external — which lower to a host form, not a
+    /// call to an emitted function — so this returns a [`Dispatch`] describing
+    /// how to emit it; `emit_dispatch` turns that into the actual call node. A
+    /// generic dispatch resolving to an extern/intrinsic without this would mint
+    /// a dangling name for a function that is never emitted.
+    fn resolve_dispatch(&mut self, type_id: TypeId, member: &str) -> Option<Dispatch<'src>> {
         let type_id = self.resolve_type_id(type_id);
         if let Some(member_id) = self.resolve_member_on_type(type_id, member) {
+            if let Some(intrinsic) = self.program.intrinsics.get(&member_id).copied() {
+                return Some(Dispatch::Intrinsic(intrinsic));
+            }
+            if let Some(binding) = self
+                .program
+                .external_functions
+                .get(&member_id)
+                .and_then(|external| external.extern_binding.clone())
+            {
+                return Some(Dispatch::Extern(member_id, binding));
+            }
             self.ensure_function_emitted(member_id);
             let is_async = self.program.async_functions.contains(&member_id);
-            return Some((self.ng.name_for(member_id), is_async));
+            return Some(Dispatch::Call(self.ng.name_for(member_id), is_async));
         }
         let default_id = self.resolve_inherited_default(type_id, member)?;
         let is_async = self.program.async_functions.contains(&default_id);
-        Some((self.emit_default_instance(default_id, type_id), is_async))
+        Some(Dispatch::Call(
+            self.emit_default_instance(default_id, type_id),
+            is_async,
+        ))
+    }
+
+    /// Lowers a resolved [`Dispatch`] to its call node with `args` (the receiver
+    /// is the first argument). An async member is awaited.
+    fn emit_dispatch(
+        &mut self,
+        dispatch: Dispatch<'src>,
+        args: Vec<js::Node<'src>>,
+    ) -> js::Node<'src> {
+        match dispatch {
+            Dispatch::Intrinsic(intrinsic) => self.emit_intrinsic(intrinsic, args),
+            Dispatch::Extern(member_id, binding) => {
+                let call = self.emit_extern(member_id, binding, args);
+                self.maybe_await(member_id, call)
+            }
+            Dispatch::Call(name, is_async) => {
+                let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
+                if is_async {
+                    js::Node::Await(Box::new(call))
+                } else {
+                    call
+                }
+            }
+        }
     }
 
     /// Emits a trait default method specialized for a concrete type, keyed by
