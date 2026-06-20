@@ -443,6 +443,10 @@ enum Constraint<'src> {
     /// type once the iterable resolves (committed to `any` post-fixpoint if it
     /// never does — an empty, never-pushed list).
     ForEachItem { item_id: Id, iterable_id: Id },
+    /// `subject(args)` — once the call subject resolves (a function, a closure
+    /// value, or an enum variant constructor), checks the arguments and wires the
+    /// call, recording any generic bindings inferred from the arguments.
+    CallSubject(CallSubjectConstraint),
 }
 
 impl Constraint<'_> {
@@ -461,6 +465,7 @@ impl Constraint<'_> {
             Constraint::ForEachItem { .. } => 8,
             Constraint::MethodArgCheck { .. } => 9,
             Constraint::Variable(_) => 10,
+            Constraint::CallSubject(_) => 11,
         }
     }
 }
@@ -535,7 +540,6 @@ pub struct Scope<'src> {
 #[derive(Debug)]
 pub struct Analyzer<'src> {
     assignment_values: IndexMap<Id, Vec<Id>>,
-    call_subject_constraints: Vec<CallSubjectConstraint>,
     closures: IndexMap<Id, Closure>,
     diagnostics: Vec<Error>,
     entity_id: u32,
@@ -732,7 +736,6 @@ impl<'src> Analyzer<'src> {
     fn new() -> Self {
         Self {
             assignment_values: IndexMap::new(),
-            call_subject_constraints: Vec::new(),
             closures: IndexMap::new(),
             diagnostics: Vec::new(),
             entity_id: 0,
@@ -3272,14 +3275,14 @@ impl<'src> Analyzer<'src> {
                     })
                     .unwrap_or_else(Vec::new);
                 // Defer call type-checking to constraint solving.
-                self.call_subject_constraints
-                    .push(CallSubjectConstraint::from_walk(
+                self.constraints
+                    .push(Constraint::CallSubject(CallSubjectConstraint::from_walk(
                         id,
                         subject_id,
                         generic_argument_ids,
                         argument_ids,
                         arguments.1,
-                    ));
+                    )));
                 Some(Expr::Call(id))
             }
             Node::FuncReturn(value) => {
@@ -5494,6 +5497,290 @@ impl<'src> Analyzer<'src> {
                 item_id,
                 iterable_id,
             } => self.resolve_for_each_item(*item_id, *iterable_id),
+            Constraint::CallSubject(constraint) => self.resolve_call_subject(constraint),
+        }
+    }
+
+    /// Records a resolved call: a `FunctionCall` plus the `Expr::Call` entity.
+    fn wire_call(
+        &mut self,
+        call_id: Id,
+        subject_id: Id,
+        generic_argument_ids: &[TypeId],
+        argument_ids: &[Id],
+        arguments_span: Span,
+    ) {
+        self.function_calls.insert(
+            call_id,
+            FunctionCall {
+                id: call_id,
+                subject_id,
+                generic_argument_ids: generic_argument_ids.to_vec(),
+                argument_ids: argument_ids.to_vec(),
+                arguments_span,
+            },
+        );
+        self.expr_id_to_expr_map
+            .insert(call_id, Expr::Call(call_id));
+    }
+
+    /// `subject(args)`: once the subject resolves, dispatch on what it is — a
+    /// closure value, an enum variant constructor, or a function reference —
+    /// type-check the arguments, and wire the call. Defers while the subject or an
+    /// argument is unresolved (or an argument is an unknown closure parameter).
+    fn resolve_call_subject(&mut self, constraint: &CallSubjectConstraint) -> Resolution {
+        let call_id = constraint.call_id;
+        let subject_id = constraint.subject_id;
+        let generic_argument_ids = &constraint.generic_argument_ids;
+        let argument_ids = &constraint.argument_ids;
+        let arguments_span = constraint.arguments_span;
+
+        // Defer until the subject's entity is resolved and its type can be
+        // inferred (a local pointing at a function, a static accessor, etc.).
+        if !self.expr_id_to_expr_map.contains_key(&subject_id) {
+            return Resolution::Deferred;
+        }
+        let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+        if matches!(subject_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+
+        // Calling a closure-typed value, e.g. `(self.fn)()`: type-check the
+        // arguments against the closure's parameter types.
+        if let Type::Closure(parameter_type_ids, _) = &subject_type {
+            if argument_ids.len() != parameter_type_ids.len() {
+                self.diagnostics.push(Error {
+                    span: arguments_span,
+                    msg: format!(
+                        "Expected {} {}, but got {} instead.",
+                        parameter_type_ids.len(),
+                        plural(parameter_type_ids.len(), "argument", "arguments"),
+                        argument_ids.len()
+                    ),
+                });
+                return Resolution::Failed;
+            }
+            let substitution_context = HashMap::new();
+            for (index, parameter_type_id) in parameter_type_ids.clone().iter().enumerate() {
+                let parameter_type = parameter_type_id.get_type(self);
+                let argument_id = *argument_ids.get(index).unwrap();
+                let argument_type =
+                    self.infer_type(argument_id, &parameter_type, &substitution_context);
+                if matches!(argument_type, Type::Unresolved) {
+                    return Resolution::Deferred;
+                }
+                if self
+                    .reconcile_type(&argument_type, &parameter_type, &substitution_context)
+                    .is_none()
+                {
+                    let expected = self.pretty_print_type(&parameter_type, &substitution_context);
+                    let got = self.pretty_print_type(&argument_type, &substitution_context);
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&argument_id).unwrap(),
+                        msg: format!("Expected {}, but got {} instead.", expected, got),
+                    });
+                }
+            }
+            self.wire_call(
+                call_id,
+                subject_id,
+                generic_argument_ids,
+                argument_ids,
+                arguments_span,
+            );
+            return Resolution::Resolved;
+        }
+
+        let subject_expr = self.get_entity_by_id(subject_id).clone();
+        match subject_expr {
+            Expr::Local(target_id) => {
+                let target = self.get_entity_by_id(target_id).clone();
+                // A variant constructor call, e.g. `Some(1)`: the arguments are
+                // checked against the variant's declared data types.
+                if let Expr::EnumVariant(enum_id, variant_index) = target {
+                    let data_type_ids = self.enums.get(&enum_id).unwrap().variants[variant_index]
+                        .data_type_ids
+                        .clone();
+                    if argument_ids.len() != data_type_ids.len() {
+                        self.diagnostics.push(Error {
+                            span: arguments_span,
+                            msg: format!(
+                                "Expected {} {}, but got {} instead.",
+                                data_type_ids.len(),
+                                plural(data_type_ids.len(), "argument", "arguments"),
+                                argument_ids.len()
+                            ),
+                        });
+                        return Resolution::Failed;
+                    }
+                    let substitution_context = HashMap::new();
+                    for (index, data_type_id) in data_type_ids.iter().enumerate() {
+                        let data_type = data_type_id.get_type(self);
+                        let argument_id = *argument_ids.get(index).unwrap();
+                        let argument_type =
+                            self.infer_type(argument_id, &data_type, &substitution_context);
+                        if matches!(argument_type, Type::Unresolved) {
+                            return Resolution::Deferred;
+                        }
+                        if self
+                            .reconcile_type(&argument_type, &data_type, &substitution_context)
+                            .is_none()
+                        {
+                            let expected =
+                                self.pretty_print_type(&data_type, &substitution_context);
+                            let got = self.pretty_print_type(&argument_type, &substitution_context);
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&argument_id).unwrap(),
+                                msg: format!("Expected {}, but got {} instead.", expected, got),
+                            });
+                        }
+                    }
+                    self.wire_call(
+                        call_id,
+                        subject_id,
+                        generic_argument_ids,
+                        argument_ids,
+                        arguments_span,
+                    );
+                    return Resolution::Resolved;
+                }
+                let function_data = match &target {
+                    Expr::Function(function_id) => {
+                        self.functions.get(function_id).map(|function| {
+                            (
+                                function.parameters.clone(),
+                                function.generic_parameter_constraint_ids.clone(),
+                            )
+                        })
+                    }
+                    Expr::ExternalFunction(external_function_id) => self
+                        .external_functions
+                        .get(external_function_id)
+                        .map(|function| {
+                            (
+                                function.parameters.clone(),
+                                function.generic_parameter_constraint_ids.clone(),
+                            )
+                        }),
+                    _ => None,
+                };
+
+                if let Some((parameters, generic_parameter_constraint_ids)) = function_data {
+                    if argument_ids.len() != parameters.len() {
+                        self.diagnostics.push(Error {
+                            span: arguments_span,
+                            msg: format!(
+                                "Expected {} {}, but got {} instead.",
+                                parameters.len(),
+                                plural(parameters.len(), "argument", "arguments"),
+                                argument_ids.len()
+                            ),
+                        });
+                        return Resolution::Failed;
+                    }
+                    let mut substitution_context = HashMap::new();
+                    for (index, generic_argument_id) in generic_argument_ids.iter().enumerate() {
+                        if let Some(generic_constraint) =
+                            generic_parameter_constraint_ids.get(index)
+                        {
+                            substitution_context.insert(*generic_constraint, *generic_argument_id);
+                        }
+                    }
+                    for (index, parameter_id) in parameters.iter().enumerate() {
+                        let parameter = self.parameters.get(parameter_id).unwrap();
+                        let parameter_type = parameter.type_id.get_type(self);
+                        let argument_id = *argument_ids.get(index).unwrap();
+                        let argument_type =
+                            self.infer_type(argument_id, &parameter_type, &substitution_context);
+                        // Defer while an argument is unresolved, or is a closure
+                        // parameter still awaiting its type (`count.derive(|n|
+                        // format(n))` — `n` is typed only once `derive` resolves).
+                        if matches!(argument_type, Type::Unresolved)
+                            || self.is_unknown_closure_parameter(argument_id)
+                        {
+                            return Resolution::Deferred;
+                        }
+                        // Reconcile parameter-first so the bindings key on the
+                        // *callee's* generics (passing a `T`-typed value to
+                        // `f<U>(u: U)` must bind `U = T`, not `T = U`).
+                        match self.reconcile_type(
+                            &parameter_type,
+                            &argument_type,
+                            &substitution_context,
+                        ) {
+                            Some((_unified, bindings)) => {
+                                for (constraint_id, type_id) in bindings {
+                                    substitution_context.insert(constraint_id, type_id);
+                                }
+                            }
+                            None => {
+                                let expected =
+                                    self.pretty_print_type(&parameter_type, &substitution_context);
+                                let got =
+                                    self.pretty_print_type(&argument_type, &substitution_context);
+                                self.diagnostics.push(Error {
+                                    span: **self.span_map.get(&argument_id).unwrap(),
+                                    msg: format!("Expected {}, but got {} instead.", expected, got),
+                                });
+                            }
+                        }
+                    }
+                    self.wire_call(
+                        call_id,
+                        subject_id,
+                        generic_argument_ids,
+                        argument_ids,
+                        arguments_span,
+                    );
+                    // Record generic bindings inferred from the arguments so the
+                    // transformer can monomorphize the call (e.g. `range(0, 9)`
+                    // binds `T = i32`, `Box::new(5)` binds the impl's `T`). Key off
+                    // the inferred bindings, not the function's own generic list.
+                    if !substitution_context.is_empty() {
+                        self.method_call_substitution
+                            .insert(call_id, substitution_context);
+                    }
+                    Resolution::Resolved
+                } else if !matches!(target, Expr::Error) {
+                    // The subject resolved to a non-callable value (a struct or
+                    // module name, not a function or variant) — e.g. `Point(1, 2)`.
+                    let struct_name = match &target {
+                        Expr::Struct(struct_id) => self.structs.get(struct_id).map(|s| s.name),
+                        _ => None,
+                    };
+                    self.diagnostics.push(Error {
+                        span: arguments_span,
+                        msg: match struct_name {
+                            Some(name) => format!(
+                                "cannot call '{name}': it is a struct, not a function — construct it with `{{ .. }}` or `::new(..)`"
+                            ),
+                            None => "cannot call a non-function value".to_string(),
+                        },
+                    });
+                    Resolution::Failed
+                } else {
+                    // The subject is already an error; leave it to its own diagnostic.
+                    Resolution::Failed
+                }
+            }
+            // A direct function reference.
+            Expr::Function(_) | Expr::ExternalFunction(_) => {
+                self.wire_call(
+                    call_id,
+                    subject_id,
+                    generic_argument_ids,
+                    argument_ids,
+                    arguments_span,
+                );
+                Resolution::Resolved
+            }
+            _ => {
+                self.diagnostics.push(Error {
+                    span: arguments_span,
+                    msg: "cannot call a non-function value".to_string(),
+                });
+                Resolution::Failed
+            }
         }
     }
 
@@ -6773,380 +7060,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
 
-            // --- Resolve call subject constraints ---
-            let mut remaining_calls = Vec::new();
-            let call_constraints: Vec<_> = std::mem::take(&mut self.call_subject_constraints)
-                .into_iter()
-                .collect();
-            for constraint in call_constraints {
-                let CallSubjectConstraint {
-                    call_id,
-                    subject_id,
-                    ref generic_argument_ids,
-                    ref argument_ids,
-                    arguments_span,
-                } = constraint;
-
-                // Defer until the subject's entity is resolved and its type
-                // can be inferred (a local pointing at a function, a static
-                // accessor resolved to a module member, etc.).
-                if !self.expr_id_to_expr_map.contains_key(&subject_id) {
-                    remaining_calls.push(constraint);
-                    continue;
-                }
-                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-                if matches!(subject_type, Type::Unresolved) {
-                    remaining_calls.push(constraint);
-                    continue;
-                }
-
-                // Calling a closure-typed value, e.g. `(self.fn)()` or a
-                // closure stored in a variable: type check the arguments
-                // against the closure's parameter types.
-                if let Type::Closure(parameter_type_ids, _) = subject_type {
-                    if argument_ids.len() != parameter_type_ids.len() {
-                        self.diagnostics.push(Error {
-                            span: arguments_span,
-                            msg: format!(
-                                "Expected {} {}, but got {} instead.",
-                                parameter_type_ids.len(),
-                                plural(parameter_type_ids.len(), "argument", "arguments"),
-                                argument_ids.len()
-                            ),
-                        });
-                        continue;
-                    }
-                    let substitution_context = HashMap::new();
-                    let mut deferred = false;
-                    for (i, parameter_type_id) in parameter_type_ids.iter().enumerate() {
-                        let parameter_type = parameter_type_id.get_type(self);
-                        let argument_id = *argument_ids.get(i).unwrap();
-                        let argument_type =
-                            self.infer_type(argument_id, &parameter_type, &substitution_context);
-                        if matches!(argument_type, Type::Unresolved) {
-                            remaining_calls.push(CallSubjectConstraint {
-                                call_id,
-                                subject_id,
-                                generic_argument_ids: generic_argument_ids.clone(),
-                                argument_ids: argument_ids.clone(),
-                                arguments_span,
-                            });
-                            deferred = true;
-                            break;
-                        }
-                        if self
-                            .reconcile_type(&argument_type, &parameter_type, &substitution_context)
-                            .is_none()
-                        {
-                            let expected =
-                                self.pretty_print_type(&parameter_type, &substitution_context);
-                            let got = self.pretty_print_type(&argument_type, &substitution_context);
-                            self.diagnostics.push(Error {
-                                span: **self.span_map.get(&argument_id).unwrap(),
-                                msg: format!("Expected {}, but got {} instead.", expected, got),
-                            });
-                        }
-                    }
-                    if !deferred {
-                        self.function_calls.insert(
-                            call_id,
-                            FunctionCall {
-                                id: call_id,
-                                subject_id,
-                                generic_argument_ids: generic_argument_ids.clone(),
-                                argument_ids: argument_ids.clone(),
-                                arguments_span,
-                            },
-                        );
-                        self.expr_id_to_expr_map
-                            .insert(call_id, Expr::Call(call_id));
-                        progress = true;
-                    }
-                    continue;
-                }
-
-                let subject_expr = self.get_entity_by_id(subject_id);
-                match subject_expr {
-                    Expr::Local(target_id) => {
-                        let target = self.get_entity_by_id(*target_id);
-                        // A variant constructor call, e.g. `Some(1)`: the
-                        // arguments are checked against the variant's declared
-                        // data types and the call produces the enum value.
-                        if let Expr::EnumVariant(enum_id, variant_index) = target {
-                            let enum_id = *enum_id;
-                            let variant_index = *variant_index;
-                            let data_type_ids = self.enums.get(&enum_id).unwrap().variants
-                                [variant_index]
-                                .data_type_ids
-                                .clone();
-                            if argument_ids.len() != data_type_ids.len() {
-                                self.diagnostics.push(Error {
-                                    span: arguments_span,
-                                    msg: format!(
-                                        "Expected {} {}, but got {} instead.",
-                                        data_type_ids.len(),
-                                        plural(data_type_ids.len(), "argument", "arguments"),
-                                        argument_ids.len()
-                                    ),
-                                });
-                                continue;
-                            }
-                            let substitution_context = HashMap::new();
-                            let mut deferred = false;
-                            for (i, data_type_id) in data_type_ids.iter().enumerate() {
-                                let data_type = data_type_id.get_type(self);
-                                let argument_id = *argument_ids.get(i).unwrap();
-                                let argument_type =
-                                    self.infer_type(argument_id, &data_type, &substitution_context);
-                                if matches!(argument_type, Type::Unresolved) {
-                                    remaining_calls.push(CallSubjectConstraint {
-                                        call_id,
-                                        subject_id,
-                                        generic_argument_ids: generic_argument_ids.clone(),
-                                        argument_ids: argument_ids.clone(),
-                                        arguments_span,
-                                    });
-                                    deferred = true;
-                                    break;
-                                }
-                                if self
-                                    .reconcile_type(
-                                        &argument_type,
-                                        &data_type,
-                                        &substitution_context,
-                                    )
-                                    .is_none()
-                                {
-                                    let expected =
-                                        self.pretty_print_type(&data_type, &substitution_context);
-                                    let got = self
-                                        .pretty_print_type(&argument_type, &substitution_context);
-                                    self.diagnostics.push(Error {
-                                        span: **self.span_map.get(&argument_id).unwrap(),
-                                        msg: format!(
-                                            "Expected {}, but got {} instead.",
-                                            expected, got
-                                        ),
-                                    });
-                                }
-                            }
-                            if !deferred {
-                                self.function_calls.insert(
-                                    call_id,
-                                    FunctionCall {
-                                        id: call_id,
-                                        subject_id,
-                                        generic_argument_ids: generic_argument_ids.clone(),
-                                        argument_ids: argument_ids.clone(),
-                                        arguments_span,
-                                    },
-                                );
-                                self.expr_id_to_expr_map
-                                    .insert(call_id, Expr::Call(call_id));
-                                progress = true;
-                            }
-                            continue;
-                        }
-                        let function_data = match target {
-                            Expr::Function(function_id) => {
-                                let function = self.functions.get(function_id).unwrap();
-                                Some((
-                                    function.parameters.clone(),
-                                    function.generic_parameter_constraint_ids.clone(),
-                                ))
-                            }
-                            Expr::ExternalFunction(external_function_id) => {
-                                let function =
-                                    self.external_functions.get(external_function_id).unwrap();
-                                Some((
-                                    function.parameters.clone(),
-                                    function.generic_parameter_constraint_ids.clone(),
-                                ))
-                            }
-                            _ => None,
-                        };
-
-                        if let Some((parameters, generic_parameter_constraint_ids)) = function_data
-                        {
-                            if argument_ids.len() != parameters.len() {
-                                self.diagnostics.push(Error {
-                                    span: arguments_span,
-                                    msg: format!(
-                                        "Expected {} {}, but got {} instead.",
-                                        parameters.len(),
-                                        plural(parameters.len(), "argument", "arguments"),
-                                        argument_ids.len()
-                                    ),
-                                });
-                            } else {
-                                let mut substitution_context = HashMap::new();
-                                for (i, generic_argument_id) in
-                                    generic_argument_ids.iter().enumerate()
-                                {
-                                    if let Some(gpc) = generic_parameter_constraint_ids.get(i) {
-                                        substitution_context.insert(*gpc, *generic_argument_id);
-                                    }
-                                }
-
-                                let mut all_args_ok = true;
-                                for (i, parameter_id) in parameters.iter().enumerate() {
-                                    let parameter = self.parameters.get(parameter_id).unwrap();
-                                    let parameter_type = parameter.type_id.get_type(self);
-                                    let argument_id = *argument_ids.get(i).unwrap();
-                                    let argument_type = self.infer_type(
-                                        argument_id,
-                                        &parameter_type,
-                                        &substitution_context,
-                                    );
-                                    // Defer while an argument is unresolved, or is a
-                                    // closure parameter still awaiting its type from
-                                    // bidirectional inference (`count.derive(|n|
-                                    // format(n))` — `n` is typed `i32` only once the
-                                    // `derive` call resolves). Committing now would
-                                    // bind the callee's generic to `Unknown` and
-                                    // never revisit it. (The method-call resolver
-                                    // defers on an unknown closure *receiver* for
-                                    // the same reason.)
-                                    if matches!(argument_type, Type::Unresolved)
-                                        || self.is_unknown_closure_parameter(argument_id)
-                                    {
-                                        remaining_calls.push(CallSubjectConstraint {
-                                            call_id,
-                                            subject_id,
-                                            generic_argument_ids: generic_argument_ids.clone(),
-                                            argument_ids: argument_ids.clone(),
-                                            arguments_span,
-                                        });
-                                        all_args_ok = false;
-                                        break;
-                                    }
-                                    // Reconcile parameter-first so the bindings key
-                                    // on the *callee's* generics (the ones being
-                                    // solved), not the argument's. It matters only
-                                    // when the argument is itself generic — passing
-                                    // a `T`-typed value to `f<U>(u: U)` must bind
-                                    // `U = T`, not `T = U` — so that `f` monomorphizes
-                                    // against the caller's instantiation rather than
-                                    // staying abstract. For a concrete argument the
-                                    // direction is irrelevant (same single binding).
-                                    match self.reconcile_type(
-                                        &parameter_type,
-                                        &argument_type,
-                                        &substitution_context,
-                                    ) {
-                                        Some((_unified, bindings)) => {
-                                            for (cid, tid) in bindings {
-                                                substitution_context.insert(cid, tid);
-                                            }
-                                        }
-                                        None => {
-                                            let expected = self.pretty_print_type(
-                                                &parameter_type,
-                                                &substitution_context,
-                                            );
-                                            let got = self.pretty_print_type(
-                                                &argument_type,
-                                                &substitution_context,
-                                            );
-                                            self.diagnostics.push(Error {
-                                                span: **self.span_map.get(&argument_id).unwrap(),
-                                                msg: format!(
-                                                    "Expected {}, but got {} instead.",
-                                                    expected, got
-                                                ),
-                                            });
-                                        }
-                                    }
-                                }
-
-                                if all_args_ok {
-                                    self.function_calls.insert(
-                                        call_id,
-                                        FunctionCall {
-                                            id: call_id,
-                                            subject_id,
-                                            generic_argument_ids: generic_argument_ids.clone(),
-                                            argument_ids: argument_ids.clone(),
-                                            arguments_span,
-                                        },
-                                    );
-                                    self.expr_id_to_expr_map
-                                        .insert(call_id, Expr::Call(call_id));
-                                    // Record the generic bindings for a generic
-                                    // function call so the transformer can
-                                    // monomorphize it even when the type arguments
-                                    // were inferred from the arguments rather than
-                                    // written explicitly (e.g. `range(0, 9)` binds
-                                    // `T = i32`). Explicit-argument calls take the
-                                    // earlier path in the transformer; this fills
-                                    // the inferred gap. A static constructor binds
-                                    // the *impl's* parameter from its argument
-                                    // (`Box::new(5)` binds `T = i32`) though `new`
-                                    // declares no generics of its own, so key off
-                                    // the inferred bindings, not the function's own
-                                    // generic list.
-                                    if !substitution_context.is_empty() {
-                                        self.method_call_substitution
-                                            .insert(call_id, substitution_context.clone());
-                                    }
-                                }
-                            }
-                        } else if !matches!(target, Expr::Error) {
-                            // The subject resolved to a non-callable value (a
-                            // struct or module name, not a function or variant) —
-                            // e.g. `Point(1, 2)`. Without this the call stays an
-                            // `Expr::Call` with no `FunctionCall` and the
-                            // transformer panics; report it instead. (A subject
-                            // that's already an error is left to its own
-                            // diagnostic.)
-                            let struct_name = match target {
-                                Expr::Struct(struct_id) => {
-                                    self.structs.get(struct_id).map(|struct_| struct_.name)
-                                }
-                                _ => None,
-                            };
-                            self.diagnostics.push(Error {
-                                span: arguments_span,
-                                msg: match struct_name {
-                                    Some(name) => format!(
-                                        "cannot call '{name}': it is a struct, not a function — construct it with `{{ .. }}` or `::new(..)`"
-                                    ),
-                                    None => "cannot call a non-function value".to_string(),
-                                },
-                            });
-                            progress = true;
-                        }
-                    }
-                    _ => {
-                        // Direct function reference
-                        match subject_expr {
-                            Expr::Function(_) | Expr::ExternalFunction(_) => {
-                                self.function_calls.insert(
-                                    call_id,
-                                    FunctionCall {
-                                        id: call_id,
-                                        subject_id,
-                                        generic_argument_ids: generic_argument_ids.clone(),
-                                        argument_ids: argument_ids.clone(),
-                                        arguments_span,
-                                    },
-                                );
-                                self.expr_id_to_expr_map
-                                    .insert(call_id, Expr::Call(call_id));
-                                progress = true;
-                            }
-                            _ => {
-                                self.diagnostics.push(Error {
-                                    span: arguments_span,
-                                    msg: "cannot call a non-function value".to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            self.call_subject_constraints = remaining_calls;
-
             // A true fixpoint: a pass that resolves nothing is stuck — every
             // resolution above sets `progress`, so unresolved work that *could*
             // make progress would have. Whatever remains is reported below.
@@ -7303,14 +7216,12 @@ impl<'src> Analyzer<'src> {
                             .unwrap_or("unknown")
                     ),
                 }),
+                Constraint::CallSubject(constraint) => self.diagnostics.push(Error {
+                    span: constraint.arguments_span,
+                    msg: "type of function call arguments could not be resolved".to_string(),
+                }),
                 _ => {}
             }
-        }
-        for constraint in &self.call_subject_constraints {
-            self.diagnostics.push(Error {
-                span: constraint.arguments_span,
-                msg: "type of function call arguments could not be resolved".to_string(),
-            });
         }
         let unresolved_matches: Vec<(Id, Span)> = self
             .constraints
@@ -7333,7 +7244,6 @@ impl<'src> Analyzer<'src> {
         }
 
         // Clear processed constraints
-        self.call_subject_constraints.clear();
     }
 
     /// Pretty-prints a type for diagnostics, resolving generic names
