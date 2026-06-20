@@ -418,6 +418,27 @@ enum Constraint<'src> {
     /// `let v = value` (plus any reassignments) — grounds the variable's type
     /// from its first value, then checks the reassignments against it.
     Variable(VariableConstraint),
+    /// `receiver.method(args)` — resolves the method against the receiver's type
+    /// (impl, trait, or bound generic), binds generics, wires the call, and spawns
+    /// a `MethodArgCheck` (and a `SlotUnification` for `push`/`run`).
+    MethodCall {
+        id: Id,
+        subject_id: Id,
+        member_name: &'src str,
+        generic_argument_ids: Vec<TypeId>,
+        argument_ids: Vec<Id>,
+        arguments_span: Span,
+    },
+    /// Unify a container's element inference slot with a pushed value's type
+    /// (`list.push(value)`), spawned while resolving a `push`/`run` method call.
+    SlotUnification { slot: TypeId, argument_id: Id },
+    /// Type-check a wired method call's arguments against the method's parameters,
+    /// spawned once the call is wired (deferred until every argument resolves).
+    MethodArgCheck {
+        member_id: Id,
+        argument_ids: Vec<Id>,
+        arguments_span: Span,
+    },
 }
 
 impl Constraint<'_> {
@@ -431,6 +452,9 @@ impl Constraint<'_> {
             Constraint::Subscript { .. } => 3,
             Constraint::Is(_) => 4,
             Constraint::Match(_) => 5,
+            Constraint::MethodCall { .. } => 6,
+            Constraint::SlotUnification { .. } => 7,
+            Constraint::MethodArgCheck { .. } => 9,
             Constraint::Variable(_) => 10,
         }
     }
@@ -571,13 +595,11 @@ pub struct Analyzer<'src> {
     list_element_slots: HashMap<Id, TypeId>,
     // Pending element-slot unifications from `push` calls: (element slot, the
     // pushed argument's expression id). Resolved in the constraint loop.
-    prepped_slot_unifications: Vec<(TypeId, Id)>,
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
-    prepped_method_calls: Vec<(Id, Id, &'src str, Vec<TypeId>, Vec<Id>, Span)>,
     // `for x in iterable` expressions, as (for-each id, iterable id), resolved
     // after typing to decide native `for...of` vs the Iterator-protocol loop.
     prepped_for_each: Vec<(Id, Id)>,
@@ -591,7 +613,6 @@ pub struct Analyzer<'src> {
     // re-resolution — that recurses); it also drives bidirectional closure-arg
     // inference. The method's first parameter is `self`, so args align at +1. The
     // `Span` is the call's argument list, for the arity diagnostic.
-    prepped_method_arg_checks: Vec<(Id, Vec<Id>, Span)>,
     // For-each loops whose iterable is a custom iterator: the resolved `next`
     // method id, so codegen emits a `next()`/`Some`-matching loop instead.
     for_each_next: HashMap<Id, Id>,
@@ -733,15 +754,12 @@ impl<'src> Analyzer<'src> {
             primitive_struct_ids: HashMap::new(),
             bool_enum_id: None,
             list_element_slots: HashMap::new(),
-            prepped_slot_unifications: Vec::new(),
             prepped_assignments: Vec::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
-            prepped_method_calls: Vec::new(),
             prepped_for_each: Vec::new(),
             prepped_for_each_items: Vec::new(),
-            prepped_method_arg_checks: Vec::new(),
             for_each_next: HashMap::new(),
             for_each_views: HashMap::new(),
             wrapped_view_captures: HashMap::new(),
@@ -2878,14 +2896,14 @@ impl<'src> Analyzer<'src> {
                                             .collect()
                                     })
                                     .unwrap_or_else(Vec::new);
-                                self.prepped_method_calls.push((
+                                self.constraints.push(Constraint::MethodCall {
                                     id,
                                     subject_id,
-                                    *name,
+                                    member_name: name,
                                     generic_argument_ids,
                                     argument_ids,
-                                    call_arguments.1,
-                                ));
+                                    arguments_span: call_arguments.1,
+                                });
                             }
                             _ => {
                                 self.diagnostics.push(Error {
@@ -5443,7 +5461,310 @@ impl<'src> Analyzer<'src> {
             }
             Constraint::Match(prepped) => self.resolve_match(prepped),
             Constraint::Variable(constraint) => self.resolve_variable(constraint),
+            Constraint::MethodCall {
+                id,
+                subject_id,
+                member_name,
+                generic_argument_ids,
+                argument_ids,
+                arguments_span,
+            } => self.resolve_method_call(
+                *id,
+                *subject_id,
+                member_name,
+                generic_argument_ids,
+                argument_ids,
+                *arguments_span,
+            ),
+            Constraint::SlotUnification { slot, argument_id } => {
+                self.resolve_slot_unification(*slot, *argument_id)
+            }
+            Constraint::MethodArgCheck {
+                member_id,
+                argument_ids,
+                arguments_span,
+            } => self.resolve_method_arg_check(*member_id, argument_ids, *arguments_span),
         }
+    }
+
+    /// `receiver.method(args)`: resolve the method against the receiver type
+    /// (concrete impl, trait default, or bound generic), bind the impl's and the
+    /// method's own generics, wire the call, and spawn a `MethodArgCheck` (plus a
+    /// `SlotUnification` for `push`/`run`). Defers while the receiver is
+    /// unresolved or an unknown closure parameter.
+    fn resolve_method_call(
+        &mut self,
+        id: Id,
+        subject_id: Id,
+        member_name: &'src str,
+        generic_argument_ids: &[TypeId],
+        argument_ids: &[Id],
+        arguments_span: Span,
+    ) -> Resolution {
+        // The outcome of resolving the receiver to a callable member (kept
+        // separate from acting on it so the lookup can borrow `self` immutably and
+        // the wiring mutably).
+        enum MethodLookup {
+            Found(Id),
+            NoMethod,
+            Defer,
+            NotCallable,
+        }
+        let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+        let found = |member_id: Option<Id>| match member_id {
+            Some(member_id) => MethodLookup::Found(member_id),
+            None => MethodLookup::NoMethod,
+        };
+        let lookup = match &subject_type {
+            Type::Struct(_, _) | Type::Enum(_, _) => {
+                match self.method_member_impl_subject(&subject_type, member_name) {
+                    Some((member_id, impl_subject_id)) => {
+                        // Bind the impl's generic parameters from the receiver
+                        // (`List<i32>` against the impl's `List<T>` binds `T = i32`)
+                        // so the method body monomorphizes.
+                        let impl_subject = impl_subject_id.get_type(self);
+                        if let Some((_, bindings)) =
+                            self.reconcile_type(&impl_subject, &subject_type, &HashMap::new())
+                            && !bindings.is_empty()
+                        {
+                            self.method_call_substitution
+                                .insert(id, bindings.into_iter().collect());
+                        }
+                        // A method that fills a container's inference slot —
+                        // `list.push(value)` or `context.run(value, ..)` — unifies
+                        // the slot with the value (the first argument).
+                        if member_name == "push" || member_name == "run" {
+                            if let (Some(slot), Some(argument_id)) =
+                                (self.list_element_slot(&subject_type), argument_ids.first())
+                            {
+                                self.constraints.push(Constraint::SlotUnification {
+                                    slot,
+                                    argument_id: *argument_id,
+                                });
+                            }
+                        }
+                        MethodLookup::Found(member_id)
+                    }
+                    // Gap E: fall back to an inherited trait default, re-dispatched
+                    // to this concrete type at codegen.
+                    None => {
+                        match self.method_member_in_inherited_defaults(&subject_type, member_name) {
+                            Some(member_id) => {
+                                let receiver_type_id = subject_type.clone().get_type_id(self);
+                                self.generic_dispatch.insert(
+                                    id,
+                                    GenericDispatch::OnType(Some(receiver_type_id), member_name),
+                                );
+                                MethodLookup::Found(member_id)
+                            }
+                            None => MethodLookup::NoMethod,
+                        }
+                    }
+                }
+            }
+            Type::Trait(trait_id) => {
+                let member = self.method_member_in_trait(*trait_id, member_name);
+                // Inside a trait default body `self`/`Self` is `Type::Trait`; record
+                // the call so codegen re-dispatches it to whatever concrete type the
+                // default is specialized for.
+                if member.is_some() {
+                    self.generic_dispatch
+                        .insert(id, GenericDispatch::OnType(None, member_name));
+                }
+                found(member)
+            }
+            Type::Generic(constraint_id) => {
+                let bound_trait_ids = self.generic_bound_trait_ids(*constraint_id);
+                if bound_trait_ids.is_empty() {
+                    match constraint_id.get_type(self) {
+                        Type::Unresolved => MethodLookup::Defer,
+                        _ => MethodLookup::NotCallable,
+                    }
+                } else {
+                    // Search every bound trait (`T: A + B`) for the method.
+                    let member = bound_trait_ids
+                        .iter()
+                        .find_map(|trait_id| self.method_member_in_trait(*trait_id, member_name));
+                    // The member may be an abstract (bodyless) required method, so
+                    // record the call for codegen to re-dispatch to the concrete
+                    // type `T` is bound to at each monomorphization.
+                    if member.is_some() {
+                        self.generic_dispatch.insert(
+                            id,
+                            GenericDispatch::OnConstraint(*constraint_id, member_name),
+                        );
+                    }
+                    found(member)
+                }
+            }
+            Type::Unresolved => MethodLookup::Defer,
+            // An unannotated closure parameter awaiting bidirectional inference
+            // defers rather than erroring; once its type lands the call resolves.
+            Type::Unknown if self.is_unknown_closure_parameter(subject_id) => MethodLookup::Defer,
+            _ => MethodLookup::NotCallable,
+        };
+        match lookup {
+            MethodLookup::Found(member_id) => {
+                // Drive bidirectional inference of any closure arguments against the
+                // method's parameter types, and defer a full argument type-check.
+                let mut substitution = self
+                    .method_call_substitution
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
+                self.infer_closure_args_against_params(member_id, argument_ids, &substitution);
+                // Bind the method's *own* generics from its arguments (e.g.
+                // `derive<U>`'s `U` from the closure's return type), parameter-first
+                // so the bindings key on the callee; keep only the method's own ones
+                // (the receiver already supplied the impl's).
+                if let Some((parameter_ids, own_generics)) = self.method_signature(member_id)
+                    && !own_generics.is_empty()
+                {
+                    for (index, argument_id) in argument_ids.iter().enumerate() {
+                        let Some(parameter_id) = parameter_ids.get(index + 1) else {
+                            continue;
+                        };
+                        let Some(parameter_type) = self
+                            .parameters
+                            .get(parameter_id)
+                            .map(|parameter| parameter.type_id.get_type(self))
+                        else {
+                            continue;
+                        };
+                        let argument_type =
+                            self.infer_type(*argument_id, &parameter_type, &substitution);
+                        if matches!(argument_type, Type::Unresolved) {
+                            continue;
+                        }
+                        if let Some((_, bindings)) =
+                            self.reconcile_type(&parameter_type, &argument_type, &substitution)
+                        {
+                            for (constraint_id, type_id) in bindings {
+                                if own_generics.contains(&constraint_id) {
+                                    substitution.insert(constraint_id, type_id);
+                                }
+                            }
+                        }
+                    }
+                    if !substitution.is_empty() {
+                        self.method_call_substitution.insert(id, substitution);
+                    }
+                }
+                self.constraints.push(Constraint::MethodArgCheck {
+                    member_id,
+                    argument_ids: argument_ids.to_vec(),
+                    arguments_span,
+                });
+                self.wire_method_call(
+                    id,
+                    subject_id,
+                    member_id,
+                    generic_argument_ids.to_vec(),
+                    argument_ids.to_vec(),
+                    arguments_span,
+                );
+                Resolution::Resolved
+            }
+            MethodLookup::NoMethod => {
+                let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: arguments_span,
+                    msg: format!("{} has no method '{}'", type_str, member_name),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                Resolution::Failed
+            }
+            MethodLookup::Defer => Resolution::Deferred,
+            MethodLookup::NotCallable => {
+                let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: arguments_span,
+                    msg: format!("cannot call method '{}' on {}", member_name, type_str),
+                });
+                Resolution::Failed
+            }
+        }
+    }
+
+    /// Unify a container's element slot with a pushed value's type. A slot already
+    /// filled (by an earlier push) is a no-op; defers while the value is unresolved.
+    fn resolve_slot_unification(&mut self, slot: TypeId, argument_id: Id) -> Resolution {
+        if !matches!(slot.get_type(self), Type::Unknown) {
+            // Already unified by an earlier push.
+            return Resolution::Resolved;
+        }
+        let argument_type = self.infer_type(argument_id, &Type::Unknown, &HashMap::new());
+        if matches!(argument_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        if !matches!(argument_type, Type::Unknown) {
+            self.type_id_to_type_map.insert(slot, argument_type);
+        }
+        Resolution::Resolved
+    }
+
+    /// Type-check a wired method call's arguments against the method's parameters
+    /// (`self` is parameter 0, so arguments align at offset 1). Defers until every
+    /// argument resolves, so errors aren't reported against partial types.
+    fn resolve_method_arg_check(
+        &mut self,
+        member_id: Id,
+        argument_ids: &[Id],
+        arguments_span: Span,
+    ) -> Resolution {
+        let Some((parameter_ids, _)) = self.method_signature(member_id) else {
+            return Resolution::Resolved;
+        };
+        let expected = parameter_ids.len().saturating_sub(1);
+        if argument_ids.len() != expected {
+            self.diagnostics.push(Error {
+                span: arguments_span,
+                msg: format!(
+                    "Expected {} {}, but got {} instead.",
+                    expected,
+                    plural(expected, "argument", "arguments"),
+                    argument_ids.len()
+                ),
+            });
+            return Resolution::Failed;
+        }
+        // Infer every argument first; defer until they all resolve.
+        let mut argument_types = Vec::with_capacity(argument_ids.len());
+        for argument_id in argument_ids {
+            // `+ 1` skips the method's `self` parameter.
+            let parameter_type = parameter_ids
+                .get(argument_types.len() + 1)
+                .and_then(|parameter_id| self.parameters.get(parameter_id))
+                .map(|parameter| parameter.type_id.get_type(self))
+                .unwrap_or(Type::Unknown);
+            let argument_type = self.infer_type(*argument_id, &parameter_type, &HashMap::new());
+            if matches!(argument_type, Type::Unresolved) {
+                return Resolution::Deferred;
+            }
+            argument_types.push(argument_type);
+        }
+        for (index, argument_type) in argument_types.into_iter().enumerate() {
+            let argument_id = argument_ids[index];
+            let Some(parameter_type) = parameter_ids
+                .get(index + 1)
+                .and_then(|parameter_id| self.parameters.get(parameter_id))
+                .map(|parameter| parameter.type_id.get_type(self))
+            else {
+                continue;
+            };
+            if self
+                .reconcile_type(&argument_type, &parameter_type, &HashMap::new())
+                .is_none()
+            {
+                let expected = self.pretty_print_type(&parameter_type, &HashMap::new());
+                let got = self.pretty_print_type(&argument_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&argument_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!("Expected {}, but got {} instead.", expected, got),
+                });
+            }
+        }
+        Resolution::Resolved
     }
 
     /// `let v = value` (plus reassignments): ground the variable's type from its
@@ -6422,288 +6743,6 @@ impl<'src> Analyzer<'src> {
                 progress = true;
             }
 
-            // --- Resolve deferred method calls ---
-            if !self.prepped_method_calls.is_empty() {
-                // The outcome of resolving one method call's receiver to a callable
-                // member (kept separate from acting on it so the lookup can borrow
-                // `self` immutably and the wiring mutably).
-                enum MethodLookup {
-                    Found(Id),
-                    NoMethod,
-                    Defer,
-                    NotCallable,
-                }
-                let mut remaining_methods = Vec::new();
-                let method_calls: Vec<_> = std::mem::take(&mut self.prepped_method_calls)
-                    .into_iter()
-                    .collect();
-                for (
-                    id,
-                    subject_id,
-                    member_name,
-                    generic_argument_ids,
-                    argument_ids,
-                    arguments_span,
-                ) in method_calls
-                {
-                    let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-                    // Resolve the method against the receiver's implementations
-                    // for a concrete struct/enum, or against a trait's declarations
-                    // for an abstract receiver: `Self` in a trait default method
-                    // (`Type::Trait`), a trait-bounded generic (`Type::Generic`
-                    // whose constraint is a trait), or a trait-typed value.
-                    let found = |member_id: Option<Id>| match member_id {
-                        Some(member_id) => MethodLookup::Found(member_id),
-                        None => MethodLookup::NoMethod,
-                    };
-                    let lookup = match &subject_type {
-                        Type::Struct(_, _) | Type::Enum(_, _) => {
-                            match self.method_member_impl_subject(&subject_type, member_name) {
-                                Some((member_id, impl_subject_id)) => {
-                                    // Bind the impl's generic parameters from the
-                                    // receiver (`List<i32>` against the impl's
-                                    // `List<T>` binds `T = i32`) so the method body
-                                    // monomorphizes.
-                                    let impl_subject = impl_subject_id.get_type(self);
-                                    if let Some((_, bindings)) = self.reconcile_type(
-                                        &impl_subject,
-                                        &subject_type,
-                                        &HashMap::new(),
-                                    ) {
-                                        if !bindings.is_empty() {
-                                            self.method_call_substitution
-                                                .insert(id, bindings.into_iter().collect());
-                                        }
-                                    }
-                                    // A method that fills a container's inference
-                                    // slot — `list.push(value)` or
-                                    // `context.run(value, ..)` — unifies the slot
-                                    // with the value (the first argument).
-                                    if member_name == "push" || member_name == "run" {
-                                        if let (Some(slot), Some(argument_id)) = (
-                                            self.list_element_slot(&subject_type),
-                                            argument_ids.first(),
-                                        ) {
-                                            self.prepped_slot_unifications
-                                                .push((slot, *argument_id));
-                                        }
-                                    }
-                                    MethodLookup::Found(member_id)
-                                }
-                                // Gap E: fall back to an inherited trait default,
-                                // re-dispatched to this concrete type at codegen.
-                                None => match self
-                                    .method_member_in_inherited_defaults(&subject_type, member_name)
-                                {
-                                    Some(member_id) => {
-                                        let receiver_type_id =
-                                            subject_type.clone().get_type_id(self);
-                                        self.generic_dispatch.insert(
-                                            id,
-                                            GenericDispatch::OnType(
-                                                Some(receiver_type_id),
-                                                member_name,
-                                            ),
-                                        );
-                                        MethodLookup::Found(member_id)
-                                    }
-                                    None => MethodLookup::NoMethod,
-                                },
-                            }
-                        }
-                        Type::Trait(trait_id) => {
-                            let member = self.method_member_in_trait(*trait_id, member_name);
-                            // Inside a trait default body `self`/`Self` is
-                            // `Type::Trait`; record the call so codegen re-dispatches
-                            // it to whatever concrete type the default is
-                            // specialized for.
-                            if member.is_some() {
-                                self.generic_dispatch
-                                    .insert(id, GenericDispatch::OnType(None, member_name));
-                            }
-                            found(member)
-                        }
-                        Type::Generic(constraint_id) => {
-                            let bound_trait_ids = self.generic_bound_trait_ids(*constraint_id);
-                            if bound_trait_ids.is_empty() {
-                                match constraint_id.get_type(self) {
-                                    Type::Unresolved => MethodLookup::Defer,
-                                    _ => MethodLookup::NotCallable,
-                                }
-                            } else {
-                                // Search every bound trait (`T: A + B`) for the method.
-                                let member = bound_trait_ids.iter().find_map(|trait_id| {
-                                    self.method_member_in_trait(*trait_id, member_name)
-                                });
-                                // The resolved member may be an abstract (bodyless)
-                                // required method, so record the call for codegen to
-                                // re-dispatch to the concrete type `T` is bound to at
-                                // each monomorphization — the instance analogue of the
-                                // `T::member` static-accessor path.
-                                if member.is_some() {
-                                    self.generic_dispatch.insert(
-                                        id,
-                                        GenericDispatch::OnConstraint(*constraint_id, member_name),
-                                    );
-                                }
-                                found(member)
-                            }
-                        }
-                        Type::Unresolved => MethodLookup::Defer,
-                        // An unannotated closure parameter awaiting bidirectional
-                        // inference (e.g. `|res| { res.method() }` where `res`'s
-                        // type is filled in from the expected closure type) defers
-                        // rather than erroring; once its type lands the call
-                        // resolves. (Only closure params, so an uncalled closure's
-                        // method-less param doesn't churn the loop.)
-                        Type::Unknown if self.is_unknown_closure_parameter(subject_id) => {
-                            MethodLookup::Defer
-                        }
-                        _ => MethodLookup::NotCallable,
-                    };
-                    match lookup {
-                        MethodLookup::Found(member_id) => {
-                            // Drive bidirectional inference of any closure
-                            // arguments against the method's parameter types (a
-                            // wired method call isn't arg-checked like a free
-                            // call, so `builder.on_start(|s| ..)` would otherwise
-                            // leave `s` untyped), and defer a full argument
-                            // type-check against the parameters.
-                            let mut substitution = self
-                                .method_call_substitution
-                                .get(&id)
-                                .cloned()
-                                .unwrap_or_default();
-                            self.infer_closure_args_against_params(
-                                member_id,
-                                &argument_ids,
-                                &substitution,
-                            );
-                            // Bind the method's *own* generics from its arguments —
-                            // e.g. `derive<U>(self, transform: |T| U): Source<U>`
-                            // binds `U` from the closure's return type, so
-                            // `count.derive(|n| n * 2)` is `Source<i32>` (not an
-                            // abstract `Source<U>`) and a chained `.derive`/`.sub`
-                            // sees a concrete element. Free-function calls already
-                            // bind their generics this way; method calls bound only
-                            // the impl's generics (from the receiver) until now.
-                            // Reconcile parameter-first so the bindings key on the
-                            // callee's generics, and keep only the method's own ones
-                            // (the receiver already supplied the impl's).
-                            if let Some((parameter_ids, own_generics)) =
-                                self.method_signature(member_id)
-                                && !own_generics.is_empty()
-                            {
-                                for (index, argument_id) in argument_ids.iter().enumerate() {
-                                    let Some(parameter_id) = parameter_ids.get(index + 1) else {
-                                        continue;
-                                    };
-                                    let Some(parameter_type) = self
-                                        .parameters
-                                        .get(parameter_id)
-                                        .map(|parameter| parameter.type_id.get_type(self))
-                                    else {
-                                        continue;
-                                    };
-                                    let argument_type = self.infer_type(
-                                        *argument_id,
-                                        &parameter_type,
-                                        &substitution,
-                                    );
-                                    if matches!(argument_type, Type::Unresolved) {
-                                        continue;
-                                    }
-                                    if let Some((_, bindings)) = self.reconcile_type(
-                                        &parameter_type,
-                                        &argument_type,
-                                        &substitution,
-                                    ) {
-                                        for (constraint_id, type_id) in bindings {
-                                            if own_generics.contains(&constraint_id) {
-                                                substitution.insert(constraint_id, type_id);
-                                            }
-                                        }
-                                    }
-                                }
-                                if !substitution.is_empty() {
-                                    self.method_call_substitution.insert(id, substitution);
-                                }
-                            }
-                            self.prepped_method_arg_checks.push((
-                                member_id,
-                                argument_ids.clone(),
-                                arguments_span,
-                            ));
-                            self.wire_method_call(
-                                id,
-                                subject_id,
-                                member_id,
-                                generic_argument_ids,
-                                argument_ids,
-                                arguments_span,
-                            );
-                            progress = true;
-                        }
-                        MethodLookup::NoMethod => {
-                            let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
-                            self.diagnostics.push(Error {
-                                span: arguments_span,
-                                msg: format!("{} has no method '{}'", type_str, member_name),
-                            });
-                            self.expr_id_to_expr_map.insert(id, Expr::Error);
-                            progress = true;
-                        }
-                        MethodLookup::Defer => {
-                            remaining_methods.push((
-                                id,
-                                subject_id,
-                                member_name,
-                                generic_argument_ids,
-                                argument_ids,
-                                arguments_span,
-                            ));
-                        }
-                        MethodLookup::NotCallable => {
-                            let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
-                            self.diagnostics.push(Error {
-                                span: arguments_span,
-                                msg: format!(
-                                    "cannot call method '{}' on {}",
-                                    member_name, type_str
-                                ),
-                            });
-                            progress = true;
-                        }
-                    }
-                }
-                self.prepped_method_calls = remaining_methods;
-            }
-
-            // --- Unify `List` element slots from `push` calls ---
-            // `list.push(value)` writes the list's element inference slot
-            // (`List::new()`'s fresh `Unknown`) with the pushed value's type, so a
-            // built-up list's element is inferred.
-            if !self.prepped_slot_unifications.is_empty() {
-                let mut remaining = Vec::new();
-                for (slot, argument_id) in std::mem::take(&mut self.prepped_slot_unifications) {
-                    if !matches!(slot.get_type(self), Type::Unknown) {
-                        // Already unified by an earlier push.
-                        continue;
-                    }
-                    let argument_type =
-                        self.infer_type(argument_id, &Type::Unknown, &HashMap::new());
-                    if matches!(argument_type, Type::Unresolved) {
-                        remaining.push((slot, argument_id));
-                        continue;
-                    }
-                    if !matches!(argument_type, Type::Unknown) {
-                        self.type_id_to_type_map.insert(slot, argument_type);
-                        progress = true;
-                    }
-                }
-                self.prepped_slot_unifications = remaining;
-            }
-
             // --- Resolve `for x in iterable` element bindings ---
             // Once the iterable's type is known, the item takes its element type
             // (`List<i32>` -> `i32`), falling back to `any` when the element type
@@ -6734,91 +6773,6 @@ impl<'src> Analyzer<'src> {
                     progress = true;
                 }
                 self.prepped_for_each_items = remaining_items;
-            }
-
-            // --- Type-check method-call arguments against parameters ---
-            // Deferred until every argument resolves; then each is reconciled
-            // against the method's parameter type. (Only argument checking — no
-            // subject re-resolution, which would recurse.)
-            if !self.prepped_method_arg_checks.is_empty() {
-                let mut remaining = Vec::new();
-                'checks: for (member_id, argument_ids, arguments_span) in
-                    std::mem::take(&mut self.prepped_method_arg_checks)
-                {
-                    let parameter_ids = match self.expr_id_to_expr_map.get(&member_id) {
-                        Some(Expr::Function(function_id)) => self
-                            .functions
-                            .get(function_id)
-                            .map(|f| f.parameters.clone()),
-                        Some(Expr::ExternalFunction(function_id)) => self
-                            .external_functions
-                            .get(function_id)
-                            .map(|f| f.parameters.clone()),
-                        _ => None,
-                    };
-                    let Some(parameter_ids) = parameter_ids else {
-                        continue;
-                    };
-                    // The receiver supplies `self` (parameter 0), so the call must
-                    // pass one argument per remaining parameter. The count is known
-                    // immediately (no inference), so check it before the per-argument
-                    // type checks below and skip them on a mismatch.
-                    let expected = parameter_ids.len().saturating_sub(1);
-                    if argument_ids.len() != expected {
-                        self.diagnostics.push(Error {
-                            span: arguments_span,
-                            msg: format!(
-                                "Expected {} {}, but got {} instead.",
-                                expected,
-                                plural(expected, "argument", "arguments"),
-                                argument_ids.len()
-                            ),
-                        });
-                        progress = true;
-                        continue;
-                    }
-                    // Infer every argument first; defer the whole check until they
-                    // all resolve, so errors aren't reported against partial types.
-                    let mut argument_types = Vec::with_capacity(argument_ids.len());
-                    for argument_id in &argument_ids {
-                        // `+ 1` skips the method's `self` parameter.
-                        let parameter_type = parameter_ids
-                            .get(argument_types.len() + 1)
-                            .and_then(|parameter_id| self.parameters.get(parameter_id))
-                            .map(|parameter| parameter.type_id.get_type(self))
-                            .unwrap_or(Type::Unknown);
-                        let argument_type =
-                            self.infer_type(*argument_id, &parameter_type, &HashMap::new());
-                        if matches!(argument_type, Type::Unresolved) {
-                            remaining.push((member_id, argument_ids.clone(), arguments_span));
-                            continue 'checks;
-                        }
-                        argument_types.push(argument_type);
-                    }
-                    for (index, argument_type) in argument_types.into_iter().enumerate() {
-                        let argument_id = argument_ids[index];
-                        let Some(parameter_type) = parameter_ids
-                            .get(index + 1)
-                            .and_then(|parameter_id| self.parameters.get(parameter_id))
-                            .map(|parameter| parameter.type_id.get_type(self))
-                        else {
-                            continue;
-                        };
-                        if self
-                            .reconcile_type(&argument_type, &parameter_type, &HashMap::new())
-                            .is_none()
-                        {
-                            let expected = self.pretty_print_type(&parameter_type, &HashMap::new());
-                            let got = self.pretty_print_type(&argument_type, &HashMap::new());
-                            self.diagnostics.push(Error {
-                                span: **self.span_map.get(&argument_id).unwrap_or(&&EMPTY_SPAN),
-                                msg: format!("Expected {}, but got {} instead.", expected, got),
-                            });
-                        }
-                    }
-                    progress = true;
-                }
-                self.prepped_method_arg_checks = remaining;
             }
 
             // --- Resolve call subject constraints ---
