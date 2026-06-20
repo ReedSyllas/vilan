@@ -115,29 +115,31 @@ not help, and the premise was wrong:**
 Memoization is the wrong tool. It is also only safely cacheable once passes are
 *well-ordered* (no mid-pass refinement) — i.e. after item 5. Revisit only then.
 
-### Performance: `analyze` is quadratic (the real bottleneck)
+### Performance: `analyze` was quadratic — **FIXED** (commit fa55979)
 Measuring synthetic programs of *independent* functions (each constructing a
-generic `W<T>` and calling a few methods) found `analyze` is **~O(N²)** in program
-size: 882 ms → 2589 → 9132 → ~34 000 ms for 100/200/400/800 functions. The other
-phases are negligible (`context`/`async_infer`/`transform` each ≤ 10 ms even at
-800 functions). Within `analyze`:
-- The fixpoint runs a **constant 6 passes** regardless of N (it breaks on a quiet
-  pass), so this is not pass-count blow-up.
-- ~95% of the time is in two sections — **method-call resolution** and
-  **call-subject resolution** — and both scale quadratically.
-- Yet every discrete operation *count* is **linear**: attempts, `infer_type`
-  calls, `compare_type` calls, `reconcile_type` calls, `implementations` (constant
-  14), and the type-id map size. `infer_type(subject)` itself is cheap (~45 ms).
+generic `W<T>` and calling a few methods) found `analyze` was **~O(N²)** in
+program size: 882 ms → 2589 → 9132 → ~34 000 ms for 100/200/400/800 functions
+(other phases negligible — `context`/`async_infer`/`transform` each ≤ 10 ms). The
+fixpoint ran a **constant 6 passes**, and every operation *count* was **linear**
+(attempts, `infer_type`/`compare_type`/`reconcile_type` calls, `implementations`
+= constant 14, type-id map size) — yet wall-clock was quadratic. Linear counts +
+quadratic time pointed to per-call work growing with the working set.
 
-Linear counts + quadratic wall-clock ⇒ a **per-operation cost that grows with the
-accumulated working set** (the `O(N)` type-id map and friends — allocator/cache
-pressure), or a hidden `O(N)` clone, not an algorithmic count blow-up. Pinpointing
-it needs a sampling profiler (`perf`/flamegraph), unavailable in this environment.
-This quadratic — not memoization — is the highest-value perf target; it likely
-relates to item 5's worklist rework and/or item 6's interning (bounding the
-ever-growing type-id map). One concrete latent `O(N²)` already spotted: a struct
-initializer with a placeholder id scans **all scopes** by name
-(`analyzer.rs`, "Resolve struct initializer constraints").
+A `callgrind` profile settled it: ~60% of time was in `core::fmt` —
+`PadAdapter::write_str` (the `{:#?}` indented-Debug writer), `DebugMap`, `Id`/`Expr`
+`Debug::fmt` — *not* inference. The cause: `get_entity_by_id` built its panic
+message `format!("… {:#?}", id, self.expr_id_to_expr_map)` as the **argument** to
+`.expect()`, so it pretty-printed the **entire expr map** (O(N)) on *every*
+successful lookup. Called O(N) times ⇒ O(N²). Fixed by making the message lazy
+(`unwrap_or_else(|| panic!(..))`) and dropping the map dump; same for two sibling
+scope accessors. Result: **217/398/788/1547 ms** for 100/200/400/800 functions —
+linear, up to **22× faster**, corpus byte-identical.
+
+*Lesson:* `.expect(format!(..))` / `.unwrap_or(expensive())` evaluate their
+argument eagerly on the success path. In a hot accessor that is a latent O(N²).
+clippy's `expect_fun_call` flags these — worth clearing. (A second latent O(N²)
+remains, lower-impact: a struct initializer with a placeholder id scans **all
+scopes** by name — `analyzer.rs`, "Resolve struct initializer constraints".)
 
 ### 2. Closure-parameter typing + dependency re-queue — ordering class · M · medium
 Two halves: (i) once a closure parameter's type is inferred from the expected
@@ -186,9 +188,8 @@ inference paths are simpler.
 1. ~~**Item 3** (safety net)~~ — **done** (d77c8ef).
 2. ~~**Item 4** (unify dispatch channels)~~ — **done** (77699dc).
 3. ~~**Item 1** (memoization)~~ — **investigated, dropped** (doesn't help; see above).
-4. **The quadratic `analyze`** (see "Performance" above) — now the highest-value
-   target. Profile with a sampling profiler to find the per-operation cost that
-   grows with the working set; likely converges with items 5 and 6.
+4. ~~**The quadratic `analyze`**~~ — **fixed** (fa55979): an eager `{:#?}` in a hot
+   accessor, found via `callgrind`. `analyze` is now linear (up to 22× faster).
 5. **Item 5** (unified constraint queue), staged — removes the ordering fragility
    that breeds (b)-like bugs; subsumes item 2, enables a deeper merge of the
    *bindings* channels, and makes memoization safe (well-ordered passes).
