@@ -1,9 +1,11 @@
 import std::print;
+import std::json::FromJson;
 
 // Derives extend to enums via a `match` over the variants. `Json` is externally
 // tagged: a payload-less variant is a string `"V"`, a single payload is
-// `{"V":<x>}`, and several are `{"V":[<x>,<y>]}`. `Default` is skipped for enums
-// (no unambiguous default variant).
+// `{"V":<x>}`, and several are `{"V":[<x>,<y>]}`, and `from_json` reads that tag
+// back to the variant. `Default` is skipped for enums (no unambiguous default
+// variant).
 @derive(PartialEq, Debug, Json)
 enum Shape {
 	Circle(i32),
@@ -31,4 +33,9 @@ fun main() {
 	print(c.to_json()); // {"Circle":3}
 	print(r.to_json()); // {"Rect":[4,5]}
 	print(e.to_json()); // "Empty"
+
+	// from_json reads each tag form back; the round-trip reproduces the value.
+	print(Shape::from_json(c.to_json()) == c); // true
+	print(Shape::from_json(r.to_json()) == r); // true
+	print(Shape::from_json(e.to_json()) == e); // true
 }

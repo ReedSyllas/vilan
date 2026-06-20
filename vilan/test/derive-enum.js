@@ -1,3 +1,6 @@
+function __json_tag(value) {
+	return typeof value === "string" ? value : Object.keys(value)[0];
+}
 function eq(self, other) {
 	const $a = [ self, other ];
 	let $b = null;
@@ -48,6 +51,25 @@ function to_json(self) {
 	}
 	return $f;
 }
+function from_json(text) {
+	return from_json_value(JSON.parse(text));
+}
+function from_json_value(value) {
+	const $g = __json_tag(value);
+	let $h = null;
+	if ($g === "Circle") {
+		$h = [ 0, Number(value["Circle"]) ];
+	} else if ($g === "Rect") {
+		$h = [ 1, Number(value["Rect"]["0"]), Number(value["Rect"]["1"]) ];
+	} else if ($g === "Empty") {
+		$h = [ 2 ];
+	} else {
+		$h = (() => {
+			throw "unknown variant in JSON for enum Shape";
+		})();
+	}
+	return $h;
+}
 const c = [ 0, 3 ];
 const r = [ 1, 4, 5 ];
 const e = [ 2 ];
@@ -61,3 +83,6 @@ console.log(debug(e));
 console.log(to_json(c));
 console.log(to_json(r));
 console.log(to_json(e));
+console.log(eq(from_json(to_json(c)), c));
+console.log(eq(from_json(to_json(r)), r));
+console.log(eq(from_json(to_json(e)), e));

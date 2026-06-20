@@ -53,6 +53,11 @@ impl JsonValue {
 	// `self[name]` — the value at a named object field (an intrinsic: there is no
 	// host function for dynamic property access).
 	external fun field(self, name: str): JsonValue;
+
+	// The externally-tagged discriminator of an enum value: the string itself
+	// when this is a bare `"Variant"`, else the single key of a `{"Variant":..}`
+	// object (an intrinsic — `typeof`/`Object.keys` have no plain extern shape).
+	external fun tag(self): str;
 }
 
 trait FromJson {

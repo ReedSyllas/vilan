@@ -133,6 +133,11 @@ fn helper_source(name: &str) -> &'static str {
         "__map_values" => {
             "function __map_values(map) {\n\treturn [ ...map.values() ].map(__clone);\n}"
         }
+        // The externally-tagged enum discriminator: a bare `"Variant"` is its own
+        // tag, a `{"Variant":..}` object's tag is its single key.
+        "__json_tag" => {
+            "function __json_tag(value) {\n\treturn typeof value === \"string\" ? value : Object.keys(value)[0];\n}"
+        }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays and a
         // `Set`/`Map` is a JS `Set`/`Map`, so recurse into them; everything else —
         // primitives and closures — is returned by reference (a closure is
@@ -1712,6 +1717,13 @@ impl<'src> Transformer<'src> {
                 let receiver = args.next().unwrap_or(js::Node::Void);
                 let key = args.next().unwrap_or(js::Node::Void);
                 js::Node::PropertyIndex(Box::new(receiver), Box::new(key))
+            }
+            Intrinsic::JsonTag => {
+                self.used_helpers.insert("__json_tag");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__json_tag".to_string())),
+                    args.collect(),
+                )
             }
             // `Array.from(document.querySelectorAll(selector))` — the NodeList as a
             // real array, so `List` operations (`map`/`push`/…) behave.

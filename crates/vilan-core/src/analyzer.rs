@@ -7634,6 +7634,9 @@ pub enum Intrinsic {
     // `JsonValue.field(name): JsonValue` -> native `self[name]` (a dynamic
     // property read on a `JSON.parse` result, for which there is no host fn).
     JsonField,
+    // `JsonValue.tag(): str` -> the externally-tagged enum discriminator via a
+    // runtime helper (`typeof`/`Object.keys`).
+    JsonTag,
     // `dom::query_selector_all(selector): List<Element>` -> the matches as a real
     // array, `Array.from(document.querySelectorAll(selector))` (querySelectorAll
     // yields a NodeList, which a `List` would otherwise mishandle).
@@ -7856,11 +7859,19 @@ fn derive_enum_impls(
     enum_name: &str,
     variants: &Spanned<Vec<Spanned<crate::node::EnumVariant<'_>>>>,
 ) -> String {
-    // (variant name, payload arity).
-    let variants: Vec<(&str, usize)> = variants
+    // (variant name, payload type names — its arity is the length).
+    let variants: Vec<(&str, Vec<String>)> = variants
         .0
         .iter()
-        .map(|variant| (variant.0.0, variant.0.1.len()))
+        .map(|variant| {
+            let payload_types = variant
+                .0
+                .1
+                .iter()
+                .map(|payload| render_type(&payload.0))
+                .collect();
+            (variant.0.0, payload_types)
+        })
         .collect();
     let mut out = String::new();
     for derive in derives {
@@ -7869,19 +7880,20 @@ fn derive_enum_impls(
                 // `match (self, other) { (E::V(let s0,..), E::V(let o0,..)) => s0
                 // == o0 && .., (E::W, E::W) => true, _ => false }`.
                 let mut arms = String::new();
-                for (name, arity) in &variants {
-                    if *arity == 0 {
+                for (name, payload_types) in &variants {
+                    let arity = payload_types.len();
+                    if arity == 0 {
                         arms.push_str(&format!(
                             "\t\t\t({enum_name}::{name}, {enum_name}::{name}) => true,\n"
                         ));
                     } else {
                         let bind = |prefix: char| {
-                            (0..*arity)
+                            (0..arity)
                                 .map(|i| format!("let {prefix}{i}"))
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         };
-                        let comparison = (0..*arity)
+                        let comparison = (0..arity)
                             .map(|i| format!("s{i} == o{i}"))
                             .collect::<Vec<_>>()
                             .join(" && ");
@@ -7905,15 +7917,16 @@ fn derive_enum_impls(
                 // `match self { E::V(let p0,..) => "V(" + p0.debug() + ", " + .. +
                 // ")", E::W => "W" }`.
                 let mut arms = String::new();
-                for (name, arity) in &variants {
-                    if *arity == 0 {
+                for (name, payload_types) in &variants {
+                    let arity = payload_types.len();
+                    if arity == 0 {
                         arms.push_str(&format!("\t\t\t{enum_name}::{name} => \"{name}\",\n"));
                     } else {
-                        let binds = (0..*arity)
+                        let binds = (0..arity)
                             .map(|i| format!("let p{i}"))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let parts = (0..*arity)
+                        let parts = (0..arity)
                             .map(|i| format!("p{i}.debug()"))
                             .collect::<Vec<_>>()
                             .join(" + \", \" + ");
@@ -7934,21 +7947,22 @@ fn derive_enum_impls(
                 // Externally tagged: no payload -> `"V"`; one -> `{"V":<p>}`;
                 // many -> `{"V":[<p0>,<p1>]}`.
                 let mut arms = String::new();
-                for (name, arity) in &variants {
-                    if *arity == 0 {
+                for (name, payload_types) in &variants {
+                    let arity = payload_types.len();
+                    if arity == 0 {
                         arms.push_str(&format!(
                             "\t\t\t{enum_name}::{name} => \"\\\"{name}\\\"\",\n"
                         ));
-                    } else if *arity == 1 {
+                    } else if arity == 1 {
                         arms.push_str(&format!(
                             "\t\t\t{enum_name}::{name}(let p0) => \"{{\\\"{name}\\\":\" + p0.to_json() + \"}}\",\n"
                         ));
                     } else {
-                        let binds = (0..*arity)
+                        let binds = (0..arity)
                             .map(|i| format!("let p{i}"))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        let parts = (0..*arity)
+                        let parts = (0..arity)
                             .map(|i| format!("p{i}.to_json()"))
                             .collect::<Vec<_>>()
                             .join(" + \",\" + ");
@@ -7961,6 +7975,50 @@ fn derive_enum_impls(
                     "impl {enum_name} with Json {{\n\
                      \tfun to_json(self): str {{\n\
                      \t\tmatch self {{\n{arms}\t\t}}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+                // The reverse direction: read the externally-tagged discriminator,
+                // then rebuild that variant from the host value. A no-payload tag is
+                // the bare string; a single payload is `value.field(tag)`; several
+                // are positional elements of the tagged array. Each payload is
+                // coerced via its own type's `from_json_value`.
+                let mut arms = String::new();
+                for (name, payload_types) in &variants {
+                    let arity = payload_types.len();
+                    if arity == 0 {
+                        arms.push_str(&format!("\t\t\t\"{name}\" => {enum_name}::{name},\n"));
+                    } else if arity == 1 {
+                        let payload_type = &payload_types[0];
+                        arms.push_str(&format!(
+                            "\t\t\t\"{name}\" => {enum_name}::{name}({payload_type}::from_json_value(value.field(\"{name}\"))),\n"
+                        ));
+                    } else {
+                        let elements = payload_types
+                            .iter()
+                            .enumerate()
+                            .map(|(index, payload_type)| {
+                                format!(
+                                    "{payload_type}::from_json_value(value.field(\"{name}\").field(\"{index}\"))"
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        arms.push_str(&format!(
+                            "\t\t\t\"{name}\" => {enum_name}::{name}({elements}),\n"
+                        ));
+                    }
+                }
+                arms.push_str(&format!(
+                    "\t\t\t_ => panic(\"unknown variant in JSON for enum {enum_name}\"),\n"
+                ));
+                out.push_str(&format!(
+                    "impl {enum_name} with FromJson {{\n\
+                     \tfun from_json(text: str): {enum_name} {{\n\
+                     \t\t{enum_name}::from_json_value(parse_json_value(text))\n\
+                     \t}}\n\
+                     \tfun from_json_value(value: JsonValue): {enum_name} {{\n\
+                     \t\tmatch value.tag() {{\n{arms}\t\t}}\n\
                      \t}}\n\
                      }}\n"
                 ));
@@ -8109,15 +8167,15 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     use chumsky::prelude::*;
     let mut source = String::new();
     let mut traits: HashSet<&str> = HashSet::new();
-    // `@derive(Json)` on a struct also synthesizes the reverse `FromJson` impl,
-    // which references `FromJson`/`JsonValue`/`parse_json_value` (enums get only
-    // the one-way `to_json`, so they don't pull these in).
-    let mut struct_derives_json = false;
+    // `@derive(Json)` synthesizes the reverse `FromJson` impl too, which
+    // references `FromJson`/`JsonValue`/`parse_json_value`; the enum form also
+    // calls `panic` on an unknown tag.
+    let mut enum_derives_json = false;
     for (node, _span) in nodes {
         if let Node::Derive(derives, item) = node {
             traits.extend(derives.iter().copied());
-            if derives.contains(&"Json") && matches!(item.0, Node::Struct(..)) {
-                struct_derives_json = true;
+            if derives.contains(&"Json") && matches!(item.0, Node::Enum(..)) {
+                enum_derives_json = true;
             }
             source.push_str(&derive_impl_source(derives, item));
         }
@@ -8134,10 +8192,11 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     if traits.contains("Default") {
         prelude.push_str("import std::default::Default;\n");
     }
-    if struct_derives_json {
+    if traits.contains("Json") {
         prelude.push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
-    } else if traits.contains("Json") {
-        prelude.push_str("import std::json::Json;\n");
+    }
+    if enum_derives_json {
+        prelude.push_str("import std::io::panic;\n");
     }
     if traits.contains("Debug") {
         prelude.push_str("import std::debug::Debug;\n");
@@ -8795,10 +8854,14 @@ pub fn analyze<'src>(
                 analyzer.type_id_to_type_map.get(&implementation.subject),
                 Some(Type::Struct(id, _)) if *id == json_value_struct_id
             );
-            if subject_is_json_value
-                && let Some(id) = implementation.declarations.get("field").copied()
-            {
-                intrinsics.insert(id, Intrinsic::JsonField);
+            if subject_is_json_value {
+                for (name, intrinsic) in
+                    [("field", Intrinsic::JsonField), ("tag", Intrinsic::JsonTag)]
+                {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
             }
         }
     }
