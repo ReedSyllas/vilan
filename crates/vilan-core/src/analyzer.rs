@@ -4194,24 +4194,36 @@ impl<'src> Analyzer<'src> {
     /// bidirectionally (`builder.on_start(|s| ..)` types `s` from `|Server|
     /// void`). `argument_ids` are the explicit args (no receiver); the method's
     /// first parameter is `self`, so they align at offset 1.
+    /// A resolved method/function entity's parameter ids and its *own* generic
+    /// constraint ids (the `<U>` it declares, not any inherited from an enclosing
+    /// impl). `None` if `member_id` isn't a function.
+    fn method_signature(&self, member_id: Id) -> Option<(Vec<Id>, Vec<TypeId>)> {
+        match self.expr_id_to_expr_map.get(&member_id) {
+            Some(Expr::Function(function_id)) => self.functions.get(function_id).map(|function| {
+                (
+                    function.parameters.clone(),
+                    function.generic_parameter_constraint_ids.clone(),
+                )
+            }),
+            Some(Expr::ExternalFunction(function_id)) => {
+                self.external_functions.get(function_id).map(|function| {
+                    (
+                        function.parameters.clone(),
+                        function.generic_parameter_constraint_ids.clone(),
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn infer_closure_args_against_params(
         &mut self,
         member_id: Id,
         argument_ids: &[Id],
         substitution: &SubstitutionContext,
     ) {
-        let parameter_ids = match self.expr_id_to_expr_map.get(&member_id) {
-            Some(Expr::Function(function_id)) => self
-                .functions
-                .get(function_id)
-                .map(|f| f.parameters.clone()),
-            Some(Expr::ExternalFunction(function_id)) => self
-                .external_functions
-                .get(function_id)
-                .map(|f| f.parameters.clone()),
-            _ => None,
-        };
-        let Some(parameter_ids) = parameter_ids else {
+        let Some((parameter_ids, _)) = self.method_signature(member_id) else {
             return;
         };
         for (index, argument_id) in argument_ids.iter().enumerate() {
@@ -6421,7 +6433,7 @@ impl<'src> Analyzer<'src> {
                             // call, so `builder.on_start(|s| ..)` would otherwise
                             // leave `s` untyped), and defer a full argument
                             // type-check against the parameters.
-                            let substitution = self
+                            let mut substitution = self
                                 .method_call_substitution
                                 .get(&id)
                                 .cloned()
@@ -6431,6 +6443,56 @@ impl<'src> Analyzer<'src> {
                                 &argument_ids,
                                 &substitution,
                             );
+                            // Bind the method's *own* generics from its arguments —
+                            // e.g. `derive<U>(self, transform: |T| U): Source<U>`
+                            // binds `U` from the closure's return type, so
+                            // `count.derive(|n| n * 2)` is `Source<i32>` (not an
+                            // abstract `Source<U>`) and a chained `.derive`/`.sub`
+                            // sees a concrete element. Free-function calls already
+                            // bind their generics this way; method calls bound only
+                            // the impl's generics (from the receiver) until now.
+                            // Reconcile parameter-first so the bindings key on the
+                            // callee's generics, and keep only the method's own ones
+                            // (the receiver already supplied the impl's).
+                            if let Some((parameter_ids, own_generics)) =
+                                self.method_signature(member_id)
+                                && !own_generics.is_empty()
+                            {
+                                for (index, argument_id) in argument_ids.iter().enumerate() {
+                                    let Some(parameter_id) = parameter_ids.get(index + 1) else {
+                                        continue;
+                                    };
+                                    let Some(parameter_type) = self
+                                        .parameters
+                                        .get(parameter_id)
+                                        .map(|parameter| parameter.type_id.get_type(self))
+                                    else {
+                                        continue;
+                                    };
+                                    let argument_type = self.infer_type(
+                                        *argument_id,
+                                        &parameter_type,
+                                        &substitution,
+                                    );
+                                    if matches!(argument_type, Type::Unresolved) {
+                                        continue;
+                                    }
+                                    if let Some((_, bindings)) = self.reconcile_type(
+                                        &parameter_type,
+                                        &argument_type,
+                                        &substitution,
+                                    ) {
+                                        for (constraint_id, type_id) in bindings {
+                                            if own_generics.contains(&constraint_id) {
+                                                substitution.insert(constraint_id, type_id);
+                                            }
+                                        }
+                                    }
+                                }
+                                if !substitution.is_empty() {
+                                    self.method_call_substitution.insert(id, substitution);
+                                }
+                            }
                             self.prepped_method_arg_checks.push((
                                 member_id,
                                 argument_ids.clone(),

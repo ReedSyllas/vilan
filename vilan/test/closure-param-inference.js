@@ -1,10 +1,3 @@
-function fold(self, init, fn) {
-	let accumulator = init;
-	for (const item of self) {
-		accumulator = fn(accumulator, item);
-	}
-	return accumulator;
-}
 function $a(self, fn) {
 	const $b = self;
 	let $c = null;
@@ -45,7 +38,14 @@ function $j(self, fn) {
 	}
 	return result;
 }
-function $k(self, predicate) {
+function $k(self, init, fn) {
+	let accumulator = init;
+	for (const item of self) {
+		accumulator = fn(accumulator, item);
+	}
+	return accumulator;
+}
+function $l(self, predicate) {
 	let result = [  ];
 	for (const item of self) {
 		if (predicate(item)) {
@@ -64,11 +64,11 @@ console.log($g(p, (q) => {
 let pts = [  ];
 pts.push([ 1, 10 ]);
 pts.push([ 2, 20 ]);
-console.log(fold($j(pts, (pt) => {
+console.log($k($j(pts, (pt) => {
 	return pt[0];
 }), 0, (a, b) => {
 	return a + b;
 }));
-console.log($k(pts, (pt) => {
+console.log($l(pts, (pt) => {
 	return pt[1] > 15;
 }).length);

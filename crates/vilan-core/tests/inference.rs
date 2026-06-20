@@ -297,6 +297,29 @@ fn format_through_nested_generic() {
 }
 
 #[test]
+fn chained_derive_binds_method_generic_from_closure_return() {
+    // A chained `derive` (`count.derive(|n| n * 2).derive(|m| format(m))`) used to
+    // emit `undefined`: the first `derive<U>` left its result `Source<U>` abstract
+    // because `U` (its *own* generic) was never bound from the closure's return
+    // type, so the second `derive` saw an abstract element. Method calls now bind
+    // their own generics from arguments, like free-function calls do.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::Signal;
+        import std::display::format;
+        fun main() {
+            let count = Signal::new(3);
+            let label = count.derive(|n| n * 2).derive(|m| format(m));
+            label.sub(|s| print(s));
+            count.set(10);
+        }
+        "#,
+        "6\n20\n",
+    );
+}
+
+#[test]
 fn format_in_closure_argument() {
     // Bug c′ (fixed): a free generic function called with an unannotated closure
     // parameter (`count.derive(|n| format(n))`) emitted `undefined`. The call
