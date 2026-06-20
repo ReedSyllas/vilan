@@ -5401,13 +5401,22 @@ impl<'src> Analyzer<'src> {
     /// failed — i.e. whether this pass made progress.
     fn resolve_constraints(&mut self) -> bool {
         let mut progress = false;
+        // Re-sort each pass so any task a prior pass spawned (e.g. a slot
+        // unification produced while resolving `push`) falls into priority order.
+        // The sort is stable — tasks of one kind keep their original source order
+        // — and the queue is already near-sorted, so it stays cheap.
+        let mut queue = std::mem::take(&mut self.constraints);
+        queue.sort_by_key(|constraint| constraint.priority());
         let mut deferred = Vec::new();
-        for constraint in std::mem::take(&mut self.constraints) {
+        for constraint in queue {
             match self.try_resolve(&constraint) {
                 Resolution::Resolved | Resolution::Failed => progress = true,
                 Resolution::Deferred => deferred.push(constraint),
             }
         }
+        // Tasks spawned mid-pass landed back in `self.constraints`; keep them
+        // (after the deferrals) to be sorted into place on the next pass.
+        deferred.append(&mut self.constraints);
         self.constraints = deferred;
         progress
     }
@@ -5684,13 +5693,6 @@ impl<'src> Analyzer<'src> {
     }
 
     fn build(&mut self) {
-        // Keep the constraint queue in priority order so `resolve_constraints`
-        // reproduces the original inter-section resolution order. (Tasks are
-        // walked in source order; a stable sort by priority groups them by kind
-        // without disturbing order within a kind.)
-        self.constraints
-            .sort_by_key(|constraint| constraint.priority());
-
         // Resolve imports/re-exports to a fixpoint: a re-export may name an item
         // bound by another re-export resolved in a later pass (a chain of relay
         // modules), so keep retrying the unresolved ones until a pass binds
