@@ -18,6 +18,11 @@ pub enum Type {
     Struct(Id, Vec<TypeId>),
     Trait(Id),
     Tuple(Vec<TypeId>),
+    // A mapped tuple type `(U in T: F<U>)`, symbolic while the source tuple `T` is
+    // still abstract: the binder `U`'s generic id, the source tuple type, and the
+    // template `F<U>`. Expands to a concrete `Tuple` once `T` resolves to one
+    // (each element `X` maps to `F[U := X]`).
+    Mapped(TypeId, TypeId, TypeId),
     Unknown,
     Unresolved,
     Void,

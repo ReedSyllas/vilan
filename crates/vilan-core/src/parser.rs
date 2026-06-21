@@ -1151,6 +1151,29 @@ where
         .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
         .map_with(|x, e| (Node::Tuple(x), e.span()));
 
+    // A mapped tuple type `(U in T: F<U>)` — the `in` distinguishes it from a
+    // tuple type. `U` binds each element of the source tuple `T`; the slot is the
+    // template `F<U>`.
+    let mapped_type = just(Token::Ctrl('('))
+        .ignore_then(identifier.map_with(|binder, e| (binder, e.span())))
+        .then_ignore(just(Token::In))
+        .then(type_.clone().map(Box::new))
+        .then_ignore(just(Token::Op(":")))
+        .then(type_.clone().map(Box::new))
+        .then_ignore(just(Token::Ctrl(')')))
+        .map_with(|(((binder, binder_span), source), template), e| {
+            (
+                Node::MappedType {
+                    binder,
+                    binder_span,
+                    source,
+                    template,
+                },
+                e.span(),
+            )
+        })
+        .boxed();
+
     let closure_type = identifier
         .labelled("closure type parameter name")
         .then_ignore(just(Token::Op(":")))
@@ -1222,6 +1245,7 @@ where
         closure_type,
         local_type,
         local,
+        mapped_type,
         tuple_type,
     )));
 

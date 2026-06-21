@@ -170,6 +170,14 @@ pub enum Node<'src> {
         Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
         Option<Box<Spanned<Node<'src>>>>,
     ),
+    // A mapped tuple type `(U in T: F<U>)`: bind each element of the source tuple
+    // type `T` as `U`, and the corresponding result slot is the template `F<U>`.
+    MappedType {
+        binder: &'src str,
+        binder_span: Span,
+        source: Box<Spanned<Node<'src>>>,
+        template: Box<Spanned<Node<'src>>>,
+    },
     // An enum declaration: name, generics, and the variants — each a name,
     // the types of its optional data, and an optional explicit discriminant
     // (`Less = -1`).

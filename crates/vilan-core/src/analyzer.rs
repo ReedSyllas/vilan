@@ -3771,6 +3771,14 @@ impl<'src> Analyzer<'src> {
                 });
                 Some(Expr::Error)
             }
+            Node::MappedType { .. } => {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "a mapped tuple type is not valid here (expected an expression)"
+                        .to_string(),
+                });
+                Some(Expr::Error)
+            }
             Node::Module(name, body) => {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
@@ -4194,9 +4202,11 @@ impl<'src> Analyzer<'src> {
                 ))
             }
             WalkPattern::Tuple(span, patterns) => {
-                // Element types come from the matched tuple type when known;
-                // otherwise each element resolves against `Unknown`.
-                let element_type_ids = match expected_type_id.get_type(self) {
+                // Element types come from the matched tuple type when known (a
+                // concrete-source mapped type expands to one); otherwise each
+                // element resolves against `Unknown`.
+                let expected = expected_type_id.get_type(self);
+                let element_type_ids = match self.expand_mapped(expected) {
                     Type::Tuple(ids) if ids.len() == patterns.len() => ids,
                     _ => {
                         let unknown = Type::Unknown.get_type_id(self);
@@ -4321,6 +4331,26 @@ impl<'src> Analyzer<'src> {
                     .map(|return_type| self.walk_type_node(&*return_type, scope_id))
                     .unwrap_or_else(|| Type::Unknown.get_type_id(self));
                 Some(Type::Closure(t_parameter_type_ids, t_return_type_id))
+            }
+            // A mapped tuple type `(U in T: F<U>)`. Walk the source in this scope;
+            // bind `U` in a child scope and walk the template there. Expand now if
+            // the source is already a concrete tuple, else stay symbolic until it
+            // is (at the call / monomorphization).
+            Node::MappedType {
+                binder,
+                binder_span: _,
+                source,
+                template,
+            } => {
+                let source_id = self.walk_type_node(source, scope_id);
+                let mapping_scope_id = self.create_owned_scope(Some(scope_id)).id;
+                // The binder `U` is a synthetic type-level generic; its name span
+                // isn't needed (it isn't a go-to-definition target).
+                let binder_id = self.register_binder(binder, &EMPTY_SPAN, &[], mapping_scope_id);
+                let template_id = self.walk_type_node(template, mapping_scope_id);
+                // Stay symbolic: the source/template ids may be deferred (resolved
+                // only in `build()`), so expansion happens lazily on consumption.
+                Some(Type::Mapped(binder_id, source_id, template_id))
             }
             // `&T` / `&mut T` carries the inner type for now (identity); a
             // parameter captures the `&`/`&mut` separately as its convention.
@@ -5164,6 +5194,55 @@ impl<'src> Analyzer<'src> {
         matches!(self.type_id_to_type_map.get(&type_id), Some(Type::Generic(c)) if *c == constraint_id)
     }
 
+    /// Inverts a mapped tuple `(U in T: F<U>)` against a concrete argument tuple:
+    /// for each argument slot, reconcile it against the template `F<U>` to recover
+    /// what `U` (the single hole) bound to, then bind the source generic `T` to the
+    /// tuple of those. The unified type is the concrete argument tuple.
+    fn invert_mapped(
+        &mut self,
+        binder_id: TypeId,
+        source_id: TypeId,
+        template_id: TypeId,
+        argument_element_ids: &[TypeId],
+        substitution_context: &SubstitutionContext,
+    ) -> Option<(Type, Vec<(TypeId, TypeId)>)> {
+        // The source must be an unbound generic `T`; a concrete source would have
+        // already expanded to a `Tuple`, leaving nothing to infer.
+        let source_constraint = match source_id.get_type(self) {
+            Type::Generic(constraint_id) => constraint_id,
+            _ => return None,
+        };
+        let template = template_id.get_type(self);
+        let mut inner_ids = Vec::with_capacity(argument_element_ids.len());
+        for element_id in argument_element_ids {
+            let element = element_id.get_type(self);
+            let (_, bindings) = self.reconcile_type(&element, &template, substitution_context)?;
+            // The template's single hole is `binder_id`; recover its binding.
+            let inner = bindings
+                .iter()
+                .rev()
+                .find(|(constraint_id, _)| *constraint_id == binder_id)
+                .map(|(_, type_id)| *type_id)?;
+            inner_ids.push(inner);
+        }
+        let tuple_type_id = Type::Tuple(inner_ids).get_type_id(self);
+        Some((
+            Type::Tuple(argument_element_ids.to_vec()),
+            vec![(source_constraint, tuple_type_id)],
+        ))
+    }
+
+    /// Expands a mapped tuple type whose source is concrete (`(U in (A,B): F<U>)`
+    /// -> `(F<A>, F<B>)`); a mapped type over a still-abstract source, or any
+    /// other type, is returned unchanged.
+    fn expand_mapped(&mut self, type_: Type) -> Type {
+        if matches!(type_, Type::Mapped(..)) {
+            self.substitute_type(&type_, &SubstitutionContext::new())
+        } else {
+            type_
+        }
+    }
+
     fn reconcile_type(
         &mut self,
         a: &Type,
@@ -5171,6 +5250,22 @@ impl<'src> Analyzer<'src> {
         substitution_context: &SubstitutionContext,
     ) -> Option<(Type, Vec<(TypeId, TypeId)>)> {
         let _guard = crate::util::RecursionGuard::enter()?;
+        // A concrete-source mapped type expands to its tuple and reconciles
+        // structurally; an abstract-source one stays mapped for the inversion arms.
+        let a_owned;
+        let a = if matches!(a, Type::Mapped(..)) {
+            a_owned = self.expand_mapped(a.clone());
+            &a_owned
+        } else {
+            a
+        };
+        let b_owned;
+        let b = if matches!(b, Type::Mapped(..)) {
+            b_owned = self.expand_mapped(b.clone());
+            &b_owned
+        } else {
+            b
+        };
         Some(match (a, b) {
             (Type::Any, _) | (_, Type::Unknown) => (a.clone(), Vec::new()),
             (_, Type::Any) | (Type::Unknown, _) => (b.clone(), Vec::new()),
@@ -5208,6 +5303,25 @@ impl<'src> Analyzer<'src> {
                     (b.clone(), bindings)
                 }
             },
+            // A mapped tuple parameter `(U in T: F<U>)` reconciled against a
+            // concrete argument tuple: invert the template per element to infer the
+            // source tuple `T` (`combine((Source<A>, Source<B>))` binds `T = (A, B)`).
+            (Type::Mapped(binder_id, source_id, template_id), Type::Tuple(elements)) => self
+                .invert_mapped(
+                    *binder_id,
+                    *source_id,
+                    *template_id,
+                    elements,
+                    substitution_context,
+                )?,
+            (Type::Tuple(elements), Type::Mapped(binder_id, source_id, template_id)) => self
+                .invert_mapped(
+                    *binder_id,
+                    *source_id,
+                    *template_id,
+                    elements,
+                    substitution_context,
+                )?,
             // A concrete value satisfies a trait-typed parameter when it
             // implements that trait — e.g. a `Counter` (which `impl`s `Combine`)
             // passed where a `Combine` is expected, including a `Self`-defaulted
@@ -5459,6 +5573,32 @@ impl<'src> Analyzer<'src> {
                     .substitute_type(&return_type, substitution_context)
                     .get_type_id(self);
                 Type::Closure(parameters, return_type)
+            }
+            Type::Tuple(element_ids) => {
+                let element_ids = element_ids.clone();
+                Type::Tuple(self.substitute_argument_types(&element_ids, substitution_context))
+            }
+            // A mapped tuple substitutes its source; once that is a concrete tuple
+            // it expands element-wise (`F[U := X]` per element `X`), otherwise it
+            // stays a mapped type over the substituted source.
+            Type::Mapped(binder_id, source_id, template_id) => {
+                let (binder_id, source_id, template_id) = (*binder_id, *source_id, *template_id);
+                let source = source_id.get_type(self);
+                match self.substitute_type(&source, substitution_context) {
+                    Type::Tuple(element_ids) => {
+                        let template = template_id.get_type(self);
+                        let slots = element_ids
+                            .iter()
+                            .map(|element_id| {
+                                let mut context = substitution_context.clone();
+                                context.insert(binder_id, *element_id);
+                                self.substitute_type(&template, &context).get_type_id(self)
+                            })
+                            .collect();
+                        Type::Tuple(slots)
+                    }
+                    other => Type::Mapped(binder_id, other.get_type_id(self), template_id),
+                }
             }
             _ => type_.clone(),
         }
@@ -7768,6 +7908,20 @@ impl<'src> Analyzer<'src> {
                     buf.push_str(&item_str);
                 }
                 buf.push(')');
+            }
+            Type::Mapped(binder_id, source_id, template_id) => {
+                let binder = self
+                    .generic_constraint_names
+                    .get(binder_id)
+                    .copied()
+                    .unwrap_or("?");
+                let source = source_id.get_type(self);
+                let template = template_id.get_type(self);
+                let source_str =
+                    self.pretty_print_type_at(&source, substitution, depth + 1, visiting);
+                let template_str =
+                    self.pretty_print_type_at(&template, substitution, depth + 1, visiting);
+                buf.push_str(&format!("({binder} in {source_str}: {template_str})"));
             }
         }
     }

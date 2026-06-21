@@ -345,6 +345,45 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn mapped_tuple_forward_expansion() {
+    // A mapped tuple type with a concrete source expands element-wise:
+    // `(U in (i32, str): List<U>)` is `(List<i32>, List<str>)`, so each binding
+    // dispatches concretely.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun main() {
+            let pair: (U in (i32, str): List<U>) = ([1, 2], ["x", "y", "z"]);
+            let (nums, strs) = pair;
+            print(i"{nums.len().to_string()} {strs.len().to_string()}");
+        }
+        "#,
+        "2 3\n",
+    );
+}
+
+#[test]
+fn mapped_tuple_inverted_inference() {
+    // A generic function over a mapped parameter infers the source tuple `T` from
+    // the argument by inverting the template per element: `id(([1,2,3], ["a","b"]))`
+    // binds `T = (i32, str)`, so the result mapped type re-expands to
+    // `(List<i32>, List<str>)`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun id<T: (2..)>(sources: (U in T: List<U>)): (U in T: List<U>) { sources }
+        fun main() {
+            let (nums, strs) = id(([1, 2, 3], ["a", "b"]));
+            print(i"{nums.len().to_string()} {strs.len().to_string()}");
+        }
+        "#,
+        "3 2\n",
+    );
+}
+
+#[test]
 fn tuple_arity_bounds_parse() {
     // The tuple-bound grammar — `(..)`, `(2..)`, `(..10)`, and a per-element
     // bound `(2..: Display)` — parses and the parameter behaves as a generic
