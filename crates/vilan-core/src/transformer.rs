@@ -2129,7 +2129,7 @@ impl<'src> Transformer<'src> {
                 }
             }
             for supertrait_type_id in &trait_.supertraits {
-                if let Some(Type::Trait(super_id)) =
+                if let Some(Type::Trait(super_id, _)) =
                     self.program.type_id_to_type_map.get(supertrait_type_id)
                 {
                     stack.push(*super_id);

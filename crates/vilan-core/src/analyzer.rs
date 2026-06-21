@@ -992,7 +992,7 @@ impl<'src> Analyzer<'src> {
             result.push(id);
             if let Some(trait_) = self.traits.get(&id) {
                 for supertrait_type_id in &trait_.supertraits {
-                    if let Type::Trait(super_id) = supertrait_type_id.get_type(self) {
+                    if let Type::Trait(super_id, _) = supertrait_type_id.get_type(self) {
                         stack.push(super_id);
                     }
                 }
@@ -2786,7 +2786,7 @@ impl<'src> Analyzer<'src> {
         bound_type_ids
             .iter()
             .filter_map(|type_id| match type_id.get_type(self) {
-                Type::Trait(trait_id) => Some(trait_id),
+                Type::Trait(trait_id, _) => Some(trait_id),
                 _ => None,
             })
             .collect()
@@ -3675,7 +3675,7 @@ impl<'src> Analyzer<'src> {
                 // Inside a trait, `Self` is the trait itself (abstractly): a
                 // `self`-typed receiver in a default method resolves its method
                 // calls against this trait's own declarations.
-                let self_type_id = Type::Trait(id).get_type_id(self);
+                let self_type_id = Type::Trait(id, Vec::new()).get_type_id(self);
                 self.register_self_type(body_scope_id, self_type_id);
                 // Supertraits are resolved in the body scope so their generic
                 // arguments (`PartialEq<B>`) see the trait's parameters.
@@ -4856,7 +4856,7 @@ impl<'src> Analyzer<'src> {
             // variant with data acts as a constructor whose call also yields
             // the enum.
             Expr::EnumVariant(enum_id, _) => Type::Enum(*enum_id, Vec::new()),
-            Expr::Trait(trait_id) => Type::Trait(*trait_id),
+            Expr::Trait(trait_id) => Type::Trait(*trait_id, Vec::new()),
             Expr::Module(module_id) => Type::Module(*module_id),
             Expr::Call(id) => {
                 let id = *id;
@@ -5326,7 +5326,7 @@ impl<'src> Analyzer<'src> {
             // implements that trait — e.g. a `Counter` (which `impl`s `Combine`)
             // passed where a `Combine` is expected, including a `Self`-defaulted
             // generic that resolved to the trait.
-            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id)) => {
+            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id, _)) => {
                 if self.type_implements_trait(a, *trait_id) {
                     (a.clone(), Vec::new())
                 } else {
@@ -5449,7 +5449,7 @@ impl<'src> Analyzer<'src> {
             // `T: PartialEq`, or a trait-typed parameter) when it implements the
             // trait — so a conditional impl `impl Option<T: PartialEq>` matches a
             // concrete `Option<i32>`. (Mirrors the same arm in `reconcile_type`.)
-            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id)) => {
+            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id, _)) => {
                 self.type_implements_trait(a, *trait_id)
             }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
@@ -5469,6 +5469,11 @@ impl<'src> Analyzer<'src> {
                 self.compare_argument_types(l_arguments, r_arguments, substitution_context)
             }
             (Type::Struct(l_id, l_arguments), Type::Struct(r_id, r_arguments)) if l_id == r_id => {
+                self.compare_argument_types(l_arguments, r_arguments, substitution_context)
+            }
+            // Same trait: compatible when their arguments are (an erased side —
+            // `Iterator` written without `<T>` — matches any instantiation).
+            (Type::Trait(l_id, l_arguments), Type::Trait(r_id, r_arguments)) if l_id == r_id => {
                 self.compare_argument_types(l_arguments, r_arguments, substitution_context)
             }
             (
@@ -5561,6 +5566,15 @@ impl<'src> Analyzer<'src> {
                     self.substitute_argument_types(&arguments, substitution_context),
                 )
             }
+            // A parameterized trait substitutes its arguments (`Readable<U>` ->
+            // `Readable<A>` under `U = A`), so a mapped trait template instantiates.
+            Type::Trait(id, arguments) => {
+                let arguments = arguments.clone();
+                Type::Trait(
+                    *id,
+                    self.substitute_argument_types(&arguments, substitution_context),
+                )
+            }
             // A closure type substitutes its parameter and return types, so a
             // generic method parameter `|T| U` becomes `|i32| U` under `T = i32` —
             // without this an unannotated closure argument's parameter stays the
@@ -5634,7 +5648,7 @@ impl<'src> Analyzer<'src> {
         let label_type = match self.expr_id_to_expr_map.get(&target_id) {
             Some(Expr::Enum(id)) | Some(Expr::EnumVariant(id, _)) => Type::Enum(*id, Vec::new()),
             Some(Expr::Struct(id)) => Type::Struct(*id, Vec::new()),
-            Some(Expr::Trait(id)) => Type::Trait(*id),
+            Some(Expr::Trait(id)) => Type::Trait(*id, Vec::new()),
             Some(Expr::Module(id)) => Type::Module(*id),
             Some(Expr::Function(id)) | Some(Expr::ExternalFunction(id)) => Type::Function(*id),
             _ => Type::Unknown,
@@ -6185,7 +6199,7 @@ impl<'src> Analyzer<'src> {
                     }
                 }
             }
-            Type::Trait(trait_id) => {
+            Type::Trait(trait_id, _) => {
                 let member = self.method_member_in_trait(*trait_id, member_name);
                 // Inside a trait default body `self`/`Self` is `Type::Trait`; record
                 // the call so codegen re-dispatches it to whatever concrete type the
@@ -7076,6 +7090,9 @@ impl<'src> Analyzer<'src> {
                     let subject_type = match (subject_type, argument_type_ids.is_empty()) {
                         (Type::Enum(id, _), false) => Type::Enum(id, argument_type_ids),
                         (Type::Struct(id, _), false) => Type::Struct(id, argument_type_ids),
+                        // A parameterized trait bound/template (`Into<bool>`,
+                        // `Readable<U>`) keeps its arguments for impl selection.
+                        (Type::Trait(id, _), false) => Type::Trait(id, argument_type_ids),
                         (other, _) => other,
                     };
                     // Record the reference for the language server: the type name
@@ -7083,7 +7100,7 @@ impl<'src> Analyzer<'src> {
                     // generic resolves to its binder entity (`subject_id`), which
                     // carries the `<T>` name span.
                     let definition_id = match &subject_type {
-                        Type::Struct(id, _) | Type::Enum(id, _) | Type::Trait(id) => Some(*id),
+                        Type::Struct(id, _) | Type::Enum(id, _) | Type::Trait(id, _) => Some(*id),
                         Type::Generic(_) => Some(subject_id),
                         _ => None,
                     };
@@ -7183,7 +7200,7 @@ impl<'src> Analyzer<'src> {
                 // (`Iterator::from_fn`), or an enum (`Option::Some`): look the
                 // member up among the variants (for enums) and the matching
                 // implementations.
-                Type::Struct(_, _) | Type::Trait(_) | Type::Enum(_, _) => {
+                Type::Struct(_, _) | Type::Trait(_, _) | Type::Enum(_, _) => {
                     let variant_id = match &subject_type {
                         Type::Enum(enum_id, _) => {
                             let variants_scope_id =
@@ -7328,7 +7345,7 @@ impl<'src> Analyzer<'src> {
                 implementation.trait_ids.push(trait_id);
             }
             // Record the `with <trait>` reference for go-to-definition / hover.
-            let trait_type_id = Type::Trait(trait_id).get_type_id(self);
+            let trait_type_id = Type::Trait(trait_id, Vec::new()).get_type_id(self);
             self.type_references
                 .push((check.source_id, check.span, Some(trait_id), trait_type_id));
             // Required members are the signature-only declarations of the trait
@@ -7847,9 +7864,10 @@ impl<'src> Analyzer<'src> {
                 self.push_type_arguments(buf, arguments, substitution, depth, visiting);
             }
 
-            Type::Trait(id) => {
+            Type::Trait(id, trait_arguments) => {
                 if let Some(trait_) = self.traits.get(id) {
                     buf.push_str(trait_.name);
+                    self.push_type_arguments(buf, trait_arguments, substitution, depth, visiting);
                 } else {
                     buf.push('?');
                 }
@@ -9393,7 +9411,8 @@ pub fn analyze<'src>(
         expr_types.insert(enum_id, label);
     }
     for trait_id in analyzer.traits.keys().copied().collect::<Vec<_>>() {
-        let label = analyzer.pretty_print_type(&Type::Trait(trait_id), &empty_substitution);
+        let label =
+            analyzer.pretty_print_type(&Type::Trait(trait_id, Vec::new()), &empty_substitution);
         expr_types.insert(trait_id, label);
     }
 

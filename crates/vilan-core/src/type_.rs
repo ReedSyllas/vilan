@@ -16,7 +16,11 @@ pub enum Type {
     Generic(TypeId),
     Module(Id),
     Struct(Id, Vec<TypeId>),
-    Trait(Id),
+    // A trait and its generic arguments (`Display` -> `Trait(display_id, [])`,
+    // `Into<bool>` -> `Trait(into_id, [bool])`, `Readable<U>` ->
+    // `Trait(readable_id, [U])`). The arguments drive parameterized-trait impl
+    // selection and a mapped trait template's inversion.
+    Trait(Id, Vec<TypeId>),
     Tuple(Vec<TypeId>),
     // A mapped tuple type `(U in T: F<U>)`, symbolic while the source tuple `T` is
     // still abstract: the binder `U`'s generic id, the source tuple type, and the
