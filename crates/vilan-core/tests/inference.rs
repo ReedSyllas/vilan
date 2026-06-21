@@ -345,6 +345,32 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn method_closure_param_inferred_from_argument_generic() {
+    // A method's own generic bound from a (nested) argument must reach its closure
+    // parameters: `pick<T, K>(rows: List<List<T>>, key: |T| K, get: |T| i32)` typed
+    // `|p| p.id`'s `p` as the abstract `T` until the own-generic binding ran first.
+    // This is the `bind_each(source: Source<List<T>>, |todo| todo.id, ..)` shape.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        struct P { id: i32 }
+        struct Holder { tag: i32 }
+        impl Holder {
+            fun pick<T, K>(self, rows: List<List<T>>, key: |T| K, get: |T| i32): i32 {
+                get(rows[0][0])
+            }
+        }
+        fun main() {
+            let h = Holder { tag = 0 };
+            print(h.pick([[P { id = 42 }]], |p| p.id, |p| p.id).to_string());
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
 fn logical_or_operator() {
     // `||` is logical-or: binds looser than `&&`, short-circuits, and an empty
     // closure `|| body` still parses (it's tried before the operator).

@@ -4584,6 +4584,61 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Binds a method's own generics from its arguments, parameter-first (so the
+    /// bindings key on the callee). With `skip_closures`, only non-closure
+    /// arguments are used — run first so a closure parameter `|T| ..` is typed with
+    /// `T` already known (e.g. `bind_each`'s `|todo| ..`, where `T` is the element
+    /// of `Source<List<T>>`); a second pass over all arguments then binds generics
+    /// fixed by a closure's return (`derive<U>`'s `U`).
+    fn bind_method_own_generics(
+        &mut self,
+        member_id: Id,
+        argument_ids: &[Id],
+        skip_closures: bool,
+        substitution: &mut SubstitutionContext,
+    ) {
+        let Some((parameter_ids, own_generics)) = self.method_signature(member_id) else {
+            return;
+        };
+        if own_generics.is_empty() {
+            return;
+        }
+        for (index, argument_id) in argument_ids.iter().enumerate() {
+            if skip_closures
+                && matches!(
+                    self.expr_id_to_expr_map.get(argument_id),
+                    Some(Expr::Closure(_))
+                )
+            {
+                continue;
+            }
+            // `+ 1` skips the method's `self` parameter.
+            let Some(parameter_id) = parameter_ids.get(index + 1) else {
+                continue;
+            };
+            let Some(parameter_type) = self
+                .parameters
+                .get(parameter_id)
+                .map(|parameter| parameter.type_id.get_type(self))
+            else {
+                continue;
+            };
+            let argument_type = self.infer_type(*argument_id, &parameter_type, substitution);
+            if matches!(argument_type, Type::Unresolved) {
+                continue;
+            }
+            if let Some((_, bindings)) =
+                self.reconcile_type(&parameter_type, &argument_type, substitution)
+            {
+                for (constraint_id, type_id) in bindings {
+                    if own_generics.contains(&constraint_id) {
+                        substitution.insert(constraint_id, type_id);
+                    }
+                }
+            }
+        }
+    }
+
     fn infer_closure_args_against_params(
         &mut self,
         member_id: Id,
@@ -6476,43 +6531,15 @@ impl<'src> Analyzer<'src> {
                     .get(&id)
                     .cloned()
                     .unwrap_or_default();
+                // Bind the method's own generics from the non-closure arguments
+                // first, so a closure parameter `|T| ..` is typed with `T` known.
+                self.bind_method_own_generics(member_id, argument_ids, true, &mut substitution);
                 self.infer_closure_args_against_params(member_id, argument_ids, &substitution);
-                // Bind the method's *own* generics from its arguments (e.g.
-                // `derive<U>`'s `U` from the closure's return type), parameter-first
-                // so the bindings key on the callee; keep only the method's own ones
-                // (the receiver already supplied the impl's).
-                if let Some((parameter_ids, own_generics)) = self.method_signature(member_id)
-                    && !own_generics.is_empty()
-                {
-                    for (index, argument_id) in argument_ids.iter().enumerate() {
-                        let Some(parameter_id) = parameter_ids.get(index + 1) else {
-                            continue;
-                        };
-                        let Some(parameter_type) = self
-                            .parameters
-                            .get(parameter_id)
-                            .map(|parameter| parameter.type_id.get_type(self))
-                        else {
-                            continue;
-                        };
-                        let argument_type =
-                            self.infer_type(*argument_id, &parameter_type, &substitution);
-                        if matches!(argument_type, Type::Unresolved) {
-                            continue;
-                        }
-                        if let Some((_, bindings)) =
-                            self.reconcile_type(&parameter_type, &argument_type, &substitution)
-                        {
-                            for (constraint_id, type_id) in bindings {
-                                if own_generics.contains(&constraint_id) {
-                                    substitution.insert(constraint_id, type_id);
-                                }
-                            }
-                        }
-                    }
-                    if !substitution.is_empty() {
-                        self.method_call_substitution.insert(id, substitution);
-                    }
+                // Then bind generics fixed by a closure's return (`derive<U>`'s `U`),
+                // now that the closures are typed.
+                self.bind_method_own_generics(member_id, argument_ids, false, &mut substitution);
+                if !substitution.is_empty() {
+                    self.method_call_substitution.insert(id, substitution);
                 }
                 self.constraints.push(Constraint::MethodArgCheck {
                     member_id,
