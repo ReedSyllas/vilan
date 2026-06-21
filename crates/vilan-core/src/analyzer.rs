@@ -659,6 +659,12 @@ pub struct Analyzer<'src> {
     // pushed argument's expression id). Resolved in the constraint loop.
     // Assignments awaiting local resolution: (target accessor id, value id).
     prepped_assignments: Vec<(Id, Id)>,
+    // The compiler-synthesized re-read of the target in a compound assignment
+    // (`x += v` desugars to `x = x + v`). When the target is a view, this re-read
+    // must also read *through* it (transparent references R5), so it is tracked
+    // to be deref-wrapped alongside the target — distinct from a user-written
+    // value-position read, which keeps its explicit `*` (R6).
+    compound_reread_ids: HashSet<Id>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
@@ -818,6 +824,7 @@ impl<'src> Analyzer<'src> {
             bool_enum_id: None,
             list_element_slots: HashMap::new(),
             prepped_assignments: Vec::new(),
+            compound_reread_ids: HashSet::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
@@ -1306,6 +1313,113 @@ impl<'src> Analyzer<'src> {
             }
             _ => None,
         }
+    }
+
+    /// Whether a call resolves to a `borrows` function (one that returns a view —
+    /// scalar *or* aggregate). The dual of `call_returns_scalar_view`, which only
+    /// admits the scalar `(base, key)` shape.
+    fn call_returns_view(&self, call_id: Id) -> bool {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return false;
+        };
+        matches!(
+            self.expr_id_to_expr_map.get(&function_call.subject_id),
+            Some(Expr::Local(function_id))
+                if self.functions.get(function_id).is_some_and(|function| function.borrows)
+        )
+    }
+
+    /// Whether a binding or parameter holds a view: a view binding (a `&`/`&mut`
+    /// reference, a copy of one, a `borrows`-call result, or a `for e in &mut` /
+    /// `Option<&mut T>` capture — all unified by `view_binding_mutability`), or a
+    /// `&`/`&mut` parameter.
+    fn binding_or_param_is_view(&self, binding_id: Id) -> bool {
+        self.view_binding_mutability(binding_id).is_some()
+            || self.parameters.get(&binding_id).is_some_and(|parameter| {
+                matches!(parameter.convention, Convention::Ref | Convention::RefMut)
+            })
+    }
+
+    /// Whether an l-value denotes a view, so a bare assignment to it writes
+    /// *through* to the referent (transparent-references rule R5): a view binding
+    /// or `&`/`&mut` parameter, a `borrows`-returning call, or a `&[mut] place`
+    /// reference. A field/index projection (`view.field`) is *not* a view — it is
+    /// an ordinary place reached by auto-derefing the view, so it is excluded.
+    fn assignment_target_is_view(&self, expr_id: Id) -> bool {
+        match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::Reference(_, _)) => true,
+            Some(Expr::Local(binding_id)) => self.binding_or_param_is_view(*binding_id),
+            Some(Expr::Call(call_id)) => self.call_returns_view(*call_id),
+            _ => false,
+        }
+    }
+
+    /// Transparent-references rule R5: a bare assignment to a view writes
+    /// *through* it. Wrap a view-typed assignment target (and, for a compound
+    /// assignment, the synthesized re-read of that target) in a synthetic
+    /// `Dereference` so it lowers exactly like the explicit `*target`
+    /// write-through path — unifying `x = v` with the former `*x = v` at zero cost
+    /// to codegen (so the migration off `*` is byte-identical). Runs after
+    /// `infer_borrows`, so `borrows`-call targets are recognized.
+    fn rewrite_view_assignment_targets(&mut self) {
+        let assignments: Vec<(Id, Id, Id)> = self
+            .expr_id_to_expr_map
+            .iter()
+            .filter_map(|(id, expr)| match expr {
+                Expr::Assignment(target, value) => Some((*id, *target, *value)),
+                _ => None,
+            })
+            .collect();
+        for (assignment_id, target_id, value_id) in assignments {
+            // The target: a bare view writes *through*, so deref it.
+            if !matches!(
+                self.expr_id_to_expr_map.get(&target_id),
+                Some(Expr::Dereference(_))
+            ) && self.assignment_target_is_view(target_id)
+            {
+                let deref_id = self.wrap_in_deref(target_id);
+                self.expr_id_to_expr_map
+                    .insert(assignment_id, Expr::Assignment(deref_id, value_id));
+            }
+            // A compound assignment (`x op= v` → `x = x + v`) re-reads the target;
+            // when that target is a view, the synthesized re-read must read
+            // *through* it too. (A user-written value-position read is not in
+            // `compound_reread_ids`, so it keeps needing an explicit `*` — R6.)
+            let compound = match self.expr_id_to_expr_map.get(&value_id) {
+                Some(Expr::Binary(op, lhs_id, rhs_id)) => Some((*op, *lhs_id, *rhs_id)),
+                _ => None,
+            };
+            if let Some((op, lhs_id, rhs_id)) = compound
+                && self.compound_reread_ids.contains(&lhs_id)
+                && !matches!(
+                    self.expr_id_to_expr_map.get(&lhs_id),
+                    Some(Expr::Dereference(_))
+                )
+                && self.assignment_target_is_view(lhs_id)
+            {
+                let deref_id = self.wrap_in_deref(lhs_id);
+                self.expr_id_to_expr_map
+                    .insert(value_id, Expr::Binary(op, deref_id, rhs_id));
+            }
+        }
+    }
+
+    /// Mint a synthetic `Dereference` of `operand_id`, carrying its span / scope /
+    /// type so diagnostics and codegen treat it like an explicit `*operand`.
+    fn wrap_in_deref(&mut self, operand_id: Id) -> Id {
+        let deref_id = self.new_entity_id();
+        self.expr_id_to_expr_map
+            .insert(deref_id, Expr::Dereference(operand_id));
+        if let Some(span) = self.span_map.get(&operand_id).copied() {
+            self.span_map.insert(deref_id, span);
+        }
+        if let Some(scope_id) = self.expr_id_to_scope_id_map.get(&operand_id).copied() {
+            self.expr_id_to_scope_id_map.insert(deref_id, scope_id);
+        }
+        if let Some(type_id) = self.expr_id_to_type_id_map.get(&operand_id).copied() {
+            self.expr_id_to_type_id_map.insert(deref_id, type_id);
+        }
+        deref_id
     }
 
     /// Whether an expression evaluates to a *view* (rule 3, second-class): a
@@ -3426,6 +3540,9 @@ impl<'src> Analyzer<'src> {
                 let stored_value_id = match op {
                     Some(op) => {
                         let lhs_id = self.walk_expr_node(target, scope_id);
+                        // Remember this synthesized re-read so a view target's
+                        // re-read is also deref-wrapped (R5).
+                        self.compound_reread_ids.insert(lhs_id);
                         let binary_id = self.new_entity_id();
                         self.expr_id_to_expr_map
                             .insert(binary_id, Expr::Binary(*op, lhs_id, value_id));
@@ -7335,25 +7452,24 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Local(variable_id)) => *variable_id,
                 _ => continue,
             };
-            match self.variables.get(&variable_id) {
-                Some(variable) if !variable.mutable => {
-                    let name = variable.name;
-                    self.diagnostics.push(Error {
-                        span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
-                        msg: format!(
-                            "cannot assign to immutable variable '{}'. Declare it with `mut` instead.",
-                            name
-                        ),
-                    });
-                }
-                Some(_) => {}
-                None => {
-                    self.diagnostics.push(Error {
-                        span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
-                        msg: "cannot assign to this expression".to_string(),
-                    });
-                    continue;
-                }
+            // A view binding or `&[mut]` parameter is written *through* — the
+            // assignment mutates the referent, not the binding — so its
+            // writability is enforced by `check_readonly_mutation` (after
+            // `borrows` is inferred) and the assigned value refines the referent,
+            // not this binding's own type. Skip both checks here.
+            if self.binding_or_param_is_view(variable_id) {
+                continue;
+            }
+            // An ordinary immutable local is rejected by `check_readonly_mutation`
+            // (which knows about views); here we only flag a target that is not a
+            // variable at all (e.g. a by-value parameter) and feed the assigned
+            // value into the variable's type inference.
+            if self.variables.get(&variable_id).is_none() {
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: "cannot assign to this expression".to_string(),
+                });
+                continue;
             }
             if let Some(Constraint::Variable(constraint)) =
                 self.constraints.iter_mut().find(|constraint| {
@@ -9640,6 +9756,9 @@ pub fn analyze<'src>(
         intrinsics.insert(id, Intrinsic::QuerySelectorAll);
     }
 
+    // Transparent references (R5): rewrite bare assignments to a view into the
+    // write-through deref form before codegen reads the targets.
+    analyzer.rewrite_view_assignment_targets();
     let clone_sites = analyzer.compute_clone_sites();
     let boxed_locals = analyzer.compute_boxed_locals();
     let primitive_views = analyzer.compute_primitive_views();

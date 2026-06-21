@@ -1,0 +1,52 @@
+// transparent-references.vl — assigning *through* a view writes to its referent
+// with no `*` (transparent references, rule R5): a view binding, a `&mut`
+// parameter, a `borrows`-returning call, a re-borrow, and a captured
+// `Option<&mut T>` view — for both plain `=` and compound `+=` / `/=`. Reading a
+// view as a value keeps its explicit `*`.
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+fun add_ten(x: &mut i32) {
+	x += 10; // compound write-through a `&mut` parameter
+}
+
+fun same(x: &mut i32): &mut i32 borrows x {
+	x // forward the view (re-borrow)
+}
+
+struct Cell {
+	value: i32,
+}
+
+impl Cell {
+	fun slot(&mut self): Option<&mut i32> {
+		Some(&mut self.value)
+	}
+}
+
+fun main() {
+	mut a: i32 = 10;
+	let b: &mut i32 = &mut a; // a view binding
+	let c: &mut i32 = b; // re-borrow — alias the same referent
+
+	b = 20; // write-through a view binding
+	print(i"{a} {*b} {*c}"); // 20 20 20
+
+	add_ten(&mut a);
+	print(i"{a} {*b}"); // 30 30
+
+	add_ten(b); // pass the view (re-borrow)
+	print(i"{a} {*b}"); // 40 40
+
+	same(c) /= 10; // compound write-through a borrows-returning call
+	print(i"{a} {*b}"); // 4 4
+
+	mut cell = Cell { value = 100 };
+	match cell.slot() {
+		Some(let s) => {
+			s += 5; // compound write-through a captured `Option<&mut T>` view
+		}
+		None => {}
+	}
+	print(cell.value); // 105
+}
