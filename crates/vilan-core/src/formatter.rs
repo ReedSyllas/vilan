@@ -724,6 +724,7 @@ impl<'src> Printer<'src> {
     /// decide where operands need parentheses.
     fn binary_precedence(operator: BinaryOp) -> u8 {
         match operator {
+            BinaryOp::Or => 0,
             BinaryOp::And => 1,
             BinaryOp::Eq
             | BinaryOp::NotEq
@@ -1183,6 +1184,7 @@ fn binary_operator_symbol(operator: BinaryOp) -> &'static str {
         BinaryOp::LtEq => "<=",
         BinaryOp::GtEq => ">=",
         BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
     }
 }
 

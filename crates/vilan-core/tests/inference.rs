@@ -345,6 +345,28 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn logical_or_operator() {
+    // `||` is logical-or: binds looser than `&&`, short-circuits, and an empty
+    // closure `|| body` still parses (it's tried before the operator).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun boom(): bool { print("evaluated"); true }
+        fun main() {
+            let a = "x";
+            print(a == "x" || a == "y");
+            print(a == "z" || a == "y");
+            print(a == "x" && false || a == "x");
+            print(true || boom());
+            let f = || 7;
+            print(f());
+        }
+        "#,
+        "true\nfalse\ntrue\ntrue\n7\n",
+    );
+}
+
+#[test]
 fn reactive_combine_variadic() {
     // The driving example: `combine` is variadic over its inputs' distinct types
     // via a mapped-tuple parameter, yielding a source of the tuple that recomputes

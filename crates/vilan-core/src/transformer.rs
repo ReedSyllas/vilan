@@ -2575,6 +2575,7 @@ impl Formatter {
                     BinaryOp::LtEq => "<=",
                     BinaryOp::GtEq => ">=",
                     BinaryOp::And => "&&",
+                    BinaryOp::Or => "||",
                 };
                 format!(
                     "{}{}{}{}{}{}",

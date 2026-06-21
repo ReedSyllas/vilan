@@ -1059,6 +1059,22 @@ where
         )
         .boxed();
 
+    // `||` binds looser than `&&`. A `||`-led empty closure (`|| body`) is parsed
+    // by the `closure` alternative below, tried before this in the choice, so it's
+    // never mistaken for a logical-or operator (which always has a left operand).
+    let logical_or = logical_and
+        .clone()
+        .foldl_with(
+            just(Token::Op("||")).ignore_then(logical_and).repeated(),
+            |a, b, e| {
+                (
+                    Node::Binary(BinaryOp::Or, Box::new(a), Box::new(b)),
+                    e.span(),
+                )
+            },
+        )
+        .boxed();
+
     secondary_expression.define(choice((
         closure,
         block
@@ -1071,7 +1087,7 @@ where
         let_,
         return_,
         assignment,
-        logical_and,
+        logical_or,
     )));
 
     // A struct literal may be the subject of a `.field` access or `.method()`

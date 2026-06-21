@@ -43,11 +43,8 @@ fun todos(): View {
 		combine((items.source(), filter.source())).derive(|(list, filter)| {
 		mut shown: List<Todo> = [];
 		for todo in list {
-			let keep = match filter {
-				"active" => !todo.done,
-				"done" => todo.done,
-				_ => true,
-			};
+			let keep =
+				filter == "all" || (filter == "active" && !todo.done) || (filter == "done" && todo.done);
 			if keep {
 				shown.push(todo);
 			}

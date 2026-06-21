@@ -26,9 +26,11 @@ by what the type system actually supports:
 - Comprehensions lower to a **runtime `.map`** over the flat array (arity-
   independent), so no per-arity monomorphization/unrolling was required.
 
-Found along the way (pre-existing, out of scope): **`||` is not a Vilan operator**
-(only `&&`; `||` is the empty-closure-params token) — `todos.vl`'s filter was
-rewritten as a `match`.
+Found along the way (pre-existing): **`||` was not a Vilan operator** (only `&&`;
+`||` is also the empty-closure-params token) — now **added** as logical-or
+(commit after 3a72123), binding looser than `&&`, short-circuiting, with the
+empty-closure `|| body` still parsed first in the expression choice. `todos.vl`'s
+filter is back to `||`.
 
 ## Current shape (what we build on)
 

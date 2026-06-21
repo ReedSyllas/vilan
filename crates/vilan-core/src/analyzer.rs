@@ -5190,7 +5190,8 @@ impl<'src> Analyzer<'src> {
                 | BinaryOp::Gt
                 | BinaryOp::LtEq
                 | BinaryOp::GtEq
-                | BinaryOp::And,
+                | BinaryOp::And
+                | BinaryOp::Or,
                 _,
                 _,
             ) => self.bool_type(),

@@ -339,4 +339,6 @@ pub enum BinaryOp {
     // Logical AND (`&&`), also produced by the compiler for nested
     // match-pattern tests.
     And,
+    // Logical OR (`||`). Binds looser than `&&`.
+    Or,
 }
