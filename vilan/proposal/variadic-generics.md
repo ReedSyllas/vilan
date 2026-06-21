@@ -105,10 +105,14 @@ A tuple type built by mapping a **single-hole** template over `T`'s elements:
 ```vilan
 (U in T: Source<U>)   //  T = (A, B)  ->  (Source<A>, Source<B>)
 (_ in T: bool)        //  ignore the element, every slot is bool
+(U in T: Readable<U>) //  trait template => an EXISTENTIAL slot (any impl)
 ```
 
-Map preserves arity. The single-hole restriction keeps inference decidable (see
-below); multi-hole templates (`Map<U, V>`, `U::Assoc`) are **deferred**.
+A template is either a **concrete constructor** (`Source<U>` — the exact slot
+type) or a single **trait** (`Readable<U>` — an existential slot, "any type
+satisfying it", the form `combine` uses). Map preserves arity. The single-hole
+restriction keeps inference decidable (see below); multi-hole templates
+(`Map<U, V>`, `U::Assoc`) are **deferred**.
 
 ### Tuple comprehensions (value) — `(x in xs = e)`
 
@@ -146,17 +150,68 @@ template `Source<U>` to bind `U = Ai`, collect `T` — reusing the existing
 `reconcile_type` tuple path (`analyzer.rs:5202`). Multi-hole templates would make
 the inversion ambiguous, hence the single-hole rule.
 
+For a **trait template** (`Readable<U>`) the inversion is by impl resolution
+instead of structural unification: find `U` such that the concrete slot type
+implements `Readable<U>`. Unambiguous precisely because `Readable` has no blanket
+impl (one impl per type) — the reason a bespoke trait is chosen over `Into`
+(below).
+
 ---
+
+## Source vs Signal inputs — a bespoke `Readable<T>` trait
+
+`combine`'s inputs are heterogeneous in a second way: `todos.vl` passes
+`Signal`s, but a `Signal<T>` is a writable root, not a `Source<T>` (it *wraps*
+one in `.node`). Two ways to let a slot accept either:
+
+1. **A bespoke trait** both implement — `Readable<T>`, with one bridge method.
+2. **`Into<Source<U>>`** — `Signal` converts to its `Source`; `Source` is covered
+   for free by the reflexive blanket `impl type T with Into<T>` (`std/into.vl`).
+
+Option 2 is more elegant *in principle* (no new trait; `Source` needs no impl),
+and would be my pick **but for a verified blocker**: target-directed dispatch
+through the blanket impl doesn't work today. With both `Into<Wrap>` (the reflexive
+identity) and an explicit `Into<i32>` in scope, `let x: i32 = w.into()` resolves to
+the *identity* impl and errors `Expected i32, but got Wrap` — the annotation
+doesn't steer impl selection. Resolving `Signal<A>: Into<Source<A>>` hits exactly
+this: the identity `Into<Signal<A>>` competes and wins. Fixing it is a separate
+analyzer change in the generic-resolution cluster ([[analyzer-stabilization]]).
+
+A **bespoke trait sidesteps it entirely** — `Readable<T>` has no blanket impl, so
+each type has exactly one impl and per-element resolution is unambiguous (verified:
+a `first<R: Readable<i32>>` dispatches cleanly for two distinct implementors).
+**Recommendation: Option 1.** It also formalizes the README's claim that
+"`Source<T>` is the read interface every reactive value implements." Revisit
+Option 2 if/when blanket-impl dispatch is fixed — `combine` would then need no
+change beyond dropping the trait.
+
+```vilan
+// std::reactive — the read interface both a Source and a Signal satisfy.
+trait Readable<T> {
+    fun as_source(self): Source<T>;
+}
+impl Source<type T> with Readable<T> { fun as_source(self): Source<T> { self } }
+impl Signal<type T> with Readable<T> { fun as_source(self): Source<T> { self.node } }
+```
 
 ## Worked: the reactive combinators
 
 ```vilan
-// product — the driving example, keyof-free
-fun combine<T: (2..)>(sources: (U in T: Source<U>)): Source<T> { … as above … }
+// product — the driving example, keyof-free. A slot is any Readable<U> (a trait
+// template => an existential slot, inverted through its single impl per type).
+fun combine<T: (2..)>(sources: (U in T: Readable<U>)): Source<T> {
+    let nodes = (s in sources = s.as_source());     // (Source<U0>, Source<U1>, …)
+    let snapshot = || (node in nodes = node.get());
+    let derived = Source::new(snapshot());
+    for (_, node) in nodes {
+        node.sub(|| derived.update(snapshot()));
+    }
+    derived
+}
 
-// a homogeneous map, for contrast
-fun all_true<T: (..: Into<bool>)>(items: T): (_ in T: bool) {
-    (item in items = item.into())
+// a homogeneous map, for contrast — element bound gives each item its method
+fun labels<T: (..: Display)>(items: T): (_ in T: str) {
+    (item in items = item.to_string())
 }
 ```
 

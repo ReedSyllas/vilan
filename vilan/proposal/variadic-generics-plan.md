@@ -71,8 +71,14 @@ the type relation.
 - **Inverted inference.** In the call-binding path / `reconcile_type`: unifying a
   concrete argument tuple against a `Type::Mapped` parameter binds the binder
   element-wise (single hole), yielding `T`. Reuse the `(Tuple, Tuple)` machinery.
+  - *Concrete-constructor template* (`Source<U>`): structural unify each slot.
+  - *Trait template* (`Readable<U>`, the form `combine` needs): invert by impl
+    resolution — find `U` such that the slot type implements the trait. Sound
+    only because the trait has no blanket impl (one impl per type); reject /
+    diagnose an ambiguous (multi-impl) inversion rather than guess.
 - Tests: forward expansion (`(U in (i32,str): Source<U>)` → `(Source<i32>,
-  Source<str>)`), and inversion (`combine((a,b,c))` binds `T = (A,B,C)`).
+  Source<str>)`), inversion (`combine((a,b,c))` binds `T = (A,B,C)`), and a
+  trait-template inversion against two distinct implementors.
 
 ## Stage 3 — Tuple comprehensions + `for`
 
@@ -87,15 +93,30 @@ the type relation.
   expressions; the `for` emits N statements with `x` bound to each `xs[i]`.
 - Tests: a comprehension round-trips; a `for` over a 3-tuple emits 3 bodies.
 
-## Stage 4 — `combine` in `std::reactive`
+## Stage 4 — `Readable` bridge + `combine` in `std::reactive`
 
-- Define `combine<T: (2..)>(sources: (U in T: Source<U>)): Source<T>` with the
-  keyof-free body (snapshot recompute) from the proposal.
-- **Resolve the Source/Signal input question** (its own sub-commit): `combine`
-  takes `Source<U>`; decide whether a `Signal` coerces, exposes `.node`, or gains
-  `to_source()`. Update `todos.vl` to `combine((items, filter))`.
+- **`Readable<T>` trait** (its own sub-commit) — the read interface a `Source` and
+  a `Signal` both satisfy, accepted as `combine`'s slot type. Chosen over
+  `Into<Source<U>>` because the reflexive blanket `Into` impl breaks
+  target-directed dispatch today (verified: `let x: i32 = w.into()` resolves to the
+  identity impl); a bespoke trait has one impl per type, so per-element inversion
+  is unambiguous (see proposal). Revisit `Into` only if blanket-impl dispatch is
+  fixed ([[analyzer-stabilization]]).
+
+  ```vilan
+  trait Readable<T> { fun as_source(self): Source<T>; }
+  impl Source<type T> with Readable<T> { fun as_source(self): Source<T> { self } }
+  impl Signal<type T> with Readable<T> { fun as_source(self): Source<T> { self.node } }
+  ```
+
+- **`combine`** — `combine<T: (2..)>(sources: (U in T: Readable<U>)): Source<T>`,
+  keyof-free body (convert each slot via `as_source`, snapshot-recompute) from the
+  proposal. Depends on Stage 2's trait-template inversion.
+- Update `todos.vl` to `combine((items, filter))` (the `Signal`s now satisfy
+  `Readable`).
 - Tests: a 2- and 3-input `combine` runtime test (assert recompute on each input
-  change); `reactive-ui/todos.vl` builds and runs.
+  change), with a mix of `Signal` and `Source` inputs; `reactive-ui/todos.vl`
+  builds and runs.
 - Update `reactive-ui/README.md` (drop the "not yet built" caveat).
 
 ---
