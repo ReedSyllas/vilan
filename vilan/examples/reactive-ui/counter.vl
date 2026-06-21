@@ -23,3 +23,18 @@ fun counter(): View {
 		.child(view("button").text("−").on("click", || count.set_with(|n| n - 1)))
 		.child(view("button").text("+").on("click", || count.set_with(|n| n + 1)))
 }
+
+fun complex_counter(): View {
+	let count = Signal::new(0);
+	let double = count.derive(|n| n * 2);
+	
+	view("section")
+		.class("complex-counter")
+		.child(view("h2").text("Complex Counter"))
+		.child(view("p").bind_text(count.derive(|n| i"Count: {n}")))
+		.child(view("button").text("−").on("click", || count.set_with(|n| n - 1)))
+		.child(view("button").text("+").on("click", || count.set_with(|n| n + 1)))
+		.child(view("p").bind_text(double.derive(|n| i"Double: {n}")))
+		.child(view("button").text("−").on("click", || count.set(double.get() - 1)))
+		.child(view("button").text("+").on("click", || count.set(double.get() + 1)))
+}
