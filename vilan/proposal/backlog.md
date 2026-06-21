@@ -31,7 +31,12 @@ dependencies. Unordered within a section.
    - **Formal question:** `borrows self` subjects the result to second-class-view rules (no escape,
      eventually no-cross-`await`). `Shared` is a deliberately first-class, ref-counted escape hatch,
      so some of those restrictions may be *false* for it. Decide whether `Shared`'s view is exempt.
-   - **Decision needed** before building (see "Open decisions" at the bottom).
+   - **Decision (2026-06-21):** keep `write(): T` for now. The hoped-for shortcut — *forbid binding a
+     view to a local (`mut a = &mut x`) so the `*` deref operator can be removed, leaving clean call
+     sites* — does not hold: `*` is independently load-bearing for `&mut` **parameters**
+     (`fun bump(slot: &mut i32) { *slot = *slot + 1 }`, which cannot be forbidden), for `for e in
+     &mut` and `Option<&mut T>` captures, and for `*`-reads. The clean route is **transparent
+     references** (item C5), a memory-model change; revisit A1 once that lands (or is rejected).
 
 2. **Ownership & disposal via `context`** (M) — *correctness bug, not just a leak.* `sub()` returns
    a `Subscription` that every caller drops, so observers fire forever. For `bind_each` this is a
@@ -101,6 +106,15 @@ dependencies. Unordered within a section.
 3. **No-view-across-`await`** (M) — reject a second-class view held across a suspension point.
    Interacts with A1's `borrows`-exemption question for `Shared`.
 4. **Deterministic destruction** (L) — scope-end destructors / `Drop`-equivalent.
+5. **Transparent references — eliminate the `*` deref operator** (L) — *the lever for A1.* Adopt the
+   C++-reference model: a `&`/`&mut` view auto-derefs on read and writes through on assignment,
+   uniformly across parameters, captures, and bindings, and cannot be rebound. Deletes `*` from the
+   language (`*slot` → `slot`), so view-returning calls (`w.slot()`, `Shared::write`) read cleanly at
+   the use site with no special-casing. **Why it's a memory-model change, not syntax sugar:** it
+   flips `let v = w.slot()` from *alias* to *value copy* (binding-as-view then needs an explicit
+   `let v: &mut T = …`), and assignment to a view binding must mean write-through rather than rebind —
+   a real semantic shift with its own re-borrow story. Needs a proposal + formal definition + a full
+   re-test of the view corpus (`view-*.vl`, `borrows*.vl`, `for-*.vl`, `option-view.vl`).
 
 ---
 
@@ -194,7 +208,7 @@ dependencies. Unordered within a section.
 
 ## Open decisions (block the items above)
 
-- **A1 (`Shared.write`):** three mutually-exclusive routes —
-  (i) full view + auto-deref (B2) — cleanest, largest, makes call sites unchanged;
-  (ii) full view, explicit `*`/`(*…)` at every call site — correct, self-contained, verbose;
-  (iii) keep `: T`, documented as a deliberate place-projection — smallest, least honest.
+- **A1 (`Shared.write`):** *resolved 2026-06-21* — keep `write(): T` until **transparent references**
+  (C5) is decided; that is the route that gives a type-honest `&mut T borrows self` with clean call
+  sites and no special-casing. (The two alternatives — auto-deref through view calls (B2) keeping
+  `*`, or a full view with explicit `*` at every call site — are superseded by C5 if it lands.)
