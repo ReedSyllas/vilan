@@ -345,6 +345,43 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn parameter_tuple_destructuring() {
+    // A tuple binder in parameter position — both a function parameter
+    // (`fun f((a, b): T)`) and a closure parameter (`|(a, b)|`) — destructures,
+    // typing each binding from the matched tuple element.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun sum_pair((a, b): (i32, i32)): i32 { a + b }
+        fun apply(pair: (i32, str), f: |(i32, str)| str): str { f(pair) }
+        fun main() {
+            print(sum_pair((3, 4)).to_string());
+            print(apply((7, "x"), |(n, label)| i"{n.to_string()}{label}"));
+        }
+        "#,
+        "7\n7x\n",
+    );
+}
+
+#[test]
+fn nested_parameter_tuple_destructuring() {
+    // A nested tuple binder in a closure parameter, dispatched through a generic
+    // reactive `derive` so the parameter type is inferred, not annotated.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun main() {
+            let f = |(a, (b, c)): (i32, (i32, str))| i"{a.to_string()} {b.to_string()} {c}";
+            print(f((1, (2, "z"))));
+        }
+        "#,
+        "1 2 z\n",
+    );
+}
+
+#[test]
 fn let_tuple_destructuring() {
     // `let (a, b, c) = tuple` destructures, typing each binding from the tuple's
     // element types (so a method call on a binding dispatches concretely).

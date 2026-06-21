@@ -75,7 +75,8 @@ pub struct Func<'src> {
 /// A parsed parameter: name, optional declared type, view convention, and the
 /// span of the name (for go-to-definition / hover in the language server).
 pub type Parameter<'src> = (
-    &'src str,
+    // The binder: a plain name (`x`) or a tuple destructure (`(a, b)`).
+    Pattern<'src>,
     Option<Box<Spanned<Node<'src>>>>,
     Convention,
     Span,

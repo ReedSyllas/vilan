@@ -280,9 +280,24 @@ where
     )))
     .boxed();
 
-    let closure = identifier
-        .labelled("parameter name")
-        .map_with(|name, e| (name, e.span()))
+    // A binder in `let`/parameter position: a plain name, or a tuple of binders
+    // (irrefutable destructuring — `let (a, b) = pair`, `|(a, b)|`). Distinct from
+    // the `match` pattern grammar (no variants/literals/guards). Nests recursively.
+    let binder = recursive(|binder| {
+        let tuple = binder
+            .separated_by(just(Token::Ctrl(',')))
+            .at_least(2)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .map_with(|patterns, e| (Pattern::Tuple(patterns), e.span()));
+        let name = identifier.map_with(|name, e| (Pattern::Binding(name, false), e.span()));
+        choice((tuple, name))
+    });
+
+    let closure = binder
+        .clone()
+        .labelled("parameter")
         .then(
             just(Token::Op(":"))
                 .ignore_then(type_.clone().map(|x| Box::new(x)))
@@ -290,8 +305,8 @@ where
                 .or_not(),
         )
         // Closure parameters carry no view convention yet.
-        .map(|((name, name_span), parameter_type)| {
-            (name, parameter_type, Convention::Bare, name_span)
+        .map(|((pattern, pattern_span), parameter_type)| {
+            (pattern, parameter_type, Convention::Bare, pattern_span)
         })
         .labelled("parameter")
         .separated_by(just(Token::Ctrl(',')))
@@ -421,18 +436,6 @@ where
     // A binder in `let`/parameter position: a plain name, or a tuple of binders
     // (irrefutable destructuring — `let (a, b) = pair`). Distinct from the `match`
     // pattern grammar (no variants, literals, or guards). Nests via recursion.
-    let binder = recursive(|binder| {
-        let tuple = binder
-            .separated_by(just(Token::Ctrl(',')))
-            .at_least(2)
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-            .map_with(|patterns, e| (Pattern::Tuple(patterns), e.span()));
-        let name = identifier.map_with(|name, e| (Pattern::Binding(name, false), e.span()));
-        choice((tuple, name))
-    });
-
     let let_ = choice((just(Token::Let).to(false), just(Token::Mut).to(true)))
         .then(binder.clone())
         .then(
@@ -723,18 +726,14 @@ where
                     }),
             ))
             .or_not()
-            .then(
-                identifier
-                    .labelled("parameter name")
-                    .map_with(|name, e| (name, e.span())),
-            )
+            .then(binder.clone().labelled("parameter name"))
             .then(
                 just(Token::Op(":"))
                     .ignore_then(type_.clone().map(|x| Box::new(x)))
                     .labelled("parameter type")
                     .or_not(),
             )
-            .map(|((prefix, (name, name_span)), parameter_type)| {
+            .map(|((prefix, (pattern, pattern_span)), parameter_type)| {
                 // A prefix wins; otherwise a `&T` / `&mut T` type gives the
                 // convention; otherwise bare.
                 let convention = prefix.unwrap_or_else(|| {
@@ -744,7 +743,7 @@ where
                         _ => Convention::Bare,
                     }
                 });
-                (name, parameter_type, convention, name_span)
+                (pattern, parameter_type, convention, pattern_span)
             })
             .labelled("parameter")
             .separated_by(just(Token::Ctrl(',')))

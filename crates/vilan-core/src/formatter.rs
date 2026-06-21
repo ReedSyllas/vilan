@@ -637,7 +637,7 @@ impl<'src> Printer<'src> {
     /// Prints the comma-separated parameters themselves, without the surrounding
     /// delimiters (shared by function `(…)` and closure `|…|` lists).
     fn print_parameters_inner(&mut self, parameters: &[crate::node::Parameter<'src>]) {
-        for (index, (name, parameter_type, convention, _)) in parameters.iter().enumerate() {
+        for (index, (binder, parameter_type, convention, _)) in parameters.iter().enumerate() {
             if index > 0 {
                 self.out.push_str(", ");
             }
@@ -651,7 +651,7 @@ impl<'src> Printer<'src> {
                 Convention::RefMut if !type_is_reference => self.out.push_str("&mut "),
                 _ => {}
             }
-            self.out.push_str(name);
+            self.print_binder(binder);
             if let Some(parameter_type) = parameter_type {
                 self.out.push_str(": ");
                 self.print_type(&parameter_type.0);
@@ -1108,6 +1108,27 @@ impl<'src> Printer<'src> {
     }
 
     /// Prints a match pattern.
+    /// Prints a binder in `let`/parameter position: a bare name (no `let `
+    /// keyword) or a tuple of binders (`(a, b)`). Distinct from a match pattern.
+    fn print_binder(&mut self, binder: &Pattern<'src>) {
+        match binder {
+            Pattern::Binding(name, _) => self.out.push_str(name),
+            Pattern::Tuple(elements) => {
+                self.out.push('(');
+                for (index, (element, _)) in elements.iter().enumerate() {
+                    if index > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.print_binder(element);
+                }
+                self.out.push(')');
+            }
+            // A binder is only ever a name or a tuple of names; other shapes
+            // can't reach here from the parser.
+            other => self.print_pattern(other),
+        }
+    }
+
     fn print_pattern(&mut self, pattern: &Pattern<'src>) {
         match pattern {
             Pattern::Wildcard => self.out.push('_'),

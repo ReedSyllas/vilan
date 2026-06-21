@@ -824,6 +824,11 @@ impl<'src> Transformer<'src> {
                     })
                     .collect::<Vec<_>>();
                 let mut body = Vec::new();
+                // Tuple-parameter destructures run before the body proper.
+                let parameter_destructures = closure.parameter_destructures.clone();
+                for destructure_id in parameter_destructures {
+                    self.walk_entity(destructure_id, &mut body);
+                }
                 let value = self.walk_entity(closure.return_, &mut body);
                 if let Some(value) = value {
                     body.push(js::Node::Return(Box::new(value)));

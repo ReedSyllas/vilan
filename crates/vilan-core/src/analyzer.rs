@@ -288,6 +288,11 @@ struct DestructureConstraint<'src> {
     type_id: Option<TypeId>,
     scope_id: Id,
     pattern: WalkPattern<'src>,
+    // A parameter binder's value is an `Unknown`-typed parameter until later
+    // inference fills it (a closure passed where `|(A, B)| ..` is expected), so
+    // defer while it is still `Unknown` rather than typing bindings as unknown.
+    // A `let`'s value is ready immediately, so its `Unknown` is a real error.
+    defer_until_known: bool,
 }
 
 // An `is` pattern test awaiting subject and pattern resolution. Its captures are
@@ -352,6 +357,8 @@ pub struct Module<'src> {
 pub struct Closure {
     pub id: Id,
     pub parameters: Vec<Id>,
+    // Destructures for tuple parameters (`|(a, b)| ..`), run before the body.
+    pub parameter_destructures: Vec<Id>,
     pub return_: Id,
 }
 
@@ -3077,7 +3084,7 @@ impl<'src> Analyzer<'src> {
             // `build`. The expression itself types as `bool`.
             Node::Is(subject, pattern) => {
                 let subject_id = self.walk_expr_node(subject, scope_id);
-                let walk_pattern = self.walk_pattern(pattern, scope_id);
+                let walk_pattern = self.walk_pattern(&pattern.0, &pattern.1, scope_id, true);
                 self.constraints.push(Constraint::Is(PreppedIs {
                     id,
                     subject_id,
@@ -3151,48 +3158,25 @@ impl<'src> Analyzer<'src> {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
-                let mut body_scope = self.create_scope(Some(scope_id));
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                // A tuple parameter (`fun f((a, b): T)`) desugars to a synthetic
+                // positional parameter plus a destructure run before the body.
+                let mut parameter_destructures = Vec::new();
                 let parameters = function
                     .parameters
                     .0
                     .iter()
-                    .map(|x| {
-                        let parameter_id = self.new_entity_id();
-                        let parameter = Parameter {
-                            id: parameter_id,
-                            function_id: id,
-                            name: x.0,
-                            type_id: match &x.1 {
-                                Some(type_node) => self.walk_type_node(type_node, body_scope.id),
-                                // A bare `self` parameter (incl. `&self` /
-                                // `&mut self`) takes the enclosing `Self` type.
-                                None if x.0 == "self" => self
-                                    .try_get_expr_id_by_name("Self", scope_id)
-                                    .and_then(|self_id| {
-                                        self.expr_id_to_type_id_map.get(&self_id).copied()
-                                    })
-                                    .unwrap_or_else(|| Type::Unknown.get_type_id(self)),
-                                None => Type::Unknown.get_type_id(self),
-                            },
-                            convention: x.2,
-                        };
-                        // `_` eats the argument: it stays positional but is
-                        // never referenceable.
-                        if parameter.name != "_" {
-                            body_scope
-                                .name_to_id_map
-                                .insert(parameter.name, parameter_id);
-                        }
-                        self.parameters.insert(parameter_id, parameter);
-                        self.expr_id_to_expr_map
-                            .insert(parameter_id, Expr::Parameter(parameter_id));
-                        // The name span makes the parameter go-to-definable and
-                        // hoverable, and a referenceable cursor target.
-                        self.span_map.insert(parameter_id, &x.3);
-                        parameter_id
+                    .map(|parameter| {
+                        self.walk_parameter(
+                            parameter,
+                            id,
+                            body_scope_id,
+                            body_scope_id,
+                            &mut parameter_destructures,
+                        )
                     })
                     .collect::<Vec<_>>();
-                let body_scope_id = self.push_scope(body_scope);
                 let generic_parameter_constraint_ids =
                     self.register_generic_parameters(&function.generic_parameters, body_scope_id);
                 // The return type is resolved in the body scope so it can refer
@@ -3235,7 +3219,9 @@ impl<'src> Analyzer<'src> {
                 } else {
                     let (ids, expr_id) = match &function.body {
                         Some(body) => {
-                            let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
+                            // Parameter destructures run first, before the body.
+                            let mut ids = parameter_destructures;
+                            ids.extend(self.walk_expr_nodes(&body.0.0, body_scope_id));
                             let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
                             (ids, expr_id)
                         }
@@ -3370,7 +3356,7 @@ impl<'src> Analyzer<'src> {
                 let value_id = value
                     .as_ref()
                     .map(|value| self.walk_expr_node(value, scope_id));
-                let walk_pattern = self.walk_pattern(pattern, scope_id);
+                let walk_pattern = self.walk_pattern(&pattern.0, &pattern.1, scope_id, false);
                 if *mutable {
                     self.set_pattern_bindings_mutable(&walk_pattern);
                 }
@@ -3384,6 +3370,7 @@ impl<'src> Analyzer<'src> {
                                 type_id,
                                 scope_id,
                                 pattern: walk_pattern,
+                                defer_until_known: false,
                             }));
                         None
                     }
@@ -3548,7 +3535,9 @@ impl<'src> Analyzer<'src> {
                     let leg_scope_id = self.create_owned_scope(Some(scope_id)).id;
                     let walked_patterns = patterns
                         .iter()
-                        .map(|pattern| self.walk_pattern(pattern, leg_scope_id))
+                        .map(|pattern| {
+                            self.walk_pattern(&pattern.0, &pattern.1, leg_scope_id, true)
+                        })
                         .collect();
                     let guard_id = guard
                         .as_ref()
@@ -3711,47 +3700,32 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Trait(id))
             }
             Node::Closure(closure) => {
-                let mut body_scope = self.create_scope(Some(scope_id));
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                // A tuple parameter (`|(a, b)| ..`) desugars to a synthetic
+                // positional parameter plus a destructure run before the body.
+                let mut parameter_destructures = Vec::new();
                 let parameters = closure
                     .parameters
                     .0
                     .iter()
-                    .map(|x| {
-                        let parameter_id = self.new_entity_id();
-                        let parameter = Parameter {
-                            id: parameter_id,
-                            function_id: id,
-                            name: x.0,
-                            type_id: x
-                                .1
-                                .as_ref()
-                                .map(|x| self.walk_type_node(x, scope_id))
-                                .unwrap_or(Type::Unknown.get_type_id(self)),
-                            convention: x.2,
-                        };
-                        // `_` eats the argument: it stays positional but is
-                        // never referenceable.
-                        if parameter.name != "_" {
-                            body_scope
-                                .name_to_id_map
-                                .insert(parameter.name, parameter_id);
-                        }
-                        self.parameters.insert(parameter_id, parameter);
-                        self.expr_id_to_expr_map
-                            .insert(parameter_id, Expr::Parameter(parameter_id));
-                        // The name span makes the parameter go-to-definable and
-                        // hoverable, and a referenceable cursor target.
-                        self.span_map.insert(parameter_id, &x.3);
-                        parameter_id
+                    .map(|parameter| {
+                        self.walk_parameter(
+                            parameter,
+                            id,
+                            body_scope_id,
+                            scope_id,
+                            &mut parameter_destructures,
+                        )
                     })
                     .collect::<Vec<_>>();
-                let body_scope_id = self.push_scope(body_scope);
                 let expr_id = self.walk_expr_node(&closure.return_value, body_scope_id);
                 self.closures.insert(
                     id,
                     Closure {
                         id,
                         parameters,
+                        parameter_destructures,
                         return_: expr_id,
                     },
                 );
@@ -3771,6 +3745,7 @@ impl<'src> Analyzer<'src> {
                     Closure {
                         id: closure_id,
                         parameters: Vec::new(),
+                        parameter_destructures: Vec::new(),
                         return_: return_id,
                     },
                 );
@@ -3843,24 +3818,107 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Walks one function/closure parameter into a positional parameter entity.
+    /// A plain binder (`x`, `self`) becomes a named, referenceable parameter; a
+    /// tuple binder (`(a, b)`) becomes a synthetic, non-referenceable positional
+    /// parameter plus a `Destructure` prelude (collected into `destructures`)
+    /// that binds its elements in the body scope — exactly like a destructuring
+    /// `let` whose value is that parameter.
+    fn walk_parameter(
+        &mut self,
+        parameter: &'src crate::node::Parameter<'src>,
+        function_id: Id,
+        body_scope_id: Id,
+        type_scope_id: Id,
+        destructures: &mut Vec<Id>,
+    ) -> Id {
+        let (pattern, parameter_type, convention, span) = parameter;
+        let parameter_id = self.new_entity_id();
+        let type_id = match (pattern, parameter_type) {
+            (_, Some(type_node)) => self.walk_type_node(type_node, type_scope_id),
+            // A bare `self` (incl. `&self` / `&mut self`) takes the enclosing
+            // `Self` type.
+            (Pattern::Binding(name, _), None) if *name == "self" => self
+                .try_get_expr_id_by_name("Self", type_scope_id)
+                .and_then(|self_id| self.expr_id_to_type_id_map.get(&self_id).copied())
+                .unwrap_or_else(|| Type::Unknown.get_type_id(self)),
+            (_, None) => Type::Unknown.get_type_id(self),
+        };
+        // A tuple binder is not referenceable by name; `_` keeps it positional.
+        let name = match pattern {
+            Pattern::Binding(name, _) => *name,
+            _ => "_",
+        };
+        // `_` eats the argument: it stays positional but is never referenceable.
+        if name != "_" {
+            let scope = self.mut_scope_for_scope_id(body_scope_id);
+            scope.name_to_id_map.insert(name, parameter_id);
+        }
+        self.parameters.insert(
+            parameter_id,
+            Parameter {
+                id: parameter_id,
+                function_id,
+                name,
+                type_id,
+                convention: *convention,
+            },
+        );
+        self.expr_id_to_expr_map
+            .insert(parameter_id, Expr::Parameter(parameter_id));
+        // The name span makes the parameter go-to-definable and hoverable, and a
+        // referenceable cursor target.
+        self.span_map.insert(parameter_id, span);
+        // A tuple binder: bind its elements from the synthetic parameter, lowering
+        // to a `Destructure` prelude run before the body. The destructure reads a
+        // *reference* to the parameter (an `Expr::Local`), since the parameter
+        // entity itself is a declaration that emits no value.
+        if !matches!(pattern, Pattern::Binding(..)) {
+            let walked = self.walk_pattern(pattern, span, body_scope_id, false);
+            let reference_id = self.new_entity_id();
+            self.expr_id_to_expr_map
+                .insert(reference_id, Expr::Local(parameter_id));
+            self.expr_id_to_scope_id_map
+                .insert(reference_id, body_scope_id);
+            self.span_map.insert(reference_id, span);
+            let destructure_id = self.new_entity_id();
+            self.span_map.insert(destructure_id, span);
+            self.expr_id_to_scope_id_map
+                .insert(destructure_id, body_scope_id);
+            self.constraints
+                .push(Constraint::Destructure(DestructureConstraint {
+                    id: destructure_id,
+                    value_id: reference_id,
+                    type_id: None,
+                    scope_id: body_scope_id,
+                    pattern: walked,
+                    defer_until_known: true,
+                }));
+            destructures.push(destructure_id);
+        }
+        parameter_id
+    }
+
     fn walk_pattern(
         &mut self,
-        pattern: &'src Spanned<Pattern<'src>>,
+        pattern: &'src Pattern<'src>,
+        span: &'src Span,
         scope_id: Id,
+        // `match` bindings spell `let`/`mut` before each capture; binder elements
+        // (a `let`/parameter tuple) don't. Drives the name-span keyword strip.
+        keyword_prefixed: bool,
     ) -> WalkPattern<'src> {
-        match &pattern.0 {
+        match pattern {
             Pattern::Wildcard => WalkPattern::Wildcard,
             Pattern::Binding(name, mutable) => {
                 let name = *name;
                 let capture_id = self.new_entity_id();
                 let unknown_type_id = Type::Unknown.get_type_id(self);
-                // The capture name follows `let ` (or `let mut `) in the pattern.
-                let header = pattern.1.into_range();
-                let prefix = if *mutable {
-                    "let mut ".len()
-                } else {
-                    "let ".len()
-                };
+                // In a `match` binding the span covers the `let `/`mut ` keyword
+                // before the capture, so strip it; a binder element (a `let`/parameter
+                // tuple) carries the bare identifier span and needs no adjustment.
+                let header = span.into_range();
+                let prefix = if keyword_prefixed { "let ".len() } else { 0 };
                 let name_span: Span =
                     (header.start + prefix..header.start + prefix + name.len()).into();
                 self.variables.insert(
@@ -3877,7 +3935,7 @@ impl<'src> Analyzer<'src> {
                 self.expr_id_to_expr_map
                     .insert(capture_id, Expr::Variable(capture_id));
                 self.expr_id_to_scope_id_map.insert(capture_id, scope_id);
-                self.span_map.insert(capture_id, &pattern.1);
+                self.span_map.insert(capture_id, span);
                 self.reference_count.entry(capture_id).or_insert(0);
                 // `_` eats the value: it matches but is never referenceable.
                 if name != "_" {
@@ -3888,20 +3946,34 @@ impl<'src> Analyzer<'src> {
             }
             Pattern::Variant(path, payload) => WalkPattern::Variant(
                 path.clone(),
-                pattern.1,
+                *span,
                 self.current_source_id,
                 payload.as_ref().map(|patterns| {
                     patterns
                         .iter()
-                        .map(|sub_pattern| self.walk_pattern(sub_pattern, scope_id))
+                        .map(|sub_pattern| {
+                            self.walk_pattern(
+                                &sub_pattern.0,
+                                &sub_pattern.1,
+                                scope_id,
+                                keyword_prefixed,
+                            )
+                        })
                         .collect()
                 }),
             ),
             Pattern::Tuple(patterns) => WalkPattern::Tuple(
-                pattern.1,
+                *span,
                 patterns
                     .iter()
-                    .map(|sub_pattern| self.walk_pattern(sub_pattern, scope_id))
+                    .map(|sub_pattern| {
+                        self.walk_pattern(
+                            &sub_pattern.0,
+                            &sub_pattern.1,
+                            scope_id,
+                            keyword_prefixed,
+                        )
+                    })
                     .collect(),
             ),
             Pattern::Literal(literal) => {
@@ -6164,7 +6236,9 @@ impl<'src> Analyzer<'src> {
     /// transformer lowers.
     fn resolve_destructure(&mut self, constraint: &DestructureConstraint<'src>) -> Resolution {
         let value_type = self.infer_type(constraint.value_id, &Type::Unknown, &HashMap::new());
-        if matches!(value_type, Type::Unresolved) {
+        let not_ready = matches!(value_type, Type::Unresolved)
+            || (constraint.defer_until_known && matches!(value_type, Type::Unknown));
+        if not_ready {
             return Resolution::Deferred;
         }
         let expected_type_id = constraint

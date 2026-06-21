@@ -1,0 +1,37 @@
+import std::display::Display;
+import std::option::Option::{ self, None, Some };
+import std::print;
+
+// Tuple destructuring as a first-class binder in every binding position: `let`,
+// function and closure parameters, and `match` patterns (bare and nested in a
+// variant). Each binding is typed from the matched tuple element, so a method
+// dispatches concretely.
+
+// A tuple binder in function-parameter position.
+fun swap((a, b): (i32, str)): (str, i32) {
+	(b, a)
+}
+
+fun main() {
+	// `let` destructuring, including nesting.
+	let (x, y) = (10, "hi");
+	let (n, (m, label)) = (1, (2, "z"));
+	print(i"{x.to_string()} {y}");
+	print(i"{n.to_string()} {m.to_string()} {label}");
+
+	// Parameter destructuring: a function and a closure.
+	let (p, q) = swap((5, "z"));
+	print(i"{p} {q.to_string()}");
+	let scale = |(value, factor): (i32, i32)| value * factor;
+	print(scale((6, 7)).to_string());
+
+	// `match` destructuring: a bare tuple binder and one inside a variant.
+	match (3, 4) {
+		let (a, b) => print((a + b).to_string()),
+	}
+	let opt: Option<(i32, str)> = Some((1, "ok"));
+	match opt {
+		Some(let (first, second)) => print(i"{first.to_string()} {second}"),
+		None => print("none"),
+	}
+}
