@@ -315,6 +315,10 @@ pub struct Implementation<'src> {
     /// resolved during the conformance check. Lets a method call on the subject
     /// fall back to a trait's inherited default methods.
     pub trait_ids: Vec<Id>,
+    /// Each provided trait's generic arguments, in the impl's own generic terms
+    /// (`impl Signal<type T> with Readable<T>` -> `[(readable_id, [T])]`). Used to
+    /// recover a parameterized trait's arguments for a concrete subject.
+    pub trait_args: Vec<(Id, Vec<TypeId>)>,
 }
 
 #[derive(Debug)]
@@ -323,6 +327,10 @@ pub struct Trait<'src> {
     pub name: &'src str,
     /// The span of the trait's name (for go-to-definition / rename).
     pub name_span: Span,
+    /// The trait's own generic parameters' constraint ids (`trait Get<T>` -> the
+    /// id of `T`), so a parameterized-trait method call can substitute them with
+    /// the trait's concrete arguments.
+    pub generic_parameter_constraint_ids: Vec<TypeId>,
     /// The members the trait declares, keyed by name. For a required method
     /// without a default body these point at signature-only functions.
     pub declarations: IndexMap<&'src str, Id>,
@@ -338,6 +346,8 @@ pub struct Trait<'src> {
 pub struct TraitImplCheck<'src> {
     pub subject_type_id: TypeId,
     pub trait_name: &'src str,
+    // The trait's generic arguments (`with Readable<T>` -> `[T]`), in impl terms.
+    pub trait_arguments: Vec<TypeId>,
     pub scope_id: Id,
     pub declarations: IndexMap<&'src str, Id>,
     pub span: Span,
@@ -3639,14 +3649,25 @@ impl<'src> Analyzer<'src> {
                 // conformance check per trait to run once declarations are known.
                 // The check also resolves the trait id back onto the impl.
                 for trait_ in traits {
-                    let trait_name = match &trait_.0 {
-                        Node::Accessor(name) | Node::AccessorWithGenerics(name, _) => Some(*name),
-                        _ => None,
+                    let (trait_name, trait_arguments) = match &trait_.0 {
+                        Node::Accessor(name) => (Some(*name), Vec::new()),
+                        // `with Readable<T>` — capture the trait's arguments in the
+                        // impl's generic terms (resolved in the impl body scope).
+                        Node::AccessorWithGenerics(name, generic_arguments) => {
+                            let argument_type_ids = generic_arguments
+                                .0
+                                .iter()
+                                .map(|argument| self.walk_type_node(argument, body_scope_id))
+                                .collect();
+                            (Some(*name), argument_type_ids)
+                        }
+                        _ => (None, Vec::new()),
                     };
                     if let Some(trait_name) = trait_name {
                         self.prepped_trait_impls.push(TraitImplCheck {
                             subject_type_id: subject,
                             trait_name,
+                            trait_arguments,
                             scope_id,
                             declarations: declarations.clone(),
                             span: trait_.1,
@@ -3659,6 +3680,7 @@ impl<'src> Analyzer<'src> {
                     subject,
                     declarations,
                     trait_ids: Vec::new(),
+                    trait_args: Vec::new(),
                 });
 
                 Some(Expr::Impl(id))
@@ -3671,7 +3693,8 @@ impl<'src> Analyzer<'src> {
                 self.reference_count.entry(id).or_insert(0);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
-                self.register_generic_parameters(generic_parameters, body_scope_id);
+                let generic_parameter_constraint_ids =
+                    self.register_generic_parameters(generic_parameters, body_scope_id);
                 // Inside a trait, `Self` is the trait itself (abstractly): a
                 // `self`-typed receiver in a default method resolves its method
                 // calls against this trait's own declarations.
@@ -3695,6 +3718,7 @@ impl<'src> Analyzer<'src> {
                         id,
                         name,
                         name_span,
+                        generic_parameter_constraint_ids,
                         declarations,
                         supertraits,
                     },
@@ -5232,6 +5256,42 @@ impl<'src> Analyzer<'src> {
         ))
     }
 
+    /// The generic arguments a concrete type provides for a trait it implements
+    /// (`Source<i32>` for `Readable` -> `[i32]`): match the type against the
+    /// providing impl's subject to bind the impl's generics, then substitute the
+    /// impl's recorded trait arguments through that binding.
+    fn trait_args_for(&mut self, concrete: &Type, trait_id: Id) -> Option<Vec<TypeId>> {
+        let candidates: Vec<(TypeId, Vec<TypeId>)> = self
+            .implementations
+            .iter()
+            .filter_map(|implementation| {
+                implementation
+                    .trait_args
+                    .iter()
+                    .find(|(provided, _)| *provided == trait_id)
+                    .map(|(_, arguments)| (implementation.subject, arguments.clone()))
+            })
+            .collect();
+        for (subject_id, arguments) in candidates {
+            let subject = subject_id.get_type(self);
+            if let Some((_, bindings)) =
+                self.reconcile_type(concrete, &subject, &SubstitutionContext::new())
+            {
+                let context: SubstitutionContext = bindings.into_iter().collect();
+                let resolved = arguments
+                    .iter()
+                    .map(|argument| {
+                        let argument_type = argument.get_type(self);
+                        self.substitute_type(&argument_type, &context)
+                            .get_type_id(self)
+                    })
+                    .collect();
+                return Some(resolved);
+            }
+        }
+        None
+    }
+
     /// Expands a mapped tuple type whose source is concrete (`(U in (A,B): F<U>)`
     /// -> `(F<A>, F<B>)`); a mapped type over a still-abstract source, or any
     /// other type, is returned unchanged.
@@ -5326,12 +5386,31 @@ impl<'src> Analyzer<'src> {
             // implements that trait — e.g. a `Counter` (which `impl`s `Combine`)
             // passed where a `Combine` is expected, including a `Self`-defaulted
             // generic that resolved to the trait.
-            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id, _)) => {
-                if self.type_implements_trait(a, *trait_id) {
-                    (a.clone(), Vec::new())
-                } else {
+            (Type::Struct(..) | Type::Enum(..), Type::Trait(trait_id, template_arguments)) => {
+                if !self.type_implements_trait(a, *trait_id) {
                     return None;
                 }
+                // A parameterized trait (`Readable<U>`) binds its arguments from the
+                // concrete impl: recover the type's trait arguments and reconcile
+                // them against the template, so `Signal<A>` against `Readable<U>`
+                // binds `U = A`.
+                let mut bindings = Vec::new();
+                if !template_arguments.is_empty() {
+                    if let Some(concrete_arguments) = self.trait_args_for(a, *trait_id) {
+                        for (template_argument, concrete_argument) in
+                            template_arguments.clone().iter().zip(concrete_arguments)
+                        {
+                            let template = template_argument.get_type(self);
+                            let concrete = concrete_argument.get_type(self);
+                            if let Some((_, mut argument_bindings)) =
+                                self.reconcile_type(&concrete, &template, substitution_context)
+                            {
+                                bindings.append(&mut argument_bindings);
+                            }
+                        }
+                    }
+                }
+                (a.clone(), bindings)
             }
             (Type::Tuple(l_items), Type::Tuple(r_items)) => {
                 let mut result_items = Vec::with_capacity(l_items.len());
@@ -6199,14 +6278,31 @@ impl<'src> Analyzer<'src> {
                     }
                 }
             }
-            Type::Trait(trait_id, _) => {
-                let member = self.method_member_in_trait(*trait_id, member_name);
+            Type::Trait(trait_id, trait_arguments) => {
+                let trait_id = *trait_id;
+                let trait_arguments = trait_arguments.clone();
+                let member = self.method_member_in_trait(trait_id, member_name);
                 // Inside a trait default body `self`/`Self` is `Type::Trait`; record
                 // the call so codegen re-dispatches it to whatever concrete type the
                 // default is specialized for.
                 if member.is_some() {
                     self.generic_dispatch
                         .insert(id, GenericDispatch::OnType(None, member_name));
+                    // A parameterized trait substitutes its generic parameters with
+                    // the concrete arguments, so the method's signature (`got(): T`)
+                    // types against them (`Get<i32>::got` -> `i32`).
+                    if !trait_arguments.is_empty() {
+                        let parameter_ids = self
+                            .traits
+                            .get(&trait_id)
+                            .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
+                            .unwrap_or_default();
+                        let substitution: SubstitutionContext =
+                            parameter_ids.into_iter().zip(trait_arguments).collect();
+                        if !substitution.is_empty() {
+                            self.method_call_substitution.insert(id, substitution);
+                        }
+                    }
                 }
                 found(member)
             }
@@ -7343,6 +7439,9 @@ impl<'src> Analyzer<'src> {
             // fall back to the trait's inherited default methods.
             if let Some(implementation) = self.implementations.get_mut(check.implementation_index) {
                 implementation.trait_ids.push(trait_id);
+                implementation
+                    .trait_args
+                    .push((trait_id, check.trait_arguments.clone()));
             }
             // Record the `with <trait>` reference for go-to-definition / hover.
             let trait_type_id = Type::Trait(trait_id, Vec::new()).get_type_id(self);
