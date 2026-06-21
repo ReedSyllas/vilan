@@ -1,6 +1,6 @@
 use crate::node::{
     BinaryOp, Closure, Convention, ExternBinding, Func, GenericArguments, GenericParameter, If,
-    ImportBranch, Node, NodeIfBranch, NodeList, Pattern,
+    ImportBranch, Node, NodeIfBranch, NodeList, Pattern, TupleBound,
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
@@ -107,8 +107,31 @@ where
     .labelled("value")
     .map_with(|x, e| (x, e.span()));
 
+    // A tuple-arity bound `(lo?..hi? : Element?)`. `..` is two `.` control tokens
+    // (there is no dedicated range token); the optional `: Element` is a per-element
+    // trait bound. Used in generic-bound position (`T: (2..)`, `T: (..: Display)`).
+    let integer = select! { Token::Number(whole, _, _) => whole };
+    let dot_dot = just(Token::Ctrl('.')).then(just(Token::Ctrl('.')));
+    let tuple_bound = integer
+        .or_not()
+        .then_ignore(dot_dot)
+        .then(integer.or_not())
+        .then(
+            just(Token::Op(":"))
+                .ignore_then(type_.clone().map(Box::new))
+                .or_not(),
+        )
+        .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+        .map_with(|((lo, hi), element), e| TupleBound {
+            lo: lo.and_then(|whole: &str| whole.parse::<u32>().ok()),
+            hi: hi.and_then(|whole: &str| whole.parse::<u32>().ok()),
+            element,
+            span: e.span(),
+        })
+        .boxed();
+
     // A generic parameter: an optional `type` binder marker, a name, optional
-    // `: A + B` bounds, and an optional `= Default`.
+    // `: A + B` (or a tuple bound) bounds, and an optional `= Default`.
     let generic_parameter = just(Token::Type)
         .or_not()
         .then(
@@ -118,13 +141,17 @@ where
         )
         .then(
             just(Token::Op(":"))
-                .ignore_then(
+                .ignore_then(choice((
+                    // A tuple bound `(lo?..hi? : Element?)` — distinguished from a
+                    // tuple type by the `..`. Produces no trait bounds.
+                    tuple_bound.clone().map(|bound| (Vec::new(), Some(bound))),
                     type_
                         .clone()
                         .separated_by(just(Token::Op("+")))
                         .at_least(1)
-                        .collect::<Vec<_>>(),
-                )
+                        .collect::<Vec<_>>()
+                        .map(|bounds| (bounds, None)),
+                )))
                 .labelled("generic parameter bounds")
                 .or_not(),
         )
@@ -134,15 +161,17 @@ where
                 .labelled("generic parameter default")
                 .or_not(),
         )
-        .map(
-            |(((type_keyword, (name, name_span)), bounds), default)| GenericParameter {
+        .map(|(((type_keyword, (name, name_span)), bounds), default)| {
+            let (bounds, tuple_bound) = bounds.unwrap_or_default();
+            GenericParameter {
                 name,
                 name_span,
                 is_type: type_keyword.is_some(),
-                bounds: bounds.unwrap_or_default(),
+                bounds,
+                tuple_bound,
                 default,
-            },
-        );
+            }
+        });
 
     let generic_parameters = generic_parameter
         .labelled("generic parameter")

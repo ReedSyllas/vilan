@@ -11,8 +11,23 @@ pub struct GenericParameter<'src> {
     pub is_type: bool,
     // Trait bounds: `T: A + B` collects `[A, B]`.
     pub bounds: Vec<Spanned<Node<'src>>>,
+    // A tuple bound: `T: (2..)` / `(..10)` / `(..: Display)` — the parameter is a
+    // tuple of the given arity, optionally with a per-element trait bound. Mutually
+    // exclusive with `bounds` (a tuple bound replaces the trait-bound list).
+    pub tuple_bound: Option<TupleBound<'src>>,
     // A default, e.g. the `Self` in `<B = Self>`.
     pub default: Option<Box<Spanned<Node<'src>>>>,
+}
+
+// A tuple-arity bound on a generic parameter (`T: (lo..hi : Element)`). Either
+// endpoint may be omitted (`(..)`, `(2..)`, `(..10)`); `element` is the optional
+// per-element trait bound (`(..: Display)`).
+#[derive(Debug)]
+pub struct TupleBound<'src> {
+    pub lo: Option<u32>,
+    pub hi: Option<u32>,
+    pub element: Option<Box<Spanned<Node<'src>>>>,
+    pub span: Span,
 }
 
 pub type GenericArguments<'src> = Spanned<Vec<Spanned<Node<'src>>>>;

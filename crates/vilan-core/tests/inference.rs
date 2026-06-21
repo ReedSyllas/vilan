@@ -345,6 +345,29 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn tuple_arity_bounds_parse() {
+    // The tuple-bound grammar — `(..)`, `(2..)`, `(..10)`, and a per-element
+    // bound `(2..: Display)` — parses and the parameter behaves as a generic
+    // tuple. (Arity isn't enforced, mirroring trait bounds, which aren't either.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun any<T: (..)>(x: T): T { x }
+        fun two<T: (2..)>(x: T): T { x }
+        fun small<T: (..10)>(x: T): T { x }
+        fun shown<T: (2..: Display)>(x: T): T { x }
+        fun main() {
+            let (a, b) = two((1, 2));
+            let (c, d, e) = any((3, 4, 5));
+            print(i"{a.to_string()} {b.to_string()} {c.to_string()} {d.to_string()} {e.to_string()}");
+        }
+        "#,
+        "1 2 3 4 5\n",
+    );
+}
+
+#[test]
 fn nested_tuple_flat_lowering() {
     // A nested tuple stores flat (`((1,2),3)` -> `[1,2,3]`), so a matching nested
     // pattern reads flat offsets and a sub-tuple capture reslices — all behaviorally
