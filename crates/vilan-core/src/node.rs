@@ -178,6 +178,14 @@ pub enum Node<'src> {
         source: Box<Spanned<Node<'src>>>,
         template: Box<Spanned<Node<'src>>>,
     },
+    // A tuple comprehension `(x in xs = e)`: build a tuple by evaluating the body
+    // `e` for each element of the source tuple `xs`, with the element bound as `x`.
+    TupleComprehension {
+        binder: &'src str,
+        binder_span: Span,
+        source: Box<Spanned<Node<'src>>>,
+        body: Box<Spanned<Node<'src>>>,
+    },
     // An enum declaration: name, generics, and the variants — each a name,
     // the types of its optional data, and an optional explicit discriminant
     // (`Less = -1`).

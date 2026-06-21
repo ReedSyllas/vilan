@@ -276,9 +276,33 @@ where
         .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
         .map_with(|x, e| (Node::Tuple(x), e.span()));
 
+    // A tuple comprehension `(x in xs => e)` — the `in` distinguishes it from a
+    // tuple; `=>` (a value mapping) distinguishes it from the mapped *type*
+    // `(U in T: F)` and avoids the `=` ambiguity with an assignment in `xs`.
+    let tuple_comprehension = just(Token::Ctrl('('))
+        .ignore_then(identifier.map_with(|binder, e| (binder, e.span())))
+        .then_ignore(just(Token::In))
+        .then(secondary_expression.clone())
+        .then_ignore(just(Token::Op("=>")))
+        .then(expression.clone())
+        .then_ignore(just(Token::Ctrl(')')))
+        .map_with(|(((binder, binder_span), source), body), e| {
+            (
+                Node::TupleComprehension {
+                    binder,
+                    binder_span,
+                    source: Box::new(source),
+                    body: Box::new(body),
+                },
+                e.span(),
+            )
+        })
+        .boxed();
+
     // 'Atoms' are expressions that contain no ambiguity
     let atom = choice((
         literal,
+        tuple_comprehension,
         local,
         local_type.clone(),
         list,

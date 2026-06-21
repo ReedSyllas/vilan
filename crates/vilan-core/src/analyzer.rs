@@ -30,6 +30,9 @@ pub enum Expr<'src> {
     Bool(bool),
     Call(Id),
     Closure(Id),
+    // A tuple comprehension `(x in xs = e)`: the element binder, the source tuple
+    // expr, and the body expr. Types as a mapped tuple and unrolls per element.
+    TupleComprehension(Id, Id, Id),
     // An enum declaration.
     Enum(Id),
     // A reference to one variant of an enum: the enum and the variant index.
@@ -438,6 +441,15 @@ enum Constraint<'src> {
     /// `subject is Pattern` — resolves the pattern (typing its captures) once the
     /// subject type is known; the expression itself is `bool`.
     Is(PreppedIs<'src>),
+    /// `(x in xs => e)` — once the source `xs` resolves to a mapped tuple, type the
+    /// binder `x` as its element so the body `e` checks; the expression is itself a
+    /// mapped tuple. Resolved before method calls so a method on `x` sees its type.
+    Comprehension {
+        id: Id,
+        binder_id: Id,
+        source_id: Id,
+        body_id: Id,
+    },
     /// `subject.field` — resolves to the named field's type once the subject
     /// resolves to a struct.
     FieldAccessor(FieldAccessorConstraint<'src>),
@@ -493,6 +505,9 @@ impl Constraint<'_> {
     fn priority(&self) -> u8 {
         match self {
             Constraint::StructInitializer(_) => 1,
+            // Before method calls (6), so a method on a comprehension binder sees
+            // the binder's element type.
+            Constraint::Comprehension { .. } => 1,
             Constraint::FieldAccessor(_) => 2,
             Constraint::Subscript { .. } => 3,
             Constraint::Is(_) => 4,
@@ -647,6 +662,9 @@ pub struct Analyzer<'src> {
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
+    // Comprehension binders whose element type isn't set yet — a method call on
+    // one defers (like an unknown closure parameter) rather than erroring.
+    untyped_comprehension_binders: HashSet<Id>,
     // `for x in iterable` expressions, as (for-each id, iterable id), resolved
     // after typing to decide native `for...of` vs the Iterator-protocol loop.
     prepped_for_each: Vec<(Id, Id)>,
@@ -803,6 +821,7 @@ impl<'src> Analyzer<'src> {
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
+            untyped_comprehension_binders: HashSet::new(),
             prepped_for_each: Vec::new(),
             for_each_next: HashMap::new(),
             for_each_views: HashMap::new(),
@@ -3725,6 +3744,54 @@ impl<'src> Analyzer<'src> {
                 );
                 Some(Expr::Trait(id))
             }
+            Node::TupleComprehension {
+                binder,
+                binder_span,
+                source,
+                body,
+            } => {
+                let source_id = self.walk_expr_node(source, scope_id);
+                // The element binder scopes to the body. Its type (the source's
+                // element type) is set when the comprehension resolves.
+                let body_scope = self.create_scope(Some(scope_id));
+                let body_scope_id = self.push_scope(body_scope);
+                let binder_id = self.new_entity_id();
+                let unknown_type_id = Type::Unknown.get_type_id(self);
+                self.variables.insert(
+                    binder_id,
+                    Variable {
+                        id: binder_id,
+                        name: binder,
+                        name_span: *binder_span,
+                        initial: None,
+                        type_id: unknown_type_id,
+                        mutable: false,
+                    },
+                );
+                self.expr_id_to_expr_map
+                    .insert(binder_id, Expr::Variable(binder_id));
+                self.expr_id_to_scope_id_map
+                    .insert(binder_id, body_scope_id);
+                self.span_map.insert(binder_id, binder_span);
+                self.reference_count.entry(binder_id).or_insert(0);
+                if *binder != "_" {
+                    self.mut_scope_for_scope_id(body_scope_id)
+                        .name_to_id_map
+                        .insert(binder, binder_id);
+                }
+                // A method on the binder defers until its type is set (below).
+                self.untyped_comprehension_binders.insert(binder_id);
+                let body_id = self.walk_expr_node(body, body_scope_id);
+                // The binder's type is set when the source resolves (before method
+                // calls); the constraint records the `Expr::TupleComprehension`.
+                self.constraints.push(Constraint::Comprehension {
+                    id,
+                    binder_id,
+                    source_id,
+                    body_id,
+                });
+                None
+            }
             Node::Closure(closure) => {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
@@ -4570,6 +4637,25 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Whether an expression refers to a comprehension binder whose element type
+    /// isn't set yet — following `Local`/`Variable` indirections to the binder.
+    fn is_untyped_comprehension_binder(&self, expr_id: Id) -> bool {
+        let mut id = expr_id;
+        loop {
+            if self.untyped_comprehension_binders.contains(&id) {
+                return true;
+            }
+            match self.expr_id_to_expr_map.get(&id) {
+                Some(Expr::Local(target_id)) | Some(Expr::Variable(target_id))
+                    if *target_id != id =>
+                {
+                    id = *target_id
+                }
+                _ => return false,
+            }
+        }
+    }
+
     /// The variant index a constructor subject refers to (`Some` -> 0), following
     /// `Local` indirections to the `EnumVariant` entity.
     fn enum_variant_index(&self, subject_id: Id) -> Option<usize> {
@@ -5149,6 +5235,40 @@ impl<'src> Analyzer<'src> {
                         )
                     }
                     _ => Type::Void,
+                }
+            }
+            Expr::TupleComprehension(binder_id, source_id, body_id) => {
+                let (binder_id, source_id, body_id) = (*binder_id, *source_id, *body_id);
+                // The source must be a mapped tuple `(U in T: F<U>)` (its element
+                // type is the template `F<U>`); type the binder as that element,
+                // then the result is `(U in T: <body type>)`.
+                let source_type = self.infer_type_inner(
+                    source_id,
+                    &Type::Unknown,
+                    substitution_context,
+                    exprs_seen,
+                );
+                match source_type {
+                    Type::Unresolved => Type::Unresolved,
+                    Type::Mapped(element_binder, element_source, element_template) => {
+                        if let Some(variable) = self.variables.get_mut(&binder_id) {
+                            variable.type_id = element_template;
+                        }
+                        let body_type = self.infer_type_inner(
+                            body_id,
+                            &Type::Unknown,
+                            substitution_context,
+                            exprs_seen,
+                        );
+                        match body_type {
+                            Type::Unresolved => Type::Unresolved,
+                            body_type => {
+                                let body_type_id = body_type.get_type_id(self);
+                                Type::Mapped(element_binder, element_source, body_type_id)
+                            }
+                        }
+                    }
+                    _ => Type::Unknown,
                 }
             }
             Expr::Closure(closure_id) => {
@@ -5869,6 +5989,12 @@ impl<'src> Analyzer<'src> {
             Constraint::Match(prepped) => self.resolve_match(prepped),
             Constraint::Variable(constraint) => self.resolve_variable(constraint),
             Constraint::Destructure(constraint) => self.resolve_destructure(constraint),
+            Constraint::Comprehension {
+                id,
+                binder_id,
+                source_id,
+                body_id,
+            } => self.resolve_comprehension(*id, *binder_id, *source_id, *body_id),
             Constraint::MethodCall {
                 id,
                 subject_id,
@@ -6334,6 +6460,10 @@ impl<'src> Analyzer<'src> {
             // An unannotated closure parameter awaiting bidirectional inference
             // defers rather than erroring; once its type lands the call resolves.
             Type::Unknown if self.is_unknown_closure_parameter(subject_id) => MethodLookup::Defer,
+            // A comprehension binder whose element type isn't set yet defers, too.
+            Type::Unknown if self.is_untyped_comprehension_binder(subject_id) => {
+                MethodLookup::Defer
+            }
             _ => MethodLookup::NotCallable,
         };
         match lookup {
@@ -6504,6 +6634,43 @@ impl<'src> Analyzer<'src> {
     /// against it (an explicit annotation takes precedence), typing each binding
     /// from the corresponding tuple element. Records the `Expr::Destructure` the
     /// transformer lowers.
+    /// `(x in xs => e)`: once the source resolves to a mapped tuple, type the
+    /// binder as its element template so the body checks, and record the
+    /// comprehension expression (it itself types as a mapped tuple via `infer_type`).
+    fn resolve_comprehension(
+        &mut self,
+        id: Id,
+        binder_id: Id,
+        source_id: Id,
+        body_id: Id,
+    ) -> Resolution {
+        let source_type = self.infer_type(source_id, &Type::Unknown, &HashMap::new());
+        match self.expand_mapped(source_type) {
+            Type::Unresolved | Type::Unknown => Resolution::Deferred,
+            Type::Mapped(_, _, element_template) => {
+                if let Some(variable) = self.variables.get_mut(&binder_id) {
+                    variable.type_id = element_template;
+                }
+                self.untyped_comprehension_binders.remove(&binder_id);
+                self.expr_id_to_expr_map
+                    .insert(id, Expr::TupleComprehension(binder_id, source_id, body_id));
+                Resolution::Resolved
+            }
+            // A concrete tuple source isn't supported yet (heterogeneous elements
+            // have no single binder type); only mapped sources, which combine uses.
+            other => {
+                let got = self.pretty_print_type(&other, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!(
+                        "a tuple comprehension's source must be a mapped tuple, got {got}"
+                    ),
+                });
+                Resolution::Failed
+            }
+        }
+    }
+
     fn resolve_destructure(&mut self, constraint: &DestructureConstraint<'src>) -> Resolution {
         let value_type = self.infer_type(constraint.value_id, &Type::Unknown, &HashMap::new());
         let not_ready = matches!(value_type, Type::Unresolved)

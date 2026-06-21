@@ -345,6 +345,28 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn tuple_comprehension_over_mapped_source() {
+    // A tuple comprehension `(x in xs => e)` maps each element of a mapped-tuple
+    // source through the body, typing as `(U in T: <body>)`. Here `source.len()`
+    // collapses `(List<i32>, List<str>)` to `(i32, str) = T`. Lowers to a runtime
+    // `.map`, so it's arity-independent.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun lengths<T: (2..)>(sources: (U in T: List<U>)): T {
+            (source in sources => source.len())
+        }
+        fun main() {
+            let (a, b) = lengths(([1, 2, 3], ["a", "b"]));
+            print(i"{a.to_string()} {b.to_string()}");
+        }
+        "#,
+        "3 2\n",
+    );
+}
+
+#[test]
 fn mapped_tuple_forward_expansion() {
     // A mapped tuple type with a concrete source expands element-wise:
     // `(U in (i32, str): List<U>)` is `(List<i32>, List<str>)`, so each binding

@@ -552,6 +552,29 @@ impl<'src> Transformer<'src> {
 
         Some(match entity {
             Expr::Error => unreachable!(),
+            Expr::TupleComprehension(binder_id, source_id, body_id) => {
+                // A flat tuple is a JS array, so the comprehension lowers to a
+                // runtime `source.map((x) => body)` — arity-independent, no
+                // monomorphization needed. The binder is the closure parameter.
+                let (binder_id, source_id, body_id) = (*binder_id, *source_id, *body_id);
+                let source = self.walk_entity(source_id, block).unwrap_or(js::Node::Void);
+                let parameter_name = self.ng.name_for(binder_id);
+                let mut body = Vec::new();
+                if let Some(value) = self.walk_entity(body_id, &mut body) {
+                    body.push(js::Node::Return(Box::new(value)));
+                }
+                let closure = js::Node::Closure(js::Closure {
+                    parameters: vec![js::Parameter {
+                        name: parameter_name,
+                    }],
+                    body,
+                    is_async: false,
+                });
+                js::Node::Call(
+                    Box::new(js::Node::Property(Box::new(source), "map".to_string())),
+                    vec![closure],
+                )
+            }
             Expr::Void => js::Node::Void,
             Expr::Null => js::Node::Null,
             Expr::Bool(x) => js::Node::Bool(*x),
