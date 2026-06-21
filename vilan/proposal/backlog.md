@@ -162,6 +162,14 @@ dependencies. Unordered within a section.
    batch parser, so this is the largest, lowest-priority LSP item.
 5. **Migrate the codegen-snapshot corpus into `vilan test`** (S; roadmap #7 note) — `vilan/test/` is
    a dev-time `.js` snapshot check, separate from the behavior runner; unify.
+6. **Re-evaluate the project structure + how the LSP identifies a file's target** (M; ties into F1) —
+   the browser backend introduces `--target node|browser` and platform-gated std (core/node/dom), so
+   a file's *target* decides which std layer and host globals are in scope. The LSP has no per-file
+   notion of target today, so diagnostics/hover/completion for a `dom`- or `node`-only file can be
+   wrong or missing. Revisit the project model (`vilan.toml`, `[server]`/`[client]` entries, entry
+   discovery) and **define how a file's target is determined** — manifest-entry membership, directory
+   convention, or an in-file annotation — so each file is analyzed under the right target. The chosen
+   rule belongs in the language/project spec (D1).
 
 ---
 
