@@ -1,255 +1,231 @@
-# Variadic generics — `combine` and parameter packs
+# Variadic generics via mapped tuples over flat storage
 
-Driving example: `std::reactive::combine`, the **product combinator** of the
-reactivity model. It is the one piece of the reactive UI that the type system
-can't yet express, so `vilan/examples/reactive-ui/todos.vl` imports it but the
-app can't be built (`README.md`: "not yet built — needs variadic generics").
+> Supersedes the parameter-pack exploration (previous commit). The driving
+> example is unchanged — `std::reactive::combine`, the product combinator the
+> reactive UI needs (`reactive-ui/todos.vl` imports it; `README.md` flags it as
+> "not yet built — needs variadic generics"). The mechanism is different: instead
+> of dedicated pack syntax, three orthogonal, independently-useful tuple features
+> — **arity-bounded generics, mapped tuple types, and tuple comprehensions** — out
+> of which `combine` falls as an ordinary function.
 
 ```vilan
-// Today's gap: a reactive value depending on N inputs of DIFFERENT types.
-let visible: Source<(List<Todo>, str)> = combine((items, filter));
-//   combine((Source<List<Todo>>, Source<str>))  ->  Source<(List<Todo>, str)>
-visible.derive(|(list, filter)| { /* recompute when EITHER changes */ });
+//              ┌─ T is a tuple of arity ≥ 2
+fun combine<T: (2..)>(sources: (U in T: Source<U>)): Source<T> {
+//                             └─ for each element U of T, this slot is Source<U>
+    let snapshot = || (source in sources = source.get());   // a tuple comprehension
+    let derived = Source::new(snapshot());
+    for (_, source) in sources {                            // iterate a tuple
+        source.sub(|| derived.update(snapshot()));
+    }
+    derived
+}
+
+let visible = combine((items, filter));        // Source<(List<Todo>, str)>
+visible.derive(|(list, filter)| { … });        // destructures with binders shipped already
 ```
 
-`combine` maps a **tuple of sources** to a **source of a tuple**:
-
-```
-combine: (Source<A>, Source<B>, …, Source<Z>) -> Source<(A, B, …, Z)>
-```
-
-The arity and the element types are both unknown at declaration. That is exactly
-a **parameter pack**: one type variable standing for *zero or more* types at
-once. This proposal designs packs for Vilan and lands `combine`.
-
-> **Note the call shape.** We take a single **tuple argument** —
-> `combine((a, b, c))` — not spread varargs `combine(a, b, c)`. A tuple needs no
-> new argument-list grammar (it reuses the tuple expression that already exists),
-> and the consumer destructures it with the tuple binders that **just shipped**
-> (`derive(|(list, filter)| …)`). The earlier `combine(a, b)` spelling in
-> `todos.vl` becomes `combine((a, b))`.
+`combine` is not special-cased: it is a normal function written in the language
+over a mapped-tuple parameter. The same features give `zip`, a tuple `map`,
+element-wise `into`, etc.
 
 ---
 
-## The key simplification: monomorphization makes packs concrete
+## The load-bearing mechanism: monomorphization → compile-time unrolling
 
-Vilan monomorphizes — every generic call is specialized to a concrete variant by
-its argument types (`transformer.rs`, `current_substitution` / `required_functions`).
-So **a pack is never variadic at runtime**: at each call site the argument tuple
-fixes the arity *N* and the element types, and the compiler emits one specialized
-`combine` for that shape. There is no runtime arity, no fold over types, no
-recursion at the type level — just compile-time expansion, the same machinery
-that already turns `f<T>` into `f<i32>`.
+Iterating a heterogeneous tuple, mapping a template type per element, indexing a
+slot whose type depends on the index — these are normally **dependent typing**.
+In Vilan they are not, because **`T` is concrete at every monomorphization**, so
+every tuple map / loop **unrolls at compile time**:
 
-This is what makes the feature affordable here, where it is famously heavy in a
-non-monomorphizing language. The whole design is: **bind a pack to a
-`Vec<TypeId>` at the call, then expand.**
+```vilan
+for (_, source) in sources { source.sub(…); }   //  T = (A, B, C)
+// emits, in the A,B,C variant:
+sources[0].sub(…); sources[1].sub(…); sources[2].sub(…);
+```
+
+The body is *type-checked once* against the abstract element type `U` (its trait
+bound, if any), then *expanded N times* against the concrete elements when the
+call fixes `T`. This is exactly how generic functions already work — analyze
+once, specialize per call — and it is what makes the whole feature affordable.
 
 ---
 
-## Current shape (what's already in place)
+## Runtime model: flat storage, but **distinct types**
 
-- **Tuples are first class.** `Type::Tuple(Vec<TypeId>)` (`type_.rs`), parsed from
-  `(A, B)` to `Type::Tuple` in `walk_type_node` (`analyzer.rs:4287`), lowered to a
-  JS array; element access and pattern destructuring exist.
-- **Generic binders are a `TypeId` identity.** `register_generic_parameters`
-  (`analyzer.rs:2643`) turns each `<T>` into a constraint `TypeId`; substitution is
-  `SubstitutionContext = HashMap<TypeId, TypeId>` (`type_.rs`). A pack is the same
-  idea with the value side widened to `Vec<TypeId>`.
-- **Tuple unification already collects bindings.** `reconcile_type`'s
-  `(Tuple, Tuple)` arm (`analyzer.rs:5202`) zips element-wise and accumulates
-  generic bindings. Pack inference hooks in exactly here.
-- **The consumer side is done.** `combine(...).derive(|(list, filter)| …)` relies
-  on closure tuple-parameter destructuring, which landed in the last change set.
-
-### One prerequisite bug (found while scoping this)
-
-A generic function returning a tuple does **not** propagate the call's
-substitution to a destructured binding:
+**Flat lowering.** A nested tuple lowers to a flat array at construction, using
+each element's statically-known width:
 
 ```vilan
-fun pair<A, B>(a: A, b: B): (A, B) { (a, b) }
-let p = pair(1, "x");
-match p { let (n, s) => n.to_string() }   // ERROR: cannot call 'to_string' on A
+let a = (1, 2);
+let b = (a, 3);
+// today:  const b = [a, 3];           ->  [[1,2], 3]
+// flat:   const b = [a[0], a[1], 3];  ->  [1, 2, 3]
 ```
 
-`p` is typed `(A, B)` (abstract) instead of `(i32, str)`, so the binding `n`
-stays generic. This is the same generic-resolution class tracked in
-`analyzer-refactor.md`. It matters because `combine`'s result element types come
-*from* the pack substitution. The intrinsic-typing route below **side-steps** it
-(it computes a concrete result type directly), but the general expression-level
-packs (Stage 2) would need it fixed. Filed here as a dependency.
+So `(A, B, C)`, `((A, B), C)`, and `(A, (B, (C, ())))` are the **same value at
+runtime** — coercing between them is zero-cost *when requested*.
+
+**Types stay distinct (the deliberate choice).** Equal runtime layout does *not*
+make them the same type. `(Point, Color)` with `Point = (i32, i32)`,
+`Color = (i32, i32, i32)` is **not** interchangeable with `(i32, i32, i32, i32,
+i32)` — nesting is a real type boundary, so a 5-int tuple cannot silently satisfy
+a `(Point, Color)` parameter. Flattening happens **only** through an explicit
+spread, a comprehension, or an explicit annotation — never implicitly. This keeps
+the perf win without dissolving the type system's structure.
+
+**Costs.** Construction copies the flattened elements (a later optimization elides
+the copy when a source operand is dead — *deferred*, needs liveness/move
+analysis). Extracting a sub-tuple is the reverse — `let (a, rest) = x` where
+`rest: (B, C)` reslices `[x[1], x[2]]` (copy or view).
 
 ---
 
-## Design
+## Surface syntax
 
-### Surface syntax
+### Arity & element bounds — `T: (..)`
+
+A tuple bound on a generic: an arity range, optionally with a per-element bound.
 
 ```vilan
-//        pack decl ─┐        ┌─ pack mapped over a template   ┌─ pack as a tuple
-fun combine< ...T >( sources: ( ...Source<T> ) ): Source< ( ...T ) > { … }
+T: (..)            // any tuple (incl. () and 1-tuples)
+T: (2..)           // arity ≥ 2
+T: (..10)          // arity ≤ 10
+T: (2..10)         // 2 ≤ arity ≤ 10
+T: (..: Display)   // any tuple, every element bound by Display
+T: (2..: Into<bool>)   // ≥ 2 elements, each Into<bool>
 ```
 
-Three new forms, all opt-in behind `...`:
+The element bound is what lets a uniform body type-check (`item.to_string()`
+needs `(..: Display)`; `item.into()` needs `(..: Into<_>)`).
 
-1. **Pack declaration** `<...T>` — `T` binds to an ordered list of types
-   (`GenericParameter { is_pack: true }`).
-2. **Pack expansion in a tuple type** `(...F<T>)` — element-wise map of the
-   one-hole template `F<T>` over the pack: `(F<T0>, F<T1>, …, F<Tn>)`. The bare
-   case `(...T)` is the identity template, i.e. `(T0, …, Tn)`. Expansion is only
-   legal inside a tuple type (the only place an unknown-length type list is sound).
-3. *(Stage 2)* **Pack expansion in expressions** — see below; not needed to land
-   `combine`.
+### Mapped tuple types — `(U in T: F<U>)`
 
-A pack may appear in **at most one** parameter and is bound there; other
-positions (the return type here) only *consume* it. This keeps inference
-one-directional and decidable.
+A tuple type built by mapping a **single-hole** template over `T`'s elements:
 
-### Type representation
+```vilan
+(U in T: Source<U>)   //  T = (A, B)  ->  (Source<A>, Source<B>)
+(_ in T: bool)        //  ignore the element, every slot is bool
+```
 
-```rust
-// type_.rs
-enum Type {
-    …
-    Pack(Vec<TypeId>),   // an expanded pack: the concrete element list
+Map preserves arity. The single-hole restriction keeps inference decidable (see
+below); multi-hole templates (`Map<U, V>`, `U::Assoc`) are **deferred**.
+
+### Tuple comprehensions (value) — `(x in xs = e)`
+
+The value-level twin of the mapped type — `:` ascribes a type, `=` binds a value:
+
+```vilan
+(source in sources = source.get())   //  (s0.get(), s1.get(), …)
+(item in items = item.into())
+```
+
+### Tuple iteration — `for (_, item) in items`
+
+Yields `(key, element)` per element; the body is unrolled per element at
+monomorphization. The `key` slot is a placeholder in the core (`_`); a usable
+`keyof`-typed key for in-place indexing is **deferred** (below).
+
+### Explicit flatten / concat — spread `..`
+
+The *only* way nested becomes flat, in both type and value position:
+
+```vilan
+(..T, U)       // type:  append U to the elements of tuple T
+(..a, b)       // value: a = (x, y)  ->  (x, y, b)
+```
+
+---
+
+## Inference
+
+`combine((a, b, c))` must infer `T` **backwards** through the mapped parameter
+type: given the concrete argument `(Source<A>, Source<B>, Source<C>)`, solve
+`(U in T: Source<U>)` for `T = (A, B, C)`. With a single-hole template this is
+element-wise unification — reconcile each concrete slot `Source<Ai>` against the
+template `Source<U>` to bind `U = Ai`, collect `T` — reusing the existing
+`reconcile_type` tuple path (`analyzer.rs:5202`). Multi-hole templates would make
+the inversion ambiguous, hence the single-hole rule.
+
+---
+
+## Worked: the reactive combinators
+
+```vilan
+// product — the driving example, keyof-free
+fun combine<T: (2..)>(sources: (U in T: Source<U>)): Source<T> { … as above … }
+
+// a homogeneous map, for contrast
+fun all_true<T: (..: Into<bool>)>(items: T): (_ in T: bool) {
+    (item in items = item.into())
 }
 ```
 
-- A declared-but-unbound pack `T` keeps its `Type::Generic(constraint_id)`
-  identity (so `T` is a name in scope) and is *marked* a pack.
-- Substitution gains a sibling map carried alongside `SubstitutionContext`:
-  `PackBindings = HashMap<TypeId, Vec<TypeId>>` (pack constraint id → element
-  types). Expanding `(...F<T>)` looks `T` up here.
-
-### Inference (arity + elements), at the call
-
-`combine((items, filter))` types the argument tuple as
-`(Source<List<Todo>>, Source<str>)`, then unifies it against the parameter type
-`(...Source<T>)`:
-
-1. The parameter is a **pack-tuple**: a fixed prefix/suffix of ordinary elements
-   (none here) plus one `...Source<T>`. Match the concrete tuple's length to fix
-   *N* = 2.
-2. For each concrete element `Source<Xi>`, reconcile the template `Source<T>`
-   against it (reusing `reconcile_type`), binding the hole: `T_i = Xi`.
-3. Record `PackBindings[T] = [List<Todo>, str]`.
-
-Then the return type `Source<(...T)>` expands to `Source<(List<Todo>, str)>` —
-**concrete**, so `.derive`'s closure sees concrete element types and the
-prerequisite bug never fires.
-
-### Monomorphization
-
-Keyed by the concrete shape, like every other generic call: the variant for
-arity *N* with elements `[X0…Xn]` is emitted once (`required_functions`), reused
-for an identical later call. Distinct arities are distinct variants — there is no
-single `combine` in the output, only `combine` specialized per call shape (and
-deduped). Bounded in practice: a program has a handful of `combine` arities.
-
-### The body — two routes
-
-**Route A (recommended to land first): `combine` as an arity-polymorphic intrinsic.**
-Declare it in `std::reactive` with the pack signature and an `external`-style
-body the compiler supplies per arity — exactly how a bodyless `external` fn is an
-intrinsic today, but expanded for the inferred *N*:
-
-```vilan
-// std::reactive
-external fun combine< ...T >(sources: ( ...Source<T> )): Source< ( ...T ) >;
-```
-
-The transformer lowers a resolved `combine` call of arity *N* to:
-
-```js
-function combine(sources) {
-    const sample = () => sources.map((s) => s.get());   // tuple = JS array
-    const result = Source.new(sample());
-    for (const s of sources) s.sub((_) => result.update(sample()));
-    return result;
-}
-```
-
-Because tuples are JS arrays and `Source` is uniform in `T`, the **emitted JS is
-arity-independent** — a single helper, not one per *N*. Only the *type* is
-expanded per arity; codegen is shared. This is the smallest correct thing: it
-needs the pack *type* system (decl + tuple expansion + inference) but **no**
-expression-level pack expansion.
-
-This mirrors how built-in derives shipped as a special-cased subset of the macro
-engine (#9) before the general engine existed — a sanctioned precedent in the
-roadmap.
-
-**Route B (Stage 2, only if a second pack use appears): user-writable pack bodies.**
-To let users write their *own* pack functions (`zip`, tuple `map`, argument
-forwarding), expression-level expansion is needed:
-
-- tuple-spread `(...sources@.get())` — build a tuple by applying a per-element
-  expression across the pack;
-- pack-`for` `for ...s in sources { … }` — unroll a statement per element.
-
-The honest cost: a heterogeneous per-element map (each `s.get()` returns a
-different `Ti`) is rank-2 (the body is polymorphic *per element*), which is a
-much larger lift than Route A. It is **not** justified by one function. Defer
-until a second variadic need is real, then design it against two callers.
+`combine`'s result type is concrete at the call (inference fixes `T`), so the
+downstream `.derive(|(list, filter)| …)` sees a concrete tuple and destructures
+with the binders that already shipped.
 
 ---
 
-## Staged plan — each stage its own commit, **corpus byte-identical**
+## Deferred aspects (in scope conceptually, out of scope for the core)
 
-The corpus (`vilan/test/*.vl` → `.js`) must stay byte-identical through Stage 1
-and 2 (no existing program uses `...`).
-
-1. **Parser: `...` forms.** Pack decl `<...T>`; pack expansion `(...Template)`
-   inside a tuple type. Add `is_pack` to `GenericParameter`; a `Node` for a
-   tuple-type pack element. No semantics yet → corpus untouched.
-2. **Type + inference.** `Type::Pack`, `PackBindings`; teach `reconcile_type` /
-   the call-binding path to match a pack-tuple against a concrete tuple, fix
-   arity, bind elements; expand `(...F<T>)` in `walk_type_node` and during
-   substitution. Unit-test arity/element inference in `tests/inference.rs`.
-3. **Intrinsic `combine`.** Declare it `external` in `std::reactive` with the pack
-   signature; transformer recognizes it and emits the shared helper; result type
-   expands concretely. New runtime test: a 2- and 3-input `combine`, assert it
-   recomputes on each input. `todos.vl` compiles and runs.
-4. **Ergonomics & polish.** `Signal` vs `Source` inputs (combine takes
-   `Source<T>`; a `Signal` exposes its `.node` or a `to_source()` — decide and
-   document); formatter prints `...T` / `(...F<T>)`; LSP hover/format for packs;
-   update `reactive-ui/README.md` (drop the "not yet built" caveat).
-5. *(Deferred)* **Stage 2 expression packs** — only against a second caller.
+- **`keyof` + indexed per-slot write** — a real key type usable as
+  `v[key] = source.get()`, turning `combine`'s O(N)-per-update snapshot recompute
+  into an O(1) per-slot write. Sound only where the index is statically known
+  (an unrolled loop / literal); a `keyof` value that escapes to a runtime-dynamic
+  position collapses `v[key]` to the union of element types. The core uses the
+  recompute form and needs none of this.
+- **Spread parameters — `fun f(...items: T)` / `f(1, "hi", true)`** — a second,
+  varargs call convention alongside the single-tuple `combine((a, b, c))` form.
+  Orthogonal; the core ships only the tuple-argument form.
+- **Copy elision on flatten** — reuse a dead source operand in place
+  (`const b = [a[0], a[1], 3]` without copying `a`). Needs liveness/move analysis;
+  correctness holds without it (it just copies).
+- **Multi-hole mapped templates** — `(U, V in T: Map<U, V>)` and associated-type
+  templates. The core is single-hole.
+- **Implicit structural flatten coercion** — *explicitly rejected* (see "distinct
+  types"); flattening is always opt-in.
 
 ---
 
 ## Risks & mitigations
 
-- **Arity-mismatch silently truncating.** `reconcile_type`'s tuple arm zips
-  (stops at the shorter), which would hide a wrong-arity call. The pack matcher
-  must check lengths explicitly and emit a real diagnostic ("combine expects a
-  tuple of sources").
-- **Pack in an un-inferable position.** Restrict a pack to be *bound* by exactly
-  one parameter; other occurrences only consume it. Reject a pack that can't be
-  fixed from arguments (return-only) with a clear error.
-- **The prerequisite generic-tuple-destructure bug** (above). Route A avoids it;
-  note it as a hard dependency for Route B and link `analyzer-refactor.md`.
-- **Monomorphization blow-up.** Per-arity *type* variants only; codegen is shared
-  (arity-independent JS). Bounded by the number of distinct `combine` shapes.
-- **Type interning (#6 in analyzer-refactor).** `Type::Pack` holds a `Vec`;
-  ensure it participates in whatever identity/interning story lands, or keep packs
-  out of the interned set initially.
+- **Flat lowering is a breaking codegen change.** It is the one stage that is
+  *not* corpus-byte-identical: any file with a genuinely nested tuple regenerates
+  its golden. Today that is exactly one file (`vilan/test/destructuring.vl`:
+  `(1, (2, "z"))` → `[1,2,"z"]` instead of `[1,[2,"z"]]`). All tuple access is
+  compiler-generated from static types, so the rewrite is mechanical; validate by
+  *running* every corpus program and diffing behavior, not just the `.js`. (Heed
+  [[golden-regen-rebuild-debug]] — rebuild the debug binary before regenerating.)
+- **Symbolic mapped types through generics.** While `T` is abstract (inside
+  `combine` before specialization), `(U in T: Source<U>)` is a symbolic type that
+  must survive substitution and expand to a concrete `Type::Tuple` when `T` is
+  fixed. Needs a `Type::Mapped`-style representation, expanded in the same place
+  generic substitution happens.
+- **Mapped-type inference inversion** is the one genuinely new analysis; the
+  single-hole rule keeps it to element-wise unification.
+- **Generic-tuple-destructure propagation bug** (`pair<A,B>(): (A,B)` leaves a
+  destructured binding abstract — see `analyzer-refactor.md`). Not on the core's
+  critical path (combine's `T` is concrete at the call), but it bites a `combine`
+  nested inside another *generic* function; track alongside.
+- **Type interning (#6 in analyzer-refactor).** `Type::Tuple`/`Type::Mapped` hold
+  `Vec`s; keep them out of any interned identity set initially, or make them
+  participate explicitly.
 
-## Verification (every stage)
+## Verification
 
-- Corpus byte-identical (Stages 1–2 add unused grammar; Stage 3 adds only new
-  programs).
-- `tests/inference.rs`: arity inference, element binding, a wrong-arity error,
-  and a **runtime** `combine` test (compile + run under `node`, assert recompute).
-- `reactive-ui/todos.vl` builds and runs end to end — the real acceptance test.
+- Flat-lowering stage: regenerate affected goldens; **run** the whole corpus under
+  `node` and confirm identical behavior.
+- Every later stage adds unused grammar/types → corpus byte-identical until a
+  program opts in.
+- New `tests/inference.rs` cases: arity-bound check + error, mapped-type inference
+  (forward and inverted), a comprehension, and a **runtime** `combine` (2- and
+  3-input, asserting recompute on each change).
+- Acceptance: `reactive-ui/todos.vl` builds and runs end to end.
 
 ## Recommendation
 
-Ship **Route A**: parameter-pack *types* (declaration + tuple expansion +
-arity/element inference) plus `combine` as an arity-polymorphic intrinsic with a
-shared, arity-independent JS body. It is the minimal change that makes the
-signature honestly variadic-generic Vilan, unblocks the reactive UI, and leaves a
-clean seam for general expression-level packs (Route B) if and when a second
-caller justifies them. Fix the generic-tuple-destructure bug opportunistically;
-it is not on Route A's critical path but is on Route B's.
+Build the keyof-free core: flat lowering → arity/element bounds → mapped tuple
+types + inference → comprehensions + tuple `for` → `combine` in std. Defer
+`keyof`/indexed-write, spread parameters, and copy elision until a second caller
+or a measured need justifies them. See `variadic-generics-plan.md` for the staged
+plan.
