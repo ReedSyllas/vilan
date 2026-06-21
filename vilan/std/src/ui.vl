@@ -99,6 +99,31 @@ impl View {
 		});
 		self
 	}
+
+	// A reactive list: render one child view per element of `source`, re-rendering
+	// the whole list whenever it changes (so a row reflects its item's current
+	// value). `key` identifies a row for a future keyed-reconcile optimization;
+	// `render` builds the row's view from the item value.
+	fun bind_each<T, K>(self, source: Source<List<T>>, key: |T| K, render: |T| View): View {
+		let element = self.element;
+		source.sub(|list| {
+			element.clear();
+			for item in list {
+				element.append(render(item).element);
+			}
+		});
+		self
+	}
+
+	// Show or hide the element on a reactive condition — present when `condition`
+	// is true, hidden otherwise.
+	fun show(self, condition: Source<bool>): View {
+		let element = self.element;
+		condition.sub(|visible| {
+			element.set_hidden(!visible);
+		});
+		self
+	}
 }
 
 // Attach a view to the page element with the given id.

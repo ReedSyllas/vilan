@@ -1,13 +1,14 @@
 // app.vl — the client entry. Components are ordinary functions returning a
 // `View`, so an app is just composition: build the views and `mount` them.
 //
-// Increment 1 (the reactive `Source`/`Signal` core + the counter-level UI) is
-// implemented, so the counter builds and runs. The todo list (`todos.vl`) awaits
-// `combine` (needs variadic generics) and `bind_each`, so it isn't mounted yet.
+// Both components build and run: the counter, and the todo list (`todos.vl`) now
+// that `combine` (variadic generics), `bind_each`, and `show` are implemented.
 
 import std::ui::mount;
 import pkg::counter::counter;
+import pkg::todos::todos;
 
 fun main() {
 	mount("counter", counter());
+	mount("todos", todos());
 }
