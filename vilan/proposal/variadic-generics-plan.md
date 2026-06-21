@@ -5,6 +5,31 @@ call `combine` without `keyof`**. Deferred items have their own section. Each
 stage is one commit; every stage after Stage 0 is **corpus byte-identical** (it
 adds grammar/types unused until a program opts in).
 
+## STATUS: shipped (commits bc360e9 … 3d00f5c) — `combine` works end to end
+
+Built across Stages 0–4 with these deviations from the original plan, all forced
+by what the type system actually supports:
+
+- **`combine` takes a concrete `(U in T: Source<U>)` template, not the trait
+  template `(U in T: Readable<U>)`.** The trait template needs parameterized-trait
+  *dispatch on a trait-typed value*, which runs into the deep generic-dispatch
+  cluster (+ the blanket-`Into` ambiguity). A `Signal` reaches `combine` via a new
+  `Signal.source()` accessor: `combine((a.source(), b.source()))`.
+- **Parameterized traits are partial** (commits 151837d, a1492d5): `Type::Trait`
+  carries args, impls record their trait args, trait-arg *inference* + method
+  *return-type* substitution work — but trait-typed-*value* dispatch is unfinished.
+  Left as committed infrastructure for a future `combine((a, b))` (no `.source()`).
+- **Comprehension body separator is `=>`, not `=`** — `=` collides with an
+  assignment inside the source expression. `:` still marks the mapped *type*.
+- **No tuple `for`** — the subscription loop is a side-effecting comprehension
+  (`.map`), so a separate `for` wasn't needed.
+- Comprehensions lower to a **runtime `.map`** over the flat array (arity-
+  independent), so no per-arity monomorphization/unrolling was required.
+
+Found along the way (pre-existing, out of scope): **`||` is not a Vilan operator**
+(only `&&`; `||` is the empty-closure-params token) — `todos.vl`'s filter was
+rewritten as a `match`.
+
 ## Current shape (what we build on)
 
 - **Tuples.** `Type::Tuple(Vec<TypeId>)` (`type_.rs`); `Node::Tuple` walked to
