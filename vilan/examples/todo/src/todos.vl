@@ -22,8 +22,6 @@ fun todos(): View {
 	let filter = Signal::new("all"); // "all" | "active" | "done"
 	let next_id = Signal::new(0);
 
-	// `remaining` depends only on `items` — one input, so plain `derive`. The
-	// result is a read-only `Source`; only the root `Signal`s above can be `set`.
 	let remaining: Signal<i32> = items.map(|list| {
 		mut open = 0;
 		for todo in list {
@@ -34,23 +32,18 @@ fun todos(): View {
 		open
 	});
 
-	// `visible` depends on BOTH `items` and `filter`. `combine` is variadic — it
-	// takes a tuple of the dependencies (a `Signal` viewed as `.source()`) and
-	// yields a `Source<(List<Todo>, str)>`; `derive` then maps the pair. The graph
-	// is data: `visible` recomputes exactly when either input changes — no body is
-	// run to "find" the dependencies.
 	let visible: Signal<List<Todo>> =
 		combine((items, filter)).map(|(list, filter)| {
-		mut shown: List<Todo> = [];
-		for todo in list {
-			let keep =
-				filter == "all" || (filter == "active" && !todo.done) || (filter == "done" && todo.done);
-			if keep {
-				shown.push(todo);
+			mut shown: List<Todo> = [];
+			for todo in list {
+				let keep =
+					filter == "all" || (filter == "active" && !todo.done) || (filter == "done" && todo.done);
+				if keep {
+					shown.push(todo);
+				}
 			}
-		}
-		shown
-	});
+			shown
+		});
 
 	let add = || {
 		let label = draft.get(); // a one-shot SAMPLE — we want the value, not a dependency

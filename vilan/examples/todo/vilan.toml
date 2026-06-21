@@ -1,0 +1,7 @@
+name = "fullstack"
+
+[server]
+entry = "src/server.vl"
+
+[client]
+entry = "src/client.vl"

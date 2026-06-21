@@ -1,0 +1,27 @@
+import std::dom::{ Element, get_element_by_id, create_element };
+import std::fetch::{ fetch, Response };
+import std::ui::{ mount, view, View };
+import std::reactive::Signal;
+import pkg::todos::todos;
+
+fun main() {
+	mount("app", app());
+}
+
+fun app(): View {
+	todos()
+}
+
+fun counter(): View {
+	let count = Signal::new(0);
+
+	view("section")
+		.class("counter")
+		.child(view("h2").text("Counter"))
+		// `bind_text` binds to a `Source<str>`; derive one from `count`. The
+		// i-string renders the number directly (host coercion) — see the README
+		// note on calling a generic like `format` inside a binding closure.
+		.child(view("p").bind_text(count.map(|n| i"Count: {n}")))
+		.child(view("button").text("−").on("click", || count.set_with(|n| n - 1)))
+		.child(view("button").text("+").on("click", || count.set_with(|n| n + 1)))
+}

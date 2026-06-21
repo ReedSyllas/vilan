@@ -8,7 +8,7 @@
 // Only available when building for the browser (`vilan build --target browser`).
 
 import pkg::dom::{ Element, get_element_by_id, create_element };
-import pkg::reactive::{ Source, Signal };
+import pkg::reactive::{ Signal };
 
 // A handle to a DOM element under construction. `View` wraps an `Element` (a
 // reference), so chaining returns the same underlying element.
@@ -61,7 +61,7 @@ impl View {
 	}
 
 	// Reactive text content — re-set whenever `source` changes.
-	fun bind_text(self, source: Source<str>): View {
+	fun bind_text(self, source: Signal<str>): View {
 		let element = self.element;
 		source.sub(|value| {
 			element.set_text(value);
@@ -70,7 +70,7 @@ impl View {
 	}
 
 	// Reactive CSS class.
-	fun bind_class(self, source: Source<str>): View {
+	fun bind_class(self, source: Signal<str>): View {
 		let element = self.element;
 		source.sub(|value| {
 			element.set_class(value);
@@ -79,7 +79,7 @@ impl View {
 	}
 
 	// Reactive attribute.
-	fun bind_attr(self, name: str, source: Source<str>): View {
+	fun bind_attr(self, name: str, source: Signal<str>): View {
 		let element = self.element;
 		source.sub(|value| {
 			element.set_attribute(name, value);
@@ -104,7 +104,7 @@ impl View {
 	// the whole list whenever it changes (so a row reflects its item's current
 	// value). `key` identifies a row for a future keyed-reconcile optimization;
 	// `render` builds the row's view from the item value.
-	fun bind_each<T, K>(self, source: Source<List<T>>, key: |T| K, render: |T| View): View {
+	fun bind_each<T, K>(self, source: Signal<List<T>>, key: |T| K, render: |T| View): View {
 		let element = self.element;
 		source.sub(|list| {
 			element.clear();
@@ -117,7 +117,7 @@ impl View {
 
 	// Show or hide the element on a reactive condition — present when `condition`
 	// is true, hidden otherwise.
-	fun show(self, condition: Source<bool>): View {
+	fun show(self, condition: Signal<bool>): View {
 		let element = self.element;
 		condition.sub(|visible| {
 			element.set_hidden(!visible);

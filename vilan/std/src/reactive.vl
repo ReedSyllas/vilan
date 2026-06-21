@@ -1,21 +1,7 @@
-// `std::reactive` — fine-grained reactivity with EXPLICIT dependencies.
-//
-// A `Source<T>` is any reactive value; a `Signal<T>` is a writable root. You
-// build derived values with combinators whose shape IS the dependency graph —
-// `a.derive(f)` depends on `a` — so dependencies are known the moment a value is
-// constructed, never discovered by running it. A `derive`/`sub` body is a pure
-// function of its input, so it is safe across an `await` and there is nothing to
-// re-discover.
-//
-// Reading a source with `get()` is a NON-reactive sample — it creates no
-// dependency. Tracking is opt-in (build the value from the source), so there is
-// no global tracker and no `untrack` escape hatch.
-//
-// Built on `Shared` and core features only, so it works on any target.
 
 import pkg::shared::Shared;
 
-// A registered observer of a source: `notify` re-runs it when the source's value
+// A registered observer of a signal: `notify` re-runs it when the signal's value
 // changes; `id` lets a `Subscription` find and remove it.
 struct Subscriber {
 	id: i32,
@@ -29,118 +15,6 @@ fun fresh_id(): i32 {
 	let id = next_subscriber_id.read();
 	next_subscriber_id.write() = id + 1;
 	id
-}
-
-// A reactive value: a current value plus the observers to notify when it changes.
-// Both a root `Signal` and every derived value share this representation; the
-// difference is only who may write it (a root, via `Signal::set`).
-struct Source<T> {
-	value: Shared<T>,
-	subscribers: Shared<List<Subscriber>>,
-}
-
-impl Source<type T> {
-	fun new(value: T): Source<T> {
-		mut subscribers: List<Subscriber> = [];
-		Source { value = Shared::new(value), subscribers = Shared::new(subscribers) }
-	}
-
-	// The current value — a non-reactive sample.
-	fun get(self): T {
-		self.value.read()
-	}
-
-	// Replace the value and notify every observer. Used by `Signal::set` and by a
-	// derived source when its dependency changes.
-	fun update(self, value: T) {
-		self.value.write() = value;
-		for subscriber in self.subscribers.read() {
-			let notify = subscriber.notify;
-			notify();
-		}
-	}
-
-	// A new source that is `transform` applied to this one — it recomputes (and
-	// notifies its own observers) exactly when this source changes.
-	fun derive<U>(self, transform: |T| U): Source<U> {
-		let derived = Source::new(transform(self.value.read()));
-		let upstream = self.value;
-		self.subscribers.write().push(Subscriber {
-			id = fresh_id(),
-			notify = || {
-				derived.update(transform(upstream.read()));
-			},
-		});
-		derived
-	}
-
-	// Run `observer` now and on every change; returns a handle to stop observing.
-	fun sub(self, observer: |T| void): Subscription {
-		let upstream = self.value;
-		let id = fresh_id();
-		self.subscribers.write().push(Subscriber {
-			id = id,
-			notify = || {
-				observer(upstream.read());
-			},
-		});
-		observer(self.value.read());
-		Subscription { subscribers = self.subscribers, id = id }
-	}
-}
-
-// A writable root source. Only a `Signal` can be `set`; everything derived from
-// it is a read-only `Source`.
-struct Signal<T> {
-	node: Source<T>,
-}
-
-impl Signal<type T> {
-	fun new(value: T): Signal<T> {
-		Signal { node = Source::new(value) }
-	}
-
-	fun get(self): T {
-		self.node.get()
-	}
-
-	fun set(self, value: T) {
-		self.node.update(value);
-	}
-
-	// Read-modify-write in one step: `count.set_with(|n| n + 1)`.
-	fun set_with(self, transform: |T| T) {
-		self.node.update(transform(self.node.get()));
-	}
-
-	fun derive<U>(self, transform: |T| U): Source<U> {
-		self.node.derive(transform)
-	}
-
-	fun sub(self, observer: |T| void): Subscription {
-		self.node.sub(observer)
-	}
-
-	// This signal viewed as a read-only `Source` — e.g. to pass to `combine`.
-	fun source(self): Source<T> {
-		self.node
-	}
-}
-
-// The product combinator: a source of the tuple of its inputs' current values,
-// recomputed whenever any input changes. Variadic over the inputs' (distinct)
-// types via a mapped-tuple parameter — `combine((a, b, c))` of `Source<A>`,
-// `Source<B>`, `Source<C>` yields `Source<(A, B, C)>`. A `Signal` is passed as
-// `signal.source()`.
-fun combine<T: (2..)>(sources: (U in T: Source<U>)): Source<T> {
-	let snapshot = || (source in sources => source.get());
-	let derived = Source::new(snapshot());
-	// Subscribe each input (the comprehension's `.map` runs `sub` per element);
-	// the resulting subscriptions are intentionally dropped.
-	let subscriptions = (source in sources => source.sub(|_| {
-		derived.update(snapshot());
-	}));
-	derived
 }
 
 // A live subscription. Dropping it does NOT stop it (an owner scope is
@@ -160,4 +34,71 @@ impl Subscription {
 		}
 		self.subscribers.write() = kept;
 	}
+}
+
+// A reactive value: a current value plus the observers to notify when it changes.
+// Both a root `Signal` and every derived value share this representation; the
+// difference is only who may write it (a root, via `Signal::set`).
+struct Signal<T> {
+	value: Shared<T>,
+	subscribers: Shared<List<Subscriber>>,
+}
+
+impl Signal<type T> {
+	fun new(value: T): Signal<T> {
+		mut subscribers: List<Subscriber> = [];
+		Signal { value = Shared::new(value), subscribers = Shared::new(subscribers) }
+	}
+	
+	fun get(self): T {
+		self.value.read()
+	}
+	
+	fun set(self, value: T) {
+		self.value.write() = value;
+		
+		for subscriber in self.subscribers.read() {
+			(subscriber.notify)();
+		}
+	}
+	
+	fun set_with(self, transform: |T| T) {
+		self.set(transform(self.get()));
+	}
+	
+	fun sub(self, observer: |T| void): Subscription {
+		let id = fresh_id();
+		self.subscribers.write().push(Subscriber {
+			id,
+			notify = || {
+				observer(self.get());
+			},
+		});
+		observer(self.get());
+		Subscription { subscribers = self.subscribers, id }
+	}
+	
+	fun map<U>(self, transform: |T| U): Signal<U> {
+		let derived = Signal::new(transform(self.get()));
+		self.subscribers.write().push(Subscriber {
+			id = fresh_id(),
+			notify = || {
+				derived.set(transform(self.get()));
+			},
+		});
+		derived
+	}
+}
+
+// The product combinator: a signal of the tuple of its inputs' current values,
+// recomputed whenever any input changes. Variadic over the inputs' (distinct)
+// types via a mapped-tuple parameter — `combine((a, b, c))` of `Signal<A>`,
+// `Signal<B>`, `Signal<C>` yields `Signal<(A, B, C)>`.
+fun combine<T: (2..)>(sources: (U in T: Signal<U>)): Signal<T> {
+	let snapshot = || (source in sources => source.get());
+	let derived = Signal::new(snapshot());
+	// Subscribe each input (the comprehension's `.map` runs `sub` per element);
+	// the resulting subscriptions are intentionally dropped.
+	let subscriptions = (source in sources => source.sub(|_| { derived.set(snapshot()); }));
+	derived
 }
