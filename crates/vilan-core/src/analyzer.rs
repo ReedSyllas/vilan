@@ -110,8 +110,10 @@ pub enum ExprPattern {
     // sub-patterns. The enum id lets the transformer lower `bool` patterns to a
     // native boolean comparison rather than the array discriminant form.
     Variant(Id, usize, Vec<ExprPattern>),
-    // A tuple destructure, matching each element positionally.
-    Tuple(Vec<ExprPattern>),
+    // A tuple destructure. Each element carries its flat-storage width (a nested
+    // tuple element occupies more than one slot), so the transformer reads each
+    // at its flat offset and reslices a multi-slot capture.
+    Tuple(Vec<(ExprPattern, usize)>),
     // A literal value test: the matched value equals this literal expression.
     Literal(Id),
 }
@@ -4039,6 +4041,22 @@ impl<'src> Analyzer<'src> {
     // looked up and verified to belong to the matched enum, and captures take
     // the type of the value they bind. Returns `None` after emitting a
     // diagnostic when the pattern is invalid.
+    /// The number of flat slots a value of this type occupies once tuples are
+    /// flattened (matching the transformer's `flat_width`): a tuple is the sum of
+    /// its elements', anything else is one. Computed from the type known at
+    /// pattern resolution — correct for every concrete pattern; a still-generic
+    /// element counts as one slot (it can only be destructured as a tuple once a
+    /// tuple bound makes its arity known).
+    fn tuple_flat_width(&self, type_id: TypeId) -> usize {
+        match type_id.get_type(self) {
+            Type::Tuple(element_ids) => element_ids
+                .iter()
+                .map(|id| self.tuple_flat_width(*id))
+                .sum(),
+            _ => 1,
+        }
+    }
+
     fn resolve_pattern(
         &mut self,
         pattern: &WalkPattern<'src>,
@@ -4188,11 +4206,13 @@ impl<'src> Analyzer<'src> {
                 let _ = span;
                 let mut resolved = Vec::new();
                 for (sub_pattern, element_type_id) in patterns.iter().zip(element_type_ids) {
-                    resolved.push(self.resolve_pattern(
-                        sub_pattern,
-                        element_type_id,
-                        lookup_scope_id,
-                    )?);
+                    // The element's flat width (a nested tuple spans several slots),
+                    // resolved here while the matched type is known.
+                    let width = self.tuple_flat_width(element_type_id);
+                    resolved.push((
+                        self.resolve_pattern(sub_pattern, element_type_id, lookup_scope_id)?,
+                        width,
+                    ));
                 }
                 Some(ExprPattern::Tuple(resolved))
             }
@@ -7967,6 +7987,11 @@ pub struct Program<'src> {
     // language-server hover. Keyed by expr id; `expr_id_to_type_id_map` wins
     // over `resolved_types` where both apply (matching `type_of_expr`).
     pub expr_types: HashMap<Id, String>,
+    // The resolved type id of every typed expression and binding (same merge as
+    // `expr_types`). The transformer reads this to compute a tuple's flat-storage
+    // layout — which elements are themselves tuples (and so are spread, not nested)
+    // — resolving any generic element through the active monomorphization.
+    pub expr_type_ids: HashMap<Id, TypeId>,
     // The next unused entity id. Post-analysis passes (the context threading
     // pass) mint fresh entities — synthetic parameters and references — from
     // here without colliding with analyzed ones.
@@ -9160,6 +9185,8 @@ pub fn analyze<'src>(
     // is applied last so it wins over `resolved_types`, matching `type_of_expr`.
     let empty_substitution = SubstitutionContext::new();
     let mut expr_types: HashMap<Id, String> = HashMap::new();
+    // The same merge, kept as raw type ids for the transformer (tuple layout).
+    let mut expr_type_ids: HashMap<Id, TypeId> = HashMap::new();
     for (expr_id, type_id) in analyzer
         .resolved_types
         .iter()
@@ -9170,6 +9197,7 @@ pub fn analyze<'src>(
             *expr_id,
             analyzer.pretty_print_type(&type_, &empty_substitution),
         );
+        expr_type_ids.insert(*expr_id, *type_id);
     }
     // Also label variable and parameter bindings by their own id: a *use* of one
     // (an `Expr::Local`/`Expr::Parameter`) carries no type on its own expr id, so
@@ -9267,6 +9295,7 @@ pub fn analyze<'src>(
         struct_initializer_to_def: analyzer.struct_initializer_to_def,
         type_references,
         expr_types,
+        expr_type_ids,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
         clone_sites,

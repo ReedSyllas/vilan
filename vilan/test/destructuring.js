@@ -10,10 +10,10 @@ function swap(_) {
 const $a = [ 10, "hi" ];
 const x = $a[0];
 const y = $a[1];
-const $b = [ 1, [ 2, "z" ] ];
+const $b = [ 1, ...[ 2, "z" ] ];
 const n = $b[0];
-const m = $b[1][0];
-const label = $b[1][1];
+const m = $b[1];
+const label = $b[2];
 console.log("" + to_string(x) + " " + y);
 console.log("" + to_string(n) + " " + to_string(m) + " " + label);
 const $d = swap([ 5, "z" ]);

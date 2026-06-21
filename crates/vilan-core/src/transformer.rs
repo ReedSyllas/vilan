@@ -1422,9 +1422,18 @@ impl<'src> Transformer<'src> {
                 js::Node::Array(items)
             }
             Expr::Tuple(ids) => {
+                // Tuples store flat: a tuple-typed element's value is itself a flat
+                // array, so splice its slots in (`...elem`) rather than nesting it.
                 let items = ids
                     .iter()
-                    .filter_map(|id| self.walk_entity(*id, block))
+                    .filter_map(|id| {
+                        let value = self.walk_entity(*id, block)?;
+                        Some(if self.is_tuple_typed(*id) {
+                            js::Node::Spread(Box::new(value))
+                        } else {
+                            value
+                        })
+                    })
                     .collect();
                 js::Node::Array(items)
             }
@@ -1551,17 +1560,56 @@ impl<'src> Transformer<'src> {
                 }
             }
             ExprPattern::Tuple(elements) => {
-                for (index, sub_pattern) in elements.iter().enumerate() {
-                    let element = js::Node::PropertyIndex(
-                        Box::new(subject.clone()),
-                        Box::new(js::Node::Number(index.to_string(), None)),
-                    );
+                let mut leaves = Vec::new();
+                Self::flatten_tuple_pattern(elements, &subject, 0, &mut leaves);
+                for (sub_pattern, element) in leaves {
                     self.compile_is_pattern(sub_pattern, element, conditions);
                 }
             }
             ExprPattern::Literal(literal_id) => {
                 conditions.push(self.literal_equality(*literal_id, subject));
             }
+        }
+    }
+
+    /// Flattens a tuple pattern's elements to `(sub-pattern, subject-slot)` leaves
+    /// for flat storage: a nested tuple pattern recurses (accumulating the flat
+    /// offset), a width-1 element reads `subject[offset]`, and a multi-slot capture
+    /// (a binding/wildcard of tuple type) reslices `subject.slice(offset, end)`.
+    fn flatten_tuple_pattern<'a>(
+        elements: &'a [(ExprPattern, usize)],
+        subject: &js::Node<'src>,
+        base: usize,
+        out: &mut Vec<(&'a ExprPattern, js::Node<'src>)>,
+    ) {
+        let mut offset = base;
+        for (sub_pattern, width) in elements {
+            match sub_pattern {
+                ExprPattern::Tuple(inner) => {
+                    Self::flatten_tuple_pattern(inner, subject, offset, out);
+                }
+                _ if *width == 1 => out.push((
+                    sub_pattern,
+                    js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number(offset.to_string(), None)),
+                    ),
+                )),
+                _ => out.push((
+                    sub_pattern,
+                    js::Node::Call(
+                        Box::new(js::Node::Property(
+                            Box::new(subject.clone()),
+                            "slice".to_string(),
+                        )),
+                        vec![
+                            js::Node::Number(offset.to_string(), None),
+                            js::Node::Number((offset + width).to_string(), None),
+                        ],
+                    ),
+                )),
+            }
+            offset += width;
         }
     }
 
@@ -1832,7 +1880,7 @@ impl<'src> Transformer<'src> {
                     }
                 }
                 ExprPattern::Tuple(elements) => {
-                    for sub_pattern in elements {
+                    for (sub_pattern, _width) in elements {
                         collect(sub_pattern, ids);
                     }
                 }
@@ -1896,13 +1944,11 @@ impl<'src> Transformer<'src> {
                 }
             }
             ExprPattern::Tuple(elements) => {
-                // Tuples are plain arrays, so each element is matched
-                // positionally with no discriminant.
-                for (index, sub_pattern) in elements.iter().enumerate() {
-                    let element = js::Node::PropertyIndex(
-                        Box::new(subject.clone()),
-                        Box::new(js::Node::Number(index.to_string(), None)),
-                    );
+                // Tuples store flat: read each leaf at its flat offset, reslicing a
+                // multi-slot (sub-tuple) capture.
+                let mut leaves = Vec::new();
+                Self::flatten_tuple_pattern(elements, &subject, 0, &mut leaves);
+                for (sub_pattern, element) in leaves {
                     self.compile_pattern(sub_pattern, element, conditions, bindings);
                 }
             }
@@ -2256,6 +2302,36 @@ impl<'src> Transformer<'src> {
 
     /// Resolves a type id to its concrete form under the active substitution,
     /// following generic parameters to the type they're currently bound to.
+    /// The resolved type id of an expression, used for tuple flat-layout
+    /// decisions. Falls back through a binding reference to the binding's type
+    /// (a bare `Expr::Local`/`Parameter` use carries no type on its own id).
+    fn expr_type_id(&self, expr_id: Id) -> Option<TypeId> {
+        if let Some(type_id) = self.program.expr_type_ids.get(&expr_id) {
+            return Some(*type_id);
+        }
+        match self.program.entity_map.get(&expr_id)? {
+            Expr::Local(binding) | Expr::Variable(binding) => {
+                self.program.variables.get(binding).map(|v| v.type_id)
+            }
+            Expr::Parameter(binding) => self.program.parameters.get(binding).map(|p| p.type_id),
+            _ => None,
+        }
+    }
+
+    /// Whether an expression's (monomorphized) type is a tuple — its value is a
+    /// flat array whose slots splice into a constructed tuple. A tuple literal is
+    /// recognized structurally (its own id carries no stored type); anything else
+    /// is decided by its resolved type.
+    fn is_tuple_typed(&self, expr_id: Id) -> bool {
+        if matches!(self.program.entity_map.get(&expr_id), Some(Expr::Tuple(_))) {
+            return true;
+        }
+        self.expr_type_id(expr_id)
+            .map(|type_id| self.resolve_type_id(type_id))
+            .and_then(|type_id| self.program.type_id_to_type_map.get(&type_id))
+            .is_some_and(|type_| matches!(type_, Type::Tuple(_)))
+    }
+
     fn resolve_type_id(&self, type_id: TypeId) -> TypeId {
         let Some(_guard) = crate::util::RecursionGuard::enter() else {
             return type_id;
@@ -2400,6 +2476,9 @@ impl Formatter {
                     "[{}{}{}]{}",
                     self.array_surround, s_items, self.array_surround, terminator
                 )
+            }
+            js::Node::Spread(operand) => {
+                format!("...{}{}", self.node(operand, "", level), terminator)
             }
             js::Node::Function(function) => {
                 let name = function.name.as_str();
@@ -2632,6 +2711,9 @@ pub mod js {
     #[derive(Clone, Debug)]
     pub enum Node<'src> {
         Array(Vec<Self>),
+        // `...<operand>` — array spread, used to splice a tuple-typed element's
+        // (already flat) slots into a constructed tuple.
+        Spread(Box<Self>),
         Assignment(Box<Self>, Box<Self>),
         // `await <operand>`.
         Await(Box<Self>),
@@ -3100,6 +3182,7 @@ fn collect_node(
         | js::Node::Unary(_, inner)
         | js::Node::Return(inner)
         | js::Node::Throw(inner)
+        | js::Node::Spread(inner)
         | js::Node::Property(inner, _) => collect_node(inner, renameable, declarations, children),
         js::Node::Array(items) => collect_declarations(items, renameable, declarations, children),
         js::Node::Local(_)
@@ -3218,6 +3301,7 @@ fn rename_node(node: &mut js::Node, rename: &HashMap<String, String>) {
         | js::Node::Unary(_, inner)
         | js::Node::Return(inner)
         | js::Node::Throw(inner)
+        | js::Node::Spread(inner)
         // `Property`'s member is a property name, not a binding — recurse only the subject.
         | js::Node::Property(inner, _) => rename_node(inner, rename),
         js::Node::Array(items) => rename_nodes(items, rename),

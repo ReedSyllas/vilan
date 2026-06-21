@@ -345,6 +345,29 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn nested_tuple_flat_lowering() {
+    // A nested tuple stores flat (`((1,2),3)` -> `[1,2,3]`), so a matching nested
+    // pattern reads flat offsets and a sub-tuple capture reslices — all behaviorally
+    // transparent. Distinct types are preserved: the pattern must match the nesting.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun main() {
+            let a = (1, 2);
+            let b = (a, 3);
+            let ((x, y), z) = b;
+            print(i"{x.to_string()} {y.to_string()} {z.to_string()}");
+            let (pair, last) = b;
+            let (pa, pb) = pair;
+            print(i"{pa.to_string()} {pb.to_string()} {last.to_string()}");
+        }
+        "#,
+        "1 2 3\n1 2 3\n",
+    );
+}
+
+#[test]
 fn parameter_tuple_destructuring() {
     // A tuple binder in parameter position — both a function parameter
     // (`fun f((a, b): T)`) and a closure parameter (`|(a, b)|`) — destructures,

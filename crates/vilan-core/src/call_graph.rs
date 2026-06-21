@@ -403,7 +403,7 @@ impl<'a, 'src> Collector<'a, 'src> {
                 }
             }
             ExprPattern::Tuple(sub_patterns) => {
-                for sub_pattern in sub_patterns {
+                for (sub_pattern, _width) in sub_patterns {
                     self.walk_pattern(sub_pattern);
                 }
             }
