@@ -345,6 +345,32 @@ fn format_in_closure_argument() {
 }
 
 #[test]
+fn reactive_combine_variadic() {
+    // The driving example: `combine` is variadic over its inputs' distinct types
+    // via a mapped-tuple parameter, yielding a source of the tuple that recomputes
+    // when any input changes. A `Signal` is passed as `.source()`; the consumer
+    // destructures the tuple with a closure tuple binder.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        import std::reactive::{ Signal, Source, combine };
+        fun main() {
+            let a = Signal::new(1);
+            let b = Signal::new("x");
+            let c = Signal::new(true);
+            let combined: Source<(i32, str, bool)> =
+                combine((a.source(), b.source(), c.source()));
+            combined.sub(|(n, s, flag)| print(i"{n.to_string()} {s} {flag}"));
+            a.set(2);
+            b.set("y");
+        }
+        "#,
+        "1 x true\n2 x true\n2 y true\n",
+    );
+}
+
+#[test]
 fn tuple_comprehension_over_mapped_source() {
     // A tuple comprehension `(x in xs => e)` maps each element of a mapped-tuple
     // source through the body, typing as `(U in T: <body>)`. Here `source.len()`

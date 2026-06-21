@@ -7,9 +7,11 @@
 > The counter ([`counter.vl`](counter.vl)) builds and runs:
 > `vilan build --target browser app.vl` (emits `app.js`; serve `index.html`).
 >
-> **Not yet built (later increments):** `combine` (needs variadic generics),
-> `bind_each`, `show`, and `flatten` — so [`todos.vl`](todos.vl) does not compile
-> yet and stands as the design target.
+> **Built:** `combine` — now variadic over its inputs' distinct types (a mapped
+> tuple parameter; a `Signal` is passed as `.source()`). **Not yet built (later
+> increments):** `bind_each`, `show`, and `flatten` — so [`todos.vl`](todos.vl)
+> does not fully compile yet (its `combine` line type-checks; the list/conditional
+> rendering is the remaining gap) and stands as the design target.
 >
 > **Known limitation:** calling a *generic* function/method (e.g. `format(n)` or
 > `n.to_string()`) on a closure parameter inside a binding doesn't infer the

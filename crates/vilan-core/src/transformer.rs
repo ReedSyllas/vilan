@@ -530,6 +530,9 @@ impl<'src> Transformer<'src> {
             Some(Expr::StructInitializer(_, fields)) => {
                 fields.values().any(|id| self.expr_has_side_effects(*id))
             }
+            // A comprehension runs its body per element (`combine` subscribes each
+            // source this way), so it inherits the body's side effects.
+            Some(Expr::TupleComprehension(_, _, body_id)) => self.expr_has_side_effects(*body_id),
             _ => false,
         }
     }

@@ -120,6 +120,27 @@ impl Signal<type T> {
 	fun sub(self, observer: |T| void): Subscription {
 		self.node.sub(observer)
 	}
+
+	// This signal viewed as a read-only `Source` — e.g. to pass to `combine`.
+	fun source(self): Source<T> {
+		self.node
+	}
+}
+
+// The product combinator: a source of the tuple of its inputs' current values,
+// recomputed whenever any input changes. Variadic over the inputs' (distinct)
+// types via a mapped-tuple parameter — `combine((a, b, c))` of `Source<A>`,
+// `Source<B>`, `Source<C>` yields `Source<(A, B, C)>`. A `Signal` is passed as
+// `signal.source()`.
+fun combine<T: (2..)>(sources: (U in T: Source<U>)): Source<T> {
+	let snapshot = || (source in sources => source.get());
+	let derived = Source::new(snapshot());
+	// Subscribe each input (the comprehension's `.map` runs `sub` per element);
+	// the resulting subscriptions are intentionally dropped.
+	let subscriptions = (source in sources => source.sub(|_| {
+		derived.update(snapshot());
+	}));
+	derived
 }
 
 // A live subscription. Dropping it does NOT stop it (an owner scope is

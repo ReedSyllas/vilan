@@ -35,14 +35,19 @@ fun todos(): View {
 	});
 
 	// `visible` depends on BOTH `items` and `filter`. `combine` is variadic — it
-	// declares the dependencies up front and yields a `Source<(List<Todo>, str)>`;
-	// `derive` then maps the pair. The graph is data: `visible` recomputes exactly
-	// when either input changes — no body is run to "find" the dependencies.
-	let visible: Source<List<Todo>> = combine(items, filter).derive(|(list, filter)| {
+	// takes a tuple of the dependencies (a `Signal` viewed as `.source()`) and
+	// yields a `Source<(List<Todo>, str)>`; `derive` then maps the pair. The graph
+	// is data: `visible` recomputes exactly when either input changes — no body is
+	// run to "find" the dependencies.
+	let visible: Source<List<Todo>> =
+		combine((items.source(), filter.source())).derive(|(list, filter)| {
 		mut shown: List<Todo> = [];
 		for todo in list {
-			let keep =
-				filter == "all" || (filter == "active" && !todo.done) || (filter == "done" && todo.done);
+			let keep = match filter {
+				"active" => !todo.done,
+				"done" => todo.done,
+				_ => true,
+			};
 			if keep {
 				shown.push(todo);
 			}
