@@ -38,19 +38,20 @@ dependencies. Unordered within a section.
      (it's a ref-counted cell, so the usual escape restriction may be false) — decided when that
      rule lands.
 
-2. **Ownership & disposal** (M; **proposal written:** [`reactive-ownership.md`](reactive-ownership.md))
-   — *correctness bug, not just a leak.* `sub()` returns a `Subscription` every caller drops, so
-   observers fire forever; `bind_each` makes it a real bug (re-render `sub()`s fresh rows and
-   `clear()`s the DOM, but old rows' subs stay live, mutating detached nodes — unbounded growth). An
-   ambient **owner scope** disposes a group of subscriptions when its scope ends. **Decisions:**
-   strategic owners at dynamic boundaries (library-only, not a `comp` grammar); `sub()` requires an
-   owner (loud). **Mechanism finding:** the `context` intrinsic can't carry it library-only —
-   `Context.run` needs a *closure-literal* body, so it can't run a thunk param (and the owner must
-   wrap the component *call*). Use a **module-level owner stack** (Solid-style) instead: runtime
-   require-owner, sync-only. `mount` takes a thunk (`mount(id, || view)`); `bind_each` keeps a child
-   owner per render; `show` stays hide-only (a destroy-on-hide `mount_when` is separate). **Deferred
-   upgrade:** route through `Context<Owner>` for a compile-time guarantee + async-safety (needs a
-   context-pass extension to run a thunk param under a context).
+2. **Ownership & disposal — explicit owners** (M; **proposal written:**
+   [`reactive-ownership.md`](reactive-ownership.md)) — *correctness bug, not just a leak.* `sub()`
+   returns a `Subscription` every caller drops, so observers fire forever; `bind_each` makes it a real
+   bug (re-render `sub()`s fresh rows and `clear()`s the DOM, but old rows' subs stay live, mutating
+   detached nodes — unbounded growth). **Decision (revised):** *explicit* ownership, no ambient magic
+   for now — a `Context`/owner-stack mechanism each carried a tax (literal-body, sync-only,
+   context-pass work), so defer it until we have an ergonomic API proven against async/callbacks; the
+   magic later just desugars to these primitives. `Owner` (`new` / `take<T: Disposable>` / `dispose`)
+   + a `Disposable` trait (`Subscription`/`View`/`Owner` implement it; verified working). `View`s
+   collect their bindings' subs (rolled up via `.child`), so `owner.take(view)` owns a subtree;
+   `bind_each` keeps an internal child owner cleared/refilled per render; `mount(id, view)` and
+   `sub() → Subscription` stay unchanged. Loudness comes from **`[must_use]` on `sub`** (item B7),
+   not ambient tracking. `show` stays hide-only (destroy-on-hide `mount_when` is separate, ties to
+   A3). Deferred ergonomic layer (ambient owner / `comp` macro) is future sugar.
 
 3. **`bind_each` keyed reconciliation** (M) — currently clear-and-rebuild on every change (correct
    but not keyed). The `key` argument is reserved for this. Reorder rows with their items, dispose a
@@ -95,6 +96,14 @@ dependencies. Unordered within a section.
    is *inferred* (`List::new()` + `push`, or a chained `filter().map()`) is typed too late for the
    closure-param inference, so field access in the closure still fails; workaround is an annotation
    (`mut xs: List<T>`). README's documented "known limitation." Fold into B1.
+7. **`[must_use]`** (S–M; drives A2's loudness) — a general attribute marking a function's result as
+   must-be-consumed. A call whose result is *dropped* (a non-tail statement expression, not bound /
+   argument / assigned) gets a diagnostic ("unused `Subscription`: `take()` into an `Owner`,
+   `dispose()`, or `let _ = …`"). Detection scans block statement lists for a dropped call to a
+   `must_use` callee (the transformer already separates statement vs. tail). Severity: a **warning**
+   is the right fit — needs a `Warning` severity added (diagnostics are all errors today; the LSP
+   already filters by severity); fallback is an error + `let _ =` escape. Written `[must_use]` (needs
+   H2). First user: `std::reactive::sub` (A2).
 
 ---
 
@@ -204,6 +213,12 @@ dependencies. Unordered within a section.
 1. **Struct literal as an operator operand** (S; roadmap #2) — `Point { .. } == x` fails (bind to a
    variable first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
    degrades to a clean parse error, documented at the parser site.
+2. **Attribute syntax: `@name(..)` → `[name(..)]`** (M) — change decorator-style attributes to
+   bracket-style (Rust-like, without the `#`): `[extern("console.log")]`, `[derive(Debug)]`,
+   `[must_use]`. Lexer + parser change, a corpus-wide migration (every `@extern` / `@derive` across
+   `std` + `test` + examples), and the formatter. Mechanical but broad; goldens unchanged (attributes
+   don't affect codegen). Sequence **before / with `[must_use]` (B7)** so that lands in the new
+   syntax. Do as its own commit (the migration) ahead of the feature.
 
 ---
 

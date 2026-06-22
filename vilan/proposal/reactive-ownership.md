@@ -1,134 +1,176 @@
 # Reactive ownership & disposal (backlog A2)
 
-**Status:** proposal (not implemented). Fixes the subscription leak in `std::reactive`/`std::ui`
-and makes a leaked subscription impossible to create silently.
+**Status:** proposal (not implemented). **Explicit** owners (no ambient/automatic tracking) plus a
+`[must_use]` `Subscription`, so a dropped subscription is loud without any magic.
 
 ## Motivation
 
-`sub()` returns a `Subscription` that every caller drops, and nothing disposes it — the observer
-stays registered in the signal's subscriber list forever. For app-lifetime signals that is benign,
-but `bind_each` makes it a real bug: every list change `clear()`s the DOM and rebuilds rows, each row
+`sub()` returns a `Subscription` every caller drops, and nothing disposes it — the observer stays
+registered in the signal's subscriber list forever. For app-lifetime signals that is benign, but
+`bind_each` makes it a real bug: every list change `clear()`s the DOM and rebuilds rows, each row
 re-`sub()`-ing; the old rows' subscriptions stay live, firing on every change and mutating detached
 nodes, growing without bound.
 
-The fix is an **owner scope**: subscriptions register with an ambient owner that disposes them as a
-group when its scope ends (a component unmounts, `bind_each` reconciles a row away).
+## Decision: explicit ownership, no magic (for now)
 
-## Decisions (locked)
+Defer *ambient* owner tracking (a `Context<Owner>` or a module-level owner stack) until we have an
+ergonomic API proven against `async`, callbacks, and indirection. Every mechanism we sketched for it
+carried a tax — `Context.run` needs a closure-literal body so it can't run a thunk param; a global
+stack is sync-only and not async-safe; the compile-time guarantee needs a context-pass extension.
+Rather than pick a magic now, **ownership is an explicit value you pass and dispose.** Whatever
+ergonomic layer we eventually want (ambient owner, a `comp` macro) is just sugar that desugars to
+these primitives — so this is the right foundation, not a throwaway.
 
-- **Strategic owners, library-only — not a `comp` grammar.** Owners are created at the *dynamic*
-  boundaries where reactive content is created then destroyed (`bind_each`, conditional mount,
-  `mount`), not per component. Static composition doesn't leak, so it needs no owner — which is why
-  no component syntax is required. A `comp` ergonomic layer, if ever wanted, is a macro (#9), never
-  core grammar.
-- **`sub()` requires an owner (loud).** A subscription cannot be created without something
-  responsible for disposing it; `sub()` with no ambient owner fails loudly (see Mechanism).
+It also rolls back the two compromises the ambient design forced:
 
-## Mechanism: a module-level owner stack (not the `context` intrinsic)
+- `mount(id, view)` stays as-is (no thunk) — the owner is external, so mount wraps nothing.
+- `sub()` keeps returning `Subscription` (no `void` change).
 
-The natural design — carry the owner in a `Context<Owner>` — does **not** work library-only. The
-ambient owner must wrap the *component call* (a component subscribes while building its `View`,
-*before* `mount` receives it), so `mount` must take a thunk and run it under the owner. But
-`Context.run` requires a **closure-literal body** ("`run` must be called on a named context with a
-closure literal body") — it cannot run a passed-in thunk. So `mount(|| view)` / `Owner::run(thunk)`
-can't be expressed over `Context`.
+## API — `Owner` + `Disposable`
 
-Instead, carry the current owner in a **module-level stack** (how Solid carries its owner):
+Verified working (generic-bound dispatch through a captured closure compiles and runs):
 
 ```vilan
-let STACK: Shared<List<Owner>> = Shared::new([]);
-```
+trait Disposable {
+    fun dispose(self);
+}
 
-`run` pushes/pops around a plain thunk (no `Context` restriction); `sub()` reads the top. Trade-offs
-vs. the `Context` route, accepted for this cut:
-
-- **Runtime** require-owner (a dev-mode throw), not compile-time. Loud enough — you hit it the first
-  time the path runs — and within the locked "loud" decision.
-- **Synchronous rendering only** (a global stack interleaves under concurrent async renders).
-  Reactive rendering is synchronous, so this is moot in practice.
-
-**Deferred upgrade:** route the owner through `Context<Owner>` for a *compile-time* require-owner
-guarantee (every path, not just executed ones) and async-safety. It needs a context-pass extension —
-run a thunk parameter under a context and trace it inter-procedurally so a thunk passed to `mount`
-that reads the owner is admitted. Tracked as a follow-up; not in this cut.
-
-## API — `Owner`
-
-```vilan
 struct Owner {
-    // Cleanup thunks: a subscription's `dispose`, a child owner's `dispose`, a
-    // `sub`-body cleanup. Run (in reverse) on `dispose`.
     cleanups: Shared<List<|| void>>,
 }
 
 impl Owner {
-    // Run `body` with a fresh root owner current; returns the owner so the caller
-    // can `dispose()` it later (the app, a test). `mount` uses this.
-    fun root(body: || void): Owner { … push, body(), pop … }
-
-    // A child of the current owner: disposed when the parent is, or earlier by
-    // the caller (e.g. `bind_each` before a rebuild).
-    fun child(): Owner { … register `|| owner.dispose()` with the current owner … }
-
-    // Make `self` current for the dynamic extent of `body`.
-    fun run(self, body: || void) { … push self, body(), pop … }
-
-    // Register a cleanup with `self`.
-    fun on_cleanup(self, cleanup: || void) { self.cleanups.write().push(cleanup); }
-
-    // Run every cleanup once (idempotent: clears the list).
-    fun dispose(self) { … run cleanups, clear … }
+    fun new(): Owner {
+        Owner { cleanups = Shared::new([]) }
+    }
+    // Take ownership of any disposable — a Subscription, a View (its whole
+    // subtree), or a child Owner. The type is erased into a `|| void` so one list
+    // holds them all.
+    fun take<T: Disposable>(self, item: T) {
+        self.cleanups.write().push(|| { item.dispose(); });
+    }
 }
 
-// The current owner, or a loud failure if there is none.
-fun current_owner(): Owner { … top of STACK, else panic("…needs an owner; wrap in `mount`/`Owner::root`") … }
+impl Owner with Disposable {
+    fun dispose(self) {
+        for cleanup in self.cleanups.read() {
+            cleanup();
+        }
+        self.cleanups.write() = [];
+    }
+}
 ```
 
-## Changes to `std::reactive`
+`Subscription`, `View`, and `Owner` all implement `Disposable`, so owners nest and views are owned
+uniformly. `dispose` is idempotent (clears the list).
 
-- **`sub` registers with the current owner and returns `void`.** It still produces a `Subscription`
-  internally, but registers `|| subscription.dispose()` with `current_owner()` rather than handing it
-  back. `current_owner()` is the loud require-owner point. (Callers that dropped the `Subscription` —
-  every binding, `combine` — are unaffected; manual early disposal is done with a child owner.)
-- **Per-run cleanup (Solid-style `onCleanup`):** a `sub`/`map` body may register a cleanup that runs
-  before the next apply and on dispose. *(Optional in v1; include if cheap.)*
+## `sub` is `[must_use]`
 
-## Changes to `std::ui`
+`sub(self, observer): Subscription` keeps its signature but gains `[must_use]`. Dropping its result —
+a bare statement that discards a `Subscription` — is a loud diagnostic:
 
-- **`mount(id: str, build: || View): Owner`** — runs `build` under a fresh root owner so the
-  component's subscriptions are owned, attaches the result, and returns the root owner (so the app
-  can later dispose it). **Signature change** from `mount(id, view: View)`; migrate `app.vl`
-  (`mount("counter", || counter())`).
-- **`bind_each`** — keep a child owner *per render*: dispose the previous child, create a new one,
-  and build the rows under it (`child.run(|| { for item in list { append(render(item).element) } })`)
-  so each row's subscriptions register with the child and are disposed on the next reconcile. This is
-  the leak fix.
-- **`show`** — *no change.* As written it toggles `hidden` and never destroys its subtree, so it does
-  not leak and needs no owner. A *destroy-on-hide* conditional (Solid's `<Show>`, which unmounts
-  children when false) is a **separate, new combinator** (`mount_when`?) and a separate decision —
-  do not conflate it with `show`.
+> unused `Subscription`: `take()` it into an `Owner`, or `dispose()` it (`let _ = …` to discard).
+
+That restores the no-silent-leak property **without ambient tracking** — the loudness is a local
+"unused value" check, not a lifetime analysis. Intentional fire-and-forget is `let _ = count.sub(..)`.
+(`[must_use]` is a general attribute — see the `must_use` and attribute-syntax backlog items.)
+
+## Views collect their own subscriptions
+
+A `View` owns the subscriptions its bindings create, so handing a `View` to an `Owner` (or disposing
+it) tears down the whole subtree — no need to surface each binding's `Subscription`:
+
+- `view(tag)` — a `View` with an empty `cleanups` list (same shape as `Owner`).
+- each `bind_*` subscribes and registers `|| subscription.dispose()` on the `View`.
+- `.child(c)` nests: registers `|| c.dispose()` on `self` (so a tree's cleanups roll up to the root).
+- `View with Disposable` — `dispose` runs the cleanups.
+
+```vilan
+fun counter(owner: Owner): View {
+    let count = Signal::new(0);
+    owner.take(view("p").bind_text(count.map(format)))   // take(View) owns the subtree
+}
+
+fun app() {
+    let owner = Owner::new();
+    mount("counter", counter(owner));
+    // owner.dispose() when the app / route tears down
+}
+```
+
+## `bind_each` — an internal child owner (the leak fix)
+
+No ambient owner; `bind_each` manages a child `Owner` for the rows itself:
+
+```vilan
+fun bind_each<T, K>(self, source: Signal<List<T>>, key: |T| K, render: |T| View): View {
+    let element = self.element;
+    let rows = Owner::new();
+    self.cleanups.write().push(|| { rows.dispose(); });   // unmounting the list disposes the rows
+    self.take(source.sub(|list| {                         // reconcile sub is must_use -> take it
+        rows.dispose();                                   // drop the previous rows' subs
+        element.clear();
+        for item in list {
+            let row = render(item);
+            rows.take(row);                               // own the new row's subtree
+            element.append(row.element);
+        }
+    }));
+    self
+}
+```
+
+The same `rows` owner is reused — `dispose()` clears it, then it refills — so the subscriber list
+stays bounded across re-renders.
+
+## `show` — unchanged
+
+`show` toggles `hidden`; it never destroys its subtree, so it doesn't leak and needs no owner. A
+*destroy-on-hide* conditional (Solid's `<Show>`, which unmounts children when false) is a separate,
+new combinator (`mount_when`?) and a separate decision — do not fold it into `show`. It interacts
+with keyed reconcile (A3).
+
+## `[must_use]` — the general feature
+
+`[must_use]` on a function marks its result as must-be-consumed. A call whose result is **dropped**
+(a non-tail statement expression whose value is discarded, not bound, not an argument, not assigned)
+gets a diagnostic. Escapes: bind it (`let s = …`, `owner.take(…)`), make it the block tail, or
+explicitly discard with `let _ = …`.
+
+- **Detection:** scan block statement lists for a call expression to a `must_use` callee whose value
+  is dropped. (The transformer already distinguishes statement vs. tail and tracks side effects.)
+- **Severity:** a **warning** is the right fit (Rust-style) — which means adding a `Warning` severity
+  to diagnostics (today they are all errors; the LSP already filters by severity). Recommended. The
+  fallback, if we don't add severities now, is an **error** with `let _ =` as the escape — loudest,
+  but it forces every drop site to be handled (which is the A2 migration anyway).
+- **Syntax:** written `[must_use]`, per the new attribute syntax (`@name` → `[name]`) — backlog item.
 
 ## How it lowers
 
-Pure `std` — a `Shared<List<Owner>>` stack, `Shared<List<|| void>>` cleanup lists, and closures. No
-compiler work. (The deferred `Context` upgrade is the only part that would touch the compiler.)
+Pure `std` — `Shared` lists, closures, and the `Disposable` trait (no runtime owner stack, no context
+threading). The only compiler touch is `[must_use]` (parse the attribute + the unused-result
+diagnostic + possibly a `Warning` severity).
+
+## Migration
+
+- `bind_*` register their subs on the `View`; `mount` stays `(id, view)`.
+- `combine` creates subscriptions internally (one per input) that live for the derived signal's life;
+  it should `take` them into an owner tied to the derived signal, or be exempt — **decide** (open
+  question).
+- `reactive.vl` / examples: own top-level subs in an `Owner` (or `let _ =` for genuinely
+  app-lifetime ones) once `sub` is `[must_use]`.
 
 ## Test plan
 
 - **Leak fix:** mount a `bind_each` over a signal; change the list N times; assert the source's
-  subscriber count does not grow (old rows' subs disposed) and a disposed row's observer no longer
-  fires.
-- **Disposal propagates:** `mount` → `dispose()` the returned owner → all subscriptions gone; a
-  subsequent `set` fires nothing.
-- **Require-owner is loud:** `count.sub(..)` with no ambient owner throws (dev) with a message
-  pointing at `mount` / `Owner::root`; the same under an `Owner::root(|| …)` compiles and runs.
-- **Per-render scope:** a row's `sub`-body cleanup runs when that row is reconciled away.
+  subscriber count stays bounded and a reconciled-away row's observer no longer fires.
+- **Teardown:** `owner.dispose()` on a mounted tree → a subsequent `set` fires nothing.
+- **`[must_use]`:** a dropped `sub()` is a diagnostic; `take` / `let _ =` / a tail position silence it.
+- **Nesting:** disposing a parent owner disposes child owners and views.
 
 ## Open questions
 
-- **`sub` return type:** `void` (owner-managed; this proposal) vs. keep returning `Subscription` for
-  manual control. Leaning `void` + child owners for manual scopes.
-- **`show` vs. a destroy-on-hide `mount_when`:** confirm `show` stays hide-only; scope `mount_when`
-  separately (it interacts with keyed reconcile / A3).
-- **Compile-time upgrade:** when to do the `Context<Owner>` + context-pass extension (compile-time
-  require-owner, async-safety).
+- **`must_use` severity:** warning (add a `Warning` severity) vs. error (+ `let _ =` escape).
+- **`combine`'s internal subscriptions:** who owns them.
+- **`show` vs. a destroy-on-hide `mount_when`:** scope `mount_when` separately (ties to A3 keyed
+  reconcile).
