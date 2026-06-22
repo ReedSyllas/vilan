@@ -38,8 +38,13 @@ dependencies. Unordered within a section.
      (it's a ref-counted cell, so the usual escape restriction may be false) — decided when that
      rule lands.
 
-2. **Ownership & disposal — explicit owners** (M; **proposal written:**
-   [`reactive-ownership.md`](reactive-ownership.md)) — *correctness bug, not just a leak.* `sub()`
+2. **Ownership & disposal — explicit owners** (**done 2026-06-22**;
+   [`reactive-ownership.md`](reactive-ownership.md)) — shipped the `Disposable` trait + `Owner`
+   (`new`/`take`/`dispose`), `View` self-collecting its bindings' subs, `bind_each`'s per-render
+   child owner (the leak fix, proven by a bounded-count test), and `[must_use]` `sub`. Also delivered
+   B7 (`[must_use]` + a `Warning` severity) and H2 (the `[name(..)]` attribute syntax). Deferred: the
+   ambient-owner / `comp` ergonomic layer (future sugar over these primitives). *Original notes:*
+   `sub()`
    returns a `Subscription` every caller drops, so observers fire forever; `bind_each` makes it a real
    bug (re-render `sub()`s fresh rows and `clear()`s the DOM, but old rows' subs stay live, mutating
    detached nodes — unbounded growth). **Decision (revised):** *explicit* ownership, no ambient magic
@@ -96,14 +101,12 @@ dependencies. Unordered within a section.
    is *inferred* (`List::new()` + `push`, or a chained `filter().map()`) is typed too late for the
    closure-param inference, so field access in the closure still fails; workaround is an annotation
    (`mut xs: List<T>`). README's documented "known limitation." Fold into B1.
-7. **`[must_use]`** (S–M; drives A2's loudness) — a general attribute marking a function's result as
-   must-be-consumed. A call whose result is *dropped* (a non-tail statement expression, not bound /
-   argument / assigned) gets a diagnostic ("unused `Subscription`: `take()` into an `Owner`,
-   `dispose()`, or `let _ = …`"). Detection scans block statement lists for a dropped call to a
-   `must_use` callee (the transformer already separates statement vs. tail). Severity: a **warning**
-   is the right fit — needs a `Warning` severity added (diagnostics are all errors today; the LSP
-   already filters by severity); fallback is an error + `let _ =` escape. Written `[must_use]` (needs
-   H2). First user: `std::reactive::sub` (A2).
+7. **`[must_use]`** (**done 2026-06-22**) — a general attribute marking a function's result
+   must-be-consumed. A *dropped* result (a call that is a bare statement in a function body or block —
+   not bound / `let _` / an argument) is a **warning** (a new, non-fatal `Program.warnings` list
+   rendered with `ReportKind::Warning`; `check_must_use` scans body/block statement lists for a
+   dropped call to a `must_use` callee). First user: `std::reactive::sub` (A2). Future: surface
+   warnings in the LSP (E1) — they're collected but not yet published.
 
 ---
 
@@ -213,12 +216,10 @@ dependencies. Unordered within a section.
 1. **Struct literal as an operator operand** (S; roadmap #2) — `Point { .. } == x` fails (bind to a
    variable first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
    degrades to a clean parse error, documented at the parser site.
-2. **Attribute syntax: `@name(..)` → `[name(..)]`** (M) — change decorator-style attributes to
-   bracket-style (Rust-like, without the `#`): `[extern("console.log")]`, `[derive(Debug)]`,
-   `[must_use]`. Lexer + parser change, a corpus-wide migration (every `@extern` / `@derive` across
-   `std` + `test` + examples), and the formatter. Mechanical but broad; goldens unchanged (attributes
-   don't affect codegen). Sequence **before / with `[must_use]` (B7)** so that lands in the new
-   syntax. Do as its own commit (the migration) ahead of the feature.
+2. **Attribute syntax: `@name(..)` → `[name(..)]`** (**done 2026-06-22**) — decorator-style attributes
+   are now bracket-style (Rust-like, without the `#`): `[extern("console.log")]`, `[derive(Debug)]`,
+   `[must_use]`. Lexer (dropped `@`) + parser (no collision with `[..]` arrays — extern/derive require
+   a keyword + `(args)`) + formatter; corpus-wide migration (84 sites) with goldens unchanged.
 
 ---
 

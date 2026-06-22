@@ -1,7 +1,11 @@
 # Reactive ownership & disposal (backlog A2)
 
-**Status:** proposal (not implemented). **Explicit** owners (no ambient/automatic tracking) plus a
-`[must_use]` `Subscription`, so a dropped subscription is loud without any magic.
+**Status:** **implemented** (2026-06-22). **Explicit** owners (no ambient/automatic tracking) plus a
+`[must_use]` `sub`, so a dropped subscription is loud without any magic. Shipped: the `Disposable`
+trait + `Owner` (`new`/`take`/`dispose`) in `std::reactive`, `View` self-collecting its bindings'
+subscriptions in `std::ui`, `bind_each`'s per-render child owner (the leak fix), and the `[must_use]`
+attribute (its own general feature — backlog B7) on the new `[name(..)]` attribute syntax (H2). The
+deferred ergonomic layer (ambient owner / `comp` macro) remains future sugar.
 
 ## Motivation
 
