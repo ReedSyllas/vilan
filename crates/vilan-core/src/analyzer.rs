@@ -150,6 +150,8 @@ pub struct Function<'src> {
     /// Whether the (view) return type is `&mut` rather than `&` — so a binding of
     /// the call (`let v = obj.slot()`) is writable through `*v`.
     pub returns_mut_view: bool,
+    /// Declared `[must_use]`: dropping a call's result is a warning.
+    pub must_use: bool,
 }
 
 #[derive(Debug)]
@@ -598,6 +600,9 @@ pub struct Analyzer<'src> {
     assignment_values: IndexMap<Id, Vec<Id>>,
     closures: IndexMap<Id, Closure>,
     diagnostics: Vec<Error>,
+    /// Non-fatal diagnostics (e.g. an unused `[must_use]` result). Rendered as
+    /// warnings; they do not block codegen.
+    warnings: Vec<Error>,
     entity_id: u32,
     enums: IndexMap<Id, Enum<'src>>,
     expr_id_to_expr_map: HashMap<Id, Expr<'src>>,
@@ -808,6 +813,7 @@ impl<'src> Analyzer<'src> {
             assignment_values: IndexMap::new(),
             closures: IndexMap::new(),
             diagnostics: Vec::new(),
+            warnings: Vec::new(),
             entity_id: 0,
             enums: IndexMap::new(),
             expr_id_to_expr_map: HashMap::new(),
@@ -2612,6 +2618,49 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// `[must_use]` (a warning): a call to a `must_use` function whose result is
+    /// *dropped* — a bare statement in a block, its value discarded. Binding the
+    /// result (`let s = …`, `let _ = …`, or passing it as an argument like
+    /// `owner.take(…)`) consumes it and is fine: those are not bare block
+    /// statements. Non-fatal — pushed to `warnings`, not `diagnostics`.
+    fn check_must_use(&mut self) {
+        // Value-discarded statements: every non-tail entry of a function body
+        // (`body.0`; the tail `body.1` is the return value) and of every inner
+        // block (`if`/`for`/`match` bodies, explicit `{ }`).
+        let mut statements: Vec<Id> = Vec::new();
+        for function in self.functions.values() {
+            statements.extend(function.body.0.iter().copied());
+        }
+        for expr in self.expr_id_to_expr_map.values() {
+            if let Expr::Block((block_statements, _tail)) = expr {
+                statements.extend(block_statements.iter().copied());
+            }
+        }
+        for statement_id in statements {
+            let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(&statement_id) else {
+                continue;
+            };
+            if self.call_is_must_use(*call_id) {
+                self.warnings.push(Error {
+                    span: **self.span_map.get(&statement_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: "unused result of a `[must_use]` call: bind it (e.g. `owner.take(…)`), or `let _ = …` to discard.".to_string(),
+                });
+            }
+        }
+    }
+
+    /// Whether a call resolves to a `[must_use]` function.
+    fn call_is_must_use(&self, call_id: Id) -> bool {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return false;
+        };
+        matches!(
+            self.expr_id_to_expr_map.get(&function_call.subject_id),
+            Some(Expr::Local(function_id))
+                if self.functions.get(function_id).is_some_and(|function| function.must_use)
+        )
+    }
+
     /// Rule 1 (value semantics): the value expressions that must be deep-copied
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
@@ -3550,6 +3599,7 @@ impl<'src> Analyzer<'src> {
                                 function.return_type.as_deref().map(|spanned| &spanned.0),
                                 Some(Node::Reference(true, _))
                             ),
+                            must_use: function.must_use,
                         },
                     );
                     Some(Expr::Function(id))
@@ -8668,6 +8718,8 @@ pub struct Program<'src> {
     pub target: Target,
     pub closures: IndexMap<Id, Closure>,
     pub diagnostics: Vec<Error>,
+    /// Non-fatal diagnostics (unused `[must_use]` results) — rendered as warnings.
+    pub warnings: Vec<Error>,
     pub enums: IndexMap<Id, Enum<'src>>,
     pub entity_map: HashMap<Id, Expr<'src>>,
     pub entity_scope_map: HashMap<Id, Id>,
@@ -9697,6 +9749,7 @@ pub fn analyze<'src>(
     analyzer.check_mutable_references();
     analyzer.check_view_bindings();
     analyzer.check_view_arguments();
+    analyzer.check_must_use();
     analyzer.check_view_escape();
     analyzer.check_invalidation();
     analyzer.check_reseat_escape();
@@ -10010,6 +10063,7 @@ pub fn analyze<'src>(
         target,
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
+        warnings: analyzer.warnings,
         enums: analyzer.enums,
         entity_map: analyzer.expr_id_to_expr_map,
         entity_scope_map: analyzer.expr_id_to_scope_id_map,

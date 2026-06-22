@@ -66,6 +66,34 @@ fn assert_fails(source: &str) {
     );
 }
 
+/// The analyzer's non-fatal warning messages (e.g. unused `[must_use]` results).
+fn warnings(source: &str) -> Vec<String> {
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let leaked: &'static str = Box::leak(source.into_boxed_str());
+            let (program, _errors) = analyze_source(
+                leaked,
+                &std_root(),
+                Path::new("test.vl"),
+                Some(Target::Node),
+            );
+            program
+                .map(|program| {
+                    program
+                        .warnings
+                        .into_iter()
+                        .map(|warning| warning.msg)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .expect("spawn worker")
+        .join()
+        .unwrap_or_default()
+}
+
 /// Compile, then execute the emitted JS with `node`, returning its stdout. A
 /// compile failure or a non-zero exit becomes `Err`. This catches *runtime*
 /// miscompiles — a program that type-checks but emits the wrong code (e.g. a
@@ -137,7 +165,7 @@ fn reactive_map_sub_and_set_with() {
 
 #[test]
 fn generic_dispatch_to_extern_impl() {
-    // A trait method on a generic, dispatching to a primitive's `@extern` impl.
+    // A trait method on a generic, dispatching to a primitive's `[extern]` impl.
     assert_compiles(
         r#"
         import std::print;
@@ -759,5 +787,47 @@ fn r8_reject_implicit_borrow() {
         fun bump(x: &mut i32) { x += 1; }
         fun main() { mut a = 0; bump(a); }
         "#,
+    );
+}
+
+// --- [must_use] -------------------------------------------------------------
+
+#[test]
+fn must_use_dropped_result_warns() {
+    // A dropped `[must_use]` result (a bare statement) is a warning.
+    let messages = warnings(
+        r#"
+        [must_use]
+        fun make(): i32 { 42 }
+        fun main() { make(); }
+        "#,
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("must_use")),
+        "expected a must_use warning, got {messages:?}"
+    );
+}
+
+#[test]
+fn must_use_consumed_result_no_warning() {
+    // Binding, discarding with `let _`, or passing as an argument consumes the
+    // result — no warning.
+    let messages = warnings(
+        r#"
+        import std::print;
+        [must_use]
+        fun make(): i32 { 42 }
+        fun consume(x: i32) { print(x); }
+        fun main() {
+            let a = make();
+            let _ = make();
+            consume(make());
+            print(a);
+        }
+        "#,
+    );
+    assert!(
+        messages.is_empty(),
+        "expected no warnings, got {messages:?}"
     );
 }

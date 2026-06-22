@@ -73,6 +73,9 @@ pub struct Func<'src> {
     // method, or property access. `None` for a plain `external` (compiler
     // intrinsic) or an ordinary function.
     pub extern_binding: Option<ExternBinding<'src>>,
+    // Declared `[must_use]`: dropping a call's result (a bare statement that
+    // discards it) is a warning.
+    pub must_use: bool,
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<Parameter<'src>>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,

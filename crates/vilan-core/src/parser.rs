@@ -748,8 +748,20 @@ where
         .labelled("extern attribute")
         .boxed();
 
+    // `[must_use]` — dropping a call's result is a warning.
+    let must_use_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("must_use") => () }.labelled("`must_use`"))
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("must_use attribute")
+        .boxed();
+
     let function = extern_attribute
         .or_not()
+        .then(
+            must_use_attribute
+                .or_not()
+                .map(|must_use| must_use.is_some()),
+        )
         .then(just(Token::Async).or_not().map(|async_| async_.is_some()))
         .then(
             just(Token::External)
@@ -835,7 +847,10 @@ where
                 (
                     (
                         (
-                            ((((extern_binding, is_async), external), name), generic_parameters),
+                            (
+                                ((((extern_binding, must_use), is_async), external), name),
+                                generic_parameters,
+                            ),
                             parameters,
                         ),
                         return_type,
@@ -851,6 +866,7 @@ where
                         is_async,
                         external,
                         extern_binding,
+                        must_use,
                         generic_parameters,
                         parameters,
                         return_type,

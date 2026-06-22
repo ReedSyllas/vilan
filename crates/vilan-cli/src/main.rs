@@ -595,6 +595,11 @@ fn compile_to_js(
             for error in &program.diagnostics {
                 errs.push(Rich::custom(error.span, error.msg.as_str()));
             }
+            // Warnings are non-fatal: render them, but they do not enter `errs`,
+            // so they don't block codegen.
+            for warning in &program.warnings {
+                report_warning(&filename, &src, warning.span.into_range(), &warning.msg);
+            }
 
             if emit_debug {
                 write_debug(file, "analyze.out", &format!("{program:#?}"));
@@ -746,4 +751,21 @@ fn report<'src>(
             .print(sources([(filename.to_string(), src.to_string())]))
             .unwrap()
         });
+}
+
+/// Renders a single analyzer warning (e.g. an unused `[must_use]` result) — like
+/// `report`, but `ReportKind::Warning` and non-fatal.
+fn report_warning(filename: &str, src: &str, span: std::ops::Range<usize>, message: &str) {
+    Report::build(ReportKind::Warning, (filename.to_string(), span.clone()))
+        .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
+        .with_message(message)
+        .with_label(
+            Label::new((filename.to_string(), span))
+                .with_message(message)
+                .with_color(Color::Yellow),
+        )
+        .finish()
+        // stderr, so it doesn't corrupt `build --stdout` JS.
+        .eprint(sources([(filename.to_string(), src.to_string())]))
+        .unwrap();
 }
