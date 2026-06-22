@@ -580,3 +580,84 @@ fn let_tuple_destructuring() {
         "1 2 3 7 x\n",
     );
 }
+
+// --- Transparent references (implicit place, explicit value) ----------------
+
+#[test]
+fn transparent_references_write_through() {
+    // R5: assigning *through* a view writes to its referent with no `*` — a view
+    // binding, a `&mut` parameter, a re-borrow, a `borrows`-returning call, and a
+    // captured `Option<&mut T>`, for plain `=` and compound `+=` / `/=`. Reading a
+    // view as a value keeps its explicit `*`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun add_ten(x: &mut i32) { x += 10; }
+        fun same(x: &mut i32): &mut i32 borrows x { x }
+        struct Cell { value: i32 }
+        impl Cell { fun slot(&mut self): Option<&mut i32> { Some(&mut self.value) } }
+        fun main() {
+            mut a: i32 = 10;
+            let b: &mut i32 = &mut a;
+            let c: &mut i32 = b;
+            b = 20;
+            print(i"{a} {*b} {*c}");
+            add_ten(&mut a);
+            print(i"{a} {*b}");
+            add_ten(b);
+            print(i"{a} {*b}");
+            same(c) /= 10;
+            print(i"{a} {*b}");
+            mut cell = Cell { value = 100 };
+            match cell.slot() {
+                Some(let s) => { s += 5 }
+                None => {}
+            }
+            print(cell.value);
+        }
+        "#,
+        "20 20 20\n30 30\n40 40\n4 4\n105\n",
+    );
+}
+
+#[test]
+fn transparent_references_reject_deref_assignment() {
+    // R6: `*` is value extraction (an rvalue) and may not be an assignment
+    // target — write `v = …`, not `*v = …`.
+    assert_fails(
+        r#"
+        fun main() { mut a = 5; let v: &mut i32 = &mut a; *v = 9; }
+        "#,
+    );
+}
+
+#[test]
+fn transparent_references_reject_mut_view_binding() {
+    // R7: a view binding cannot be `mut` — a view cannot be rebound.
+    assert_fails(
+        r#"
+        fun main() { mut a = 5; mut v: &mut i32 = &mut a; v = 9; }
+        "#,
+    );
+}
+
+#[test]
+fn transparent_references_reject_view_into_value_binding() {
+    // R1: a value annotation cannot bind a view — write `*` to copy the value out.
+    assert_fails(
+        r#"
+        fun main() { mut a = 5; let v: &mut i32 = &mut a; let b: i32 = v; }
+        "#,
+    );
+}
+
+#[test]
+fn transparent_references_reject_value_into_view_binding() {
+    // R1: a view annotation (`&mut T`) cannot bind a value.
+    assert_fails(
+        r#"
+        fun main() { mut a = 5; let v: &mut i32 = &mut a; let b: &mut i32 = *v; }
+        "#,
+    );
+}

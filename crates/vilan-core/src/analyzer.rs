@@ -665,6 +665,11 @@ pub struct Analyzer<'src> {
     // to be deref-wrapped alongside the target — distinct from a user-written
     // value-position read, which keeps its explicit `*` (R6).
     compound_reread_ids: HashSet<Id>,
+    // For each *annotated* binding (`let v: T = …`), whether the annotation was a
+    // view (`&[mut] T` → true) or a value (`T` → false). The `&`/`&mut` is erased
+    // from the type, so this records it for the R1 check that a view annotation
+    // binds a view and a value annotation binds a value. Absent ⇒ no annotation.
+    binding_annotation_view: HashMap<Id, bool>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     prepped_locals: Vec<(Id, &'src str)>,
@@ -825,6 +830,7 @@ impl<'src> Analyzer<'src> {
             list_element_slots: HashMap::new(),
             prepped_assignments: Vec::new(),
             compound_reread_ids: HashSet::new(),
+            binding_annotation_view: HashMap::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             prepped_locals: Vec::new(),
@@ -2471,6 +2477,68 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Transparent references R7 + R1, on `let`/`mut` bindings:
+    /// - **R7**: a view binding cannot be `mut` — a view cannot be rebound (its
+    ///   referent's mutability is carried by `&` vs `&mut`), so `mut v = &mut x`
+    ///   is rejected in favor of `let` (mutate the referent by assigning through
+    ///   it).
+    /// - **R1**: an explicit annotation's view-ness must match its initializer's —
+    ///   a view annotation (`: &[mut] T`) binds a view, and a value annotation
+    ///   (`: T`) binds a value (`*v` copies one out). This prevents silently
+    ///   binding a raw `(base, key)` view where a value was annotated, and vice
+    ///   versa.
+    ///
+    /// Runs after `infer_borrows`, so a `borrows`-call initializer counts as a
+    /// view.
+    fn check_view_bindings(&mut self) {
+        let bindings: Vec<(Id, bool, Option<Id>, &'src str, Span)> = self
+            .variables
+            .values()
+            .map(|variable| {
+                (
+                    variable.id,
+                    variable.mutable,
+                    variable.initial,
+                    variable.name,
+                    variable.name_span,
+                )
+            })
+            .collect();
+        for (binding_id, mutable, initial, name, name_span) in bindings {
+            let holds_view = self.binding_or_param_is_view(binding_id);
+            let annotation_is_view = self.binding_annotation_view.get(&binding_id).copied();
+            let initial_is_view =
+                initial.is_some_and(|initial_id| self.assignment_target_is_view(initial_id));
+            // R7: a view binding may not be `mut`.
+            if mutable && holds_view {
+                self.diagnostics.push(Error {
+                    span: name_span,
+                    msg: format!(
+                        "view binding '{name}' cannot be `mut`: a view cannot be rebound. Declare it `let`, and mutate the referent by assigning through it (`{name} = …`)."
+                    ),
+                });
+            }
+            // R1: an annotation's view-ness must match its initializer's.
+            if let Some(annotation_is_view) = annotation_is_view
+                && annotation_is_view != initial_is_view
+            {
+                let msg = if annotation_is_view {
+                    format!(
+                        "'{name}' is annotated as a view (`&[mut] T`) but its initializer is not a view; bind a `&[mut] place` to alias it."
+                    )
+                } else {
+                    format!(
+                        "'{name}' is annotated as a value but its initializer is a view; write `*` to copy the value out, or annotate `&[mut] T` to alias it."
+                    )
+                };
+                self.diagnostics.push(Error {
+                    span: name_span,
+                    msg,
+                });
+            }
+        }
+    }
+
     /// Rule 1 (value semantics): the value expressions that must be deep-copied
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
@@ -3465,6 +3533,12 @@ impl<'src> Analyzer<'src> {
                     assignments.push(value_id);
                     value_id
                 });
+                // The annotation's view-ness is recorded before `walk_type_node`
+                // erases the `&`/`&mut`, for the R1 check.
+                if let Some(type_node) = type_.as_deref() {
+                    self.binding_annotation_view
+                        .insert(id, matches!(&type_node.0, Node::Reference(_, _)));
+                }
                 let type_id = type_
                     .as_ref()
                     .map(|x| self.walk_type_node(x, scope_id))
@@ -9540,6 +9614,7 @@ pub fn analyze<'src>(
     analyzer.check_readonly_mutation();
     analyzer.check_mutable_arguments();
     analyzer.check_mutable_references();
+    analyzer.check_view_bindings();
     analyzer.check_view_escape();
     analyzer.check_invalidation();
     analyzer.check_reseat_escape();
