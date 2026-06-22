@@ -721,3 +721,43 @@ fn shared_write_is_a_view_not_a_value() {
         "#,
     );
 }
+
+// --- R8: no implicit borrow at the call site -------------------------------
+
+#[test]
+fn r8_explicit_borrow_and_reborrow() {
+    // A `&`/`&mut` parameter takes an explicit `&[mut] place`, or an existing
+    // view forwarded (re-borrowed) — both compile.
+    assert_compiles(
+        r#"
+        fun bump(x: &mut i32) { x += 1; }
+        fun via(y: &mut i32) { bump(y); }
+        fun main() { mut a = 0; bump(&mut a); via(&mut a); }
+        "#,
+    );
+}
+
+#[test]
+fn r8_method_receiver_is_implicitly_borrowed() {
+    // R8 exempts the `self` receiver: `c.inc()` on a `&mut self` method needs no
+    // `&mut c` at the call site.
+    assert_compiles(
+        r#"
+        struct C { v: i32 }
+        impl C { fun inc(&mut self) { self.v = self.v + 1; } }
+        fun main() { mut c = C { v = 0 }; c.inc(); }
+        "#,
+    );
+}
+
+#[test]
+fn r8_reject_implicit_borrow() {
+    // Passing a bare value place to a `&mut` parameter is rejected — there is no
+    // implicit borrow (a scalar would otherwise emit a broken `(base,key)` read).
+    assert_fails(
+        r#"
+        fun bump(x: &mut i32) { x += 1; }
+        fun main() { mut a = 0; bump(a); }
+        "#,
+    );
+}

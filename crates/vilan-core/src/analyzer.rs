@@ -2549,6 +2549,69 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Transparent references R8: a `&`/`&mut` parameter is passed an explicit
+    /// view — `&[mut] place`, or an existing view (a re-borrow) — never a bare
+    /// value place. There is no implicit borrow at the call site: a bare value to
+    /// a scalar `&mut` parameter would otherwise emit broken code (the parameter
+    /// expects a `(base, key)` pair). The method receiver (`self`) is borrowed
+    /// implicitly by `obj.method(..)`, so it is exempt. Only direct
+    /// `subject -> Local(callee)` calls are resolved; dispatched/generic callees
+    /// are conservatively skipped (as elsewhere).
+    fn check_view_arguments(&mut self) {
+        let call_ids: Vec<Id> = self
+            .expr_id_to_expr_map
+            .values()
+            .filter_map(|expr| match expr {
+                Expr::Call(call_id) => Some(*call_id),
+                _ => None,
+            })
+            .collect();
+        for call_id in call_ids {
+            let Some(function_call) = self.function_calls.get(&call_id) else {
+                continue;
+            };
+            let argument_ids = function_call.argument_ids.clone();
+            let callee_id = match self.expr_id_to_expr_map.get(&function_call.subject_id) {
+                Some(Expr::Local(callee_id)) => *callee_id,
+                _ => continue,
+            };
+            let parameter_ids = self
+                .functions
+                .get(&callee_id)
+                .map(|function| function.parameters.clone())
+                .or_else(|| {
+                    self.external_functions
+                        .get(&callee_id)
+                        .map(|external| external.parameters.clone())
+                });
+            let Some(parameter_ids) = parameter_ids else {
+                continue;
+            };
+            for (parameter_id, argument_id) in parameter_ids.iter().zip(argument_ids.iter()) {
+                // The required call-site spelling for this parameter — `&`/`&mut`
+                // for a view convention; the implicit `self` receiver and all
+                // by-value conventions need nothing.
+                let kind = match self.parameters.get(parameter_id) {
+                    Some(parameter) if parameter.name == "self" => continue,
+                    Some(parameter) => match parameter.convention {
+                        Convention::RefMut => "&mut",
+                        Convention::Ref => "&",
+                        Convention::Bare | Convention::Own => continue,
+                    },
+                    None => continue,
+                };
+                if !self.assignment_target_is_view(*argument_id) {
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(argument_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "a `{kind}` parameter takes a view; pass `{kind} <place>` (there is no implicit borrow)."
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     /// Rule 1 (value semantics): the value expressions that must be deep-copied
     /// at code generation, because they bind or assign an aggregate *place* that
     /// would otherwise alias its source under JS reference semantics. Fresh
@@ -9633,6 +9696,7 @@ pub fn analyze<'src>(
     analyzer.check_mutable_arguments();
     analyzer.check_mutable_references();
     analyzer.check_view_bindings();
+    analyzer.check_view_arguments();
     analyzer.check_view_escape();
     analyzer.check_invalidation();
     analyzer.check_reseat_escape();

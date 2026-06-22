@@ -1,13 +1,13 @@
 # Transparent references — implicit place, explicit value
 
-**Status:** **mostly implemented** (2026-06-21). Landed: **R5** (assign through a view with no `*`,
+**Status:** **implemented** (2026-06-21). Landed: **R5** (assign through a view with no `*`,
 plain + compound), **R6** (`*` rejected as an assignment target), **R1** (annotation view-ness must
-match the initializer), **R7** (no `mut` view binding). Deferred to focused follow-ups: **R8** (no
-implicit borrow at `&[mut]` call arguments — must exclude method `self` receivers; a pre-existing
-codegen bug), and constructing/matching an `Option<&mut T>` view **inline as a transient**
-(`match Some(&mut a)`) — see Open questions. **A1 (`Shared.write: &mut T borrows self`) is done**
-(backlog A1) — it built on R5 here. The conformance example is committed as
-`vilan/test/transparent-references.vl` + the `transparent_references_*` inference tests.
+match the initializer), **R7** (no `mut` view binding), **R8** (no implicit borrow at `&`/`&mut` call
+arguments — the method `self` receiver is exempt; this also fixed a pre-existing broken-codegen bug
+for bare scalars). **A1 (`Shared.write: &mut T borrows self`) is done** (backlog A1) — it built on
+R5 here. The one remaining follow-up is constructing/matching an `Option<&mut T>` view **inline as a
+transient** (`match Some(&mut a)`) — see Open questions. The conformance example is committed as
+`vilan/test/transparent-references.vl` + the `transparent_references_*` / `r8_*` inference tests.
 
 This is a *surface* change to how second-class views are read, written, and bound; it does **not**
 change the lifetime/escape model (second-class views, `borrows`, the position-default conventions)

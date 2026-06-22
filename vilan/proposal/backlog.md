@@ -113,11 +113,12 @@ dependencies. Unordered within a section.
    as an assignment target), R1 (annotation view-ness must match the initializer), R7 (no `mut` view
    binding); the view corpus migrated to bare form (byte-identical JS), conformance test +
    `transparent_references_*` inference tests. **Remaining sub-items:**
-   - **R8 — no implicit borrow at call sites** (S–M): a `&`/`&mut` parameter must be passed a view
-     (`&[mut] place` or an existing view), not a bare value place. Today a bare value to a scalar
-     `&mut` param compiles to *broken* JS (the param expects a `(base, key)` pair) — a pre-existing
-     bug. The check must **exclude the method `self` receiver** (implicitly borrowed). Ties into
-     roadmap #2 (compiler-core robustness).
+   - **R8 — no implicit borrow at call sites** (**done 2026-06-21**): a `&`/`&mut` parameter must be
+     passed a view (`&[mut] place` or an existing view, re-borrowed), not a bare value place
+     (`check_view_arguments`). This also fixed the pre-existing bug where a bare value to a scalar
+     `&mut` param emitted broken JS (the param expects a `(base, key)` pair). The method `self`
+     receiver is exempt (implicitly borrowed by `obj.method(..)`). Corpus migration: one site
+     (`side-effect-let.vl` `bump(xs)` → `bump(&mut xs)`), byte-identical JS.
    - **Inline `Option<&mut T>` transient** (M): `match Some(&mut a) { Some(let x) => … }` —
      constructing and matching a wrapped view *inline* (not via a function that returns one). Today
      wrapped-view captures are only recognized when the match subject is a view-returning *call*;

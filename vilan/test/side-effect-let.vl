@@ -9,8 +9,8 @@ fun bump(xs: &mut List<i32>): i32 {
 
 fun main() {
 	mut xs: List<i32> = List::new();
-	let a = bump(xs); // used below
-	let b = bump(xs); // UNUSED — its push must still happen
+	let a = bump(&mut xs); // used below
+	let b = bump(&mut xs); // UNUSED — its push must still happen
 	print(a); // 1
 	print(xs.len()); // 2
 }
