@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { workspace, window, commands, ExtensionContext } from 'vscode';
+import { workspace, window, commands, OutputChannel, ExtensionContext } from 'vscode';
 import {
     LanguageClient,
     LanguageClientOptions,
@@ -10,6 +10,7 @@ import {
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
+let outputChannel: OutputChannel | undefined;
 
 /// Resolve the language-server binary. An explicit `vilan.server.path` setting
 /// wins; otherwise look for a binary built in-repo (the extension lives at
@@ -49,7 +50,16 @@ function reportMissingServer(command: string): void {
     });
 }
 
-export function activate(context: ExtensionContext): void {
+/// (Re)start the language client from current settings — used on activation and
+/// by the `vilan.restartServer` command, so a rebuilt server (or a changed
+/// `vilan.server.path` / `vilan.stdPath`) is picked up without reloading the
+/// window. Replaces any running client; reuses one output channel.
+async function startClient(context: ExtensionContext): Promise<void> {
+    if (client) {
+        await client.stop().catch(() => undefined);
+        client = undefined;
+    }
+
     const config = workspace.getConfiguration('vilan');
     const command = resolveServerPath(context, config.get<string>('server.path') || 'vilan-lsp');
     const stdPath = config.get<string>('stdPath') || '';
@@ -75,13 +85,33 @@ export function activate(context: ExtensionContext): void {
         synchronize: {
             fileEvents: workspace.createFileSystemWatcher('**/*.vl'),
         },
+        outputChannel,
     };
 
     client = new LanguageClient('vilan', 'Vilan Language Server', serverOptions, clientOptions);
-    client.start().catch((error) => {
+    try {
+        await client.start();
+    } catch (error) {
+        client = undefined;
         reportMissingServer(command);
         console.error('vilan-lsp failed to start:', error);
-    });
+    }
+}
+
+export function activate(context: ExtensionContext): void {
+    outputChannel = window.createOutputChannel('Vilan Language Server');
+    context.subscriptions.push(outputChannel);
+
+    void startClient(context);
+
+    context.subscriptions.push(
+        commands.registerCommand('vilan.restartServer', async () => {
+            await startClient(context);
+            if (client) {
+                window.showInformationMessage('Vilan: language server restarted.');
+            }
+        }),
+    );
 }
 
 export function deactivate(): Thenable<void> | undefined {

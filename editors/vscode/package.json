@@ -35,6 +35,13 @@
         "path": "./syntaxes/vilan.tmLanguage.json"
       }
     ],
+    "commands": [
+      {
+        "command": "vilan.restartServer",
+        "title": "Restart Language Server",
+        "category": "Vilan"
+      }
+    ],
     "configuration": {
       "title": "Vilan",
       "properties": {
