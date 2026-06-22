@@ -362,11 +362,11 @@ impl<'src> Printer<'src> {
                 self.out.push(' ');
                 self.print_braced_items(body);
             }
-            // `@derive(A, B)` sits on its own line above the item it annotates.
+            // `[derive(A, B)]` sits on its own line above the item it annotates.
             Node::Derive(names, derived) => {
-                self.out.push_str("@derive(");
+                self.out.push_str("[derive(");
                 self.out.push_str(&names.join(", "));
-                self.out.push(')');
+                self.out.push_str(")]");
                 self.line();
                 self.print_item(derived);
             }
@@ -546,7 +546,7 @@ impl<'src> Printer<'src> {
         self.out.push('}');
     }
 
-    /// Prints a function declaration: its `@extern` attribute (if any) on its own
+    /// Prints a function declaration: its `[extern]` attribute (if any) on its own
     /// line, then `[async ][external ]fun name[<…>](…)[: T][ borrows p]` followed
     /// by the body block, or a `;` for a signature with no body.
     fn print_func(&mut self, func: &Func<'src>) {
@@ -581,9 +581,9 @@ impl<'src> Printer<'src> {
         }
     }
 
-    /// Prints a `@extern(..)` host-binding attribute in its canonical form.
+    /// Prints a `[extern(..)]` host-binding attribute in its canonical form.
     fn print_extern_attribute(&mut self, binding: &ExternBinding<'src>) {
-        self.out.push_str("@extern(");
+        self.out.push_str("[extern(");
         match binding {
             ExternBinding::Function {
                 module: None,
@@ -622,7 +622,7 @@ impl<'src> Printer<'src> {
                 self.out.push('"');
             }
         }
-        self.out.push(')');
+        self.out.push_str(")]");
     }
 
     /// Prints a `(name: T, &mut self, …)` parameter list. The `&`/`&mut`/`own`
@@ -1349,7 +1349,7 @@ mod idempotency {
     }
 
     // A spread of std modules exercising functions, impls, traits, generics,
-    // enums with payloads, matches, closures, and `@extern` bindings.
+    // enums with payloads, matches, closures, and `[extern]` bindings.
     fixed_point_tests! {
         null_vl => "null.vl",
         boolean_vl => "boolean.vl",

@@ -4,7 +4,7 @@
 // Node-layer module like `std::http`, the browser build would reject it.
 //
 // Here it's a single function the server and client both call, but in a real app
-// this is where shared types (with `@derive(Json)` for a common wire format),
+// this is where shared types (with `[derive(Json)]` for a common wire format),
 // validation, and routing tables live.
 
 fun greeting(who: str): str {

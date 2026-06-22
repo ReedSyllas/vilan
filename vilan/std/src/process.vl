@@ -4,7 +4,7 @@
 import pkg::option::Option;
 
 // Terminate the process with `code` (0 = success). Never returns.
-@extern("process.exit")
+[extern("process.exit")]
 external fun exit(code: i32): void;
 
 // Reads the next line from standard input (empty string at EOF).

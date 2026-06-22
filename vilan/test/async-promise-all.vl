@@ -4,7 +4,7 @@
 import std::{ print };
 import std::promise::Promise;
 
-@extern("node:timers/promises", "setTimeout")
+[extern("node:timers/promises", "setTimeout")]
 async external fun sleep(ms: i32): void;
 
 fun delayed(label: str, ms: i32): str {

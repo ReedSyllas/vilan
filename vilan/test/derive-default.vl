@@ -1,8 +1,8 @@
 import std::print;
 
-// `@derive(Default)` synthesizes `default()`, building the struct from each
+// `[derive(Default)]` synthesizes `default()`, building the struct from each
 // field type's own `default()`. Combines with other derives.
-@derive(PartialEq, Default)
+[derive(PartialEq, Default)]
 struct Config {
 	count: i32,
 	name: str,

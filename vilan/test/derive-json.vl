@@ -1,17 +1,17 @@
 import std::print;
 
-// `@derive(Json)` synthesizes both directions — `to_json` (a faithful JSON object
+// `[derive(Json)]` synthesizes both directions — `to_json` (a faithful JSON object
 // with real field names, which a bare `JSON.stringify` of a vilan struct can't
 // produce) and `from_json` (rebuilding the struct from that object). Scalars
 // serialize via the host `JSON.stringify` and coerce back via `Number`/`String`/
 // `Boolean`; nested derived structs recurse in both directions.
-@derive(Json)
+[derive(Json)]
 struct Point {
 	x: i32,
 	y: i32,
 }
 
-@derive(Json)
+[derive(Json)]
 struct Person {
 	name: str,
 	age: i32,

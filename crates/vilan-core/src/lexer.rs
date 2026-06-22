@@ -33,9 +33,10 @@ pub fn lexer<'src>()
         .to_slice()
         .map(Token::Op);
 
-    // A parser for control characters (delimiters, semicolons, etc.). `@`
-    // introduces an attribute (`@extern(..)`).
-    let ctrl = one_of("()[]{}<>;,.@").map(Token::Ctrl);
+    // A parser for control characters (delimiters, semicolons, etc.). Attributes
+    // use bracket syntax (`[extern(..)]`, `[derive(..)]`), so they need no special
+    // character.
+    let ctrl = one_of("()[]{}<>;,.").map(Token::Ctrl);
 
     // A parser for identifiers and keywords
     let identifier = text::ascii::ident().map(|ident: &str| match ident {

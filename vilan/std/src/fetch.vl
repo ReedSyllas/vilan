@@ -7,15 +7,15 @@
 
 external struct Response;
 
-@extern("fetch")
+[extern("fetch")]
 async external fun fetch(url: str): Response;
 
 impl Response {
 	// The HTTP status code (e.g. 200).
-	@extern(get, "status")
+	[extern(get, "status")]
 	external fun status(self): i32;
 
 	// The response body as text. Async (it awaits the host `Response.text()`).
-	@extern(method, "text")
+	[extern(method, "text")]
 	async external fun text(self): str;
 }

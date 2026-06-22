@@ -10,6 +10,6 @@ impl Promise<type T> {
 	// results in order. Like any `async` function it is implicitly awaited, so
 	// `let results = Promise::all(promises);` gives a `List<T>`. To keep the
 	// promise instead, spawn it: `let pending = async Promise::all(promises);`.
-	@extern("Promise.all")
+	[extern("Promise.all")]
 	async external fun all(promises: List<Promise<T>>): List<T>;
 }

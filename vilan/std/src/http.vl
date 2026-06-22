@@ -1,39 +1,39 @@
 // `std::http` — a small HTTP server over `node:http`, exposed through an
-// abstract `Server`/`Response` API. The raw `node:http` calls are `@extern`
+// abstract `Server`/`Response` API. The raw `node:http` calls are `[extern]`
 // host bindings used internally; everything else is ordinary Vilan.
 
 // --- Raw node:http bindings ---
 
-@extern("node:http", "createServer")
+[extern("node:http", "createServer")]
 external fun node_create_server(handler: |NodeRequest, NodeResponse| void): NodeServer;
 
 external struct NodeServer;
 
 impl NodeServer {
-	@extern(method)
+	[extern(method)]
 	external fun listen(self, port: i32, on_ready: || void);
 }
 
 external struct NodeRequest;
 
 impl NodeRequest {
-	@extern(get, "url")
+	[extern(get, "url")]
 	external fun url(self): str;
 
-	@extern(get, "method")
+	[extern(get, "method")]
 	external fun method(self): str;
 }
 
 external struct NodeResponse;
 
 impl NodeResponse {
-	@extern(set, "statusCode")
+	[extern(set, "statusCode")]
 	external fun set_status_code(self, code: i32);
 
-	@extern(method, "setHeader")
+	[extern(method, "setHeader")]
 	external fun set_header_raw(self, name: str, value: str);
 
-	@extern(method, "end")
+	[extern(method, "end")]
 	external fun end(self, body: str);
 }
 

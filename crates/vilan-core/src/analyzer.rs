@@ -161,7 +161,7 @@ pub struct ExternalFunction<'src> {
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub parameters: Vec<Id>,
     pub return_type_id: TypeId,
-    // The `@extern(..)` host binding, if any — lowers calls to a JS
+    // The `[extern(..)]` host binding, if any — lowers calls to a JS
     // import/call, method, or property access.
     pub extern_binding: Option<ExternBinding<'src>>,
     // Declares `borrows` — returns a view projecting a parameter (e.g.
@@ -3385,7 +3385,7 @@ impl<'src> Analyzer<'src> {
                 self.walk_expr_node(inner, scope_id);
                 None
             }
-            // `@derive(..)` is transparent: walk the wrapped item; the synthesized
+            // `[derive(..)]` is transparent: walk the wrapped item; the synthesized
             // trait impls are appended separately (see `derive_impl_source`).
             Node::Derive(_derives, inner) => {
                 self.walk_expr_node(inner, scope_id);
@@ -8831,7 +8831,7 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
     Some(ast)
 }
 
-/// The synthesized trait-impl source for one `@derive(..)` item. Only structs
+/// The synthesized trait-impl source for one `[derive(..)]` item. Only structs
 /// with a field body are handled; each supported trait name emits its impl,
 /// built from the struct's field names. Unknown trait names are skipped (the
 /// missing-impl error surfaces naturally at the use site).
@@ -8854,7 +8854,7 @@ fn render_type(node: &Node<'_>) -> String {
     }
 }
 
-/// The synthesized trait impls for a `@derive(..)` enum. Each derive is built
+/// The synthesized trait impls for a `[derive(..)]` enum. Each derive is built
 /// from the variants (their names and payload arities) via a `match`. `Default`
 /// is skipped — an enum has no unambiguous default variant. (Generic enums are
 /// not yet handled; the missing impl surfaces naturally at the use site.)
@@ -9164,14 +9164,14 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
     out
 }
 
-/// Synthesizes and parses the trait impls for every `@derive(..)` item at the top
+/// Synthesizes and parses the trait impls for every `[derive(..)]` item at the top
 /// level of `nodes`, returning the appended node list (leaked so it lives for the
 /// whole compilation, like a loaded module), or `None` when there are no derives.
 fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     use chumsky::prelude::*;
     let mut source = String::new();
     let mut traits: HashSet<&str> = HashSet::new();
-    // `@derive(Json)` synthesizes the reverse `FromJson` impl too, which
+    // `[derive(Json)]` synthesizes the reverse `FromJson` impl too, which
     // references `FromJson`/`JsonValue`/`parse_json_value`; the enum form also
     // calls `panic` on an unknown tag.
     let mut enum_derives_json = false;
@@ -9365,7 +9365,7 @@ pub fn analyze<'src>(
         Origin::Pkg
     };
 
-    // Synthesize `@derive(..)` impls up front: they reference std modules (e.g.
+    // Synthesize `[derive(..)]` impls up front: they reference std modules (e.g.
     // `PartialEq` in `std::compare`) that must be pulled into the reachable set
     // alongside the user's own imports, and they're walked into the entry scope
     // later. Computed once and reused.
@@ -9674,7 +9674,7 @@ pub fn analyze<'src>(
         analyzer.current_source_id = SourceId(0);
         let entry_walk_start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
-        // Synthesized `@derive(..)` impls are walked into the same (entry) scope,
+        // Synthesized `[derive(..)]` impls are walked into the same (entry) scope,
         // right after the user's items, so they see the derived types.
         if let Some(derived) = derived {
             analyzer.walk_expr_nodes(derived, global_scope_id);

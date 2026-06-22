@@ -2,11 +2,11 @@ import std::print;
 import std::json::{ Json, FromJson };
 import std::option::Option::{ self, Some, None };
 
-// `@derive(Json)` gives a struct both directions; `List`/`Option` serialize and
+// `[derive(Json)]` gives a struct both directions; `List`/`Option` serialize and
 // parse each element via its own `Json`/`FromJson`. `List::from_json` infers its
 // element type from the binding's annotation (a return-type-only generic), and
 // the derived struct fields parse their `List`/`Option` members in turn.
-@derive(Json)
+[derive(Json)]
 struct Team {
 	name: str,
 	members: List<str>,

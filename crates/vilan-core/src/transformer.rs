@@ -183,13 +183,13 @@ fn binary<'src>(op: BinaryOp, lhs: js::Node<'src>, rhs: js::Node<'src>) -> js::N
 }
 
 /// How a dispatched trait-member call lowers, once resolved to a concrete type's
-/// member. The member may be an intrinsic or an `@extern` external (a host form),
+/// member. The member may be an intrinsic or an `[extern]` external (a host form),
 /// not just a normal emitted function — so resolution is split from emission, and
 /// `args` is consumed only once the form is known (see `resolve_dispatch`).
 enum Dispatch<'src> {
     /// A built-in lowering (`str.len()` → `.length`, etc.).
     Intrinsic(Intrinsic),
-    /// An `@extern`-bound external: the external's id and its host binding.
+    /// An `[extern]`-bound external: the external's id and its host binding.
     Extern(Id, ExternBinding<'src>),
     /// A normal emitted function: its JS name and whether it is async.
     Call(String, bool),
@@ -229,7 +229,7 @@ struct Transformer<'src> {
     // Runtime helper functions (`__scan`, `__parse_i32`, `__random_int`) an
     // intrinsic call needs; emitted as a prelude only when used.
     used_helpers: BTreeSet<&'static str>,
-    // Host imports an `@extern` call needs, as module -> imported symbols;
+    // Host imports an `[extern]` call needs, as module -> imported symbols;
     // emitted as `import { a, b } from "module";` lines at the top.
     used_imports: BTreeMap<String, BTreeSet<String>>,
 }
@@ -386,7 +386,7 @@ impl<'src> Transformer<'src> {
         // among declarations is irrelevant since JS hoists them.
         let t_instances = self.monomorphized.into_iter();
 
-        // Host imports (`import { a, b } from "module";`) from `@extern` calls,
+        // Host imports (`import { a, b } from "module";`) from `[extern]` calls,
         // then runtime helpers (`__scan`, ...) — both a prelude before the body.
         let imports = self
             .used_imports
@@ -750,7 +750,7 @@ impl<'src> Transformer<'src> {
                         if let Some(intrinsic) = self.program.intrinsics.get(&target_id).copied() {
                             return Some(self.emit_intrinsic(intrinsic, args));
                         }
-                        // An `@extern`-bound external lowers to its host (JS)
+                        // An `[extern]`-bound external lowers to its host (JS)
                         // import/call, method, or property access.
                         if let Some(binding) = self
                             .program
@@ -1665,7 +1665,7 @@ impl<'src> Transformer<'src> {
         }
     }
 
-    /// Lowers an `@extern`-bound call to its host (JS) form. The first argument
+    /// Lowers an `[extern]`-bound call to its host (JS) form. The first argument
     /// is the receiver for method/property bindings; a `Function` binding with a
     /// module records the import to emit.
     fn emit_extern(
@@ -2071,7 +2071,7 @@ impl<'src> Transformer<'src> {
     /// resolves to the type's own impl member if it declares one, otherwise an
     /// inherited trait default specialized for the type (so the default's inner
     /// `self.method()` calls dispatch to this type too). The member may be an
-    /// intrinsic or an `@extern` external — which lower to a host form, not a
+    /// intrinsic or an `[extern]` external — which lower to a host form, not a
     /// call to an emitted function — so this returns a [`Dispatch`] describing
     /// how to emit it; `emit_dispatch` turns that into the actual call node. A
     /// generic dispatch resolving to an extern/intrinsic without this would mint
@@ -2834,7 +2834,7 @@ pub mod js {
 
 /// JavaScript reserved words, the globals the runtime/codegen reference, and the
 /// `__`-prefixed runtime helpers — names a readable identifier must avoid. Per-
-/// program `@extern` symbols are added on top (see `collect_reserved_names`).
+/// program `[extern]` symbols are added on top (see `collect_reserved_names`).
 const RESERVED_NAMES: &[&str] = &[
     // Reserved words (a binding can't use these).
     "break",
@@ -2934,7 +2934,7 @@ const RESERVED_NAMES: &[&str] = &[
     "__map_values",
 ];
 
-/// The free identifiers a program's `@extern`s introduce — an imported symbol
+/// The free identifiers a program's `[extern]`s introduce — an imported symbol
 /// (`createServer`) or a global root (`console` from `console.log`) — which a
 /// readable name must not shadow.
 fn collect_reserved_names(program: &Program) -> HashSet<String> {
@@ -3410,7 +3410,7 @@ fn rename_for_scopes(ng: &NameGenerator, program: &Program, nodes: &mut Vec<js::
         return;
     }
     // The reserved set (keywords, referenced globals, `__`-helpers, the program's
-    // `@extern` symbols) counts as used in every scope, so nothing collides.
+    // `[extern]` symbols) counts as used in every scope, so nothing collides.
     let reserved = collect_reserved_names(program);
     let mut declarations = Vec::new();
     let mut children = Vec::new();

@@ -1,15 +1,15 @@
 import std::print;
 
-// `@derive(PartialEq)` synthesizes the `eq` impl from a struct's fields, so `==`
+// `[derive(PartialEq)]` synthesizes the `eq` impl from a struct's fields, so `==`
 // works without hand-writing it. The compiler generates and parses the impl from
 // the field names, then analyzes it like any other code.
-@derive(PartialEq)
+[derive(PartialEq)]
 struct Point {
 	x: i32,
 	y: i32,
 }
 
-@derive(PartialEq)
+[derive(PartialEq)]
 struct Unit {}
 
 fun main() {

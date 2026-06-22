@@ -3,7 +3,7 @@ import std::json::Json;
 import std::option::Option::{ self, Some, None };
 
 // A generic function dispatching a trait method on its argument. The concrete
-// type may be a primitive whose `Json` impl is an `@extern` host binding
+// type may be a primitive whose `Json` impl is an `[extern]` host binding
 // (`i32`'s `to_json` is `JSON.stringify`) — generic dispatch lowers that to the
 // host form rather than a dangling call to an unemitted function.
 fun describe<T: Json>(value: T): str {

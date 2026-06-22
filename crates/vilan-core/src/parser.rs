@@ -6,7 +6,7 @@ use crate::span::{Span, Spanned};
 use crate::token::Token;
 use chumsky::{input::ValueInput, prelude::*};
 
-// One argument inside a `@extern(..)` attribute — a bare word (`method`/`get`/
+// One argument inside a `[extern(..)]` attribute — a bare word (`method`/`get`/
 // `set`) or a quoted string (a module path or host symbol).
 enum ExternArg<'src> {
     Word(&'src str),
@@ -29,7 +29,7 @@ fn apply_binding_mutability<'src>(pattern: Pattern<'src>, mutable: bool) -> Patt
     }
 }
 
-/// Interprets a `@extern(..)` attribute's arguments into a host binding.
+/// Interprets a `[extern(..)]` attribute's arguments into a host binding.
 fn extern_binding_from_args<'src>(args: &[ExternArg<'src>]) -> ExternBinding<'src> {
     use ExternArg::{Text, Word};
     match args {
@@ -729,9 +729,9 @@ where
         .labelled("match expression")
         .boxed();
 
-    // `@extern("node:http", "createServer")` / `@extern(method)` / `@extern(get,
-    // "statusCode")` — the host binding for the `external` function that follows.
-    let extern_attribute = just(Token::Ctrl('@'))
+    // `[extern("node:http", "createServer")]` / `[extern(method)]` / `[extern(get,
+    // "statusCode")]` — the host binding for the `external` function that follows.
+    let extern_attribute = just(Token::Ctrl('['))
         .ignore_then(select! { Token::Ident("extern") => () }.labelled("`extern`"))
         .ignore_then(
             choice((
@@ -743,6 +743,7 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
         )
+        .then_ignore(just(Token::Ctrl(']')))
         .map(|args| extern_binding_from_args(&args))
         .labelled("extern attribute")
         .boxed();
@@ -1144,10 +1145,10 @@ where
     // whose body is a single `match`).
     let not_block_end = just(Token::Ctrl('}')).not();
 
-    // `@derive(A, B) struct/enum …` — a derive attribute wrapping a struct or
+    // `[derive(A, B)] struct/enum …` — a derive attribute wrapping a struct or
     // enum, recorded as `Node::Derive`; a pre-analysis pass synthesizes the named
     // trait impls from the item's fields.
-    let derive_attribute = just(Token::Ctrl('@'))
+    let derive_attribute = just(Token::Ctrl('['))
         .ignore_then(select! { Token::Ident("derive") => () }.labelled("`derive`"))
         .ignore_then(
             identifier
@@ -1156,6 +1157,7 @@ where
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
         )
+        .then_ignore(just(Token::Ctrl(']')))
         .labelled("derive attribute");
     let derived_item = derive_attribute
         .then(choice((struct_.clone(), enum_.clone())))

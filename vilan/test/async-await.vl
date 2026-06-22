@@ -3,7 +3,7 @@
 // Output is deterministic (`sleep(0)`): first, second, third.
 import std::{ print };
 
-@extern("node:timers/promises", "setTimeout")
+[extern("node:timers/promises", "setTimeout")]
 async external fun sleep(ms: i32): void;
 
 // `labelled` awaits `sleep`, so it is inferred async; callers implicitly await

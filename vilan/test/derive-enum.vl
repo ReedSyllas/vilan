@@ -6,7 +6,7 @@ import std::json::FromJson;
 // `{"V":<x>}`, and several are `{"V":[<x>,<y>]}`, and `from_json` reads that tag
 // back to the variant. `Default` is skipped for enums (no unambiguous default
 // variant).
-@derive(PartialEq, Debug, Json)
+[derive(PartialEq, Debug, Json)]
 enum Shape {
 	Circle(i32),
 	Rect(i32, i32),

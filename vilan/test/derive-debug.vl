@@ -1,22 +1,22 @@
 import std::print;
 
-// `@derive(Debug)` synthesizes `debug(self): str` — a `Type { field = value, … }`
+// `[derive(Debug)]` synthesizes `debug(self): str` — a `Type { field = value, … }`
 // representation. Scalars format via `JSON.stringify` (numbers raw, strings
 // quoted); nested derived structs recurse; a field-less struct is just its name.
-@derive(Debug)
+[derive(Debug)]
 struct Point {
 	x: i32,
 	y: i32,
 }
 
-@derive(Debug)
+[derive(Debug)]
 struct Tagged {
 	label: str,
 	at: Point,
 	on: bool,
 }
 
-@derive(Debug)
+[derive(Debug)]
 struct Empty {}
 
 fun main() {

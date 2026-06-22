@@ -21,16 +21,16 @@ impl i32 {
 
 	// Absolute value, exponentiation, and pairwise min/max — thin wrappers over the
 	// host `Math` functions (the receiver is passed as the first argument).
-	@extern("Math.abs")
+	[extern("Math.abs")]
 	external fun abs(self): i32;
 
-	@extern("Math.pow")
+	[extern("Math.pow")]
 	external fun pow(self, exponent: i32): i32;
 
-	@extern("Math.min")
+	[extern("Math.min")]
 	external fun min(self, other: i32): i32;
 
-	@extern("Math.max")
+	[extern("Math.max")]
 	external fun max(self, other: i32): i32;
 }
 
@@ -44,28 +44,28 @@ external struct f64;
 
 impl f64 {
 	// Floating-point math over the host `Math` functions.
-	@extern("Math.abs")
+	[extern("Math.abs")]
 	external fun abs(self): f64;
 
-	@extern("Math.sqrt")
+	[extern("Math.sqrt")]
 	external fun sqrt(self): f64;
 
-	@extern("Math.pow")
+	[extern("Math.pow")]
 	external fun pow(self, exponent: f64): f64;
 
-	@extern("Math.floor")
+	[extern("Math.floor")]
 	external fun floor(self): f64;
 
-	@extern("Math.ceil")
+	[extern("Math.ceil")]
 	external fun ceil(self): f64;
 
-	@extern("Math.round")
+	[extern("Math.round")]
 	external fun round(self): f64;
 
-	@extern("Math.min")
+	[extern("Math.min")]
 	external fun min(self, other: f64): f64;
 
-	@extern("Math.max")
+	[extern("Math.max")]
 	external fun max(self, other: f64): f64;
 }
 

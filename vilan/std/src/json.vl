@@ -1,6 +1,6 @@
 // `std::json` — JSON serialization (`to_json`) and parsing (`from_json`).
 //
-// `@derive(Json)` on a struct synthesizes BOTH directions from its fields: a
+// `[derive(Json)]` on a struct synthesizes BOTH directions from its fields: a
 // faithful JSON object with real field names (which a bare host-`JSON.stringify`
 // of a vilan struct can't produce, since structs lower to field-less arrays) and
 // a `from_json` that rebuilds the struct from that object. The scalar impls bind
@@ -41,27 +41,27 @@ impl List<type T: Json> with Json {
 }
 
 impl str with Json {
-	@extern("JSON.stringify")
+	[extern("JSON.stringify")]
 	external fun to_json(self): str;
 }
 
 impl i32 with Json {
-	@extern("JSON.stringify")
+	[extern("JSON.stringify")]
 	external fun to_json(self): str;
 }
 
 impl u32 with Json {
-	@extern("JSON.stringify")
+	[extern("JSON.stringify")]
 	external fun to_json(self): str;
 }
 
 impl f64 with Json {
-	@extern("JSON.stringify")
+	[extern("JSON.stringify")]
 	external fun to_json(self): str;
 }
 
 impl bool with Json {
-	@extern("JSON.stringify")
+	[extern("JSON.stringify")]
 	external fun to_json(self): str;
 }
 
@@ -74,7 +74,7 @@ impl bool with Json {
 external struct JsonValue;
 
 // `JSON.parse(text)` — parse a document into a `JsonValue`.
-@extern("JSON.parse")
+[extern("JSON.parse")]
 external fun parse_json_value(text: str): JsonValue;
 
 impl JsonValue {
@@ -102,37 +102,37 @@ trait FromJson {
 }
 
 impl str with FromJson {
-	@extern("JSON.parse")
+	[extern("JSON.parse")]
 	external fun from_json(text: str): str;
-	@extern("String")
+	[extern("String")]
 	external fun from_json_value(value: JsonValue): str;
 }
 
 impl i32 with FromJson {
-	@extern("JSON.parse")
+	[extern("JSON.parse")]
 	external fun from_json(text: str): i32;
-	@extern("Number")
+	[extern("Number")]
 	external fun from_json_value(value: JsonValue): i32;
 }
 
 impl u32 with FromJson {
-	@extern("JSON.parse")
+	[extern("JSON.parse")]
 	external fun from_json(text: str): u32;
-	@extern("Number")
+	[extern("Number")]
 	external fun from_json_value(value: JsonValue): u32;
 }
 
 impl f64 with FromJson {
-	@extern("JSON.parse")
+	[extern("JSON.parse")]
 	external fun from_json(text: str): f64;
-	@extern("Number")
+	[extern("Number")]
 	external fun from_json_value(value: JsonValue): f64;
 }
 
 impl bool with FromJson {
-	@extern("JSON.parse")
+	[extern("JSON.parse")]
 	external fun from_json(text: str): bool;
-	@extern("Boolean")
+	[extern("Boolean")]
 	external fun from_json_value(value: JsonValue): bool;
 }
 

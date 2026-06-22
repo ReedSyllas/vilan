@@ -27,7 +27,7 @@ use crate::id::Id;
 pub enum CallTarget {
     /// A Vilan function with a body — effects propagate through it.
     Function(Id),
-    /// An `external`/`@extern` function: a leaf with no Vilan body. Async
+    /// An `external`/`[extern]` function: a leaf with no Vilan body. Async
     /// inference treats promise-returning externs as its effect sources.
     External(Id),
     /// An immediately-applied closure literal, `(|| ..)()`.
