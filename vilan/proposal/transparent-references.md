@@ -1,9 +1,17 @@
 # Transparent references — implicit place, explicit value
 
-**Status:** proposal (not implemented). Supersedes backlog item **C5** and resolves **A1**
-(`Shared.write`). This is a *surface* change to how second-class views are read, written, and
-bound; it does **not** change the lifetime/escape model (second-class views, `borrows`, the
-position-default conventions) at all.
+**Status:** **mostly implemented** (2026-06-21). Landed: **R5** (assign through a view with no `*`,
+plain + compound), **R6** (`*` rejected as an assignment target), **R1** (annotation view-ness must
+match the initializer), **R7** (no `mut` view binding). Deferred to focused follow-ups: **R8** (no
+implicit borrow at `&[mut]` call arguments — must exclude method `self` receivers; a pre-existing
+codegen bug), and constructing/matching an `Option<&mut T>` view **inline as a transient**
+(`match Some(&mut a)`) — see Open questions. This **unblocks A1** (`Shared.write`), whose remaining
+work is the `SharedValue` intrinsic split (see backlog A1). The conformance example is committed as
+`vilan/test/transparent-references.vl` + the `transparent_references_*` inference tests.
+
+This is a *surface* change to how second-class views are read, written, and bound; it does **not**
+change the lifetime/escape model (second-class views, `borrows`, the position-default conventions)
+at all.
 
 ## Motivation
 
@@ -134,14 +142,18 @@ reference (aggregate), exactly as today. Only where `*` sits in the AST moves.
 - A view-returning **call** used as an assignment target or `op=` target is bound to a temp once, so
   `g(c) /= 10` evaluates `g(c)` a single time (the transformer already does this for `*call`).
 
-## Resolves `Shared::write` (A1)
+## Unblocks `Shared::write` (A1) — remaining: the intrinsic split
 
-`fun write(self): &mut T borrows self` now reads cleanly at every existing call site with **no
-changes** to them — `self.value.write() = value` (R5), `self.subscribers.write().push(sub)` (R4),
-`a.write().count = …` (R4/R5) — because none of those are value-reads. `read(self): T` stays a value
-(a copy out). The single-slot `(cell, "v")` projection rebinds on whole-write, which is correct for
-any `T`. The `borrows self`-vs-ref-counted-cell question (whether `Shared`'s view is exempt from a
-future no-view-across-`await` rule) is recorded under memory item C and decided when that rule lands.
+With transparent references landed, every `Shared::write` call site is already clean — no `*`:
+`self.value.write() = value` (R5), `self.subscribers.write().push(sub)` (member access on a
+pointee-typed view), `a.write().count = …`. What's left to make `fun write(self): &mut T borrows
+self` *honest* is the codegen: `cell.write()` becomes a view, so the `SharedValue` intrinsic must
+split — `read → cell.v` (a value copy out) vs `write → a single-slot `(cell, "v")` projection that
+**rebinds** on whole-write for any `T`. The scalar-view path can't be reused wholesale: an aggregate
+`Shared<List<…>>` would take the aggregate-view `Object.assign` path, which *merges* instead of
+rebinding. This is the A1 follow-up (backlog A1). The `borrows self`-vs-ref-counted-cell question
+(whether `Shared`'s view is exempt from a future no-view-across-`await` rule) is recorded under
+memory item C and decided when that rule lands.
 
 ## Migration & test matrix
 

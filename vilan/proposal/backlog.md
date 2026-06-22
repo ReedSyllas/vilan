@@ -36,9 +36,13 @@ dependencies. Unordered within a section.
      sites* — does not hold: `*` is independently load-bearing for `&mut` **parameters**
      (`fun bump(slot: &mut i32) { *slot = *slot + 1 }`, which cannot be forbidden), for `for e in
      &mut` and `Option<&mut T>` captures, and for `*`-reads. The clean route is **transparent
-     references** (item C5, **proposal written:** [`transparent-references.md`](transparent-references.md)),
-     a surface change that makes `write(): &mut T borrows self` clean with no call-site edits.
-     Implement C5, then A1 is a one-liner.
+     references** (item C5, **landed 2026-06-21**), which makes `cell.write() = v` /
+     `cell.write().push(z)` read cleanly with no call-site edits. **A1 is now unblocked but not a
+     one-liner:** changing `write(): T` → `&mut T borrows self` makes `cell.write()` a view, so the
+     `SharedValue` intrinsic must split — `read → cell.v` (a value) vs `write → a single-slot
+     `(cell, "v")` projection that rebinds on whole-write for any `T`. (Reusing the scalar-view path
+     would mis-handle aggregate `Shared<List<…>>`: the aggregate-view path emits `Object.assign`,
+     which merges instead of rebinding.) Do this after the in-flight `std` reactive refactor settles.
 
 2. **Ownership & disposal via `context`** (M) — *correctness bug, not just a leak.* `sub()` returns
    a `Subscription` that every caller drops, so observers fire forever. For `bind_each` this is a
@@ -108,15 +112,23 @@ dependencies. Unordered within a section.
 3. **No-view-across-`await`** (M) — reject a second-class view held across a suspension point.
    Interacts with A1's `borrows`-exemption question for `Shared`.
 4. **Deterministic destruction** (L) — scope-end destructors / `Drop`-equivalent.
-5. **Transparent references — implicit place, explicit value** (M; **proposal written:**
-   [`transparent-references.md`](transparent-references.md)) — *the lever for A1.* A view is
-   implicitly a *place* (assign and `.`-project through it with no `*`), while its value is explicit
-   (`*v` is an rvalue copy, never an assignment target). The delta from today is small: drop `*` from
-   assignment left-hand sides (`*x = v` → `x = v`), add `.`-place-projection through views, make `*`
-   rvalue-only; value-reads keep their `*`. Surface-only — the second-class/`borrows` safety model is
-   unchanged. Resolves A1 with no call-site changes. Next: implement against the proposal's rules +
-   conformance test, re-baselining the view corpus (`view-*.vl`, `borrows*.vl`, `for-*.vl`,
-   `option-view.vl`, `subscript.vl`).
+5. **Transparent references — implicit place, explicit value** (**mostly done 2026-06-21**;
+   [`transparent-references.md`](transparent-references.md)) — a view is implicitly a *place* (assign
+   and `.`-project through it with no `*`), while its value is explicit (`*v` is an rvalue copy, never
+   an assignment target). **Landed:** R5 (assign through a view, plain + compound), R6 (`*` rejected
+   as an assignment target), R1 (annotation view-ness must match the initializer), R7 (no `mut` view
+   binding); the view corpus migrated to bare form (byte-identical JS), conformance test +
+   `transparent_references_*` inference tests. **Remaining sub-items:**
+   - **R8 — no implicit borrow at call sites** (S–M): a `&`/`&mut` parameter must be passed a view
+     (`&[mut] place` or an existing view), not a bare value place. Today a bare value to a scalar
+     `&mut` param compiles to *broken* JS (the param expects a `(base, key)` pair) — a pre-existing
+     bug. The check must **exclude the method `self` receiver** (implicitly borrowed). Ties into
+     roadmap #2 (compiler-core robustness).
+   - **Inline `Option<&mut T>` transient** (M): `match Some(&mut a) { Some(let x) => … }` —
+     constructing and matching a wrapped view *inline* (not via a function that returns one). Today
+     wrapped-view captures are only recognized when the match subject is a view-returning *call*;
+     extend `compute_wrapped_view_captures` (and the escape analysis) to admit an immediately-matched
+     inline constructor and a bare `&[mut]`-parameter forward (`Some(x)`).
 
 ---
 
@@ -218,11 +230,8 @@ dependencies. Unordered within a section.
 
 ## Open decisions (block the items above)
 
-- **A1 (`Shared.write`):** *resolved 2026-06-21* — keep `write(): T` until **transparent references**
-  (C5, proposal [`transparent-references.md`](transparent-references.md)) lands; that route gives a
-  type-honest `&mut T borrows self` with clean call sites and no special-casing. (The earlier
-  alternatives — auto-deref through view calls keeping `*`, or explicit `*` at every call site — are
-  superseded by C5.)
-- **C5 (transparent references):** the one live sub-decision is uniform `*` on value-reads vs.
-  auto-deref in value contexts; the proposal recommends uniform (no type-direction). Confirm before
-  implementing.
+- **A1 (`Shared.write`):** *unblocked 2026-06-21* — transparent references (C5) landed, so the call
+  sites are clean. Remaining work is the `SharedValue` intrinsic split (above); no open decision.
+- **C5 (transparent references):** *resolved + landed 2026-06-21* — went with uniform `*` on
+  value-reads (no type-direction). R5/R6/R1/R7 shipped; R8 and inline-`Option<&mut>` transient
+  remain as the C5 sub-items above.
