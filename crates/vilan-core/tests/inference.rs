@@ -152,14 +152,48 @@ fn reactive_map_sub_and_set_with() {
     assert_compiles(
         r#"
         import std::print;
-        import std::reactive::Signal;
+        import std::reactive::{ Signal, Owner };
         fun main() {
+            let owner = Owner::new();
             let count = Signal::new(0);
             let doubled = count.map(|n| n * 2);
-            doubled.sub(|n| print(n));
+            owner.take(doubled.sub(|n| print(n)));
             count.set_with(|n| n + 1);
         }
         "#,
+    );
+}
+
+#[test]
+fn owner_disposes_subscriptions_across_re_renders() {
+    // A2: the leak fix. Mimics `bind_each` — `source` drives re-renders; each
+    // render disposes the previous rows' subscriptions (`rows.dispose()`) and
+    // creates fresh ones. After several renders only the *current* rows fire, so
+    // the count stays bounded (a leak would give 6, not 2).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::reactive::{ Signal, Owner };
+        fun main() {
+            let source = Signal::new(0);
+            let data = Signal::new(0);
+            let rows = Owner::new();
+            let fires = Shared::new(0);
+            let outer = Owner::new();
+            outer.take(source.sub(|_| {
+                rows.dispose();
+                rows.take(data.sub(|_| { fires.write() = fires.read() + 1; }));
+                rows.take(data.sub(|_| { fires.write() = fires.read() + 1; }));
+            }));
+            source.set(1);
+            source.set(2);
+            fires.write() = 0;
+            data.set(99);
+            print(fires.read());
+        }
+        "#,
+        "2\n",
     );
 }
 

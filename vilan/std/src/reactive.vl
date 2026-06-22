@@ -1,6 +1,12 @@
 
 import pkg::shared::Shared;
 
+// A resource that can be released. An `Owner` collects `Disposable`s and releases
+// them as a group; `Subscription`, `Owner`, and `std::ui`'s `View` are disposable.
+trait Disposable {
+	fun dispose(self);
+}
+
 // A registered observer of a signal: `notify` re-runs it when the signal's value
 // changes; `id` lets a `Subscription` find and remove it.
 struct Subscriber {
@@ -24,7 +30,7 @@ struct Subscription {
 	id: i32,
 }
 
-impl Subscription {
+impl Subscription with Disposable {
 	fun dispose(self) {
 		mut kept: List<Subscriber> = [];
 		for subscriber in self.subscribers.read() {
@@ -33,6 +39,37 @@ impl Subscription {
 			}
 		}
 		self.subscribers.write() = kept;
+	}
+}
+
+// An owner scope: collects subscriptions (and child owners / views) and disposes
+// them as a group. Ownership is explicit for now — build a value, `take` it into
+// an owner, and `dispose` the owner to release the whole group.
+struct Owner {
+	cleanups: Shared<List<|| void>>,
+}
+
+impl Owner {
+	fun new(): Owner {
+		Owner { cleanups = Shared::new([]) }
+	}
+
+	// Take ownership of a disposable (a `Subscription`, a `View`, or a child
+	// `Owner`), returning it for chaining. It is released when this owner is.
+	fun take<T: Disposable>(self, item: T): T {
+		self.cleanups.write().push(|| {
+			item.dispose();
+		});
+		item
+	}
+}
+
+impl Owner with Disposable {
+	fun dispose(self) {
+		for cleanup in self.cleanups.read() {
+			cleanup();
+		}
+		self.cleanups.write() = [];
 	}
 }
 
@@ -66,6 +103,7 @@ impl Signal<type T> {
 		self.set(transform(self.get()));
 	}
 	
+	[must_use]
 	fun sub(self, observer: |T| void): Subscription {
 		let id = fresh_id();
 		self.subscribers.write().push(Subscriber {

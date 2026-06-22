@@ -1,22 +1,24 @@
 import std::print;
-import std::reactive::Signal;
+import std::reactive::{ Signal, Owner };
 
 // `std::reactive` — explicit-dependency reactivity. A `Signal` is a writable
 // root; `map` builds a `Signal` whose dependency is structural (no
 // tracking, no `await` hazard); `sub` runs now and on every change. Writing a
-// signal propagates through the derived graph to the subscribers.
+// signal propagates through the derived graph to the subscribers. `sub` is
+// `[must_use]`: `take` its `Subscription` into an `Owner` so it is disposed.
 fun main() {
+	let owner = Owner::new();
 	let count = Signal::new(0);
 	let doubled = count.map(|n| n * 2);
 
 	// `sub` fires immediately with the current value, then on each change.
-	doubled.sub(|n| print(n)); // 0
+	owner.take(doubled.sub(|n| print(n))); // 0
 
 	count.set(1); // doubled -> 2
 	count.set_with(|n| n + 4); // count 5, doubled -> 10
 	print(doubled.get()); // 10 (a `get` is a non-reactive sample)
 
 	// A second subscriber, on the root this time.
-	count.sub(|n| print(n)); // 5 (current value, now)
+	owner.take(count.sub(|n| print(n))); // 5 (current value, now)
 	count.set(20); // doubled -> 40 (its sub), then count's sub -> 20
 }

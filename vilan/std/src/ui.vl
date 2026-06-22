@@ -2,23 +2,30 @@
 //
 // A `View` describes a DOM element; methods chain to build it. Plain setters
 // (`text`/`class`/`attr`) set static content; the `bind_*` setters take a
-// reactive `Source` and keep one DOM property in sync — each is just a `sub`, so
-// when the source changes only that property updates, with no re-render.
+// `Signal` and keep one DOM property in sync — each is just a `sub`, so when the
+// signal changes only that property updates, with no re-render.
+//
+// A `View` owns the subscriptions its bindings create (and its children's): it is
+// `Disposable`, so `owner.take(view)` ties the whole subtree to an owner, and
+// disposing that owner tears every binding down. `bind_each` manages a child
+// owner per render so a list's old rows are disposed as it reconciles.
 //
 // Only available when building for the browser (`vilan build --target browser`).
 
 import pkg::dom::{ Element, get_element_by_id, create_element };
-import pkg::reactive::{ Signal };
+import pkg::reactive::{ Signal, Owner, Disposable };
 
 // A handle to a DOM element under construction. `View` wraps an `Element` (a
-// reference), so chaining returns the same underlying element.
+// reference) and an `Owner` collecting the subscriptions its bindings create, so
+// chaining returns the same underlying element and owner.
 struct View {
 	element: Element,
+	owner: Owner,
 }
 
 // A fresh element of the given tag (`view("div")`, `view("button")`, …).
 fun view(tag: str): View {
-	View { element = create_element(tag) }
+	View { element = create_element(tag), owner = Owner::new() }
 }
 
 impl View {
@@ -46,9 +53,10 @@ impl View {
 		self
 	}
 
-	// Append a child view.
+	// Append a child view, taking ownership of its subtree's subscriptions.
 	fun child(self, child: View): View {
 		self.element.append(child.element);
+		self.owner.take(child);
 		self
 	}
 
@@ -56,6 +64,7 @@ impl View {
 	fun children(self, items: List<View>): View {
 		for item in items {
 			self.element.append(item.element);
+			self.owner.take(item);
 		}
 		self
 	}
@@ -63,27 +72,27 @@ impl View {
 	// Reactive text content — re-set whenever `source` changes.
 	fun bind_text(self, source: Signal<str>): View {
 		let element = self.element;
-		source.sub(|value| {
+		self.owner.take(source.sub(|value| {
 			element.set_text(value);
-		});
+		}));
 		self
 	}
 
 	// Reactive CSS class.
 	fun bind_class(self, source: Signal<str>): View {
 		let element = self.element;
-		source.sub(|value| {
+		self.owner.take(source.sub(|value| {
 			element.set_class(value);
-		});
+		}));
 		self
 	}
 
 	// Reactive attribute.
 	fun bind_attr(self, name: str, source: Signal<str>): View {
 		let element = self.element;
-		source.sub(|value| {
+		self.owner.take(source.sub(|value| {
 			element.set_attribute(name, value);
-		});
+		}));
 		self
 	}
 
@@ -91,9 +100,9 @@ impl View {
 	// and typing writes it back.
 	fun bind_value(self, signal: Signal<str>): View {
 		let element = self.element;
-		signal.sub(|value| {
+		self.owner.take(signal.sub(|value| {
 			element.set_value(value);
-		});
+		}));
 		element.on("input", || {
 			signal.set(element.value());
 		});
@@ -102,16 +111,22 @@ impl View {
 
 	// A reactive list: render one child view per element of `source`, re-rendering
 	// the whole list whenever it changes (so a row reflects its item's current
-	// value). `key` identifies a row for a future keyed-reconcile optimization;
-	// `render` builds the row's view from the item value.
+	// value). A child owner holds the current rows' subscriptions; it is disposed
+	// before each rebuild, so old rows don't leak. `key` identifies a row for a
+	// future keyed-reconcile optimization; `render` builds the row's view.
 	fun bind_each<T, K>(self, source: Signal<List<T>>, key: |T| K, render: |T| View): View {
 		let element = self.element;
-		source.sub(|list| {
+		let rows = Owner::new();
+		self.owner.take(rows); // rows are disposed when this view is
+		self.owner.take(source.sub(|list| {
+			rows.dispose(); // drop the previous rows' subscriptions
 			element.clear();
 			for item in list {
-				element.append(render(item).element);
+				let row = render(item);
+				rows.take(row);
+				element.append(row.element);
 			}
-		});
+		}));
 		self
 	}
 
@@ -119,10 +134,17 @@ impl View {
 	// is true, hidden otherwise.
 	fun show(self, condition: Signal<bool>): View {
 		let element = self.element;
-		condition.sub(|visible| {
+		self.owner.take(condition.sub(|visible| {
 			element.set_hidden(!visible);
-		});
+		}));
 		self
+	}
+}
+
+impl View with Disposable {
+	// Release every subscription this view and its children created.
+	fun dispose(self) {
+		self.owner.dispose();
 	}
 }
 
