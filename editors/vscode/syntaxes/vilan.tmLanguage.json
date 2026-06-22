@@ -7,9 +7,10 @@
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#attributes" },
+    { "include": "#function-definition" },
     { "include": "#keywords" },
     { "include": "#types" },
-    { "include": "#functions" },
+    { "include": "#function-call" },
     { "include": "#operators" }
   ],
   "repository": {
@@ -25,14 +26,22 @@
       "patterns": [
         {
           "name": "string.quoted.double.vilan",
-          "begin": "i?\"",
-          "end": "\"",
+          "begin": "(i)?(\")",
+          "beginCaptures": {
+            "1": { "name": "storage.type.string.vilan" },
+            "2": { "name": "punctuation.definition.string.begin.vilan" }
+          },
+          "end": "(\")",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.vilan" }
+          },
           "patterns": [
             {
               "name": "constant.character.escape.vilan",
               "match": "\\\\."
             },
             {
+              "comment": "Interpolation `{expr}` in an `i\"...\"` string.",
               "name": "meta.template.expression.vilan",
               "begin": "\\{",
               "end": "\\}",
@@ -42,9 +51,7 @@
               "endCaptures": {
                 "0": { "name": "punctuation.definition.template-expression.end.vilan" }
               },
-              "patterns": [
-                { "include": "$self" }
-              ]
+              "patterns": [{ "include": "$self" }]
             }
           ]
         }
@@ -53,16 +60,50 @@
     "numbers": {
       "patterns": [
         {
+          "comment": "Decimal literal with an optional type suffix (`42u32`, `3.5f`, `0n`).",
           "name": "constant.numeric.vilan",
-          "match": "\\b[0-9]+(\\.[0-9]+)?[a-zA-Z_]*\\b"
+          "match": "\\b[0-9]+(\\.[0-9]+)?[A-Za-z_]*\\b"
         }
       ]
     },
     "attributes": {
       "patterns": [
         {
+          "comment": "Bracket attributes `[extern(..)]`, `[derive(..)]`, `[must_use]`. The lookahead keeps array literals `[1, 2]` out.",
           "name": "meta.attribute.vilan",
-          "match": "@[A-Za-z_][A-Za-z0-9_]*"
+          "begin": "(\\[)(?=\\s*(extern|derive|must_use)\\b)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.attribute.begin.vilan" }
+          },
+          "end": "(\\])",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.attribute.end.vilan" }
+          },
+          "patterns": [
+            {
+              "match": "\\b(extern|derive|must_use)\\b",
+              "name": "keyword.other.attribute.vilan"
+            },
+            {
+              "comment": "The `method`/`get`/`set` words inside `[extern(..)]`.",
+              "match": "\\b(method|get|set)\\b",
+              "name": "support.constant.attribute.vilan"
+            },
+            { "include": "#strings" },
+            { "include": "#types" }
+          ]
+        }
+      ]
+    },
+    "function-definition": {
+      "patterns": [
+        {
+          "comment": "`fun name` — the name in a function/method declaration.",
+          "match": "\\b(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.vilan" },
+            "2": { "name": "entity.name.function.vilan" }
+          }
         }
       ]
     },
@@ -70,43 +111,65 @@
       "patterns": [
         {
           "name": "keyword.control.vilan",
-          "match": "\\b(if|else|match|for|in|is|jump|ret|with|await)\\b"
+          "match": "\\b(if|else|match|for|in|is|jump|ret|await)\\b"
         },
         {
+          "name": "keyword.control.import.vilan",
+          "match": "\\b(import|use)\\b"
+        },
+        {
+          "comment": "Declaration keywords that introduce a named item.",
           "name": "storage.type.vilan",
-          "match": "\\b(fun|struct|enum|impl|trait|import|type|mod|async|self|use)\\b"
+          "match": "\\b(fun|struct|enum|impl|trait|type|mod)\\b"
         },
         {
           "name": "storage.modifier.vilan",
-          "match": "\\b(let|mut|own|external|export)\\b"
+          "match": "\\b(let|mut|own|external|export|async)\\b"
+        },
+        {
+          "comment": "`with` (trait impl / bound) and the `borrows` return clause.",
+          "name": "keyword.other.vilan",
+          "match": "\\b(with|borrows)\\b"
         },
         {
           "name": "constant.language.vilan",
           "match": "\\b(true|false|null)\\b"
+        },
+        {
+          "name": "variable.language.self.vilan",
+          "match": "\\b(self)\\b"
         }
       ]
     },
     "types": {
       "patterns": [
         {
+          "comment": "Primitive types.",
+          "name": "support.type.primitive.vilan",
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|str|bool|void|any)\\b"
+        },
+        {
+          "comment": "User types / variants — PascalCase identifiers (and `Self`).",
           "name": "entity.name.type.vilan",
           "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
         }
       ]
     },
-    "functions": {
+    "function-call": {
       "patterns": [
         {
+          "comment": "A lowercase identifier immediately followed by `(` is a call.",
           "name": "entity.name.function.vilan",
-          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*[(<])"
+          "match": "[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
         }
       ]
     },
     "operators": {
       "patterns": [
         {
+          "comment": "Multi-char operators first (`&mut`, `||`, `::`, `=>`, compound assigns, comparisons), then single-char.",
           "name": "keyword.operator.vilan",
-          "match": "(::|=>|==|!=|\\+=|-=|\\*=|/=|&&|\\|\\||&mut|[-:!*/+=|&<>])"
+          "match": "&mut|\\|\\||&&|::|=>|==|!=|<=|>=|\\+=|-=|\\*=|/=|[-+*/=<>!&|]"
         }
       ]
     }
