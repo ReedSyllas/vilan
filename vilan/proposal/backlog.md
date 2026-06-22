@@ -38,19 +38,19 @@ dependencies. Unordered within a section.
      (it's a ref-counted cell, so the usual escape restriction may be false) — decided when that
      rule lands.
 
-2. **Ownership & disposal via `context`** (M) — *correctness bug, not just a leak.* `sub()` returns
-   a `Subscription` that every caller drops, so observers fire forever. For `bind_each` this is a
-   real bug: each re-render `sub()`s fresh rows and `clear()`s the DOM, but the old rows'
-   subscriptions stay live, firing on every change and mutating detached nodes (unbounded growth).
-   Design (the deferred "owner scope" from the reactive proposal, README §"Lifecycle"):
-   - An `Owner` type collecting `dispose` thunks, threaded as a `Context<Owner>`.
-   - `sub()` registers its `Subscription` with the current owner via `Context::get()` instead of
-     returning it to the void. Context threading already captures into closures, so **no compiler
-     work** is needed.
-   - `mount` establishes a root owner; **`bind_each` keeps a child owner per render**, disposing the
-     previous one before re-rendering (scope-per-render) — this is what actually plugs the leak.
-   - Follow Solid 2.0: a `sub` body may return a per-run cleanup thunk (runs before the next apply
-     and on dispose).
+2. **Ownership & disposal** (M; **proposal written:** [`reactive-ownership.md`](reactive-ownership.md))
+   — *correctness bug, not just a leak.* `sub()` returns a `Subscription` every caller drops, so
+   observers fire forever; `bind_each` makes it a real bug (re-render `sub()`s fresh rows and
+   `clear()`s the DOM, but old rows' subs stay live, mutating detached nodes — unbounded growth). An
+   ambient **owner scope** disposes a group of subscriptions when its scope ends. **Decisions:**
+   strategic owners at dynamic boundaries (library-only, not a `comp` grammar); `sub()` requires an
+   owner (loud). **Mechanism finding:** the `context` intrinsic can't carry it library-only —
+   `Context.run` needs a *closure-literal* body, so it can't run a thunk param (and the owner must
+   wrap the component *call*). Use a **module-level owner stack** (Solid-style) instead: runtime
+   require-owner, sync-only. `mount` takes a thunk (`mount(id, || view)`); `bind_each` keeps a child
+   owner per render; `show` stays hide-only (a destroy-on-hide `mount_when` is separate). **Deferred
+   upgrade:** route through `Context<Owner>` for a compile-time guarantee + async-safety (needs a
+   context-pass extension to run a thunk param under a context).
 
 3. **`bind_each` keyed reconciliation** (M) — currently clear-and-rebuild on every change (correct
    but not keyed). The `key` argument is reserved for this. Reorder rows with their items, dispose a
@@ -113,36 +113,16 @@ dependencies. Unordered within a section.
    as an assignment target), R1 (annotation view-ness must match the initializer), R7 (no `mut` view
    binding); the view corpus migrated to bare form (byte-identical JS), conformance test +
    `transparent_references_*` inference tests. **Remaining sub-items:**
-   - **R8 — no implicit borrow at call sites** (**done 2026-06-21**): a `&`/`&mut` parameter must be
-     passed a view (`&[mut] place` or an existing view, re-borrowed), not a bare value place
-     (`check_view_arguments`). This also fixed the pre-existing bug where a bare value to a scalar
-     `&mut` param emitted broken JS (the param expects a `(base, key)` pair). The method `self`
-     receiver is exempt (implicitly borrowed by `obj.method(..)`). Corpus migration: one site
-     (`side-effect-let.vl` `bump(xs)` → `bump(&mut xs)`), byte-identical JS.
-   - **Inline `Option<&mut T>` transient** (M; the last transparent-references follow-up):
-     `match Some(&mut a) { Some(let x) => … }` fails with "cannot mutate immutable 'x'". **Not an
-     inference problem** — `Some(&mut a)` types as `Option<&mut A>` fine; the failure is downstream,
-     in the second-class-view *escape* model. A view in an enum payload is normally an escape
-     (forbidden); each legal occurrence must be individually *sanctioned* and *lowered specially* (the
-     `Option` carries the `(base, key)` pair; the `match` capture binds as a view so `x = …` writes
-     through). The **one sanctioned shape today** is `Some(&mut <param-projection>)` *returned from a
-     function* — `leaf_wrapped_view` gates on `derives_from_view_param` (escape-safe via `borrows`),
-     and `compute_wrapped_view_captures` keys on the match subject being such a *call*. `Some(&mut a)`
-     is neither: `a` is a local (not a parameter projection) and the subject is an inline constructor
-     (not a call), so the capture falls back to a plain readonly binding. It is nonetheless **safe** —
-     an immediately-matched `Some(&mut a)` is a transient (consumed in the match, in `a`'s scope; a
-     view escaping the arm body is already caught). Two ways to close it:
-     1. **Focused:** extend `leaf_wrapped_view` / `compute_wrapped_view_captures` to admit an inline
-        `Some(&[mut] place)` match subject (and a bare `&[mut]`-parameter forward `Some(x)`), with a
-        transient check (the constructed `Option` is consumed by the `match`, not bound or returned).
-        Small; unblocks the exact case.
-     2. **General (preferred):** replace the hard-coded shape with a flow/escape analysis over
-        view-carrying values — *a view may be wrapped in an enum iff the wrapper provably does not
-        outlive the referent*. Subsumes the param-projection return (`borrows`), the inline transient,
-        and `let opt = Some(&mut a); match opt { … }` uniformly — folding the special case into
-        general code (belongs with **B1**). Larger; **needs a short formal definition first** (what
-        "does not outlive" means for a second-class view's enclosing value) per prove-it-first.
-     - **Decision pending:** focused unblock vs. the general analysis.
+   - **R8 — no implicit borrow at call sites** (S–M): a `&`/`&mut` parameter must be passed a view
+     (`&[mut] place` or an existing view), not a bare value place. Today a bare value to a scalar
+     `&mut` param compiles to *broken* JS (the param expects a `(base, key)` pair) — a pre-existing
+     bug. The check must **exclude the method `self` receiver** (implicitly borrowed). Ties into
+     roadmap #2 (compiler-core robustness).
+   - **Inline `Option<&mut T>` transient** (M): `match Some(&mut a) { Some(let x) => … }` —
+     constructing and matching a wrapped view *inline* (not via a function that returns one). Today
+     wrapped-view captures are only recognized when the match subject is a view-returning *call*;
+     extend `compute_wrapped_view_captures` (and the escape analysis) to admit an immediately-matched
+     inline constructor and a bare `&[mut]`-parameter forward (`Some(x)`).
 
 ---
 
