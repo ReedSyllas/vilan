@@ -120,14 +120,14 @@ fn generic_method_calls_generic_methods_on_self() {
 }
 
 #[test]
-fn reactive_derive_sub_and_set_with() {
+fn reactive_map_sub_and_set_with() {
     assert_compiles(
         r#"
         import std::print;
         import std::reactive::Signal;
         fun main() {
             let count = Signal::new(0);
-            let doubled = count.derive(|n| n * 2);
+            let doubled = count.map(|n| n * 2);
             doubled.sub(|n| print(n));
             count.set_with(|n| n + 1);
         }
@@ -238,7 +238,7 @@ fn generic_struct_infers_type_arg_from_literal() {
 fn generic_struct_infers_type_arg_from_constructor() {
     // The same inference through a static constructor: `Box::new(5)` binds the
     // *impl's* `T` from the argument even though `new` declares no generics of
-    // its own. (Bug B in disguise — `Signal::new(0).derive(|n| ..)` left `n`
+    // its own. (Bug B in disguise — `Signal::new(0).map(|n| ..)` left `n`
     // abstract only because `count` itself was an abstract `Signal<T>`.)
     assert_compiles(
         r#"
@@ -256,7 +256,7 @@ fn generic_struct_infers_type_arg_from_constructor() {
 
 #[test]
 fn generic_call_on_closure_parameter() {
-    // Bug B (fixed): a closure passed to a generic method (`count.derive(|n|
+    // Bug B (fixed): a closure passed to a generic method (`count.map(|n|
     // n.to_string())`) used to type `n` as an abstract generic, so the method
     // call on it couldn't dispatch. The real cause was that `Signal::new(0)`
     // left `count` as an abstract `Signal<T>`; with construction now inferring
@@ -268,7 +268,7 @@ fn generic_call_on_closure_parameter() {
         import std::display::Display;
         fun main() {
             let count = Signal::new(0);
-            let label = count.derive(|n| n.to_string());
+            let label = count.map(|n| n.to_string());
             label.sub(|s| print(s));
         }
         "#,
@@ -298,8 +298,8 @@ fn format_through_nested_generic() {
 
 #[test]
 fn chained_derive_binds_method_generic_from_closure_return() {
-    // A chained `derive` (`count.derive(|n| n * 2).derive(|m| format(m))`) used to
-    // emit `undefined`: the first `derive<U>` left its result `Source<U>` abstract
+    // A chained `derive` (`count.map(|n| n * 2).map(|m| format(m))`) used to
+    // emit `undefined`: the first `derive<U>` left its result `Signal<U>` abstract
     // because `U` (its *own* generic) was never bound from the closure's return
     // type, so the second `derive` saw an abstract element. Method calls now bind
     // their own generics from arguments, like free-function calls do.
@@ -310,7 +310,7 @@ fn chained_derive_binds_method_generic_from_closure_return() {
         import std::display::format;
         fun main() {
             let count = Signal::new(3);
-            let label = count.derive(|n| n * 2).derive(|m| format(m));
+            let label = count.map(|n| n * 2).map(|m| format(m));
             label.sub(|s| print(s));
             count.set(10);
         }
@@ -322,7 +322,7 @@ fn chained_derive_binds_method_generic_from_closure_return() {
 #[test]
 fn format_in_closure_argument() {
     // Bug c′ (fixed): a free generic function called with an unannotated closure
-    // parameter (`count.derive(|n| format(n))`) emitted `undefined`. The call
+    // parameter (`count.map(|n| format(n))`) emitted `undefined`. The call
     // resolved while `n` was still `Unknown` (its type lands only once `derive`
     // resolves), committed with no generic binding, and was never revisited.
     // Fixed by deferring the call while an argument is an unknown closure
@@ -335,7 +335,7 @@ fn format_in_closure_argument() {
         import std::display::format;
         fun main() {
             let count = Signal::new(0);
-            let label = count.derive(|n| format(n));
+            let label = count.map(|n| format(n));
             label.sub(|s| print(s));
             count.set(5);
         }
@@ -349,7 +349,7 @@ fn method_closure_param_inferred_from_argument_generic() {
     // A method's own generic bound from a (nested) argument must reach its closure
     // parameters: `pick<T, K>(rows: List<List<T>>, key: |T| K, get: |T| i32)` typed
     // `|p| p.id`'s `p` as the abstract `T` until the own-generic binding ran first.
-    // This is the `bind_each(source: Source<List<T>>, |todo| todo.id, ..)` shape.
+    // This is the `bind_each(source: Signal<List<T>>, |todo| todo.id, ..)` shape.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -395,20 +395,19 @@ fn logical_or_operator() {
 #[test]
 fn reactive_combine_variadic() {
     // The driving example: `combine` is variadic over its inputs' distinct types
-    // via a mapped-tuple parameter, yielding a source of the tuple that recomputes
-    // when any input changes. A `Signal` is passed as `.source()`; the consumer
-    // destructures the tuple with a closure tuple binder.
+    // via a mapped-tuple parameter, yielding a `Signal` of the tuple that
+    // recomputes when any input changes. The consumer destructures the tuple with
+    // a closure tuple binder.
     assert_compiles_and_runs(
         r#"
         import std::print;
         import std::display::Display;
-        import std::reactive::{ Signal, Source, combine };
+        import std::reactive::{ Signal, combine };
         fun main() {
             let a = Signal::new(1);
             let b = Signal::new("x");
             let c = Signal::new(true);
-            let combined: Source<(i32, str, bool)> =
-                combine((a.source(), b.source(), c.source()));
+            let combined: Signal<(i32, str, bool)> = combine((a, b, c));
             combined.sub(|(n, s, flag)| print(i"{n.to_string()} {s} {flag}"));
             a.set(2);
             b.set("y");

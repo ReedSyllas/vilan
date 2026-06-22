@@ -2,12 +2,12 @@ import std::print;
 import std::reactive::Signal;
 
 // `std::reactive` — explicit-dependency reactivity. A `Signal` is a writable
-// root; `derive` builds a read-only `Source` whose dependency is structural (no
+// root; `map` builds a `Signal` whose dependency is structural (no
 // tracking, no `await` hazard); `sub` runs now and on every change. Writing a
 // signal propagates through the derived graph to the subscribers.
 fun main() {
 	let count = Signal::new(0);
-	let doubled = count.derive(|n| n * 2);
+	let doubled = count.map(|n| n * 2);
 
 	// `sub` fires immediately with the current value, then on each change.
 	doubled.sub(|n| print(n)); // 0
