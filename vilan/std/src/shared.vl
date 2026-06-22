@@ -21,7 +21,9 @@ impl Shared<type T> {
 	// The cell's value for reading.
 	external fun read(self): T;
 
-	// The cell's value for in-place mutation — `a.write().field = …` is visible
-	// through every handle to the cell.
-	external fun write(self): T;
+	// A mutable view of the cell's value, for in-place mutation: `a.write() = x`
+	// rebinds the cell's slot, `a.write().field = …` mutates in place — both
+	// visible through every handle to the cell. `borrows self`: the view projects
+	// the cell, so it cannot outlive this handle.
+	external fun write(self): &mut T borrows self;
 }

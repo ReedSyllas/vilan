@@ -660,3 +660,40 @@ fn transparent_references_reject_value_into_view_binding() {
         "#,
     );
 }
+
+// --- A1: `Shared::write(): &mut T borrows self` -----------------------------
+
+#[test]
+fn shared_write_view_rebinds_and_mutates_through_handles() {
+    // Writing a whole value through the view rebinds the cell's slot, so every
+    // handle (a clone) sees it; a method call mutates in place. The rebind must
+    // NOT merge — the old aggregate-view `Object.assign` path would have left a
+    // stale tail (len 3 then 4 instead of 1 then 2).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        fun main() {
+            let a: Shared<List<i32>> = Shared::new([1, 2, 3]);
+            let b = a.clone();
+            a.write() = [9];
+            print(b.read().len());
+            a.write().push(8);
+            print(b.read().len());
+        }
+        "#,
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn shared_write_is_a_view_not_a_value() {
+    // `write()` returns a view (`&mut T`), so binding its result to a value slot
+    // is rejected (transparent references R1) — use `read()` or `*`.
+    assert_fails(
+        r#"
+        import std::shared::Shared;
+        fun main() { let c = Shared::new(5); let x: i32 = c.write(); }
+        "#,
+    );
+}

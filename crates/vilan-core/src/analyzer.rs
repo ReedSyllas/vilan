@@ -164,6 +164,9 @@ pub struct ExternalFunction<'src> {
     // The `@extern(..)` host binding, if any — lowers calls to a JS
     // import/call, method, or property access.
     pub extern_binding: Option<ExternBinding<'src>>,
+    // Declares `borrows` — returns a view projecting a parameter (e.g.
+    // `Shared::write(self): &mut T borrows self`), so a call to it is a view.
+    pub borrows: bool,
     pub call_count: u32,
     /// Declared `async` — a promise-returning host function. Calls to it are
     /// implicitly awaited.
@@ -1328,11 +1331,18 @@ impl<'src> Analyzer<'src> {
         let Some(function_call) = self.function_calls.get(&call_id) else {
             return false;
         };
-        matches!(
-            self.expr_id_to_expr_map.get(&function_call.subject_id),
-            Some(Expr::Local(function_id))
-                if self.functions.get(function_id).is_some_and(|function| function.borrows)
-        )
+        let Some(Expr::Local(function_id)) =
+            self.expr_id_to_expr_map.get(&function_call.subject_id)
+        else {
+            return false;
+        };
+        self.functions
+            .get(function_id)
+            .is_some_and(|function| function.borrows)
+            || self
+                .external_functions
+                .get(function_id)
+                .is_some_and(|external| external.borrows)
     }
 
     /// Whether a binding or parameter holds a view: a view binding (a `&`/`&mut`
@@ -3420,6 +3430,7 @@ impl<'src> Analyzer<'src> {
                             parameters,
                             return_type_id,
                             extern_binding: function.extern_binding.clone(),
+                            borrows: function.borrows.is_some(),
                             call_count: 0,
                             is_async: function.is_async,
                         },
@@ -8517,8 +8528,12 @@ pub enum Intrinsic {
     SharedNew,
     // `Shared.clone()` -> the same cell (identity): just the receiver.
     SharedClone,
-    // `Shared.read()`/`write()` -> the cell's value, `self.v`.
+    // `Shared.read()` -> a copy of the cell's value, `self.v`.
     SharedValue,
+    // `Shared.write()` -> a mutable view of the cell's slot, `self.v`. Same JS as
+    // `SharedValue`, but distinguished so a write *through* it rebinds the slot
+    // (`self.v = x`) rather than merging (`Object.assign`).
+    SharedWrite,
     // `Set::new(): Set<T>` -> `new Set()`.
     SetNew,
     // `Set.insert(value)` -> native `.add(value)`.
@@ -9803,7 +9818,7 @@ pub fn analyze<'src>(
                     ("new", Intrinsic::SharedNew),
                     ("clone", Intrinsic::SharedClone),
                     ("read", Intrinsic::SharedValue),
-                    ("write", Intrinsic::SharedValue),
+                    ("write", Intrinsic::SharedWrite),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

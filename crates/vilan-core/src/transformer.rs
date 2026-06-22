@@ -550,6 +550,26 @@ impl<'src> Transformer<'src> {
         }
     }
 
+    /// Whether an expression is a `Shared::write()` call — a single-slot view of
+    /// the cell's `v` slot. Writing through it rebinds the slot (`cell.v = x`),
+    /// distinct from both the `(base, key)` and aggregate-`Object.assign` views.
+    fn is_shared_write(&self, operand: Id) -> bool {
+        let Some(Expr::Call(call_id)) = self.program.entity_map.get(&operand) else {
+            return false;
+        };
+        let Some(function_call) = self.program.function_calls.get(call_id) else {
+            return false;
+        };
+        let Some(Expr::Local(function_id)) = self.program.entity_map.get(&function_call.subject_id)
+        else {
+            return false;
+        };
+        matches!(
+            self.program.intrinsics.get(function_id),
+            Some(Intrinsic::SharedWrite)
+        )
+    }
+
     fn walk_entity(&mut self, id: Id, block: &mut Vec<js::Node<'src>>) -> Option<js::Node<'src>> {
         let entity = self.program.entity_map.get(&id).unwrap();
 
@@ -1046,11 +1066,17 @@ impl<'src> Transformer<'src> {
             Expr::Assignment(target_id, value_id) => {
                 let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
                 let value = self.maybe_clone(*value_id, value);
-                // `*view = wholeValue` through an aggregate view copies the fields
-                // in place, so the view's target (and any aliases) update rather
-                // than rebinding the local. A primitive view's `*c` is a `[0]`
-                // slot write, handled by the normal path below.
+                // Writing a *whole value* through a view. A `Shared` write is a
+                // single-slot view (`cell.v`): rebind the slot, so every handle to
+                // the cell sees the new value (`cell.v = value`). An ordinary
+                // aggregate view copies the fields in place (`Object.assign`), so
+                // the target and its aliases update rather than rebinding a local.
+                // A primitive view's `*c` is a `[0]` slot write — the normal path.
                 if let Some(Expr::Dereference(operand)) = self.program.entity_map.get(target_id) {
+                    if self.is_shared_write(*operand) {
+                        let slot = self.walk_entity(*operand, block).unwrap_or(js::Node::Void);
+                        return Some(js::Node::Assignment(Box::new(slot), Box::new(value)));
+                    }
                     if !self.derefs_scalar_view(*operand) {
                         let base = self.walk_entity(*operand, block).unwrap_or(js::Node::Void);
                         return Some(js::Node::Call(
@@ -1798,7 +1824,9 @@ impl<'src> Transformer<'src> {
             // `shared.clone()` -> the same cell (the receiver, unchanged).
             Intrinsic::SharedClone => args.next().unwrap_or(js::Node::Void),
             // `shared.read()` / `shared.write()` -> the cell's value, `self.v`.
-            Intrinsic::SharedValue => js::Node::Property(
+            // `write` returns a view of the slot; the write-*through* (rebind vs
+            // merge) is handled where the assignment is lowered.
+            Intrinsic::SharedValue | Intrinsic::SharedWrite => js::Node::Property(
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 "v".to_string(),
             ),

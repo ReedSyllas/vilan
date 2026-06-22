@@ -13,36 +13,30 @@ dependencies. Unordered within a section.
 
 ## A. Reactive core & UI (`std::reactive`, `std::ui`)
 
-1. **`Shared.write` as a real view — `&mut T borrows self`** (M). Today `write(self): T` lowers to
-   the `SharedValue` intrinsic (`cell.v`, a JS lvalue), and `cell.write() = x` works only because
-   assignment to a call expression is not place-checked. The type-honest signature is
-   `fun write(self): &mut T borrows self` — a mutable view projecting the cell's slot. Doing this
-   *correctly* (not a different lie) is feature-sized:
-   - Split the intrinsic: `read → SharedRead` (`cell.v`, a value) vs `write → SharedWrite` (a view).
-   - Generalize the `(base, key)` view to a **single-slot cell projection** `(cell, "v")` that
-     rebinds on whole-write (`*w = x → cell.v = x`) for *any* `T`. The existing scalar-view path is
-     scalar-primitive-only; the aggregate-view path uses `Object.assign`, which is **wrong** here
-     (it merges instead of rebinding — observably broken for `Shared<List<…>>`, which is used).
-   - Teach `function_returns_scalar_view` / `call_returns_scalar_view` about `external` functions
-     (they currently consult only `self.functions`, never `external_functions`).
-   - Either depend on **auto-deref through view-returning calls** (item B2) so `cell.write().push()`
-     and `a.write().count` keep working, or rewrite every call site to `*cell.write() = x` /
-     `(*cell.write()).push()` (an ergonomic regression at ~6 sites in `reactive.vl` + `test/shared.vl`).
-   - **Formal question:** `borrows self` subjects the result to second-class-view rules (no escape,
-     eventually no-cross-`await`). `Shared` is a deliberately first-class, ref-counted escape hatch,
-     so some of those restrictions may be *false* for it. Decide whether `Shared`'s view is exempt.
-   - **Decision (2026-06-21):** keep `write(): T` for now. The hoped-for shortcut — *forbid binding a
-     view to a local (`mut a = &mut x`) so the `*` deref operator can be removed, leaving clean call
-     sites* — does not hold: `*` is independently load-bearing for `&mut` **parameters**
-     (`fun bump(slot: &mut i32) { *slot = *slot + 1 }`, which cannot be forbidden), for `for e in
-     &mut` and `Option<&mut T>` captures, and for `*`-reads. The clean route is **transparent
-     references** (item C5, **landed 2026-06-21**), which makes `cell.write() = v` /
-     `cell.write().push(z)` read cleanly with no call-site edits. **A1 is now unblocked but not a
-     one-liner:** changing `write(): T` → `&mut T borrows self` makes `cell.write()` a view, so the
-     `SharedValue` intrinsic must split — `read → cell.v` (a value) vs `write → a single-slot
-     `(cell, "v")` projection that rebinds on whole-write for any `T`. (Reusing the scalar-view path
-     would mis-handle aggregate `Shared<List<…>>`: the aggregate-view path emits `Object.assign`,
-     which merges instead of rebinding.) Do this after the in-flight `std` reactive refactor settles.
+1. **`Shared.write` as a real view — `&mut T borrows self`** (**done 2026-06-21**). `write` now
+   returns a mutable view (honest signature; it participates in the view rules — e.g. R1 flags
+   `let x: T = c.write()`), while `read(self): T` stays a value copy-out. How it shipped — simpler
+   than the originally-feared `(base, key)` generalization + auto-deref:
+   - `external` functions now record `borrows`, and `call_returns_view` consults
+     `external_functions`, so `c.write()` is a recognized view: `c.write() = v` write-throughs via
+     transparent references (R5).
+   - Split the `SharedValue` intrinsic into `SharedValue` (read) / `SharedWrite` (write); both lower
+     to `cell.v`. Because `write()` lowers to the `cell.v` **lvalue** directly, member access
+     (`c.write().push(z)`, `c.write().count = x`) just works — **no auto-deref needed** (this is why
+     B2 wasn't required).
+   - The single-slot rebind: a write *through* a `SharedWrite` view (`*c.write() = v`, the R5 form)
+     lowers to `cell.v = v` (rebind the slot), not `Object.assign` (which would *merge* — wrong for
+     `Shared<List<…>>`). A `is_shared_write` check in the assignment lowering picks the rebind.
+     Verified: a rebind propagates through clones (`shared_write_*` inference tests).
+   - Codegen is **byte-identical** to the old `write(): T` at every call site (shared / reactive /
+     generic-methods goldens unchanged).
+   - **Deferred edge:** binding the view first (`let w = c.write(); w = v`) is not a write-through —
+     it's treated as a value copy, as before, because `view_binding_mutability` doesn't yet consult
+     external `borrows`. Unused in practice (Shared writes are immediate). Revisit with the
+     bound-view rebind story.
+   - **Open (memory C):** whether `Shared`'s view is exempt from a future no-view-across-`await` rule
+     (it's a ref-counted cell, so the usual escape restriction may be false) — decided when that
+     rule lands.
 
 2. **Ownership & disposal via `context`** (M) — *correctness bug, not just a leak.* `sub()` returns
    a `Subscription` that every caller drops, so observers fire forever. For `bind_each` this is a
@@ -230,8 +224,8 @@ dependencies. Unordered within a section.
 
 ## Open decisions (block the items above)
 
-- **A1 (`Shared.write`):** *unblocked 2026-06-21* — transparent references (C5) landed, so the call
-  sites are clean. Remaining work is the `SharedValue` intrinsic split (above); no open decision.
+- **A1 (`Shared.write`):** *done 2026-06-21* — `write(): &mut T borrows self` shipped (item A1):
+  view-tracked, codegen byte-identical, rebind-through-handles verified.
 - **C5 (transparent references):** *resolved + landed 2026-06-21* — went with uniform `*` on
   value-reads (no type-direction). R5/R6/R1/R7 shipped; R8 and inline-`Option<&mut>` transient
   remain as the C5 sub-items above.
