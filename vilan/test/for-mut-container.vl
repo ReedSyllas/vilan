@@ -23,7 +23,7 @@ fun main() {
 	mut counter = Counter { items = [1, 2, 3], pos = 0 };
 
 	for element in &mut counter {
-		*element = *element * 10;
+		element = *element * 10;
 	}
 
 	print(counter.items[0]); // 10

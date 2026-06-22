@@ -3529,6 +3529,15 @@ impl<'src> Analyzer<'src> {
                 }
             }
             Node::Assign(target, op, value) => {
+                // R6 (transparent references): `*` is value extraction — an
+                // rvalue — and may not be an assignment target. A view is written
+                // *through* directly (`x = v`), so `*x = v` is rejected.
+                if matches!(&target.0, Node::Dereference(_)) {
+                    self.diagnostics.push(Error {
+                        span: target.1,
+                        msg: "cannot assign through `*`: a view is written through directly — write `x = …`, not `*x = …`".to_string(),
+                    });
+                }
                 let value_id = self.walk_expr_node(value, scope_id);
                 // The target is an lvalue node — a local (`Accessor`) or a field
                 // place (`MemberAccessor`). Walking it yields an `Expr::Local`

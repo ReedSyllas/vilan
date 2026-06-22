@@ -22,13 +22,13 @@ fun main() {
 	mut w = Wrapper { value = 1 };
 
 	// Write through the inferred-borrows projection.
-	*w.slot() = 10;
+	w.slot() = 10;
 	print(w.value); // 10
 
 	// Bind it, then read and write through it.
 	let v = w.slot();
 	print(*v); // 10
-	*v = 25;
+	v = 25;
 	print(w.value); // 25
 
 	// A readonly projection reads through but can't be written.

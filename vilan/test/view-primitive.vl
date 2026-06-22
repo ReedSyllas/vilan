@@ -4,14 +4,14 @@
 import std::print;
 
 fun scale(target: &mut i32, factor: i32) {
-	*target = *target * factor;
+	target = *target * factor;
 }
 
 fun main() {
 	// Local view of a scalar: `a` is boxed, `c` aliases its cell.
 	mut a = 10;
 	let c = &mut a;
-	*c = 40;
+	c = 40;
 	print(a); // 40
 
 	// `&mut i32` parameter: `n` is boxed, the cell is passed to `scale`.

@@ -7,7 +7,7 @@ import std::print;
 struct Point { x: i32, y: i32 }
 
 fun bump(slot: &mut i32) {
-	*slot = *slot + 100;
+	slot = *slot + 100;
 }
 
 fun main() {

@@ -45,7 +45,7 @@ fun main() {
 	// Write through a direct scalar projection.
 	match slot.get_mut() {
 		Some(let v) => {
-			*v = 42;
+			v = 42;
 		}
 		None => {}
 	}
@@ -73,7 +73,7 @@ fun main() {
 	// Write through a conditional element view; the out-of-bounds index is None.
 	match outer.item_mut(1) {
 		Some(let v) => {
-			*v = 99;
+			v = 99;
 		}
 		None => {}
 	}
@@ -81,7 +81,7 @@ fun main() {
 
 	match outer.item_mut(9) {
 		Some(let v) => {
-			*v = 0;
+			v = 0;
 		}
 		None => {
 			print(0); // 0 (out of bounds)

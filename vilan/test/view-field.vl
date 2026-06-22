@@ -7,14 +7,14 @@ struct Counter { value: i32 }
 struct Pair { first: i32, second: i32 }
 
 fun bump(slot: &mut i32) {
-	*slot = *slot + 1;
+	slot = *slot + 1;
 }
 
 fun main() {
 	// Write through a field view.
 	mut c = Counter { value = 1 };
 	let v = &mut c.value;
-	*v = 10;
+	v = 10;
 	print(c.value); // 10
 
 	// A field view passed to a `&mut` parameter.
@@ -25,13 +25,13 @@ fun main() {
 	// Read and read-modify-write through a field view.
 	let r = &mut p.first;
 	print(*r); // 5
-	*r = *r * 3;
+	r = *r * 3;
 	print(p.first); // 15
 
-	// Whole-aggregate view: `*v = whole` still copies fields in place.
+	// Whole-aggregate view: `w = whole` writes through, copying fields in place.
 	mut q = Pair { first = 1, second = 2 };
 	let w = &mut q;
-	*w = Pair { first = 7, second = 8 };
+	w = Pair { first = 7, second = 8 };
 	print(q.first); // 7
 	print(q.second); // 8
 }
