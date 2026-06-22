@@ -119,11 +119,30 @@ dependencies. Unordered within a section.
      `&mut` param emitted broken JS (the param expects a `(base, key)` pair). The method `self`
      receiver is exempt (implicitly borrowed by `obj.method(..)`). Corpus migration: one site
      (`side-effect-let.vl` `bump(xs)` → `bump(&mut xs)`), byte-identical JS.
-   - **Inline `Option<&mut T>` transient** (M): `match Some(&mut a) { Some(let x) => … }` —
-     constructing and matching a wrapped view *inline* (not via a function that returns one). Today
-     wrapped-view captures are only recognized when the match subject is a view-returning *call*;
-     extend `compute_wrapped_view_captures` (and the escape analysis) to admit an immediately-matched
-     inline constructor and a bare `&[mut]`-parameter forward (`Some(x)`).
+   - **Inline `Option<&mut T>` transient** (M; the last transparent-references follow-up):
+     `match Some(&mut a) { Some(let x) => … }` fails with "cannot mutate immutable 'x'". **Not an
+     inference problem** — `Some(&mut a)` types as `Option<&mut A>` fine; the failure is downstream,
+     in the second-class-view *escape* model. A view in an enum payload is normally an escape
+     (forbidden); each legal occurrence must be individually *sanctioned* and *lowered specially* (the
+     `Option` carries the `(base, key)` pair; the `match` capture binds as a view so `x = …` writes
+     through). The **one sanctioned shape today** is `Some(&mut <param-projection>)` *returned from a
+     function* — `leaf_wrapped_view` gates on `derives_from_view_param` (escape-safe via `borrows`),
+     and `compute_wrapped_view_captures` keys on the match subject being such a *call*. `Some(&mut a)`
+     is neither: `a` is a local (not a parameter projection) and the subject is an inline constructor
+     (not a call), so the capture falls back to a plain readonly binding. It is nonetheless **safe** —
+     an immediately-matched `Some(&mut a)` is a transient (consumed in the match, in `a`'s scope; a
+     view escaping the arm body is already caught). Two ways to close it:
+     1. **Focused:** extend `leaf_wrapped_view` / `compute_wrapped_view_captures` to admit an inline
+        `Some(&[mut] place)` match subject (and a bare `&[mut]`-parameter forward `Some(x)`), with a
+        transient check (the constructed `Option` is consumed by the `match`, not bound or returned).
+        Small; unblocks the exact case.
+     2. **General (preferred):** replace the hard-coded shape with a flow/escape analysis over
+        view-carrying values — *a view may be wrapped in an enum iff the wrapper provably does not
+        outlive the referent*. Subsumes the param-projection return (`borrows`), the inline transient,
+        and `let opt = Some(&mut a); match opt { … }` uniformly — folding the special case into
+        general code (belongs with **B1**). Larger; **needs a short formal definition first** (what
+        "does not outlive" means for a second-class view's enclosing value) per prove-it-first.
+     - **Decision pending:** focused unblock vs. the general analysis.
 
 ---
 
