@@ -687,6 +687,30 @@ fn shared_write_view_rebinds_and_mutates_through_handles() {
 }
 
 #[test]
+fn own_parameter_is_a_mutable_copy() {
+    // `own x: T` consumes a copy the callee may mutate freely — reassign a scalar,
+    // or rebind an aggregate — without affecting the caller (an aggregate is
+    // cloned at the call site). Reassigning an `own` parameter used to be rejected
+    // ("cannot assign to this expression"); it is now allowed.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun bump(own x: i32): i32 { x += 1; x }
+        fun grow(own xs: List<i32>): i32 { xs = [7, 8, 9, 10]; xs.len() }
+        fun main() {
+            mut a = 10;
+            print(bump(a)); // 11
+            print(a);       // 10 — caller untouched
+            mut list = [1, 2];
+            print(grow(list)); // 4
+            print(list.len()); // 2 — caller untouched
+        }
+        "#,
+        "11\n10\n4\n2\n",
+    );
+}
+
+#[test]
 fn shared_write_is_a_view_not_a_value() {
     // `write()` returns a view (`&mut T`), so binding its result to a value slot
     // is rejected (transparent references R1) — use `read()` or `*`.

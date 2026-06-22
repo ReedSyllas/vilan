@@ -7546,18 +7546,21 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Local(variable_id)) => *variable_id,
                 _ => continue,
             };
-            // A view binding or `&[mut]` parameter is written *through* — the
-            // assignment mutates the referent, not the binding — so its
-            // writability is enforced by `check_readonly_mutation` (after
-            // `borrows` is inferred) and the assigned value refines the referent,
-            // not this binding's own type. Skip both checks here.
-            if self.binding_or_param_is_view(variable_id) {
+            // A parameter's assignability is governed by its convention in
+            // `check_readonly_mutation`: bare / `&` are readonly and rejected
+            // there, while `own` rebinds its owned copy and `&mut` writes
+            // *through* — both allowed. A view binding is likewise handled by
+            // `check_readonly_mutation` + the write-through rewrite, and its type
+            // is fixed by the view it was bound to, not by later assignments. So
+            // skip both here (don't reject, don't feed type inference).
+            if self.parameters.contains_key(&variable_id)
+                || self.binding_or_param_is_view(variable_id)
+            {
                 continue;
             }
-            // An ordinary immutable local is rejected by `check_readonly_mutation`
-            // (which knows about views); here we only flag a target that is not a
-            // variable at all (e.g. a by-value parameter) and feed the assigned
-            // value into the variable's type inference.
+            // Anything else that is not a variable cannot be assigned (e.g. a
+            // function name); a plain immutable local is rejected by
+            // `check_readonly_mutation`.
             if self.variables.get(&variable_id).is_none() {
                 self.diagnostics.push(Error {
                     span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
