@@ -13,6 +13,67 @@ the two big strategic items: the browser backend (#8) and the general macro engi
 derives already shipped as a special-cased subset of #9. Remaining Phase 6+ memory tail
 (`Weak<T>`, dynamic rule-4, no-view-across-`await`, deterministic destruction) is deferred.
 
+**Recently shipped (since this note):** transparent references (the view model — assign *through* a
+view with no `*`, `*` is value-only; R1/R5/R6/R7/R8), `Shared::write` as a real view, reactive
+ownership & disposal (explicit `Owner` + `Disposable` + `[must_use] sub`), the general `[must_use]`
+attribute + a `Warning` severity, and the `[name(..)]` attribute syntax. **The next frontier is the
+project & platform model** — the *Next up* section below — which supersedes #8's full-stack
+project-model bits and folds in backlog E6.
+
+---
+
+## Next up — project & platform model (the new frontier)
+
+The full-stack vision graduates from one package with `[server]`/`[client]` entries to a
+**multi-package workspace**, each package targeting a platform; a transport/RPC library then makes
+the client/server seam ergonomic. Ordered by dependency. Supersedes #8's full-stack project-model
+bits and folds in backlog **E6** (project structure + per-file target). Items are tagged **[new]**
+where they capture a decision from this round.
+
+P1. **Explicit `vilan.toml` — drop the resolution magic** (M) **[new]**. Make package resolution
+    fully declarative, no inference:
+    - `[package]`: `name` (a valid identifier — it is how other packages import this one),
+      `description` (optional), `entry` (the default for `build`/`run`, e.g. `src/main.vl`), `target`
+      (the default target).
+    - `[package.dependencies]`: `dep = "version"` or `dep = { version, registry, path }`.
+    - `[project]`: `packages = [ "packages/a", … ]`; `[project.dependencies]` are inherited by every
+      package in the project.
+    - **`NAME.vl` and `NAME/lib.vl` must resolve identically** to an importer — investigate whether
+      that already holds and guarantee it.
+
+P2. **Multi-package workspace + per-package targets** (L) **[new]** — *replaces `[server]`/`[client]`.*
+    The top `vilan.toml` lists `[project] packages = [ "packages/client", "packages/server",
+    "packages/common" ]`; each sub-package has its own `vilan.toml` (`name`, `target`). A package
+    imports another by its **name** as the top-level source — `import common::something` from
+    `server/src/main.vl`. A package's **target gates which features are in scope**; `target = none`
+    means no platform/proprietary features (a pure library like `common`). Needs P1. (Supersedes
+    backlog **F1**'s `[server]`/`[client]`; addresses **E6**.)
+
+P3. **Cross-target imports diagnose, don't break typings** (M) **[new]** — importing an item whose
+    target isn't accessible reports a diagnostic ("not available for the `<x>` target") but the
+    analyzer keeps typing the rest of the file *as if it were allowed*, so one cross-target import
+    doesn't cascade into spurious downstream errors. An error-recovery requirement on P2's gating.
+
+P4. **Target-varying modules** (M) **[new]** — the same import path resolves to a different module
+    per target, so `import std::http` pulls `http.node.vl` under a node target, `http.deno.vl` under
+    deno, etc. **Config approach (preferred):** `vilan.toml` `[[module_override]] { module, target,
+    path }`. (A sibling-file convention — `http.node.vl` / `http.deno.vl` / a dispatching `http.vl` —
+    was considered, but has no clean implementation, so it's deferred to config.) The std needs this
+    most as targets multiply, though any package benefits. Needs the target model (P2).
+
+P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent]** — rebuild / rerun
+    on source change. Independent of the project work (pull forward as a quick DX win); leans on the
+    existing parse / skip-unchanged caching for fast incremental rounds.
+
+P6. **Transport / RPC library** (XL) **[new]** — two processes communicate and move data **without
+    hand-written serializers**, for client↔server and server↔server. Requirements: **pluggable
+    transports** (not locked to http / websocket / ipc — custom transports are first-class);
+    encode/decode of both **data and invocations**; and a **permission / exposure system** to
+    constrain the invocation attack surface. This is the concrete form of the reactive README's
+    "north star" (a `Signal` as a remote handle) and the transport layer #8's full-stack model
+    implies. Needs the workspace model (P1–P2); the largest item here, best split into its own
+    proposal.
+
 ---
 
 ## Tier 1 — Make it usable & keep it correct
@@ -98,10 +159,11 @@ derives already shipped as a special-cased subset of #9. Remaining Phase 6+ memo
    browser, and shared modules compile under both targets. Design (full-stack, see notes below):
    a `--target node|browser` flag threaded through codegen; the std split into a universal **core**
    layer + platform layers (`node`: fs/http/process; `dom`: document/events/fetch) gated by target;
-   target-aware `@extern` host-import emission (Node `import {x} from "node:.."` vs browser globals);
-   a project model with `[server]`/`[client]` entries (`vilan build` emits `dist/server.js` +
-   `dist/client.js`, server serves the client). Reactive UI uses `Shared<T>` (now landed).
-   First slice — a `--target browser` + minimal `std::dom` — is independent.
+   target-aware `[extern]` host-import emission (Node `import {x} from "node:.."` vs browser globals).
+   The **full-stack project model is now the *Next up* sequence** (P1–P2 above) — a multi-package
+   workspace with per-package targets, replacing the `[server]`/`[client]` design sketched here.
+   Reactive UI uses `Shared<T>` (now landed). First slice — a `--target browser` + minimal
+   `std::dom` — is independent.
 9. **Compiler bindings / macros** (L) — see proposal/compiler-bindings.md. ✅ **Built-in derives
    done** (0cb21c8 PartialEq, 01918b3 Default, 3b250f2 Json, 691f0b6 Debug, d3409e6 enums): a
    pre-analysis `expand_derives` generates trait impls as Vilan *source text* from an item's

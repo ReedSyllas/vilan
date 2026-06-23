@@ -180,23 +180,25 @@ dependencies. Unordered within a section.
    batch parser, so this is the largest, lowest-priority LSP item.
 5. **Migrate the codegen-snapshot corpus into `vilan test`** (S; roadmap #7 note) — `vilan/test/` is
    a dev-time `.js` snapshot check, separate from the behavior runner; unify.
-6. **Re-evaluate the project structure + how the LSP identifies a file's target** (M; ties into F1) —
-   the browser backend introduces `--target node|browser` and platform-gated std (core/node/dom), so
-   a file's *target* decides which std layer and host globals are in scope. The LSP has no per-file
-   notion of target today, so diagnostics/hover/completion for a `dom`- or `node`-only file can be
-   wrong or missing. Revisit the project model (`vilan.toml`, `[server]`/`[client]` entries, entry
-   discovery) and **define how a file's target is determined** — manifest-entry membership, directory
-   convention, or an in-file annotation — so each file is analyzed under the right target. The chosen
-   rule belongs in the language/project spec (D1).
+6. **Re-evaluate the project structure + how the LSP identifies a file's target** (**planned:**
+   roadmap *Next up* P1–P3) — the browser backend introduces `--target node|browser` and
+   platform-gated std (core/node/dom), so a file's *target* decides which std layer and host globals
+   are in scope; the LSP has no per-file notion of target today, so diagnostics/hover/completion for
+   a `dom`- or `node`-only file can be wrong or missing. **Resolved by the Next-up direction:** a
+   file's target is its *package*'s target (P1/P2 — a multi-package workspace where each package's
+   `vilan.toml` declares `target`), and cross-target imports diagnose without breaking typings (P3).
+   The chosen rule belongs in the language/project spec (D1).
 
 ---
 
 ## F. Backend & platform
 
 1. **Browser backend — full-stack slice 5** (L; roadmap #8, see `browser-backend` memory) — slices
-   1–4 done (`--target` flag, platform-gated std core/node/dom, `std::dom`). Remaining: the
-   full-stack project model — `[server]`/`[client]` entries, `vilan build` emits
-   `dist/server.js` + `dist/client.js`, server serves the client bundle.
+   1–4 done (`--target` flag, platform-gated std core/node/dom, `std::dom`). The full-stack project
+   model is **redesigned in roadmap *Next up* P2** — a multi-package workspace with per-package
+   targets (`packages/client` + `packages/server` + `packages/common`), **replacing** the
+   `[server]`/`[client]` sketch. `vilan build` still emits a server + client bundle, server serves
+   the client; the transport between them is the *Next up* P6 RPC library.
 2. **Numeric types `u8`…`i64`/`f32`** (S; roadmap #15) — low value on a JS target (collapse to
    `f64`/`BigInt`); do via the macro engine (G1) or defer to a WASM/native backend. Prune
    superseded `vilan/outdated/` sketches.
