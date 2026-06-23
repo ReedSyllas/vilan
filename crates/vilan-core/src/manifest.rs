@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::analyzer::{PackageSpec, Workspace};
+use crate::analyzer::{Layer, PackageSpec, Workspace};
 use crate::options::{BuildOptions, Preset};
-use crate::target::Target;
+use crate::target::{Platform, PlatformPattern};
 
 /// A parsed `vilan.toml`. Exactly one of `[package]` (an app) / `[library]` (an
 /// importable library) / `[project]` (a workspace) is present for a current-shape
@@ -51,10 +51,11 @@ pub struct Package {
     pub dependencies: BTreeMap<String, Dependency>,
 }
 
-/// A library (L1): an importable unit with a public surface (`lib.vl`) and no app
-/// baggage — no `entry`, no single host `target`. It serves every target by
-/// **layering** its source: a base `root` (shared) plus per-target overlay roots
-/// under `[library.target.<t>]` (a module there shadows the base for that target).
+/// A library: an importable unit with a public surface (`lib.vl`) and no app
+/// baggage — no `entry`, no single host `target`. It serves every platform by
+/// **layering** its source: a base `root` (shared) plus `[library.layer.<name>]`
+/// overlays that each declare the platforms they serve (a module there shadows the
+/// base for those platforms). See `proposal/platform-model.md`.
 #[derive(Debug, Deserialize)]
 pub struct Library {
     /// How dependents import this library. Required; a valid identifier.
@@ -62,18 +63,22 @@ pub struct Library {
     pub description: Option<String>,
     /// The base (shared) source root, relative to the manifest. Default `src`.
     pub root: Option<PathBuf>,
-    /// Per-target overlay roots, keyed by target name (`node` / `browser`).
+    /// Overlay layers, keyed by layer name (`process`, `browser`, …).
     #[serde(default)]
-    pub target: BTreeMap<String, Layer>,
+    pub layer: BTreeMap<String, LayerDecl>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
 }
 
-/// One `[library.target.<t>]` overlay layer.
+/// One `[library.layer.<name>]`: a source root plus the platform patterns it serves.
 #[derive(Debug, Deserialize)]
-pub struct Layer {
-    /// The overlay's source root, relative to the manifest. Defaults to `src/<t>`.
+pub struct LayerDecl {
+    /// The layer's source root, relative to the manifest. Defaults to `src/<name>`.
     pub root: Option<PathBuf>,
+    /// The platforms this layer serves: `node` / `node:24` / `node:*` / `browser`,
+    /// or a family (`@process`). At least one.
+    #[serde(default)]
+    pub platform: Vec<String>,
 }
 
 impl Library {
@@ -153,9 +158,9 @@ impl Package {
         self.entry.as_deref().unwrap_or(Path::new("main.vl"))
     }
 
-    /// The declared target, if any (validated by [`Manifest::validate`]).
-    pub fn resolved_target(&self) -> Option<Target> {
-        self.target.as_deref().and_then(Target::parse)
+    /// The declared platform, if any (validated by [`Manifest::validate`]).
+    pub fn resolved_target(&self) -> Option<Platform> {
+        self.target.as_deref().and_then(|t| Platform::parse(t).ok())
     }
 }
 
@@ -261,10 +266,8 @@ impl Manifest {
             Some(_) => {}
         }
         if let Some(target) = &package.target {
-            if Target::parse(target).is_none() {
-                errors.push(format!(
-                    "unknown `[package] target` `{target}` (expected `node`, `browser`, or `none`)"
-                ));
+            if let Err(error) = Platform::parse(target) {
+                errors.push(format!("invalid `[package] target`: {error}"));
             }
         }
     }
@@ -277,15 +280,20 @@ impl Manifest {
             )),
             Some(_) => {}
         }
-        // L1 layers are the concrete codegen targets (`node`/`browser`); `none`
-        // isn't an overlay (it's the absence of a host). Open-ended layer names
-        // (`deno`/`bun`) are L3.
-        for layer in library.target.keys() {
-            match Target::parse(layer) {
-                Some(Target::Node) | Some(Target::Browser) => {}
-                _ => errors.push(format!(
-                    "unknown `[library.target.{layer}]` (expected `node` or `browser`)"
-                )),
+        for (name, layer) in &library.layer {
+            if layer.platform.is_empty() {
+                errors.push(format!(
+                    "`[library.layer.{name}]` must declare the platforms it serves \
+                     (e.g. `platform = [\"@process\"]`)"
+                ));
+            }
+            for token in &layer.platform {
+                if PlatformPattern::parse(token).is_none() {
+                    errors.push(format!(
+                        "`[library.layer.{name}]` has an unknown platform `{token}` \
+                         (expected `node`/`node:24`/`browser`, or `@process`)"
+                    ));
+                }
             }
         }
     }
@@ -352,11 +360,11 @@ pub fn resolve_workspace(package_dir: &Path) -> Result<Workspace, String> {
     })
 }
 
-/// Resolves the `std` library's layered [`PackageSpec`] from `std_dir`. Reads
-/// `std_dir/vilan.toml` (`[library]`) when present; otherwise treats `std_dir` as
-/// the base source root and derives `node`/`browser` overlays by the directory
-/// convention (so a `VILAN_STD` pointing at the source root still resolves). `std`
-/// has no external dependencies — its modules reference each other via `pkg::`.
+/// Resolves the `std` library's layered [`PackageSpec`] from `std_dir` — the std
+/// *package* directory (with its `[library]` `vilan.toml`). A directory with no
+/// manifest is treated as a base-only library (core std only); point `VILAN_STD`
+/// at the package directory to get the platform layers. `std` has no external
+/// dependencies — its modules reference each other via `pkg::`.
 pub fn resolve_std(std_dir: &Path) -> PackageSpec {
     if let Ok(contents) = std::fs::read_to_string(std_dir.join("vilan.toml")) {
         if let Ok((manifest, _)) = Manifest::parse(&contents) {
@@ -365,44 +373,41 @@ pub fn resolve_std(std_dir: &Path) -> PackageSpec {
             }
         }
     }
-    // Convention fallback: `std_dir` is the base source root; overlays are its
-    // `node`/`browser` subdirectories.
-    let overlay = |target: Target, name: &str| {
-        let root = std_dir.join(name);
-        root.is_dir().then_some((target, root))
-    };
     PackageSpec {
         base_root: std_dir.to_path_buf(),
-        target_roots: [
-            overlay(Target::Node, "node"),
-            overlay(Target::Browser, "browser"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
+        layers: Vec::new(),
         dependencies: Vec::new(),
     }
 }
 
 /// Builds a [`PackageSpec`] for the `[library]` rooted at `dir`: its base root
-/// (default `src`) plus each declared per-target overlay (default `src/<t>`), with
-/// the already-resolved dependency edges.
+/// (default `src`) plus each declared layer (root default `src/<name>`, with the
+/// platform patterns it serves), and the already-resolved dependency edges.
 fn library_spec(dir: &Path, library: &Library, dependencies: Vec<(String, usize)>) -> PackageSpec {
-    let target_roots = library
-        .target
+    let layers = library
+        .layer
         .iter()
-        .filter_map(|(name, layer)| {
-            let target = Target::parse(name)?;
-            let root = layer
+        .map(|(name, decl)| {
+            let root = decl
                 .root
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("src").join(name));
-            Some((target, dir.join(root)))
+            let patterns = decl
+                .platform
+                .iter()
+                .filter_map(|token| PlatformPattern::parse(token))
+                .flatten()
+                .collect();
+            Layer {
+                name: name.clone(),
+                patterns,
+                root: dir.join(root),
+            }
         })
         .collect();
     PackageSpec {
         base_root: dir.join(library.base_root()),
-        target_roots,
+        layers,
         dependencies,
     }
 }
@@ -532,7 +537,7 @@ mod tests {
         let package = manifest.package.as_ref().unwrap();
         assert_eq!(package.root(), Path::new("source"));
         assert_eq!(package.entry(), Path::new("app.vl"));
-        assert_eq!(package.resolved_target(), Some(Target::Browser));
+        assert_eq!(package.resolved_target(), Some(Platform::Browser));
         assert!(manifest.validate().is_empty());
     }
 
@@ -559,29 +564,36 @@ mod tests {
         let manifest = parse("[package]\nname = \"common\"\ntarget = \"none\"\n");
         assert_eq!(
             manifest.package.as_ref().unwrap().resolved_target(),
-            Some(Target::None)
+            Some(Platform::None)
         );
         assert!(manifest.validate().is_empty());
     }
 
-    #[test]
-    fn resolve_std_reads_manifest_layers() {
-        // The real `std` library declares `node`/`browser` overlays in its manifest.
-        let std = resolve_std(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"));
-        assert!(std.base_root.ends_with("std/src"));
-        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Node));
-        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Browser));
+    /// Whether any layer in `spec` serves a platform matching `pattern`.
+    fn serves(spec: &PackageSpec, pattern: PlatformPattern) -> bool {
+        spec.layers
+            .iter()
+            .any(|layer| layer.patterns.iter().any(|p| *p == pattern))
     }
 
     #[test]
-    fn resolve_std_convention_fallback() {
-        // Pointing at a bare source root (no manifest) derives `node`/`browser`
-        // overlays by the directory convention, so a `VILAN_STD` at the src root works.
+    fn resolve_std_reads_manifest_layers() {
+        // The real `std` library declares `process`/`browser` layers in its manifest.
+        let std = resolve_std(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"));
+        assert!(std.base_root.ends_with("std/src"));
+        assert!(serves(&std, PlatformPattern::Node { version: None }));
+        assert!(serves(&std, PlatformPattern::Browser));
+    }
+
+    #[test]
+    fn resolve_std_without_manifest_is_base_only() {
+        // Pointing at a bare source root (no `vilan.toml`) yields a base-only library:
+        // its `src` is the base layer and there are no platform layers. A `VILAN_STD`
+        // at the src root still resolves the core modules, just not the overlays.
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src");
         let std = resolve_std(&src);
         assert_eq!(std.base_root, src);
-        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Node));
-        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Browser));
+        assert!(std.layers.is_empty());
     }
 
     #[test]
@@ -607,12 +619,13 @@ mod tests {
     }
 
     #[test]
-    fn library_with_target_layer_is_valid() {
-        let manifest =
-            parse("[library]\nname = \"geometry\"\n[library.target.node]\nroot = \"src/node\"\n");
+    fn library_with_layer_is_valid() {
+        let manifest = parse(
+            "[library]\nname = \"geometry\"\n[library.layer.process]\nplatform = [\"@process\"]\n",
+        );
         let library = manifest.library.as_ref().unwrap();
         assert_eq!(library.base_root(), Path::new("src"));
-        assert!(library.target.contains_key("node"));
+        assert!(library.layer.contains_key("process"));
         assert!(manifest.validate().is_empty());
     }
 
@@ -623,8 +636,16 @@ mod tests {
     }
 
     #[test]
-    fn unknown_library_target_layer_is_an_error() {
-        let manifest = parse("[library]\nname = \"x\"\n[library.target.deno]\nroot = \"d\"\n");
+    fn library_layer_without_platform_is_an_error() {
+        // A layer must declare the platforms it serves — the layer *name* is free
+        // (it doesn't imply a platform), so an empty `platform` is ambiguous.
+        let manifest = parse("[library]\nname = \"x\"\n[library.layer.weird]\nroot = \"w\"\n");
+        assert!(manifest.validate().iter().any(|e| e.contains("weird")));
+    }
+
+    #[test]
+    fn unknown_library_layer_platform_is_an_error() {
+        let manifest = parse("[library]\nname = \"x\"\n[library.layer.l]\nplatform = [\"deno\"]\n");
         assert!(manifest.validate().iter().any(|e| e.contains("deno")));
     }
 

@@ -5,7 +5,6 @@ use crate::error::Error;
 use crate::id::Id;
 use crate::node::{BinaryOp, ExternBinding};
 use crate::options::BuildOptions;
-use crate::target::Target;
 use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
@@ -351,18 +350,19 @@ impl<'src> Transformer<'src> {
         // effects still run (a `main` that ends in `render()`), the value discarded.
         if let Some(value) = self.walk_entity(main_fn.body.1, &mut t_main_fn_body) {
             if !matches!(value, js::Node::Void) {
-                let statement = match self.program.target {
-                    Target::Node => js::Node::Call(
+                // A host with `process.exit` (Node) forwards `main`'s result as the
+                // exit code; the browser (and the host-less `none`, which the CLI
+                // refuses to *build*) has none, so the tail is a plain statement.
+                let statement = if self.program.platform.has_process_exit() {
+                    js::Node::Call(
                         Box::new(js::Node::Property(
                             Box::new(js::Node::Local("process".to_string())),
                             "exit".to_string(),
                         )),
                         vec![value],
-                    ),
-                    // No host (`none`) has no exit code either — like the browser,
-                    // emit the tail as a plain statement. (The CLI refuses to
-                    // *build* a `none` target; this keeps codegen total.)
-                    Target::Browser | Target::None => value,
+                    )
+                } else {
+                    value
                 };
                 t_main_fn_body.push(statement);
             }

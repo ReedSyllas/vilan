@@ -1,12 +1,16 @@
-# The Vilan standard library — a `[library]` that serves every target by layering
+# The Vilan standard library — a `[library]` that serves every platform by layering
 # its source. Core modules live in the base `root` (`src`) and are available
-# everywhere; platform modules live in per-target overlays and are available only
-# to a build for that target (importing one off-target is a cross-target error).
+# everywhere; platform modules live in `[library.layer.<name>]` overlays, each
+# declaring the platforms it serves. A module resolves to the most-specific matching
+# layer; importing an off-platform module (e.g. `std::dom` in a Node build) is a
+# cross-platform error.
 [library]
 name = "std"
 
-[library.target.node]
-root = "src/node"       # fs, http, process
+# The process-having runtimes (node today; deno/bun join `@process` when added).
+# Its `node:`-compat bindings are portable across them, so no per-runtime split.
+[library.layer.process]
+platform = ["@process"]    # fs, http, process
 
-[library.target.browser]
-root = "src/browser"    # dom, ui
+[library.layer.browser]
+platform = ["browser"]     # dom, ui

@@ -10,19 +10,19 @@ use vilan_core::id::Id;
 use vilan_core::manifest::EntrySection;
 use vilan_core::type_::Type;
 use vilan_core::{
-    Error, Manifest, Program, Span, Target as BuildTarget, Workspace as BuildWorkspace,
+    Error, Manifest, Platform as BuildPlatform, Program, Span, Workspace as BuildWorkspace,
     analyze_source,
 };
 
 use crate::line_index::LineIndex;
 
 /// A file's project context, resolved from the nearest `vilan.toml`: the build
-/// target to analyze it against, and the package source root (where `import
+/// platform to analyze it against, and the package source root (where `import
 /// pkg::..` siblings resolve). Either is `None` when there's no project (or the
-/// file's role can't be determined) — analysis then infers the target from the
+/// file's role can't be determined) — analysis then infers the platform from the
 /// file's imports and roots `pkg::` at the file's own directory.
 struct ProjectContext {
-    target: Option<BuildTarget>,
+    platform: Option<BuildPlatform>,
     pkg_root: Option<PathBuf>,
     /// The file's resolved dependency workspace (P2), so cross-package imports
     /// (`import <dep>::..`) type-check in the editor.
@@ -32,7 +32,7 @@ struct ProjectContext {
 impl ProjectContext {
     fn none() -> ProjectContext {
         ProjectContext {
-            target: None,
+            platform: None,
             pkg_root: None,
             workspace: BuildWorkspace::default(),
         }
@@ -41,9 +41,9 @@ impl ProjectContext {
 
 /// Resolves a file's [`ProjectContext`] from the nearest ancestor `vilan.toml`.
 /// A `[package]` roots `pkg::` at its source `root`, analyzes its files against the
-/// package `target`, and resolves its dependency workspace (so cross-package
+/// package `target` platform, and resolves its dependency workspace (so cross-package
 /// imports type-check); the legacy `[server]`/`[client]` form keeps its role-based
-/// target. Anything unreadable / unrecognized yields [`ProjectContext::none`].
+/// platform. Anything unreadable / unrecognized yields [`ProjectContext::none`].
 fn resolve_project_context(entry_path: &Path) -> ProjectContext {
     let mut directory = entry_path.parent();
     let (manifest_path, root) = loop {
@@ -63,7 +63,7 @@ fn resolve_project_context(entry_path: &Path) -> ProjectContext {
         return ProjectContext::none();
     };
 
-    // Legacy full-stack: target by the file's role; `pkg::` roots at its own
+    // Legacy full-stack: platform by the file's role; `pkg::` roots at its own
     // directory (no declared package root), so leave `pkg_root` to the fallback.
     if manifest.is_legacy_fullstack() {
         let is_entry = |section: &Option<EntrySection>| {
@@ -72,30 +72,30 @@ fn resolve_project_context(entry_path: &Path) -> ProjectContext {
                 .and_then(|section| section.entry.as_deref())
                 .is_some_and(|entry| same_file(&root.join(entry), entry_path))
         };
-        let target = if is_entry(&manifest.client) {
-            Some(BuildTarget::Browser)
+        let platform = if is_entry(&manifest.client) {
+            Some(BuildPlatform::Browser)
         } else if is_entry(&manifest.server) {
-            Some(BuildTarget::Node)
+            Some(BuildPlatform::default())
         } else {
             None
         };
         return ProjectContext {
-            target,
+            platform,
             pkg_root: None,
             workspace: BuildWorkspace::default(),
         };
     }
 
     // A package: root `pkg::` at its declared source root, analyze every file under
-    // that root against the package target (default Node), and resolve the package's
+    // that root against the package platform (default Node), and resolve the package's
     // dependency workspace (best-effort — a resolution error degrades to no deps).
     if let Some(package) = &manifest.package {
         let pkg_root = root.join(package.root());
-        let build_target = package.resolved_target().unwrap_or(BuildTarget::Node);
-        let target = is_within(&pkg_root, entry_path).then_some(build_target);
+        let build_platform = package.resolved_target().unwrap_or_default();
+        let platform = is_within(&pkg_root, entry_path).then_some(build_platform);
         let workspace = vilan_core::manifest::resolve_workspace(root).unwrap_or_default();
         return ProjectContext {
-            target,
+            platform,
             pkg_root: Some(pkg_root),
             workspace,
         };
@@ -227,22 +227,22 @@ impl Document {
         // The program borrows its source for `'static`, so leak a copy (the
         // editor re-analyzes on change; see the known leak tradeoff).
         let leaked: &'static str = Box::leak(text.to_string().into_boxed_str());
-        // Prefer the project's declared target and source root (the file's role in
-        // its `vilan.toml`); fall back to inferring the target from imports and
+        // Prefer the project's declared platform and source root (the file's role in
+        // its `vilan.toml`); fall back to inferring the platform from imports and
         // rooting `pkg::` at the file's own directory.
         let context = resolve_project_context(entry_path);
         let pkg_root = context
             .pkg_root
             .unwrap_or_else(|| pkg_root_fallback(entry_path));
         // `std` is resolved as a library (its layered roots) from the std directory
-        // — the manifest when present, else the layer convention (L2).
+        // — the manifest when present, else a bare base layer (L2).
         let std = vilan_core::manifest::resolve_std(std_dir);
         let (program, diagnostics) = analyze_source(
             leaked,
             &std,
             &pkg_root,
             entry_path,
-            context.target,
+            context.platform,
             &context.workspace,
         );
 

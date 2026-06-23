@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vilan_core::{BuildOptions, PackageSpec, Target, Workspace, analyze_source, transform};
+use vilan_core::{BuildOptions, PackageSpec, Platform, Workspace, analyze_source, transform};
 
 fn std_spec() -> PackageSpec {
     vilan_core::manifest::resolve_std(
@@ -33,7 +33,7 @@ fn compile(source: &str) -> Result<String, Vec<String>> {
                     &std_spec(),
                     Path::new("."),
                     Path::new("test.vl"),
-                    Some(Target::Node),
+                    Some(Platform::default()),
                     &Workspace::default(),
                 );
                 match program {
@@ -82,7 +82,7 @@ fn warnings(source: &str) -> Vec<String> {
                 &std_spec(),
                 Path::new("."),
                 Path::new("test.vl"),
-                Some(Target::Node),
+                Some(Platform::default()),
                 &Workspace::default(),
             );
             program

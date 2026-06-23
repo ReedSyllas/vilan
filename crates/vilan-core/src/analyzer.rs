@@ -10,7 +10,7 @@ use crate::node::{
     NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
-use crate::target::Target;
+use crate::target::{Platform, PlatformPattern};
 use crate::type_::{SubstitutionContext, Type, TypeId};
 use crate::util::plural;
 
@@ -8744,9 +8744,9 @@ pub struct SourceRange {
 
 #[derive(Debug)]
 pub struct Program<'src> {
-    /// The host the emitted JS targets (Node / browser) — gates the platform std
-    /// layer at load time and host-binding emission in the transformer.
-    pub target: Target,
+    /// The platform the program builds for — gates which library layers are
+    /// reachable at load time and the host-profile bit in the transformer.
+    pub platform: Platform,
     pub closures: IndexMap<Id, Closure>,
     pub diagnostics: Vec<Error>,
     /// Non-fatal diagnostics (unused `[must_use]` results) — rendered as warnings.
@@ -9362,18 +9362,17 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<(&'a str,
     modules
 }
 
-/// Pushes a recoverable cross-target error — spanned at the offending `import` —
+/// Pushes a recoverable cross-platform error — spanned at the offending `import` —
 /// for each module imported from `library` that isn't available for the build
-/// `target` (it lives only in *another* target's overlay) (L1). The module still
-/// loads for typing (from wherever it is), so the file doesn't cascade. Imports
-/// that aren't module files in any layer — an item re-exported from `lib.vl`, or a
-/// typo — are left to normal name resolution. This per-module layer-availability
-/// check replaces P2/P3's coarse per-dependency target gate.
+/// `platform` (it lives only in a layer serving *other* platforms). The module
+/// still loads for typing (from wherever it is), so the file doesn't cascade.
+/// Imports that aren't module files in any layer — an item re-exported from
+/// `lib.vl`, or a typo — are left to normal name resolution.
 fn gate_library_imports(
     refs: &[(&str, Span)],
     library: &PackageSpec,
     library_name: &str,
-    target: Target,
+    platform: Platform,
     diagnostics: &mut Vec<Error>,
 ) {
     let mut reported: HashSet<&str> = HashSet::new();
@@ -9381,28 +9380,39 @@ fn gate_library_imports(
         if !reported.insert(*name) {
             continue;
         }
-        // Available for this target (its overlay or the base)? then fine.
-        if resolve_module_in_roots(&library.available_roots(target), name)
+        // Available for this platform (a matching layer or the base)? then fine.
+        if resolve_module_in_roots(&library.available_roots(platform), name)
             .0
             .is_some()
         {
             continue;
         }
-        // Not available here, but present in another target's overlay → cross-target.
-        if resolve_module_in_roots(&library.search_roots(target), name)
+        // Not available here, but present in a layer serving another platform →
+        // cross-platform.
+        if resolve_module_in_roots(&library.search_roots(platform), name)
             .0
             .is_some()
         {
             diagnostics.push(Error {
                 span: *span,
                 msg: format!(
-                    "`{library_name}::{name}` is in another target's layer and is not available \
-                     when building for `{}`",
-                    target.name()
+                    "`{library_name}::{name}` is in another platform's layer and is not \
+                     available when building for `{}`",
+                    platform.name()
                 ),
             });
         }
     }
+}
+
+/// One layer of a library: a named source root and the platform patterns it serves
+/// (L1/L2). A module in a layer is reachable by a build whose platform matches one
+/// of the layer's patterns.
+#[derive(Debug, Clone)]
+pub struct Layer {
+    pub name: String,
+    pub patterns: Vec<PlatformPattern>,
+    pub root: PathBuf,
 }
 
 /// A dependency **library** reachable from the program being analyzed (P2/L1). The
@@ -9410,51 +9420,75 @@ fn gate_library_imports(
 /// each one's modules into its own namespace, so `import <name>::module::item`
 /// resolves against it and the library's own `pkg::` self-references stay within it.
 ///
-/// A library serves every target by **layering** its source: a `base_root` shared
-/// by all targets plus per-target overlay roots (L1). For a build target `T` a
-/// module resolves from `T`'s overlay then the base (the overlay shadows the base);
-/// a module present only in *another* target's overlay is a cross-target import,
-/// reported at the `import` but still loaded (for typing) from wherever it lives.
+/// A library serves every platform by **layering** its source: a `base_root` shared
+/// by all platforms plus `layers` that each declare the platforms they serve. For a
+/// build platform `P` a module resolves from the most-specific matching layer, then
+/// the base; a module present only in a layer serving *other* platforms is a
+/// cross-platform import, reported at the `import` but still loaded for typing.
 #[derive(Debug, Clone)]
 pub struct PackageSpec {
-    /// The library's base (shared) source root — where its `lib.vl` and all-target
-    /// modules live.
+    /// The base (shared) source root — `lib.vl` and modules serving every platform.
     pub base_root: PathBuf,
-    /// Per-target overlay roots. A module here shadows a base module of the same
-    /// name for that target.
-    pub target_roots: Vec<(Target, PathBuf)>,
+    /// The library's layers, each serving a set of platform patterns.
+    pub layers: Vec<Layer>,
     /// How this library addresses its own dependencies: `(import name, index into
     /// the package slice)`. Lets a transitive `dep::subdep::item` resolve.
     pub dependencies: Vec<(String, usize)>,
 }
 
 impl PackageSpec {
-    /// The ordered roots to search for a module when building for `target`: the
-    /// target's overlay (if any) first so it shadows the base, then the base, then
-    /// the *other* overlays last — so a cross-target module still loads for typing
-    /// (its cross-target import having been reported at the `import`).
-    fn search_roots(&self, target: Target) -> Vec<&Path> {
-        let mut roots = Vec::new();
-        if let Some((_, root)) = self.target_roots.iter().find(|(t, _)| *t == target) {
-            roots.push(root.as_path());
-        }
+    /// The layers matching `platform`, paired with their match specificity, sorted
+    /// most-specific first (a version-specific layer outranks an any-version one).
+    fn matching_layers(&self, platform: Platform) -> Vec<(u8, &Path)> {
+        let mut matching: Vec<(u8, &Path)> = self
+            .layers
+            .iter()
+            .filter_map(|layer| {
+                layer
+                    .patterns
+                    .iter()
+                    .filter_map(|pattern| platform.matches(*pattern))
+                    .max()
+                    .map(|specificity| (specificity, layer.root.as_path()))
+            })
+            .collect();
+        // Stable sort by descending specificity keeps declaration order for ties.
+        matching.sort_by(|a, b| b.0.cmp(&a.0));
+        matching
+    }
+
+    /// The ordered roots to search for a module when building for `platform`: the
+    /// matching layers (most-specific first, shadowing the base), then the base,
+    /// then the *non-matching* layers last — so a cross-platform module still loads
+    /// for typing (its cross-platform import having been reported at the `import`).
+    fn search_roots(&self, platform: Platform) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = self
+            .matching_layers(platform)
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
         roots.push(self.base_root.as_path());
-        for (other, root) in &self.target_roots {
-            if *other != target {
-                roots.push(root.as_path());
+        for layer in &self.layers {
+            if !layer
+                .patterns
+                .iter()
+                .any(|pattern| platform.matches(*pattern).is_some())
+            {
+                roots.push(layer.root.as_path());
             }
         }
         roots
     }
 
-    /// The roots a module is *available* from for `target`: its overlay then the
-    /// base (not other targets' overlays). A module resolvable here is in-target;
-    /// one resolvable only via [`search_roots`] is cross-target.
-    fn available_roots(&self, target: Target) -> Vec<&Path> {
-        let mut roots = Vec::new();
-        if let Some((_, root)) = self.target_roots.iter().find(|(t, _)| *t == target) {
-            roots.push(root.as_path());
-        }
+    /// The roots a module is *available* from for `platform`: the matching layers
+    /// then the base (not layers serving other platforms). A module resolvable here
+    /// is in-platform; one resolvable only via [`search_roots`] is cross-platform.
+    fn available_roots(&self, platform: Platform) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = self
+            .matching_layers(platform)
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
         roots.push(self.base_root.as_path());
         roots
     }
@@ -9503,7 +9537,7 @@ pub fn analyze<'src>(
     std: &PackageSpec,
     pkg_root: &Path,
     entry_path: &Path,
-    target: Target,
+    platform: Platform,
     workspace: &Workspace,
 ) -> Program<'src> {
     // `sources[0]` is the entry file; std modules are appended as they load.
@@ -9596,7 +9630,7 @@ pub fn analyze<'src>(
         |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let pkg_root_canonical = canonical(pkg_root);
     let compiling_std = std::iter::once(&std.base_root)
-        .chain(std.target_roots.iter().map(|(_, root)| root))
+        .chain(std.layers.iter().map(|layer| &layer.root))
         .any(|root| canonical(root) == pkg_root_canonical);
     let entry_pkg_origin = if compiling_std {
         Origin::Std
@@ -9635,7 +9669,7 @@ pub fn analyze<'src>(
             &entry_std_refs,
             std,
             "std",
-            target,
+            platform,
             &mut analyzer.diagnostics,
         );
     }
@@ -9738,7 +9772,7 @@ pub fn analyze<'src>(
                 &refs,
                 &workspace.packages[*index],
                 name,
-                target,
+                platform,
                 &mut analyzer.diagnostics,
             );
             to_load.extend(
@@ -9781,7 +9815,7 @@ pub fn analyze<'src>(
             for (module, _) in collect_module_refs(&lib_ast.0, "pkg") {
                 if resolve_module_file(&spec.base_root, module).0.is_some() {
                     to_load.push((Origin::Dep(index), module));
-                } else if resolve_module_in_roots(&spec.search_roots(target), module)
+                } else if resolve_module_in_roots(&spec.search_roots(platform), module)
                     .0
                     .is_some()
                 {
@@ -9828,9 +9862,9 @@ pub fn analyze<'src>(
         // dependency library is layered — its overlay for the build target, then its
         // base, then other overlays (so a cross-target module still loads for typing).
         let search_roots: Vec<&Path> = match origin {
-            Origin::Std => std.search_roots(target),
+            Origin::Std => std.search_roots(platform),
             Origin::Pkg => vec![pkg_root],
-            Origin::Dep(index) => workspace.packages[index].search_roots(target),
+            Origin::Dep(index) => workspace.packages[index].search_roots(platform),
         };
         // A platform-gated std module (e.g. `std::http` in a browser build) is *not*
         // skipped here: it loads so its signatures bind and the rest of the file
@@ -9951,7 +9985,7 @@ pub fn analyze<'src>(
             Origin::Std => {}
             Origin::Pkg => {
                 let std_refs = collect_module_refs(&ast.0, "std");
-                gate_library_imports(&std_refs, std, "std", target, &mut analyzer.diagnostics);
+                gate_library_imports(&std_refs, std, "std", platform, &mut analyzer.diagnostics);
                 to_load.extend(
                     std_refs
                         .into_iter()
@@ -9963,7 +9997,7 @@ pub fn analyze<'src>(
                         &refs,
                         &workspace.packages[*index],
                         name,
-                        target,
+                        platform,
                         &mut analyzer.diagnostics,
                     );
                     to_load.extend(
@@ -10496,7 +10530,7 @@ pub fn analyze<'src>(
         .collect::<Vec<_>>();
 
     Program {
-        target,
+        platform,
         closures: analyzer.closures,
         diagnostics: analyzer.diagnostics,
         warnings: analyzer.warnings,

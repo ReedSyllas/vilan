@@ -22,36 +22,37 @@ pub mod type_;
 pub mod util;
 
 // The common pipeline + core types, re-exported for convenience.
-pub use analyzer::{PackageSpec, Program, Workspace, analyze};
+pub use analyzer::{Layer, PackageSpec, Program, Workspace, analyze};
 pub use error::Error;
 pub use lexer::lexer;
 pub use manifest::Manifest;
 pub use options::{BuildOptions, Preset};
 pub use parser::parser;
 pub use span::{Span, Spanned};
-pub use target::Target;
+pub use target::{Backend, Platform, PlatformPattern};
 pub use transformer::transform;
 
 use std::path::Path;
 
 use node::{ImportBranch, Node, NodeList};
+use target::PlatformPattern as Pattern;
 
-/// Infers a compilation target for editor analysis (which has no `--target`) from
-/// a file's top-level imports: a file importing a module from `std`'s **browser**
-/// layer (e.g. `std::dom`) is a browser file, otherwise Node. This lets the
-/// language server analyze a browser client without the cross-target gate
-/// false-flagging it. The module's layer is read from `std`'s overlay directory,
-/// not a hardcoded list (L2).
-fn infer_target(root: &NodeList, std: &PackageSpec) -> Target {
-    let Some((_, browser_root)) = std
-        .target_roots
+/// Infers a build platform for editor analysis (which has no `--platform`) from a
+/// file's top-level imports: a file importing a module from one of `std`'s
+/// **browser**-serving layers (e.g. `std::dom`) is a browser file, otherwise Node.
+/// This lets the language server analyze a browser client without the cross-platform
+/// gate false-flagging it. The module's layer is read from `std`'s layer directory,
+/// not a hardcoded list.
+fn infer_platform(root: &NodeList, std: &PackageSpec) -> Platform {
+    let Some(browser_root) = std
+        .layers
         .iter()
-        .find(|(layer_target, _)| *layer_target == Target::Browser)
+        .find(|layer| layer.patterns.iter().any(|p| matches!(p, Pattern::Browser)))
+        .map(|layer| layer.root.as_path())
     else {
-        return Target::Node;
+        return Platform::default();
     };
-    // Whether `name` is a module file in the browser overlay (`name.vl` or
-    // `name/lib.vl`).
+    // Whether `name` is a module file in the browser layer (`name.vl` or `name/lib.vl`).
     let in_browser_layer = |name: &str| {
         browser_root.join(format!("{name}.vl")).exists()
             || browser_root.join(name).join("lib.vl").exists()
@@ -73,9 +74,9 @@ fn infer_target(root: &NodeList, std: &PackageSpec) -> Target {
         _ => false,
     });
     if references_browser {
-        Target::Browser
+        Platform::Browser
     } else {
-        Target::Node
+        Platform::default()
     }
 }
 
@@ -88,7 +89,7 @@ fn infer_target(root: &NodeList, std: &PackageSpec) -> Target {
 /// (lexer, parser, and analyzer) for the entry file. Analysis is wrapped so a
 /// panic on malformed input degrades to "no program" rather than taking the
 /// process down, which matters when an editor analyzes on every keystroke.
-/// `target` is the build target to analyze against — pass `Some` when the
+/// `platform` is the build platform to analyze against — pass `Some` when the
 /// front-end knows it (e.g. the language server resolved it from the project's
 /// `vilan.toml`), or `None` to infer it from the file's imports.
 pub fn analyze_source(
@@ -96,7 +97,7 @@ pub fn analyze_source(
     std: &PackageSpec,
     pkg_root: &Path,
     entry_path: &Path,
-    target: Option<Target>,
+    platform: Option<Platform>,
     workspace: &Workspace,
 ) -> (Option<Program<'static>>, Vec<Error>) {
     use chumsky::prelude::*;
@@ -132,15 +133,15 @@ pub fn analyze_source(
     };
 
     let root = Box::leak(Box::new(root));
-    // Use the front-end's resolved target (e.g. from `vilan.toml`), else infer one
-    // from the file's own imports: a file importing the browser DOM layer is a
+    // Use the front-end's resolved platform (e.g. from `vilan.toml`), else infer
+    // one from the file's own imports: a file importing the browser DOM layer is a
     // browser file, otherwise Node. This keeps the platform gate from
     // false-flagging valid `std::dom` usage while still catching a genuine
-    // cross-target import (e.g. `std::http` in a file that also reaches for
+    // cross-platform import (e.g. `std::http` in a file that also reaches for
     // `std::dom`).
-    let target = target.unwrap_or_else(|| infer_target(&root.0, std));
+    let platform = platform.unwrap_or_else(|| infer_platform(&root.0, std));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut program = analyze(root, std, pkg_root, entry_path, target, workspace);
+        let mut program = analyze(root, std, pkg_root, entry_path, platform, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program

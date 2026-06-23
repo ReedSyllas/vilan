@@ -1,13 +1,13 @@
 //! Filesystem-backed tests for package-module resolution (P1): a `pkg::` module
 //! resolves equivalently whether it's a flat `foo.vl` or a directory `foo/lib.vl`,
-//! both existing is an ambiguity error, and the `none` target gates out the
+//! both existing is an ambiguity error, and the `none` platform gates out the
 //! platform `std` layers. These need real files on disk (the loader reads them),
 //! so each writes a throwaway package directory and analyzes against it.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use vilan_core::{Error, PackageSpec, Target, Workspace, analyze_source};
+use vilan_core::{Error, Layer, PackageSpec, Platform, PlatformPattern, Workspace, analyze_source};
 
 fn std_spec() -> PackageSpec {
     vilan_core::manifest::resolve_std(
@@ -18,7 +18,7 @@ fn std_spec() -> PackageSpec {
 /// Writes `files` (relative path → contents) into a fresh temp package directory,
 /// analyzes `entry` (also relative) against it as `pkg_root`, and returns the raw
 /// diagnostics (message + span). The directory is removed before returning.
-fn analyze_package_raw(files: &[(&str, &str)], entry: &str, target: Target) -> Vec<Error> {
+fn analyze_package_raw(files: &[(&str, &str)], entry: &str, platform: Platform) -> Vec<Error> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("vilan_modres_{}_{unique}", std::process::id()));
@@ -36,7 +36,7 @@ fn analyze_package_raw(files: &[(&str, &str)], entry: &str, target: Target) -> V
         &std_spec(),
         &dir,
         &entry_path,
-        Some(target),
+        Some(platform),
         &Workspace::default(),
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -44,8 +44,8 @@ fn analyze_package_raw(files: &[(&str, &str)], entry: &str, target: Target) -> V
 }
 
 /// As [`analyze_package_raw`], but just the diagnostic messages.
-fn analyze_package(files: &[(&str, &str)], entry: &str, target: Target) -> Vec<String> {
-    analyze_package_raw(files, entry, target)
+fn analyze_package(files: &[(&str, &str)], entry: &str, platform: Platform) -> Vec<String> {
+    analyze_package_raw(files, entry, platform)
         .into_iter()
         .map(|error| error.msg)
         .collect()
@@ -59,7 +59,7 @@ fn flat_module_resolves() {
     let errors = analyze_package(
         &[("main.vl", ENTRY), ("foo.vl", MODULE)],
         "main.vl",
-        Target::Node,
+        Platform::default(),
     );
     assert!(
         errors.is_empty(),
@@ -73,7 +73,7 @@ fn lib_module_resolves() {
     let errors = analyze_package(
         &[("main.vl", ENTRY), ("foo/lib.vl", MODULE)],
         "main.vl",
-        Target::Node,
+        Platform::default(),
     );
     assert!(
         errors.is_empty(),
@@ -90,7 +90,7 @@ fn both_forms_is_ambiguous() {
             ("foo/lib.vl", MODULE),
         ],
         "main.vl",
-        Target::Node,
+        Platform::default(),
     );
     assert!(
         errors.iter().any(|error| error.contains("ambiguous")),
@@ -99,11 +99,11 @@ fn both_forms_is_ambiguous() {
 }
 
 #[test]
-fn none_target_rejects_platform_std() {
-    // A `none` (pure-library) target reaches only the core std layer, so importing
-    // a Node-layer module is a clear platform diagnostic rather than a build.
+fn none_platform_rejects_platform_std() {
+    // A `none` (pure-library) platform reaches only the base std layer, so importing
+    // a process-layer module is a clear platform diagnostic rather than a build.
     let entry = "import std::http;\nfun main() {}\n";
-    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Target::None);
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::None);
     assert!(
         errors.iter().any(|error| error.contains("not available")),
         "expected a platform-gate error, got: {errors:#?}"
@@ -111,10 +111,10 @@ fn none_target_rejects_platform_std() {
 }
 
 #[test]
-fn none_target_allows_core_std() {
-    // Core std (e.g. `print`) is universal — a `none` target still type-checks it.
+fn none_platform_allows_base_std() {
+    // Base std (e.g. `print`) is universal — a `none` platform still type-checks it.
     let entry = "import std::print;\nfun main() { print(1); }\n";
-    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Target::None);
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::None);
     assert!(
         errors.is_empty(),
         "expected a clean compile, got: {errors:#?}"
@@ -132,10 +132,10 @@ struct Dep {
 
 /// Analyzes an entry program against a set of dependency packages (P2). The entry
 /// lives in its own `app/` directory; each dependency in `<import_name>/`. Builds
-/// the `Workspace` (entry depends on every dep, each a `none` pure library) and
+/// the `Workspace` (entry depends on every dep, each a base-only pure library) and
 /// returns the diagnostics. Dependencies are not interdependent here (the loader's
 /// transitive edges are exercised through `lib.vl` seeding within a dep).
-fn analyze_workspace(entry: &str, deps: &[Dep], target: Target) -> Vec<String> {
+fn analyze_workspace(entry: &str, deps: &[Dep], platform: Platform) -> Vec<String> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("vilan_ws_{}_{unique}", std::process::id()));
@@ -157,7 +157,7 @@ fn analyze_workspace(entry: &str, deps: &[Dep], target: Target) -> Vec<String> {
         }
         packages.push(PackageSpec {
             base_root: dep_root,
-            target_roots: Vec::new(),
+            layers: Vec::new(),
             dependencies: Vec::new(),
         });
         entry_dependencies.push((dep.import_name.to_string(), index));
@@ -174,7 +174,7 @@ fn analyze_workspace(entry: &str, deps: &[Dep], target: Target) -> Vec<String> {
         &std_spec(),
         &app_dir,
         &entry_path,
-        Some(target),
+        Some(platform),
         &workspace,
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -188,7 +188,7 @@ fn cross_package_import_resolves() {
         import_name: "common",
         files: &[("lib.vl", "fun greeting(): str { \"hi\" }\n")],
     };
-    let errors = analyze_workspace(entry, &[common], Target::Node);
+    let errors = analyze_workspace(entry, &[common], Platform::default());
     assert!(
         errors.is_empty(),
         "expected a clean compile, got: {errors:#?}"
@@ -207,7 +207,7 @@ fn cross_package_submodule_resolves() {
             ("shape.vl", "fun area(side: i32): i32 { side * side }\n"),
         ],
     };
-    let errors = analyze_workspace(entry, &[common], Target::Node);
+    let errors = analyze_workspace(entry, &[common], Platform::default());
     assert!(
         errors.is_empty(),
         "expected a clean compile, got: {errors:#?}"
@@ -253,7 +253,7 @@ fn dependency_pkg_self_reference_is_isolated() {
     let workspace = Workspace {
         packages: vec![PackageSpec {
             base_root: dep_root,
-            target_roots: Vec::new(),
+            layers: Vec::new(),
             dependencies: Vec::new(),
         }],
         entry_dependencies: vec![("common".to_string(), 0)],
@@ -266,7 +266,7 @@ fn dependency_pkg_self_reference_is_isolated() {
         &std_spec(),
         &app_dir,
         &entry_path,
-        Some(Target::Node),
+        Some(Platform::default()),
         &workspace,
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -286,18 +286,18 @@ fn unknown_dependency_name_errors() {
         import_name: "common",
         files: &[("lib.vl", "fun greeting(): str { \"hi\" }\n")],
     };
-    let errors = analyze_workspace(entry, &[common], Target::Node);
+    let errors = analyze_workspace(entry, &[common], Platform::default());
     assert!(
         !errors.is_empty(),
         "expected an unresolved-import error for `other`"
     );
 }
 
-// --- Cross-target import error recovery (P3) -------------------------------
+// --- Cross-platform import error recovery (P3) -----------------------------
 
 #[test]
-fn cross_target_std_import_does_not_cascade() {
-    // A browser build of a Node program: the two cross-target imports are reported,
+fn cross_platform_std_import_does_not_cascade() {
+    // A browser build of a Node program: the two cross-platform imports are reported,
     // but `std::http`/`std::fs` still load for typing, so `Server`,
     // `read_file_to_str`, etc. resolve and there's no unresolved-name cascade.
     let entry = concat!(
@@ -309,18 +309,18 @@ fn cross_target_std_import_does_not_cascade() {
         "    server.start();\n",
         "}\n",
     );
-    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Target::Browser);
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::Browser);
     assert!(
         errors
             .iter()
             .any(|e| e.contains("std::http") && e.contains("not available")),
-        "missing the std::http cross-target error: {errors:#?}"
+        "missing the std::http cross-platform error: {errors:#?}"
     );
     assert!(
         errors
             .iter()
             .any(|e| e.contains("std::fs") && e.contains("not available")),
-        "missing the std::fs cross-target error: {errors:#?}"
+        "missing the std::fs cross-platform error: {errors:#?}"
     );
     assert!(
         !errors.iter().any(|e| e.contains("cannot find")),
@@ -329,14 +329,14 @@ fn cross_target_std_import_does_not_cascade() {
 }
 
 #[test]
-fn cross_target_diagnostic_is_spanned() {
+fn cross_platform_diagnostic_is_spanned() {
     // The error points at the offending `import` (not EMPTY_SPAN at 0..0).
     let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
-    let errors = analyze_package_raw(&[("main.vl", entry)], "main.vl", Target::Browser);
+    let errors = analyze_package_raw(&[("main.vl", entry)], "main.vl", Platform::Browser);
     let http = errors
         .iter()
         .find(|e| e.msg.contains("std::http") && e.msg.contains("not available"))
-        .expect("a std::http cross-target error");
+        .expect("a std::http cross-platform error");
     let range = http.span.into_range();
     assert!(
         range.start < range.end && range.start > 0,
@@ -345,55 +345,55 @@ fn cross_target_diagnostic_is_spanned() {
 }
 
 #[test]
-fn cross_target_transitive_import_not_reported() {
+fn cross_platform_transitive_import_not_reported() {
     // Importing `std::http` reports `http` once; the modules it pulls in
     // transitively (std-internal) load but are not separately gated.
     let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
-    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Target::Browser);
-    let cross_target = errors
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::Browser);
+    let cross_platform = errors
         .iter()
         .filter(|e| e.contains("not available"))
         .count();
     assert_eq!(
-        cross_target, 1,
-        "expected exactly one cross-target error (http), got: {errors:#?}"
+        cross_platform, 1,
+        "expected exactly one cross-platform error (http), got: {errors:#?}"
     );
     assert!(errors.iter().any(|e| e.contains("std::http")));
 }
 
 #[test]
-fn platform_modules_load_for_typing_under_opposite_target() {
-    // Loading a cross-target std module purely to type-check it must not introduce
-    // spurious errors beyond the single cross-target diagnostic (P3 Q5 sweep).
-    for (module, target) in [
-        ("http", Target::Browser),
-        ("fs", Target::Browser),
-        ("process", Target::Browser),
-        ("dom", Target::Node),
-        ("ui", Target::Node),
+fn platform_modules_load_for_typing_under_opposite_platform() {
+    // Loading a cross-platform std module purely to type-check it must not introduce
+    // spurious errors beyond the single cross-platform diagnostic (P3 Q5 sweep).
+    for (module, platform) in [
+        ("http", Platform::Browser),
+        ("fs", Platform::Browser),
+        ("process", Platform::Browser),
+        ("dom", Platform::default()),
+        ("ui", Platform::default()),
     ] {
         let entry = format!("import std::{module};\nfun main() {{}}\n");
-        let errors = analyze_package(&[("main.vl", &entry)], "main.vl", target);
+        let errors = analyze_package(&[("main.vl", &entry)], "main.vl", platform);
         assert_eq!(
             errors.len(),
             1,
-            "`std::{module}` under {target:?} should yield exactly the one cross-target \
+            "`std::{module}` under {platform:?} should yield exactly the one cross-platform \
              error (loading-for-typing introduced no others): {errors:#?}"
         );
         assert!(
             errors[0].contains(module) && errors[0].contains("not available"),
-            "`std::{module}` under {target:?}: unexpected error: {errors:#?}"
+            "`std::{module}` under {platform:?}: unexpected error: {errors:#?}"
         );
     }
 }
 
-// --- Library target layers (L1) --------------------------------------------
+// --- Library platform layers (L1) ------------------------------------------
 
-/// Sets up a library `plat` with layers — a base module `shared`, a `node`-overlay
-/// `nodeonly`, and a `clock` present in both overlays (node returns `i32`, browser
-/// `str`) — and an empty base `lib.vl`. Analyzes `entry` (which imports from
-/// `plat`) for `target`, returning the diagnostics.
-fn analyze_layered(entry: &str, target: Target) -> Vec<String> {
+/// Sets up a library `plat` with layers — a base module `shared`, a `process`-layer
+/// `nodeonly`, and a `clock` present in both layers (process returns `i32`, browser
+/// `str`) — and an empty base `lib.vl`. Analyzes `entry` (which imports from `plat`)
+/// for `platform`, returning the diagnostics.
+fn analyze_layered(entry: &str, platform: Platform) -> Vec<String> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("vilan_layer_{}_{unique}", std::process::id()));
@@ -411,16 +411,24 @@ fn analyze_layered(entry: &str, target: Target) -> Vec<String> {
     };
     put("src/lib.vl", "");
     put("src/shared.vl", "fun shared(): i32 { 0 }\n");
-    put("src/node/nodeonly.vl", "fun nodeonly(): i32 { 1 }\n");
-    put("src/node/clock.vl", "fun clock(): i32 { 1 }\n");
+    put("src/process/nodeonly.vl", "fun nodeonly(): i32 { 1 }\n");
+    put("src/process/clock.vl", "fun clock(): i32 { 1 }\n");
     put("src/browser/clock.vl", "fun clock(): str { \"x\" }\n");
 
     let workspace = Workspace {
         packages: vec![PackageSpec {
             base_root: plat.join("src"),
-            target_roots: vec![
-                (Target::Node, plat.join("src/node")),
-                (Target::Browser, plat.join("src/browser")),
+            layers: vec![
+                Layer {
+                    name: "process".to_string(),
+                    patterns: vec![PlatformPattern::Node { version: None }],
+                    root: plat.join("src/process"),
+                },
+                Layer {
+                    name: "browser".to_string(),
+                    patterns: vec![PlatformPattern::Browser],
+                    root: plat.join("src/browser"),
+                },
             ],
             dependencies: Vec::new(),
         }],
@@ -433,7 +441,7 @@ fn analyze_layered(entry: &str, target: Target) -> Vec<String> {
         &std_spec(),
         &app,
         &entry_path,
-        Some(target),
+        Some(platform),
         &workspace,
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -441,23 +449,25 @@ fn analyze_layered(entry: &str, target: Target) -> Vec<String> {
 }
 
 #[test]
-fn base_module_available_for_all_targets() {
+fn base_module_available_for_all_platforms() {
     let entry = "import plat::shared::shared;\nfun main() { shared() }\n";
-    assert!(analyze_layered(entry, Target::Node).is_empty());
-    assert!(analyze_layered(entry, Target::Browser).is_empty());
+    assert!(analyze_layered(entry, Platform::default()).is_empty());
+    assert!(analyze_layered(entry, Platform::Browser).is_empty());
 }
 
 #[test]
-fn overlay_module_available_only_for_its_target() {
+fn layer_module_available_only_for_its_platform() {
     let entry = "import plat::nodeonly::nodeonly;\nfun main() { nodeonly() }\n";
     assert!(
-        analyze_layered(entry, Target::Node).is_empty(),
-        "the node overlay module is available for a node build"
+        analyze_layered(entry, Platform::default()).is_empty(),
+        "the process-layer module is available for a node build"
     );
-    let browser = analyze_layered(entry, Target::Browser);
+    let browser = analyze_layered(entry, Platform::Browser);
     assert!(
-        browser.iter().any(|e| e.contains("another target's layer")),
-        "expected a cross-target error for browser, got: {browser:#?}"
+        browser
+            .iter()
+            .any(|e| e.contains("another platform's layer")),
+        "expected a cross-platform error for browser, got: {browser:#?}"
     );
     assert!(
         !browser.iter().any(|e| e.contains("cannot find")),
@@ -466,29 +476,29 @@ fn overlay_module_available_only_for_its_target() {
 }
 
 #[test]
-fn varying_module_resolves_the_target_version() {
-    // `clock` is `i32` in the node overlay, `str` in the browser overlay. Passing it
+fn varying_module_resolves_the_platform_version() {
+    // `clock` is `i32` in the process layer, `str` in the browser layer. Passing it
     // to an `i32` parameter type-checks for node and fails for browser — proving the
-    // build target's version loaded (the P4 case, structurally).
+    // build platform's version loaded (the P4 case, structurally).
     let entry = concat!(
         "import plat::clock::clock;\n",
         "fun need_int(n: i32) {}\n",
         "fun main() { need_int(clock()) }\n",
     );
     assert!(
-        analyze_layered(entry, Target::Node).is_empty(),
+        analyze_layered(entry, Platform::default()).is_empty(),
         "node `clock` is i32"
     );
     assert!(
-        !analyze_layered(entry, Target::Browser).is_empty(),
+        !analyze_layered(entry, Platform::Browser).is_empty(),
         "browser `clock` is str — a type mismatch, proving the browser version loaded"
     );
 }
 
 #[test]
-fn base_lib_reexporting_an_overlay_module_errors() {
-    // A library whose base `lib.vl` re-exports `nodeonly` (a node-overlay module):
-    // the public surface must be target-agnostic, so this is a Q4 violation.
+fn base_lib_reexporting_a_layer_module_errors() {
+    // A library whose base `lib.vl` re-exports `nodeonly` (a process-layer module):
+    // the public surface must be platform-agnostic, so this is a Q4 violation.
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("vilan_q4_{}_{unique}", std::process::id()));
@@ -509,11 +519,15 @@ fn base_lib_reexporting_an_overlay_module_errors() {
     };
     put("src/lib.vl", "export import pkg::nodeonly::nodeonly;\n");
     put("src/shared.vl", "fun shared(): i32 { 0 }\n");
-    put("src/node/nodeonly.vl", "fun nodeonly(): i32 { 1 }\n");
+    put("src/process/nodeonly.vl", "fun nodeonly(): i32 { 1 }\n");
     let workspace = Workspace {
         packages: vec![PackageSpec {
             base_root: plat.join("src"),
-            target_roots: vec![(Target::Node, plat.join("src/node"))],
+            layers: vec![Layer {
+                name: "process".to_string(),
+                patterns: vec![PlatformPattern::Node { version: None }],
+                root: plat.join("src/process"),
+            }],
             dependencies: Vec::new(),
         }],
         entry_dependencies: vec![("plat".to_string(), 0)],
@@ -525,7 +539,7 @@ fn base_lib_reexporting_an_overlay_module_errors() {
         &std_spec(),
         &app,
         &entry_path,
-        Some(Target::Node),
+        Some(Platform::default()),
         &workspace,
     );
     let _ = std::fs::remove_dir_all(&root);

@@ -17,7 +17,7 @@ use vilan_core::lexer::lexer;
 use vilan_core::manifest::{EntrySection, Package};
 use vilan_core::parser::parser;
 use vilan_core::transformer::transform;
-use vilan_core::{BuildOptions, Manifest, Target, Workspace};
+use vilan_core::{Backend, BuildOptions, Manifest, Platform, Workspace};
 
 /// The vilan language toolchain.
 #[derive(clap::Parser)]
@@ -37,10 +37,14 @@ enum Command {
         /// Print the JavaScript to stdout instead of writing `<file>.js`.
         #[arg(long)]
         stdout: bool,
-        /// The host to compile for: `node`, `browser`, or `none`. Overrides the
-        /// package's `target`; defaults to the package target, else `node`.
+        /// The platform to build for: `node` (`node:24`), `browser`, or `none`.
+        /// Overrides the package's `target`; defaults to it, else `node`.
+        /// `--target` is an accepted alias.
+        #[arg(long, alias = "target")]
+        platform: Option<String>,
+        /// The emitter backend: `js` (the only backend today).
         #[arg(long)]
-        target: Option<String>,
+        backend: Option<String>,
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
@@ -50,10 +54,14 @@ enum Command {
     Check {
         /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
         file: Option<PathBuf>,
-        /// The host to check for: `node`, `browser`, or `none`. Overrides the
-        /// package's `target`; defaults to the package target, else `node`.
+        /// The platform to check for: `node` (`node:24`), `browser`, or `none`.
+        /// Overrides the package's `target`; defaults to it, else `node`.
+        /// `--target` is an accepted alias.
+        #[arg(long, alias = "target")]
+        platform: Option<String>,
+        /// The emitter backend: `js` (the only backend today).
         #[arg(long)]
-        target: Option<String>,
+        backend: Option<String>,
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
@@ -103,49 +111,59 @@ fn run_cli() -> ExitCode {
         Command::Build {
             file,
             stdout,
-            target,
+            platform,
+            backend,
             debug,
-        } => with_project(file, |project| match project {
-            Project::Single {
-                unit,
-                target: package_target,
-            } => match effective_target(target.as_deref(), package_target) {
-                Ok(Target::None) => no_host_target(),
-                Ok(target) => build_single(&unit, stdout, target, debug),
-                Err(name) => unknown_target(&name),
-            },
-            // A workspace builds each member for its own declared target, so the
-            // `--target` flag doesn't apply.
-            Project::Workspace { root, members } => build_workspace(&root, &members, debug),
-        }),
+        } => match effective_backend(backend.as_deref()) {
+            Err(message) => report_error(&message),
+            Ok(_backend) => with_project(file, |project| match project {
+                Project::Single {
+                    unit,
+                    platform: package_platform,
+                } => match effective_platform(platform.as_deref(), package_platform) {
+                    Ok(Platform::None) => no_host_platform(),
+                    Ok(platform) => build_single(&unit, stdout, platform, debug),
+                    Err(message) => report_error(&message),
+                },
+                // A workspace builds each member for its own declared platform, so
+                // the `--platform` flag doesn't apply.
+                Project::Workspace { root, members } => build_workspace(&root, &members, debug),
+            }),
+        },
         Command::Check {
             file,
-            target,
+            platform,
+            backend,
             debug,
-        } => with_project(file, |project| match project {
-            Project::Single {
-                unit,
-                target: package_target,
-            } => match effective_target(target.as_deref(), package_target) {
-                // A `none` package is a pure library — it can't be built, but it
-                // can still be type-checked (against the core layer only).
-                Ok(target) => check_single(&unit, target, debug),
-                Err(name) => unknown_target(&name),
-            },
-            Project::Workspace { members, .. } => check_workspace(&members, debug),
-        }),
+        } => match effective_backend(backend.as_deref()) {
+            Err(message) => report_error(&message),
+            Ok(_backend) => with_project(file, |project| match project {
+                Project::Single {
+                    unit,
+                    platform: package_platform,
+                } => match effective_platform(platform.as_deref(), package_platform) {
+                    // A `none` package is a pure library — it can't be built, but it
+                    // can still be type-checked (against the base layer only).
+                    Ok(platform) => check_single(&unit, platform, debug),
+                    Err(message) => report_error(&message),
+                },
+                Project::Workspace { members, .. } => check_workspace(&members, debug),
+            }),
+        },
         // `run`/`test` execute with `node`.
         Command::Run { file, args } => with_project(file, |project| match project {
-            Project::Single { unit, target } => match target.unwrap_or(Target::Node) {
-                Target::Node => run_single(&unit, &args),
-                other => {
+            Project::Single { unit, platform } => {
+                let platform = platform.unwrap_or_default();
+                if matches!(platform, Platform::Node { .. }) {
+                    run_single(&unit, &args)
+                } else {
                     eprintln!(
-                        "error: `vilan run` executes with Node, but the package target is `{}`",
-                        other.name()
+                        "error: `vilan run` executes with Node, but the package platform is `{}`",
+                        platform.name()
                     );
                     ExitCode::FAILURE
                 }
-            },
+            }
             Project::Workspace { root, members } => run_workspace(&root, &members, &args),
         }),
         Command::Test { path } => test(path),
@@ -153,28 +171,42 @@ fn run_cli() -> ExitCode {
     }
 }
 
-/// Reports an unrecognized `--target` value.
-fn unknown_target(name: &str) -> ExitCode {
-    eprintln!("error: unknown target `{name}` (expected `node`, `browser`, or `none`)");
+/// Prints an `error: <message>` line and returns the failure code.
+fn report_error(message: &str) -> ExitCode {
+    eprintln!("error: {message}");
     ExitCode::FAILURE
 }
 
-/// Reports that a `none`-target package can't be built (it's a pure library).
-fn no_host_target() -> ExitCode {
+/// Reports that a `none`-platform package can't be built (it's a pure library).
+fn no_host_platform() -> ExitCode {
     eprintln!(
-        "error: the package target is `none` (a pure library); pick a host to build for with \
-         `--target node` or `--target browser`"
+        "error: the platform is `none` (a pure library); pick a host to build for with \
+         `--platform node` or `--platform browser`"
     );
     ExitCode::FAILURE
 }
 
-/// The effective build target: an explicit `--target` flag wins (it may name any
-/// host, including `none`); otherwise the package's declared target; otherwise the
-/// `node` default. `Err(name)` for an unrecognized flag value.
-fn effective_target(flag: Option<&str>, package: Option<Target>) -> Result<Target, String> {
+/// The effective build platform: an explicit `--platform`/`--target` flag wins (it
+/// may name any platform, including `none`); otherwise the package's declared
+/// `target`; otherwise the `node` default. `Err` carries a descriptive message for
+/// an unrecognized or unsupported flag value.
+fn effective_platform(flag: Option<&str>, package: Option<Platform>) -> Result<Platform, String> {
     match flag {
-        Some(name) => Target::parse(name).ok_or_else(|| name.to_string()),
-        None => Ok(package.unwrap_or(Target::Node)),
+        Some(name) => Platform::parse(name),
+        None => Ok(package.unwrap_or_default()),
+    }
+}
+
+/// Validates a `--backend` flag value (only `js` today). The returned [`Backend`]
+/// selects nothing yet — there's a single backend — so this exists to reject an
+/// unknown name (e.g. `wasm`, not yet implemented) at the CLI boundary rather than
+/// silently ignoring it.
+fn effective_backend(flag: Option<&str>) -> Result<Backend, String> {
+    match flag {
+        Some(name) => {
+            Backend::parse(name).ok_or_else(|| format!("unknown backend `{name}` (expected `js`)"))
+        }
+        None => Ok(Backend::default()),
     }
 }
 
@@ -268,19 +300,20 @@ struct Unit {
     options: BuildOptions,
 }
 
-/// A project to act on: a lone package / bare file (its target chosen with the
-/// `--target` flag, defaulting to the package's), or a workspace of members each
-/// built for its own fixed target. The legacy `[server]`/`[client]` pair lowers
+/// A project to act on: a lone package / bare file (its platform chosen with the
+/// `--platform` flag, defaulting to the package's), or a workspace of members each
+/// built for its own fixed platform. The legacy `[server]`/`[client]` pair lowers
 /// onto a two-member workspace.
 enum Project {
     Single {
         unit: Unit,
-        /// The package's declared `target`, if any (`None` ⇒ the `node` default).
-        target: Option<Target>,
+        /// The package's declared `target` platform, if any (`None` ⇒ the `node`
+        /// default).
+        platform: Option<Platform>,
     },
     Workspace {
         root: PathBuf,
-        members: Vec<(Unit, Target)>,
+        members: Vec<(Unit, Platform)>,
     },
 }
 
@@ -312,7 +345,7 @@ fn resolve_project(path: Option<PathBuf>) -> Result<Project, String> {
                 package_dir: None,
                 options: BuildOptions::default(),
             },
-            target: None,
+            platform: None,
         }),
         // No path: find the enclosing project from the working directory.
         None => {
@@ -364,7 +397,7 @@ fn unit_from_package(directory: &Path, package: &Package, options: BuildOptions)
 
 /// Resolves the project rooted at `directory` from its `vilan.toml`. A `[package]`
 /// is a single package (`entry` resolves against `root`; `target` is the default).
-/// A `[project]` is a workspace — each member builds for its own target. The legacy
+/// A `[project]` is a workspace — each member builds for its own platform. The legacy
 /// `[server]`/`[client]` pair lowers onto a two-member workspace.
 fn project_from_manifest(directory: &Path) -> Result<Project, String> {
     let manifest = read_manifest(directory)?;
@@ -375,7 +408,7 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
     // Legacy full-stack: a browser client + a Node server, as a two-member
     // workspace (client first, since the server serves `dist/client.js`).
     if manifest.is_legacy_fullstack() {
-        let member = |section: &Option<EntrySection>, name: &str, target: Target| {
+        let member = |section: &Option<EntrySection>, name: &str, platform: Platform| {
             let entry = directory.join(
                 section
                     .as_ref()
@@ -390,19 +423,19 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
                     package_dir: None,
                     options,
                 },
-                target,
+                platform,
             )
         };
         return Ok(Project::Workspace {
             root: directory.to_path_buf(),
             members: vec![
-                member(&manifest.client, "client", Target::Browser),
-                member(&manifest.server, "server", Target::Node),
+                member(&manifest.client, "client", Platform::Browser),
+                member(&manifest.server, "server", Platform::default()),
             ],
         });
     }
 
-    // A workspace: each `[project] packages` member is built for its own target.
+    // A workspace: each `[project] packages` member is built for its own platform.
     if let Some(project) = &manifest.project {
         let mut members = Vec::new();
         for member_path in &project.packages {
@@ -423,10 +456,10 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
             let member_options = member_manifest
                 .build_options()
                 .map_err(|error| format!("invalid {}/vilan.toml: {error}", member_dir.display()))?;
-            let target = package.resolved_target().unwrap_or(Target::Node);
+            let platform = package.resolved_target().unwrap_or_default();
             members.push((
                 unit_from_package(&member_dir, package, member_options),
-                target,
+                platform,
             ));
         }
         return Ok(Project::Workspace {
@@ -439,14 +472,14 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
     let package = manifest.package.as_ref().expect("validated package");
     Ok(Project::Single {
         unit: unit_from_package(directory, package, options),
-        target: package.resolved_target(),
+        platform: package.resolved_target(),
     })
 }
 
 /// Resolves a unit's dependency workspace. A unit with no manifest (a bare file)
 /// has no dependencies. Delegates to the shared `vilan_core::manifest::resolve_workspace`
-/// so the CLI and LSP resolve identically. (The build target isn't needed — the
-/// graph is target-independent; the analyzer reports any cross-target import.)
+/// so the CLI and LSP resolve identically. (The build platform isn't needed — the
+/// graph is platform-independent; the analyzer reports any cross-platform import.)
 fn resolve_workspace(unit: &Unit) -> Result<Workspace, String> {
     match &unit.package_dir {
         Some(package_dir) => vilan_core::manifest::resolve_workspace(package_dir),
@@ -454,9 +487,9 @@ fn resolve_workspace(unit: &Unit) -> Result<Workspace, String> {
     }
 }
 
-/// Resolves a unit's workspace and compiles its entry for `target`, returning the
+/// Resolves a unit's workspace and compiles its entry for `platform`, returning the
 /// emitted JavaScript (or a failure code after reporting).
-fn compile_unit(unit: &Unit, target: Target, emit_debug: bool) -> Result<String, ExitCode> {
+fn compile_unit(unit: &Unit, platform: Platform, emit_debug: bool) -> Result<String, ExitCode> {
     let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
         Err(message) => {
@@ -467,7 +500,7 @@ fn compile_unit(unit: &Unit, target: Target, emit_debug: bool) -> Result<String,
     compile_to_js(
         &unit.entry,
         &unit.pkg_root,
-        target,
+        platform,
         &unit.options,
         &workspace,
         emit_debug,
@@ -475,8 +508,8 @@ fn compile_unit(unit: &Unit, target: Target, emit_debug: bool) -> Result<String,
 }
 
 /// Builds a lone package / bare file, writing `<entry>.js` (or printing to stdout).
-fn build_single(unit: &Unit, stdout: bool, target: Target, emit_debug: bool) -> ExitCode {
-    let javascript = match compile_unit(unit, target, emit_debug) {
+fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool) -> ExitCode {
+    let javascript = match compile_unit(unit, platform, emit_debug) {
         Ok(javascript) => javascript,
         Err(code) => return code,
     };
@@ -502,8 +535,8 @@ fn build_single(unit: &Unit, stdout: bool, target: Target, emit_debug: bool) -> 
 }
 
 /// Type-checks a lone package / bare file, writing no output.
-fn check_single(unit: &Unit, target: Target, emit_debug: bool) -> ExitCode {
-    match compile_unit(unit, target, emit_debug) {
+fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
+    match compile_unit(unit, platform, emit_debug) {
         Ok(_) => {
             println!("{}: no errors", unit.entry.display());
             ExitCode::SUCCESS
@@ -514,7 +547,7 @@ fn check_single(unit: &Unit, target: Target, emit_debug: bool) -> ExitCode {
 
 /// Builds and runs a lone package's entry with Node, forwarding `args`.
 fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
-    let javascript = match compile_unit(unit, Target::Node, false) {
+    let javascript = match compile_unit(unit, Platform::default(), false) {
         Ok(javascript) => javascript,
         Err(code) => return code,
     };
@@ -524,8 +557,8 @@ fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
 /// Builds every host (non-`none`) member of a workspace into `<root>/dist/<name>.js`
 /// — a `none` member is a pure library, compiled only as a dependency of a host.
 /// Members build in declaration order (the client before the server, so the
-/// server's `dist/client.js` exists). `--target`/`--stdout` don't apply.
-fn build_workspace(root: &Path, members: &[(Unit, Target)], debug: bool) -> ExitCode {
+/// server's `dist/client.js` exists). `--platform`/`--stdout` don't apply.
+fn build_workspace(root: &Path, members: &[(Unit, Platform)], debug: bool) -> ExitCode {
     match build_workspace_artifacts(root, members, debug) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => code,
@@ -534,7 +567,7 @@ fn build_workspace(root: &Path, members: &[(Unit, Target)], debug: bool) -> Exit
 
 fn build_workspace_artifacts(
     root: &Path,
-    members: &[(Unit, Target)],
+    members: &[(Unit, Platform)],
     debug: bool,
 ) -> Result<(), ExitCode> {
     let dist = root.join("dist");
@@ -542,11 +575,11 @@ fn build_workspace_artifacts(
         eprintln!("error: cannot create {}: {error}", dist.display());
         return Err(ExitCode::FAILURE);
     }
-    for (unit, target) in members {
-        if *target == Target::None {
+    for (unit, platform) in members {
+        if platform.is_none() {
             continue;
         }
-        let javascript = compile_unit(unit, *target, debug)?;
+        let javascript = compile_unit(unit, *platform, debug)?;
         let output = dist.join(format!("{}.js", unit.name));
         if let Err(error) = fs::write(&output, javascript) {
             eprintln!("error: cannot write {}: {error}", output.display());
@@ -557,12 +590,12 @@ fn build_workspace_artifacts(
     Ok(())
 }
 
-/// Type-checks every member of a workspace (each for its own target; a `none`
-/// library against the core layer).
-fn check_workspace(members: &[(Unit, Target)], debug: bool) -> ExitCode {
+/// Type-checks every member of a workspace (each for its own platform; a `none`
+/// library against the base layer).
+fn check_workspace(members: &[(Unit, Platform)], debug: bool) -> ExitCode {
     let mut ok = true;
-    for (unit, target) in members {
-        ok &= compile_unit(unit, *target, debug).is_ok();
+    for (unit, platform) in members {
+        ok &= compile_unit(unit, *platform, debug).is_ok();
     }
     if ok {
         ExitCode::SUCCESS
@@ -573,21 +606,21 @@ fn check_workspace(members: &[(Unit, Target)], debug: bool) -> ExitCode {
 
 /// Builds a workspace, then runs its single Node member with `node` from the
 /// project root (so it can read sibling `dist/*.js`). `args` are forwarded.
-fn run_workspace(root: &Path, members: &[(Unit, Target)], args: &[String]) -> ExitCode {
+fn run_workspace(root: &Path, members: &[(Unit, Platform)], args: &[String]) -> ExitCode {
     let node_members: Vec<&Unit> = members
         .iter()
-        .filter(|(_, target)| *target == Target::Node)
+        .filter(|(_, platform)| matches!(platform, Platform::Node { .. }))
         .map(|(unit, _)| unit)
         .collect();
     let server = match node_members.as_slice() {
         [unit] => unit,
         [] => {
-            eprintln!("error: no `node`-target package in this workspace to run");
+            eprintln!("error: no `node` package in this workspace to run");
             return ExitCode::FAILURE;
         }
         _ => {
             eprintln!(
-                "error: this workspace has more than one `node`-target package; \
+                "error: this workspace has more than one `node` package; \
                  `vilan run` can't tell which to run"
             );
             return ExitCode::FAILURE;
@@ -665,7 +698,7 @@ fn run_test(file: &Path) -> Result<(), String> {
     let javascript = compile_to_js(
         file,
         &pkg_root_of(file),
-        Target::Node,
+        Platform::default(),
         &BuildOptions::default(),
         &Workspace::default(),
         false,
@@ -720,7 +753,8 @@ fn discover_tests(path: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
 
 /// The `std` library directory: `$VILAN_STD` if set, else the in-repo `vilan/std`
 /// relative to this crate. `resolve_std` reads its `[library]` manifest (or, if
-/// `$VILAN_STD` points at a bare source root, falls back to the layer convention).
+/// `$VILAN_STD` points at a bare source root with no manifest, uses it as the base
+/// layer).
 fn std_dir() -> PathBuf {
     env::var_os("VILAN_STD")
         .map(PathBuf::from)
@@ -735,7 +769,7 @@ fn std_dir() -> PathBuf {
 fn compile_to_js(
     file: &Path,
     pkg_root: &Path,
-    target: Target,
+    platform: Platform,
     options: &BuildOptions,
     workspace: &Workspace,
     emit_debug: bool,
@@ -768,7 +802,7 @@ fn compile_to_js(
                 write_debug(file, "parse.out", &format!("{root:#?}"));
             }
 
-            let mut program = analyze(&root, &std, pkg_root, file, target, workspace);
+            let mut program = analyze(&root, &std, pkg_root, file, platform, workspace);
 
             // Thread `std::context::Context` values as hidden parameters (a no-op
             // unless the program creates a context).

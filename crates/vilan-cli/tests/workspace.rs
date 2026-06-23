@@ -1,5 +1,5 @@
 //! End-to-end CLI tests for the multi-package workspace model (P2): building a
-//! workspace emits one bundle per host member, the target-compatibility rule and
+//! workspace emits one bundle per host member, the platform-compatibility rule and
 //! dependency cycles are rejected, and the legacy `[server]`/`[client]` form still
 //! builds (the examples have migrated to workspaces, so this is its only coverage).
 //!
@@ -103,21 +103,21 @@ fn combined(output: &Output) -> String {
 }
 
 #[test]
-fn cross_target_library_module_is_rejected_without_cascade() {
-    // A browser app imports a module that lives only in a library's `node` overlay:
-    // the cross-target import is a recoverable error (the build fails) — but the
+fn cross_platform_library_module_is_rejected_without_cascade() {
+    // A browser app imports a module that lives only in a library's `process` layer:
+    // the cross-platform import is a recoverable error (the build fails) — but the
     // module still loads for typing, so `feature` resolves and there's no
     // unresolved-name cascade (L1).
     let dir = temp_project("compat");
     write(
         dir.as_path(),
         "platlib/vilan.toml",
-        "[library]\nname = \"platlib\"\n\n[library.target.node]\nroot = \"src/node\"\n",
+        "[library]\nname = \"platlib\"\n\n[library.layer.process]\nplatform = [\"@process\"]\n",
     );
     write(dir.as_path(), "platlib/src/lib.vl", "");
     write(
         dir.as_path(),
-        "platlib/src/node/feature.vl",
+        "platlib/src/process/feature.vl",
         "fun value(): i32 { 1 }\n",
     );
     write(
@@ -131,10 +131,13 @@ fn cross_target_library_module_is_rejected_without_cascade() {
         "import platlib::feature::value;\nfun main() { value() }\n",
     );
     let output = vilan(&["build", dir.join("web").to_str().unwrap()]);
-    assert!(!output.status.success(), "expected a cross-target failure");
+    assert!(
+        !output.status.success(),
+        "expected a cross-platform failure"
+    );
     let text = combined(&output);
     assert!(
-        text.contains("another target's layer"),
+        text.contains("another platform's layer"),
         "unexpected output: {text}"
     );
     assert!(
