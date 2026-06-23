@@ -20,9 +20,13 @@ attribute + a `Warning` severity, and the `[name(..)]` attribute syntax, and —
 (explicit `vilan.toml`)**: a typed `vilan-core::manifest::Manifest` (replacing the ad-hoc
 `toml::Table`), `[package]` `name`/`root`/`entry`/`target` with validation, target precedence
 (flag ► manifest ► `node`), a `none` (pure-library) target, `NAME.vl` ≡ `NAME/lib.vl` resolution,
-and a `vilan.toml` JSON Schema for the editor. **The next frontier is the rest of the project &
-platform model** — the *Next up* section below — which supersedes #8's full-stack project-model bits
-and folds in backlog E6.
+and a `vilan.toml` JSON Schema for the editor; and **P2 (multi-package workspaces)**: isolated
+per-package namespaces in the loader (each package its own `pkg`, resolved per-source), `[project]`
+workspaces with per-package targets + `path`-dependency loading, the `none`-or-same target-compat
+rule, cycle detection, `vilan build`/`run` over a workspace (`dist/<name>.js`; `run` selects the node
+member), and both examples migrated (`[server]`/`[client]` now lowers onto a workspace). **The next
+frontier is the rest of the project & platform model** — the *Next up* section below (P3–P6) —
+which supersedes #8's full-stack project-model bits and folds in backlog E6.
 
 ---
 
@@ -51,7 +55,8 @@ P1. **Explicit `vilan.toml` — drop the resolution magic** (M) **[new] — ✅ 
       P1); optional server-side completions from `vilan-lsp`'s own `Manifest` parse (follow-on).
     - Replaces the ad-hoc `toml::Table` parsing with a typed `vilan-core::manifest::Manifest`.
 
-P2. **Multi-package workspace + per-package targets** (L) **[new]** — *replaces `[server]`/`[client]`.*
+P2. **Multi-package workspace + per-package targets** (L) **[new] — ✅ shipped 2026-06-22.** *Replaces
+    `[server]`/`[client]`. Plan + outcome in `proposal/project-model-p2.md`.*
     The top `vilan.toml` lists `[project] packages = [ "packages/client", "packages/server",
     "packages/common" ]`; each sub-package has its own `vilan.toml` (`name`, `target`). A package
     imports another by its **name** as the top-level source — `import common::something` from

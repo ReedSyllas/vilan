@@ -649,6 +649,16 @@ pub struct Analyzer<'src> {
     impl_subject_args: HashMap<Id, (TypeId, Vec<TypeId>)>,
     implementations: Vec<Implementation<'src>>,
     module_id_by_name: HashMap<&'src str, Id>,
+    // Multi-package namespace isolation (P2). `packages[i]` is a loaded package —
+    // the entry (index 0, when there are dependencies) plus each dependency — with
+    // its own `pkg` self-namespace and its dependency edges. `package_of_source`
+    // maps each loaded module's source to its package, so an `import pkg::..` /
+    // `import <dep>::..` resolves *relative to the importing package* rather than a
+    // single global namespace. Empty for a dependency-free program (the entry +
+    // `std` then use the legacy global `module_id_by_name`), keeping that path
+    // byte-for-byte unchanged.
+    packages: Vec<LoadedPackage>,
+    package_of_source: HashMap<SourceId, usize>,
     modules: IndexMap<Id, Module<'src>>,
     parameters: IndexMap<Id, Parameter<'src>>,
     // The built-in `std` structs that back scalar primitives, keyed by name
@@ -832,6 +842,8 @@ impl<'src> Analyzer<'src> {
             impl_subject_args: HashMap::new(),
             implementations: Vec::new(),
             module_id_by_name: HashMap::new(),
+            packages: Vec::new(),
+            package_of_source: HashMap::new(),
             modules: IndexMap::new(),
             parameters: IndexMap::new(),
             primitive_struct_ids: HashMap::new(),
@@ -6237,6 +6249,25 @@ impl<'src> Analyzer<'src> {
             .push((source_id, span, Some(target_id), label_type_id));
     }
 
+    /// Resolves the root segment of an import path — `pkg`, `std`, or a dependency
+    /// name — to its namespace module id, *relative to the package the importing
+    /// `source` belongs to* (P2). A dependency package has an isolated namespace
+    /// (its `pkg::` self-references stay within it); the entry and `std` fall
+    /// through to the global module map, so a dependency-free program resolves
+    /// exactly as before.
+    fn resolve_import_root(&self, root: &str, source: SourceId) -> Option<Id> {
+        if let Some(&package_index) = self.package_of_source.get(&source) {
+            let package = &self.packages[package_index];
+            if root == "pkg" {
+                return Some(package.namespace_id);
+            }
+            if let Some(&namespace_id) = package.dependencies.get(root) {
+                return Some(namespace_id);
+            }
+        }
+        self.module_id_by_name.get(root).copied()
+    }
+
     fn resolve_import(
         &mut self,
         path: &[(&'src str, Span)],
@@ -6270,8 +6301,8 @@ impl<'src> Analyzer<'src> {
         };
         let mut segments = segments.into_iter();
         let (root, root_span) = segments.next().unwrap();
-        let module_id = match self.module_id_by_name.get(root) {
-            Some(module_id) => *module_id,
+        let module_id = match self.resolve_import_root(root, source_id) {
+            Some(module_id) => module_id,
             None => {
                 if report {
                     self.diagnostics.push(Error {
@@ -9329,12 +9360,55 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
     modules
 }
 
+/// A dependency package reachable from the program being analyzed (P2). The
+/// front-end (CLI / LSP) resolves these from the manifests and their declared
+/// `[package.dependencies]` paths; `analyze` loads each one's modules into its own
+/// namespace, so `import <name>::module::item` resolves against it and the
+/// dependency's own `pkg::` self-references stay within it.
+#[derive(Debug, Clone)]
+pub struct PackageSpec {
+    /// The package's source root (the directory its modules and `pkg::` siblings
+    /// live in).
+    pub root: PathBuf,
+    /// Its declared target (informational — every loaded module is gated by the
+    /// *build* target; the front-end enforces dependency-target compatibility).
+    pub target: Target,
+    /// How this package addresses its own dependencies: `(import name, index into
+    /// the package slice)`. Lets a transitive `dep::subdep::item` resolve.
+    pub dependencies: Vec<(String, usize)>,
+}
+
+/// The dependency graph available to a program: the flat set of reachable
+/// dependency packages plus the entry's own direct dependency edges. Empty (the
+/// default) means a single, dependency-free program — the legacy single-package
+/// loader path, byte-for-byte unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct Workspace {
+    /// Every dependency package reachable from the entry (edges are indices here).
+    pub packages: Vec<PackageSpec>,
+    /// The entry package's direct dependencies: `(import name, index into
+    /// `packages`)`.
+    pub entry_dependencies: Vec<(String, usize)>,
+}
+
+/// A package loaded during analysis: its source root, the namespace its modules
+/// register into (its own `pkg`), and its resolved dependency edges (import name →
+/// the dependency's namespace module id). Used by `resolve_import_root` to resolve
+/// `pkg::` / `<dep>::` relative to the importing package.
+#[derive(Debug)]
+struct LoadedPackage {
+    namespace_id: Id,
+    namespace_scope_id: Id,
+    dependencies: HashMap<String, Id>,
+}
+
 pub fn analyze<'src>(
     nodes: &'src Spanned<NodeList<'src>>,
     std_root: &Path,
     pkg_root: &Path,
     entry_path: &Path,
     target: Target,
+    workspace: &Workspace,
 ) -> Program<'src> {
     // `sources[0]` is the entry file; std modules are appended as they load.
     // `source_ranges` records the entity-id span each file's walk produced.
@@ -9408,11 +9482,15 @@ pub fn analyze<'src>(
     // A module's package: `Std` modules resolve under `std_root` and are
     // addressable as both `std::name` and `pkg::name`; `Pkg` modules — the entry
     // program's own multi-file siblings — resolve under `pkg_root` (the entry's
-    // directory) and are addressable only as `pkg::name`.
-    #[derive(Clone, Copy, PartialEq)]
+    // directory) and are addressable only as `pkg::name`; `Dep(i)` modules — a
+    // dependency package (P2) — resolve under `workspace.packages[i].root` into
+    // that package's own isolated namespace, reachable from a dependent as
+    // `<import-name>::name` and from within the dependency as `pkg::name`.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum Origin {
         Std,
         Pkg,
+        Dep(usize),
     }
     // The entry program's package root (`pkg_root`, passed in): the directory its
     // `import pkg::..` siblings live in — the package's declared source root, not
@@ -9472,18 +9550,144 @@ pub fn analyze<'src>(
     for core in ["boolean", "list", "null", "promise"] {
         to_load.push((Origin::Std, core));
     }
+
+    // --- Dependency packages (P2) ---
+    // When the program has dependencies, give each its own namespace: the entry is
+    // package 0 (its existing `pkg`), and each `workspace.packages[i]` becomes a
+    // fresh namespace module + scope at `analyzer.packages[1 + i]`. Each
+    // dependency's `lib.vl` is its public surface (loaded like `std`'s), and its
+    // modules load under its own namespace so its `pkg::` self-references stay
+    // within it. A dependency-free program skips all of this, leaving the
+    // single-package path byte-for-byte unchanged.
+    let has_dependencies = !compiling_std
+        && (!workspace.packages.is_empty() || !workspace.entry_dependencies.is_empty());
+    // `lib.vl` bodies are walked after every module is registered (like `std`'s),
+    // so cross-module references resolve during `build()`.
+    let mut dependency_lib_walks: Vec<(SourceId, Id, &Spanned<NodeList>)> = Vec::new();
+    if has_dependencies {
+        // Package 0 is the entry; its namespace is the existing `pkg`. The entry
+        // program (SourceId 0) and its sibling modules belong to it.
+        analyzer.packages.push(LoadedPackage {
+            namespace_id: pkg_module_id,
+            namespace_scope_id: pkg_scope_id,
+            dependencies: HashMap::new(),
+        });
+        analyzer.package_of_source.insert(SourceId(0), 0);
+        // One namespace per dependency package, created up front so edges (which
+        // reference packages by index) resolve to namespace ids below.
+        for spec in &workspace.packages {
+            let namespace_scope = analyzer.create_scope(Some(global_scope_id));
+            let namespace_scope_id = analyzer.push_scope(namespace_scope);
+            let namespace_id = analyzer.new_entity_id();
+            // The namespace module's display name is the package directory's base
+            // name (a dependent addresses it by its own import name regardless).
+            let display_name: &'static str = Box::leak(
+                spec.root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "dep".to_string())
+                    .into_boxed_str(),
+            );
+            analyzer.modules.insert(
+                namespace_id,
+                Module {
+                    id: namespace_id,
+                    name: display_name,
+                    body: (Vec::new(), namespace_scope_id),
+                },
+            );
+            analyzer
+                .expr_id_to_expr_map
+                .insert(namespace_id, Expr::Module(namespace_id));
+            analyzer.packages.push(LoadedPackage {
+                namespace_id,
+                namespace_scope_id,
+                dependencies: HashMap::new(),
+            });
+        }
+        // Resolve dependency edges to namespace ids now that every namespace
+        // exists. `workspace.packages[i]` is `analyzer.packages[1 + i]`.
+        let dependency_namespace_ids: Vec<Id> = analyzer.packages[1..]
+            .iter()
+            .map(|package| package.namespace_id)
+            .collect();
+        let resolve_edges = |edges: &[(String, usize)]| -> HashMap<String, Id> {
+            edges
+                .iter()
+                .map(|(name, index)| (name.clone(), dependency_namespace_ids[*index]))
+                .collect()
+        };
+        analyzer.packages[0].dependencies = resolve_edges(&workspace.entry_dependencies);
+        for (index, spec) in workspace.packages.iter().enumerate() {
+            analyzer.packages[1 + index].dependencies = resolve_edges(&spec.dependencies);
+        }
+        // The entry's own `<dep>::submodule` references seed those dependencies.
+        for (name, index) in &workspace.entry_dependencies {
+            to_load.extend(
+                collect_module_refs(&nodes.0, name)
+                    .into_iter()
+                    .map(|module| (Origin::Dep(*index), module)),
+            );
+        }
+        // Load each dependency's `lib.vl` (its public surface) and seed the modules
+        // reachable from it — its own `pkg::` submodules, `std::` imports, and
+        // `<subdep>::` references — mirroring the `std` package load above.
+        for (index, spec) in workspace.packages.iter().enumerate() {
+            let package_index = 1 + index;
+            let namespace_scope_id = analyzer.packages[package_index].namespace_scope_id;
+            let lib_path = std_module_path(&spec.root, "lib.vl");
+            let Some(lib_ast) = load_package_module(&lib_path) else {
+                analyzer.diagnostics.push(Error {
+                    span: EMPTY_SPAN,
+                    msg: format!(
+                        "dependency package at `{}` has no `lib.vl`",
+                        spec.root.display()
+                    ),
+                });
+                continue;
+            };
+            sources.push(PathBuf::from(&lib_path));
+            let lib_source_id = SourceId((sources.len() - 1) as u32);
+            analyzer
+                .package_of_source
+                .insert(lib_source_id, package_index);
+            dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast));
+            to_load.extend(
+                collect_module_refs(&lib_ast.0, "pkg")
+                    .into_iter()
+                    .map(|module| (Origin::Dep(index), module)),
+            );
+            to_load.extend(
+                collect_module_refs(&lib_ast.0, "std")
+                    .into_iter()
+                    .map(|module| (Origin::Std, module)),
+            );
+            for (name, dependency_index) in &spec.dependencies {
+                to_load.extend(
+                    collect_module_refs(&lib_ast.0, name)
+                        .into_iter()
+                        .map(|module| (Origin::Dep(*dependency_index), module)),
+                );
+            }
+        }
+    }
+
     // Set when the entry file is itself a std module (a std file opened directly
     // in an editor): it is then analyzed *as* that module from the editor's
     // buffer rather than loaded a second time from disk, which would create
     // duplicate, non-unifiable types. The separate entry walk is skipped below.
     let mut entry_is_module = false;
+    // Dedup is per-package, not by bare name: two packages may each define a
+    // module of the same name, and both must load into their own namespace.
+    let mut loaded_keys: HashSet<(Origin, &str)> = HashSet::new();
     while let Some((origin, name)) = to_load.pop() {
-        if module_scopes.contains_key(name) {
+        if !loaded_keys.insert((origin, name)) {
             continue;
         }
         let root = match origin {
             Origin::Std => std_root,
             Origin::Pkg => pkg_root,
+            Origin::Dep(index) => workspace.packages[index].root.as_path(),
         };
         // Gate the platform std layer by target: a browser build can't load the
         // Node layer (`std::http`, `std::fs`, `std::process`), and vice versa. A
@@ -9562,22 +9766,47 @@ pub fn analyze<'src>(
         analyzer
             .expr_id_to_expr_map
             .insert(module_id, Expr::Module(module_id));
+        // Register the module under its package's namespace: `std`/entry modules
+        // in `pkg` (and `std` modules also under `std` for external `std::name`
+        // access); a dependency's modules only in that dependency's namespace, so
+        // they neither collide with nor shadow another package's modules.
+        let namespace_scope_id = match origin {
+            Origin::Std | Origin::Pkg => pkg_scope_id,
+            Origin::Dep(index) => analyzer.packages[1 + index].namespace_scope_id,
+        };
         analyzer
-            .mut_scope_for_scope_id(pkg_scope_id)
+            .mut_scope_for_scope_id(namespace_scope_id)
             .name_to_id_map
             .insert(name, module_id);
-        // A std module is also exposed under the `std` root so it's addressable by
-        // path from outside (`std::<module>::item`), mirroring its internal
-        // `pkg::<module>` reference. A user (`Pkg`) module lives only in `pkg::`.
         if origin == Origin::Std {
             analyzer
                 .mut_scope_for_scope_id(std_scope_id)
                 .name_to_id_map
                 .insert(name, module_id);
         }
-        module_scopes.insert(name, module_scope_id);
-        // A module's `pkg::` siblings inherit its package; a user module's `std::`
-        // imports are std. (Std modules reference each other via `pkg::` only, so
+        // `module_scopes` indexes std/entry modules by name for the primitive and
+        // `panic` lookups below; a dependency's modules must not enter it (a `dep`
+        // module named `string`/`number`/... would shadow the real primitive).
+        if !matches!(origin, Origin::Dep(_)) {
+            module_scopes.insert(name, module_scope_id);
+        }
+        // Record which package this module's source belongs to, so its imports
+        // resolve `pkg::`/`<dep>::` relative to that package (only when the program
+        // has dependencies; otherwise the legacy global resolution applies).
+        match origin {
+            Origin::Dep(index) => {
+                analyzer
+                    .package_of_source
+                    .insert(module_source_id, 1 + index);
+            }
+            Origin::Pkg if has_dependencies => {
+                analyzer.package_of_source.insert(module_source_id, 0);
+            }
+            _ => {}
+        }
+        // A module's `pkg::` siblings inherit its package; a user/dependency
+        // module's `std::` imports are std, and its `<dep>::` references seed that
+        // dependency. (Std modules reference each other via `pkg::` only, so
         // collecting their `std::` imports would be a no-op — skip it to keep the
         // std load byte-for-byte unchanged.)
         to_load.extend(
@@ -9585,12 +9814,24 @@ pub fn analyze<'src>(
                 .into_iter()
                 .map(|sibling| (origin, sibling)),
         );
-        if origin == Origin::Pkg {
+        let dependency_edges: &[(String, usize)] = match origin {
+            Origin::Pkg => &workspace.entry_dependencies,
+            Origin::Dep(index) => &workspace.packages[index].dependencies,
+            Origin::Std => &[],
+        };
+        if !matches!(origin, Origin::Std) {
             to_load.extend(
                 collect_module_refs(&ast.0, "std")
                     .into_iter()
                     .map(|module| (Origin::Std, module)),
             );
+            for (name, dependency_index) in dependency_edges {
+                to_load.extend(
+                    collect_module_refs(&ast.0, name)
+                        .into_iter()
+                        .map(|module| (Origin::Dep(*dependency_index), module)),
+                );
+            }
         }
         loaded.push((name, ast, module_scope_id, module_source_id));
     }
@@ -9612,6 +9853,18 @@ pub fn analyze<'src>(
             start,
             end: analyzer.entity_id,
             source: lib_source_id,
+        });
+    }
+    // Walk each dependency's `lib.vl` into its own namespace (its public surface),
+    // mirroring the `std` lib walk above.
+    for (source_id, namespace_scope_id, lib_ast) in &dependency_lib_walks {
+        analyzer.current_source_id = *source_id;
+        let start = analyzer.entity_id;
+        analyzer.walk_expr_nodes(&lib_ast.0, *namespace_scope_id);
+        source_ranges.push(SourceRange {
+            start,
+            end: analyzer.entity_id,
+            source: *source_id,
         });
     }
     // Remember `panic` so its calls can be typed as never and lowered to a throw.

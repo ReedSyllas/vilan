@@ -1,5 +1,9 @@
-[server]
-entry = "src/server.vl"
-
-[client]
-entry = "src/client.vl"
+# A full-stack to-do app as a multi-package workspace: a browser `client` and a
+# Node `server`, each with its own target. (The client's todo UI lives in its own
+# `pkg::todos` module; this app has no shared package — see `examples/fullstack`
+# for cross-package imports via a `common` library.)
+#
+#   vilan build .   compiles each app into `dist/` (`client.js` / `server.js`)
+#   vilan run .     builds both and starts the Node server
+[project]
+packages = ["client", "server"]

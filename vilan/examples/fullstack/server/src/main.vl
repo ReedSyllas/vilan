@@ -1,11 +1,11 @@
 // The server — a Node program. It reads the compiled client bundle once at
 // startup, then serves the HTML shell on every path and the bundle at
-// `/client.js`. It shares `pkg::shared::greeting` with the client.
+// `/client.js`. It shares `common::greeting` with the client.
 
 import std::print;
 import std::http::{ Server, Response, Request };
 import std::fs::read_file_to_str;
-import pkg::shared::greeting;
+import common::greeting;
 
 async fun main() {
 	// Read the browser bundle once (async — `vilan build`/`run` writes it to

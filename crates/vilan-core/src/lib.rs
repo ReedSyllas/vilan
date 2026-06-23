@@ -22,7 +22,7 @@ pub mod type_;
 pub mod util;
 
 // The common pipeline + core types, re-exported for convenience.
-pub use analyzer::{Program, analyze};
+pub use analyzer::{PackageSpec, Program, Workspace, analyze};
 pub use error::Error;
 pub use lexer::lexer;
 pub use manifest::Manifest;
@@ -80,6 +80,7 @@ pub fn analyze_source(
     pkg_root: &Path,
     entry_path: &Path,
     target: Option<Target>,
+    workspace: &Workspace,
 ) -> (Option<Program<'static>>, Vec<Error>) {
     use chumsky::prelude::*;
 
@@ -122,7 +123,7 @@ pub fn analyze_source(
     // `std::dom`).
     let target = target.unwrap_or_else(|| infer_target(&root.0));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut program = analyze(root, std_root, pkg_root, entry_path, target);
+        let mut program = analyze(root, std_root, pkg_root, entry_path, target, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program

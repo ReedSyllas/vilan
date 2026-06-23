@@ -9,11 +9,12 @@
 //! schema parse here too, but resolving them across packages is later work — see
 //! `proposal/project-model-p1.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::analyzer::{PackageSpec, Workspace};
 use crate::options::{BuildOptions, Preset};
 use crate::target::Target;
 
@@ -65,7 +66,7 @@ pub struct EntrySection {
 /// A dependency: either a bare version string (`dep = "1.2"`, a registry
 /// dependency) or the table form (`{ version, registry, path }`). A `path` makes
 /// it a local *path dependency*; otherwise it is a *registry dependency*.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum Dependency {
     Version(String),
@@ -255,6 +256,125 @@ fn validate_dependencies(dependencies: &BTreeMap<String, Dependency>, errors: &m
             ));
         }
     }
+}
+
+/// Resolves the dependency [`Workspace`] for the package rooted at `package_dir`,
+/// built for `target` (P2): every reachable local `path` dependency, transitively,
+/// with cycle detection and the target-compatibility rule — a dependency must
+/// target `none` or the build target. A directory whose manifest declares no
+/// `[package]` (and a bare file, which has no manifest) yields an empty workspace.
+/// Shared by the CLI and the language server so both resolve imports identically.
+pub fn resolve_workspace(package_dir: &Path, target: Target) -> Result<Workspace, String> {
+    let manifest = load_manifest(package_dir)?;
+    let Some(package) = manifest.package else {
+        return Ok(Workspace::default());
+    };
+    let mut packages = Vec::new();
+    let mut index_by_path = HashMap::new();
+    let mut visiting = HashSet::new();
+    let entry_dependencies = resolve_dependency_edges(
+        &package.dependencies,
+        package_dir,
+        target,
+        &mut packages,
+        &mut index_by_path,
+        &mut visiting,
+    )?;
+    Ok(Workspace {
+        packages,
+        entry_dependencies,
+    })
+}
+
+/// Reads, parses, and validates the `vilan.toml` in `directory` (for dependency
+/// resolution — warnings are the front-end's concern and are dropped here).
+fn load_manifest(directory: &Path) -> Result<Manifest, String> {
+    let manifest_path = directory.join("vilan.toml");
+    let contents = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
+    let (manifest, _warnings) = Manifest::parse(&contents)
+        .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
+    let errors = manifest.validate();
+    if !errors.is_empty() {
+        return Err(format!(
+            "invalid {}:\n  - {}",
+            manifest_path.display(),
+            errors.join("\n  - ")
+        ));
+    }
+    Ok(manifest)
+}
+
+/// Resolves one package's `path` dependency edges to `(import name, index)` pairs,
+/// loading each referenced package (transitively) into `packages`. `index_by_path`
+/// dedups a shared dependency; `visiting` is the in-progress stack for cycle
+/// detection. Paths are relative to `base_dir` (the depending package's directory).
+fn resolve_dependency_edges(
+    dependencies: &BTreeMap<String, Dependency>,
+    base_dir: &Path,
+    target: Target,
+    packages: &mut Vec<PackageSpec>,
+    index_by_path: &mut HashMap<PathBuf, usize>,
+    visiting: &mut HashSet<PathBuf>,
+) -> Result<Vec<(String, usize)>, String> {
+    let mut edges = Vec::new();
+    for (import_name, dependency) in dependencies {
+        // `validate` rejects registry dependencies, so only `path` deps reach here.
+        let Some(relative) = dependency.path() else {
+            continue;
+        };
+        let dependency_dir = base_dir.join(relative);
+        let canonical =
+            std::fs::canonicalize(&dependency_dir).unwrap_or_else(|_| dependency_dir.clone());
+        if let Some(&index) = index_by_path.get(&canonical) {
+            edges.push((import_name.clone(), index));
+            continue;
+        }
+        if !visiting.insert(canonical.clone()) {
+            return Err(format!(
+                "dependency cycle through `{}`",
+                dependency_dir.display()
+            ));
+        }
+        let manifest = load_manifest(&dependency_dir)
+            .map_err(|error| format!("dependency `{import_name}`: {error}"))?;
+        let package = manifest.package.ok_or_else(|| {
+            format!(
+                "dependency `{import_name}` at `{}` is not a `[package]`",
+                dependency_dir.display()
+            )
+        })?;
+        let dependency_target = package.resolved_target().unwrap_or(Target::Node);
+        if dependency_target != Target::None && dependency_target != target {
+            return Err(format!(
+                "dependency `{import_name}` targets `{}`, which a `{}` build can't import \
+                 (a dependency must target `none` or `{}`)",
+                dependency_target.name(),
+                target.name(),
+                target.name()
+            ));
+        }
+        // Resolve the dependency's own dependencies first, so they take lower
+        // indices (a valid load order), then record the dependency itself.
+        let dependency_edges = resolve_dependency_edges(
+            &package.dependencies,
+            &dependency_dir,
+            target,
+            packages,
+            index_by_path,
+            visiting,
+        )?;
+        visiting.remove(&canonical);
+        let index = packages.len();
+        packages.push(PackageSpec {
+            root: dependency_dir.join(package.root()),
+            target: dependency_target,
+            dependencies: dependency_edges,
+        });
+        index_by_path.insert(canonical, index);
+        edges.push((import_name.clone(), index));
+    }
+    Ok(edges)
 }
 
 /// Whether `name` is a valid Vilan identifier: a leading letter or `_`, then

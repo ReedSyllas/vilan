@@ -1,0 +1,11 @@
+// `common` — domain logic shared by BOTH the server and the client, imported as
+// `common::greeting`. As a `target = "none"` package it uses only core std (no
+// Node or DOM modules), so it compiles into either bundle.
+//
+// Here it's a single function both sides call, but in a real app this is where
+// shared types (with `[derive(Json)]` for a common wire format), validation, and
+// routing tables live.
+
+fun greeting(who: str): str {
+	i"Hello from Vilan — {who} side!"
+}

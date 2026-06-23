@@ -9,7 +9,10 @@ use vilan_core::analyzer::{Expr, Implementation, SourceId};
 use vilan_core::id::Id;
 use vilan_core::manifest::EntrySection;
 use vilan_core::type_::Type;
-use vilan_core::{Error, Manifest, Program, Span, Target as BuildTarget, analyze_source};
+use vilan_core::{
+    Error, Manifest, Program, Span, Target as BuildTarget, Workspace as BuildWorkspace,
+    analyze_source,
+};
 
 use crate::line_index::LineIndex;
 
@@ -21,24 +24,31 @@ use crate::line_index::LineIndex;
 struct ProjectContext {
     target: Option<BuildTarget>,
     pkg_root: Option<PathBuf>,
+    /// The file's resolved dependency workspace (P2), so cross-package imports
+    /// (`import <dep>::..`) type-check in the editor.
+    workspace: BuildWorkspace,
 }
 
 impl ProjectContext {
-    const NONE: ProjectContext = ProjectContext {
-        target: None,
-        pkg_root: None,
-    };
+    fn none() -> ProjectContext {
+        ProjectContext {
+            target: None,
+            pkg_root: None,
+            workspace: BuildWorkspace::default(),
+        }
+    }
 }
 
 /// Resolves a file's [`ProjectContext`] from the nearest ancestor `vilan.toml`.
-/// A `[package]` roots `pkg::` at its source `root` and analyzes its files against
-/// the package `target`; the legacy `[server]`/`[client]` form keeps its
-/// role-based target. Anything unreadable / unrecognized yields [`ProjectContext::NONE`].
+/// A `[package]` roots `pkg::` at its source `root`, analyzes its files against the
+/// package `target`, and resolves its dependency workspace (so cross-package
+/// imports type-check); the legacy `[server]`/`[client]` form keeps its role-based
+/// target. Anything unreadable / unrecognized yields [`ProjectContext::none`].
 fn resolve_project_context(entry_path: &Path) -> ProjectContext {
     let mut directory = entry_path.parent();
     let (manifest_path, root) = loop {
         let Some(current) = directory else {
-            return ProjectContext::NONE;
+            return ProjectContext::none();
         };
         let candidate = current.join("vilan.toml");
         if candidate.is_file() {
@@ -47,10 +57,10 @@ fn resolve_project_context(entry_path: &Path) -> ProjectContext {
         directory = current.parent();
     };
     let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
-        return ProjectContext::NONE;
+        return ProjectContext::none();
     };
     let Ok((manifest, _warnings)) = Manifest::parse(&contents) else {
-        return ProjectContext::NONE;
+        return ProjectContext::none();
     };
 
     // Legacy full-stack: target by the file's role; `pkg::` roots at its own
@@ -72,24 +82,28 @@ fn resolve_project_context(entry_path: &Path) -> ProjectContext {
         return ProjectContext {
             target,
             pkg_root: None,
+            workspace: BuildWorkspace::default(),
         };
     }
 
-    // A package: root `pkg::` at its declared source root, and analyze every file
-    // under that root against the package target (default Node). A file outside it
-    // gets no declared target — analysis infers one from its imports.
+    // A package: root `pkg::` at its declared source root, analyze every file under
+    // that root against the package target (default Node), and resolve the package's
+    // dependency workspace (best-effort — a resolution error degrades to no deps).
     if let Some(package) = &manifest.package {
         let pkg_root = root.join(package.root());
-        let target = is_within(&pkg_root, entry_path)
-            .then(|| package.resolved_target().unwrap_or(BuildTarget::Node));
+        let build_target = package.resolved_target().unwrap_or(BuildTarget::Node);
+        let target = is_within(&pkg_root, entry_path).then_some(build_target);
+        let workspace =
+            vilan_core::manifest::resolve_workspace(root, build_target).unwrap_or_default();
         return ProjectContext {
             target,
             pkg_root: Some(pkg_root),
+            workspace,
         };
     }
 
     // A `[project]` workspace root has no buildable package of its own.
-    ProjectContext::NONE
+    ProjectContext::none()
 }
 
 /// Whether two paths name the same file (canonicalizing when possible).
@@ -221,8 +235,14 @@ impl Document {
         let pkg_root = context
             .pkg_root
             .unwrap_or_else(|| pkg_root_fallback(entry_path));
-        let (program, diagnostics) =
-            analyze_source(leaked, std_root, &pkg_root, entry_path, context.target);
+        let (program, diagnostics) = analyze_source(
+            leaked,
+            std_root,
+            &pkg_root,
+            entry_path,
+            context.target,
+            &context.workspace,
+        );
 
         let mut entity_spans = Vec::new();
         if let Some(program) = &program {

@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vilan_core::{BuildOptions, Target, analyze_source, transform};
+use vilan_core::{BuildOptions, Target, Workspace, analyze_source, transform};
 
 fn std_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src")
@@ -32,6 +32,7 @@ fn compile(source: &str) -> Result<String, Vec<String>> {
                     Path::new("."),
                     Path::new("test.vl"),
                     Some(Target::Node),
+                    &Workspace::default(),
                 );
                 match program {
                     Some(program) if errors.is_empty() => {
@@ -80,6 +81,7 @@ fn warnings(source: &str) -> Vec<String> {
                 Path::new("."),
                 Path::new("test.vl"),
                 Some(Target::Node),
+                &Workspace::default(),
             );
             program
                 .map(|program| {

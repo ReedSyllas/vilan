@@ -1,0 +1,6 @@
+[package]
+name = "common"
+# A pure library (`target = "none"`): core std only, so it compiles into both the
+# Node server and the browser client. Importing a platform module here (e.g.
+# `std::http`) would be a build error for any dependent that isn't that target.
+target = "none"

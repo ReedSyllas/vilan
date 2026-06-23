@@ -1,21 +1,10 @@
-# A full-stack project: a Node server and a browser client, both written in
-# Vilan. `vilan build` compiles each for its own target into `dist/`
-# (`dist/server.js` for Node, `dist/client.js` for the browser); `vilan run`
-# builds both and starts the server, which serves the client bundle.
-[server]
-entry = "server.vl"
-
-[client]
-entry = "client.vl"
-
-# Code-generation options. `preset` ("debug" — the default — or "release")
-# initializes every option; individual keys then override it. The knobs:
-#   indent          lay out across lines with indentation (vs one flat line)
-#   spaces          pad tokens — `a + b`, `[ 1, 2 ]` (vs tight `a+b`, `[1,2]`)
-#   readable-names  name identifiers after the source (`greet`) — most debuggable
-#   debug-names     when readable-names is off, annotate short names (`a/*greet*/`)
-# Debug turns indent/spaces/readable-names on; release turns everything off
-# (minified, obfuscated short names).
-# [build]
-# preset = "release"
-# readable-names = true   # e.g. minified layout but with readable names
+# A full-stack project as a multi-package workspace. Each member has its own
+# `vilan.toml` and target; `common` (a pure `target = "none"` library) is shared
+# by both apps via `import common::greeting`.
+#
+#   vilan build .   compiles each app for its target into `dist/`
+#                   (`dist/server.js` for Node, `dist/client.js` for the browser)
+#   vilan run .     builds both and starts the Node server, which serves the
+#                   client bundle (the workspace's single `node` member is run)
+[project]
+packages = ["common", "client", "server"]

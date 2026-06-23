@@ -1,10 +1,10 @@
 // The client — a browser program. It mounts into the `<div id="app">` the
-// server's HTML shell provides, and calls the same `pkg::shared::greeting` the
-// server does (proof the shared module compiled into both bundles).
+// server's HTML shell provides, and calls the same `common::greeting` the server
+// does (proof the shared package compiled into both bundles).
 
 import std::dom::{ Element, get_element_by_id, create_element };
 import std::fetch::{ fetch, Response };
-import pkg::shared::greeting;
+import common::greeting;
 
 fun main() {
 	let app = get_element_by_id("app");

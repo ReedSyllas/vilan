@@ -14,9 +14,10 @@ use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
 use vilan_core::context;
 use vilan_core::lexer::lexer;
+use vilan_core::manifest::{EntrySection, Package};
 use vilan_core::parser::parser;
 use vilan_core::transformer::transform;
-use vilan_core::{BuildOptions, Manifest, Target};
+use vilan_core::{BuildOptions, Manifest, Target, Workspace};
 
 /// The vilan language toolchain.
 #[derive(clap::Parser)]
@@ -106,23 +107,16 @@ fn run_cli() -> ExitCode {
             debug,
         } => with_project(file, |project| match project {
             Project::Single {
-                entry,
-                pkg_root,
+                unit,
                 target: package_target,
-                options,
             } => match effective_target(target.as_deref(), package_target) {
                 Ok(Target::None) => no_host_target(),
-                Ok(target) => build(&entry, &pkg_root, stdout, target, &options, debug),
+                Ok(target) => build_single(&unit, stdout, target, debug),
                 Err(name) => unknown_target(&name),
             },
-            // A full-stack project builds each entry for its own target, so the
+            // A workspace builds each member for its own declared target, so the
             // `--target` flag doesn't apply.
-            Project::FullStack {
-                root,
-                server,
-                client,
-                options,
-            } => build_fullstack(&root, &server, &client, &options, debug),
+            Project::Workspace { root, members } => build_workspace(&root, &members, debug),
         }),
         Command::Check {
             file,
@@ -130,32 +124,20 @@ fn run_cli() -> ExitCode {
             debug,
         } => with_project(file, |project| match project {
             Project::Single {
-                entry,
-                pkg_root,
+                unit,
                 target: package_target,
-                options,
             } => match effective_target(target.as_deref(), package_target) {
                 // A `none` package is a pure library — it can't be built, but it
                 // can still be type-checked (against the core layer only).
-                Ok(target) => check(&entry, &pkg_root, target, &options, debug),
+                Ok(target) => check_single(&unit, target, debug),
                 Err(name) => unknown_target(&name),
             },
-            Project::FullStack {
-                server,
-                client,
-                options,
-                ..
-            } => check_fullstack(&server, &client, &options, debug),
+            Project::Workspace { members, .. } => check_workspace(&members, debug),
         }),
         // `run`/`test` execute with `node`.
         Command::Run { file, args } => with_project(file, |project| match project {
-            Project::Single {
-                entry,
-                pkg_root,
-                target,
-                options,
-            } => match target.unwrap_or(Target::Node) {
-                Target::Node => run(&entry, &pkg_root, &options, &args),
+            Project::Single { unit, target } => match target.unwrap_or(Target::Node) {
+                Target::Node => run_single(&unit, &args),
                 other => {
                     eprintln!(
                         "error: `vilan run` executes with Node, but the package target is `{}`",
@@ -164,12 +146,7 @@ fn run_cli() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
-            Project::FullStack {
-                root,
-                server,
-                client,
-                options,
-            } => run_fullstack(&root, &server, &client, &options, &args),
+            Project::Workspace { root, members } => run_workspace(&root, &members, &args),
         }),
         Command::Test { path } => test(path),
         Command::Fmt { paths, check } => fmt(&paths, check),
@@ -275,24 +252,35 @@ fn collect_vl_files(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// A project to act on: a single package, or a legacy full-stack pair — a Node
-/// server plus a browser client, declared by `[server]`/`[client]` in
-/// `vilan.toml`. Both carry the code-generation options resolved from `[build]`.
+/// A buildable unit — a workspace member, a lone package, or a bare file: the
+/// entry to compile, its package source root, the directory whose `vilan.toml`
+/// declares its dependencies (for resolving the workspace), and its codegen
+/// options. `name` labels a workspace member's `dist/<name>.js` output.
+struct Unit {
+    name: String,
+    /// The entry file, resolved against the package root.
+    entry: PathBuf,
+    /// The package source root (where `import pkg::..` siblings resolve).
+    pkg_root: PathBuf,
+    /// The directory holding this unit's `vilan.toml` (from which its dependency
+    /// workspace is resolved), or `None` for a bare file with no manifest.
+    package_dir: Option<PathBuf>,
+    options: BuildOptions,
+}
+
+/// A project to act on: a lone package / bare file (its target chosen with the
+/// `--target` flag, defaulting to the package's), or a workspace of members each
+/// built for its own fixed target. The legacy `[server]`/`[client]` pair lowers
+/// onto a two-member workspace.
 enum Project {
     Single {
-        /// The entry file, resolved against the package root.
-        entry: PathBuf,
-        /// The package source root (where `import pkg::..` siblings resolve).
-        pkg_root: PathBuf,
+        unit: Unit,
         /// The package's declared `target`, if any (`None` ⇒ the `node` default).
         target: Option<Target>,
-        options: BuildOptions,
     },
-    FullStack {
+    Workspace {
         root: PathBuf,
-        server: PathBuf,
-        client: PathBuf,
-        options: BuildOptions,
+        members: Vec<(Unit, Target)>,
     },
 }
 
@@ -315,12 +303,16 @@ fn resolve_project(path: Option<PathBuf>) -> Result<Project, String> {
         Some(path) if path.is_dir() => project_from_manifest(&path),
         // An explicit file (or a not-yet-existing path, so `compile` can report
         // the read error): a single entry, compiled directly with default options
-        // (there's no manifest to read `[build]`/`target` from).
+        // (there's no manifest to read `[build]`/`target`/dependencies from).
         Some(path) => Ok(Project::Single {
-            pkg_root: pkg_root_of(&path),
-            entry: path,
+            unit: Unit {
+                name: String::new(),
+                pkg_root: pkg_root_of(&path),
+                entry: path,
+                package_dir: None,
+                options: BuildOptions::default(),
+            },
             target: None,
-            options: BuildOptions::default(),
         }),
         // No path: find the enclosing project from the working directory.
         None => {
@@ -336,12 +328,9 @@ fn resolve_project(path: Option<PathBuf>) -> Result<Project, String> {
     }
 }
 
-/// Reads and validates a project's `vilan.toml`. A `[package]` is a single
-/// package — its `entry` (default `main.vl`) resolves against `root` (default
-/// `src`), and its `target` becomes the default. The legacy `[server]` +
-/// `[client]` pair makes a full-stack project. A `[project]` (workspace) isn't
-/// directly buildable yet (P2). All paths are relative to the manifest directory.
-fn project_from_manifest(directory: &Path) -> Result<Project, String> {
+/// Reads, parses, validates, and reports warnings for the `vilan.toml` in
+/// `directory`.
+fn read_manifest(directory: &Path) -> Result<Manifest, String> {
     let manifest_path = directory.join("vilan.toml");
     let contents = fs::read_to_string(&manifest_path)
         .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
@@ -358,70 +347,187 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
             errors.join("\n  - ")
         ));
     }
+    Ok(manifest)
+}
+
+/// Builds a [`Unit`] from a package manifest in `directory`.
+fn unit_from_package(directory: &Path, package: &Package, options: BuildOptions) -> Unit {
+    let pkg_root = directory.join(package.root());
+    Unit {
+        name: package.name.clone().unwrap_or_default(),
+        entry: pkg_root.join(package.entry()),
+        pkg_root,
+        package_dir: Some(directory.to_path_buf()),
+        options,
+    }
+}
+
+/// Resolves the project rooted at `directory` from its `vilan.toml`. A `[package]`
+/// is a single package (`entry` resolves against `root`; `target` is the default).
+/// A `[project]` is a workspace — each member builds for its own target. The legacy
+/// `[server]`/`[client]` pair lowers onto a two-member workspace.
+fn project_from_manifest(directory: &Path) -> Result<Project, String> {
+    let manifest = read_manifest(directory)?;
     let options = manifest
         .build_options()
-        .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
+        .map_err(|error| format!("invalid {}/vilan.toml: {error}", directory.display()))?;
 
-    // Legacy full-stack: a Node server + a browser client.
+    // Legacy full-stack: a browser client + a Node server, as a two-member
+    // workspace (client first, since the server serves `dist/client.js`).
     if manifest.is_legacy_fullstack() {
-        let entry = |section: &Option<vilan_core::manifest::EntrySection>| {
-            directory.join(
+        let member = |section: &Option<EntrySection>, name: &str, target: Target| {
+            let entry = directory.join(
                 section
                     .as_ref()
                     .and_then(|section| section.entry.as_deref())
                     .unwrap_or(Path::new("main.vl")),
+            );
+            (
+                Unit {
+                    name: name.to_string(),
+                    pkg_root: pkg_root_of(&entry),
+                    entry,
+                    package_dir: None,
+                    options,
+                },
+                target,
             )
         };
-        return Ok(Project::FullStack {
+        return Ok(Project::Workspace {
             root: directory.to_path_buf(),
-            server: entry(&manifest.server),
-            client: entry(&manifest.client),
-            options,
+            members: vec![
+                member(&manifest.client, "client", Target::Browser),
+                member(&manifest.server, "server", Target::Node),
+            ],
         });
     }
 
-    // A workspace root: not directly buildable until multi-package support (P2).
-    if manifest.project.is_some() {
-        return Err(format!(
-            "{} is a `[project]` (workspace); building a multi-package project isn't \
-             supported yet — build a specific package",
-            manifest_path.display()
-        ));
+    // A workspace: each `[project] packages` member is built for its own target.
+    if let Some(project) = &manifest.project {
+        let mut members = Vec::new();
+        for member_path in &project.packages {
+            let member_dir = directory.join(member_path);
+            let member_manifest = read_manifest(&member_dir)?;
+            let package = member_manifest.package.as_ref().ok_or_else(|| {
+                format!(
+                    "workspace member `{}` is not a `[package]`",
+                    member_dir.display()
+                )
+            })?;
+            let member_options = member_manifest
+                .build_options()
+                .map_err(|error| format!("invalid {}/vilan.toml: {error}", member_dir.display()))?;
+            let target = package.resolved_target().unwrap_or(Target::Node);
+            members.push((
+                unit_from_package(&member_dir, package, member_options),
+                target,
+            ));
+        }
+        return Ok(Project::Workspace {
+            root: directory.to_path_buf(),
+            members,
+        });
     }
 
     // A single package. `validate` guarantees `[package]` is present here.
     let package = manifest.package.as_ref().expect("validated package");
-    let pkg_root = directory.join(package.root());
     Ok(Project::Single {
-        entry: pkg_root.join(package.entry()),
-        pkg_root,
+        unit: unit_from_package(directory, package, options),
         target: package.resolved_target(),
-        options,
     })
 }
 
-/// Builds a full-stack project into `<root>/dist/`: the client for the browser
-/// (`dist/client.js`) and the server for Node (`dist/server.js`). The client is
-/// built first since the server serves `dist/client.js`. `--target`/`--stdout`
-/// don't apply — each entry has its own target and output.
-fn build_fullstack(
-    root: &Path,
-    server: &Path,
-    client: &Path,
-    options: &BuildOptions,
-    debug: bool,
-) -> ExitCode {
-    match build_fullstack_artifacts(root, server, client, options, debug) {
+/// Resolves a unit's dependency workspace for the given build `target`. A unit
+/// with no manifest (a bare file) has no dependencies. Delegates to the shared
+/// `vilan_core::manifest::resolve_workspace` so the CLI and LSP resolve identically.
+fn resolve_workspace(unit: &Unit, target: Target) -> Result<Workspace, String> {
+    match &unit.package_dir {
+        Some(package_dir) => vilan_core::manifest::resolve_workspace(package_dir, target),
+        None => Ok(Workspace::default()),
+    }
+}
+
+/// Resolves a unit's workspace and compiles its entry for `target`, returning the
+/// emitted JavaScript (or a failure code after reporting).
+fn compile_unit(unit: &Unit, target: Target, emit_debug: bool) -> Result<String, ExitCode> {
+    let workspace = match resolve_workspace(unit, target) {
+        Ok(workspace) => workspace,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    compile_to_js(
+        &unit.entry,
+        &unit.pkg_root,
+        target,
+        &unit.options,
+        &workspace,
+        emit_debug,
+    )
+}
+
+/// Builds a lone package / bare file, writing `<entry>.js` (or printing to stdout).
+fn build_single(unit: &Unit, stdout: bool, target: Target, emit_debug: bool) -> ExitCode {
+    let javascript = match compile_unit(unit, target, emit_debug) {
+        Ok(javascript) => javascript,
+        Err(code) => return code,
+    };
+    if stdout {
+        print!("{javascript}");
+        return ExitCode::SUCCESS;
+    }
+    let output_path = unit.entry.with_extension("js");
+    match fs::write(&output_path, javascript) {
+        Ok(()) => {
+            println!(
+                "Compiled {} -> {}",
+                unit.entry.display(),
+                output_path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: cannot write {}: {error}", output_path.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Type-checks a lone package / bare file, writing no output.
+fn check_single(unit: &Unit, target: Target, emit_debug: bool) -> ExitCode {
+    match compile_unit(unit, target, emit_debug) {
+        Ok(_) => {
+            println!("{}: no errors", unit.entry.display());
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+/// Builds and runs a lone package's entry with Node, forwarding `args`.
+fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
+    let javascript = match compile_unit(unit, Target::Node, false) {
+        Ok(javascript) => javascript,
+        Err(code) => return code,
+    };
+    run_node_script(&javascript, args)
+}
+
+/// Builds every host (non-`none`) member of a workspace into `<root>/dist/<name>.js`
+/// — a `none` member is a pure library, compiled only as a dependency of a host.
+/// Members build in declaration order (the client before the server, so the
+/// server's `dist/client.js` exists). `--target`/`--stdout` don't apply.
+fn build_workspace(root: &Path, members: &[(Unit, Target)], debug: bool) -> ExitCode {
+    match build_workspace_artifacts(root, members, debug) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => code,
     }
 }
 
-fn build_fullstack_artifacts(
+fn build_workspace_artifacts(
     root: &Path,
-    server: &Path,
-    client: &Path,
-    options: &BuildOptions,
+    members: &[(Unit, Target)],
     debug: bool,
 ) -> Result<(), ExitCode> {
     let dist = root.join("dist");
@@ -429,73 +535,68 @@ fn build_fullstack_artifacts(
         eprintln!("error: cannot create {}: {error}", dist.display());
         return Err(ExitCode::FAILURE);
     }
-    for (entry, target, output_name) in [
-        (client, Target::Browser, "client.js"),
-        (server, Target::Node, "server.js"),
-    ] {
-        let javascript = compile_to_js(entry, &pkg_root_of(entry), target, options, debug)?;
-        let output = dist.join(output_name);
+    for (unit, target) in members {
+        if *target == Target::None {
+            continue;
+        }
+        let javascript = compile_unit(unit, *target, debug)?;
+        let output = dist.join(format!("{}.js", unit.name));
         if let Err(error) = fs::write(&output, javascript) {
             eprintln!("error: cannot write {}: {error}", output.display());
             return Err(ExitCode::FAILURE);
         }
-        println!("Compiled {} -> {}", entry.display(), output.display());
+        println!("Compiled {} -> {}", unit.entry.display(), output.display());
     }
     Ok(())
 }
 
-/// Type-checks both entries of a full-stack project (the client for the browser,
-/// the server for Node).
-fn check_fullstack(server: &Path, client: &Path, options: &BuildOptions, debug: bool) -> ExitCode {
-    let client_ok = compile_to_js(
-        client,
-        &pkg_root_of(client),
-        Target::Browser,
-        options,
-        debug,
-    )
-    .is_ok();
-    let server_ok =
-        compile_to_js(server, &pkg_root_of(server), Target::Node, options, debug).is_ok();
-    if client_ok && server_ok {
+/// Type-checks every member of a workspace (each for its own target; a `none`
+/// library against the core layer).
+fn check_workspace(members: &[(Unit, Target)], debug: bool) -> ExitCode {
+    let mut ok = true;
+    for (unit, target) in members {
+        ok &= compile_unit(unit, *target, debug).is_ok();
+    }
+    if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
 }
 
-/// Builds a full-stack project, then runs its server with `node` from the project
-/// root (so it can read `dist/client.js`). `args` are forwarded to the server.
-fn run_fullstack(
-    root: &Path,
-    server: &Path,
-    client: &Path,
-    options: &BuildOptions,
-    args: &[String],
-) -> ExitCode {
-    if let Err(code) = build_fullstack_artifacts(root, server, client, options, false) {
+/// Builds a workspace, then runs its single Node member with `node` from the
+/// project root (so it can read sibling `dist/*.js`). `args` are forwarded.
+fn run_workspace(root: &Path, members: &[(Unit, Target)], args: &[String]) -> ExitCode {
+    let node_members: Vec<&Unit> = members
+        .iter()
+        .filter(|(_, target)| *target == Target::Node)
+        .map(|(unit, _)| unit)
+        .collect();
+    let server = match node_members.as_slice() {
+        [unit] => unit,
+        [] => {
+            eprintln!("error: no `node`-target package in this workspace to run");
+            return ExitCode::FAILURE;
+        }
+        _ => {
+            eprintln!(
+                "error: this workspace has more than one `node`-target package; \
+                 `vilan run` can't tell which to run"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(code) = build_workspace_artifacts(root, members, false) {
         return code;
     }
-    // Run from the project root so the server reads `dist/client.js`; the script
+    // Run from the project root so the server reads sibling `dist/*.js`; the script
     // path is relative to that working directory.
     let status = std::process::Command::new("node")
-        .arg(Path::new("dist").join("server.js"))
+        .arg(Path::new("dist").join(format!("{}.js", server.name)))
         .args(args)
         .current_dir(root)
         .status();
-    match status {
-        Ok(status) => match status.code() {
-            Some(code) => ExitCode::from(code as u8),
-            None => ExitCode::FAILURE,
-        },
-        Err(error) => {
-            eprintln!(
-                "error: failed to launch `node`: {error} \
-                 (is Node.js installed and on your PATH?)"
-            );
-            ExitCode::FAILURE
-        }
-    }
+    exit_code_of(status)
 }
 
 /// Walks up from `start` for the nearest directory containing a `vilan.toml`.
@@ -559,6 +660,7 @@ fn run_test(file: &Path) -> Result<(), String> {
         &pkg_root_of(file),
         Target::Node,
         &BuildOptions::default(),
+        &Workspace::default(),
         false,
     )
     .map_err(|_| String::new())?;
@@ -627,6 +729,7 @@ fn compile_to_js(
     pkg_root: &Path,
     target: Target,
     options: &BuildOptions,
+    workspace: &Workspace,
     emit_debug: bool,
 ) -> Result<String, ExitCode> {
     let src = match fs::read_to_string(file) {
@@ -657,7 +760,7 @@ fn compile_to_js(
                 write_debug(file, "parse.out", &format!("{root:#?}"));
             }
 
-            let mut program = analyze(&root, &std_root, pkg_root, file, target);
+            let mut program = analyze(&root, &std_root, pkg_root, file, target, workspace);
 
             // Thread `std::context::Context` values as hidden parameters (a no-op
             // unless the program creates a context).
@@ -704,63 +807,12 @@ fn compile_to_js(
     }
 }
 
-/// Compiles `file` and writes `<file>.js` (or prints to stdout).
-fn build(
-    file: &Path,
-    pkg_root: &Path,
-    stdout: bool,
-    target: Target,
-    options: &BuildOptions,
-    emit_debug: bool,
-) -> ExitCode {
-    let javascript = match compile_to_js(file, pkg_root, target, options, emit_debug) {
-        Ok(javascript) => javascript,
-        Err(code) => return code,
-    };
-    if stdout {
-        print!("{javascript}");
-        return ExitCode::SUCCESS;
-    }
-    let output_path = file.with_extension("js");
-    match fs::write(&output_path, javascript) {
-        Ok(()) => {
-            println!("Compiled {} -> {}", file.display(), output_path.display());
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("error: cannot write {}: {error}", output_path.display());
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// Compiles `file` and reports diagnostics, writing no output.
-fn check(
-    file: &Path,
-    pkg_root: &Path,
-    target: Target,
-    options: &BuildOptions,
-    emit_debug: bool,
-) -> ExitCode {
-    match compile_to_js(file, pkg_root, target, options, emit_debug) {
-        Ok(_) => {
-            println!("{}: no errors", file.display());
-            ExitCode::SUCCESS
-        }
-        Err(code) => code,
-    }
-}
-
-/// Compiles `file`, then executes the JavaScript with Node.js — propagating its
-/// exit code, with stdin/stdout/stderr connected to the terminal. `args` are
-/// forwarded to the program, reachable through `process::args()`.
-fn run(file: &Path, pkg_root: &Path, options: &BuildOptions, args: &[String]) -> ExitCode {
-    let javascript = match compile_to_js(file, pkg_root, Target::Node, options, false) {
-        Ok(javascript) => javascript,
-        Err(code) => return code,
-    };
-    // Run from a temp file rather than piping the script via stdin, so the program
-    // keeps its own stdin (a piped script would consume it, breaking `scan()`).
+/// Writes `javascript` to a temp file and executes it with Node.js, propagating
+/// its exit code, with stdin/stdout/stderr connected to the terminal. `args` are
+/// forwarded to the program, reachable through `process::args()`. (A temp file
+/// rather than piping via stdin, so the program keeps its own stdin — a piped
+/// script would consume it, breaking `scan()`.)
+fn run_node_script(javascript: &str, args: &[String]) -> ExitCode {
     let script = env::temp_dir().join(format!("vilan-run-{}.js", std::process::id()));
     if let Err(error) = fs::write(&script, javascript) {
         eprintln!("error: cannot write {}: {error}", script.display());
@@ -773,6 +825,11 @@ fn run(file: &Path, pkg_root: &Path, options: &BuildOptions, args: &[String]) ->
         .args(args)
         .status();
     let _ = fs::remove_file(&script);
+    exit_code_of(status)
+}
+
+/// Maps a launched process's result to an `ExitCode`, reporting a launch failure.
+fn exit_code_of(status: std::io::Result<std::process::ExitStatus>) -> ExitCode {
     match status {
         Ok(status) => match status.code() {
             Some(code) => ExitCode::from(code as u8),
