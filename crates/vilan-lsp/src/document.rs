@@ -7,54 +7,117 @@ use std::path::{Path, PathBuf};
 
 use vilan_core::analyzer::{Expr, Implementation, SourceId};
 use vilan_core::id::Id;
+use vilan_core::manifest::EntrySection;
 use vilan_core::type_::Type;
-use vilan_core::{Error, Program, Span, Target as BuildTarget, analyze_source};
+use vilan_core::{Error, Manifest, Program, Span, Target as BuildTarget, analyze_source};
 
 use crate::line_index::LineIndex;
 
-/// The build target for a file, resolved from its project's `vilan.toml` when the
-/// file is a declared entry: the `[client]` entry is a browser build, a
-/// `[server]`/`[package]` entry a Node build. `None` if there's no project or the
-/// file isn't an entry (a module / shared file) — analysis then infers the target
-/// from the file's own imports.
-fn resolve_manifest_target(entry_path: &Path) -> Option<BuildTarget> {
-    // The nearest ancestor directory holding a `vilan.toml`.
+/// A file's project context, resolved from the nearest `vilan.toml`: the build
+/// target to analyze it against, and the package source root (where `import
+/// pkg::..` siblings resolve). Either is `None` when there's no project (or the
+/// file's role can't be determined) — analysis then infers the target from the
+/// file's imports and roots `pkg::` at the file's own directory.
+struct ProjectContext {
+    target: Option<BuildTarget>,
+    pkg_root: Option<PathBuf>,
+}
+
+impl ProjectContext {
+    const NONE: ProjectContext = ProjectContext {
+        target: None,
+        pkg_root: None,
+    };
+}
+
+/// Resolves a file's [`ProjectContext`] from the nearest ancestor `vilan.toml`.
+/// A `[package]` roots `pkg::` at its source `root` and analyzes its files against
+/// the package `target`; the legacy `[server]`/`[client]` form keeps its
+/// role-based target. Anything unreadable / unrecognized yields [`ProjectContext::NONE`].
+fn resolve_project_context(entry_path: &Path) -> ProjectContext {
     let mut directory = entry_path.parent();
-    let (manifest, root) = loop {
-        let current = directory?;
+    let (manifest_path, root) = loop {
+        let Some(current) = directory else {
+            return ProjectContext::NONE;
+        };
         let candidate = current.join("vilan.toml");
         if candidate.is_file() {
             break (candidate, current);
         }
         directory = current.parent();
     };
-    let table: toml::Table = std::fs::read_to_string(&manifest).ok()?.parse().ok()?;
-    let entry = |section: &str, default: Option<&str>| -> Option<PathBuf> {
-        table
-            .get(section)
-            .and_then(|section| section.get("entry"))
-            .and_then(|entry| entry.as_str())
-            .or(default)
-            .map(|entry| root.join(entry))
+    let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+        return ProjectContext::NONE;
     };
-    let is = |entry: Option<PathBuf>| {
-        entry.is_some_and(|entry| {
-            match (
-                std::fs::canonicalize(&entry),
-                std::fs::canonicalize(entry_path),
-            ) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => entry == entry_path,
-            }
-        })
+    let Ok((manifest, _warnings)) = Manifest::parse(&contents) else {
+        return ProjectContext::NONE;
     };
-    if is(entry("client", None)) {
-        Some(BuildTarget::Browser)
-    } else if is(entry("server", None)) || is(entry("package", Some("main.vl"))) {
-        Some(BuildTarget::Node)
-    } else {
-        None
+
+    // Legacy full-stack: target by the file's role; `pkg::` roots at its own
+    // directory (no declared package root), so leave `pkg_root` to the fallback.
+    if manifest.is_legacy_fullstack() {
+        let is_entry = |section: &Option<EntrySection>| {
+            section
+                .as_ref()
+                .and_then(|section| section.entry.as_deref())
+                .is_some_and(|entry| same_file(&root.join(entry), entry_path))
+        };
+        let target = if is_entry(&manifest.client) {
+            Some(BuildTarget::Browser)
+        } else if is_entry(&manifest.server) {
+            Some(BuildTarget::Node)
+        } else {
+            None
+        };
+        return ProjectContext {
+            target,
+            pkg_root: None,
+        };
     }
+
+    // A package: root `pkg::` at its declared source root, and analyze every file
+    // under that root against the package target (default Node). A file outside it
+    // gets no declared target — analysis infers one from its imports.
+    if let Some(package) = &manifest.package {
+        let pkg_root = root.join(package.root());
+        let target = is_within(&pkg_root, entry_path)
+            .then(|| package.resolved_target().unwrap_or(BuildTarget::Node));
+        return ProjectContext {
+            target,
+            pkg_root: Some(pkg_root),
+        };
+    }
+
+    // A `[project]` workspace root has no buildable package of its own.
+    ProjectContext::NONE
+}
+
+/// Whether two paths name the same file (canonicalizing when possible).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Whether `file` lives within `directory` (canonicalizing when possible).
+fn is_within(directory: &Path, file: &Path) -> bool {
+    match (
+        std::fs::canonicalize(directory),
+        std::fs::canonicalize(file),
+    ) {
+        (Ok(directory), Ok(file)) => file.starts_with(directory),
+        _ => file.starts_with(directory),
+    }
+}
+
+/// A package source root for a file with no manifest: its own directory.
+fn pkg_root_fallback(entry_path: &Path) -> PathBuf {
+    entry_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
 }
 
 /// A content hash of a document's text, used to skip re-analysis when an edit
@@ -151,10 +214,15 @@ impl Document {
         // The program borrows its source for `'static`, so leak a copy (the
         // editor re-analyzes on change; see the known leak tradeoff).
         let leaked: &'static str = Box::leak(text.to_string().into_boxed_str());
-        // Prefer the project's declared target (the file's role in its
-        // `vilan.toml`); fall back to inferring from imports for a non-entry file.
-        let target = resolve_manifest_target(entry_path);
-        let (program, diagnostics) = analyze_source(leaked, std_root, entry_path, target);
+        // Prefer the project's declared target and source root (the file's role in
+        // its `vilan.toml`); fall back to inferring the target from imports and
+        // rooting `pkg::` at the file's own directory.
+        let context = resolve_project_context(entry_path);
+        let pkg_root = context
+            .pkg_root
+            .unwrap_or_else(|| pkg_root_fallback(entry_path));
+        let (program, diagnostics) =
+            analyze_source(leaked, std_root, &pkg_root, entry_path, context.target);
 
         let mut entity_spans = Vec::new();
         if let Some(program) = &program {

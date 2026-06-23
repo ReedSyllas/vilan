@@ -9276,6 +9276,23 @@ fn std_module_path(std_root: &Path, file: &str) -> String {
     std_root.join(file).to_string_lossy().into_owned()
 }
 
+/// Resolves a module `name` under `root` to its source file. A module may be a
+/// flat file (`name.vl`) or a directory with a `lib.vl` (`name/lib.vl`) — the two
+/// are equivalent to an importer. Returns the existing path (the flat form wins
+/// when both somehow exist), and a flag set when *both* exist (an ambiguity the
+/// caller reports). `None` when neither exists — the name isn't a module here
+/// (e.g. the `print` in `std::print`), which the caller simply skips.
+fn resolve_module_file(root: &Path, name: &str) -> (Option<String>, bool) {
+    let flat = root.join(format!("{name}.vl"));
+    let nested = root.join(name).join("lib.vl");
+    let to_string = |path: &Path| path.to_string_lossy().into_owned();
+    match (flat.exists(), nested.exists()) {
+        (true, both_exist) => (Some(to_string(&flat)), both_exist),
+        (false, true) => (Some(to_string(&nested)), false),
+        (false, false) => (None, false),
+    }
+}
+
 /// Collects the names of package modules referenced via `<root>::<module>::..`
 /// in a node list's top-level `import`/`use`/`export import` statements, so the
 /// loader can pull them in transitively. `root` is `pkg` when scanning a std
@@ -9315,6 +9332,7 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
 pub fn analyze<'src>(
     nodes: &'src Spanned<NodeList<'src>>,
     std_root: &Path,
+    pkg_root: &Path,
     entry_path: &Path,
     target: Target,
 ) -> Program<'src> {
@@ -9396,14 +9414,11 @@ pub fn analyze<'src>(
         Std,
         Pkg,
     }
-    // The entry program's package root: the directory its `import pkg::..` siblings
-    // live in. When it equals `std_root` we're compiling std itself (or a std file
-    // opened in an editor), so every module is `Std` and the original single-root
-    // behavior is preserved exactly.
-    let pkg_root = entry_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    // The entry program's package root (`pkg_root`, passed in): the directory its
+    // `import pkg::..` siblings live in — the package's declared source root, not
+    // inferred from the entry file's parent. When it equals `std_root` we're
+    // compiling std itself (or a std file opened in an editor), so every module is
+    // `Std` and the original single-root behavior is preserved exactly.
     let compiling_std = match (
         std::fs::canonicalize(pkg_root),
         std::fs::canonicalize(std_root),
@@ -9489,7 +9504,21 @@ pub fn analyze<'src>(
                 continue;
             }
         }
-        let module_path = std_module_path(root, &format!("{name}.vl"));
+        let (resolved_path, ambiguous) = resolve_module_file(root, name);
+        let Some(module_path) = resolved_path else {
+            // Not a module file here (a non-module name, or a missing import the
+            // resolver below will report) — skip, as the previous loader did.
+            continue;
+        };
+        if ambiguous {
+            analyzer.diagnostics.push(Error {
+                span: EMPTY_SPAN,
+                msg: format!(
+                    "module `{name}` is ambiguous: both `{name}.vl` and `{name}/lib.vl` \
+                     exist — keep only one"
+                ),
+            });
+        }
         let is_entry_module = match (
             std::fs::canonicalize(&module_path),
             std::fs::canonicalize(entry_path),

@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "vilan.toml",
+  "description": "A Vilan package or project (workspace) manifest.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "package": {
+      "type": "object",
+      "description": "A package: a buildable, importable unit.",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "How other packages import this one. A valid identifier (letters, digits, underscore; no leading digit).",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "description": {
+          "type": "string",
+          "description": "A short, free-text description of the package."
+        },
+        "root": {
+          "type": "string",
+          "description": "The package source root, relative to this manifest. `entry` and every `pkg::` module resolve against it. Default: `src`.",
+          "default": "src"
+        },
+        "entry": {
+          "type": "string",
+          "description": "The `build`/`run` entry file, resolved against `root`. Default: `main.vl`.",
+          "default": "main.vl"
+        },
+        "target": {
+          "type": "string",
+          "description": "The default build target. `none` is a pure library (core std only) — type-checkable but not buildable without a host.",
+          "enum": ["node", "browser", "none"],
+          "default": "node"
+        },
+        "dependencies": {
+          "$ref": "#/definitions/dependencies"
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "description": "A workspace root: a set of member packages plus dependencies they inherit.",
+      "additionalProperties": false,
+      "properties": {
+        "packages": {
+          "type": "array",
+          "description": "Paths to the member package directories.",
+          "items": { "type": "string" }
+        },
+        "dependencies": {
+          "$ref": "#/definitions/dependencies"
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "description": "Code-generation options. A `preset` initializes every knob; individual keys then override it.",
+      "additionalProperties": false,
+      "properties": {
+        "preset": {
+          "type": "string",
+          "description": "A named starting point. `debug` is readable (indented, source names); `release` is minified and obfuscated.",
+          "enum": ["debug", "release"],
+          "default": "debug"
+        },
+        "indent": {
+          "type": "boolean",
+          "description": "Lay the output across lines with indentation (vs one flat line)."
+        },
+        "spaces": {
+          "type": "boolean",
+          "description": "Pad tokens with spaces (`a + b`, `[ 1, 2 ]`) vs tight (`a+b`, `[1,2]`)."
+        },
+        "readable-names": {
+          "type": "boolean",
+          "description": "Name generated identifiers after their source (most debuggable)."
+        },
+        "debug-names": {
+          "type": "boolean",
+          "description": "When `readable-names` is off, annotate obfuscated names with their source (`a/*count*/`)."
+        }
+      }
+    },
+    "server": {
+      "$ref": "#/definitions/entrySection",
+      "description": "Legacy full-stack server entry (a Node build). Superseded by a `[package]` with a `target`."
+    },
+    "client": {
+      "$ref": "#/definitions/entrySection",
+      "description": "Legacy full-stack client entry (a browser build). Superseded by a `[package]` with a `target`."
+    }
+  },
+  "definitions": {
+    "entrySection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entry": {
+          "type": "string",
+          "description": "The entry file, relative to this manifest."
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "Package dependencies. A bare version string is a registry dependency; the table form may instead give a local `path`.",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "A registry dependency version requirement (e.g. \"1.2\")."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "version": { "type": "string", "description": "The version requirement." },
+              "registry": { "type": "string", "description": "The registry to fetch from." },
+              "path": { "type": "string", "description": "A local path dependency, relative to this manifest." }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

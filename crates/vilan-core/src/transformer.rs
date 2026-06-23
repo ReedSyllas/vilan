@@ -359,7 +359,10 @@ impl<'src> Transformer<'src> {
                         )),
                         vec![value],
                     ),
-                    Target::Browser => value,
+                    // No host (`none`) has no exit code either — like the browser,
+                    // emit the tail as a plain statement. (The CLI refuses to
+                    // *build* a `none` target; this keeps codegen total.)
+                    Target::Browser | Target::None => value,
                 };
                 t_main_fn_body.push(statement);
             }

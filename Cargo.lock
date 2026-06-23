@@ -1038,7 +1038,6 @@ dependencies = [
  "ariadne",
  "chumsky",
  "clap",
- "toml",
  "vilan-core",
 ]
 
@@ -1048,6 +1047,8 @@ version = "0.1.0"
 dependencies = [
  "chumsky",
  "indexmap",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -1056,7 +1057,6 @@ version = "0.1.0"
 dependencies = [
  "dashmap 6.2.1",
  "tokio",
- "toml",
  "tower-lsp",
  "vilan-core",
 ]

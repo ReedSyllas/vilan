@@ -1,3 +1,5 @@
 [package]
 name = "math"
-entry = "main.vl"
+# Sources sit at the package root rather than the default `src/`, so `root` is
+# `.` — `main.vl` and its `pkg::square` sibling resolve next to this manifest.
+root = "."

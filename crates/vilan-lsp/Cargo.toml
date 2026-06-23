@@ -12,4 +12,3 @@ vilan-core = { path = "../vilan-core" }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "time"] }
 dashmap = "6"
-toml = "0.8"

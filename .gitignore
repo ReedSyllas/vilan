@@ -2,3 +2,6 @@
 .vscode
 .claude
 *.out
+
+# Build artifacts emitted by the examples (`vilan build` writes `dist/`).
+vilan/examples/**/dist/

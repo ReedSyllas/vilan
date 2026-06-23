@@ -29,6 +29,7 @@ fn compile(source: &str) -> Result<String, Vec<String>> {
                 let (program, errors) = analyze_source(
                     leaked,
                     &std_root(),
+                    Path::new("."),
                     Path::new("test.vl"),
                     Some(Target::Node),
                 );
@@ -76,6 +77,7 @@ fn warnings(source: &str) -> Vec<String> {
             let (program, _errors) = analyze_source(
                 leaked,
                 &std_root(),
+                Path::new("."),
                 Path::new("test.vl"),
                 Some(Target::Node),
             );

@@ -10,6 +10,7 @@ pub mod error;
 pub mod formatter;
 pub mod id;
 pub mod lexer;
+pub mod manifest;
 pub mod node;
 pub mod options;
 pub mod parser;
@@ -24,6 +25,7 @@ pub mod util;
 pub use analyzer::{Program, analyze};
 pub use error::Error;
 pub use lexer::lexer;
+pub use manifest::Manifest;
 pub use options::{BuildOptions, Preset};
 pub use parser::parser;
 pub use span::{Span, Spanned};
@@ -75,6 +77,7 @@ fn infer_target(root: &NodeList) -> Target {
 pub fn analyze_source(
     source: &'static str,
     std_root: &Path,
+    pkg_root: &Path,
     entry_path: &Path,
     target: Option<Target>,
 ) -> (Option<Program<'static>>, Vec<Error>) {
@@ -119,7 +122,7 @@ pub fn analyze_source(
     // `std::dom`).
     let target = target.unwrap_or_else(|| infer_target(&root.0));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut program = analyze(root, std_root, entry_path, target);
+        let mut program = analyze(root, std_root, pkg_root, entry_path, target);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program

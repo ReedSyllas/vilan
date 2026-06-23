@@ -12,14 +12,20 @@ pub enum Target {
     /// The browser. Has the DOM and `fetch` as globals; no `process`, no `node:`
     /// imports, no stdin.
     Browser,
+    /// No host — a pure library. Only the universal `Core` platform layer is in
+    /// scope (no `Node` or `Browser` std), so it can be type-checked anywhere but
+    /// can't be built: emitting picks a concrete host (`--target node`/`browser`).
+    None,
 }
 
 impl Target {
-    /// Parses a `--target` value (`node` / `browser`), or `None` if unrecognized.
+    /// Parses a `--target` value (`node` / `browser` / `none`), or `None` if
+    /// unrecognized.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "node" => Some(Target::Node),
             "browser" => Some(Target::Browser),
+            "none" => Some(Target::None),
             _ => None,
         }
     }
@@ -29,6 +35,7 @@ impl Target {
         match self {
             Target::Node => "node",
             Target::Browser => "browser",
+            Target::None => "none",
         }
     }
 }

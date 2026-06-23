@@ -16,9 +16,13 @@ derives already shipped as a special-cased subset of #9. Remaining Phase 6+ memo
 **Recently shipped (since this note):** transparent references (the view model — assign *through* a
 view with no `*`, `*` is value-only; R1/R5/R6/R7/R8), `Shared::write` as a real view, reactive
 ownership & disposal (explicit `Owner` + `Disposable` + `[must_use] sub`), the general `[must_use]`
-attribute + a `Warning` severity, and the `[name(..)]` attribute syntax. **The next frontier is the
-project & platform model** — the *Next up* section below — which supersedes #8's full-stack
-project-model bits and folds in backlog E6.
+attribute + a `Warning` severity, and the `[name(..)]` attribute syntax, and — **2026-06-22** — **P1
+(explicit `vilan.toml`)**: a typed `vilan-core::manifest::Manifest` (replacing the ad-hoc
+`toml::Table`), `[package]` `name`/`root`/`entry`/`target` with validation, target precedence
+(flag ► manifest ► `node`), a `none` (pure-library) target, `NAME.vl` ≡ `NAME/lib.vl` resolution,
+and a `vilan.toml` JSON Schema for the editor. **The next frontier is the rest of the project &
+platform model** — the *Next up* section below — which supersedes #8's full-stack project-model bits
+and folds in backlog E6.
 
 ---
 
@@ -30,16 +34,22 @@ the client/server seam ergonomic. Ordered by dependency. Supersedes #8's full-st
 bits and folds in backlog **E6** (project structure + per-file target). Items are tagged **[new]**
 where they capture a decision from this round.
 
-P1. **Explicit `vilan.toml` — drop the resolution magic** (M) **[new]**. Make package resolution
-    fully declarative, no inference:
-    - `[package]`: `name` (a valid identifier — it is how other packages import this one),
-      `description` (optional), `entry` (the default for `build`/`run`, e.g. `src/main.vl`), `target`
-      (the default target).
-    - `[package.dependencies]`: `dep = "version"` or `dep = { version, registry, path }`.
-    - `[project]`: `packages = [ "packages/a", … ]`; `[project.dependencies]` are inherited by every
-      package in the project.
-    - **`NAME.vl` and `NAME/lib.vl` must resolve identically** to an importer — investigate whether
-      that already holds and guarantee it.
+P1. **Explicit `vilan.toml` — drop the resolution magic** (M) **[new] — ✅ shipped 2026-06-22.**
+    Make package resolution fully declarative, no inference. *Plan + outcome in
+    `proposal/project-model-p1.md`.*
+    - `[package]`: `name` (required, a valid identifier — how other packages import this one),
+      `description` (optional), `root` (the source root, default `src`), `entry` (default `main.vl`,
+      resolved against `root`), `target` (default; `node`/`browser`/`none`). `name` is parsed/validated
+      but cross-package `name::..` imports are P2; in P1 a package self-references via `pkg::`.
+    - `[package.dependencies]`: `dep = "version"` or `dep = { version, registry, path }`. P1 parses
+      the schema; a declared **registry** dependency errors ("not yet supported"); a **path**
+      dependency parses but its loading is deferred (the multi-package follow-up below).
+    - `[project]`: `packages = [ "packages/a", … ]`; `[project.dependencies]` inherited by members.
+      `[package]` and `[project]` are **mutually exclusive** in P1; multi-package resolution is P2.
+    - **`NAME.vl` and `NAME/lib.vl` resolve identically** (gap today — closed in P1).
+    - **Manifest autocomplete:** a `vilan.toml` JSON Schema for key/enum completion + hover (ships in
+      P1); optional server-side completions from `vilan-lsp`'s own `Manifest` parse (follow-on).
+    - Replaces the ad-hoc `toml::Table` parsing with a typed `vilan-core::manifest::Manifest`.
 
 P2. **Multi-package workspace + per-package targets** (L) **[new]** — *replaces `[server]`/`[client]`.*
     The top `vilan.toml` lists `[project] packages = [ "packages/client", "packages/server",
@@ -47,7 +57,9 @@ P2. **Multi-package workspace + per-package targets** (L) **[new]** — *replace
     imports another by its **name** as the top-level source — `import common::something` from
     `server/src/main.vl`. A package's **target gates which features are in scope**; `target = none`
     means no platform/proprietary features (a pure library like `common`). Needs P1. (Supersedes
-    backlog **F1**'s `[server]`/`[client]`; addresses **E6**.)
+    backlog **F1**'s `[server]`/`[client]`; addresses **E6**.) **Includes path-dependency loading**
+    — resolving a `[package.dependencies]` `{ path = ".." }` entry (parsed but not loaded in P1) by
+    pulling that package's modules under its `name` namespace, reusing this item's multi-package loader.
 
 P3. **Cross-target imports diagnose, don't break typings** (M) **[new]** — importing an item whose
     target isn't accessible reports a diagnostic ("not available for the `<x>` target") but the

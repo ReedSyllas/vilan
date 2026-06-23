@@ -42,6 +42,12 @@
         "category": "Vilan"
       }
     ],
+    "tomlValidation": [
+      {
+        "fileMatch": "vilan.toml",
+        "url": "./schemas/vilan-toml.schema.json"
+      }
+    ],
     "configuration": {
       "title": "Vilan",
       "properties": {
