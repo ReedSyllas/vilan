@@ -35,22 +35,39 @@ pub use transformer::transform;
 use std::path::Path;
 
 use node::{ImportBranch, Node, NodeList};
-use target::Platform;
 
 /// Infers a compilation target for editor analysis (which has no `--target`) from
-/// a file's top-level imports: a file importing the browser DOM layer
-/// (`std::dom`) is a browser file, otherwise Node. This lets the language server
-/// analyze a `std::dom` client without the platform gate false-flagging it.
-fn infer_target(root: &NodeList) -> Target {
-    fn std_child_is_browser(branch: &ImportBranch) -> bool {
+/// a file's top-level imports: a file importing a module from `std`'s **browser**
+/// layer (e.g. `std::dom`) is a browser file, otherwise Node. This lets the
+/// language server analyze a browser client without the cross-target gate
+/// false-flagging it. The module's layer is read from `std`'s overlay directory,
+/// not a hardcoded list (L2).
+fn infer_target(root: &NodeList, std: &PackageSpec) -> Target {
+    let Some((_, browser_root)) = std
+        .target_roots
+        .iter()
+        .find(|(layer_target, _)| *layer_target == Target::Browser)
+    else {
+        return Target::Node;
+    };
+    // Whether `name` is a module file in the browser overlay (`name.vl` or
+    // `name/lib.vl`).
+    let in_browser_layer = |name: &str| {
+        browser_root.join(format!("{name}.vl")).exists()
+            || browser_root.join(name).join("lib.vl").exists()
+    };
+    fn std_child_in_browser(
+        branch: &ImportBranch,
+        in_browser_layer: &impl Fn(&str) -> bool,
+    ) -> bool {
         match branch {
-            ImportBranch::Path(module, _, _) => {
-                Platform::of_std_module(module) == Platform::Browser
-            }
-            ImportBranch::Set(branches) => branches.iter().any(std_child_is_browser),
+            ImportBranch::Path(module, _, _) => in_browser_layer(module),
+            ImportBranch::Set(branches) => branches
+                .iter()
+                .any(|branch| std_child_in_browser(branch, in_browser_layer)),
         }
     }
-    let imports_browser_layer = |branch: &ImportBranch| matches!(branch, ImportBranch::Path("std", _, Some(child)) if std_child_is_browser(child));
+    let imports_browser_layer = |branch: &ImportBranch| matches!(branch, ImportBranch::Path("std", _, Some(child)) if std_child_in_browser(child, &in_browser_layer));
     let references_browser = root.iter().any(|(node, _)| match node {
         Node::Import(branch) | Node::Use(branch) => imports_browser_layer(branch),
         _ => false,
@@ -76,7 +93,7 @@ fn infer_target(root: &NodeList) -> Target {
 /// `vilan.toml`), or `None` to infer it from the file's imports.
 pub fn analyze_source(
     source: &'static str,
-    std_root: &Path,
+    std: &PackageSpec,
     pkg_root: &Path,
     entry_path: &Path,
     target: Option<Target>,
@@ -121,9 +138,9 @@ pub fn analyze_source(
     // false-flagging valid `std::dom` usage while still catching a genuine
     // cross-target import (e.g. `std::http` in a file that also reaches for
     // `std::dom`).
-    let target = target.unwrap_or_else(|| infer_target(&root.0));
+    let target = target.unwrap_or_else(|| infer_target(&root.0, std));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut program = analyze(root, std_root, pkg_root, entry_path, target, workspace);
+        let mut program = analyze(root, std, pkg_root, entry_path, target, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program

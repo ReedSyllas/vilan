@@ -1,3 +1,12 @@
-[package]
-name = "vilan"
-version = "0.0.1"
+# The Vilan standard library — a `[library]` that serves every target by layering
+# its source. Core modules live in the base `root` (`src`) and are available
+# everywhere; platform modules live in per-target overlays and are available only
+# to a build for that target (importing one off-target is a cross-target error).
+[library]
+name = "std"
+
+[library.target.node]
+root = "src/node"       # fs, http, process
+
+[library.target.browser]
+root = "src/browser"    # dom, ui

@@ -221,7 +221,7 @@ fn span_of(program: &Program, id: Id) -> Option<Span> {
 }
 
 impl Document {
-    pub fn analyze(text: &str, std_root: &Path, entry_path: &Path) -> Self {
+    pub fn analyze(text: &str, std_dir: &Path, entry_path: &Path) -> Self {
         let line_index = LineIndex::new(text);
         let text_hash = hash_text(text);
         // The program borrows its source for `'static`, so leak a copy (the
@@ -234,9 +234,12 @@ impl Document {
         let pkg_root = context
             .pkg_root
             .unwrap_or_else(|| pkg_root_fallback(entry_path));
+        // `std` is resolved as a library (its layered roots) from the std directory
+        // — the manifest when present, else the layer convention (L2).
+        let std = vilan_core::manifest::resolve_std(std_dir);
         let (program, diagnostics) = analyze_source(
             leaked,
-            std_root,
+            &std,
             &pkg_root,
             entry_path,
             context.target,

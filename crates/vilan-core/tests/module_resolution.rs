@@ -9,8 +9,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use vilan_core::{Error, PackageSpec, Target, Workspace, analyze_source};
 
-fn std_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src")
+fn std_spec() -> PackageSpec {
+    vilan_core::manifest::resolve_std(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"),
+    )
 }
 
 /// Writes `files` (relative path → contents) into a fresh temp package directory,
@@ -31,7 +33,7 @@ fn analyze_package_raw(files: &[(&str, &str)], entry: &str, target: Target) -> V
     let leaked: &'static str = Box::leak(source.into_boxed_str());
     let (_program, errors) = analyze_source(
         leaked,
-        &std_root(),
+        &std_spec(),
         &dir,
         &entry_path,
         Some(target),
@@ -169,7 +171,7 @@ fn analyze_workspace(entry: &str, deps: &[Dep], target: Target) -> Vec<String> {
     let leaked: &'static str = Box::leak(source.into_boxed_str());
     let (_program, errors) = analyze_source(
         leaked,
-        &std_root(),
+        &std_spec(),
         &app_dir,
         &entry_path,
         Some(target),
@@ -261,7 +263,7 @@ fn dependency_pkg_self_reference_is_isolated() {
     let leaked: &'static str = Box::leak(source.into_boxed_str());
     let (_program, errors) = analyze_source(
         leaked,
-        &std_root(),
+        &std_spec(),
         &app_dir,
         &entry_path,
         Some(Target::Node),
@@ -428,7 +430,7 @@ fn analyze_layered(entry: &str, target: Target) -> Vec<String> {
     let leaked: &'static str = Box::leak(source.into_boxed_str());
     let (_program, errors) = analyze_source(
         leaked,
-        &std_root(),
+        &std_spec(),
         &app,
         &entry_path,
         Some(target),
@@ -520,7 +522,7 @@ fn base_lib_reexporting_an_overlay_module_errors() {
     let leaked: &'static str = Box::leak(source.into_boxed_str());
     let (_program, errors) = analyze_source(
         leaked,
-        &std_root(),
+        &std_spec(),
         &app,
         &entry_path,
         Some(Target::Node),

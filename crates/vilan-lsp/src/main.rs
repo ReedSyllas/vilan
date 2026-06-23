@@ -89,21 +89,23 @@ struct Backend {
     line_indices: Arc<DashMap<PathBuf, Arc<LineIndex>>>,
 }
 
-/// Locate the `std` package's source root: `$VILAN_STD`, else the nearest
-/// ancestor of the document containing `vilan/std/src`.
-fn discover_std_root(start: &Path) -> PathBuf {
+/// Locate the `std` library directory: `$VILAN_STD`, else the nearest ancestor of
+/// the document containing `vilan/std`. `resolve_std` reads its `[library]`
+/// manifest (or falls back to the layer convention if the path is a bare source
+/// root).
+fn discover_std_dir(start: &Path) -> PathBuf {
     if let Some(path) = std::env::var_os("VILAN_STD") {
         return PathBuf::from(path);
     }
     let mut directory = start.parent();
     while let Some(current) = directory {
-        let candidate = current.join("vilan").join("std").join("src");
+        let candidate = current.join("vilan").join("std");
         if candidate.is_dir() {
             return candidate;
         }
         directory = current.parent();
     }
-    PathBuf::from("vilan/std/src")
+    PathBuf::from("vilan/std")
 }
 
 /// Analyze `text` as the document at `uri`, store the result, and publish its
@@ -116,13 +118,15 @@ async fn analyze_and_publish(
     text: String,
 ) {
     let path = uri.to_file_path().unwrap_or_default();
-    let std_root = discover_std_root(&path);
-    let document =
-        match tokio::task::spawn_blocking(move || Document::analyze(&text, &std_root, &path)).await
-        {
-            Ok(document) => document,
-            Err(_) => return,
-        };
+    let std_dir = discover_std_dir(&path);
+    let document = match tokio::task::spawn_blocking(move || {
+        Document::analyze(&text, &std_dir, &path)
+    })
+    .await
+    {
+        Ok(document) => document,
+        Err(_) => return,
+    };
     let diagnostics = build_diagnostics(&document);
     documents.insert(uri.clone(), document);
     client.publish_diagnostics(uri, diagnostics, None).await;
@@ -255,8 +259,8 @@ impl LanguageServer for Backend {
         // but there a previous analysis is always already in place.)
         let uri = params.text_document.uri;
         let path = uri.to_file_path().unwrap_or_default();
-        let std_root = discover_std_root(&path);
-        let document = Document::analyze(&params.text_document.text, &std_root, &path);
+        let std_dir = discover_std_dir(&path);
+        let document = Document::analyze(&params.text_document.text, &std_dir, &path);
         let diagnostics = build_diagnostics(&document);
         self.documents.insert(uri.clone(), document);
         self.client

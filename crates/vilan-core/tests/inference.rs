@@ -9,10 +9,12 @@
 
 use std::path::{Path, PathBuf};
 
-use vilan_core::{BuildOptions, Target, Workspace, analyze_source, transform};
+use vilan_core::{BuildOptions, PackageSpec, Target, Workspace, analyze_source, transform};
 
-fn std_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src")
+fn std_spec() -> PackageSpec {
+    vilan_core::manifest::resolve_std(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"),
+    )
 }
 
 /// Compile a source through the full pipeline (analyze → context → infer →
@@ -28,7 +30,7 @@ fn compile(source: &str) -> Result<String, Vec<String>> {
                 let leaked: &'static str = Box::leak(source.into_boxed_str());
                 let (program, errors) = analyze_source(
                     leaked,
-                    &std_root(),
+                    &std_spec(),
                     Path::new("."),
                     Path::new("test.vl"),
                     Some(Target::Node),
@@ -77,7 +79,7 @@ fn warnings(source: &str) -> Vec<String> {
             let leaked: &'static str = Box::leak(source.into_boxed_str());
             let (program, _errors) = analyze_source(
                 leaked,
-                &std_root(),
+                &std_spec(),
                 Path::new("."),
                 Path::new("test.vl"),
                 Some(Target::Node),

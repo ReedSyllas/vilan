@@ -30,10 +30,12 @@ an incompatible-target dependency) is loaded for typing and reported as one reco
 at the `import` rather than skip-loaded into a cascade (the headline fixture dropped from 18
 diagnostics to 2). **The next frontier is the rest of the project & platform model** — the *Next up*
 section below (P4–P6) — which supersedes #8's full-stack project-model bits and folds in backlog E6;
-and **library packages L1** (the first slice of P4): a `[library]` manifest (importable, no app
+and **library packages L1 + L2** (the first slices of P4): a `[library]` manifest (importable, no app
 baggage) that serves multiple targets by **layering** its source (`[library.target.node] root = …`),
-with a per-module layer-availability gate that replaces P2's coarse dependency-target compat. `std`
-de-special-casing is **L2**, the next step.
+with a per-module layer-availability gate that replaces P2's coarse dependency-target compat — and
+**`std` itself migrated onto it** (`vilan/std/vilan.toml`, platform modules in `src/node`/`src/browser`
+overlays, the hardcoded `Platform::of_std_module` map deleted). Frontier: **L3** (open-ended target
+layers — `deno`/`bun`).
 
 ---
 
@@ -93,10 +95,11 @@ P4. **Library packages** (L) **[new, replaces "target-varying modules"]** — a 
     - **L1 — ✅ shipped 2026-06-23:** the `[library]` manifest + target-layered resolution for *user*
       libraries; dependencies must be libraries (the per-module layer gate replaced
       `gate_dependency_import`); `common` migrated to `[library]`. `std` untouched (corpus byte-identical).
-    - **L2 (next):** `std` becomes a library — a `[library]` manifest, its 5 platform modules reorganized into
-      `node`/`browser` layers, `Platform::of_std_module` deleted, and the std-specific gate collapsed
-      into the general one. The big de-special-casing.
-    - **L3 (optional):** open-ended target layers (`deno`/`bun`), decoupled from the codegen target enum.
+    - **L2 — ✅ shipped 2026-06-23:** `std` is now a `[library]` (`vilan/std/vilan.toml`) — its 5
+      platform modules reorganized into `src/node`/`src/browser` overlays, `Platform::of_std_module`
+      deleted, and the std-specific gate collapsed into the one `gate_library_imports`. Corpus
+      byte-identical. The big de-special-casing.
+    - **L3 (next, optional):** open-ended target layers (`deno`/`bun`), decoupled from the codegen target enum.
     Needs the target model (P2) and error recovery (P3).
 
 P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent]** — rebuild / rerun

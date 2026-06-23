@@ -1,11 +1,14 @@
 # Library packages (replaces roadmap P4)
 
-Status: **L1 implemented** (2026-06-23); L2/L3 sketched below. The `[library]`
-manifest, target-layered resolution, the per-module layer-availability gate
-(replacing P2/P3's coarse per-dependency gate), and the dependencies-must-be-
-libraries rule all landed; `examples/fullstack/common` migrated to `[library]`.
-The decisions in §7 reflect what shipped. `std` is untouched (its migration is L2),
-so the corpus stays byte-identical.
+Status: **L1 + L2 implemented** (2026-06-23); L3 sketched below. **L1**: the
+`[library]` manifest, target-layered resolution, the per-module layer-availability
+gate (replacing P2/P3's coarse per-dependency gate), and the dependencies-must-be-
+libraries rule; `examples/fullstack/common` migrated to `[library]`. **L2**: `std`
+is now a `[library]` — its 5 platform modules reorganized into `node`/`browser`
+overlays, the hardcoded `Platform::of_std_module` map deleted, and the std gate
+collapsed into the one `gate_library_imports`. The corpus is byte-identical
+(the file reorg + layered resolution produce the same output). The decisions in §7
+reflect what shipped.
 
 Supersedes the roadmap's P4 ("target-varying modules" via `[[module_override]]`).
 A `[library]` package with **target layers** turns out to subsume P4 *and* the

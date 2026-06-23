@@ -10,7 +10,7 @@ use crate::node::{
     NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
-use crate::target::{Platform, Target};
+use crate::target::Target;
 use crate::type_::{SubstitutionContext, Type, TypeId};
 use crate::util::plural;
 
@@ -9363,29 +9363,6 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<(&'a str,
 }
 
 /// Pushes a recoverable cross-target error — spanned at the offending `import` —
-/// for each std module in `refs` whose platform layer isn't available for the
-/// build `target` (P3). The modules are still loaded (the caller enqueues them):
-/// the type pass continues as if allowed, so one cross-target import doesn't
-/// cascade into unresolved-name errors. De-duplicated by module name.
-fn gate_platform_imports(refs: &[(&str, Span)], target: Target, diagnostics: &mut Vec<Error>) {
-    let mut reported: HashSet<&str> = HashSet::new();
-    for (name, span) in refs {
-        let platform = Platform::of_std_module(name);
-        if !platform.is_available_for(target) && reported.insert(*name) {
-            diagnostics.push(Error {
-                span: *span,
-                msg: format!(
-                    "`std::{name}` is part of the {} platform layer and is not available \
-                     when building for `{}`",
-                    platform.name(),
-                    target.name()
-                ),
-            });
-        }
-    }
-}
-
-/// Pushes a recoverable cross-target error — spanned at the offending `import` —
 /// for each module imported from `library` that isn't available for the build
 /// `target` (it lives only in *another* target's overlay) (L1). The module still
 /// loads for typing (from wherever it is), so the file doesn't cascade. Imports
@@ -9419,7 +9396,7 @@ fn gate_library_imports(
             diagnostics.push(Error {
                 span: *span,
                 msg: format!(
-                    "`{library_name}::{name}` is in another target's layer and isn't available \
+                    "`{library_name}::{name}` is in another target's layer and is not available \
                      when building for `{}`",
                     target.name()
                 ),
@@ -9523,7 +9500,7 @@ struct LoadedPackage {
 
 pub fn analyze<'src>(
     nodes: &'src Spanned<NodeList<'src>>,
-    std_root: &Path,
+    std: &PackageSpec,
     pkg_root: &Path,
     entry_path: &Path,
     target: Target,
@@ -9592,19 +9569,19 @@ pub fn analyze<'src>(
     // transitively. Each becomes a module registered in the `pkg` namespace;
     // bodies are walked after all are registered so cross-module references
     // resolve during `build()`.
-    let lib_path = std_module_path(std_root, "lib.vl");
+    let lib_path = std_module_path(&std.base_root, "lib.vl");
     let lib_ast = load_package_module(&lib_path);
     sources.push(PathBuf::from(&lib_path));
     let lib_source_id = SourceId((sources.len() - 1) as u32);
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
     let mut loaded: Vec<(&str, &Spanned<NodeList>, Id, SourceId)> = Vec::new();
-    // A module's package: `Std` modules resolve under `std_root` and are
-    // addressable as both `std::name` and `pkg::name`; `Pkg` modules — the entry
-    // program's own multi-file siblings — resolve under `pkg_root` (the entry's
-    // directory) and are addressable only as `pkg::name`; `Dep(i)` modules — a
-    // dependency package (P2) — resolve under `workspace.packages[i].root` into
-    // that package's own isolated namespace, reachable from a dependent as
-    // `<import-name>::name` and from within the dependency as `pkg::name`.
+    // A module's package: `Std` modules resolve under the `std` library's layered
+    // roots and are addressable as both `std::name` and `pkg::name`; `Pkg` modules —
+    // the entry program's own multi-file siblings — resolve under `pkg_root` (the
+    // entry's directory) and are addressable only as `pkg::name`; `Dep(i)` modules —
+    // a dependency library (P2) — resolve under its layered roots into its own
+    // isolated namespace, reachable from a dependent as `<import-name>::name` and
+    // from within the dependency as `pkg::name`.
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum Origin {
         Std,
@@ -9612,17 +9589,15 @@ pub fn analyze<'src>(
         Dep(usize),
     }
     // The entry program's package root (`pkg_root`, passed in): the directory its
-    // `import pkg::..` siblings live in — the package's declared source root, not
-    // inferred from the entry file's parent. When it equals `std_root` we're
-    // compiling std itself (or a std file opened in an editor), so every module is
-    // `Std` and the original single-root behavior is preserved exactly.
-    let compiling_std = match (
-        std::fs::canonicalize(pkg_root),
-        std::fs::canonicalize(std_root),
-    ) {
-        (Ok(pkg_canonical), Ok(std_canonical)) => pkg_canonical == std_canonical,
-        _ => pkg_root == std_root,
-    };
+    // `import pkg::..` siblings live in. When it is one of `std`'s own layer roots
+    // we're compiling std itself (or a std file opened in an editor), so every
+    // module is `Std` and the single-package behavior is preserved exactly.
+    let canonical =
+        |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let pkg_root_canonical = canonical(pkg_root);
+    let compiling_std = std::iter::once(&std.base_root)
+        .chain(std.target_roots.iter().map(|(_, root)| root))
+        .any(|root| canonical(root) == pkg_root_canonical);
     let entry_pkg_origin = if compiling_std {
         Origin::Std
     } else {
@@ -9656,7 +9631,13 @@ pub fn analyze<'src>(
     // (Skipped when compiling std itself, whose internal imports aren't user code.)
     let entry_std_refs = collect_module_refs(&nodes.0, "std");
     if !compiling_std {
-        gate_platform_imports(&entry_std_refs, target, &mut analyzer.diagnostics);
+        gate_library_imports(
+            &entry_std_refs,
+            std,
+            "std",
+            target,
+            &mut analyzer.diagnostics,
+        );
     }
     to_load.extend(
         entry_std_refs
@@ -9847,7 +9828,7 @@ pub fn analyze<'src>(
         // dependency library is layered — its overlay for the build target, then its
         // base, then other overlays (so a cross-target module still loads for typing).
         let search_roots: Vec<&Path> = match origin {
-            Origin::Std => vec![std_root],
+            Origin::Std => std.search_roots(target),
             Origin::Pkg => vec![pkg_root],
             Origin::Dep(index) => workspace.packages[index].search_roots(target),
         };
@@ -9970,7 +9951,7 @@ pub fn analyze<'src>(
             Origin::Std => {}
             Origin::Pkg => {
                 let std_refs = collect_module_refs(&ast.0, "std");
-                gate_platform_imports(&std_refs, target, &mut analyzer.diagnostics);
+                gate_library_imports(&std_refs, std, "std", target, &mut analyzer.diagnostics);
                 to_load.extend(
                     std_refs
                         .into_iter()

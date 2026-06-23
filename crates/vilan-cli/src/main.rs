@@ -718,14 +718,15 @@ fn discover_tests(path: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
     Ok(tests)
 }
 
-/// The `std` package source root: `$VILAN_STD` if set, else the in-repo
-/// `vilan/std/src` relative to this crate.
-fn std_root() -> PathBuf {
+/// The `std` library directory: `$VILAN_STD` if set, else the in-repo `vilan/std`
+/// relative to this crate. `resolve_std` reads its `[library]` manifest (or, if
+/// `$VILAN_STD` points at a bare source root, falls back to the layer convention).
+fn std_dir() -> PathBuf {
     env::var_os("VILAN_STD")
         .map(PathBuf::from)
         // `CARGO_MANIFEST_DIR` is `crates/vilan-cli`; std lives at the workspace
-        // root under `vilan/std/src`.
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src"))
+        // root under `vilan/std`.
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"))
 }
 
 /// Runs the full pipeline (lex -> parse -> analyze -> contexts -> async infer ->
@@ -747,7 +748,7 @@ fn compile_to_js(
         }
     };
     let filename = file.to_string_lossy().into_owned();
-    let std_root = std_root();
+    let std = vilan_core::manifest::resolve_std(&std_dir());
     let mut output = None;
 
     let (tokens, mut errs) = lexer().parse(src.as_str()).into_output_errors();
@@ -767,7 +768,7 @@ fn compile_to_js(
                 write_debug(file, "parse.out", &format!("{root:#?}"));
             }
 
-            let mut program = analyze(&root, &std_root, pkg_root, file, target, workspace);
+            let mut program = analyze(&root, &std, pkg_root, file, target, workspace);
 
             // Thread `std::context::Context` values as hidden parameters (a no-op
             // unless the program creates a context).

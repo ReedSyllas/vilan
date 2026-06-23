@@ -352,6 +352,61 @@ pub fn resolve_workspace(package_dir: &Path) -> Result<Workspace, String> {
     })
 }
 
+/// Resolves the `std` library's layered [`PackageSpec`] from `std_dir`. Reads
+/// `std_dir/vilan.toml` (`[library]`) when present; otherwise treats `std_dir` as
+/// the base source root and derives `node`/`browser` overlays by the directory
+/// convention (so a `VILAN_STD` pointing at the source root still resolves). `std`
+/// has no external dependencies — its modules reference each other via `pkg::`.
+pub fn resolve_std(std_dir: &Path) -> PackageSpec {
+    if let Ok(contents) = std::fs::read_to_string(std_dir.join("vilan.toml")) {
+        if let Ok((manifest, _)) = Manifest::parse(&contents) {
+            if let Some(library) = manifest.library {
+                return library_spec(std_dir, &library, Vec::new());
+            }
+        }
+    }
+    // Convention fallback: `std_dir` is the base source root; overlays are its
+    // `node`/`browser` subdirectories.
+    let overlay = |target: Target, name: &str| {
+        let root = std_dir.join(name);
+        root.is_dir().then_some((target, root))
+    };
+    PackageSpec {
+        base_root: std_dir.to_path_buf(),
+        target_roots: [
+            overlay(Target::Node, "node"),
+            overlay(Target::Browser, "browser"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        dependencies: Vec::new(),
+    }
+}
+
+/// Builds a [`PackageSpec`] for the `[library]` rooted at `dir`: its base root
+/// (default `src`) plus each declared per-target overlay (default `src/<t>`), with
+/// the already-resolved dependency edges.
+fn library_spec(dir: &Path, library: &Library, dependencies: Vec<(String, usize)>) -> PackageSpec {
+    let target_roots = library
+        .target
+        .iter()
+        .filter_map(|(name, layer)| {
+            let target = Target::parse(name)?;
+            let root = layer
+                .root
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("src").join(name));
+            Some((target, dir.join(root)))
+        })
+        .collect();
+    PackageSpec {
+        base_root: dir.join(library.base_root()),
+        target_roots,
+        dependencies,
+    }
+}
+
 /// Reads, parses, and validates the `vilan.toml` in `directory` (for dependency
 /// resolution — warnings are the front-end's concern and are dropped here).
 fn load_manifest(directory: &Path) -> Result<Manifest, String> {
@@ -422,25 +477,11 @@ fn resolve_dependency_edges(
                 ));
             }
         };
-        // The library's layered roots: a base plus each declared per-target overlay
-        // (default `src/<t>`). A target-specific module being unavailable for the
-        // build target is the analyzer's per-module diagnostic, at the import (L1) —
-        // resolution itself only fails on structural problems (cycles, bad manifest).
-        let base_root = dependency_dir.join(library.base_root());
-        let target_roots: Vec<(Target, PathBuf)> = library
-            .target
-            .iter()
-            .filter_map(|(name, layer)| {
-                let target = Target::parse(name)?;
-                let root = layer
-                    .root
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("src").join(name));
-                Some((target, dependency_dir.join(root)))
-            })
-            .collect();
         // Resolve the library's own dependencies first, so they take lower indices
-        // (a valid load order), then record the library itself.
+        // (a valid load order), then record the library itself. Its layered roots (a
+        // base plus each declared per-target overlay) come from `library_spec`; a
+        // target-specific module being unavailable for the build target is the
+        // analyzer's per-module diagnostic at the import (L1), not a resolution error.
         let dependency_edges = resolve_dependency_edges(
             &library.dependencies,
             &dependency_dir,
@@ -450,11 +491,7 @@ fn resolve_dependency_edges(
         )?;
         visiting.remove(&canonical);
         let index = packages.len();
-        packages.push(PackageSpec {
-            base_root,
-            target_roots,
-            dependencies: dependency_edges,
-        });
+        packages.push(library_spec(&dependency_dir, &library, dependency_edges));
         index_by_path.insert(canonical, index);
         edges.push((import_name.clone(), index));
     }
@@ -525,6 +562,26 @@ mod tests {
             Some(Target::None)
         );
         assert!(manifest.validate().is_empty());
+    }
+
+    #[test]
+    fn resolve_std_reads_manifest_layers() {
+        // The real `std` library declares `node`/`browser` overlays in its manifest.
+        let std = resolve_std(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"));
+        assert!(std.base_root.ends_with("std/src"));
+        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Node));
+        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Browser));
+    }
+
+    #[test]
+    fn resolve_std_convention_fallback() {
+        // Pointing at a bare source root (no manifest) derives `node`/`browser`
+        // overlays by the directory convention, so a `VILAN_STD` at the src root works.
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src");
+        let std = resolve_std(&src);
+        assert_eq!(std.base_root, src);
+        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Node));
+        assert!(std.target_roots.iter().any(|(t, _)| *t == Target::Browser));
     }
 
     #[test]
