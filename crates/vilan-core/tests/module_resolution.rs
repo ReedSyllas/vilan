@@ -7,16 +7,16 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use vilan_core::{PackageSpec, Target, Workspace, analyze_source};
+use vilan_core::{Error, PackageSpec, Target, Workspace, analyze_source};
 
 fn std_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src")
 }
 
 /// Writes `files` (relative path → contents) into a fresh temp package directory,
-/// analyzes `entry` (also relative) against it as `pkg_root`, and returns the
-/// diagnostic messages. The directory is removed before returning.
-fn analyze_package(files: &[(&str, &str)], entry: &str, target: Target) -> Vec<String> {
+/// analyzes `entry` (also relative) against it as `pkg_root`, and returns the raw
+/// diagnostics (message + span). The directory is removed before returning.
+fn analyze_package_raw(files: &[(&str, &str)], entry: &str, target: Target) -> Vec<Error> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("vilan_modres_{}_{unique}", std::process::id()));
@@ -38,7 +38,15 @@ fn analyze_package(files: &[(&str, &str)], entry: &str, target: Target) -> Vec<S
         &Workspace::default(),
     );
     let _ = std::fs::remove_dir_all(&dir);
-    errors.into_iter().map(|error| error.msg).collect()
+    errors
+}
+
+/// As [`analyze_package_raw`], but just the diagnostic messages.
+fn analyze_package(files: &[(&str, &str)], entry: &str, target: Target) -> Vec<String> {
+    analyze_package_raw(files, entry, target)
+        .into_iter()
+        .map(|error| error.msg)
+        .collect()
 }
 
 const ENTRY: &str = "import std::print;\nimport pkg::foo::bar;\nfun main() { print(bar()); }\n";
@@ -281,4 +289,98 @@ fn unknown_dependency_name_errors() {
         !errors.is_empty(),
         "expected an unresolved-import error for `other`"
     );
+}
+
+// --- Cross-target import error recovery (P3) -------------------------------
+
+#[test]
+fn cross_target_std_import_does_not_cascade() {
+    // A browser build of a Node program: the two cross-target imports are reported,
+    // but `std::http`/`std::fs` still load for typing, so `Server`,
+    // `read_file_to_str`, etc. resolve and there's no unresolved-name cascade.
+    let entry = concat!(
+        "import std::http::{ Server, Response };\n",
+        "import std::fs::read_file_to_str;\n",
+        "fun main() {\n",
+        "    let data = read_file_to_str(\"x.txt\");\n",
+        "    let server = Server::builder().port(3000).build();\n",
+        "    server.start();\n",
+        "}\n",
+    );
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Target::Browser);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("std::http") && e.contains("not available")),
+        "missing the std::http cross-target error: {errors:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("std::fs") && e.contains("not available")),
+        "missing the std::fs cross-target error: {errors:#?}"
+    );
+    assert!(
+        !errors.iter().any(|e| e.contains("cannot find")),
+        "expected no cascade, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn cross_target_diagnostic_is_spanned() {
+    // The error points at the offending `import` (not EMPTY_SPAN at 0..0).
+    let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
+    let errors = analyze_package_raw(&[("main.vl", entry)], "main.vl", Target::Browser);
+    let http = errors
+        .iter()
+        .find(|e| e.msg.contains("std::http") && e.msg.contains("not available"))
+        .expect("a std::http cross-target error");
+    let range = http.span.into_range();
+    assert!(
+        range.start < range.end && range.start > 0,
+        "expected a real import span, got {range:?}"
+    );
+}
+
+#[test]
+fn cross_target_transitive_import_not_reported() {
+    // Importing `std::http` reports `http` once; the modules it pulls in
+    // transitively (std-internal) load but are not separately gated.
+    let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Target::Browser);
+    let cross_target = errors
+        .iter()
+        .filter(|e| e.contains("not available"))
+        .count();
+    assert_eq!(
+        cross_target, 1,
+        "expected exactly one cross-target error (http), got: {errors:#?}"
+    );
+    assert!(errors.iter().any(|e| e.contains("std::http")));
+}
+
+#[test]
+fn platform_modules_load_for_typing_under_opposite_target() {
+    // Loading a cross-target std module purely to type-check it must not introduce
+    // spurious errors beyond the single cross-target diagnostic (P3 Q5 sweep).
+    for (module, target) in [
+        ("http", Target::Browser),
+        ("fs", Target::Browser),
+        ("process", Target::Browser),
+        ("dom", Target::Node),
+        ("ui", Target::Node),
+    ] {
+        let entry = format!("import std::{module};\nfun main() {{}}\n");
+        let errors = analyze_package(&[("main.vl", &entry)], "main.vl", target);
+        assert_eq!(
+            errors.len(),
+            1,
+            "`std::{module}` under {target:?} should yield exactly the one cross-target \
+             error (loading-for-typing introduced no others): {errors:#?}"
+        );
+        assert!(
+            errors[0].contains(module) && errors[0].contains("not available"),
+            "`std::{module}` under {target:?}: unexpected error: {errors:#?}"
+        );
+    }
 }

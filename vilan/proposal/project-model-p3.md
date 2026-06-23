@@ -1,6 +1,12 @@
 # P3 — Cross-target imports diagnose, don't break typings
 
-Status: **plan, awaiting review** (open questions in §6 to settle before implementing)
+Status: **implemented** (2026-06-22). The loader no longer skip-loads a
+cross-target module — it loads for typing and reports one recoverable, spanned
+error at the import; `resolve_workspace` no longer hard-fails on the compat rule
+(cycles stay fatal). The headline fixture dropped from **18 diagnostics to 2**,
+each pointing at its `import`. The decisions in §6 reflect what shipped (and the Q5
+sweep confirmed every platform std module loads cleanly for typing under the
+opposite target — no body-walk gating needed).
 
 Roadmap: "Next up — project & platform model", item **P3**. An error-recovery
 requirement on P2's target gating. Builds on P1 (the target model) and P2 (the

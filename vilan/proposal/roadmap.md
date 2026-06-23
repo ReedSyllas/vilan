@@ -24,9 +24,12 @@ and a `vilan.toml` JSON Schema for the editor; and **P2 (multi-package workspace
 per-package namespaces in the loader (each package its own `pkg`, resolved per-source), `[project]`
 workspaces with per-package targets + `path`-dependency loading, the `none`-or-same target-compat
 rule, cycle detection, `vilan build`/`run` over a workspace (`dist/<name>.js`; `run` selects the node
-member), and both examples migrated (`[server]`/`[client]` now lowers onto a workspace). **The next
-frontier is the rest of the project & platform model** — the *Next up* section below (P3–P6) —
-which supersedes #8's full-stack project-model bits and folds in backlog E6.
+member), and both examples migrated (`[server]`/`[client]` now lowers onto a workspace); and **P3
+(cross-target error recovery)**: a cross-target import (a browser build reaching for `std::http`, or
+an incompatible-target dependency) is loaded for typing and reported as one recoverable, spanned error
+at the `import` rather than skip-loaded into a cascade (the headline fixture dropped from 18
+diagnostics to 2). **The next frontier is the rest of the project & platform model** — the *Next up*
+section below (P4–P6) — which supersedes #8's full-stack project-model bits and folds in backlog E6.
 
 ---
 
@@ -66,10 +69,13 @@ P2. **Multi-package workspace + per-package targets** (L) **[new] — ✅ shippe
     — resolving a `[package.dependencies]` `{ path = ".." }` entry (parsed but not loaded in P1) by
     pulling that package's modules under its `name` namespace, reusing this item's multi-package loader.
 
-P3. **Cross-target imports diagnose, don't break typings** (M) **[new]** — importing an item whose
-    target isn't accessible reports a diagnostic ("not available for the `<x>` target") but the
+P3. **Cross-target imports diagnose, don't break typings** (M) **[new] — ✅ shipped 2026-06-22.**
+    *Plan + outcome in `proposal/project-model-p3.md`.* Importing an item whose target isn't
+    accessible reports one diagnostic at the `import` ("not available for the `<x>` target") but the
     analyzer keeps typing the rest of the file *as if it were allowed*, so one cross-target import
-    doesn't cascade into spurious downstream errors. An error-recovery requirement on P2's gating.
+    doesn't cascade. The loader now loads gated modules for typing instead of skipping them, and
+    `resolve_workspace` no longer hard-fails on the compat rule (cycles stay fatal) — the headline
+    fixture dropped from 18 diagnostics to 2. An error-recovery requirement on P2's gating.
 
 P4. **Target-varying modules** (M) **[new]** — the same import path resolves to a different module
     per target, so `import std::http` pulls `http.node.vl` under a node target, `http.deno.vl` under

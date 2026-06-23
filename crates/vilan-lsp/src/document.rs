@@ -93,8 +93,7 @@ fn resolve_project_context(entry_path: &Path) -> ProjectContext {
         let pkg_root = root.join(package.root());
         let build_target = package.resolved_target().unwrap_or(BuildTarget::Node);
         let target = is_within(&pkg_root, entry_path).then_some(build_target);
-        let workspace =
-            vilan_core::manifest::resolve_workspace(root, build_target).unwrap_or_default();
+        let workspace = vilan_core::manifest::resolve_workspace(root).unwrap_or_default();
         return ProjectContext {
             target,
             pkg_root: Some(pkg_root),

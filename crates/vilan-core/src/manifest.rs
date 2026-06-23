@@ -258,13 +258,14 @@ fn validate_dependencies(dependencies: &BTreeMap<String, Dependency>, errors: &m
     }
 }
 
-/// Resolves the dependency [`Workspace`] for the package rooted at `package_dir`,
-/// built for `target` (P2): every reachable local `path` dependency, transitively,
-/// with cycle detection and the target-compatibility rule — a dependency must
-/// target `none` or the build target. A directory whose manifest declares no
+/// Resolves the dependency [`Workspace`] for the package rooted at `package_dir`
+/// (P2): every reachable local `path` dependency, transitively, with cycle
+/// detection. Each `PackageSpec` records its declared `target`, but the graph
+/// itself is target-independent — the target-compatibility *diagnostic* is the
+/// analyzer's, reported at the import (P3). A directory whose manifest declares no
 /// `[package]` (and a bare file, which has no manifest) yields an empty workspace.
 /// Shared by the CLI and the language server so both resolve imports identically.
-pub fn resolve_workspace(package_dir: &Path, target: Target) -> Result<Workspace, String> {
+pub fn resolve_workspace(package_dir: &Path) -> Result<Workspace, String> {
     let manifest = load_manifest(package_dir)?;
     let Some(package) = manifest.package else {
         return Ok(Workspace::default());
@@ -275,7 +276,6 @@ pub fn resolve_workspace(package_dir: &Path, target: Target) -> Result<Workspace
     let entry_dependencies = resolve_dependency_edges(
         &package.dependencies,
         package_dir,
-        target,
         &mut packages,
         &mut index_by_path,
         &mut visiting,
@@ -312,7 +312,6 @@ fn load_manifest(directory: &Path) -> Result<Manifest, String> {
 fn resolve_dependency_edges(
     dependencies: &BTreeMap<String, Dependency>,
     base_dir: &Path,
-    target: Target,
     packages: &mut Vec<PackageSpec>,
     index_by_path: &mut HashMap<PathBuf, usize>,
     visiting: &mut HashSet<PathBuf>,
@@ -345,21 +344,17 @@ fn resolve_dependency_edges(
             )
         })?;
         let dependency_target = package.resolved_target().unwrap_or(Target::Node);
-        if dependency_target != Target::None && dependency_target != target {
-            return Err(format!(
-                "dependency `{import_name}` targets `{}`, which a `{}` build can't import \
-                 (a dependency must target `none` or `{}`)",
-                dependency_target.name(),
-                target.name(),
-                target.name()
-            ));
-        }
+        // A target-incompatible dependency is *not* rejected here: it's recorded
+        // (with its target) and loaded, and the analyzer reports the cross-target
+        // import once, at the user's `import`, while still typing the rest of the
+        // file (P3). Only structural problems (cycles, a missing/invalid manifest)
+        // fail resolution.
+        //
         // Resolve the dependency's own dependencies first, so they take lower
         // indices (a valid load order), then record the dependency itself.
         let dependency_edges = resolve_dependency_edges(
             &package.dependencies,
             &dependency_dir,
-            target,
             packages,
             index_by_path,
             visiting,

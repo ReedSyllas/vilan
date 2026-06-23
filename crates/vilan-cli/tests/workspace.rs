@@ -98,10 +98,20 @@ fn workspace_builds_each_host_member() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A command's combined stdout + stderr (errors render to stdout, resolution
+/// failures to stderr — a test asserting on a message wants both).
+fn combined(output: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text
+}
+
 #[test]
-fn incompatible_target_dependency_is_rejected() {
-    // A browser package depending on a `node`-target library — the compat rule
-    // (`none` or same target) rejects it with a clear diagnostic.
+fn incompatible_target_dependency_is_rejected_without_cascade() {
+    // A browser package depending on a `node`-target library: the cross-target
+    // import is a recoverable error (the build fails) — but the dependency still
+    // loads for typing, so `helper` resolves and there's no unresolved-name
+    // cascade (P3).
     let dir = temp_project("compat");
     write(
         dir.as_path(),
@@ -125,8 +135,12 @@ fn incompatible_target_dependency_is_rejected() {
     );
     let output = vilan(&["build", dir.join("web").to_str().unwrap()]);
     assert!(!output.status.success(), "expected a compat failure");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("target"), "unexpected error: {stderr}");
+    let text = combined(&output);
+    assert!(text.contains("target"), "unexpected output: {text}");
+    assert!(
+        !text.contains("cannot find"),
+        "the dependency should still type-check (no cascade): {text}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -151,8 +165,8 @@ fn dependency_cycle_is_rejected() {
     write(&dir, "b/src/lib.vl", "import a::va;\nfun vb(): i32 { 1 }\n");
     let output = vilan(&["check", dir.join("a").to_str().unwrap()]);
     assert!(!output.status.success(), "expected a cycle failure");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cycle"), "unexpected error: {stderr}");
+    let text = combined(&output);
+    assert!(text.contains("cycle"), "unexpected output: {text}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

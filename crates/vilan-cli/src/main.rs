@@ -437,12 +437,13 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
     })
 }
 
-/// Resolves a unit's dependency workspace for the given build `target`. A unit
-/// with no manifest (a bare file) has no dependencies. Delegates to the shared
-/// `vilan_core::manifest::resolve_workspace` so the CLI and LSP resolve identically.
-fn resolve_workspace(unit: &Unit, target: Target) -> Result<Workspace, String> {
+/// Resolves a unit's dependency workspace. A unit with no manifest (a bare file)
+/// has no dependencies. Delegates to the shared `vilan_core::manifest::resolve_workspace`
+/// so the CLI and LSP resolve identically. (The build target isn't needed — the
+/// graph is target-independent; the analyzer reports any cross-target import.)
+fn resolve_workspace(unit: &Unit) -> Result<Workspace, String> {
     match &unit.package_dir {
-        Some(package_dir) => vilan_core::manifest::resolve_workspace(package_dir, target),
+        Some(package_dir) => vilan_core::manifest::resolve_workspace(package_dir),
         None => Ok(Workspace::default()),
     }
 }
@@ -450,7 +451,7 @@ fn resolve_workspace(unit: &Unit, target: Target) -> Result<Workspace, String> {
 /// Resolves a unit's workspace and compiles its entry for `target`, returning the
 /// emitted JavaScript (or a failure code after reporting).
 fn compile_unit(unit: &Unit, target: Target, emit_debug: bool) -> Result<String, ExitCode> {
-    let workspace = match resolve_workspace(unit, target) {
+    let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
         Err(message) => {
             eprintln!("error: {message}");

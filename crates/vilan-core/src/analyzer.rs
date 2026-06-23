@@ -9324,12 +9324,14 @@ fn resolve_module_file(root: &Path, name: &str) -> (Option<String>, bool) {
     }
 }
 
-/// Collects the names of package modules referenced via `<root>::<module>::..`
-/// in a node list's top-level `import`/`use`/`export import` statements, so the
-/// loader can pull them in transitively. `root` is `pkg` when scanning a std
-/// module's own siblings, or `std` when scanning the entry program for the std
-/// submodules it addresses by path (e.g. `import std::option::Option`).
-fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> {
+/// Collects package modules referenced via `<root>::<module>::..` in a node list's
+/// top-level `import`/`use`/`export import` statements — each with the **span** of
+/// its module segment, so the loader can pull them in transitively and report a
+/// cross-target import at its source location (P3). `root` is `pkg` when scanning a
+/// std module's own siblings, `std` when scanning the entry program for the std
+/// submodules it addresses by path (e.g. `import std::option::Option`), or a
+/// dependency's import name.
+fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<(&'a str, Span)> {
     let mut modules = Vec::new();
     for (node, _span) in nodes {
         let branch = match node {
@@ -9343,21 +9345,72 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<&'a str> 
         if let Some(branch) = branch {
             let mut entries = Vec::new();
             flatten_namespace_branch(branch, Vec::new(), &mut entries);
-            for (path, leaf, _span) in entries {
+            for (path, leaf, leaf_span) in entries {
                 if path.first().map(|(name, _)| *name) != Some(root) {
                     continue;
                 }
                 // `import std::option::..` -> the module is the segment after the
                 // root; a bare `import std::random` -> the module is the leaf.
                 if path.len() >= 2 {
-                    modules.push(path[1].0);
+                    modules.push((path[1].0, path[1].1));
                 } else {
-                    modules.push(leaf);
+                    modules.push((leaf, leaf_span));
                 }
             }
         }
     }
     modules
+}
+
+/// Pushes a recoverable cross-target error — spanned at the offending `import` —
+/// for each std module in `refs` whose platform layer isn't available for the
+/// build `target` (P3). The modules are still loaded (the caller enqueues them):
+/// the type pass continues as if allowed, so one cross-target import doesn't
+/// cascade into unresolved-name errors. De-duplicated by module name.
+fn gate_platform_imports(refs: &[(&str, Span)], target: Target, diagnostics: &mut Vec<Error>) {
+    let mut reported: HashSet<&str> = HashSet::new();
+    for (name, span) in refs {
+        let platform = Platform::of_std_module(name);
+        if !platform.is_available_for(target) && reported.insert(*name) {
+            diagnostics.push(Error {
+                span: *span,
+                msg: format!(
+                    "`std::{name}` is part of the {} platform layer and is not available \
+                     when building for `{}`",
+                    platform.name(),
+                    target.name()
+                ),
+            });
+        }
+    }
+}
+
+/// Pushes a recoverable cross-target error — spanned at the first import of the
+/// dependency — when a user-imported dependency's `target` is incompatible with
+/// the build target (it must be `none` or the build target) (P3). The dependency
+/// is still loaded for typing, so its items resolve and the file doesn't cascade.
+fn gate_dependency_import(
+    refs: &[(&str, Span)],
+    dependency_name: &str,
+    dependency_target: Target,
+    target: Target,
+    diagnostics: &mut Vec<Error>,
+) {
+    if dependency_target == Target::None || dependency_target == target {
+        return;
+    }
+    if let Some((_, span)) = refs.first() {
+        diagnostics.push(Error {
+            span: *span,
+            msg: format!(
+                "dependency `{dependency_name}` targets `{}`, which a `{}` build can't import \
+                 (a dependency must target `none` or `{}`)",
+                dependency_target.name(),
+                target.name(),
+                target.name()
+            ),
+        });
+    }
 }
 
 /// A dependency package reachable from the program being analyzed (P2). The
@@ -9520,22 +9573,29 @@ pub fn analyze<'src>(
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
         .unwrap_or_default()
         .into_iter()
-        .map(|name| (Origin::Std, name))
+        .map(|(name, _)| (Origin::Std, name))
         .collect();
     if let Some(derived) = derived {
         to_load.extend(
             collect_module_refs(derived, "std")
                 .into_iter()
-                .map(|name| (Origin::Std, name)),
+                .map(|(name, _)| (Origin::Std, name)),
         );
     }
     // The entry program addresses std submodules by path (`std::option::..`), so
     // its imports also seed the reachable set. Names that aren't modules (e.g. the
-    // `print` in `std::print`) simply find no file and are skipped.
+    // `print` in `std::print`) simply find no file and are skipped. A cross-target
+    // std import (e.g. `std::http` in a browser build) is reported here — once, at
+    // its import — but still loaded, so the rest of the file types cleanly (P3).
+    // (Skipped when compiling std itself, whose internal imports aren't user code.)
+    let entry_std_refs = collect_module_refs(&nodes.0, "std");
+    if !compiling_std {
+        gate_platform_imports(&entry_std_refs, target, &mut analyzer.diagnostics);
+    }
     to_load.extend(
-        collect_module_refs(&nodes.0, "std")
+        entry_std_refs
             .into_iter()
-            .map(|name| (Origin::Std, name)),
+            .map(|(name, _)| (Origin::Std, name)),
     );
     // The entry's `pkg::sibling` references pull in its own package's modules from
     // `pkg_root`. When the entry is itself a std file (`compiling_std`) these are
@@ -9543,7 +9603,7 @@ pub fn analyze<'src>(
     to_load.extend(
         collect_module_refs(&nodes.0, "pkg")
             .into_iter()
-            .map(|name| (entry_pkg_origin, name)),
+            .map(|(name, _)| (entry_pkg_origin, name)),
     );
     // `bool`, `List`, and `null` are core primitives, so their (dependency-free)
     // modules are always loaded even when not imported.
@@ -9621,12 +9681,21 @@ pub fn analyze<'src>(
         for (index, spec) in workspace.packages.iter().enumerate() {
             analyzer.packages[1 + index].dependencies = resolve_edges(&spec.dependencies);
         }
-        // The entry's own `<dep>::submodule` references seed those dependencies.
+        // The entry's own `<dep>::submodule` references seed those dependencies. An
+        // incompatible-target dependency is reported here (once, at its import) but
+        // still loaded, so its items resolve and the file doesn't cascade (P3).
         for (name, index) in &workspace.entry_dependencies {
+            let refs = collect_module_refs(&nodes.0, name);
+            gate_dependency_import(
+                &refs,
+                name,
+                workspace.packages[*index].target,
+                target,
+                &mut analyzer.diagnostics,
+            );
             to_load.extend(
-                collect_module_refs(&nodes.0, name)
-                    .into_iter()
-                    .map(|module| (Origin::Dep(*index), module)),
+                refs.into_iter()
+                    .map(|(module, _)| (Origin::Dep(*index), module)),
             );
         }
         // Load each dependency's `lib.vl` (its public surface) and seed the modules
@@ -9652,21 +9721,24 @@ pub fn analyze<'src>(
                 .package_of_source
                 .insert(lib_source_id, package_index);
             dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast));
+            // A dependency's own imports are its internals (not the building
+            // package's code), so they load for typing without a cross-target gate —
+            // the dependency's compatibility was checked at the user's import above.
             to_load.extend(
                 collect_module_refs(&lib_ast.0, "pkg")
                     .into_iter()
-                    .map(|module| (Origin::Dep(index), module)),
+                    .map(|(module, _)| (Origin::Dep(index), module)),
             );
             to_load.extend(
                 collect_module_refs(&lib_ast.0, "std")
                     .into_iter()
-                    .map(|module| (Origin::Std, module)),
+                    .map(|(module, _)| (Origin::Std, module)),
             );
             for (name, dependency_index) in &spec.dependencies {
                 to_load.extend(
                     collect_module_refs(&lib_ast.0, name)
                         .into_iter()
-                        .map(|module| (Origin::Dep(*dependency_index), module)),
+                        .map(|(module, _)| (Origin::Dep(*dependency_index), module)),
                 );
             }
         }
@@ -9689,25 +9761,10 @@ pub fn analyze<'src>(
             Origin::Pkg => pkg_root,
             Origin::Dep(index) => workspace.packages[index].root.as_path(),
         };
-        // Gate the platform std layer by target: a browser build can't load the
-        // Node layer (`std::http`, `std::fs`, `std::process`), and vice versa. A
-        // clear diagnostic beats the downstream "cannot find" once the symbols go
-        // missing. (Pkg modules are the user's own — never platform-gated.)
-        if origin == Origin::Std {
-            let platform = Platform::of_std_module(name);
-            if !platform.is_available_for(target) {
-                analyzer.diagnostics.push(Error {
-                    span: EMPTY_SPAN,
-                    msg: format!(
-                        "`std::{name}` is part of the {} platform layer and is not available \
-                         when building for `{}`",
-                        platform.name(),
-                        target.name()
-                    ),
-                });
-                continue;
-            }
-        }
+        // A platform-gated std module (e.g. `std::http` in a browser build) is *not*
+        // skipped here: it loads so its signatures bind and the rest of the file
+        // types cleanly. The cross-target diagnostic is reported once, at the user's
+        // `import`, where the load is seeded (`gate_platform_imports`) (P3).
         let (resolved_path, ambiguous) = resolve_module_file(root, name);
         let Some(module_path) = resolved_path else {
             // Not a module file here (a non-module name, or a missing import the
@@ -9812,25 +9869,51 @@ pub fn analyze<'src>(
         to_load.extend(
             collect_module_refs(&ast.0, "pkg")
                 .into_iter()
-                .map(|sibling| (origin, sibling)),
+                .map(|(sibling, _)| (origin, sibling)),
         );
-        let dependency_edges: &[(String, usize)] = match origin {
-            Origin::Pkg => &workspace.entry_dependencies,
-            Origin::Dep(index) => &workspace.packages[index].dependencies,
-            Origin::Std => &[],
-        };
-        if !matches!(origin, Origin::Std) {
-            to_load.extend(
-                collect_module_refs(&ast.0, "std")
-                    .into_iter()
-                    .map(|module| (Origin::Std, module)),
-            );
-            for (name, dependency_index) in dependency_edges {
+        // Seed the module's `std::` and `<dep>::` references. Only the *building*
+        // package's own code (`Pkg`) is cross-target-gated — a dependency's modules
+        // (`Dep`) are its internals, loaded for typing without a gate (the
+        // dependency's compatibility was checked at the user's import). Std modules
+        // reference each other only via `pkg::`, so they seed nothing here.
+        match origin {
+            Origin::Std => {}
+            Origin::Pkg => {
+                let std_refs = collect_module_refs(&ast.0, "std");
+                gate_platform_imports(&std_refs, target, &mut analyzer.diagnostics);
                 to_load.extend(
-                    collect_module_refs(&ast.0, name)
+                    std_refs
                         .into_iter()
-                        .map(|module| (Origin::Dep(*dependency_index), module)),
+                        .map(|(module, _)| (Origin::Std, module)),
                 );
+                for (name, index) in &workspace.entry_dependencies {
+                    let refs = collect_module_refs(&ast.0, name);
+                    gate_dependency_import(
+                        &refs,
+                        name,
+                        workspace.packages[*index].target,
+                        target,
+                        &mut analyzer.diagnostics,
+                    );
+                    to_load.extend(
+                        refs.into_iter()
+                            .map(|(module, _)| (Origin::Dep(*index), module)),
+                    );
+                }
+            }
+            Origin::Dep(index) => {
+                to_load.extend(
+                    collect_module_refs(&ast.0, "std")
+                        .into_iter()
+                        .map(|(module, _)| (Origin::Std, module)),
+                );
+                for (name, dependency_index) in &workspace.packages[index].dependencies {
+                    to_load.extend(
+                        collect_module_refs(&ast.0, name)
+                            .into_iter()
+                            .map(|(module, _)| (Origin::Dep(*dependency_index), module)),
+                    );
+                }
             }
         }
         loaded.push((name, ast, module_scope_id, module_source_id));
