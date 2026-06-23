@@ -1,7 +1,8 @@
-//! The typed `vilan.toml` manifest: a declarative description of a *package* (a
-//! buildable / importable unit) or a *project* (a workspace grouping packages).
-//! Both the `vilan` CLI and the language server parse a manifest through here, so
-//! the schema — and its validation — has a single source of truth.
+//! The typed `vilan.toml` manifest: a declarative description of a *package* (an
+//! app), a *library* (an importable, target-layered unit), or a *project* (a
+//! workspace grouping members). Both the `vilan` CLI and the language server parse
+//! a manifest through here, so the schema — and its validation — has a single
+//! source of truth.
 //!
 //! P1 makes resolution fully declarative (no inference): a package names its
 //! source `root` (default `src`) and `entry` (default `main.vl`, resolved against
@@ -18,12 +19,14 @@ use crate::analyzer::{PackageSpec, Workspace};
 use crate::options::{BuildOptions, Preset};
 use crate::target::Target;
 
-/// A parsed `vilan.toml`. Exactly one of `[package]` / `[project]` is present for
-/// a current-shape manifest; the legacy `[server]` + `[client]` pair (P2 replaces
-/// it with per-package targets) is still accepted.
+/// A parsed `vilan.toml`. Exactly one of `[package]` (an app) / `[library]` (an
+/// importable library) / `[project]` (a workspace) is present for a current-shape
+/// manifest; the legacy `[server]` + `[client]` pair (P2 replaces it with
+/// per-package targets) is still accepted.
 #[derive(Debug, Default, Deserialize)]
 pub struct Manifest {
     pub package: Option<Package>,
+    pub library: Option<Library>,
     pub project: Option<Project>,
     pub build: Option<Build>,
     /// Legacy full-stack server entry (`[server]`), kept working through P1.
@@ -46,6 +49,38 @@ pub struct Package {
     pub target: Option<String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
+}
+
+/// A library (L1): an importable unit with a public surface (`lib.vl`) and no app
+/// baggage — no `entry`, no single host `target`. It serves every target by
+/// **layering** its source: a base `root` (shared) plus per-target overlay roots
+/// under `[library.target.<t>]` (a module there shadows the base for that target).
+#[derive(Debug, Deserialize)]
+pub struct Library {
+    /// How dependents import this library. Required; a valid identifier.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// The base (shared) source root, relative to the manifest. Default `src`.
+    pub root: Option<PathBuf>,
+    /// Per-target overlay roots, keyed by target name (`node` / `browser`).
+    #[serde(default)]
+    pub target: BTreeMap<String, Layer>,
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, Dependency>,
+}
+
+/// One `[library.target.<t>]` overlay layer.
+#[derive(Debug, Deserialize)]
+pub struct Layer {
+    /// The overlay's source root, relative to the manifest. Defaults to `src/<t>`.
+    pub root: Option<PathBuf>,
+}
+
+impl Library {
+    /// The base source root (default `src`).
+    pub fn base_root(&self) -> &Path {
+        self.root.as_deref().unwrap_or(Path::new("src"))
+    }
 }
 
 /// A workspace root: a set of member packages plus dependencies they inherit.
@@ -134,7 +169,7 @@ impl Manifest {
         // so a typo doesn't silently do nothing. A second, untyped parse keeps the
         // typed deserialize free of a catch-all field.
         let table: toml::Table = toml::from_str(text).map_err(|error| error.to_string())?;
-        const KNOWN: &[&str] = &["package", "project", "build", "server", "client"];
+        const KNOWN: &[&str] = &["package", "library", "project", "build", "server", "client"];
         let warnings = table
             .keys()
             .filter(|key| !KNOWN.contains(&key.as_str()))
@@ -163,31 +198,41 @@ impl Manifest {
                         .to_string(),
                 );
             }
-            if self.package.is_some() || self.project.is_some() {
+            if self.package.is_some() || self.library.is_some() || self.project.is_some() {
                 errors.push(
                     "the legacy `[server]`/`[client]` form can't be combined with \
-                     `[package]` or `[project]`"
+                     `[package]`, `[library]`, or `[project]`"
                         .to_string(),
                 );
             }
         } else {
-            match (&self.package, &self.project) {
-                (Some(_), Some(_)) => errors.push(
-                    "set either `[package]` or `[project]`, not both — a package and \
-                     a workspace root are different manifests"
+            // Exactly one of `[package]` (app) / `[library]` / `[project]` (workspace).
+            let kinds = self.package.is_some() as u8
+                + self.library.is_some() as u8
+                + self.project.is_some() as u8;
+            if kinds > 1 {
+                errors.push(
+                    "set exactly one of `[package]`, `[library]`, or `[project]` — an app, a \
+                     library, and a workspace root are different manifests"
                         .to_string(),
-                ),
-                (None, None) => errors
-                    .push("`vilan.toml` must declare a `[package]` or a `[project]`".to_string()),
-                _ => {}
+                );
+            } else if kinds == 0 {
+                errors.push(
+                    "`vilan.toml` must declare a `[package]`, `[library]`, or `[project]`"
+                        .to_string(),
+                );
             }
         }
 
         if let Some(package) = &self.package {
             self.validate_package(package, &mut errors);
         }
+        if let Some(library) = &self.library {
+            self.validate_library(library, &mut errors);
+        }
         for dependencies in [
             self.package.as_ref().map(|p| &p.dependencies),
+            self.library.as_ref().map(|l| &l.dependencies),
             self.project.as_ref().map(|p| &p.dependencies),
         ]
         .into_iter()
@@ -220,6 +265,27 @@ impl Manifest {
                 errors.push(format!(
                     "unknown `[package] target` `{target}` (expected `node`, `browser`, or `none`)"
                 ));
+            }
+        }
+    }
+
+    fn validate_library(&self, library: &Library, errors: &mut Vec<String>) {
+        match &library.name {
+            None => errors.push("`[library]` is missing a `name`".to_string()),
+            Some(name) if !is_identifier(name) => errors.push(format!(
+                "`[library] name` must be a valid identifier (got `{name}`)"
+            )),
+            Some(_) => {}
+        }
+        // L1 layers are the concrete codegen targets (`node`/`browser`); `none`
+        // isn't an overlay (it's the absence of a host). Open-ended layer names
+        // (`deno`/`bun`) are L3.
+        for layer in library.target.keys() {
+            match Target::parse(layer) {
+                Some(Target::Node) | Some(Target::Browser) => {}
+                _ => errors.push(format!(
+                    "unknown `[library.target.{layer}]` (expected `node` or `browser`)"
+                )),
             }
         }
     }
@@ -337,23 +403,46 @@ fn resolve_dependency_edges(
         }
         let manifest = load_manifest(&dependency_dir)
             .map_err(|error| format!("dependency `{import_name}`: {error}"))?;
-        let package = manifest.package.ok_or_else(|| {
-            format!(
-                "dependency `{import_name}` at `{}` is not a `[package]`",
-                dependency_dir.display()
-            )
-        })?;
-        let dependency_target = package.resolved_target().unwrap_or(Target::Node);
-        // A target-incompatible dependency is *not* rejected here: it's recorded
-        // (with its target) and loaded, and the analyzer reports the cross-target
-        // import once, at the user's `import`, while still typing the rest of the
-        // file (P3). Only structural problems (cycles, a missing/invalid manifest)
-        // fail resolution.
-        //
-        // Resolve the dependency's own dependencies first, so they take lower
-        // indices (a valid load order), then record the dependency itself.
+        // A dependency must be a `[library]` — you depend on libraries, not apps
+        // (L1, Q2). A `[package]` (app) dependency is an error with a migration hint.
+        let library = match (&manifest.library, &manifest.package) {
+            (Some(_), _) => manifest.library.unwrap(),
+            (None, Some(_)) => {
+                return Err(format!(
+                    "dependency `{import_name}` at `{}` is a `[package]` (an app); only \
+                     `[library]` packages can be depended on — change its `[package]` to a \
+                     `[library]`",
+                    dependency_dir.display()
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "dependency `{import_name}` at `{}` is not a `[library]`",
+                    dependency_dir.display()
+                ));
+            }
+        };
+        // The library's layered roots: a base plus each declared per-target overlay
+        // (default `src/<t>`). A target-specific module being unavailable for the
+        // build target is the analyzer's per-module diagnostic, at the import (L1) —
+        // resolution itself only fails on structural problems (cycles, bad manifest).
+        let base_root = dependency_dir.join(library.base_root());
+        let target_roots: Vec<(Target, PathBuf)> = library
+            .target
+            .iter()
+            .filter_map(|(name, layer)| {
+                let target = Target::parse(name)?;
+                let root = layer
+                    .root
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("src").join(name));
+                Some((target, dependency_dir.join(root)))
+            })
+            .collect();
+        // Resolve the library's own dependencies first, so they take lower indices
+        // (a valid load order), then record the library itself.
         let dependency_edges = resolve_dependency_edges(
-            &package.dependencies,
+            &library.dependencies,
             &dependency_dir,
             packages,
             index_by_path,
@@ -362,8 +451,8 @@ fn resolve_dependency_edges(
         visiting.remove(&canonical);
         let index = packages.len();
         packages.push(PackageSpec {
-            root: dependency_dir.join(package.root()),
-            target: dependency_target,
+            base_root,
+            target_roots,
             dependencies: dependency_edges,
         });
         index_by_path.insert(canonical, index);
@@ -441,7 +530,45 @@ mod tests {
     #[test]
     fn package_and_project_are_mutually_exclusive() {
         let manifest = parse("[package]\nname = \"x\"\n[project]\npackages = []\n");
-        assert!(manifest.validate().iter().any(|e| e.contains("not both")));
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|e| e.contains("exactly one"))
+        );
+    }
+
+    #[test]
+    fn package_and_library_are_mutually_exclusive() {
+        let manifest = parse("[package]\nname = \"x\"\n[library]\nname = \"y\"\n");
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|e| e.contains("exactly one"))
+        );
+    }
+
+    #[test]
+    fn library_with_target_layer_is_valid() {
+        let manifest =
+            parse("[library]\nname = \"geometry\"\n[library.target.node]\nroot = \"src/node\"\n");
+        let library = manifest.library.as_ref().unwrap();
+        assert_eq!(library.base_root(), Path::new("src"));
+        assert!(library.target.contains_key("node"));
+        assert!(manifest.validate().is_empty());
+    }
+
+    #[test]
+    fn library_missing_name_is_an_error() {
+        let manifest = parse("[library]\n");
+        assert!(manifest.validate().iter().any(|e| e.contains("name")));
+    }
+
+    #[test]
+    fn unknown_library_target_layer_is_an_error() {
+        let manifest = parse("[library]\nname = \"x\"\n[library.target.deno]\nroot = \"d\"\n");
+        assert!(manifest.validate().iter().any(|e| e.contains("deno")));
     }
 
     #[test]

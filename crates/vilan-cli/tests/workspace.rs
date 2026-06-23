@@ -44,11 +44,7 @@ fn write_fullstack_workspace(dir: &Path) {
         "vilan.toml",
         "[project]\npackages = [\"common\", \"client\", \"server\"]\n",
     );
-    write(
-        dir,
-        "common/vilan.toml",
-        "[package]\nname = \"common\"\ntarget = \"none\"\n",
-    );
+    write(dir, "common/vilan.toml", "[library]\nname = \"common\"\n");
     write(dir, "common/src/lib.vl", "fun greeting(): str { \"hi\" }\n");
     write(
         dir,
@@ -107,63 +103,98 @@ fn combined(output: &Output) -> String {
 }
 
 #[test]
-fn incompatible_target_dependency_is_rejected_without_cascade() {
-    // A browser package depending on a `node`-target library: the cross-target
-    // import is a recoverable error (the build fails) — but the dependency still
-    // loads for typing, so `helper` resolves and there's no unresolved-name
-    // cascade (P3).
+fn cross_target_library_module_is_rejected_without_cascade() {
+    // A browser app imports a module that lives only in a library's `node` overlay:
+    // the cross-target import is a recoverable error (the build fails) — but the
+    // module still loads for typing, so `feature` resolves and there's no
+    // unresolved-name cascade (L1).
     let dir = temp_project("compat");
     write(
         dir.as_path(),
-        "nodelib/vilan.toml",
-        "[package]\nname = \"nodelib\"\ntarget = \"node\"\n",
+        "platlib/vilan.toml",
+        "[library]\nname = \"platlib\"\n\n[library.target.node]\nroot = \"src/node\"\n",
     );
+    write(dir.as_path(), "platlib/src/lib.vl", "");
     write(
         dir.as_path(),
-        "nodelib/src/lib.vl",
-        "fun helper(): i32 { 1 }\n",
+        "platlib/src/node/feature.vl",
+        "fun value(): i32 { 1 }\n",
     );
     write(
         &dir,
         "web/vilan.toml",
-        "[package]\nname = \"web\"\ntarget = \"browser\"\n\n[package.dependencies]\nnodelib = { path = \"../nodelib\" }\n",
+        "[package]\nname = \"web\"\ntarget = \"browser\"\n\n[package.dependencies]\nplatlib = { path = \"../platlib\" }\n",
     );
     write(
         &dir,
         "web/src/main.vl",
-        "import nodelib::helper;\nfun main() { helper() }\n",
+        "import platlib::feature::value;\nfun main() { value() }\n",
     );
     let output = vilan(&["build", dir.join("web").to_str().unwrap()]);
-    assert!(!output.status.success(), "expected a compat failure");
+    assert!(!output.status.success(), "expected a cross-target failure");
     let text = combined(&output);
-    assert!(text.contains("target"), "unexpected output: {text}");
+    assert!(
+        text.contains("another target's layer"),
+        "unexpected output: {text}"
+    );
     assert!(
         !text.contains("cannot find"),
-        "the dependency should still type-check (no cascade): {text}"
+        "the module should still type-check (no cascade): {text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
+fn dependency_must_be_a_library() {
+    // You depend on libraries, not apps (L1, Q2): a `[package]` dependency is an
+    // error with a migration hint.
+    let dir = temp_project("notlib");
+    write(
+        dir.as_path(),
+        "applib/vilan.toml",
+        "[package]\nname = \"applib\"\ntarget = \"node\"\n",
+    );
+    write(dir.as_path(), "applib/src/main.vl", "fun main() {}\n");
+    write(
+        &dir,
+        "web/vilan.toml",
+        "[package]\nname = \"web\"\ntarget = \"node\"\n\n[package.dependencies]\napplib = { path = \"../applib\" }\n",
+    );
+    write(&dir, "web/src/main.vl", "fun main() {}\n");
+    let output = vilan(&["check", dir.join("web").to_str().unwrap()]);
+    assert!(!output.status.success(), "expected a not-a-library failure");
+    let text = combined(&output);
+    assert!(text.contains("[library]"), "unexpected output: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn dependency_cycle_is_rejected() {
+    // App `web` → library `liba` → library `libb` → `liba` (a cycle).
     let dir = temp_project("cycle");
     write(
         &dir,
-        "a/vilan.toml",
-        "[package]\nname = \"a\"\ntarget = \"none\"\n\n[package.dependencies]\nb = { path = \"../b\" }\n",
+        "web/vilan.toml",
+        "[package]\nname = \"web\"\ntarget = \"node\"\n\n[package.dependencies]\nliba = { path = \"../liba\" }\n",
     );
     write(
         &dir,
-        "a/src/lib.vl",
-        "import b::vb;\nfun va(): i32 { vb() }\n",
+        "web/src/main.vl",
+        "import liba::va;\nfun main() { va() }\n",
     );
     write(
         &dir,
-        "b/vilan.toml",
-        "[package]\nname = \"b\"\ntarget = \"none\"\n\n[package.dependencies]\na = { path = \"../a\" }\n",
+        "liba/vilan.toml",
+        "[library]\nname = \"liba\"\n\n[library.dependencies]\nlibb = { path = \"../libb\" }\n",
     );
-    write(&dir, "b/src/lib.vl", "import a::va;\nfun vb(): i32 { 1 }\n");
-    let output = vilan(&["check", dir.join("a").to_str().unwrap()]);
+    write(&dir, "liba/src/lib.vl", "fun va(): i32 { 1 }\n");
+    write(
+        &dir,
+        "libb/vilan.toml",
+        "[library]\nname = \"libb\"\n\n[library.dependencies]\nliba = { path = \"../liba\" }\n",
+    );
+    write(&dir, "libb/src/lib.vl", "fun vb(): i32 { 1 }\n");
+    let output = vilan(&["check", dir.join("web").to_str().unwrap()]);
     assert!(!output.status.success(), "expected a cycle failure");
     let text = combined(&output);
     assert!(text.contains("cycle"), "unexpected output: {text}");

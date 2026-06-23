@@ -154,8 +154,8 @@ fn analyze_workspace(entry: &str, deps: &[Dep], target: Target) -> Vec<String> {
             std::fs::write(&path, contents).unwrap();
         }
         packages.push(PackageSpec {
-            root: dep_root,
-            target: Target::None,
+            base_root: dep_root,
+            target_roots: Vec::new(),
             dependencies: Vec::new(),
         });
         entry_dependencies.push((dep.import_name.to_string(), index));
@@ -250,8 +250,8 @@ fn dependency_pkg_self_reference_is_isolated() {
     }
     let workspace = Workspace {
         packages: vec![PackageSpec {
-            root: dep_root,
-            target: Target::None,
+            base_root: dep_root,
+            target_roots: Vec::new(),
             dependencies: Vec::new(),
         }],
         entry_dependencies: vec![("common".to_string(), 0)],
@@ -383,4 +383,155 @@ fn platform_modules_load_for_typing_under_opposite_target() {
             "`std::{module}` under {target:?}: unexpected error: {errors:#?}"
         );
     }
+}
+
+// --- Library target layers (L1) --------------------------------------------
+
+/// Sets up a library `plat` with layers — a base module `shared`, a `node`-overlay
+/// `nodeonly`, and a `clock` present in both overlays (node returns `i32`, browser
+/// `str`) — and an empty base `lib.vl`. Analyzes `entry` (which imports from
+/// `plat`) for `target`, returning the diagnostics.
+fn analyze_layered(entry: &str, target: Target) -> Vec<String> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("vilan_layer_{}_{unique}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app = root.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let entry_path = app.join("main.vl");
+    std::fs::write(&entry_path, entry).unwrap();
+
+    let plat = root.join("plat");
+    let put = |rel: &str, contents: &str| {
+        let path = plat.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    put("src/lib.vl", "");
+    put("src/shared.vl", "fun shared(): i32 { 0 }\n");
+    put("src/node/nodeonly.vl", "fun nodeonly(): i32 { 1 }\n");
+    put("src/node/clock.vl", "fun clock(): i32 { 1 }\n");
+    put("src/browser/clock.vl", "fun clock(): str { \"x\" }\n");
+
+    let workspace = Workspace {
+        packages: vec![PackageSpec {
+            base_root: plat.join("src"),
+            target_roots: vec![
+                (Target::Node, plat.join("src/node")),
+                (Target::Browser, plat.join("src/browser")),
+            ],
+            dependencies: Vec::new(),
+        }],
+        entry_dependencies: vec![("plat".to_string(), 0)],
+    };
+    let source = std::fs::read_to_string(&entry_path).unwrap();
+    let leaked: &'static str = Box::leak(source.into_boxed_str());
+    let (_program, errors) = analyze_source(
+        leaked,
+        &std_root(),
+        &app,
+        &entry_path,
+        Some(target),
+        &workspace,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    errors.into_iter().map(|error| error.msg).collect()
+}
+
+#[test]
+fn base_module_available_for_all_targets() {
+    let entry = "import plat::shared::shared;\nfun main() { shared() }\n";
+    assert!(analyze_layered(entry, Target::Node).is_empty());
+    assert!(analyze_layered(entry, Target::Browser).is_empty());
+}
+
+#[test]
+fn overlay_module_available_only_for_its_target() {
+    let entry = "import plat::nodeonly::nodeonly;\nfun main() { nodeonly() }\n";
+    assert!(
+        analyze_layered(entry, Target::Node).is_empty(),
+        "the node overlay module is available for a node build"
+    );
+    let browser = analyze_layered(entry, Target::Browser);
+    assert!(
+        browser.iter().any(|e| e.contains("another target's layer")),
+        "expected a cross-target error for browser, got: {browser:#?}"
+    );
+    assert!(
+        !browser.iter().any(|e| e.contains("cannot find")),
+        "the module still loads for typing (no cascade): {browser:#?}"
+    );
+}
+
+#[test]
+fn varying_module_resolves_the_target_version() {
+    // `clock` is `i32` in the node overlay, `str` in the browser overlay. Passing it
+    // to an `i32` parameter type-checks for node and fails for browser — proving the
+    // build target's version loaded (the P4 case, structurally).
+    let entry = concat!(
+        "import plat::clock::clock;\n",
+        "fun need_int(n: i32) {}\n",
+        "fun main() { need_int(clock()) }\n",
+    );
+    assert!(
+        analyze_layered(entry, Target::Node).is_empty(),
+        "node `clock` is i32"
+    );
+    assert!(
+        !analyze_layered(entry, Target::Browser).is_empty(),
+        "browser `clock` is str — a type mismatch, proving the browser version loaded"
+    );
+}
+
+#[test]
+fn base_lib_reexporting_an_overlay_module_errors() {
+    // A library whose base `lib.vl` re-exports `nodeonly` (a node-overlay module):
+    // the public surface must be target-agnostic, so this is a Q4 violation.
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("vilan_q4_{}_{unique}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app = root.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let entry_path = app.join("main.vl");
+    std::fs::write(
+        &entry_path,
+        "import plat::shared::shared;\nfun main() { shared() }\n",
+    )
+    .unwrap();
+    let plat = root.join("plat");
+    let put = |rel: &str, contents: &str| {
+        let path = plat.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    put("src/lib.vl", "export import pkg::nodeonly::nodeonly;\n");
+    put("src/shared.vl", "fun shared(): i32 { 0 }\n");
+    put("src/node/nodeonly.vl", "fun nodeonly(): i32 { 1 }\n");
+    let workspace = Workspace {
+        packages: vec![PackageSpec {
+            base_root: plat.join("src"),
+            target_roots: vec![(Target::Node, plat.join("src/node"))],
+            dependencies: Vec::new(),
+        }],
+        entry_dependencies: vec![("plat".to_string(), 0)],
+    };
+    let source = std::fs::read_to_string(&entry_path).unwrap();
+    let leaked: &'static str = Box::leak(source.into_boxed_str());
+    let (_program, errors) = analyze_source(
+        leaked,
+        &std_root(),
+        &app,
+        &entry_path,
+        Some(Target::Node),
+        &workspace,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let errors: Vec<String> = errors.into_iter().map(|error| error.msg).collect();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("re-exports") && e.contains("nodeonly")),
+        "expected a base-lib re-export error, got: {errors:#?}"
+    );
 }

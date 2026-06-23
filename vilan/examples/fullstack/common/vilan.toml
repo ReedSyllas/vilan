@@ -1,6 +1,6 @@
-[package]
+[library]
 name = "common"
-# A pure library (`target = "none"`): core std only, so it compiles into both the
-# Node server and the browser client. Importing a platform module here (e.g.
-# `std::http`) would be a build error for any dependent that isn't that target.
-target = "none"
+# A library has no host `target` — it serves every target. This one is all base
+# layer (core std only), so it compiles into both the Node server and the browser
+# client. A platform-specific module would live in a `[library.target.<t>]` overlay
+# and only be available to a dependent building for that target.

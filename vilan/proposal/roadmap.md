@@ -29,7 +29,11 @@ member), and both examples migrated (`[server]`/`[client]` now lowers onto a wor
 an incompatible-target dependency) is loaded for typing and reported as one recoverable, spanned error
 at the `import` rather than skip-loaded into a cascade (the headline fixture dropped from 18
 diagnostics to 2). **The next frontier is the rest of the project & platform model** — the *Next up*
-section below (P4–P6) — which supersedes #8's full-stack project-model bits and folds in backlog E6.
+section below (P4–P6) — which supersedes #8's full-stack project-model bits and folds in backlog E6;
+and **library packages L1** (the first slice of P4): a `[library]` manifest (importable, no app
+baggage) that serves multiple targets by **layering** its source (`[library.target.node] root = …`),
+with a per-module layer-availability gate that replaces P2's coarse dependency-target compat. `std`
+de-special-casing is **L2**, the next step.
 
 ---
 
@@ -77,12 +81,23 @@ P3. **Cross-target imports diagnose, don't break typings** (M) **[new] — ✅ s
     `resolve_workspace` no longer hard-fails on the compat rule (cycles stay fatal) — the headline
     fixture dropped from 18 diagnostics to 2. An error-recovery requirement on P2's gating.
 
-P4. **Target-varying modules** (M) **[new]** — the same import path resolves to a different module
-    per target, so `import std::http` pulls `http.node.vl` under a node target, `http.deno.vl` under
-    deno, etc. **Config approach (preferred):** `vilan.toml` `[[module_override]] { module, target,
-    path }`. (A sibling-file convention — `http.node.vl` / `http.deno.vl` / a dispatching `http.vl` —
-    was considered, but has no clean implementation, so it's deferred to config.) The std needs this
-    most as targets multiply, though any package benefits. Needs the target model (P2).
+P4. **Library packages** (L) **[new, replaces "target-varying modules"]** — a `[library]` manifest:
+    an importable unit with a public surface (`lib.vl`) and *no* app baggage (no `entry`, no single
+    host `target`), that serves multiple targets by **layering** its source — a shared base root plus
+    per-target overlay roots (`[library.target.node] root = "src/node"`). The same import path resolves
+    to a different source per target *structurally* (subsuming the old "target-varying modules" idea —
+    no `[[module_override]]` config), and a module's availability for a target is just whether it
+    exists in a reachable layer (subsuming P2's hardcoded `Platform::of_std_module` map and dissolving
+    P2's coarse dependency-target compat rule into P3's per-module check). *Plan in
+    `proposal/library-packages.md`*, split into steps:
+    - **L1 — ✅ shipped 2026-06-23:** the `[library]` manifest + target-layered resolution for *user*
+      libraries; dependencies must be libraries (the per-module layer gate replaced
+      `gate_dependency_import`); `common` migrated to `[library]`. `std` untouched (corpus byte-identical).
+    - **L2 (next):** `std` becomes a library — a `[library]` manifest, its 5 platform modules reorganized into
+      `node`/`browser` layers, `Platform::of_std_module` deleted, and the std-specific gate collapsed
+      into the general one. The big de-special-casing.
+    - **L3 (optional):** open-ended target layers (`deno`/`bun`), decoupled from the codegen target enum.
+    Needs the target model (P2) and error recovery (P3).
 
 P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent]** — rebuild / rerun
     on source change. Independent of the project work (pull forward as a quick DX win); leans on the

@@ -408,12 +408,18 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
         for member_path in &project.packages {
             let member_dir = directory.join(member_path);
             let member_manifest = read_manifest(&member_dir)?;
-            let package = member_manifest.package.as_ref().ok_or_else(|| {
-                format!(
-                    "workspace member `{}` is not a `[package]`",
+            // A `[library]` member is built only as a dependency of the apps that
+            // import it, not on its own — skip it here. Only `[package]` (app)
+            // members are buildable units.
+            let Some(package) = member_manifest.package.as_ref() else {
+                if member_manifest.library.is_some() {
+                    continue;
+                }
+                return Err(format!(
+                    "workspace member `{}` is not a `[package]` or `[library]`",
                     member_dir.display()
-                )
-            })?;
+                ));
+            };
             let member_options = member_manifest
                 .build_options()
                 .map_err(|error| format!("invalid {}/vilan.toml: {error}", member_dir.display()))?;

@@ -9385,50 +9385,116 @@ fn gate_platform_imports(refs: &[(&str, Span)], target: Target, diagnostics: &mu
     }
 }
 
-/// Pushes a recoverable cross-target error — spanned at the first import of the
-/// dependency — when a user-imported dependency's `target` is incompatible with
-/// the build target (it must be `none` or the build target) (P3). The dependency
-/// is still loaded for typing, so its items resolve and the file doesn't cascade.
-fn gate_dependency_import(
+/// Pushes a recoverable cross-target error — spanned at the offending `import` —
+/// for each module imported from `library` that isn't available for the build
+/// `target` (it lives only in *another* target's overlay) (L1). The module still
+/// loads for typing (from wherever it is), so the file doesn't cascade. Imports
+/// that aren't module files in any layer — an item re-exported from `lib.vl`, or a
+/// typo — are left to normal name resolution. This per-module layer-availability
+/// check replaces P2/P3's coarse per-dependency target gate.
+fn gate_library_imports(
     refs: &[(&str, Span)],
-    dependency_name: &str,
-    dependency_target: Target,
+    library: &PackageSpec,
+    library_name: &str,
     target: Target,
     diagnostics: &mut Vec<Error>,
 ) {
-    if dependency_target == Target::None || dependency_target == target {
-        return;
-    }
-    if let Some((_, span)) = refs.first() {
-        diagnostics.push(Error {
-            span: *span,
-            msg: format!(
-                "dependency `{dependency_name}` targets `{}`, which a `{}` build can't import \
-                 (a dependency must target `none` or `{}`)",
-                dependency_target.name(),
-                target.name(),
-                target.name()
-            ),
-        });
+    let mut reported: HashSet<&str> = HashSet::new();
+    for (name, span) in refs {
+        if !reported.insert(*name) {
+            continue;
+        }
+        // Available for this target (its overlay or the base)? then fine.
+        if resolve_module_in_roots(&library.available_roots(target), name)
+            .0
+            .is_some()
+        {
+            continue;
+        }
+        // Not available here, but present in another target's overlay → cross-target.
+        if resolve_module_in_roots(&library.search_roots(target), name)
+            .0
+            .is_some()
+        {
+            diagnostics.push(Error {
+                span: *span,
+                msg: format!(
+                    "`{library_name}::{name}` is in another target's layer and isn't available \
+                     when building for `{}`",
+                    target.name()
+                ),
+            });
+        }
     }
 }
 
-/// A dependency package reachable from the program being analyzed (P2). The
-/// front-end (CLI / LSP) resolves these from the manifests and their declared
-/// `[package.dependencies]` paths; `analyze` loads each one's modules into its own
-/// namespace, so `import <name>::module::item` resolves against it and the
-/// dependency's own `pkg::` self-references stay within it.
+/// A dependency **library** reachable from the program being analyzed (P2/L1). The
+/// front-end (CLI / LSP) resolves these from `[library]` manifests; `analyze` loads
+/// each one's modules into its own namespace, so `import <name>::module::item`
+/// resolves against it and the library's own `pkg::` self-references stay within it.
+///
+/// A library serves every target by **layering** its source: a `base_root` shared
+/// by all targets plus per-target overlay roots (L1). For a build target `T` a
+/// module resolves from `T`'s overlay then the base (the overlay shadows the base);
+/// a module present only in *another* target's overlay is a cross-target import,
+/// reported at the `import` but still loaded (for typing) from wherever it lives.
 #[derive(Debug, Clone)]
 pub struct PackageSpec {
-    /// The package's source root (the directory its modules and `pkg::` siblings
-    /// live in).
-    pub root: PathBuf,
-    /// Its declared target (informational — every loaded module is gated by the
-    /// *build* target; the front-end enforces dependency-target compatibility).
-    pub target: Target,
-    /// How this package addresses its own dependencies: `(import name, index into
+    /// The library's base (shared) source root — where its `lib.vl` and all-target
+    /// modules live.
+    pub base_root: PathBuf,
+    /// Per-target overlay roots. A module here shadows a base module of the same
+    /// name for that target.
+    pub target_roots: Vec<(Target, PathBuf)>,
+    /// How this library addresses its own dependencies: `(import name, index into
     /// the package slice)`. Lets a transitive `dep::subdep::item` resolve.
     pub dependencies: Vec<(String, usize)>,
+}
+
+impl PackageSpec {
+    /// The ordered roots to search for a module when building for `target`: the
+    /// target's overlay (if any) first so it shadows the base, then the base, then
+    /// the *other* overlays last — so a cross-target module still loads for typing
+    /// (its cross-target import having been reported at the `import`).
+    fn search_roots(&self, target: Target) -> Vec<&Path> {
+        let mut roots = Vec::new();
+        if let Some((_, root)) = self.target_roots.iter().find(|(t, _)| *t == target) {
+            roots.push(root.as_path());
+        }
+        roots.push(self.base_root.as_path());
+        for (other, root) in &self.target_roots {
+            if *other != target {
+                roots.push(root.as_path());
+            }
+        }
+        roots
+    }
+
+    /// The roots a module is *available* from for `target`: its overlay then the
+    /// base (not other targets' overlays). A module resolvable here is in-target;
+    /// one resolvable only via [`search_roots`] is cross-target.
+    fn available_roots(&self, target: Target) -> Vec<&Path> {
+        let mut roots = Vec::new();
+        if let Some((_, root)) = self.target_roots.iter().find(|(t, _)| *t == target) {
+            roots.push(root.as_path());
+        }
+        roots.push(self.base_root.as_path());
+        roots
+    }
+}
+
+/// Resolves a module `name` against `roots` in order — the first root with a flat
+/// `name.vl` or directory `name/lib.vl` wins (so an earlier root shadows a later
+/// one). Returns the existing path and whether *that root* was ambiguous (both
+/// forms present); `None` if no root has the module.
+fn resolve_module_in_roots(roots: &[&Path], name: &str) -> (Option<String>, bool) {
+    for root in roots {
+        let (path, ambiguous) = resolve_module_file(root, name);
+        if path.is_some() {
+            return (path, ambiguous);
+        }
+    }
+    (None, false)
 }
 
 /// The dependency graph available to a program: the flat set of reachable
@@ -9642,7 +9708,7 @@ pub fn analyze<'src>(
             // The namespace module's display name is the package directory's base
             // name (a dependent addresses it by its own import name regardless).
             let display_name: &'static str = Box::leak(
-                spec.root
+                spec.base_root
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "dep".to_string())
@@ -9681,15 +9747,16 @@ pub fn analyze<'src>(
         for (index, spec) in workspace.packages.iter().enumerate() {
             analyzer.packages[1 + index].dependencies = resolve_edges(&spec.dependencies);
         }
-        // The entry's own `<dep>::submodule` references seed those dependencies. An
-        // incompatible-target dependency is reported here (once, at its import) but
-        // still loaded, so its items resolve and the file doesn't cascade (P3).
+        // The entry's own `<dep>::submodule` references seed those dependencies. A
+        // module not available for the build target (it's in another target's
+        // layer) is reported here (once, at its import) but still loaded, so its
+        // items resolve and the file doesn't cascade (L1).
         for (name, index) in &workspace.entry_dependencies {
             let refs = collect_module_refs(&nodes.0, name);
-            gate_dependency_import(
+            gate_library_imports(
                 &refs,
+                &workspace.packages[*index],
                 name,
-                workspace.packages[*index].target,
                 target,
                 &mut analyzer.diagnostics,
             );
@@ -9704,14 +9771,13 @@ pub fn analyze<'src>(
         for (index, spec) in workspace.packages.iter().enumerate() {
             let package_index = 1 + index;
             let namespace_scope_id = analyzer.packages[package_index].namespace_scope_id;
-            let lib_path = std_module_path(&spec.root, "lib.vl");
+            // A library's public surface is its base `lib.vl` (the base layer is
+            // target-agnostic), loaded once for every target.
+            let lib_path = std_module_path(&spec.base_root, "lib.vl");
             let Some(lib_ast) = load_package_module(&lib_path) else {
                 analyzer.diagnostics.push(Error {
                     span: EMPTY_SPAN,
-                    msg: format!(
-                        "dependency package at `{}` has no `lib.vl`",
-                        spec.root.display()
-                    ),
+                    msg: format!("library at `{}` has no `lib.vl`", spec.base_root.display()),
                 });
                 continue;
             };
@@ -9721,14 +9787,35 @@ pub fn analyze<'src>(
                 .package_of_source
                 .insert(lib_source_id, package_index);
             dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast));
-            // A dependency's own imports are its internals (not the building
-            // package's code), so they load for typing without a cross-target gate —
-            // the dependency's compatibility was checked at the user's import above.
-            to_load.extend(
-                collect_module_refs(&lib_ast.0, "pkg")
-                    .into_iter()
-                    .map(|(module, _)| (Origin::Dep(index), module)),
-            );
+            // A library's own imports are its internals (not the building package's
+            // code), so they load for typing without a cross-target gate. But the
+            // base `lib.vl` is the *public surface*, which must be the same for every
+            // target — so its `pkg::` re-exports must resolve in the **base** layer
+            // (L1, Q4). Re-exporting a target-overlay module is an error.
+            let library_name = spec
+                .base_root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "dep".to_string());
+            for (module, _) in collect_module_refs(&lib_ast.0, "pkg") {
+                if resolve_module_file(&spec.base_root, module).0.is_some() {
+                    to_load.push((Origin::Dep(index), module));
+                } else if resolve_module_in_roots(&spec.search_roots(target), module)
+                    .0
+                    .is_some()
+                {
+                    analyzer.diagnostics.push(Error {
+                        span: EMPTY_SPAN,
+                        msg: format!(
+                            "library `{library_name}`'s base `lib.vl` re-exports `{module}`, a \
+                             target-specific module (it lives in a target overlay, not the base) \
+                             — import it by path instead of re-exporting it"
+                        ),
+                    });
+                }
+                // else: not a module file in any layer — an item re-export handled by
+                // normal resolution; leave it.
+            }
             to_load.extend(
                 collect_module_refs(&lib_ast.0, "std")
                     .into_iter()
@@ -9756,16 +9843,19 @@ pub fn analyze<'src>(
         if !loaded_keys.insert((origin, name)) {
             continue;
         }
-        let root = match origin {
-            Origin::Std => std_root,
-            Origin::Pkg => pkg_root,
-            Origin::Dep(index) => workspace.packages[index].root.as_path(),
+        // The roots to search for this module. `std`/`pkg` are single-root; a
+        // dependency library is layered — its overlay for the build target, then its
+        // base, then other overlays (so a cross-target module still loads for typing).
+        let search_roots: Vec<&Path> = match origin {
+            Origin::Std => vec![std_root],
+            Origin::Pkg => vec![pkg_root],
+            Origin::Dep(index) => workspace.packages[index].search_roots(target),
         };
         // A platform-gated std module (e.g. `std::http` in a browser build) is *not*
         // skipped here: it loads so its signatures bind and the rest of the file
         // types cleanly. The cross-target diagnostic is reported once, at the user's
-        // `import`, where the load is seeded (`gate_platform_imports`) (P3).
-        let (resolved_path, ambiguous) = resolve_module_file(root, name);
+        // `import`, where the load is seeded (P3/L1).
+        let (resolved_path, ambiguous) = resolve_module_in_roots(&search_roots, name);
         let Some(module_path) = resolved_path else {
             // Not a module file here (a non-module name, or a missing import the
             // resolver below will report) — skip, as the previous loader did.
@@ -9888,10 +9978,10 @@ pub fn analyze<'src>(
                 );
                 for (name, index) in &workspace.entry_dependencies {
                     let refs = collect_module_refs(&ast.0, name);
-                    gate_dependency_import(
+                    gate_library_imports(
                         &refs,
+                        &workspace.packages[*index],
                         name,
-                        workspace.packages[*index].target,
                         target,
                         &mut analyzer.diagnostics,
                     );
