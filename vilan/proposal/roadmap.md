@@ -99,7 +99,12 @@ P4. **Library packages** (L) **[new, replaces "target-varying modules"]** — a 
       platform modules reorganized into `src/node`/`src/browser` overlays, `Platform::of_std_module`
       deleted, and the std-specific gate collapsed into the one `gate_library_imports`. Corpus
       byte-identical. The big de-special-casing.
-    - **L3 (next, optional):** open-ended target layers (`deno`/`bun`), decoupled from the codegen target enum.
+    - **L3 → redesigned as the build model** (`proposal/platform-model.md`): split `Target` into a
+      `Backend` (JS/WASM + ES level) and a `Platform` (an ordered **layer list** + launcher); library
+      layers re-key from the fixed `Target` enum to open capability/runtime layer names; host-binding
+      modules split into a shared interface (capability layer) + per-runtime `_sys` bindings. Subsumes
+      L3's open-ended targets and stabilizes the model so a backend (WASM) or runtime (Deno/Bun) is
+      additive. *Awaiting review.*
     Needs the target model (P2) and error recovery (P3).
 
 P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent]** — rebuild / rerun
