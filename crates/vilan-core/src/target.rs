@@ -6,12 +6,17 @@
 //!   serve (`PlatformPattern`), and a build resolves each module to the
 //!   most-specific matching layer.
 //!
-//! The supported set is small but extensible: platform `node:24`/`browser`,
-//! backend `js`. Adding a runtime, a node version, or a backend is a change here.
+//! The supported set is small but extensible: platforms `node:24` / `deno:2` /
+//! `browser`, backend `js`. Adding a runtime, a version, or a backend is a change
+//! here.
 
 /// The supported Node major version (the current LTS) — the only `node` version
 /// that builds for now.
 pub const NODE_LTS: u32 = 24;
+
+/// The supported Deno major version (the current major) — the only `deno` version
+/// that builds for now.
+pub const DENO_CURRENT: u32 = 2;
 
 /// The emitter backend — the output language. JavaScript today; WASM later.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,6 +49,10 @@ impl Backend {
 pub enum Platform {
     /// Node.js, by major version (only [`NODE_LTS`] is supported today).
     Node { version: u32 },
+    /// Deno, by major version (only [`DENO_CURRENT`] is supported today). A
+    /// process-having runtime (`@process`) like Node; its `node:`-compat bindings
+    /// make the shared `process` layer serve it without a per-runtime split.
+    Deno { version: u32 },
     /// The browser.
     Browser,
     /// No host — `vilan check` only; emitting requires a concrete host.
@@ -57,43 +66,37 @@ impl Default for Platform {
 }
 
 impl Platform {
-    /// Parses a `--platform` value: `node` / `node:24` / `browser` / `none`. A
-    /// `node` with no version defaults to the LTS; an unsupported version errors.
+    /// Parses a `--platform` value: `node` / `node:24` / `deno` / `deno:2` /
+    /// `browser` / `none`. A process runtime with no version defaults to its current
+    /// supported major; an unsupported version errors.
     pub fn parse(name: &str) -> Result<Self, String> {
         let (runtime, version) = match name.split_once(':') {
             Some((runtime, version)) => (runtime, Some(version)),
             None => (name, None),
         };
         match runtime {
-            "node" => {
-                let version = match version {
-                    None => NODE_LTS,
-                    Some(text) => text
-                        .parse()
-                        .map_err(|_| format!("invalid node version `{text}`"))?,
-                };
-                if version != NODE_LTS {
-                    return Err(format!(
-                        "unsupported node version `{version}` (supported: {NODE_LTS})"
-                    ));
-                }
-                Ok(Platform::Node { version })
-            }
+            "node" => Ok(Platform::Node {
+                version: supported_version(version, NODE_LTS, "node")?,
+            }),
+            "deno" => Ok(Platform::Deno {
+                version: supported_version(version, DENO_CURRENT, "deno")?,
+            }),
             "browser" | "none" if version.is_some() => {
                 Err(format!("the `{runtime}` platform takes no version"))
             }
             "browser" => Ok(Platform::Browser),
             "none" => Ok(Platform::None),
             _ => Err(format!(
-                "unknown platform `{name}` (expected `node`, `browser`, or `none`)"
+                "unknown platform `{name}` (expected `node`, `deno`, `browser`, or `none`)"
             )),
         }
     }
 
-    /// The platform's display name (`node:24` / `browser` / `none`).
+    /// The platform's display name (`node:24` / `deno:2` / `browser` / `none`).
     pub fn name(self) -> String {
         match self {
             Platform::Node { version } => format!("node:{version}"),
+            Platform::Deno { version } => format!("deno:{version}"),
             Platform::Browser => "browser".to_string(),
             Platform::None => "none".to_string(),
         }
@@ -105,9 +108,10 @@ impl Platform {
     }
 
     /// Whether the host has `process.exit` (so `main`'s result becomes an exit
-    /// code) — the one host-profile bit codegen needs.
+    /// code) — the one host-profile bit codegen needs. True for the process
+    /// runtimes (Node and Deno, via its `node:` compat).
     pub fn has_process_exit(self) -> bool {
-        matches!(self, Platform::Node { .. })
+        matches!(self, Platform::Node { .. } | Platform::Deno { .. })
     }
 
     /// How specifically this platform matches `pattern` (higher = more specific),
@@ -119,19 +123,46 @@ impl Platform {
                 PlatformPattern::Node {
                     version: Some(wanted),
                 },
+            )
+            | (
+                Platform::Deno { version },
+                PlatformPattern::Deno {
+                    version: Some(wanted),
+                },
             ) if version == wanted => Some(2),
-            (Platform::Node { .. }, PlatformPattern::Node { version: None }) => Some(1),
-            (Platform::Browser, PlatformPattern::Browser) => Some(1),
+            (Platform::Node { .. }, PlatformPattern::Node { version: None })
+            | (Platform::Deno { .. }, PlatformPattern::Deno { version: None })
+            | (Platform::Browser, PlatformPattern::Browser) => Some(1),
             _ => None,
         }
     }
 }
 
-/// What platforms a library layer serves — a pattern. A `node` version of `None`
-/// means "any node version"; `Some(v)` is a version-specific override.
+/// Validates a process runtime's version token: defaults to `supported` (the only
+/// version that builds today) when omitted, errors on a non-numeric or unsupported
+/// value. Shared by every versioned runtime so adding one doesn't duplicate this.
+fn supported_version(version: Option<&str>, supported: u32, runtime: &str) -> Result<u32, String> {
+    let version = match version {
+        None => supported,
+        Some(text) => text
+            .parse()
+            .map_err(|_| format!("invalid {runtime} version `{text}`"))?,
+    };
+    if version != supported {
+        return Err(format!(
+            "unsupported {runtime} version `{version}` (supported: {supported})"
+        ));
+    }
+    Ok(version)
+}
+
+/// What platforms a library layer serves — a pattern. A process runtime's version
+/// of `None` means "any version of that runtime"; `Some(v)` is a version-specific
+/// override.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlatformPattern {
     Node { version: Option<u32> },
+    Deno { version: Option<u32> },
     Browser,
 }
 
@@ -141,10 +172,13 @@ impl PlatformPattern {
     /// unknown token (a typo'd platform name).
     pub fn parse(token: &str) -> Option<Vec<PlatformPattern>> {
         // Families: a named set of runtimes, so a layer (and a new runtime) is a
-        // one-line edit here, not per-library churn. `@process` is node (plus deno
-        // and bun once they're added).
+        // one-line edit here, not per-library churn. `@process` is the process-having
+        // runtimes — node and deno today (bun once added).
         if token == "@process" {
-            return Some(vec![PlatformPattern::Node { version: None }]);
+            return Some(vec![
+                PlatformPattern::Node { version: None },
+                PlatformPattern::Deno { version: None },
+            ]);
         }
         let (runtime, version) = match token.split_once(':') {
             Some((runtime, "*")) => (runtime, None),
@@ -153,8 +187,130 @@ impl PlatformPattern {
         };
         match runtime {
             "node" => Some(vec![PlatformPattern::Node { version }]),
+            "deno" => Some(vec![PlatformPattern::Deno { version }]),
             "browser" if version.is_none() => Some(vec![PlatformPattern::Browser]),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_platforms() {
+        assert_eq!(
+            Platform::parse("node"),
+            Ok(Platform::Node { version: NODE_LTS })
+        );
+        assert_eq!(
+            Platform::parse("node:24"),
+            Ok(Platform::Node { version: 24 })
+        );
+        assert_eq!(
+            Platform::parse("deno"),
+            Ok(Platform::Deno {
+                version: DENO_CURRENT
+            })
+        );
+        assert_eq!(Platform::parse("deno:2"), Ok(Platform::Deno { version: 2 }));
+        assert_eq!(Platform::parse("browser"), Ok(Platform::Browser));
+        assert_eq!(Platform::parse("none"), Ok(Platform::None));
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_and_unknown() {
+        assert!(
+            Platform::parse("deno:9")
+                .unwrap_err()
+                .contains("unsupported deno version")
+        );
+        assert!(
+            Platform::parse("node:18")
+                .unwrap_err()
+                .contains("unsupported node version")
+        );
+        assert!(
+            Platform::parse("bun")
+                .unwrap_err()
+                .contains("unknown platform")
+        );
+        assert!(
+            Platform::parse("browser:1")
+                .unwrap_err()
+                .contains("takes no version")
+        );
+    }
+
+    #[test]
+    fn names_round_trip() {
+        for platform in [
+            Platform::Node { version: NODE_LTS },
+            Platform::Deno {
+                version: DENO_CURRENT,
+            },
+            Platform::Browser,
+            Platform::None,
+        ] {
+            assert_eq!(Platform::parse(&platform.name()), Ok(platform));
+        }
+    }
+
+    #[test]
+    fn process_family_expands_to_node_and_deno() {
+        let patterns = PlatformPattern::parse("@process").unwrap();
+        assert_eq!(
+            patterns,
+            vec![
+                PlatformPattern::Node { version: None },
+                PlatformPattern::Deno { version: None },
+            ]
+        );
+        // A `process` layer (declared `@process`) matches both node and deno, but
+        // not the browser — the whole point of the family.
+        let node = Platform::Node { version: NODE_LTS };
+        let deno = Platform::Deno {
+            version: DENO_CURRENT,
+        };
+        assert!(patterns.iter().any(|p| node.matches(*p).is_some()));
+        assert!(patterns.iter().any(|p| deno.matches(*p).is_some()));
+        assert!(
+            patterns
+                .iter()
+                .all(|p| Platform::Browser.matches(*p).is_none())
+        );
+    }
+
+    #[test]
+    fn matching_is_runtime_specific_and_version_ranked() {
+        let deno = Platform::Deno { version: 2 };
+        // Exact version outranks any-version; a different runtime never matches.
+        assert_eq!(
+            deno.matches(PlatformPattern::Deno { version: Some(2) }),
+            Some(2)
+        );
+        assert_eq!(
+            deno.matches(PlatformPattern::Deno { version: None }),
+            Some(1)
+        );
+        assert_eq!(deno.matches(PlatformPattern::Node { version: None }), None);
+        assert_eq!(
+            Platform::Node { version: NODE_LTS }.matches(PlatformPattern::Deno { version: None }),
+            None
+        );
+    }
+
+    #[test]
+    fn process_runtimes_have_process_exit() {
+        assert!(Platform::Node { version: NODE_LTS }.has_process_exit());
+        assert!(
+            Platform::Deno {
+                version: DENO_CURRENT
+            }
+            .has_process_exit()
+        );
+        assert!(!Platform::Browser.has_process_exit());
+        assert!(!Platform::None.has_process_exit());
     }
 }

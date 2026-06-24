@@ -37,9 +37,9 @@ enum Command {
         /// Print the JavaScript to stdout instead of writing `<file>.js`.
         #[arg(long)]
         stdout: bool,
-        /// The platform to build for: `node` (`node:24`), `browser`, or `none`.
-        /// Overrides the package's `target`; defaults to it, else `node`.
-        /// `--target` is an accepted alias.
+        /// The platform to build for: `node` (`node:24`), `deno` (`deno:2`),
+        /// `browser`, or `none`. Overrides the package's `target`; defaults to it,
+        /// else `node`. `--target` is an accepted alias.
         #[arg(long, alias = "target")]
         platform: Option<String>,
         /// The emitter backend: `js` (the only backend today).
@@ -54,9 +54,9 @@ enum Command {
     Check {
         /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
         file: Option<PathBuf>,
-        /// The platform to check for: `node` (`node:24`), `browser`, or `none`.
-        /// Overrides the package's `target`; defaults to it, else `node`.
-        /// `--target` is an accepted alias.
+        /// The platform to check for: `node` (`node:24`), `deno` (`deno:2`),
+        /// `browser`, or `none`. Overrides the package's `target`; defaults to it,
+        /// else `node`. `--target` is an accepted alias.
         #[arg(long, alias = "target")]
         platform: Option<String>,
         /// The emitter backend: `js` (the only backend today).

@@ -421,7 +421,8 @@ fn analyze_layered(entry: &str, platform: Platform) -> Vec<String> {
             layers: vec![
                 Layer {
                     name: "process".to_string(),
-                    patterns: vec![PlatformPattern::Node { version: None }],
+                    // The `@process` family (node + deno), like real `std`.
+                    patterns: PlatformPattern::parse("@process").unwrap(),
                     root: plat.join("src/process"),
                 },
                 Layer {
@@ -549,5 +550,62 @@ fn base_lib_reexporting_a_layer_module_errors() {
             .iter()
             .any(|e| e.contains("re-exports") && e.contains("nodeonly")),
         "expected a base-lib re-export error, got: {errors:#?}"
+    );
+}
+
+// --- Deno joins `@process` (a second process runtime) ----------------------
+
+/// The current `deno` platform (parsed so a test needn't name the version).
+fn deno() -> Platform {
+    Platform::parse("deno").expect("deno is a supported platform")
+}
+
+#[test]
+fn process_layer_std_is_reachable_for_deno() {
+    // `std::http` lives in the `process` layer (serves `@process`). Deno is in
+    // `@process`, so the import resolves with no cross-platform error — its
+    // `node:`-compat bindings are portable across the family (proposal §5).
+    let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", deno());
+    assert!(
+        errors.is_empty(),
+        "std::http should be reachable for deno: {errors:#?}"
+    );
+}
+
+#[test]
+fn browser_layer_std_is_cross_platform_for_deno() {
+    // The browser layer doesn't serve deno, so `std::dom` is a cross-platform import.
+    let entry = "import std::dom;\nfun main() {}\n";
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", deno());
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("std::dom") && e.contains("not available")),
+        "std::dom should be cross-platform for deno: {errors:#?}"
+    );
+}
+
+#[test]
+fn layered_process_module_serves_deno() {
+    // The `plat` fixture's `process` layer declares `@process`, so `nodeonly` is
+    // available for a deno build and `clock` resolves to the process version (i32),
+    // exactly as for node — one layer, the whole family.
+    assert!(
+        analyze_layered(
+            "import plat::nodeonly::nodeonly;\nfun main() { nodeonly() }\n",
+            deno()
+        )
+        .is_empty(),
+        "the process-layer module should be available for deno"
+    );
+    let clock = concat!(
+        "import plat::clock::clock;\n",
+        "fun need_int(n: i32) {}\n",
+        "fun main() { need_int(clock()) }\n",
+    );
+    assert!(
+        analyze_layered(clock, deno()).is_empty(),
+        "deno resolves the process `clock` (i32), like node"
     );
 }

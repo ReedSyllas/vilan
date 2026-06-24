@@ -45,7 +45,8 @@ pub struct Package {
     pub root: Option<PathBuf>,
     /// The `build`/`run` entry, resolved against `root`. Default `main.vl`.
     pub entry: Option<PathBuf>,
-    /// The default build target (`node` / `browser` / `none`). Default `node`.
+    /// The default build platform (`node` / `deno` / `browser` / `none`). Default
+    /// `node`.
     pub target: Option<String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
@@ -75,8 +76,8 @@ pub struct Library {
 pub struct LayerDecl {
     /// The layer's source root, relative to the manifest. Defaults to `src/<name>`.
     pub root: Option<PathBuf>,
-    /// The platforms this layer serves: `node` / `node:24` / `node:*` / `browser`,
-    /// or a family (`@process`). At least one.
+    /// The platforms this layer serves: `node` / `node:24` / `node:*` / `deno` /
+    /// `browser`, or a family (`@process`). At least one.
     #[serde(default)]
     pub platform: Vec<String>,
 }
@@ -291,7 +292,7 @@ impl Manifest {
                 if PlatformPattern::parse(token).is_none() {
                     errors.push(format!(
                         "`[library.layer.{name}]` has an unknown platform `{token}` \
-                         (expected `node`/`node:24`/`browser`, or `@process`)"
+                         (expected `node`/`node:24`/`deno`/`browser`, or `@process`)"
                     ));
                 }
             }
@@ -555,7 +556,7 @@ mod tests {
 
     #[test]
     fn unknown_target_is_an_error() {
-        let manifest = parse("[package]\nname = \"x\"\ntarget = \"deno\"\n");
+        let manifest = parse("[package]\nname = \"x\"\ntarget = \"bun\"\n");
         assert!(manifest.validate().iter().any(|e| e.contains("target")));
     }
 
@@ -566,6 +567,23 @@ mod tests {
             manifest.package.as_ref().unwrap().resolved_target(),
             Some(Platform::None)
         );
+        assert!(manifest.validate().is_empty());
+    }
+
+    #[test]
+    fn deno_target_is_valid() {
+        let manifest = parse("[package]\nname = \"svc\"\ntarget = \"deno\"\n");
+        assert_eq!(
+            manifest.package.as_ref().unwrap().resolved_target(),
+            Platform::parse("deno").ok()
+        );
+        assert!(manifest.validate().is_empty());
+    }
+
+    #[test]
+    fn library_layer_serving_deno_is_valid() {
+        let manifest =
+            parse("[library]\nname = \"x\"\n[library.layer.deno]\nplatform = [\"deno\"]\n");
         assert!(manifest.validate().is_empty());
     }
 
@@ -645,8 +663,8 @@ mod tests {
 
     #[test]
     fn unknown_library_layer_platform_is_an_error() {
-        let manifest = parse("[library]\nname = \"x\"\n[library.layer.l]\nplatform = [\"deno\"]\n");
-        assert!(manifest.validate().iter().any(|e| e.contains("deno")));
+        let manifest = parse("[library]\nname = \"x\"\n[library.layer.l]\nplatform = [\"bun\"]\n");
+        assert!(manifest.validate().iter().any(|e| e.contains("bun")));
     }
 
     #[test]
