@@ -1495,3 +1495,51 @@ fn trait_default_self_dispatch_still_runs() {
         "3\n",
     );
 }
+
+// --- B6: inferred-element list, closure-param field access -------------------
+
+#[test]
+fn inferred_list_closure_param_field_access() {
+    // A `List::new()` + `push` list has its element type inferred from `push`,
+    // which lands (via a `SlotUnification`) *after* a following `map`/`filter`
+    // would resolve. A method on such a receiver now defers while a `push`/`run`
+    // to fill the slot is still pending, so the closure parameter types against
+    // the concrete element and a field access on it works — no `mut xs: List<P>`
+    // annotation needed (backlog B6 / roadmap Tier 1.2). Parity with a literal
+    // list.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct P { x: i32 }
+        fun main() {
+            mut xs = List::new();
+            xs.push(P { x = 10 });
+            xs.push(P { x = 20 });
+            let big = xs.filter(|p| p.x > 15);
+            print(big.len());
+            let labels = xs.map(|p| p.x);
+            print(labels.len());
+        }
+        "#,
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn inferred_list_never_pushed_still_resolves() {
+    // The deferral must not strand a `List::new()` that is *never* pushed: with no
+    // pending `SlotUnification`, its methods resolve immediately (element stays
+    // `Unknown`/`any`) rather than deferring forever.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let xs = List::new();
+            print(xs.len());
+            let ys = xs.map(|n| 1);
+            print(ys.len());
+        }
+        "#,
+        "0\n0\n",
+    );
+}

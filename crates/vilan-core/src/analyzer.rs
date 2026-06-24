@@ -6930,6 +6930,24 @@ impl<'src> Analyzer<'src> {
             BareTraitValue(Id),
         }
         let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+        // A method on a `List::new()` whose element slot is still unknown but has a
+        // pending `push`/`run` to fill it must wait: resolving now would type a
+        // closure parameter — and the call's own result element — against the
+        // unknown slot, and a field access on that parameter would then error
+        // before the slot lands (B6). Once every such unification has run the slot
+        // is final (a concrete element, or `Unknown`/`any` for a list never pushed)
+        // and the call resolves against it. `push`/`run` are what fill the slot, so
+        // they are exempt; a list that is never pushed has no pending unification,
+        // so its methods resolve immediately as before.
+        if member_name != "push"
+            && member_name != "run"
+            && let Some(slot) = self.list_element_slot(&subject_type)
+            && self.constraints.iter().any(|constraint| {
+                matches!(constraint, Constraint::SlotUnification { slot: pending, .. } if *pending == slot)
+            })
+        {
+            return Resolution::Deferred;
+        }
         let found = |member_id: Option<Id>| match member_id {
             Some(member_id) => MethodLookup::Found(member_id),
             None => MethodLookup::NoMethod,

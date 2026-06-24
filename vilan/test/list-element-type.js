@@ -1,4 +1,7 @@
-function sum(self) {
+function default2() {
+	return 0;
+}
+function $a(self) {
 	let total = default2();
 	let seeded = false;
 	for (const item of self) {
@@ -11,7 +14,7 @@ function sum(self) {
 	}
 	return total;
 }
-function product(self) {
+function $b(self) {
 	let total = default2();
 	let seeded = false;
 	for (const item of self) {
@@ -24,31 +27,12 @@ function product(self) {
 	}
 	return total;
 }
-function default2() {
-
-}
-function default3() {
-	return 0;
-}
-function $a(self) {
-	let total = default3();
-	let seeded = false;
-	for (const item of self) {
-		if (seeded) {
-			total = total + item;
-		} else {
-			total = item;
-			seeded = true;
-		}
-	}
-	return total;
-}
 let numbers = [  ];
 numbers.push(2);
 numbers.push(3);
 numbers.push(4);
-console.log(sum(numbers));
-console.log(product(numbers));
+console.log($a(numbers));
+console.log($b(numbers));
 const empty = [  ];
 console.log($a(empty));
 for (const n of numbers) {

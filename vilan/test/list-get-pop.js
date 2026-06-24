@@ -10,12 +10,6 @@ function __list_get(list, index) {
 function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
-function first(self) {
-	return __list_get(self, 0);
-}
-function last(self) {
-	return __list_get(self, self.length - 1);
-}
 function $a(self, fallback) {
 	const $b = self;
 	let $c = null;
@@ -31,6 +25,12 @@ function $d(self) {
 	const $e = self;
 	return $e[0] === 1;
 }
+function $f(self) {
+	return __list_get(self, 0);
+}
+function $g(self) {
+	return __list_get(self, self.length - 1);
+}
 let xs = [  ];
 xs.push(10);
 xs.push(20);
@@ -39,11 +39,11 @@ console.log($a(__list_get(xs, 0), 0));
 console.log($a(__list_get(xs, 2), 0));
 console.log($a(__list_get(xs, 5), 0));
 console.log($d(__list_get(xs, 9)));
-console.log($a(first(xs), 0));
-console.log($a(last(xs), 0));
+console.log($a($f(xs), 0));
+console.log($a($g(xs), 0));
 console.log($a(__list_pop(xs), 0));
 console.log(xs.length);
-console.log($a(last(xs), 0));
+console.log($a($g(xs), 0));
 let single = [  ];
 single.push(7);
 console.log($a(__list_pop(single), 0));

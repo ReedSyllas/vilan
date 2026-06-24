@@ -1,7 +1,21 @@
-function is_empty(self) {
+function $a(self) {
 	return self.length === 0;
 }
-function filter(self, predicate) {
+function $b(self, fn) {
+	let result = [  ];
+	for (const item of self) {
+		result.push(fn(item));
+	}
+	return result;
+}
+function $c(self, init, fn) {
+	let accumulator = init;
+	for (const item of self) {
+		accumulator = fn(accumulator, item);
+	}
+	return accumulator;
+}
+function $d(self, predicate) {
 	let result = [  ];
 	for (const item of self) {
 		if (predicate(item)) {
@@ -10,24 +24,10 @@ function filter(self, predicate) {
 	}
 	return result;
 }
-function for_each(self, fn) {
+function $e(self, fn) {
 	for (const item of self) {
 		fn(item);
 	}
-}
-function $a(self, fn) {
-	let result = [  ];
-	for (const item of self) {
-		result.push(fn(item));
-	}
-	return result;
-}
-function $b(self, init, fn) {
-	let accumulator = init;
-	for (const item of self) {
-		accumulator = fn(accumulator, item);
-	}
-	return accumulator;
 }
 let xs = [  ];
 xs.push(1);
@@ -35,18 +35,18 @@ xs.push(2);
 xs.push(3);
 xs.push(4);
 console.log(xs.length);
-console.log(is_empty(xs));
-console.log($b($a(xs, (n) => {
+console.log($a(xs));
+console.log($c($b(xs, (n) => {
 	return n * 10;
 }), 0, (a, b) => {
 	return a + b;
 }));
-console.log(filter(xs, (n) => {
+console.log($d(xs, (n) => {
 	return n > 2;
 }).length);
-console.log(filter(xs, (n) => {
+console.log($d(xs, (n) => {
 	return n > 5;
 }).length);
-for_each(xs, (n) => {
+$e(xs, (n) => {
 	return console.log(n);
 });

@@ -4,7 +4,10 @@ function __clone(value) {
 	if (value instanceof Map) return new Map([ ...value ].map(([ k, v ]) => [ __clone(k), __clone(v) ]));
 	return value;
 }
-function sum(self) {
+function default2() {
+	return 0;
+}
+function $a(self) {
 	let total = default2();
 	let seeded = false;
 	for (const item of self) {
@@ -17,9 +20,6 @@ function sum(self) {
 	}
 	return total;
 }
-function default2() {
-
-}
 let a = [ 1, 2 ];
 let b = __clone(a);
 b[0] = 99;
@@ -30,5 +30,5 @@ xs.push(1);
 xs.push(2);
 let ys = __clone(xs);
 ys.push(99);
-console.log(sum(xs));
-console.log(sum(ys));
+console.log($a(xs));
+console.log($a(ys));
