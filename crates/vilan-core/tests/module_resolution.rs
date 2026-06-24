@@ -746,3 +746,57 @@ fn contract_ignores_item_reexports_and_typos() {
         "a non-module `pkg::` ref isn't a contract concern: {violations:#?}"
     );
 }
+
+// --- Derives in imported modules (bug #1) -----------------------------------
+
+#[test]
+fn derive_in_an_imported_module_resolves() {
+    // `[derive(Json)]` in an imported `pkg::` module synthesizes `to_json`/`from_json`
+    // there, visible to the importer — derive expansion is no longer entry-file-only.
+    let entry = concat!(
+        "import std::json::{ Json, FromJson };\n",
+        "import pkg::contract::User;\n",
+        "fun main() {\n",
+        "    let user = User { id = 1, name = \"Ada\" };\n",
+        "    let back: User = User::from_json(user.to_json());\n",
+        "    back.name\n",
+        "}\n",
+    );
+    let contract = "[derive(Json)]\nstruct User {\n    id: i32,\n    name: str,\n}\n";
+    let errors = analyze_package(
+        &[("main.vl", entry), ("contract.vl", contract)],
+        "main.vl",
+        Platform::default(),
+    );
+    assert!(
+        errors.is_empty(),
+        "a derived type from an imported module should round-trip, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn derive_in_a_dependency_library_resolves() {
+    // The contract-library pattern: a `[derive(Json)]` type in a dependency library's
+    // `lib.vl`, used by the app — the derive expands in the dependency too.
+    let entry = concat!(
+        "import std::json::{ Json, FromJson };\n",
+        "import common::User;\n",
+        "fun main() {\n",
+        "    let user = User { id = 1, name = \"Ada\" };\n",
+        "    let back: User = User::from_json(user.to_json());\n",
+        "    back.name\n",
+        "}\n",
+    );
+    let common = Dep {
+        import_name: "common",
+        files: &[(
+            "lib.vl",
+            "[derive(Json)]\nstruct User {\n    id: i32,\n    name: str,\n}\n",
+        )],
+    };
+    let errors = analyze_workspace(entry, &[common], Platform::default());
+    assert!(
+        errors.is_empty(),
+        "a derived type from a dependency library should round-trip, got: {errors:#?}"
+    );
+}

@@ -9705,7 +9705,17 @@ pub fn analyze<'src>(
     sources.push(PathBuf::from(&lib_path));
     let lib_source_id = SourceId((sources.len() - 1) as u32);
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
-    let mut loaded: Vec<(&str, &Spanned<NodeList>, Id, SourceId)> = Vec::new();
+    // Each loaded module carries the `[derive(..)]` impls synthesized from its own
+    // items (or `None`), walked into the module's scope after its body — the general
+    // form of the entry's derive expansion, so a derived type imported from another
+    // module has its `to_json`/`from_json`/... like one defined in the entry.
+    let mut loaded: Vec<(
+        &str,
+        &Spanned<NodeList>,
+        Option<&'static NodeList<'static>>,
+        Id,
+        SourceId,
+    )> = Vec::new();
     // A module's package: `Std` modules resolve under the `std` library's layered
     // roots and are addressable as both `std::name` and `pkg::name`; `Pkg` modules —
     // the entry program's own multi-file siblings — resolve under `pkg_root` (the
@@ -9801,7 +9811,12 @@ pub fn analyze<'src>(
         && (!workspace.packages.is_empty() || !workspace.entry_dependencies.is_empty());
     // `lib.vl` bodies are walked after every module is registered (like `std`'s),
     // so cross-module references resolve during `build()`.
-    let mut dependency_lib_walks: Vec<(SourceId, Id, &Spanned<NodeList>)> = Vec::new();
+    let mut dependency_lib_walks: Vec<(
+        SourceId,
+        Id,
+        &Spanned<NodeList>,
+        Option<&'static NodeList<'static>>,
+    )> = Vec::new();
     if has_dependencies {
         // Package 0 is the entry; its namespace is the existing `pkg`. The entry
         // program (SourceId 0) and its sibling modules belong to it.
@@ -9898,7 +9913,18 @@ pub fn analyze<'src>(
             analyzer
                 .package_of_source
                 .insert(lib_source_id, package_index);
-            dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast));
+            // A dependency's public surface can derive too — expand its `lib.vl`'s
+            // `[derive(..)]`, seeding the std modules the impls reference, and carry
+            // them to walk into the dependency's namespace below.
+            let lib_derived = expand_derives(&lib_ast.0);
+            if let Some(generated) = lib_derived {
+                to_load.extend(
+                    collect_module_refs(generated, "std")
+                        .into_iter()
+                        .map(|(module, _)| (Origin::Std, module)),
+                );
+            }
+            dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast, lib_derived));
             // A library's own imports are its internals (not the building package's
             // code), so they load for typing without a cross-platform gate. But the
             // base `lib.vl` is the *public surface*, which must be the same for every
@@ -10119,12 +10145,35 @@ pub fn analyze<'src>(
                 }
             }
         }
-        loaded.push((name, ast, module_scope_id, module_source_id));
+        // Expand this module's own `[derive(..)]` — the synthesized impls reference
+        // std modules (e.g. `std::json`), so seed those into the load set, and carry
+        // the impls to walk into this module's scope below (where its types and the
+        // imported traits resolve). The entry module reuses the `derived` already
+        // computed and seeded for it; every other module expands here.
+        let module_derived = if is_entry_module {
+            derived
+        } else {
+            let generated = expand_derives(&ast.0);
+            if let Some(generated) = generated {
+                to_load.extend(
+                    collect_module_refs(generated, "std")
+                        .into_iter()
+                        .map(|(module, _)| (Origin::Std, module)),
+                );
+            }
+            generated
+        };
+        loaded.push((name, ast, module_derived, module_scope_id, module_source_id));
     }
-    for (_name, ast, module_scope_id, source_id) in &loaded {
+    for (_name, ast, derived, module_scope_id, source_id) in &loaded {
         analyzer.current_source_id = *source_id;
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
+        // The module's synthesized derive impls, into the same scope, right after its
+        // body (so they see its types) — mirroring the entry walk below.
+        if let Some(derived) = derived {
+            analyzer.walk_expr_nodes(derived, *module_scope_id);
+        }
         source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
@@ -10143,10 +10192,13 @@ pub fn analyze<'src>(
     }
     // Walk each dependency's `lib.vl` into its own namespace (its public surface),
     // mirroring the `std` lib walk above.
-    for (source_id, namespace_scope_id, lib_ast) in &dependency_lib_walks {
+    for (source_id, namespace_scope_id, lib_ast, derived) in &dependency_lib_walks {
         analyzer.current_source_id = *source_id;
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, *namespace_scope_id);
+        if let Some(derived) = derived {
+            analyzer.walk_expr_nodes(derived, *namespace_scope_id);
+        }
         source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
