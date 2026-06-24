@@ -18,8 +18,8 @@ proposal settles the model and a phased plan before any build.
 
 ## 2. Approach: typed procedures, not an IDL
 
-The TypeScript world splits into **schema-first** (gRPC/protobuf, Cap'n Proto — an IDL
-+ codegen) and **type-first** (tRPC — the language's own types *are* the contract, no
+The TypeScript world splits into **schema-first** (gRPC/protobuf, Cap'n Proto — an IDL +
+codegen) and **type-first** (tRPC — the language's own types *are* the contract, no
 IDL). Vilan already has the type-first ingredients, so we take that path:
 
 - **Shared types are the schema.** A `[library]` package (like `common` in the
@@ -217,8 +217,8 @@ This needs three things beyond the procedure core, hence its own phase:
 
 ## 9. Where it lives
 
-A `[library]` package, `std::rpc` (or a standalone `rpc` library). The contract trait
-+ payload types go in the app's own `common`-style library (imported by both sides);
+A `[library]` package, `std::rpc` (or a standalone `rpc` library). The contract trait +
+payload types go in the app's own `common`-style library (imported by both sides);
 `std::rpc` provides `Transport`, `Codec`, `RpcError`, the envelope types, the built-in
 transports, and the `[service]` derive. Client and server packages each depend on both,
 exactly like the current `common`/`client`/`server` workspace.
@@ -252,9 +252,19 @@ Small, independently-useful std extensions (Phase 0) plus larger standing depend
    service (dispatcher + stub) proving an end-to-end client↔server call with the
    `Result` error model and async. No codegen yet — pins the wire format and the
    runtime first (the project's "prove it before generating it").
+   - **Then upgrade the example projects to use it.** Once the hand-written runtime
+     works, migrate the full-stack examples (`examples/fullstack`, `examples/todo`)
+     from their manual `fetch` + `request.path()` route wiring to an RPC client/stub
+     over the shared `common` contract — the first real dogfooding of the system, and
+     the proof it composes. **In the same pass, bring every example up to the latest
+     project structure** (the platform model + library packages that have shipped
+     since they were written): current `vilan.toml` conventions, the `common` shared
+     `[library]`, and per-package `platform`. They're then the worked references the
+     docs point at, and the regression that keeps the RPC core honest end-to-end.
 2. **`[service]` generation** (L) — generate the dispatcher + stub from a `[service]`
    trait; the exposure boundary; `[rpc(auth)]`. This is the headline "no hand-written
-   serializers/dispatch." Replaces Phase 1's manual service in the example.
+   serializers/dispatch." Migrate the Phase 1 examples again — manual service → the
+   generated `[service]` — so they always demonstrate the current best form.
 3. **Bidirectional + server↔server** (L) — `SocketTransport` (WebSocket); in-process
    service composition; a server calling another server. Streaming replies.
 4. **Reactive north star** (L) — `Source`/`Signal` split; stateful-object `[service]`;
