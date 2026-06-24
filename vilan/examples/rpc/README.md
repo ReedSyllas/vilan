@@ -34,10 +34,10 @@ The server `lookup_user` returns `Option<User>` — `None` is an *application-le
 
 ## Quirks discovered
 
-The reason this example is worth keeping. Every workaround below is a thing the
-`[service]` generator (or the compiler) must handle for the real library. **Quirks
-2–4 are one underlying weakness: generic dispatch / monomorphization does not thread
-type arguments through indirect or nested contexts, so a call binds to the empty
+The reason this example is worth keeping. **#1, #3, and #4 are bugs; #2 is intended
+syntax** (so it's documented as a gotcha, not a defect). **Bugs #3 and #4 are one
+underlying weakness: generic dispatch / monomorphization does not thread type
+arguments through indirect or nested contexts, so a call binds to the empty
 *abstract* trait method.** That's the analyzer's generic-resolution cluster (backlog
 B1 / `analyzer-refactor.md`), and P6 leans on it heavily.
 
@@ -54,43 +54,54 @@ modules.
   **library**, imported by both sides — so **derives must expand in dependency
   modules** before that works. A hard prerequisite, surfaced immediately.
 
-### 2. Generic dispatch fails on a generic-typed *field projection* (type error)
+### 2. Calling a method on a generic field needs parens + a struct-level bound (intended syntax — *not* a bug)
 
-The natural client stub is an object holding the transport:
+The natural client stub is an object holding the transport, and the first instinct
+errors:
 
 ```vilan
-struct AccountsClient<T> { transport: T }
+struct AccountsClient<T> { transport: T }                       // bound only on the impl
 impl AccountsClient<type T: Transport> {
-    fun get_user(self, id: i32): ... { ... self.transport.call(..) ... }   // ✗
+    fun get_user(self, id) { ... self.transport.call(..) ... }  // ✗ cannot call method 'call' on T
 }
 ```
 
-`self.transport.call(..)` → **`cannot call method 'call' on T`**. A trait method
-dispatches fine on a *direct generic parameter* (`fun f<T: Transport>(t: T) { t.call(..) }`)
-or a *concrete-typed* field, but not on a **generic-typed field projection**.
-Binding it to a local first (`let t = self.transport; t.call(..)`) does **not** help.
-
-### 3. A generic helper called from a generic context *miscompiles* (runtime)
-
-Routing quirk 2 through a helper type-checks but is worse — it lowers to the empty
-abstract method:
+Two things are wrong, both **intended language rules**: a method call on a
+field-*projection* receiver must **parenthesize the receiver**, and the trait **bound
+must be on the struct definition** (so the field's type carries it). With both, it
+type-checks:
 
 ```vilan
-fun transport_call<T: Transport>(t: T, r: str): Promise<str> { t.call(r) }   // type-checks
-// ... but the emitted helper is:  function $p(t, r) { return call(t, r); }
-//     where `function call(self, request) {}`  ← the empty *abstract* Transport::call
+struct AccountsClient<T: Transport> { transport: T }            // bound on the struct
+impl AccountsClient<type T: Transport> {
+    fun get_user(self, id) { ... (self.transport).call(..) ... }  // ✓ type-checks
+}
 ```
 
-So `await` got `undefined`. The generic call inside the helper, invoked from the
-already-generic stub method, never monomorphized to `LocalTransport::call`.
+(`(self.transport).call(..)` is the same disambiguation that makes a *closure* field
+call `(self.handler)(request)` — which the runtime above uses.)
+
+### 3. …but that object stub then *miscompiles* (runtime bug)
+
+The form from #2 type-checks, then prints `undefined`: the generic-field dispatch
+lowers to the empty abstract trait method.
+
+```vilan
+// (self.transport).call(r)  with  struct AccountsClient<T: Transport>  emits:
+function paren(self, r) { return call(self[0], r); }   // `call` = function call(self, request) {}  ← abstract, empty
+```
+
+So the correctly-written object stub still doesn't *run*. (Routing through a generic
+helper hits the same wall — the generic call, invoked from an already-generic context,
+never monomorphizes to `LocalTransport::call`.)
 
 - **Workaround here:** the client stub is a **free generic function taking the
   transport as a direct parameter**, called from `main` with a concrete transport —
   `get_user<T: Transport>(transport: T, id)`. Monomorphized at a top-level concrete
   call site, the dispatch lowers correctly.
 - **What the plan needs:** the object-stub form (and the proposal's
-  `Accounts::connect(transport)`) needs nested-generic dispatch fixed. Until then the
-  `[service]` derive should emit **free functions**, or the compiler grows this.
+  `Accounts::connect(transport)`) needs this nested/field generic dispatch fixed in
+  codegen. Until then the `[service]` derive should emit **free functions**.
 
 ### 4. `from_json` element-type inference through an indirect path → abstract method
 

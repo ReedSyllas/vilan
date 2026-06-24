@@ -119,14 +119,13 @@ fun accounts_dispatch(request_text: str): str {
 // --- Client side: the typed stub ---------------------------------------------
 
 // Each procedure is a free function generic over the transport (`T: Transport`),
-// taking it as a DIRECT parameter. An object stub — `AccountsClient<T> { transport:
-// T }` with a `self.transport.call(..)` method — would read nicer, but it doesn't
-// work yet: a method call on a generic-typed *field* fails to type-check, and
-// routing it through a helper from inside a generic method *miscompiles* to the
-// empty abstract trait method (quirks 2 & 3 in the README). A direct generic
-// parameter, monomorphized at a concrete call site, dispatches correctly — so that
-// is the form here. The `[service]` derive will want the object form (and so needs
-// those compiler gaps closed first).
+// taking it as a DIRECT parameter. An object stub — `AccountsClient<T: Transport>`
+// with a `(self.transport).call(..)` method — would read nicer and now *type-checks*
+// (with the bound on the struct + parens on the field receiver, both intended syntax;
+// README quirk 2), but it then *miscompiles* to the empty abstract trait method →
+// `undefined` (README quirk 3). A direct generic parameter, monomorphized at a
+// concrete call site, dispatches correctly — so that is the form here. The
+// `[service]` derive will want the object form, once that codegen bug is fixed.
 //
 // Mirrors `get_user(id: i32): Option<User>`, wrapped in `Result<_, RpcError>`
 // because the round-trip itself can fail.
