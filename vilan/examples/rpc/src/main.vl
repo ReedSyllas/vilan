@@ -1,0 +1,178 @@
+// A hand-written RPC service (roadmap P6 / proposal/transport-rpc.md), written out
+// plain — NO `[service]`/`[rpc]` sugar — so the whole system is visible in one file.
+// In-process (a `LocalTransport`), so it builds and runs with no network. Everything
+// the Phase-2 `[service]` derive *would* generate is spelled by hand: the runtime,
+// the shared contract, the server dispatcher, and the client stub.
+//
+//     vilan run vilan/examples/rpc
+
+import std::print;
+import std::json::{ Json, FromJson };
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::promise::Promise;
+
+// =============================================================================
+// The reusable runtime (what the proposal calls `std::rpc`)
+// =============================================================================
+
+// --- Transport: the pluggable seam -------------------------------------------
+
+// A request/response transport: send an encoded request, get the encoded reply.
+// The return is an explicit `Promise<str>` because a transport is dispatched
+// indirectly (through a generic bound) and today's async-effect inference only
+// auto-awaits *direct* calls — so a caller `await`s this Promise (see the stub).
+trait Transport {
+	fun call(self, request: str): Promise<str>;
+}
+
+// The in-process transport: runs a request handler in the same process, wrapped as
+// a resolved Promise. No network — so none of the (still-missing) `fetch` POST /
+// `http` body support an `HttpTransport` would need. `handler` is the dispatcher.
+struct LocalTransport {
+	handler: |str| str,
+}
+
+impl LocalTransport with Transport {
+	fun call(self, request: str): Promise<str> {
+		async {
+			(self.handler)(request)
+		}
+	}
+}
+
+// --- The wire model ----------------------------------------------------------
+
+// An invocation: a procedure name plus its arguments, each pre-encoded to a JSON
+// fragment, so a heterogeneous argument list fits a homogeneous `List<str>`.
+[derive(Json)]
+struct RpcRequest {
+	method: str,
+	args: List<str>,
+}
+
+// An infrastructure-level failure — distinct from an application error, which is
+// part of a procedure's own return type (e.g. `Option<User>` for "might not exist").
+[derive(Json)]
+enum RpcError {
+	Transport(str),
+	Decode(str),
+	Remote(str),
+	Unauthorized,
+}
+
+// A reply: the procedure's JSON-encoded result, or an `RpcError`.
+[derive(Json)]
+enum RpcReply {
+	Success(str),
+	Failure(RpcError),
+}
+
+// =============================================================================
+// The application
+// =============================================================================
+
+// --- The shared contract (would live in a `common` library, on both sides) ----
+
+[derive(Json)]
+struct User {
+	id: i32,
+	name: str,
+}
+
+// The `Accounts` service, conceptually one procedure:
+//     get_user(id: i32): Option<User>
+// Its two hand-written halves — server dispatcher and client stub — are below.
+
+// --- Server side: the implementation + the dispatcher ------------------------
+
+// The server's real logic: a tiny fixed "database". `None` is an application-level
+// "not found" (part of the return type), not an RpcError.
+fun lookup_user(id: i32): Option<User> {
+	if id == 1 {
+		Some(User { id = 1, name = "Ada" })
+	} else if id == 2 {
+		Some(User { id = 2, name = "Bob" })
+	} else {
+		None
+	}
+}
+
+// The dispatcher: decode an invocation, route on the method name, decode each
+// argument at its parameter type, call the impl, encode the result into a reply.
+// This is exactly the mechanical glue `[service]` would generate from the contract.
+fun accounts_dispatch(request_text: str): str {
+	let request = RpcRequest::from_json(request_text);
+	let reply = match request.method {
+		"get_user" => match request.args.first() {
+			Some(let arg) => {
+				let id = i32::from_json(arg);
+				RpcReply::Success(lookup_user(id).to_json())
+			}
+			None => RpcReply::Failure(RpcError::Decode("get_user expects 1 argument")),
+		},
+		_ => RpcReply::Failure(RpcError::Remote("unknown method: " + request.method)),
+	};
+	reply.to_json()
+}
+
+// --- Client side: the typed stub ---------------------------------------------
+
+// Each procedure is a free function generic over the transport (`T: Transport`),
+// taking it as a DIRECT parameter. An object stub — `AccountsClient<T> { transport:
+// T }` with a `self.transport.call(..)` method — would read nicer, but it doesn't
+// work yet: a method call on a generic-typed *field* fails to type-check, and
+// routing it through a helper from inside a generic method *miscompiles* to the
+// empty abstract trait method (quirks 2 & 3 in the README). A direct generic
+// parameter, monomorphized at a concrete call site, dispatches correctly — so that
+// is the form here. The `[service]` derive will want the object form (and so needs
+// those compiler gaps closed first).
+//
+// Mirrors `get_user(id: i32): Option<User>`, wrapped in `Result<_, RpcError>`
+// because the round-trip itself can fail.
+fun get_user<T: Transport>(transport: T, id: i32): Result<Option<User>, RpcError> {
+	let request = RpcRequest { method = "get_user", args = [id.to_json()] };
+	let reply_text = await transport.call(request.to_json());
+	match RpcReply::from_json(reply_text) {
+		RpcReply::Success(let json) => {
+			// The element type must be pinned explicitly: `Ok(Option::from_json(json))`
+			// alone leaves `from_json` to infer `User` through the `Ok` wrapper + the
+			// function return type, and that indirect path lowers to the *empty
+			// abstract* `from_json_value` (quirk 4 in the README) — `Some(undefined)`.
+			let user: Option<User> = Option::from_json(json);
+			Ok(user)
+		}
+		RpcReply::Failure(let error) => Err(error),
+	}
+}
+
+// --- Wiring + demo -----------------------------------------------------------
+
+fun main() {
+	// The transport routes every call to the server dispatcher, in-process.
+	let transport = LocalTransport { handler = |request| accounts_dispatch(request) };
+
+	// A hit (id 1 -> Ada), a miss (id 9 -> None, an application-level absence), and
+	// a bogus call made directly through the transport (a clean RpcError, no crash).
+	show(get_user(transport, 1));
+	show(get_user(transport, 9));
+	show_raw(transport);
+}
+
+fun show(result: Result<Option<User>, RpcError>) {
+	match result {
+		Ok(Some(let user)) => print("ok: found " + user.name),
+		Ok(None) => print("ok: no such user"),
+		Err(let error) => print("rpc error: " + error.to_json()),
+	}
+}
+
+// Exercise the error path: invoke a method the dispatcher doesn't know, by hand.
+fun show_raw(transport: LocalTransport) {
+	let request = RpcRequest { method = "delete_everything", args = [] };
+	let reply_text = await transport.call(request.to_json());
+	match RpcReply::from_json(reply_text) {
+		RpcReply::Success(let json) => print("raw ok: " + json),
+		RpcReply::Failure(let error) => print("raw error: " + error.to_json()),
+	}
+}

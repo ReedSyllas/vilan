@@ -1,0 +1,5 @@
+# A hand-written RPC example (roadmap P6 / proposal/transport-rpc.md), in-process so
+# it builds and runs with no network. `vilan run vilan/examples/rpc`.
+[package]
+name = "rpc"
+target = "node"
