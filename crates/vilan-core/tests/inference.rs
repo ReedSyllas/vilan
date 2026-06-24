@@ -906,11 +906,13 @@ fn enum_constructor_propagates_expected_type_to_payload() {
 // Remove `#[ignore]` as each lands.
 
 #[test]
-#[ignore = "B1 class B: dispatch on a generic-typed field lowers to the abstract trait method"]
 fn generic_field_method_dispatch_runs() {
-    // `(self.inner).handle(x)` on a generic-bounded field type-checks but the nested
-    // generic dispatch isn't composed through `current_substitution` (the field's `T`
-    // id differs from the binding key), so it emits the empty abstract `handle`.
+    // `(self.inner).handle(x)` on a generic-bounded field. Field access now
+    // substitutes the struct's declared field generic through the subject's actual
+    // arguments (`resolve_field_accessor`), so `self.inner` carries the receiver's
+    // `T` id rather than the struct definition's — the dispatch binding composes
+    // through `current_substitution` and emits the concrete `Doubler::handle`
+    // instead of the empty abstract trait method.
     assert_compiles_and_runs(
         r#"
         import std::print;

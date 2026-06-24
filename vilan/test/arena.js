@@ -2,7 +2,7 @@ function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
 function sum_from(arena, handle) {
-	const $A = $x(arena, handle);
+	const $A = $v(arena, handle);
 	let $B = null;
 	if ($A[0] === 0) {
 		const node = $A[1];
@@ -86,33 +86,33 @@ function $p(self, handle) {
 	}
 	return $q;
 }
-function $r(self) {
-	const $s = self;
-	return $s[0] === 0;
-}
-function $t() {
+function $r() {
 	return [ [  ], [  ] ];
 }
-function $u(self, value) {
-	const $v = __list_pop(self[1]);
-	let $w = null;
-	if ($v[0] === 0) {
-		const index = $v[1];
+function $s(self, value) {
+	const $t = __list_pop(self[1]);
+	let $u = null;
+	if ($t[0] === 0) {
+		const index = $t[1];
 		self[0][index][1] = [ 0, value ];
-		$w = [ index, self[0][index][0] ];
+		$u = [ index, self[0][index][0] ];
 	} else {
 		const index2 = self[0].length;
 		self[0].push([ 0, [ 0, value ] ]);
-		$w = [ index2, 0 ];
+		$u = [ index2, 0 ];
 	}
-	return $w;
+	return $u;
 }
-function $y(self, handle) {
-	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $h(self[0][handle[0]][1]);
+function $x(self) {
+	const $y = self;
+	return $y[0] === 0;
 }
-function $x(self, handle) {
+function $w(self, handle) {
+	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $x(self[0][handle[0]][1]);
+}
+function $v(self, handle) {
 	let $z = null;
-	if ($y(self, handle)) {
+	if ($w(self, handle)) {
 		$z = self[0][handle[0]][1];
 	} else {
 		$z = [ 1 ];
@@ -127,16 +127,16 @@ console.log($k($f(numbers, a), -(1)));
 $n(numbers, b, 99);
 console.log($k($f(numbers, b), -(1)));
 console.log($k($p(numbers, b), -(1)));
-console.log($r($f(numbers, b)));
+console.log($h($f(numbers, b)));
 const c = $b(numbers, 30);
 console.log($k($f(numbers, c), -(1)));
-console.log($r($f(numbers, b)));
+console.log($h($f(numbers, b)));
 console.log($k($f(numbers, a), -(1)));
-let graph = $t();
-const leaf1 = $u(graph, [ 2, [  ] ]);
-const leaf2 = $u(graph, [ 3, [  ] ]);
+let graph = $r();
+const leaf1 = $s(graph, [ 2, [  ] ]);
+const leaf2 = $s(graph, [ 3, [  ] ]);
 let root_edges = [  ];
 root_edges.push(leaf1);
 root_edges.push(leaf2);
-const root = $u(graph, [ 1, root_edges ]);
+const root = $s(graph, [ 1, root_edges ]);
 console.log(sum_from(graph, root));

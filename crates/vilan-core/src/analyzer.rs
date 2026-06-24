@@ -7612,7 +7612,7 @@ impl<'src> Analyzer<'src> {
         let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
         match subject_type {
             Type::Unresolved => Resolution::Deferred,
-            Type::Struct(struct_id, _) => {
+            Type::Struct(struct_id, arguments) => {
                 let struct_ = match self.structs.get(&struct_id) {
                     Some(struct_) => struct_,
                     None => {
@@ -7624,6 +7624,8 @@ impl<'src> Analyzer<'src> {
                     }
                 };
                 let struct_name = struct_.name;
+                let generic_parameter_constraint_ids =
+                    struct_.generic_parameter_constraint_ids.clone();
                 let field = struct_
                     .fields
                     .iter()
@@ -7633,6 +7635,31 @@ impl<'src> Analyzer<'src> {
                     });
                 match field {
                     Some((field_index, field_type)) => {
+                        // The field's declared type is written in the struct's own
+                        // generic terms (`inner: T`). Substitute the subject's
+                        // actual arguments so a field reached through `Wrap<Doubler>`
+                        // — or, inside `impl Wrap<type T>`, through the impl's own
+                        // `T` — gets the concrete (or impl-bound) type rather than
+                        // the struct's abstract parameter. Without this the field
+                        // keeps the struct definition's generic id, which differs
+                        // from the receiver's, so downstream dispatch on the field
+                        // can't compose the binding and falls back to the abstract
+                        // trait method.
+                        let field_type = if generic_parameter_constraint_ids.is_empty()
+                            || arguments.is_empty()
+                        {
+                            field_type
+                        } else {
+                            let substitution: SubstitutionContext =
+                                generic_parameter_constraint_ids
+                                    .iter()
+                                    .copied()
+                                    .zip(arguments.iter().copied())
+                                    .collect();
+                            let declared = field_type.get_type(self);
+                            self.substitute_type(&declared, &substitution)
+                                .get_type_id(self)
+                        };
                         self.expr_id_to_expr_map
                             .insert(id, Expr::Field(subject_id, struct_id, field_index));
                         self.expr_id_to_type_id_map.insert(id, field_type);
