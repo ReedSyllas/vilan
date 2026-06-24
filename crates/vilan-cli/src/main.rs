@@ -9,7 +9,7 @@ use chumsky::prelude::*;
 // `clap::Parser` collides with `chumsky`'s `Parser` trait (glob-imported above),
 // so bring it in anonymously — enough for `Cli::parse()` — and derive by path.
 use clap::{Parser as _, Subcommand};
-use vilan_core::analyzer::analyze;
+use vilan_core::analyzer::{analyze, check_library_contract};
 use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
 use vilan_core::context;
@@ -128,6 +128,7 @@ fn run_cli() -> ExitCode {
                 // A workspace builds each member for its own declared platform, so
                 // the `--platform` flag doesn't apply.
                 Project::Workspace { root, members } => build_workspace(&root, &members, debug),
+                Project::Library { name, .. } => not_buildable_library(&name),
             }),
         },
         Command::Check {
@@ -148,6 +149,10 @@ fn run_cli() -> ExitCode {
                     Err(message) => report_error(&message),
                 },
                 Project::Workspace { members, .. } => check_workspace(&members, debug),
+                // A standalone `[library]` has no fixed platform: check its platform
+                // contract (every module's `pkg::` imports resolve across the platforms
+                // its layer serves) instead of a single-platform build.
+                Project::Library { dir, name } => check_library(&dir, &name),
             }),
         },
         // `run`/`test` execute with `node`.
@@ -165,6 +170,7 @@ fn run_cli() -> ExitCode {
                 }
             }
             Project::Workspace { root, members } => run_workspace(&root, &members, &args),
+            Project::Library { name, .. } => not_buildable_library(&name),
         }),
         Command::Test { path } => test(path),
         Command::Fmt { paths, check } => fmt(&paths, check),
@@ -184,6 +190,34 @@ fn no_host_platform() -> ExitCode {
          `--platform node` or `--platform browser`"
     );
     ExitCode::FAILURE
+}
+
+/// Reports that a `[library]` can't be built or run on its own — it's compiled only
+/// as a dependency of an app.
+fn not_buildable_library(name: &str) -> ExitCode {
+    eprintln!(
+        "error: `{name}` is a `[library]`, built only as a dependency of an app, not on its own. \
+         Verify its platform contract with `vilan check`, or build an app that depends on it."
+    );
+    ExitCode::FAILURE
+}
+
+/// Checks a standalone `[library]`: it has no fixed build platform, so instead of a
+/// single-platform compile it verifies the **platform contract** (§4.2) — every
+/// module's `pkg::` imports must resolve for every platform that module's layer
+/// serves. Reports any violation; clean ⇒ success.
+fn check_library(dir: &Path, name: &str) -> ExitCode {
+    let spec = vilan_core::manifest::resolve_library(dir);
+    let violations = check_library_contract(&spec);
+    if violations.is_empty() {
+        println!("{name}: platform contract OK");
+        ExitCode::SUCCESS
+    } else {
+        for violation in &violations {
+            eprintln!("error: {}", violation.msg);
+        }
+        ExitCode::FAILURE
+    }
 }
 
 /// The effective build platform: an explicit `--platform`/`--target` flag wins (it
@@ -315,6 +349,10 @@ enum Project {
         root: PathBuf,
         members: Vec<(Unit, Platform)>,
     },
+    /// A standalone `[library]`, addressed directly. Not a buildable app (a library
+    /// is compiled only as a dependency), but `vilan check` verifies its platform
+    /// contract. `dir` is the library's package directory; `name` labels diagnostics.
+    Library { dir: PathBuf, name: String },
 }
 
 /// Resolves the project from an optional path, then runs `action`. An explicit
@@ -468,7 +506,18 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
         });
     }
 
-    // A single package. `validate` guarantees `[package]` is present here.
+    // A standalone `[library]` addressed directly: not a buildable app, but its
+    // platform contract is checkable. (`[library]` workspace *members* are handled
+    // above — skipped as build units; this is a library directory on its own.)
+    if let Some(library) = &manifest.library {
+        return Ok(Project::Library {
+            dir: directory.to_path_buf(),
+            name: library.name.clone().unwrap_or_default(),
+        });
+    }
+
+    // A single package. `validate` guarantees one of the three sections is present,
+    // and the others are ruled out above.
     let package = manifest.package.as_ref().expect("validated package");
     Ok(Project::Single {
         unit: unit_from_package(directory, package, options),

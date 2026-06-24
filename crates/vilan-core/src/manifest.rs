@@ -361,24 +361,31 @@ pub fn resolve_workspace(package_dir: &Path) -> Result<Workspace, String> {
     })
 }
 
-/// Resolves the `std` library's layered [`PackageSpec`] from `std_dir` — the std
-/// *package* directory (with its `[library]` `vilan.toml`). A directory with no
-/// manifest is treated as a base-only library (core std only); point `VILAN_STD`
-/// at the package directory to get the platform layers. `std` has no external
-/// dependencies — its modules reference each other via `pkg::`.
-pub fn resolve_std(std_dir: &Path) -> PackageSpec {
-    if let Ok(contents) = std::fs::read_to_string(std_dir.join("vilan.toml")) {
+/// Resolves a `[library]`'s layered [`PackageSpec`] from its package directory `dir`
+/// (with its `vilan.toml`). A directory with no manifest is a base-only library (its
+/// own `dir` is the base layer). Dependency edges are left empty — this resolves the
+/// library's *own* layer structure (for `std`, and for the platform contract check),
+/// not a full dependency build.
+pub fn resolve_library(dir: &Path) -> PackageSpec {
+    if let Ok(contents) = std::fs::read_to_string(dir.join("vilan.toml")) {
         if let Ok((manifest, _)) = Manifest::parse(&contents) {
             if let Some(library) = manifest.library {
-                return library_spec(std_dir, &library, Vec::new());
+                return library_spec(dir, &library, Vec::new());
             }
         }
     }
     PackageSpec {
-        base_root: std_dir.to_path_buf(),
+        base_root: dir.to_path_buf(),
         layers: Vec::new(),
         dependencies: Vec::new(),
     }
+}
+
+/// Resolves the `std` library's spec — `std` is just a library, so this is
+/// [`resolve_library`] at the std package directory. Point `VILAN_STD` at that
+/// directory (not the bare `src`) to get the platform layers.
+pub fn resolve_std(std_dir: &Path) -> PackageSpec {
+    resolve_library(std_dir)
 }
 
 /// Builds a [`PackageSpec`] for the `[library]` rooted at `dir`: its base root

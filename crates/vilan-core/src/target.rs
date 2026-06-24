@@ -119,6 +119,22 @@ impl Platform {
         matches!(self, Platform::None)
     }
 
+    /// Every buildable host platform in the registry (at its supported version),
+    /// excluding `none`. This is the set a base/`*` layer serves — used by the
+    /// platform-agnostic contract check to require completeness across all of them.
+    pub fn all_hosts() -> Vec<Platform> {
+        vec![
+            Platform::Node { version: NODE_LTS },
+            Platform::Deno {
+                version: DENO_CURRENT,
+            },
+            Platform::Bun {
+                version: BUN_CURRENT,
+            },
+            Platform::Browser,
+        ]
+    }
+
     /// Whether the host has `process.exit` (so `main`'s result becomes an exit
     /// code) — the one host-profile bit codegen needs. True for the process
     /// runtimes (Node, Deno, and Bun, via their `node:` compat).
@@ -215,6 +231,24 @@ impl PlatformPattern {
             "bun" => Some(vec![PlatformPattern::Bun { version }]),
             "browser" if version.is_none() => Some(vec![PlatformPattern::Browser]),
             _ => None,
+        }
+    }
+
+    /// A concrete platform standing in for this pattern (its supported version when
+    /// the pattern is version-agnostic) — so resolution, which works on a concrete
+    /// [`Platform`], can answer "does this layer's served set provide module M?".
+    pub fn representative(self) -> Platform {
+        match self {
+            PlatformPattern::Node { version } => Platform::Node {
+                version: version.unwrap_or(NODE_LTS),
+            },
+            PlatformPattern::Deno { version } => Platform::Deno {
+                version: version.unwrap_or(DENO_CURRENT),
+            },
+            PlatformPattern::Bun { version } => Platform::Bun {
+                version: version.unwrap_or(BUN_CURRENT),
+            },
+            PlatformPattern::Browser => Platform::Browser,
         }
     }
 }

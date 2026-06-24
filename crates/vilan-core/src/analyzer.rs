@@ -9405,6 +9405,103 @@ fn gate_library_imports(
     }
 }
 
+/// Lists the module files directly under `root`: a flat `name.vl` or a directory
+/// `name/lib.vl` (the two forms an importer can't tell apart). Returns each
+/// `(module name, file path)` in a stable (sorted) order, so diagnostics built from
+/// it are deterministic.
+fn modules_in_root(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut modules = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return modules;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("vl") {
+            if let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) {
+                modules.push((name.to_string(), path.clone()));
+            }
+        } else if path.is_dir() {
+            let lib = path.join("lib.vl");
+            if lib.is_file() {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    modules.push((name.to_string(), lib));
+                }
+            }
+        }
+    }
+    modules.sort();
+    modules
+}
+
+/// Verifies a library's **platform contract** (proposal §4.2, the *completeness*
+/// half): every `pkg::M` a library module imports must be available for *every*
+/// platform that module's layer serves. A base-layer module serves all host
+/// platforms, so it may only reach base modules; a `process`-layer module (serving
+/// `@process`) may reach process or base modules; and so on. A module resolvable for
+/// some but not all of its layer's platforms is a contract violation, reported at
+/// the importing module.
+///
+/// This is the platform-agnostic check — the same resolution a build does, run over
+/// each importing module's *whole served set* instead of one platform. It is purely
+/// structural (the layer layout + each module's `pkg::` imports) and needs no type
+/// information; the *uniformity* half — that a module's per-platform variants share
+/// one signature — does, and is deferred until a divergent `_sys` exists. It
+/// generalizes the consumer-side base-`lib.vl` re-export check (Q4) from `lib.vl`
+/// alone to every module, and from the base layer to every layer's served set.
+pub fn check_library_contract(spec: &PackageSpec) -> Vec<Error> {
+    let mut diagnostics = Vec::new();
+    // (served platforms, root) for the base layer — which serves every host — and
+    // each declared layer, which serves its own pattern set.
+    let mut layers: Vec<(Vec<Platform>, &Path)> =
+        vec![(Platform::all_hosts(), spec.base_root.as_path())];
+    for layer in &spec.layers {
+        let served = layer
+            .patterns
+            .iter()
+            .map(|pattern| pattern.representative())
+            .collect();
+        layers.push((served, layer.root.as_path()));
+    }
+    // Every root in declaration-independent order, so we can tell a real module
+    // (which the contract governs) from a `pkg::item` re-export or a typo (which
+    // ordinary name resolution handles).
+    let all_roots = spec.search_roots(Platform::None);
+    for (served, root) in &layers {
+        for (importer, path) in modules_in_root(root) {
+            let Some(ast) = load_package_module(&path.to_string_lossy()) else {
+                continue;
+            };
+            for (module, span) in collect_module_refs(&ast.0, "pkg") {
+                if resolve_module_in_roots(&all_roots, module).0.is_none() {
+                    continue; // not a module file anywhere — an item re-export or a typo
+                }
+                let unavailable: Vec<String> = served
+                    .iter()
+                    .filter(|platform| {
+                        resolve_module_in_roots(&spec.available_roots(**platform), module)
+                            .0
+                            .is_none()
+                    })
+                    .map(|platform| platform.name())
+                    .collect();
+                if unavailable.is_empty() {
+                    continue;
+                }
+                diagnostics.push(Error {
+                    span,
+                    msg: format!(
+                        "`{importer}` imports `pkg::{module}`, but `{module}` is not available for \
+                         {} — it lives only in another platform's layer, and a module serving \
+                         those platforms must resolve for every one of them",
+                        unavailable.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+    diagnostics
+}
+
 /// One layer of a library: a named source root and the platform patterns it serves
 /// (L1/L2). A module in a layer is reachable by a build whose platform matches one
 /// of the layer's patterns.
@@ -9803,10 +9900,11 @@ pub fn analyze<'src>(
                 .insert(lib_source_id, package_index);
             dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast));
             // A library's own imports are its internals (not the building package's
-            // code), so they load for typing without a cross-target gate. But the
+            // code), so they load for typing without a cross-platform gate. But the
             // base `lib.vl` is the *public surface*, which must be the same for every
-            // target — so its `pkg::` re-exports must resolve in the **base** layer
-            // (L1, Q4). Re-exporting a target-overlay module is an error.
+            // platform — so its `pkg::` re-exports must resolve in the **base** layer
+            // (L1, Q4; the producer-side generalization is `check_library_contract`).
+            // Re-exporting a platform-layer module is an error.
             let library_name = spec
                 .base_root
                 .file_name()
@@ -9823,7 +9921,7 @@ pub fn analyze<'src>(
                         span: EMPTY_SPAN,
                         msg: format!(
                             "library `{library_name}`'s base `lib.vl` re-exports `{module}`, a \
-                             target-specific module (it lives in a target overlay, not the base) \
+                             platform-specific module (it lives in a platform layer, not the base) \
                              — import it by path instead of re-exporting it"
                         ),
                     });

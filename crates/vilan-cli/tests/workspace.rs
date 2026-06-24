@@ -237,3 +237,70 @@ fn legacy_server_client_still_builds() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn standalone_library_check_verifies_the_platform_contract() {
+    // A `[library]` has no fixed platform: `vilan check` verifies its contract (every
+    // module's `pkg::` imports resolve across the platforms its layer serves) rather
+    // than a single-platform build — and `vilan build` rejects it (a library is built
+    // only as a dependency).
+    let dir = temp_project("contract");
+    write(
+        dir.as_path(),
+        "vilan.toml",
+        "[library]\nname = \"lib\"\n\n[library.layer.process]\nplatform = [\"@process\"]\n",
+    );
+    write(dir.as_path(), "src/lib.vl", "");
+    write(dir.as_path(), "src/util.vl", "fun util(): i32 { 1 }\n");
+    write(
+        dir.as_path(),
+        "src/process/service.vl",
+        "import pkg::util::util;\nfun service(): i32 { util() }\n",
+    );
+    let check = vilan(&["check", dir.to_str().unwrap()]);
+    assert!(
+        check.status.success(),
+        "a well-formed library's contract should pass: {}",
+        combined(&check)
+    );
+    let build = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(!build.status.success(), "a `[library]` is not buildable");
+    assert!(
+        combined(&build).contains("[library]"),
+        "unexpected build output: {}",
+        combined(&build)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn standalone_library_check_flags_a_contract_violation() {
+    // A base module (serves every platform) importing a process-only module is a
+    // completeness violation (the browser can't provide it); `vilan check` reports it
+    // and fails.
+    let dir = temp_project("contract_bad");
+    write(
+        dir.as_path(),
+        "vilan.toml",
+        "[library]\nname = \"lib\"\n\n[library.layer.process]\nplatform = [\"@process\"]\n",
+    );
+    write(dir.as_path(), "src/lib.vl", "");
+    write(
+        dir.as_path(),
+        "src/core.vl",
+        "import pkg::feature::feature;\nfun core(): i32 { feature() }\n",
+    );
+    write(
+        dir.as_path(),
+        "src/process/feature.vl",
+        "fun feature(): i32 { 1 }\n",
+    );
+    let output = vilan(&["check", dir.to_str().unwrap()]);
+    assert!(!output.status.success(), "expected a contract violation");
+    let text = combined(&output);
+    assert!(
+        text.contains("not available for") && text.contains("browser"),
+        "unexpected output: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

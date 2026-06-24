@@ -609,3 +609,140 @@ fn layered_process_module_serves_deno() {
         "deno resolves the process `clock` (i32), like node"
     );
 }
+
+// --- Platform contract check (§4.2 completeness) ----------------------------
+
+/// Writes a library tree under a fresh temp dir — `base` files in `src/`, `process`
+/// files in `src/process` (a layer serving `@process`), `browser` files in
+/// `src/browser` — then runs the structural platform contract check over it and
+/// returns the violation messages.
+fn contract_violations(
+    base: &[(&str, &str)],
+    process: &[(&str, &str)],
+    browser: &[(&str, &str)],
+) -> Vec<String> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("vilan_contract_{}_{unique}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let put = |dir: &std::path::Path, files: &[(&str, &str)]| {
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, contents) in files {
+            std::fs::write(dir.join(name), contents).unwrap();
+        }
+    };
+    let src = root.join("src");
+    put(&src, base);
+    put(&src.join("process"), process);
+    put(&src.join("browser"), browser);
+    let spec = PackageSpec {
+        base_root: src.clone(),
+        layers: vec![
+            Layer {
+                name: "process".to_string(),
+                patterns: PlatformPattern::parse("@process").unwrap(),
+                root: src.join("process"),
+            },
+            Layer {
+                name: "browser".to_string(),
+                patterns: vec![PlatformPattern::Browser],
+                root: src.join("browser"),
+            },
+        ],
+        dependencies: Vec::new(),
+    };
+    let violations = vilan_core::analyzer::check_library_contract(&spec)
+        .into_iter()
+        .map(|error| error.msg)
+        .collect();
+    let _ = std::fs::remove_dir_all(&root);
+    violations
+}
+
+#[test]
+fn contract_ok_when_each_module_stays_within_its_served_set() {
+    // A base module importing a base sibling (available everywhere) and a process
+    // module importing a process sibling (available across `@process`) — both within
+    // the platforms their own layer serves.
+    let violations = contract_violations(
+        &[
+            ("lib.vl", ""),
+            ("util.vl", "fun util(): i32 { 1 }\n"),
+            (
+                "core.vl",
+                "import pkg::util::util;\nfun core(): i32 { util() }\n",
+            ),
+        ],
+        &[
+            ("feature.vl", "fun feature(): i32 { 1 }\n"),
+            (
+                "service.vl",
+                "import pkg::feature::feature;\nfun service(): i32 { feature() }\n",
+            ),
+        ],
+        &[],
+    );
+    assert!(
+        violations.is_empty(),
+        "expected no contract violations, got: {violations:#?}"
+    );
+}
+
+#[test]
+fn contract_flags_base_module_reaching_into_a_layer() {
+    // A base module serves every host, so importing a process-only module breaks the
+    // contract for the platforms the process layer doesn't serve (the browser).
+    let violations = contract_violations(
+        &[
+            ("lib.vl", ""),
+            (
+                "core.vl",
+                "import pkg::feature::feature;\nfun core(): i32 { feature() }\n",
+            ),
+        ],
+        &[("feature.vl", "fun feature(): i32 { 1 }\n")],
+        &[],
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|m| m.contains("core") && m.contains("feature") && m.contains("browser")),
+        "expected a completeness violation naming `browser`, got: {violations:#?}"
+    );
+}
+
+#[test]
+fn contract_flags_process_module_reaching_into_the_browser_layer() {
+    // A process module serves `@process` (node/deno/bun), so importing a browser-only
+    // module isn't available for any of them — a violation, even though neither
+    // module is in the base.
+    let violations = contract_violations(
+        &[("lib.vl", "")],
+        &[(
+            "service.vl",
+            "import pkg::widget::widget;\nfun service(): i32 { widget() }\n",
+        )],
+        &[("widget.vl", "fun widget(): i32 { 1 }\n")],
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|m| m.contains("service") && m.contains("widget")),
+        "expected a violation for the process→browser import, got: {violations:#?}"
+    );
+}
+
+#[test]
+fn contract_ignores_item_reexports_and_typos() {
+    // `pkg::helper` here names an item re-exported through resolution, not a module
+    // file — the contract check leaves it to ordinary name resolution.
+    let violations = contract_violations(
+        &[("lib.vl", "export import pkg::missing::thing;\n")],
+        &[],
+        &[],
+    );
+    assert!(
+        violations.is_empty(),
+        "a non-module `pkg::` ref isn't a contract concern: {violations:#?}"
+    );
+}
