@@ -115,14 +115,19 @@ P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent
     previous process before rebuilding + respawning (a server frees its port; `Ctrl-C` stops both via
     the shared process group). One `spawn_node` helper shared by the blocking run and the watch restart.
 
-P6. **Transport / RPC library** (XL) **[new]** — two processes communicate and move data **without
+P6. **Transport / RPC library** (XL) **[new] — proposal written: `transport-rpc.md`** (2026-06-23;
+    awaiting answers to open Q1–Q8 before building). Two processes communicate and move data **without
     hand-written serializers**, for client↔server and server↔server. Requirements: **pluggable
     transports** (not locked to http / websocket / ipc — custom transports are first-class);
     encode/decode of both **data and invocations**; and a **permission / exposure system** to
     constrain the invocation attack surface. This is the concrete form of the reactive README's
     "north star" (a `Signal` as a remote handle) and the transport layer #8's full-stack model
-    implies. Needs the workspace model (P1–P2); the largest item here, best split into its own
-    proposal.
+    implies. Needs the workspace model (P1–P2, ✅ shipped). **The proposal's design:** type-first
+    (the shared trait is the contract, no IDL — `[derive(Json)]` is the codec); three swappable layers
+    (service / codec / transport); opt-in `[service]` exposure as the permission boundary; phased 0–4
+    (substrate → hand-written runtime → `[service]` generation → bidirectional → the reactive remote
+    `Source`). Two small prerequisite std gaps surfaced: `fetch` is GET-only (needs POST/body) and
+    `http`'s `Request` has no `body()`.
 
 ---
 
