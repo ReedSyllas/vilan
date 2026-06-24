@@ -199,9 +199,45 @@ dependencies. Unordered within a section.
    targets (`packages/client` + `packages/server` + `packages/common`), **replacing** the
    `[server]`/`[client]` sketch. `vilan build` still emits a server + client bundle, server serves
    the client; the transport between them is the *Next up* P6 RPC library.
+   - **Update (2026-06-23):** the platform model has **shipped** (`Target` → `Backend` + `Platform`;
+     library layers; `deno`/`bun` runtimes; the §4.2 contract check) — see `platform-model.md` and the
+     [[roadmap]] memory. So the `--target`/`[server]`/`[client]` vocabulary above is historical; the
+     remaining open piece here is the **P6 RPC transport** between client and server.
 2. **Numeric types `u8`…`i64`/`f32`** (S; roadmap #15) — low value on a JS target (collapse to
-   `f64`/`BigInt`); do via the macro engine (G1) or defer to a WASM/native backend. Prune
-   superseded `vilan/outdated/` sketches.
+   `f64`/`BigInt`); do via the macro engine (G1) or defer to a non-JS backend (F3/F4, where the
+   distinct integer widths are real). Prune superseded `vilan/outdated/` sketches.
+3. **WASM backend** (L; far future) — the second emitter on the platform model's `Backend` axis
+   (`Js` is the only variant today; `platform-model.md` §7.1 reserves `Wasm`). Three parts, only one
+   of which is "codegen":
+   - **Emitter** — Vilan's lowered IR → WebAssembly (via a `wasm-encoder`-style crate, or emit WAT).
+     Most language constructs (functions, structs, control flow) lower straightforwardly; closures
+     and generics (already monomorphized) are the work.
+   - **Host-import seam** (`platform-model.md` §5) — a WASM module imports host functions differently
+     than JS, so an `[extern]` binding may gate on **backend**: `http_sys.wasm.vl`, or a layer with
+     `backend = ["wasm"]`. The *shared interface* is unchanged — only the `_sys` impl differs. This
+     needs **adding backend-gating to layers** (`LayerDecl` carries only `platform` today; the
+     resolver/`PackageSpec` would gain a backend constraint — `Layer.backend: Option<Backend>` per
+     §7.1) — the one piece of platform-model scaffolding deferred from the stabilizing slice.
+   - **Memory-model lowering** — no JS GC, so value semantics / `Shared` / `Arena` / `__clone` need a
+     linear-memory allocator plus a GC or refcount scheme. This is the heavy part and is **shared with
+     F4**; do it once. Targets both `browser` and `@process` (WASM runs in each).
+4. **Native backend — server performance** (XL; far future) — a third `Backend` emitting native
+   machine code, motivated by server throughput (no V8/JS overhead). For comparison, **Rust** lowers
+   `source → HIR → MIR` (its own mid-level IR, CFG form) `→ LLVM IR` (the architecture-portable
+   intermediate) `→` per-target machine code; **LLVM is the default backend**, with **Cranelift**
+   (`rustc_codegen_cranelift`, faster debug builds) and **GCC** (`rustc_codegen_gcc`) as alternates.
+   A Vilan native path wants the same shape — a typed mid-level IR to lower from — and faces two
+   choices:
+   - **Backend infra** (cheapest → fastest peak): **emit C** (portable, leans on the C compiler;
+     simplest to maintain — Nim/V do this) ▸ **Cranelift** (Rust-native, fast compiles, solid codegen;
+     the natural fit for a Rust project) ▸ **LLVM** (peak performance, heavy dependency, slow builds).
+   - **Memory model** — the central challenge (bigger than codegen): JS's GC currently backs the whole
+     value-semantics/`Shared`/`Arena` model, so native needs either a **bundled GC runtime** or the
+     ownership/view model **lowered to manual/ARC**. Shares the F3 lowering work.
+   - **Standing cost:** maintaining ≥3 backends is a real tax (each language feature must lower to
+     each). Gate this behind a **stable backend abstraction + a shared lowered IR**, and prove the
+     seam with a *single* non-JS backend (WASM, F3) before committing to a third. Far future — flagged
+     here so the IR/abstraction work that unblocks it is designed with this in mind.
 
 ---
 
