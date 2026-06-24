@@ -61,7 +61,7 @@ runtime. The binding is lost in one of two ways:
 | --- | --- | --- |
 | bug **c′** — `count.derive(\|n\| format(n))` | A | `n` types late (from `derive`'s signature); `format(n)` committed against `Unknown`, not re-run. |
 | RPC **#4** — `Ok(Option::from_json(json))` | A | the element type `User` arrives via the `Ok` wrapper + return type, *after* the `from_json` constraint resolved. |
-| `List<List<T>>` round-trip | A/B | the inner container's element binding isn't threaded through the outer `from_json_value`. |
+| `List<List<T>>` round-trip ✅ | A/B | the inner container's element binding isn't threaded through the outer `from_json_value`. **Fixed (baacc9c): `resolve_dispatch` monomorphizes the dispatched method for the concrete receiver.** |
 | RPC **#3** — object-stub `(self.t).call()` | B | the stub's `<T>` and a routed helper's `<U>` are different ids; `inherited_substitution` can't thread one through the other. |
 
 These are not four bugs. They are one structural leak: **the substitution model is
@@ -224,13 +224,18 @@ directly. The full item-6 type interning is *not* required — the targeted fixe
 it. Item 6 remains available only if a future case needs genuinely stable ids that these
 local substitutions can't reach.
 
-**One class-A/B case remains open: the `List<List<T>>` round-trip** (the last row of the
-bug table). A nested container's inner element binding is not threaded through the outer
-`from_json_value`, so the inner decode stays abstract and `List::from_json("[[1,2]]")`
-yields `[[undefined,...]]`. The single-level case works (the inherited element type
-composes once); the *nesting* is what doesn't compose — the inherited substitution
-reaches the outer container's element decode but not the inner one's. This was always in
-the table; the earlier "all of B1 closed" note was an overstatement (the case was never
-pinned as a test, so it slipped). Now pinned as the ignored
-`nested_container_from_json_roundtrip_runs`. It is not in the path P6 needs (the RPC
-contract types are flat structs), so it is tracked, not urgent.
+**The last class-A/B case — the `List<List<T>>` round-trip — is now fixed** (commit
+baacc9c). The nested decode `T::from_json_value(element)` inside `List<T>::from_json_value`
+lowered to the abstract decoder whenever the method was reached as a *nested* dispatch:
+`resolve_dispatch` emitted the callee's *generic* body with the impl's `T` still abstract.
+(Single-level worked only because its first-level dispatch goes through the
+analyzer-recorded `method_call_substitution`; the inner levels go through
+`resolve_dispatch`.) The cure: `resolve_dispatch` binds the impl's generics from the
+concrete receiver type (`bind_generics` matches the impl subject `List<Generic(T)>`
+against `List<i32>`, recursing through arguments/tuples/closures) and emits a
+monomorphized instance via the one `emit_instance` path. Pinned by
+`nested_container_from_json_roundtrip_runs` (to triple nesting) and
+`mixed_nested_container_from_json_roundtrips`. **B1 is now genuinely fully closed — every
+row of the bug table has a passing test.** (Lesson recorded: "closed" needs a pinned test
+per case, not suite-green plus one example — the earlier overstatement came from skipping
+that.)
