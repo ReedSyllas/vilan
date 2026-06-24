@@ -1132,13 +1132,14 @@ fn single_level_container_from_json_roundtrip_runs() {
 }
 
 #[test]
-#[ignore = "B1 open: a nested container's inner element binding isn't threaded through the outer from_json_value (List<List<T>> round-trip)"]
 fn nested_container_from_json_roundtrip_runs() {
-    // The `List<List<T>>` round-trip the type-solver proposal lists as an open
-    // class-A/B case: the inner `List`'s element binding is not threaded through the
-    // outer `from_json_value`, so the inner decode stays abstract and yields
-    // `[[undefined,...],...]`. Pre-existing (not a refactor regression); pinned here
-    // so it flips green when the inherited binding composes through nested containers.
+    // The `List<List<T>>` round-trip (the last row of the type-solver bug table).
+    // The inner `List`'s element binding must thread through the *outer*
+    // `from_json_value`: `resolve_dispatch` now binds an impl's generics from the
+    // concrete receiver type (`bind_generics`) and emits a monomorphized instance,
+    // so the nested `T::from_json_value` resolves at each level instead of lowering
+    // to the abstract decoder (which yielded `[[undefined,...]]`). Triple nesting
+    // exercises the recursion through two intermediate container instances.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -1146,8 +1147,35 @@ fn nested_container_from_json_roundtrip_runs() {
         fun main() {
             let grid: List<List<i32>> = List::from_json("[[1,2],[3,4]]");
             print(grid.to_json());
+            let deep: List<List<List<i32>>> = List::from_json("[[[1]],[[2,3]]]");
+            print(deep.to_json());
         }
         "#,
-        "[[1,2],[3,4]]\n",
+        "[[1,2],[3,4]]\n[[[1]],[[2,3]]]\n",
+    );
+}
+
+#[test]
+fn mixed_nested_container_from_json_roundtrips() {
+    // Mixed nesting through the same monomorphizing dispatch: `Option<List<i32>>`,
+    // `List<Option<i32>>` (with a JSON `null` -> `None`), and a `List` of derived
+    // structs — each inner decoder is monomorphized for its element via the impl's
+    // generics bound from the concrete type.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        import std::option::Option::{ self, Some, None };
+        [derive(Json)] struct P { x: i32 }
+        fun main() {
+            let a: Option<List<i32>> = Option::from_json("[1,2,3]");
+            print(a.to_json());
+            let b: List<Option<i32>> = List::from_json("[1,null,3]");
+            print(b.to_json());
+            let c: List<P> = List::from_json("[{\"x\":1},{\"x\":2}]");
+            print(c.to_json());
+        }
+        "#,
+        "[1,2,3]\n[1,null,3]\n[{\"x\":1},{\"x\":2}]\n",
     );
 }

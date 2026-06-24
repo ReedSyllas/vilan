@@ -2056,7 +2056,7 @@ impl<'src> Transformer<'src> {
     /// a dangling name for a function that is never emitted.
     fn resolve_dispatch(&mut self, type_id: TypeId, member: &str) -> Option<Dispatch<'src>> {
         let type_id = self.resolve_type_id(type_id);
-        if let Some(member_id) = self.resolve_member_on_type(type_id, member) {
+        if let Some((member_id, impl_subject)) = self.resolve_member_on_type(type_id, member) {
             if let Some(intrinsic) = self.program.intrinsics.get(&member_id).copied() {
                 return Some(Dispatch::Intrinsic(intrinsic));
             }
@@ -2068,9 +2068,22 @@ impl<'src> Transformer<'src> {
             {
                 return Some(Dispatch::Extern(member_id, binding));
             }
-            self.ensure_function_emitted(member_id);
+            // Bind the impl's generics from the concrete receiver type and emit a
+            // monomorphized instance, so a method whose body uses the impl's type
+            // parameter — `T::from_json_value` inside `List<T>::from_json_value` —
+            // resolves it concretely even when reached as a *nested* dispatch (the
+            // `List<List<i32>>` round-trip). With no bindings (a non-generic impl)
+            // this is the plain generic emission as before.
+            let mut substitution = HashMap::new();
+            self.bind_generics(impl_subject, type_id, &mut substitution);
+            let name = if substitution.is_empty() {
+                self.ensure_function_emitted(member_id);
+                self.ng.name_for(member_id)
+            } else {
+                self.emit_instance(member_id, &substitution)
+            };
             let is_async = self.program.async_functions.contains(&member_id);
-            return Some(Dispatch::Call(self.ng.name_for(member_id), is_async));
+            return Some(Dispatch::Call(name, is_async));
         }
         let default_id = self.resolve_inherited_default(type_id, member)?;
         let is_async = self.program.async_functions.contains(&default_id);
@@ -2185,8 +2198,6 @@ impl<'src> Transformer<'src> {
         }
     }
 
-    /// Returns the JS name of the monomorphized variant of `function_id` for
-    /// the given concrete type arguments, generating it on first use.
     /// The generic binding to monomorphize a call's callee with, drawn from
     /// whichever channel carries it — so the transformer reads a call's binding in
     /// one place and emits through the one [`Self::emit_instance`] path. In
@@ -2412,7 +2423,11 @@ impl<'src> Transformer<'src> {
 
     /// Finds the function implementing `member` for a concrete type, searching
     /// the implementations whose subject matches that type.
-    fn resolve_member_on_type(&self, type_id: TypeId, member: &str) -> Option<Id> {
+    /// Resolves `member` on a concrete type to its impl method, returning the
+    /// member id *and the impl's subject* (in the impl's own generic terms, e.g.
+    /// `List<Generic(T)>`) so the caller can bind the impl's generics from the
+    /// concrete type's arguments.
+    fn resolve_member_on_type(&self, type_id: TypeId, member: &str) -> Option<(Id, TypeId)> {
         let type_ = self.program.type_id_to_type_map.get(&type_id)?;
         match type_ {
             Type::Struct(_, _) | Type::Enum(_, _) => self
@@ -2425,8 +2440,58 @@ impl<'src> Transformer<'src> {
                         .get(&implementation.subject)
                         .is_some_and(|subject| nominal_matches(subject, type_))
                 })
-                .find_map(|implementation| implementation.declarations.get(member).copied()),
+                .find_map(|implementation| {
+                    implementation
+                        .declarations
+                        .get(member)
+                        .map(|member_id| (*member_id, implementation.subject))
+                }),
             _ => None,
+        }
+    }
+
+    /// Binds the generic parameters in `pattern` (an impl subject in its own
+    /// generic terms, `List<Generic(T)>`) from the matching positions of the
+    /// concrete `type_id` (`List<i32>`), accumulating `{T -> i32}`. Recurses
+    /// through nominal arguments, tuples, and closures so a nested parameter
+    /// (`List<List<T>>` -> `T = i32`) is reached.
+    fn bind_generics(&self, pattern: TypeId, type_id: TypeId, out: &mut HashMap<TypeId, TypeId>) {
+        let Some(pattern_type) = self.program.type_id_to_type_map.get(&pattern).cloned() else {
+            return;
+        };
+        if let Type::Generic(constraint_id) = pattern_type {
+            out.insert(constraint_id, type_id);
+            return;
+        }
+        let Some(concrete_type) = self.program.type_id_to_type_map.get(&type_id).cloned() else {
+            return;
+        };
+        let zip_args = |out: &mut HashMap<TypeId, TypeId>,
+                        pattern_args: &[TypeId],
+                        concrete_args: &[TypeId],
+                        this: &Self| {
+            for (pattern_arg, concrete_arg) in pattern_args.iter().zip(concrete_args.iter()) {
+                this.bind_generics(*pattern_arg, *concrete_arg, out);
+            }
+        };
+        match (pattern_type, concrete_type) {
+            (Type::Struct(a, pattern_args), Type::Struct(b, concrete_args)) if a == b => {
+                zip_args(out, &pattern_args, &concrete_args, self);
+            }
+            (Type::Enum(a, pattern_args), Type::Enum(b, concrete_args)) if a == b => {
+                zip_args(out, &pattern_args, &concrete_args, self);
+            }
+            (Type::Tuple(pattern_args), Type::Tuple(concrete_args)) => {
+                zip_args(out, &pattern_args, &concrete_args, self);
+            }
+            (
+                Type::Closure(pattern_params, pattern_ret),
+                Type::Closure(concrete_params, concrete_ret),
+            ) => {
+                zip_args(out, &pattern_params, &concrete_params, self);
+                self.bind_generics(pattern_ret, concrete_ret, out);
+            }
+            _ => {}
         }
     }
 }
