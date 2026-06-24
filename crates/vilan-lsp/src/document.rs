@@ -1092,6 +1092,59 @@ mod tests {
         );
     }
 
+    /// The shipped example projects must analyze cleanly through the *LSP* path
+    /// (`Document::analyze` — project-context + `pkg::` + `std` resolution), not
+    /// just the CLI. Guards against a regression where the editor surfaces errors
+    /// the CLI doesn't, and pins that the RPC example's cross-file object-stub form
+    /// stays diagnostic-free. Reads the real files, so an example edit that breaks
+    /// analysis fails here.
+    fn assert_example_analyzes_clean(relative: &str) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let document = Document::analyze(&text, &std_root(), &path);
+        let messages: Vec<String> = document
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.msg.clone())
+            .collect();
+        assert!(
+            messages.is_empty(),
+            "{relative}: expected no LSP diagnostics, got {messages:#?}"
+        );
+    }
+
+    #[test]
+    fn rpc_example_analyzes_without_diagnostics() {
+        // The entry: the object-stub client + cross-file `pkg::rpc` imports.
+        assert_example_analyzes_clean("../../vilan/examples/rpc/src/main.vl");
+        // The library module it imports: a non-entry file (no `main`) must analyze
+        // as a package module via project context, not be rejected for lacking a
+        // `main` the way a bare `vilan check <file>` would.
+        assert_example_analyzes_clean("../../vilan/examples/rpc/src/rpc.vl");
+    }
+
+    #[test]
+    fn span_to_range_conversions_never_panic_on_multibyte_source() {
+        // The RPC example's leading comment contains em-dashes (3-byte chars).
+        // Converting an entity/symbol span whose byte boundary lands inside one
+        // (documentSymbol, go-to-definition, diagnostics) used to panic the server
+        // on a non-char-boundary string slice (`line_index.rs`). Drive the whole
+        // span→range path the editor exercises on open, on the real file.
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/examples/rpc/src/main.vl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let document = Document::analyze(&text, &std_root(), &path);
+        for symbol in document.document_symbols() {
+            let _ = document.line_index.range(&symbol.full);
+            let _ = document.line_index.range(&symbol.selection);
+        }
+        for (start, end, _) in &document.entity_spans {
+            let _ = document.line_index.position(*start);
+            let _ = document.line_index.position(*end);
+        }
+    }
+
     #[test]
     fn scope_completion_includes_top_level_and_keywords() {
         let labels = completions_at_cursor(
