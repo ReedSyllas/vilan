@@ -955,6 +955,27 @@ fn from_json_indirect_element_type_runs() {
 }
 
 #[test]
+fn deep_dependency_chain_resolves_across_passes() {
+    // Ordering test for the dependency-driven re-queue (item 5 v2): each `id` call's
+    // generic `T` binds from its argument, which is the *next* `id` call — so the
+    // outer calls can only resolve several passes after the innermost. The runner
+    // wakes each deferred call when its input lands (with the run-all backstop as a
+    // safety net), so the whole nest resolves to `i32` and prints `7`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        fun id<T>(x: T): T { x }
+        fun main() {
+            let deep = id(id(id(id(id(id(7))))));
+            print(format(deep));
+        }
+        "#,
+        "7\n",
+    );
+}
+
+#[test]
 fn from_json_return_type_flows_through_match_arm() {
     // The RPC-client shape: the `from_json` decode sits inside a `match` arm whose
     // enclosing function declares the return type. The return type must reach the

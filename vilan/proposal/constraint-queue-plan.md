@@ -3,6 +3,20 @@
 A staged plan to replace the ~25 ad-hoc deferred-work lists in `analyzer.rs`
 `build()` with one constraint queue. Companion to `analyzer-refactor.md` (item 5).
 
+> **Status: v1 *and* v2 shipped.** Stages 0–13 (the unified `Constraint`/`Resolution`
+> queue) landed earlier. **Stage 14 (the dependency-driven re-queue) is now done**: a
+> per-resolution `current_waiting_on` set captures every expression a constraint reads
+> as `Unresolved` (the one `infer_type_inner` chokepoint); `wake_ready_constraints`
+> re-queues a deferred constraint once one of those inputs appears in the type maps;
+> and a **run-all backstop on every quiet pass** keeps termination — and therefore the
+> resolved set and the codegen — identical to the old run-all fixpoint by construction
+> (resolution is monotone, so order can't change which bindings commit). Verified:
+> corpus 69/69 byte-identical, full suite green, clippy ≤ baseline, and an old-vs-new
+> timing on a 200–1600-function synthetic shows v2 is performance-neutral (within
+> debug-build noise). `deep_dependency_chain_resolves_across_passes` pins the wake
+> path. The cleanup half of stage 15 (delete the now-unused channels / merge the
+> bindings recording per item 4) is still open.
+
 ## Why (and an honest scope)
 
 The fixpoint in `build()` re-runs *every* unresolved constraint on *every* pass,

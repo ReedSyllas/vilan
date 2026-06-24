@@ -634,8 +634,22 @@ pub struct Analyzer<'src> {
     // `subject[index]` subscripts awaiting type resolution: index expr id ->
     // The unified constraint queue (replacing the per-kind `prepped_*` worklists,
     // one kind migrated at a time). Drained and re-queued by `resolve_constraints`
-    // each fixpoint pass.
+    // each fixpoint pass. New (never-tried) and freshly-woken constraints live
+    // here; ones that deferred move to `deferred` with the expressions they are
+    // waiting on, so the fixpoint re-runs a constraint only when one of its inputs
+    // resolves (dependency-driven re-queue, item 5 v2) rather than retrying every
+    // constraint every pass.
     constraints: Vec<Constraint<'src>>,
+    // Deferred constraints paired with the expression ids they read as
+    // `Unresolved` while resolving — the inputs whose resolution should wake them.
+    // A constraint is woken once any of these appears in the type maps; an empty
+    // set (deferred for a reason no `infer_type` read captured) is retried only by
+    // the run-all backstop, which also guarantees termination matches run-all.
+    deferred: Vec<(Constraint<'src>, Vec<Id>)>,
+    // While a constraint resolves, the expression ids it read as `Unresolved`
+    // (captured at the one `infer_type` chokepoint). `Some` only during
+    // `resolve_constraints`; taken to become a deferred constraint's wait set.
+    current_waiting_on: Option<Vec<Id>>,
     function_calls: IndexMap<Id, FunctionCall>,
     functions: IndexMap<Id, Function<'src>>,
     generic_constraint_names: HashMap<TypeId, &'src str>,
@@ -852,6 +866,8 @@ impl<'src> Analyzer<'src> {
             type_references: Vec::new(),
             external_functions: IndexMap::new(),
             constraints: Vec::new(),
+            deferred: Vec::new(),
+            current_waiting_on: None,
             function_calls: IndexMap::new(),
             functions: IndexMap::new(),
             generic_constraint_names: HashMap::new(),
@@ -5195,6 +5211,16 @@ impl<'src> Analyzer<'src> {
         exprs_seen.insert(expr_id);
         let inferred = self.infer_type_path(expr_id, constraint, substitution_context, exprs_seen);
         exprs_seen.remove(&expr_id);
+        // Dependency capture (item 5 v2): record every expression read as
+        // `Unresolved` while a constraint is resolving, so it can be re-run when
+        // one of them lands. Recording at every recursion level (not just the top
+        // `expr_id`) captures the deepest unresolved leaf — the expression whose
+        // later resolution actually unblocks the constraint.
+        if matches!(inferred, Type::Unresolved)
+            && let Some(waiting_on) = self.current_waiting_on.as_mut()
+        {
+            waiting_on.push(expr_id);
+        }
         inferred
     }
 
@@ -6420,6 +6446,10 @@ impl<'src> Analyzer<'src> {
     /// (the queue is kept sorted, so this preserves the original section order)
     /// and re-queueing those that defer. Returns whether any task resolved or
     /// failed — i.e. whether this pass made progress.
+    /// Run every ready constraint (`self.constraints`: new or freshly-woken) once,
+    /// in priority order, capturing each deferral's wait set. Constraints that
+    /// defer move to `self.deferred`; tasks spawned mid-pass land in
+    /// `self.constraints` for the next pass. Returns whether anything resolved.
     fn resolve_constraints(&mut self) -> bool {
         let mut progress = false;
         // Re-sort each pass so any task a prior pass spawned (e.g. a slot
@@ -6428,18 +6458,38 @@ impl<'src> Analyzer<'src> {
         // — and the queue is already near-sorted, so it stays cheap.
         let mut queue = std::mem::take(&mut self.constraints);
         queue.sort_by_key(|constraint| constraint.priority());
-        let mut deferred = Vec::new();
         for constraint in queue {
-            match self.try_resolve(&constraint) {
+            self.current_waiting_on = Some(Vec::new());
+            let resolution = self.try_resolve(&constraint);
+            let waiting_on = self.current_waiting_on.take().unwrap_or_default();
+            match resolution {
                 Resolution::Resolved | Resolution::Failed => progress = true,
-                Resolution::Deferred => deferred.push(constraint),
+                Resolution::Deferred => self.deferred.push((constraint, waiting_on)),
             }
         }
-        // Tasks spawned mid-pass landed back in `self.constraints`; keep them
-        // (after the deferrals) to be sorted into place on the next pass.
-        deferred.append(&mut self.constraints);
-        self.constraints = deferred;
         progress
+    }
+
+    /// Move every deferred constraint whose wait set has since resolved (an input
+    /// now appears in the type maps) back into `self.constraints` to be retried.
+    /// Constraints with an empty wait set are left for the run-all backstop.
+    /// Returns whether any were woken.
+    fn wake_ready_constraints(&mut self) -> bool {
+        let mut woke = false;
+        let still_deferred = std::mem::take(&mut self.deferred);
+        for (constraint, waiting_on) in still_deferred {
+            let ready = waiting_on.iter().any(|expr_id| {
+                self.resolved_types.contains_key(expr_id)
+                    || self.expr_id_to_type_id_map.contains_key(expr_id)
+            });
+            if ready {
+                self.constraints.push(constraint);
+                woke = true;
+            } else {
+                self.deferred.push((constraint, waiting_on));
+            }
+        }
+        woke
     }
 
     /// Dispatches a constraint to its per-kind resolver.
@@ -8133,21 +8183,51 @@ impl<'src> Analyzer<'src> {
         // --- Constraint solving loop ---
         // A true fixpoint: each pass resolves the constraints whose dependencies
         // have landed (their blocked dependents resolve on later passes), in
-        // priority order; resolved types never revert. The loop exits the moment a
-        // pass resolves nothing — so it is order-independent: whatever can resolve
-        // eventually does, regardless of which pass reaches it. The bound is only a
-        // safety net against a non-converging bug, never the reason a well-typed
-        // program resolves, so it just has to exceed any real dependency chain.
-        // Each resolution consumes a distinct queued task, and the tasks (including
-        // the slot unifications spawned mid-solve while resolving `push`/`run`) are
-        // bounded by the entity count, so twice it is ample.
+        // priority order; resolved types never revert. It is dependency-driven —
+        // a deferred constraint is retried only once one of the inputs it read as
+        // `Unresolved` has landed (`wake_ready_constraints`) — so passes do not
+        // re-run every constraint every time. To stay exactly as complete as a
+        // run-all fixpoint, a quiet pass falls back to retrying *all* deferred
+        // constraints once: only if that backstop also resolves nothing is the
+        // program truly at a fixpoint. Termination (and thus the resolved set, and
+        // the codegen) therefore matches run-all by construction; resolution is
+        // monotone, so the dependency order cannot change which bindings commit.
+        // The bound is only a safety net against a non-converging bug (e.g. a
+        // dependency cycle), never the reason a well-typed program resolves, so it
+        // just has to exceed any real dependency chain. Each resolution consumes a
+        // distinct queued task, bounded by the entity count, so twice it is ample.
         let max_iterations = 2 * self.entity_id as usize + 16;
 
         for _ in 0..max_iterations {
-            if !self.resolve_constraints() {
+            let mut progress = self.resolve_constraints();
+            if self.wake_ready_constraints() {
+                progress = true;
+            }
+            if progress {
+                continue;
+            }
+            // Quiet pass: no constraint resolved and none woke. Retry every
+            // deferred constraint once as a backstop — this catches an input that
+            // resolved without a type-map write (so `wake_ready` missed it) and
+            // makes the exit condition identical to run-all's "a full pass resolves
+            // nothing". If the backstop also makes no progress, it is a fixpoint.
+            if self.deferred.is_empty() {
+                break;
+            }
+            self.constraints
+                .extend(self.deferred.drain(..).map(|(constraint, _)| constraint));
+            let backstop_progress = self.resolve_constraints();
+            self.wake_ready_constraints();
+            if !backstop_progress {
                 break;
             }
         }
+
+        // Hand any still-unresolved constraints back to `self.constraints` so the
+        // post-fixpoint passes (the `for…in` commit, the end-of-fixpoint
+        // diagnostics) see them where they always have.
+        self.constraints
+            .extend(self.deferred.drain(..).map(|(constraint, _)| constraint));
 
         // Commit any `for x in iterable` bindings still deferred (their element
         // slot never resolved — an empty, never-pushed list): the item is `any`.

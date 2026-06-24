@@ -176,10 +176,13 @@ constructor propagation (#1), return-type body inference incl. through-match (#2
 closure parameter* (the same rule the method-call resolver applies to an unknown
 closure receiver; pinned by `format_in_closure_argument`). So **item 5 v2 (dependency
 re-queue) no longer has a failing repro to gate it** — its targets are all closed. It
-remains available as a *generalization* (replace the targeted defers with one principled
-re-queue, per B1's "merge special cases into general code"), but that is now a refactor,
-not a bugfix, and the riskiest stage — to be undertaken on its own merits, not to chase
-a live bug.
+was nonetheless **shipped as a generalization** (replace the all-each-pass loop with one
+principled re-queue, per B1's "merge special cases into general code"): a per-resolution
+`current_waiting_on` capture, `wake_ready_constraints` re-queuing a deferred constraint
+once an input lands, and a run-all backstop that keeps termination — and so the codegen
+— identical to run-all by construction (resolution is monotone). Corpus byte-identical,
+perf-neutral; details in `constraint-queue-plan.md` stage 14. A maintainability change,
+not a bugfix.
 
 **The one genuinely-open B1 bug is class (B) / #3** — dispatch on a generic-typed field
 lowers to the abstract trait method (`generic_field_method_dispatch_runs`, the RPC
