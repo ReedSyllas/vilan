@@ -2,8 +2,11 @@
 // the browser and Node (18+), so this is a core (universal) module: a browser
 // client can call its server's API routes, and a Node program can call out too.
 //
-// `fetch` and `Response::text` are async (the host returns promises), so calls to
-// them are implicitly awaited.
+// `fetch(url)` is a GET shorthand. For another method, a request body, or headers,
+// build a request with `get`/`post`, chain `.header(..)`, and `.send()` it.
+//
+// `fetch`/`send` and `Response::text` are async (the host returns promises), so calls
+// to them are implicitly awaited.
 
 external struct Response;
 
@@ -18,4 +21,74 @@ impl Response {
 	// The response body as text. Async (it awaits the host `Response.text()`).
 	[extern(method, "text")]
 	async external fun text(self): str;
+}
+
+// --- Configurable requests ---------------------------------------------------
+
+// One request header. A two-field struct lowers to the `[name, value]` array that
+// the host `fetch` accepts as a headers entry, so `List<Header>` is a valid
+// `HeadersInit` with no conversion.
+struct Header {
+	name: str,
+	value: str,
+}
+
+// The host `fetch` init object — `{ method, headers, body }` — built up via setters.
+// It's an opaque host value (like a DOM node), not a vilan struct.
+external struct RequestInit;
+
+// `Object()` returns a fresh empty `{}` to fill in.
+[extern("Object")]
+external fun new_request_init(): RequestInit;
+
+impl RequestInit {
+	[extern(set, "method")]
+	external fun set_method(self, value: str);
+
+	[extern(set, "body")]
+	external fun set_body(self, value: str);
+
+	[extern(set, "headers")]
+	external fun set_headers(self, value: List<Header>);
+}
+
+[extern("fetch")]
+async external fun fetch_with(url: str, options: RequestInit): Response;
+
+// A request being built: its method + URL, an optional body, and headers.
+struct Request {
+	url: str,
+	method: str,
+	body: str,
+	headers: List<Header>,
+}
+
+// Start a GET request.
+fun get(url: str): Request {
+	Request { url = url, method = "GET", body = "", headers = [] }
+}
+
+// Start a POST request carrying `body`.
+fun post(url: str, body: str): Request {
+	Request { url = url, method = "POST", body = body, headers = [] }
+}
+
+impl Request {
+	// Add a request header (e.g. `Content-Type`, `Authorization`).
+	fun header(own self, name: str, value: str): Request {
+		self.headers.push(Header { name = name, value = value });
+		self
+	}
+
+	// Send the request and await the response. GET can't carry a body, so the body
+	// is attached only for other methods.
+	fun send(self): Response {
+		let options = new_request_init();
+		options.set_method(self.method);
+		options.set_headers(self.headers);
+		if self.method != "GET" {
+			options.set_body(self.body);
+		}
+		fetch_with(self.url, options)
+	}
 }
