@@ -1,7 +1,9 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Child, ExitCode},
+    time::{Duration, SystemTime},
 };
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
@@ -48,6 +50,9 @@ enum Command {
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
+        /// Rebuild whenever a watched `.vl` source file changes (Ctrl-C to stop).
+        #[arg(long)]
+        watch: bool,
     },
     /// Type-check, reporting diagnostics without writing output. With no path,
     /// checks the project entry from the nearest `vilan.toml`.
@@ -65,12 +70,19 @@ enum Command {
         /// Also emit `.parse.out` / `.analyze.out` / `.callgraph.out` debug dumps.
         #[arg(short, long)]
         debug: bool,
+        /// Re-check whenever a watched `.vl` source file changes (Ctrl-C to stop).
+        #[arg(long)]
+        watch: bool,
     },
     /// Build and run a source file, forwarding any trailing arguments to the
     /// program (reach them with `process::args()`).
     Run {
         /// A `.vl` file, a project directory, or omitted to use `vilan.toml`.
         file: Option<PathBuf>,
+        /// Rebuild and restart whenever a watched `.vl` source file changes. Place it
+        /// before the file (`vilan run --watch app.vl`), ahead of any program args.
+        #[arg(long)]
+        watch: bool,
         /// Arguments passed through to the running program (after the file).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -88,6 +100,9 @@ enum Command {
     Test {
         /// A test file, a directory of tests, or omitted to use the project root.
         path: Option<PathBuf>,
+        /// Re-run the tests whenever a watched `.vl` source file changes (Ctrl-C to stop).
+        #[arg(long)]
+        watch: bool,
     },
 }
 
@@ -114,66 +129,268 @@ fn run_cli() -> ExitCode {
             platform,
             backend,
             debug,
+            watch,
         } => match effective_backend(backend.as_deref()) {
             Err(message) => report_error(&message),
-            Ok(_backend) => with_project(file, |project| match project {
-                Project::Single {
-                    unit,
-                    platform: package_platform,
-                } => match effective_platform(platform.as_deref(), package_platform) {
-                    Ok(Platform::None) => no_host_platform(),
-                    Ok(platform) => build_single(&unit, stdout, platform, debug),
-                    Err(message) => report_error(&message),
-                },
-                // A workspace builds each member for its own declared platform, so
-                // the `--platform` flag doesn't apply.
-                Project::Workspace { root, members } => build_workspace(&root, &members, debug),
-                Project::Library { name, .. } => not_buildable_library(&name),
-            }),
+            Ok(_backend) => {
+                let roots = watch.then(|| watch_roots(&file));
+                run_or_watch(roots, move || {
+                    build_once(file.clone(), stdout, platform.clone(), debug)
+                })
+            }
         },
         Command::Check {
             file,
             platform,
             backend,
             debug,
+            watch,
         } => match effective_backend(backend.as_deref()) {
             Err(message) => report_error(&message),
-            Ok(_backend) => with_project(file, |project| match project {
-                Project::Single {
-                    unit,
-                    platform: package_platform,
-                } => match effective_platform(platform.as_deref(), package_platform) {
-                    // A `none` package is a pure library — it can't be built, but it
-                    // can still be type-checked (against the base layer only).
-                    Ok(platform) => check_single(&unit, platform, debug),
-                    Err(message) => report_error(&message),
-                },
-                Project::Workspace { members, .. } => check_workspace(&members, debug),
-                // A standalone `[library]` has no fixed platform: check its platform
-                // contract (every module's `pkg::` imports resolve across the platforms
-                // its layer serves) instead of a single-platform build.
-                Project::Library { dir, name } => check_library(&dir, &name),
-            }),
-        },
-        // `run`/`test` execute with `node`.
-        Command::Run { file, args } => with_project(file, |project| match project {
-            Project::Single { unit, platform } => {
-                let platform = platform.unwrap_or_default();
-                if matches!(platform, Platform::Node { .. }) {
-                    run_single(&unit, &args)
-                } else {
-                    eprintln!(
-                        "error: `vilan run` executes with Node, but the package platform is `{}`",
-                        platform.name()
-                    );
-                    ExitCode::FAILURE
-                }
+            Ok(_backend) => {
+                let roots = watch.then(|| watch_roots(&file));
+                run_or_watch(roots, move || {
+                    check_once(file.clone(), platform.clone(), debug)
+                })
             }
-            Project::Workspace { root, members } => run_workspace(&root, &members, &args),
-            Project::Library { name, .. } => not_buildable_library(&name),
-        }),
-        Command::Test { path } => test(path),
+        },
+        // `run`/`test` execute with `node`. `run --watch` restarts the process on a
+        // change (see `run_watch`); the others just re-run the command.
+        Command::Run { file, args, watch } => {
+            if watch {
+                run_watch(file, args)
+            } else {
+                run_once(file, &args)
+            }
+        }
+        Command::Test { path, watch } => {
+            let roots = watch.then(|| watch_roots(&path));
+            run_or_watch(roots, move || test(path.clone()))
+        }
         Command::Fmt { paths, check } => fmt(&paths, check),
+    }
+}
+
+/// Builds the project once (a lone package / bare file for its `--platform`, a
+/// workspace for each member's platform; a `[library]` isn't buildable).
+fn build_once(
+    file: Option<PathBuf>,
+    stdout: bool,
+    platform: Option<String>,
+    debug: bool,
+) -> ExitCode {
+    with_project(file, |project| match project {
+        Project::Single {
+            unit,
+            platform: package_platform,
+        } => match effective_platform(platform.as_deref(), package_platform) {
+            Ok(Platform::None) => no_host_platform(),
+            Ok(platform) => build_single(&unit, stdout, platform, debug),
+            Err(message) => report_error(&message),
+        },
+        // A workspace builds each member for its own declared platform, so the
+        // `--platform` flag doesn't apply.
+        Project::Workspace { root, members } => build_workspace(&root, &members, debug),
+        Project::Library { name, .. } => not_buildable_library(&name),
+    })
+}
+
+/// Type-checks the project once. A standalone `[library]` has no fixed platform, so
+/// it verifies the platform contract (§4.2) instead of a single-platform build.
+fn check_once(file: Option<PathBuf>, platform: Option<String>, debug: bool) -> ExitCode {
+    with_project(file, |project| match project {
+        Project::Single {
+            unit,
+            platform: package_platform,
+        } => match effective_platform(platform.as_deref(), package_platform) {
+            // A `none` package is a pure library — not buildable, but type-checkable
+            // (against the base layer only).
+            Ok(platform) => check_single(&unit, platform, debug),
+            Err(message) => report_error(&message),
+        },
+        Project::Workspace { members, .. } => check_workspace(&members, debug),
+        Project::Library { dir, name } => check_library(&dir, &name),
+    })
+}
+
+/// Builds and runs the project once with Node, waiting for it to exit and
+/// propagating its code (the blocking, non-`--watch` path).
+fn run_once(file: Option<PathBuf>, args: &[String]) -> ExitCode {
+    with_project(file, |project| match project {
+        Project::Single { unit, platform } => {
+            let platform = platform.unwrap_or_default();
+            if matches!(platform, Platform::Node { .. }) {
+                run_single(&unit, args)
+            } else {
+                eprintln!(
+                    "error: `vilan run` executes with Node, but the package platform is `{}`",
+                    platform.name()
+                );
+                ExitCode::FAILURE
+            }
+        }
+        Project::Workspace { root, members } => run_workspace(&root, &members, args),
+        Project::Library { name, .. } => not_buildable_library(&name),
+    })
+}
+
+// --- `--watch` mode (roadmap P5) --------------------------------------------
+
+/// How often the watcher polls for changes.
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Runs `action` once and returns its exit code (no `--watch`, `roots` is `None`),
+/// or — under `--watch` — re-runs it on every change to a `.vl` file under `roots`.
+fn run_or_watch(roots: Option<Vec<PathBuf>>, mut action: impl FnMut() -> ExitCode) -> ExitCode {
+    match roots {
+        None => action(),
+        Some(roots) => watch_loop(&roots, move || {
+            let _ = action();
+        }),
+    }
+}
+
+/// The directories to watch, from a command's path argument: an explicit directory
+/// as-is (a workspace root covers every member); a file's parent (its `pkg::`
+/// siblings); with no path, the nearest project root, else the working directory.
+fn watch_roots(file: &Option<PathBuf>) -> Vec<PathBuf> {
+    let root = match file {
+        Some(path) if path.is_dir() => path.clone(),
+        Some(path) => pkg_root_of(path),
+        None => env::current_dir()
+            .ok()
+            .map(|cwd| find_project_root(&cwd).unwrap_or(cwd))
+            .unwrap_or_else(|| PathBuf::from(".")),
+    };
+    vec![root]
+}
+
+/// A snapshot of every `.vl` file under `roots` (recursively) → its last-modified
+/// time. Only `.vl` files are tracked, so the compiler's own `.js` / `dist` / `.out`
+/// output can never trigger a rebuild; comparing two snapshots detects edits,
+/// additions, and removals.
+fn scan_vl(roots: &[PathBuf]) -> BTreeMap<PathBuf, SystemTime> {
+    let mut files = Vec::new();
+    for root in roots {
+        collect_vl_files(root, &mut files);
+    }
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok()?;
+            Some((path, modified))
+        })
+        .collect()
+}
+
+/// Runs `action`, then re-runs it whenever a watched `.vl` file changes — polling
+/// every [`WATCH_POLL_INTERVAL`]. Returns only when there's nothing to watch;
+/// otherwise loops until `Ctrl-C` (which, via the shared terminal process group,
+/// also stops any `run --watch` child).
+fn watch_loop(roots: &[PathBuf], mut action: impl FnMut()) -> ExitCode {
+    if roots.iter().all(|root| !root.exists()) {
+        eprintln!("error: nothing to watch (no such path)");
+        return ExitCode::FAILURE;
+    }
+    let watched = roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!("[watch] watching {watched} for `.vl` changes — Ctrl-C to stop");
+    action();
+    let mut snapshot = scan_vl(roots);
+    loop {
+        std::thread::sleep(WATCH_POLL_INTERVAL);
+        let next = scan_vl(roots);
+        if next != snapshot {
+            snapshot = next;
+            eprintln!("\n[watch] change detected — re-running");
+            action();
+        }
+    }
+}
+
+/// `vilan run --watch`: rebuild and restart the program on every change. Each round
+/// stops the previous process first (so a server frees its port), then spawns the
+/// new one without waiting and holds its handle for the next round.
+fn run_watch(file: Option<PathBuf>, args: Vec<String>) -> ExitCode {
+    let roots = watch_roots(&file);
+    let mut child: Option<Child> = None;
+    watch_loop(&roots, move || {
+        if let Some(mut previous) = child.take() {
+            let _ = previous.kill();
+            let _ = previous.wait();
+        }
+        child = build_and_spawn_run(file.clone(), &args);
+    })
+}
+
+/// Builds the run target and spawns it with Node **without waiting**, returning the
+/// child so the next `run --watch` round can stop it. `None` after reporting a
+/// compile error or a non-runnable project.
+fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> {
+    let project = match resolve_project(file) {
+        Ok(project) => project,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return None;
+        }
+    };
+    let launch = |script: &Path, cwd: Option<&Path>| match spawn_node(script, args, cwd) {
+        Ok(child) => Some(child),
+        Err(error) => {
+            eprintln!("error: failed to launch `node`: {error}");
+            None
+        }
+    };
+    match project {
+        Project::Single { unit, platform } => {
+            let platform = platform.unwrap_or_default();
+            if !matches!(platform, Platform::Node { .. }) {
+                eprintln!(
+                    "error: `vilan run` executes with Node, but the package platform is `{}`",
+                    platform.name()
+                );
+                return None;
+            }
+            let javascript = compile_unit(&unit, Platform::default(), false).ok()?;
+            let script = env::temp_dir().join(format!("vilan-watch-{}.js", std::process::id()));
+            if let Err(error) = fs::write(&script, javascript) {
+                eprintln!("error: cannot write {}: {error}", script.display());
+                return None;
+            }
+            launch(&script, None)
+        }
+        Project::Workspace { root, members } => {
+            let node_members: Vec<&Unit> = members
+                .iter()
+                .filter(|(_, platform)| matches!(platform, Platform::Node { .. }))
+                .map(|(unit, _)| unit)
+                .collect();
+            let server = match node_members.as_slice() {
+                [unit] => unit,
+                [] => {
+                    eprintln!("error: no `node` package in this workspace to run");
+                    return None;
+                }
+                _ => {
+                    eprintln!("error: this workspace has more than one `node` package to run");
+                    return None;
+                }
+            };
+            if build_workspace_artifacts(&root, &members, false).is_err() {
+                return None;
+            }
+            launch(
+                &Path::new("dist").join(format!("{}.js", server.name)),
+                Some(&root),
+            )
+        }
+        Project::Library { name, .. } => {
+            not_buildable_library(&name);
+            None
+        }
     }
 }
 
@@ -680,11 +897,12 @@ fn run_workspace(root: &Path, members: &[(Unit, Platform)], args: &[String]) -> 
     }
     // Run from the project root so the server reads sibling `dist/*.js`; the script
     // path is relative to that working directory.
-    let status = std::process::Command::new("node")
-        .arg(Path::new("dist").join(format!("{}.js", server.name)))
-        .args(args)
-        .current_dir(root)
-        .status();
+    let status = spawn_node(
+        &Path::new("dist").join(format!("{}.js", server.name)),
+        args,
+        Some(root),
+    )
+    .and_then(|mut child| child.wait());
     exit_code_of(status)
 }
 
@@ -909,14 +1127,23 @@ fn run_node_script(javascript: &str, args: &[String]) -> ExitCode {
         eprintln!("error: cannot write {}: {error}", script.display());
         return ExitCode::FAILURE;
     }
-    // `node <script> <args...>` — `process.argv` becomes `[node, script, ...args]`,
-    // so the program's `args()` (argv.slice(2)) sees exactly `args`.
-    let status = std::process::Command::new("node")
-        .arg(&script)
-        .args(args)
-        .status();
+    let status = spawn_node(&script, args, None).and_then(|mut child| child.wait());
     let _ = fs::remove_file(&script);
     exit_code_of(status)
+}
+
+/// Spawns `node <script> <args...>` (optionally in `cwd`), inheriting this process's
+/// stdio, and returns the child **without waiting**. `node <script>` makes the
+/// program's `process.argv` `[node, script, ...args]`, so its `args()` (argv.slice(2))
+/// sees exactly `args`. The caller either waits on it (`vilan run`) or holds the
+/// handle to stop it on the next change (`vilan run --watch`).
+fn spawn_node(script: &Path, args: &[String], cwd: Option<&Path>) -> std::io::Result<Child> {
+    let mut command = std::process::Command::new("node");
+    command.arg(script).args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command.spawn()
 }
 
 /// Maps a launched process's result to an `ExitCode`, reporting a launch failure.
@@ -998,4 +1225,55 @@ fn report_warning(filename: &str, src: &str, span: std::ops::Range<usize>, messa
         // stderr, so it doesn't corrupt `build --stdout` JS.
         .eprint(sources([(filename.to_string(), src.to_string())]))
         .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_roots_from_a_file_is_its_parent_directory() {
+        // A non-existent `.vl` path isn't a directory, so it resolves to its parent —
+        // where its `pkg::` siblings live.
+        let roots = watch_roots(&Some(PathBuf::from("project/src/main.vl")));
+        assert_eq!(roots, vec![PathBuf::from("project/src")]);
+    }
+
+    #[test]
+    fn watch_roots_from_a_directory_is_the_directory() {
+        // A real directory (so `is_dir()` holds) is watched as-is.
+        let dir = env::temp_dir();
+        assert_eq!(watch_roots(&Some(dir.clone())), vec![dir]);
+    }
+
+    #[test]
+    fn scan_vl_tracks_only_vl_files_and_sees_additions() {
+        let dir = env::temp_dir().join(format!("vilan-watch-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.vl"), "fun main() {}\n").unwrap();
+        // A build's own output — must never be watched (else it triggers itself).
+        fs::write(dir.join("a.js"), "// generated\n").unwrap();
+        let roots = vec![dir.clone()];
+
+        let snapshot = scan_vl(&roots);
+        assert!(
+            snapshot.keys().any(|path| path.ends_with("a.vl")),
+            "the `.vl` source must be tracked"
+        );
+        assert!(
+            !snapshot.keys().any(|path| path.ends_with("a.js")),
+            "generated `.js` must not be tracked"
+        );
+
+        // Adding a `.vl` file changes the snapshot — a rebuild trigger.
+        fs::write(dir.join("b.vl"), "fun helper() {}\n").unwrap();
+        assert_ne!(scan_vl(&roots), snapshot);
+        // Adding a `.js` file does not.
+        let after_js = scan_vl(&roots);
+        fs::write(dir.join("c.js"), "// also generated\n").unwrap();
+        assert_eq!(scan_vl(&roots), after_js, "a new `.js` is not a change");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

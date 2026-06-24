@@ -107,9 +107,13 @@ P4. **Library packages** (L) **[new, replaces "target-varying modules"]** — a 
       additive. *Awaiting review.*
     Needs the target model (P2) and error recovery (P3).
 
-P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent]** — rebuild / rerun
-    on source change. Independent of the project work (pull forward as a quick DX win); leans on the
-    existing parse / skip-unchanged caching for fast incremental rounds.
+P5. **`--watch` for `build` / `run` / `test` / `check`** (S) **[new, independent] — ✅ shipped
+    2026-06-23** (`watch-mode.md`). A `--watch` flag on each of the four commands re-runs it on any
+    change to a watched `.vl` file. Dependency-free **polling** (~300 ms; only `.vl` tracked, so the
+    compiler's own `.js`/`dist` output never self-triggers); the watched root is the path argument's
+    directory (a file's parent, a workspace root, or the nearest project root). `run --watch` stops the
+    previous process before rebuilding + respawning (a server frees its port; `Ctrl-C` stops both via
+    the shared process group). One `spawn_node` helper shared by the blocking run and the watch restart.
 
 P6. **Transport / RPC library** (XL) **[new]** — two processes communicate and move data **without
     hand-written serializers**, for client↔server and server↔server. Requirements: **pluggable
