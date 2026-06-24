@@ -1355,14 +1355,12 @@ fn reject_bare_value_to_shared_reference_param() {
 }
 
 #[test]
-#[ignore = "open: a generic `&mut T` view parameter lowers `slot = value` to `Object.assign` instead of the scalar place-write, so a scalar pointee isn't written through"]
 fn generic_mut_view_parameter_writes_through() {
-    // A generic `&mut T` parameter: `slot = value` should write through to the
-    // caller's place. For a scalar pointee (`T = i32`) it must lower to the
-    // `(base, key)` place-write `slot[0][slot[1]] = value`; instead it emits the
-    // aggregate `Object.assign(slot, value)` (the scalar-vs-aggregate view choice
-    // is made at analysis time, when `T` is abstract, and never reconsidered at
-    // monomorphization). So the caller's `a` stays `1`.
+    // A generic `&mut T` view now behaves exactly like a concrete `&mut <T>`. For a
+    // scalar pointee (`i32`, `f64`, `str`, `u32`) the read/write goes through the
+    // `(base, key)` place-write, decided at monomorphization (the analyzer can't,
+    // with `T` abstract — it emitted the aggregate `Object.assign`, leaving `a`
+    // unchanged). For an aggregate pointee it stays the in-place copy.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -1370,7 +1368,82 @@ fn generic_mut_view_parameter_writes_through() {
         fun main() {
             mut a = 1;
             replace(&mut a, 9);
-            print(a);
+            print(a);             // 9 — i32 written through
+            mut f = 1.0;
+            replace(&mut f, 2.5);
+            print(f);             // 2.5 — f64
+            mut s = "hi";
+            replace(&mut s, "hey");
+            print(s);             // hey — str
+        }
+        "#,
+        "9\n2.5\nhey\n",
+    );
+}
+
+#[test]
+fn generic_mut_view_reads_and_swaps() {
+    // Reading through a generic `&mut T` view (`*a`) and a `swap<T>` that both reads
+    // and writes both views — the place-read `slot[0][slot[1]]` is also picked at
+    // monomorphization for a scalar `T`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun peek<T: Display>(slot: &mut T): str { (*slot).to_string() }
+        fun swap<T>(a: &mut T, b: &mut T) { let t = *a; a = *b; b = t; }
+        fun main() {
+            mut a = 5;
+            print(peek(&mut a));
+            mut x = 1;
+            mut y = 2;
+            swap(&mut x, &mut y);
+            print(x);
+            print(y);
+        }
+        "#,
+        "5\n2\n1\n",
+    );
+}
+
+#[test]
+fn generic_mut_view_of_a_generic_local() {
+    // The caller side: a `&mut` of a *generic-typed local* (`mut local = x` where
+    // `x: T`) forwarded to another generic view parameter. The local must be boxed
+    // and the reference must build the `(base, key)` pair when `T` resolves to a
+    // scalar here — decided in the transformer (`generic_referenced_roots`), since
+    // the analyzer saw `T` abstract. An aggregate `T` stays unboxed. (Before the
+    // fix the scalar case crashed: `slot[0][slot[1]]` on an unboxed value.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun inner<T>(slot: &mut T, value: T) { slot = value; }
+        fun outer<T>(x: T, value: T): T { mut local = x; inner(&mut local, value); local }
+        struct P { x: i32 }
+        fun main() {
+            print(outer(1, 9));                       // scalar local -> 9
+            print(outer(P { x = 1 }, P { x = 9 }).x); // aggregate local -> 9
+        }
+        "#,
+        "9\n9\n",
+    );
+}
+
+#[test]
+fn generic_mut_view_aggregate_pointee_copies_in_place() {
+    // The aggregate side of the same parameter: a generic `&mut T` where `T`
+    // resolves to a struct rebinds via the in-place copy (not a `(base, key)`
+    // write), so the caller's value updates. Guards that the scalar fix didn't
+    // change the aggregate path.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct P { x: i32 }
+        fun replace<T>(slot: &mut T, value: T) { slot = value; }
+        fun main() {
+            mut p = P { x = 1 };
+            replace(&mut p, P { x = 9 });
+            print(p.x);
         }
         "#,
         "9\n",

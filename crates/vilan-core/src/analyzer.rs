@@ -1894,21 +1894,34 @@ impl<'src> Analyzer<'src> {
     /// boxed into a one-slot cell `[value]`; its reads/writes go through `[0]`
     /// and `&`/`&mut` of it yields the cell. Aggregates (already JS objects) and
     /// field/element views need no boxing.
-    fn compute_boxed_locals(&self) -> HashSet<Id> {
+    /// The locals that must be declared as a one-slot cell so a `&`/`&mut` view
+    /// can point into them: the concrete scalar roots (`boxed`), and — returned
+    /// separately — the roots whose type is a *generic* parameter, whose
+    /// scalar-ness (and so whether they are boxed) can only be decided at
+    /// monomorphization, by the transformer, against the concrete type.
+    fn compute_boxed_locals(&self) -> (HashSet<Id>, HashSet<Id>) {
         let mut boxed = HashSet::new();
+        let mut generic_referenced_roots = HashSet::new();
         for expr in self.expr_id_to_expr_map.values() {
             if let Expr::Reference(operand, _) = expr {
                 if let Some(root) = self.place_root(*operand) {
-                    let is_scalar_local = self.variables.get(&root).is_some_and(|variable| {
-                        matches!(variable.type_id.get_type(self), Type::Struct(id, _) if self.is_scalar_primitive(id))
-                    });
-                    if is_scalar_local {
-                        boxed.insert(root);
+                    match self
+                        .variables
+                        .get(&root)
+                        .map(|variable| variable.type_id.get_type(self))
+                    {
+                        Some(Type::Struct(id, _)) if self.is_scalar_primitive(id) => {
+                            boxed.insert(root);
+                        }
+                        Some(Type::Generic(_)) => {
+                            generic_referenced_roots.insert(root);
+                        }
+                        _ => {}
                     }
                 }
             }
         }
-        boxed
+        (boxed, generic_referenced_roots)
     }
 
     /// Whether a place is a scalar primitive — the case that needs a `(base, key)`
@@ -9057,6 +9070,11 @@ pub struct Program<'src> {
     // Slice 4: scalar locals boxed into a `[value]` cell because a view is taken
     // of them; their reads/writes lower through `[0]`.
     pub boxed_locals: HashSet<Id>,
+    // `&`/`&mut`-referenced locals whose type is a generic parameter: whether each
+    // is a scalar `(base, key)` view (and so boxed) is only decidable at
+    // monomorphization, so the transformer resolves the concrete type and treats a
+    // scalar pointee like `boxed_locals` / `scalar_view_refs`.
+    pub generic_referenced_roots: HashSet<Id>,
     // View bindings/params holding a scalar `(base, key)` view; `*v` lowers to
     // `v[0][v[1]]` (covers both a boxed local and a scalar field).
     pub primitive_views: HashSet<Id>,
@@ -10819,7 +10837,7 @@ pub fn analyze<'src>(
     // write-through deref form before codegen reads the targets.
     analyzer.rewrite_view_assignment_targets();
     let clone_sites = analyzer.compute_clone_sites();
-    let boxed_locals = analyzer.compute_boxed_locals();
+    let (boxed_locals, generic_referenced_roots) = analyzer.compute_boxed_locals();
     let primitive_views = analyzer.compute_primitive_views();
     let scalar_view_refs = analyzer.compute_scalar_view_refs();
     let scalar_view_calls = analyzer.compute_scalar_view_calls();
@@ -10946,6 +10964,7 @@ pub fn analyze<'src>(
         async_functions: HashSet::new(),
         clone_sites,
         boxed_locals,
+        generic_referenced_roots,
         primitive_views,
         scalar_view_refs,
         scalar_view_calls,

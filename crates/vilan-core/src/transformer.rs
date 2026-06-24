@@ -3,7 +3,7 @@ use crate::analyzer::{
 };
 use crate::error::Error;
 use crate::id::Id;
-use crate::node::{BinaryOp, ExternBinding};
+use crate::node::{BinaryOp, Convention, ExternBinding};
 use crate::options::BuildOptions;
 use crate::type_::{Type, TypeId};
 use chumsky::span::Span;
@@ -545,11 +545,88 @@ impl<'src> Transformer<'src> {
     /// parameter, or `&place` of a scalar place directly.
     fn derefs_scalar_view(&self, operand: Id) -> bool {
         match self.program.entity_map.get(&operand) {
-            Some(Expr::Local(binding)) => self.program.primitive_views.contains(binding),
+            Some(Expr::Local(binding)) => {
+                self.program.primitive_views.contains(binding)
+                    || self.generic_ref_param_is_scalar(*binding)
+            }
             Some(Expr::Reference(..)) => self.program.scalar_view_refs.contains(&operand),
             // `*obj.slot()` — a `borrows` call returning a scalar view.
             Some(Expr::Call(..)) => self.program.scalar_view_calls.contains(&operand),
             _ => false,
+        }
+    }
+
+    /// A `&`/`&mut` parameter whose declared pointee is a generic that resolves,
+    /// at this monomorphization, to a scalar primitive. `compute_primitive_views`
+    /// classifies a view by its pointee type, but a generic `&mut T` parameter's
+    /// pointee is abstract there, so it cannot be added to `primitive_views`; the
+    /// classification is re-made here against the concrete type, so a scalar
+    /// pointee uses the `(base, key)` representation its (concrete) caller passed
+    /// rather than the aggregate `Object.assign` path.
+    fn generic_ref_param_is_scalar(&self, binding: Id) -> bool {
+        self.program
+            .parameters
+            .get(&binding)
+            .is_some_and(|parameter| {
+                matches!(parameter.convention, Convention::Ref | Convention::RefMut)
+                    && matches!(
+                        self.program.type_id_to_type_map.get(&parameter.type_id),
+                        Some(Type::Generic(_))
+                    )
+                    && self.resolves_to_scalar_primitive(parameter.type_id)
+            })
+    }
+
+    /// Whether `type_id`, resolved under the active monomorphization substitution,
+    /// is one of the scalar primitives that take a `(base, key)` view (the same
+    /// set as the analyzer's `is_scalar_primitive`).
+    fn resolves_to_scalar_primitive(&self, type_id: TypeId) -> bool {
+        matches!(
+            self.program.type_id_to_type_map.get(&self.resolve_type_id(type_id)),
+            Some(Type::Struct(id, _))
+                if self.program.structs.get(id).is_some_and(|struct_|
+                    matches!(struct_.name, "str" | "i32" | "u32" | "f64" | "BigInt" | "null"))
+        )
+    }
+
+    /// Whether a local is boxed into a `[value]` cell at this monomorphization: a
+    /// concrete scalar root (`boxed_locals`), or a generic-typed `&`-referenced
+    /// root that resolves here to a scalar primitive (decided now, not in the
+    /// analyzer, since its type was abstract there).
+    fn local_is_boxed(&self, id: Id) -> bool {
+        self.program.boxed_locals.contains(&id)
+            || (self.program.generic_referenced_roots.contains(&id)
+                && self
+                    .program
+                    .variables
+                    .get(&id)
+                    .is_some_and(|variable| self.resolves_to_scalar_primitive(variable.type_id)))
+    }
+
+    /// Whether `&[mut] operand` (the reference expr `ref_id`) lowers to a scalar
+    /// `(base, key)` pair: a concrete scalar place (`scalar_view_refs`), or a
+    /// reference whose place root is a generic local resolving here to a scalar.
+    fn emits_scalar_view_ref(&self, ref_id: Id, operand: Id) -> bool {
+        self.program.scalar_view_refs.contains(&ref_id)
+            || self.place_root_local(operand).is_some_and(|root| {
+                self.program.generic_referenced_roots.contains(&root)
+                    && self
+                        .program
+                        .variables
+                        .get(&root)
+                        .is_some_and(|variable| self.resolves_to_scalar_primitive(variable.type_id))
+            })
+    }
+
+    /// The local a place expression bottoms out in (mirrors the analyzer's
+    /// `place_root`) — for deciding a generic place's view representation.
+    fn place_root_local(&self, expr_id: Id) -> Option<Id> {
+        match self.program.entity_map.get(&expr_id)? {
+            Expr::Local(binding) => Some(*binding),
+            Expr::Field(subject, _, _) => self.place_root_local(*subject),
+            Expr::Index(subject, _) => self.place_root_local(*subject),
+            Expr::Dereference(operand) => self.place_root_local(*operand),
+            _ => None,
         }
     }
 
@@ -656,7 +733,7 @@ impl<'src> Transformer<'src> {
                     return Some(self.variant_value(*enum_id, *variant_index, Vec::new()));
                 }
                 // A boxed scalar local reads through its cell's slot 0.
-                if self.program.boxed_locals.contains(id) {
+                if self.local_is_boxed(*id) {
                     return Some(js::Node::PropertyIndex(
                         Box::new(js::Node::Local(self.ng.name_for(*id))),
                         Box::new(js::Node::Number("0".to_string(), None)),
@@ -942,7 +1019,7 @@ impl<'src> Transformer<'src> {
             // aggregate is the value's own JS reference (an aggregate is its own
             // view), so it passes through unchanged.
             Expr::Reference(operand, _) => {
-                if self.program.scalar_view_refs.contains(&id) {
+                if self.emits_scalar_view_ref(id, *operand) {
                     let (base, key) = match self.program.entity_map.get(operand) {
                         Some(Expr::Field(subject, _, field_index)) => (
                             self.walk_entity(*subject, block).unwrap_or(js::Node::Void),
@@ -1026,7 +1103,7 @@ impl<'src> Transformer<'src> {
                     })
                     .unwrap_or(js::Node::Void);
                 // A boxed scalar local is declared as a one-slot cell.
-                let value = if self.program.boxed_locals.contains(id) {
+                let value = if self.local_is_boxed(*id) {
                     js::Node::Array(vec![value])
                 } else {
                     value
