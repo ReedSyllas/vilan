@@ -872,13 +872,38 @@ fn must_use_consumed_result_no_warning() {
     );
 }
 
+#[test]
+fn enum_constructor_propagates_expected_type_to_payload() {
+    // Bidirectional inference (B1): a constructor argument is typed against the
+    // *expected* enum's arguments, not the abstract parameter. `Ok(Option::from_json
+    // (t))` in a `Result<Option<User>, str>` context types `from_json` against
+    // `Option<User>`, so it round-trips. (Was a generic-binding-flow bug.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        [derive(Json)] struct User { id: i32, name: str }
+        fun main() {
+            let decoded: Result<Option<User>, str> =
+                Ok(Option::from_json("{\"id\":1,\"name\":\"Ada\"}"));
+            match decoded {
+                Ok(Some(let u)) => print(u.name),
+                Ok(None) => print("none"),
+                Err(let e) => print(e),
+            }
+        }
+        "#,
+        "Ada\n",
+    );
+}
+
 // --- Known bugs: generic-binding flow (backlog B1, see proposal/type-solver.md) ---
 //
 // These assert the *desired* behaviour and are `#[ignore]`d because they currently
-// fail (both print/produce `undefined`). They are the two faces of the one remaining
-// solver weakness — a generic parameter's binding lost across a boundary — that B1's
-// item 5 v2 (dependency re-queue, class A) and item 6 (stable generic identity, class
-// B) close. Remove `#[ignore]` as each lands.
+// produce `undefined` — the two remaining faces of the generic-binding-flow class.
+// Remove `#[ignore]` as each lands.
 
 #[test]
 #[ignore = "B1 class B: dispatch on a generic-typed field lowers to the abstract trait method"]
@@ -903,12 +928,14 @@ fn generic_field_method_dispatch_runs() {
 }
 
 #[test]
-#[ignore = "B1 class A: from_json element type via an indirect path lowers to the abstract decoder"]
+#[ignore = "B1: a function body isn't inferred against its declared return type, so the binding isn't recorded"]
 fn from_json_indirect_element_type_runs() {
-    // The element type `User` arrives through the `Ok(..)` wrapper + return type,
-    // *after* the `Option::from_json` constraint resolved; with no dependency re-queue
-    // the binding is never recorded, so the decode lowers to the abstract
-    // `from_json_value` → `Some(undefined)`.
+    // `decode` returns `Result<Option<User>, str>` but its body is inferred bottom-up,
+    // not against that return type — so `Option::from_json` never sees `Option<User>`
+    // and the decode lowers to the abstract `from_json_value` → `Some(undefined)`. (The
+    // bidirectional constructor propagation is fixed; the missing piece is driving body
+    // inference from the return type — see `enum_constructor_propagates_..` which passes
+    // because the `let` annotation supplies the expected type.)
     assert_compiles_and_runs(
         r#"
         import std::print;

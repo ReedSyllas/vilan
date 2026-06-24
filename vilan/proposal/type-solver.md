@@ -135,3 +135,33 @@ generic identity) follows to close class (B).
   correctness? If only correctness, v2 can keep run-all and *just* add re-queue-on-write
   (re-run a deferred constraint when its input lands) without the full dirty-set
   scheduler — a smaller, safer v2.
+
+## Implementation progress
+
+**Update — class (A) is narrower than "no re-queue."** Tracing the `from_json` repro
+(#4) in code refined the diagnosis. It is a **bidirectional-inference** gap, not a
+late-binding/re-queue one: the binding *would* be recorded (the function-call arm
+already reconciles a call's return type against its expected `constraint`), but the
+expected type never reaches the call. Two leaks, both fixable directly:
+
+1. **Constructor propagation — ✅ fixed** (commit pending). `infer_enum_constructor_arguments`
+   inferred each argument against the variant's *abstract* declared payload type and
+   ignored the expected enum type. It now seeds the enum's parameter bindings from the
+   expected type and substitutes the payload before inferring the argument — so
+   `Ok(Option::from_json(t))` in a `Result<Option<User>, str>` context types `from_json`
+   against `Option<User>`. Verified: the `let`-annotated form round-trips; corpus 69/69.
+2. **Return-type-driven body inference — open** (the remaining half of #4). A function's
+   body/return expression is *not* inferred against its declared return type, so
+   `fun g(): Option<User> { Option::from_json(t) }` leaves the binding unrecorded (the
+   abstract decoder). The fix is to drive body inference from the return type (a
+   bidirectional return constraint) — clean and general, but it changes return-position
+   inference for every function, so it's staged with a careful corpus pass.
+
+So the `from_json` class is **bidirectional flow**, more contained than the full
+dependency re-queue. **Re-queue (item 5 v2) is still the cure for the genuinely
+late-bound case** — bug c′ (`count.derive(|n| format(n))`), where an *unannotated
+closure parameter* types only after its enclosing call resolves; no amount of
+expected-type propagation helps there. Class (B) / #3 remains item 6 (stable generic
+identity). Net: the one "binding lost across a boundary" class has three distinct
+leaks — constructor propagation (fixed), return-type body inference (next), and
+closure-parameter lateness (re-queue) — plus the nested-dispatch identity (item 6).

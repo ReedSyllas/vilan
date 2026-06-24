@@ -5073,6 +5073,7 @@ impl<'src> Analyzer<'src> {
         subject_id: Id,
         enum_id: Id,
         argument_ids: &[Id],
+        constraint: &Type,
         substitution_context: &SubstitutionContext,
         exprs_seen: &mut HashSet<Id>,
     ) -> Option<Vec<TypeId>> {
@@ -5083,11 +5084,35 @@ impl<'src> Analyzer<'src> {
             return None;
         }
         let data_type_ids = enum_.variants.get(variant_index)?.data_type_ids.clone();
-        let mut bindings: SubstitutionContext = HashMap::new();
+        // Seed the parameter bindings top-down from the expected enum type, so a
+        // constructor argument is inferred against its *concrete* payload type —
+        // `Ok(decode())` in a `Result<Option<User>, str>` context types `decode()`
+        // against `Option<User>`, not the abstract `T`. Bidirectional inference: the
+        // expected type flows down through the constructor, then each argument refines
+        // the bindings bottom-up as before. Without a matching expected enum the seed
+        // is empty and inference stays purely bottom-up (unchanged).
+        let mut bindings: SubstitutionContext = match constraint {
+            Type::Enum(expected_enum_id, expected_arguments)
+                if *expected_enum_id == enum_id
+                    && expected_arguments.len() == generic_parameters.len() =>
+            {
+                generic_parameters
+                    .iter()
+                    .copied()
+                    .zip(expected_arguments.iter().copied())
+                    .collect()
+            }
+            _ => HashMap::new(),
+        };
         for (data_type_id, argument_id) in data_type_ids.iter().zip(argument_ids.iter()) {
             let data_type = data_type_id.get_type(self);
-            let argument_type =
-                self.infer_type_inner(*argument_id, &data_type, substitution_context, exprs_seen);
+            let expected_payload = self.substitute_type(&data_type, &bindings);
+            let argument_type = self.infer_type_inner(
+                *argument_id,
+                &expected_payload,
+                substitution_context,
+                exprs_seen,
+            );
             if matches!(argument_type, Type::Unresolved) {
                 return None;
             }
@@ -5395,6 +5420,7 @@ impl<'src> Analyzer<'src> {
                                 subject_id,
                                 enum_id,
                                 &argument_ids,
+                                &constraint,
                                 substitution_context,
                                 exprs_seen,
                             );
