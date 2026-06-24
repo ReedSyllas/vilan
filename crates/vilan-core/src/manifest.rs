@@ -45,8 +45,8 @@ pub struct Package {
     pub root: Option<PathBuf>,
     /// The `build`/`run` entry, resolved against `root`. Default `main.vl`.
     pub entry: Option<PathBuf>,
-    /// The default build platform (`node` / `deno` / `browser` / `none`). Default
-    /// `node`.
+    /// The default build platform (`node` / `deno` / `bun` / `browser` / `none`).
+    /// Default `node`.
     pub target: Option<String>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
@@ -77,7 +77,7 @@ pub struct LayerDecl {
     /// The layer's source root, relative to the manifest. Defaults to `src/<name>`.
     pub root: Option<PathBuf>,
     /// The platforms this layer serves: `node` / `node:24` / `node:*` / `deno` /
-    /// `browser`, or a family (`@process`). At least one.
+    /// `bun` / `browser`, or a family (`@process`). At least one.
     #[serde(default)]
     pub platform: Vec<String>,
 }
@@ -292,7 +292,7 @@ impl Manifest {
                 if PlatformPattern::parse(token).is_none() {
                     errors.push(format!(
                         "`[library.layer.{name}]` has an unknown platform `{token}` \
-                         (expected `node`/`node:24`/`deno`/`browser`, or `@process`)"
+                         (expected `node`/`node:24`/`deno`/`bun`/`browser`, or `@process`)"
                     ));
                 }
             }
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn unknown_target_is_an_error() {
-        let manifest = parse("[package]\nname = \"x\"\ntarget = \"bun\"\n");
+        let manifest = parse("[package]\nname = \"x\"\ntarget = \"nodejs\"\n");
         assert!(manifest.validate().iter().any(|e| e.contains("target")));
     }
 
@@ -663,8 +663,9 @@ mod tests {
 
     #[test]
     fn unknown_library_layer_platform_is_an_error() {
-        let manifest = parse("[library]\nname = \"x\"\n[library.layer.l]\nplatform = [\"bun\"]\n");
-        assert!(manifest.validate().iter().any(|e| e.contains("bun")));
+        let manifest =
+            parse("[library]\nname = \"x\"\n[library.layer.l]\nplatform = [\"nodejs\"]\n");
+        assert!(manifest.validate().iter().any(|e| e.contains("nodejs")));
     }
 
     #[test]

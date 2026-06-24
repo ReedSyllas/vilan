@@ -7,8 +7,8 @@
 //!   most-specific matching layer.
 //!
 //! The supported set is small but extensible: platforms `node:24` / `deno:2` /
-//! `browser`, backend `js`. Adding a runtime, a version, or a backend is a change
-//! here.
+//! `bun:1` / `browser`, backend `js`. Adding a runtime, a version, or a backend is
+//! a change here.
 
 /// The supported Node major version (the current LTS) — the only `node` version
 /// that builds for now.
@@ -17,6 +17,10 @@ pub const NODE_LTS: u32 = 24;
 /// The supported Deno major version (the current major) — the only `deno` version
 /// that builds for now.
 pub const DENO_CURRENT: u32 = 2;
+
+/// The supported Bun major version (the current major) — the only `bun` version
+/// that builds for now.
+pub const BUN_CURRENT: u32 = 1;
 
 /// The emitter backend — the output language. JavaScript today; WASM later.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,6 +57,9 @@ pub enum Platform {
     /// process-having runtime (`@process`) like Node; its `node:`-compat bindings
     /// make the shared `process` layer serve it without a per-runtime split.
     Deno { version: u32 },
+    /// Bun, by major version (only [`BUN_CURRENT`] is supported today). Another
+    /// `@process` runtime with `node:` compatibility — same shared `process` layer.
+    Bun { version: u32 },
     /// The browser.
     Browser,
     /// No host — `vilan check` only; emitting requires a concrete host.
@@ -66,9 +73,9 @@ impl Default for Platform {
 }
 
 impl Platform {
-    /// Parses a `--platform` value: `node` / `node:24` / `deno` / `deno:2` /
-    /// `browser` / `none`. A process runtime with no version defaults to its current
-    /// supported major; an unsupported version errors.
+    /// Parses a `--platform` value: `node` / `node:24` / `deno` / `deno:2` / `bun` /
+    /// `bun:1` / `browser` / `none`. A process runtime with no version defaults to its
+    /// current supported major; an unsupported version errors.
     pub fn parse(name: &str) -> Result<Self, String> {
         let (runtime, version) = match name.split_once(':') {
             Some((runtime, version)) => (runtime, Some(version)),
@@ -81,22 +88,27 @@ impl Platform {
             "deno" => Ok(Platform::Deno {
                 version: supported_version(version, DENO_CURRENT, "deno")?,
             }),
+            "bun" => Ok(Platform::Bun {
+                version: supported_version(version, BUN_CURRENT, "bun")?,
+            }),
             "browser" | "none" if version.is_some() => {
                 Err(format!("the `{runtime}` platform takes no version"))
             }
             "browser" => Ok(Platform::Browser),
             "none" => Ok(Platform::None),
             _ => Err(format!(
-                "unknown platform `{name}` (expected `node`, `deno`, `browser`, or `none`)"
+                "unknown platform `{name}` (expected `node`, `deno`, `bun`, `browser`, or `none`)"
             )),
         }
     }
 
-    /// The platform's display name (`node:24` / `deno:2` / `browser` / `none`).
+    /// The platform's display name (`node:24` / `deno:2` / `bun:1` / `browser` /
+    /// `none`).
     pub fn name(self) -> String {
         match self {
             Platform::Node { version } => format!("node:{version}"),
             Platform::Deno { version } => format!("deno:{version}"),
+            Platform::Bun { version } => format!("bun:{version}"),
             Platform::Browser => "browser".to_string(),
             Platform::None => "none".to_string(),
         }
@@ -109,9 +121,12 @@ impl Platform {
 
     /// Whether the host has `process.exit` (so `main`'s result becomes an exit
     /// code) — the one host-profile bit codegen needs. True for the process
-    /// runtimes (Node and Deno, via its `node:` compat).
+    /// runtimes (Node, Deno, and Bun, via their `node:` compat).
     pub fn has_process_exit(self) -> bool {
-        matches!(self, Platform::Node { .. } | Platform::Deno { .. })
+        matches!(
+            self,
+            Platform::Node { .. } | Platform::Deno { .. } | Platform::Bun { .. }
+        )
     }
 
     /// How specifically this platform matches `pattern` (higher = more specific),
@@ -129,9 +144,16 @@ impl Platform {
                 PlatformPattern::Deno {
                     version: Some(wanted),
                 },
+            )
+            | (
+                Platform::Bun { version },
+                PlatformPattern::Bun {
+                    version: Some(wanted),
+                },
             ) if version == wanted => Some(2),
             (Platform::Node { .. }, PlatformPattern::Node { version: None })
             | (Platform::Deno { .. }, PlatformPattern::Deno { version: None })
+            | (Platform::Bun { .. }, PlatformPattern::Bun { version: None })
             | (Platform::Browser, PlatformPattern::Browser) => Some(1),
             _ => None,
         }
@@ -163,6 +185,7 @@ fn supported_version(version: Option<&str>, supported: u32, runtime: &str) -> Re
 pub enum PlatformPattern {
     Node { version: Option<u32> },
     Deno { version: Option<u32> },
+    Bun { version: Option<u32> },
     Browser,
 }
 
@@ -173,11 +196,12 @@ impl PlatformPattern {
     pub fn parse(token: &str) -> Option<Vec<PlatformPattern>> {
         // Families: a named set of runtimes, so a layer (and a new runtime) is a
         // one-line edit here, not per-library churn. `@process` is the process-having
-        // runtimes — node and deno today (bun once added).
+        // runtimes — node, deno, and bun today.
         if token == "@process" {
             return Some(vec![
                 PlatformPattern::Node { version: None },
                 PlatformPattern::Deno { version: None },
+                PlatformPattern::Bun { version: None },
             ]);
         }
         let (runtime, version) = match token.split_once(':') {
@@ -188,6 +212,7 @@ impl PlatformPattern {
         match runtime {
             "node" => Some(vec![PlatformPattern::Node { version }]),
             "deno" => Some(vec![PlatformPattern::Deno { version }]),
+            "bun" => Some(vec![PlatformPattern::Bun { version }]),
             "browser" if version.is_none() => Some(vec![PlatformPattern::Browser]),
             _ => None,
         }
@@ -215,6 +240,13 @@ mod tests {
             })
         );
         assert_eq!(Platform::parse("deno:2"), Ok(Platform::Deno { version: 2 }));
+        assert_eq!(
+            Platform::parse("bun"),
+            Ok(Platform::Bun {
+                version: BUN_CURRENT
+            })
+        );
+        assert_eq!(Platform::parse("bun:1"), Ok(Platform::Bun { version: 1 }));
         assert_eq!(Platform::parse("browser"), Ok(Platform::Browser));
         assert_eq!(Platform::parse("none"), Ok(Platform::None));
     }
@@ -231,8 +263,9 @@ mod tests {
                 .unwrap_err()
                 .contains("unsupported node version")
         );
+        // `nodejs` is a typo for `node` — never a valid runtime, so a stable "unknown".
         assert!(
-            Platform::parse("bun")
+            Platform::parse("nodejs")
                 .unwrap_err()
                 .contains("unknown platform")
         );
@@ -250,6 +283,9 @@ mod tests {
             Platform::Deno {
                 version: DENO_CURRENT,
             },
+            Platform::Bun {
+                version: BUN_CURRENT,
+            },
             Platform::Browser,
             Platform::None,
         ] {
@@ -258,23 +294,33 @@ mod tests {
     }
 
     #[test]
-    fn process_family_expands_to_node_and_deno() {
+    fn process_family_expands_to_all_runtimes() {
         let patterns = PlatformPattern::parse("@process").unwrap();
         assert_eq!(
             patterns,
             vec![
                 PlatformPattern::Node { version: None },
                 PlatformPattern::Deno { version: None },
+                PlatformPattern::Bun { version: None },
             ]
         );
-        // A `process` layer (declared `@process`) matches both node and deno, but
+        // A `process` layer (declared `@process`) matches every process runtime, but
         // not the browser — the whole point of the family.
-        let node = Platform::Node { version: NODE_LTS };
-        let deno = Platform::Deno {
-            version: DENO_CURRENT,
-        };
-        assert!(patterns.iter().any(|p| node.matches(*p).is_some()));
-        assert!(patterns.iter().any(|p| deno.matches(*p).is_some()));
+        for runtime in [
+            Platform::Node { version: NODE_LTS },
+            Platform::Deno {
+                version: DENO_CURRENT,
+            },
+            Platform::Bun {
+                version: BUN_CURRENT,
+            },
+        ] {
+            assert!(
+                patterns.iter().any(|p| runtime.matches(*p).is_some()),
+                "{} should match @process",
+                runtime.name()
+            );
+        }
         assert!(
             patterns
                 .iter()
@@ -307,6 +353,12 @@ mod tests {
         assert!(
             Platform::Deno {
                 version: DENO_CURRENT
+            }
+            .has_process_exit()
+        );
+        assert!(
+            Platform::Bun {
+                version: BUN_CURRENT
             }
             .has_process_exit()
         );
