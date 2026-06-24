@@ -77,11 +77,10 @@ dependencies. Unordered within a section.
    goal is a solver we can reason about, not a pile of targeted fixes. This is the umbrella under
    which the dispatch/inference gaps below should be resolved rather than individually patched.
 
-2. **Auto-deref through view-returning calls** (M) — `resolve_field_accessor` requires a
-   `Type::Struct` subject, so `obj.slot().field` / `obj.slot().method()` do not deref the returned
-   view; only scalar `*obj.slot()` is supported. Auto-inserting the deref for field/method access on
-   a view-returning subject is broadly valuable (every `borrows` method benefits) and is the
-   ergonomic prerequisite for A1. Needs its own formal definition + tests.
+2. **Auto-deref through view-returning calls** (**done** — was stale) — `obj.slot().field` and
+   `obj.slot().method()` deref the returned view and reach the inner struct's member; verified at
+   runtime (`auto_deref_through_view_returning_call` in `inference.rs`). Only the note here was
+   stale.
 
 3. **Variadic-generics deferred tail** (M–L; see `variadic-generics.md` §Deferred). Shipped:
    flat-tuple lowering, mapped tuple types `(U in T: F<U>)`, tuple comprehensions `(x in xs => e)`,
@@ -125,11 +124,17 @@ dependencies. Unordered within a section.
    as an assignment target), R1 (annotation view-ness must match the initializer), R7 (no `mut` view
    binding); the view corpus migrated to bare form (byte-identical JS), conformance test +
    `transparent_references_*` inference tests. **Remaining sub-items:**
-   - **R8 — no implicit borrow at call sites** (S–M): a `&`/`&mut` parameter must be passed a view
-     (`&[mut] place` or an existing view), not a bare value place. Today a bare value to a scalar
-     `&mut` param compiles to *broken* JS (the param expects a `(base, key)` pair) — a pre-existing
-     bug. The check must **exclude the method `self` receiver** (implicitly borrowed). Ties into
-     roadmap #2 (compiler-core robustness).
+   - **R8 — no implicit borrow at call sites** (**done**): a `&`/`&mut` parameter must be passed a
+     view (`&[mut] place` or an existing view), not a bare value place; the `self` receiver is
+     exempt. Pinned by `r8_*` + `reject_bare_value_to_shared_reference_param` (covers shared `&`).
+   - **Generic `&mut T` / `&T` views** (**done** — fix c3cfa44): the scalar-vs-aggregate view
+     representation is now resolved at monomorphization, so a generic view behaves like a concrete
+     `&mut <T>` (i32/u32/f64/str read/write through; aggregate stays the in-place copy; `&mut` of a
+     generic *local* boxes + builds the `(base, key)` pair). Pinned by `generic_mut_view_*`.
+     **Known limitation:** `&mut bool` is broken for *both* concrete and generic — `bool` is a
+     numeric enum, excluded from `is_scalar_primitive`, so it takes the aggregate path. Fixing it
+     means giving `bool` a scalar `(base, key)` view representation across the view machinery (its
+     own slice).
    - **Inline `Option<&mut T>` transient** (M): `match Some(&mut a) { Some(let x) => … }` —
      constructing and matching a wrapped view *inline* (not via a function that returns one). Today
      wrapped-view captures are only recognized when the match subject is a view-returning *call*;
