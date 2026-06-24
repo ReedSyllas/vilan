@@ -9042,6 +9042,13 @@ pub enum Intrinsic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub u32);
 
+/// The source assigned to `[derive(..)]`-synthesized entities. Their spans are
+/// offsets into a generated template, not any real file, so they get this
+/// sentinel id — outside `sources`, so `source_path` is `None` — and editor
+/// features that key on a file (the outline, go-to-definition, position lookup)
+/// skip them instead of pointing into the user's text at a bogus offset.
+pub const DERIVED_SOURCE: SourceId = SourceId(u32::MAX);
+
 /// The half-open entity-id range `[start, end)` produced while walking one
 /// source file. Since entity ids are minted monotonically and each file is
 /// walked by a single top-level pass, these ranges map an entity back to the
@@ -10485,16 +10492,23 @@ pub fn analyze<'src>(
         analyzer.current_source_id = *source_id;
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
-        // The module's synthesized derive impls, into the same scope, right after its
-        // body (so they see its types) — mirroring the entry walk below.
-        if let Some(derived) = derived {
-            analyzer.walk_expr_nodes(derived, *module_scope_id);
-        }
         source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
             source: *source_id,
         });
+        // The module's synthesized derive impls, into the same scope, right after its
+        // body (so they see its types) — mirroring the entry walk below. Their spans
+        // are generated-template offsets, so record them under `DERIVED_SOURCE`.
+        if let Some(derived) = derived {
+            let derived_start = analyzer.entity_id;
+            analyzer.walk_expr_nodes(derived, *module_scope_id);
+            source_ranges.push(SourceRange {
+                start: derived_start,
+                end: analyzer.entity_id,
+                source: DERIVED_SOURCE,
+            });
+        }
     }
     if let Some(lib_ast) = lib_ast {
         analyzer.current_source_id = lib_source_id;
@@ -10512,14 +10526,22 @@ pub fn analyze<'src>(
         analyzer.current_source_id = *source_id;
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, *namespace_scope_id);
-        if let Some(derived) = derived {
-            analyzer.walk_expr_nodes(derived, *namespace_scope_id);
-        }
         source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
             source: *source_id,
         });
+        // Synthesized derive impls carry generated-template spans, not the lib's
+        // file, so record them under `DERIVED_SOURCE` (see the entry walk).
+        if let Some(derived) = derived {
+            let derived_start = analyzer.entity_id;
+            analyzer.walk_expr_nodes(derived, *namespace_scope_id);
+            source_ranges.push(SourceRange {
+                start: derived_start,
+                end: analyzer.entity_id,
+                source: DERIVED_SOURCE,
+            });
+        }
     }
     // Remember `panic` so its calls can be typed as never and lowered to a throw.
     if let Some(io_scope_id) = module_scopes.get("io") {
@@ -10662,16 +10684,24 @@ pub fn analyze<'src>(
         analyzer.current_source_id = SourceId(0);
         let entry_walk_start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
-        // Synthesized `[derive(..)]` impls are walked into the same (entry) scope,
-        // right after the user's items, so they see the derived types.
-        if let Some(derived) = derived {
-            analyzer.walk_expr_nodes(derived, global_scope_id);
-        }
         source_ranges.push(SourceRange {
             start: entry_walk_start,
             end: analyzer.entity_id,
             source: SourceId(0),
         });
+        // Synthesized `[derive(..)]` impls are walked into the same (entry) scope,
+        // right after the user's items, so they see the derived types — but their
+        // spans are generated-template offsets, not the user's file, so record them
+        // under `DERIVED_SOURCE` so editor features skip them.
+        if let Some(derived) = derived {
+            let derived_start = analyzer.entity_id;
+            analyzer.walk_expr_nodes(derived, global_scope_id);
+            source_ranges.push(SourceRange {
+                start: derived_start,
+                end: analyzer.entity_id,
+                source: DERIVED_SOURCE,
+            });
+        }
     }
     analyzer.build();
     // Infer the `borrows` effect before any check reads it (readonly-mutation

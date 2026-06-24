@@ -1146,6 +1146,40 @@ mod tests {
     }
 
     #[test]
+    fn derive_synthesized_entities_are_excluded_from_the_user_file() {
+        // `[derive(Json)] struct User` synthesizes `to_json`/`from_json` impls whose
+        // spans are offsets into a *generated template*, not this file. They used to
+        // be bundled into the entry's `SourceId(0)` range, so `source_of` reported
+        // them as user-file entities and the editor placed them at those bogus
+        // offsets — landing inside the leading comment (and, on the em-dash, crashing
+        // position conversion). The fix attributes them to `DERIVED_SOURCE`, so they
+        // are excluded from `entity_spans`/`document_symbols`. Pin that: the file's
+        // first real token is `import` on line 9, so no user-file span may begin in
+        // the comment block before it.
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/examples/rpc/src/main.vl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let first_code = text.find("import std::print").expect("first import");
+        let document = Document::analyze(&text, &std_root(), &path);
+
+        for (start, _end, id) in &document.entity_spans {
+            assert!(
+                *start >= first_code,
+                "entity {id:?} span starts at {start}, inside the leading comment \
+                 (a derive-synthesized entity leaking into the user file)"
+            );
+        }
+        for symbol in document.document_symbols() {
+            let start = symbol.selection.into_range().start;
+            assert!(
+                start >= first_code,
+                "symbol {:?} selection starts at {start}, inside the leading comment",
+                symbol.name
+            );
+        }
+    }
+
+    #[test]
     fn scope_completion_includes_top_level_and_keywords() {
         let labels = completions_at_cursor(
             "fun helper(): i32 { 42 }\nfun main() {\n\tlet value = hel|\n}\n",
