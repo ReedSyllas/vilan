@@ -101,10 +101,18 @@ dependencies. Unordered within a section.
 5. **Analyzer Bug C** (M; see `analyzer-refactor.md`) — transformer monomorphization through a nested
    generic call. Bugs A & B fixed; C open. Fold into B1.
 
-6. **Inferred-element closure-param inference** (S–M; roadmap #2 remaining) — a `List` whose element
-   is *inferred* (`List::new()` + `push`, or a chained `filter().map()`) is typed too late for the
-   closure-param inference, so field access in the closure still fails; workaround is an annotation
-   (`mut xs: List<T>`). README's documented "known limitation." Fold into B1.
+6. **Inferred-element closure-param inference** — the documented case is **resolved** (fix 651630f).
+   A `List` whose element is inferred (`List::new()` + `push`, or a chained `filter().map()`) was
+   typed too late for the closure-param inference, so a field access in the closure failed; the
+   workaround was `mut xs: List<T>`. Now a method on such a receiver **defers while a `push`/`run`
+   to fill the slot is pending**, so `xs.filter(|p| p.x > 0)` / `xs.map(|p| p.x)` type the parameter
+   concretely — parity with a literal list, no annotation. (The `filter().map()` form already
+   worked via the B1 re-queue.) **Two adjacent gaps remain, narrower and outside the closure-param
+   scope:** (a) **inline `match`** on an inferred-list method result — `match xs.get(0) { Some(let
+   p) => p.x }` — still fails (workaround: bind `let opt = xs.get(0)` first, which works); (b) a
+   method whose **result element** comes from a field-access closure return — `xs.map(|p| p.x)` as
+   `List<i32>` — stays `List<unknown>`, but this is **pre-existing and affects literal lists too**,
+   so it is a distinct issue, not B6.
 7. **`[must_use]`** (**done 2026-06-22**) — a general attribute marking a function's result
    must-be-consumed. A *dropped* result (a call that is a bare statement in a function body or block —
    not bound / `let _` / an argument) is a **warning** (a new, non-fatal `Program.warnings` list
