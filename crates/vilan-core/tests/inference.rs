@@ -928,14 +928,12 @@ fn generic_field_method_dispatch_runs() {
 }
 
 #[test]
-#[ignore = "B1: a function body isn't inferred against its declared return type, so the binding isn't recorded"]
 fn from_json_indirect_element_type_runs() {
-    // `decode` returns `Result<Option<User>, str>` but its body is inferred bottom-up,
-    // not against that return type — so `Option::from_json` never sees `Option<User>`
-    // and the decode lowers to the abstract `from_json_value` → `Some(undefined)`. (The
-    // bidirectional constructor propagation is fixed; the missing piece is driving body
-    // inference from the return type — see `enum_constructor_propagates_..` which passes
-    // because the `let` annotation supplies the expected type.)
+    // `decode` returns `Result<Option<User>, str>`; its body is now inferred against
+    // that return type (the `ReturnType` constraint), so `Ok(Option::from_json(text))`
+    // types `from_json` against `Option<User>` — the constructor propagation (fix #1)
+    // then threads `User` into the decode. Previously the body was inferred bottom-up
+    // and lowered to the abstract `from_json_value` → `Some(undefined)`.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -946,6 +944,39 @@ fn from_json_indirect_element_type_runs() {
         fun decode(text: str): Result<Option<User>, str> { Ok(Option::from_json(text)) }
         fun main() {
             match decode("{\"id\":1,\"name\":\"Ada\"}") {
+                Ok(Some(let u)) => print(u.name),
+                Ok(None) => print("none"),
+                Err(let e) => print(e),
+            }
+        }
+        "#,
+        "Ada\n",
+    );
+}
+
+#[test]
+fn from_json_return_type_flows_through_match_arm() {
+    // The RPC-client shape: the `from_json` decode sits inside a `match` arm whose
+    // enclosing function declares the return type. The return type must reach the
+    // arm body *through* the match — `resolve_match` propagates the function's
+    // expected type into each leg, so `Ok(Option::from_json(json))` binds `User`
+    // even though a `match` sits between the call and the signature. Without the
+    // propagation the leg was inferred bottom-up → abstract decoder → `Some(undefined)`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        [derive(Json)] struct User { id: i32, name: str }
+        fun decode(tag: str, json: str): Result<Option<User>, str> {
+            match tag {
+                "ok" => Ok(Option::from_json(json)),
+                _ => Err("bad tag"),
+            }
+        }
+        fun main() {
+            match decode("ok", "{\"id\":1,\"name\":\"Ada\"}") {
                 Ok(Some(let u)) => print(u.name),
                 Ok(None) => print("none"),
                 Err(let e) => print(e),

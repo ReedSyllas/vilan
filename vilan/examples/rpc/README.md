@@ -35,12 +35,12 @@ The server `lookup_user` returns `Option<User>` — `None` is an *application-le
 
 ## Quirks discovered
 
-The reason this example is worth keeping. **#1 was a bug — now fixed; #3 and #4 are
-bugs; #2 is intended syntax.** **Bugs #3 and #4 are one underlying weakness: generic
-dispatch / monomorphization does not thread type arguments through indirect or nested
-contexts, so a call binds to the empty *abstract* trait method.** That's the
-analyzer's generic-resolution cluster (backlog B1 / `analyzer-refactor.md`), and P6
-leans on it heavily.
+The reason this example is worth keeping. **#1 and #4 were bugs — now fixed; #3 is a
+bug; #2 is intended syntax.** **Bug #3 (and the now-fixed #4) trace to one underlying
+weakness: generic dispatch / monomorphization did not thread type arguments through
+indirect or nested contexts, so a call bound to the empty *abstract* trait method.**
+That's the analyzer's generic-resolution cluster (backlog B1 / `analyzer-refactor.md`),
+and P6 leans on it heavily.
 
 ### 1. `[derive(..)]` only expanded in the entry file — ✅ FIXED
 
@@ -104,33 +104,35 @@ never monomorphizes to `LocalTransport::call`.)
   `Accounts::connect(transport)`) needs this nested/field generic dispatch fixed in
   codegen. Until then the `[service]` derive should emit **free functions**.
 
-### 4. `from_json` element-type inference through an indirect path → abstract method
+### 4. `from_json` element-type inference through an indirect path — ✅ FIXED
 
 ```vilan
-RpcReply::Success(let json) => Ok(Option::from_json(json)),   // ✗ Some(undefined)
+RpcReply::Success(let json) => Ok(Option::from_json(json)),   // ✓ now binds User
 ```
 
 Here `Option::from_json` must infer its element type `User` through the `Ok(..)`
-wrapper and the function's return type. That indirect path lowered the inner decode
-to the empty abstract `from_json_value`, yielding `Some(undefined)`. Pinning the type
-**directly** fixes it:
+wrapper and the function's return type. That indirect path *used to* lower the inner
+decode to the empty abstract `from_json_value`, yielding `Some(undefined)` — so the
+stub pinned the type with a local `let user: Option<User> = ..`.
 
-```vilan
-let user: Option<User> = Option::from_json(json);   // ✓
-Ok(user)
-```
+**Fixed** (the return-type-driven body inference, B1): a function's body is now
+inferred *against* its declared return type, and `resolve_match` propagates that
+expected type into each leg, so the type flows `Result<Option<User>, _>` → the `Ok`
+arm → the `Ok(..)` wrapper → `Option::from_json`'s element. The stub above uses the
+natural indirect form directly — no pinning needed. (`enum_constructor_..` and
+`from_json_return_type_flows_through_match_arm` in `inference.rs` pin both halves.)
 
-- **What the plan needs:** the `[service]` generator already knows every concrete
-  type, so it can always emit the pinned form — but this is a sharp edge a
-  hand-writer hits, and a sign the return-type-driven `from_json` inference is
-  fragile across wrappers.
+- **What the plan needs:** the `[service]` generator can emit the natural form; it no
+  longer has to pin every `from_json` to dodge this edge.
 
 ## What this validates for the plan
 
 The **wire model, codec, dispatcher, `Result`/`Option` error layering, and async
-round-trip all work today** — Phase 1 is real. **Derives-in-dependency-modules (#1) is
-now fixed**, so the shared `common` library of derived contract types works (this
-example imports its derived runtime from `rpc.vl`). The remaining gate on the
-ergonomic surface (a pluggable generic *client object*) is the **generic-dispatch /
-monomorphization cluster** (#3/#4 = B1/B5). Until that lands, the `[service]` generator
-must stay within the forms that work: free generic functions and pinned `from_json`.
+round-trip all work today** — Phase 1 is real. **Derives-in-dependency-modules (#1)
+and the indirect `from_json` inference (#4) are now fixed**, so the shared `common`
+library of derived contract types works (this example imports its derived runtime from
+`rpc.vl`) and the client stub decodes with the natural `Ok(Option::from_json(json))`.
+The remaining gate on the ergonomic surface (a pluggable generic *client object*) is
+the **generic-field dispatch bug (#3)** — the last of the generic-dispatch /
+monomorphization cluster (B1, class B / stable generic identity). Until that lands, the
+`[service]` generator must stay within the forms that work: free generic functions.

@@ -150,12 +150,23 @@ expected type never reaches the call. Two leaks, both fixable directly:
    expected type and substitutes the payload before inferring the argument — so
    `Ok(Option::from_json(t))` in a `Result<Option<User>, str>` context types `from_json`
    against `Option<User>`. Verified: the `let`-annotated form round-trips; corpus 69/69.
-2. **Return-type-driven body inference — open** (the remaining half of #4). A function's
-   body/return expression is *not* inferred against its declared return type, so
-   `fun g(): Option<User> { Option::from_json(t) }` leaves the binding unrecorded (the
-   abstract decoder). The fix is to drive body inference from the return type (a
-   bidirectional return constraint) — clean and general, but it changes return-position
-   inference for every function, so it's staged with a careful corpus pass.
+2. **Return-type-driven body inference — ✅ fixed.** A function's body tail was *not*
+   inferred against its declared return type, so `fun g(): Option<User> { Option::from_json(t) }`
+   left the binding unrecorded (the abstract decoder). Two pieces, both clean and
+   general:
+   - A **`ReturnType` constraint** (priority 10, beside `Variable`/the `let`-annotation
+     path it mirrors) infers the body tail against the declared return type, so a
+     return-position generic call records its binding the way `let v: R = ..` does.
+   - An **`expected_types` map**, seeded for the body tail during the walk and
+     **propagated through `resolve_match` into each leg body**, carries that expected
+     type *through* a `match` (or nested matches) between the call and the signature —
+     the RPC-client shape `match .. { "ok" => Ok(Option::from_json(json)) }`. Without
+     it the legs were inferred bottom-up (`resolve_match` ran at priority 5, before
+     `ReturnType`, and cached the abstract decode).
+
+   Verified: corpus 69/69 byte-identical; `from_json_indirect_element_type_runs` and
+   `from_json_return_type_flows_through_match_arm` pin both halves; the RPC example now
+   uses the natural `Ok(Option::from_json(json))` directly (quirk #4 retired).
 
 So the `from_json` class is **bidirectional flow**, more contained than the full
 dependency re-queue. **Re-queue (item 5 v2) is still the cure for the genuinely
@@ -163,5 +174,6 @@ late-bound case** — bug c′ (`count.derive(|n| format(n))`), where an *unanno
 closure parameter* types only after its enclosing call resolves; no amount of
 expected-type propagation helps there. Class (B) / #3 remains item 6 (stable generic
 identity). Net: the one "binding lost across a boundary" class has three distinct
-leaks — constructor propagation (fixed), return-type body inference (next), and
-closure-parameter lateness (re-queue) — plus the nested-dispatch identity (item 6).
+leaks — constructor propagation (fixed), return-type body inference (fixed, incl.
+through-match), and closure-parameter lateness (re-queue) — plus the nested-dispatch
+identity (item 6).

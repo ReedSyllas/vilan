@@ -73,14 +73,10 @@ fun get_user<T: Transport>(transport: T, id: i32): Result<Option<User>, RpcError
 	let request = RpcRequest { method = "get_user", args = [id.to_json()] };
 	let reply_text = await transport.call(request.to_json());
 	match RpcReply::from_json(reply_text) {
-		RpcReply::Success(let json) => {
-			// The element type must be pinned explicitly: `Ok(Option::from_json(json))`
-			// alone leaves `from_json` to infer `User` through the `Ok` wrapper + the
-			// function return type, and that indirect path lowers to the *empty
-			// abstract* `from_json_value` (quirk 4 in the README) — `Some(undefined)`.
-			let user: Option<User> = Option::from_json(json);
-			Ok(user)
-		}
+		// `from_json` infers its element type `User` through the `Ok` wrapper and
+		// the function's return type — the return-type-driven body inference plus
+		// the constructor propagation thread `Option<User>` all the way in.
+		RpcReply::Success(let json) => Ok(Option::from_json(json)),
 		RpcReply::Failure(let error) => Err(error),
 	}
 }

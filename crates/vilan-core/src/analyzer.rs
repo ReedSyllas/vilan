@@ -501,6 +501,13 @@ enum Constraint<'src> {
     /// value, or an enum variant constructor), checks the arguments and wires the
     /// call, recording any generic bindings inferred from the arguments.
     CallSubject(CallSubjectConstraint),
+    /// `fun f(): R { .. tail }` — infers the body's tail expression against the
+    /// declared return type `R`, exactly the way a `let v: R = ..` annotation
+    /// drives its value. Without it the body is inferred purely bottom-up, so a
+    /// return-position generic call (`Option::from_json(t)` returning `Option<T>`
+    /// where `R = Option<User>`) leaves `T` unbound and lowers to the abstract
+    /// trait method. Mirrors `Variable`.
+    ReturnType { body_id: Id, return_type_id: TypeId },
 }
 
 impl Constraint<'_> {
@@ -523,6 +530,10 @@ impl Constraint<'_> {
             Constraint::MethodArgCheck { .. } => 9,
             Constraint::Variable(_) => 10,
             Constraint::Destructure(_) => 10,
+            // With `Variable` (10), before `CallSubject` (11): the body's tail
+            // call is inferred against the return type first, so the return-type
+            // binding is recorded the same way an annotated `let` records it.
+            Constraint::ReturnType { .. } => 10,
             Constraint::CallSubject(_) => 11,
         }
     }
@@ -734,6 +745,13 @@ pub struct Analyzer<'src> {
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
     // monomorphized instance of the method body (e.g. `T::default()` -> `0`).
     method_call_substitution: HashMap<Id, SubstitutionContext>,
+    // The expected type imposed on an expression by its syntactic context — a
+    // function's declared return type for its body tail, propagated into tail
+    // positions (each `match` leg body) by their resolvers. Lets a
+    // return-position generic call (`Option::from_json(t)`) bind its parameters
+    // from the return type the way a `let v: R = ..` annotation does, even when a
+    // `match` sits between the call and the signature.
+    expected_types: HashMap<Id, TypeId>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
     // Deferred named type references: (target type id, name, scope, span, the
@@ -863,6 +881,7 @@ impl<'src> Analyzer<'src> {
             prepped_binary_ops: Vec::new(),
             binary_op_dispatch: HashMap::new(),
             method_call_substitution: HashMap::new(),
+            expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
             prepped_trait_impls: Vec::new(),
             prepped_type_locals: Vec::new(),
@@ -3593,6 +3612,19 @@ impl<'src> Analyzer<'src> {
                             (Vec::new(), void_id)
                         }
                     };
+                    // Infer the body's tail against the declared return type (the
+                    // way a `let v: R = ..` annotation drives its value), so a
+                    // return-position generic call binds its type parameters from
+                    // `R`. Only for a real body with a declared return type.
+                    if function.body.is_some()
+                        && let Some(return_type_id) = return_type_id
+                    {
+                        self.expected_types.insert(expr_id, return_type_id);
+                        self.constraints.push(Constraint::ReturnType {
+                            body_id: expr_id,
+                            return_type_id,
+                        });
+                    }
                     self.functions.insert(
                         id,
                         Function {
@@ -6460,6 +6492,10 @@ impl<'src> Analyzer<'src> {
                 iterable_id,
             } => self.resolve_for_each_item(*item_id, *iterable_id),
             Constraint::CallSubject(constraint) => self.resolve_call_subject(constraint),
+            Constraint::ReturnType {
+                body_id,
+                return_type_id,
+            } => self.resolve_return_type(*body_id, *return_type_id),
         }
     }
 
@@ -7201,6 +7237,25 @@ impl<'src> Analyzer<'src> {
         Resolution::Resolved
     }
 
+    /// Infer a function body's tail expression against the declared return type,
+    /// so a return-position generic call binds its type parameters from that type
+    /// (the return-type half of the bidirectional-inference cure — see
+    /// `proposal/type-solver.md`). No diagnostic is raised on a mismatch here: the
+    /// goal is to *flow* the expected type into the body so the call site records
+    /// its return-type binding (analyzer.rs ~5519), exactly as `let v: R = ..`
+    /// does.
+    fn resolve_return_type(&mut self, body_id: Id, return_type_id: TypeId) -> Resolution {
+        if !self.expr_id_to_expr_map.contains_key(&body_id) {
+            return Resolution::Deferred;
+        }
+        let return_type = return_type_id.get_type(self);
+        let body_type = self.infer_type(body_id, &return_type, &HashMap::new());
+        if matches!(body_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        Resolution::Resolved
+    }
+
     /// `match subject { .. }`: once the subject type is known, resolve each leg's
     /// patterns (typing captures) and guard, check exhaustiveness, and type the
     /// match as the unification of its leg bodies. Defers while the subject, a
@@ -7302,10 +7357,23 @@ impl<'src> Analyzer<'src> {
             _ => {}
         }
 
-        // The match's type unifies the leg body types.
+        // The match's type unifies the leg body types. When the match itself sits
+        // in an expected-type position (a function's return tail), that type is
+        // the expectation for every leg body too — so a return-position generic
+        // call inside a leg binds from it. Propagate it into each leg (so a nested
+        // match/leg inherits the expectation) and infer the legs against it.
+        let expected = self.expected_types.get(&prepped.id).copied();
         let mut unified: Option<Type> = None;
         for (_, _, body_id) in &resolved_legs {
-            let body_type = self.infer_type(*body_id, &Type::Unknown, &HashMap::new());
+            if let Some(expected_type_id) = expected {
+                self.expected_types
+                    .entry(*body_id)
+                    .or_insert(expected_type_id);
+            }
+            let leg_constraint = expected
+                .map(|type_id| type_id.get_type(self))
+                .unwrap_or(Type::Unknown);
+            let body_type = self.infer_type(*body_id, &leg_constraint, &HashMap::new());
             if matches!(body_type, Type::Unresolved) {
                 return Resolution::Deferred;
             }
