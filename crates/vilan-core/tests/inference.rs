@@ -1038,3 +1038,116 @@ fn from_json_return_type_flows_through_match_arm() {
         "Ada\n",
     );
 }
+
+// --- Monomorphization unification (the one `emit_instance` / `call_substitution`
+//     path; commit 6b96d3f) and dependency re-queue (item 5 v2) edge cases --------
+
+#[test]
+fn multi_parameter_generic_function_instantiations() {
+    // The unified emitter keys an instance by its bound types ordered by constraint
+    // id; the old free-function emitter keyed by *positional* type arguments. For a
+    // two-parameter function those orders coincide (constraint ids are minted in
+    // parameter order), and this pins that: `first<A, B>` must instantiate
+    // `<i32, str>`, the *swapped* `<str, i32>`, and the same-type `<i32, i32>` as
+    // distinct, non-colliding instances — a key bug would cross-wire them.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun first<A, B>(a: A, b: B): A { a }
+        fun second<A, B>(a: A, b: B): B { b }
+        fun main() {
+            print(first(1, "x"));
+            print(first("y", 2));
+            print(second(1, "z"));
+            print(first(3, 4));
+        }
+        "#,
+        "1\ny\nz\n3\n",
+    );
+}
+
+#[test]
+fn multi_parameter_generic_method_monomorphizes() {
+    // A two-generic impl whose methods return each parameter — the binding flows
+    // through `method_call_substitution` (both `A` and `B` bound from the receiver
+    // `Pair<i32, str>`) and field access substitutes the field's declared generic
+    // through the receiver's arguments. Both reach the one `emit_instance` path.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Pair<A, B> { left: A, right: B }
+        impl Pair<type A, type B> {
+            fun show_left(self): A { self.left }
+            fun show_right(self): B { self.right }
+        }
+        fun main() {
+            let p = Pair { left = 7, right = "hi" };
+            print(p.show_left());
+            print(p.show_right());
+        }
+        "#,
+        "7\nhi\n",
+    );
+}
+
+#[test]
+fn operator_monomorphizes_on_generic_aggregate() {
+    // `==` on `Option<Point>` overloads to the aggregate's `eq`, monomorphized
+    // against the recorded type-arg substitution — the operator path through
+    // `binary_op_dispatch` + `method_call_substitution` into the one emitter.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        [derive(PartialEq)] struct Point { x: i32, y: i32 }
+        fun main() {
+            let a: Option<Point> = Some(Point { x = 1, y = 2 });
+            let b: Option<Point> = Some(Point { x = 1, y = 2 });
+            let c: Option<Point> = Some(Point { x = 9, y = 9 });
+            if a == b { print("ab-eq") } else { print("ab-neq") }
+            if a == c { print("ac-eq") } else { print("ac-neq") }
+        }
+        "#,
+        "ab-eq\nac-neq\n",
+    );
+}
+
+#[test]
+fn single_level_container_from_json_roundtrip_runs() {
+    // A single-level `List<i32>` decode: `from_json` calls `from_json_value`, whose
+    // element type comes only from the enclosing `List<i32>` instantiation — the
+    // inherited-substitution channel of `call_substitution`. Verifies it threads the
+    // element type at runtime (the nested case is still open — see the ignored test).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        fun main() {
+            let nums: List<i32> = List::from_json("[1,2,3]");
+            print(nums.to_json());
+        }
+        "#,
+        "[1,2,3]\n",
+    );
+}
+
+#[test]
+#[ignore = "B1 open: a nested container's inner element binding isn't threaded through the outer from_json_value (List<List<T>> round-trip)"]
+fn nested_container_from_json_roundtrip_runs() {
+    // The `List<List<T>>` round-trip the type-solver proposal lists as an open
+    // class-A/B case: the inner `List`'s element binding is not threaded through the
+    // outer `from_json_value`, so the inner decode stays abstract and yields
+    // `[[undefined,...],...]`. Pre-existing (not a refactor regression); pinned here
+    // so it flips green when the inherited binding composes through nested containers.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        fun main() {
+            let grid: List<List<i32>> = List::from_json("[[1,2],[3,4]]");
+            print(grid.to_json());
+        }
+        "#,
+        "[[1,2],[3,4]]\n",
+    );
+}

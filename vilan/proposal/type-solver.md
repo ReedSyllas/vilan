@@ -220,7 +220,17 @@ interning needed:
 
 Pinned by `generic_field_method_dispatch_runs` and
 `generic_field_from_a_variable_dispatches`; the RPC example uses the object stub
-directly. **All of B1 (classes A and B) is now closed**, and the full item-6 type
-interning is *not* required — the targeted fixes subsume it. Item 6 remains available
-only if a future case needs genuinely stable ids that these local substitutions can't
-reach; there is no such case today.
+directly. The full item-6 type interning is *not* required — the targeted fixes subsume
+it. Item 6 remains available only if a future case needs genuinely stable ids that these
+local substitutions can't reach.
+
+**One class-A/B case remains open: the `List<List<T>>` round-trip** (the last row of the
+bug table). A nested container's inner element binding is not threaded through the outer
+`from_json_value`, so the inner decode stays abstract and `List::from_json("[[1,2]]")`
+yields `[[undefined,...]]`. The single-level case works (the inherited element type
+composes once); the *nesting* is what doesn't compose — the inherited substitution
+reaches the outer container's element decode but not the inner one's. This was always in
+the table; the earlier "all of B1 closed" note was an overstatement (the case was never
+pinned as a test, so it slipped). Now pinned as the ignored
+`nested_container_from_json_roundtrip_runs`. It is not in the path P6 needs (the RPC
+contract types are flat structs), so it is tracked, not urgent.
