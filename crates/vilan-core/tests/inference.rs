@@ -1543,3 +1543,34 @@ fn inferred_list_never_pushed_still_resolves() {
         "0\n0\n",
     );
 }
+
+#[test]
+fn inline_match_on_method_result_field_access() {
+    // An inline `match` on a method call that returns `Option<element>`
+    // (`match xs.get(0) { Some(let p) => p.x }`) typed its capture `p` only on a
+    // late pass; the field accessor on `p` was woken by that resolution but the
+    // fixpoint's backstop branch could terminate *before* running the woken
+    // constraint (its `wake_ready` result was ignored). The loop now continues
+    // while a wake is pending, so the access resolves. Worked when bound to a
+    // `let` first (an extra pass) — now works inline too, for `get` and `pop`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct P { x: i32 }
+        fun main() {
+            mut xs = List::new();
+            xs.push(P { x = 42 });
+            match xs.get(0) {
+                Some(let p) => print(p.x),
+                None => print(0),
+            }
+            match xs.pop() {
+                Some(let p) => print(p.x),
+                None => print(0),
+            }
+        }
+        "#,
+        "42\n42\n",
+    );
+}

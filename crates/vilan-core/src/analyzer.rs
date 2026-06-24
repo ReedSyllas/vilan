@@ -8349,8 +8349,13 @@ impl<'src> Analyzer<'src> {
             self.constraints
                 .extend(self.deferred.drain(..).map(|(constraint, _)| constraint));
             let backstop_progress = self.resolve_constraints();
-            self.wake_ready_constraints();
-            if !backstop_progress {
+            // A backstop pass can *resolve* one constraint and, by doing so, make a
+            // dependent ready (e.g. typing a `match` capture wakes a field accessor
+            // on it). Only terminate when neither happens — otherwise the woken
+            // constraint would be left unrun in `self.constraints` (the cause of a
+            // late `match`-capture / inferred-element field access failing).
+            let woke = self.wake_ready_constraints();
+            if !backstop_progress && !woke {
                 break;
             }
         }
