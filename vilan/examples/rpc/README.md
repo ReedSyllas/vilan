@@ -27,7 +27,7 @@ body work is needed. The four layers of the proposal are all spelled out:
 | **transport** | `trait Transport` + `LocalTransport` (a handler wrapped in a Promise) |
 | **codec** | the `Json`/`FromJson` derives, used directly (no `Codec` trait yet) |
 | **wire** | `RpcRequest { method, args }` / `RpcReply { Success \| Failure }` / `RpcError` |
-| **service** | `User` contract + `accounts_dispatch` (server) + `get_user` (client stub) |
+| **service** | `User` contract + `accounts_dispatch` (server) + `AccountsClient` object stub (client) |
 
 The server `lookup_user` returns `Option<User>` — `None` is an *application-level*
 "not found" (part of the return type), separate from an `RpcError` (an
@@ -35,12 +35,12 @@ The server `lookup_user` returns `Option<User>` — `None` is an *application-le
 
 ## Quirks discovered
 
-The reason this example is worth keeping. **#1 and #4 were bugs — now fixed; #3 is a
-bug; #2 is intended syntax.** **Bug #3 (and the now-fixed #4) trace to one underlying
-weakness: generic dispatch / monomorphization did not thread type arguments through
-indirect or nested contexts, so a call bound to the empty *abstract* trait method.**
-That's the analyzer's generic-resolution cluster (backlog B1 / `analyzer-refactor.md`),
-and P6 leans on it heavily.
+The reason this example is worth keeping. **#1, #3, and #4 were bugs — all now fixed;
+#2 is intended syntax.** **Bugs #3 and #4 traced to one underlying weakness: generic
+dispatch / monomorphization did not thread type arguments through indirect or nested
+contexts, so a call bound to the empty *abstract* trait method.** That's the analyzer's
+generic-resolution cluster (backlog B1 / `analyzer-refactor.md`), which P6 leaned on
+heavily — and which is now closed. The client is written as the natural object stub.
 
 ### 1. `[derive(..)]` only expanded in the entry file — ✅ FIXED
 
@@ -82,27 +82,30 @@ impl AccountsClient<type T: Transport> {
 (`(self.transport).call(..)` is the same disambiguation that makes a *closure* field
 call `(self.handler)(request)` — which the runtime above uses.)
 
-### 3. …but that object stub then *miscompiles* (runtime bug)
+### 3. …and that object stub used to *miscompile* — ✅ FIXED
 
-The form from #2 type-checks, then prints `undefined`: the generic-field dispatch
-lowers to the empty abstract trait method.
+The form from #2 type-checked, then printed `undefined`: the generic-field dispatch
+`(self.transport).call(..)` lowered to the empty abstract trait method, because the
+struct field's `T` carried the struct definition's generic id while the call's binding
+was keyed by the impl/receiver's id — `current_substitution` missed and the abstract
+`call` was emitted.
 
-```vilan
-// (self.transport).call(r)  with  struct AccountsClient<T: Transport>  emits:
-function paren(self, r) { return call(self[0], r); }   // `call` = function call(self, request) {}  ← abstract, empty
-```
+**Fixed** by two root-cause changes (backlog B1, class B):
 
-So the correctly-written object stub still doesn't *run*. (Routing through a generic
-helper hits the same wall — the generic call, invoked from an already-generic context,
-never monomorphizes to `LocalTransport::call`.)
+1. **Field access substitutes the receiver's type arguments** (`resolve_field_accessor`):
+   `self.transport` on `AccountsClient<LocalTransport>` (or, inside the impl, on the
+   impl's own `T`) now resolves to the concrete/impl-bound type instead of the struct's
+   abstract parameter — so the dispatch binding composes.
+2. **A generic struct initializer no longer leaks an abstract type while deferred.**
+   `let client = AccountsClient { transport = transport }` (field from a *variable*)
+   used to ground `client` as `AccountsClient<Transport>` (the trait bound) because the
+   initializer published an unbound type before the field value resolved. It now defers
+   cleanly, so `client` grounds to `AccountsClient<LocalTransport>`.
 
-- **Workaround here:** the client stub is a **free generic function taking the
-  transport as a direct parameter**, called from `main` with a concrete transport —
-  `get_user<T: Transport>(transport: T, id)`. Monomorphized at a top-level concrete
-  call site, the dispatch lowers correctly.
-- **What the plan needs:** the object-stub form (and the proposal's
-  `Accounts::connect(transport)`) needs this nested/field generic dispatch fixed in
-  codegen. Until then the `[service]` derive should emit **free functions**.
+So the **object stub is the form used here** — `AccountsClient<T: Transport>` with a
+`(self.transport).call(..)` method, constructed and called from `main`. The `[service]`
+derive can generate this directly. (`generic_field_method_dispatch_runs` and
+`generic_field_from_a_variable_dispatches` in `inference.rs` pin both halves.)
 
 ### 4. `from_json` element-type inference through an indirect path — ✅ FIXED
 
@@ -128,11 +131,11 @@ natural indirect form directly — no pinning needed. (`enum_constructor_..` and
 ## What this validates for the plan
 
 The **wire model, codec, dispatcher, `Result`/`Option` error layering, and async
-round-trip all work today** — Phase 1 is real. **Derives-in-dependency-modules (#1)
-and the indirect `from_json` inference (#4) are now fixed**, so the shared `common`
-library of derived contract types works (this example imports its derived runtime from
-`rpc.vl`) and the client stub decodes with the natural `Ok(Option::from_json(json))`.
-The remaining gate on the ergonomic surface (a pluggable generic *client object*) is
-the **generic-field dispatch bug (#3)** — the last of the generic-dispatch /
-monomorphization cluster (B1, class B / stable generic identity). Until that lands, the
-`[service]` generator must stay within the forms that work: free generic functions.
+round-trip all work today** — Phase 1 is real. **All four quirks are resolved**: derives
+in dependency modules (#1), the parenthesized field-receiver syntax (#2, intended), the
+generic-field dispatch for the object stub (#3), and the indirect `from_json` inference
+(#4). So the shared `common` library of derived contract types works, the client is the
+natural **object stub** `AccountsClient<T: Transport>` calling `(self.transport).call(..)`,
+and decoding uses the natural `Ok(Option::from_json(json))`. The generic-dispatch /
+monomorphization cluster (B1) that P6 leaned on is **closed** — the `[service]` generator
+can emit the ergonomic object form directly.

@@ -58,26 +58,26 @@ fun accounts_dispatch(request_text: str): str {
 
 // --- Client side: the typed stub ---------------------------------------------
 
-// Each procedure is a free function generic over the transport (`T: Transport`),
-// taking it as a DIRECT parameter. An object stub — `AccountsClient<T: Transport>`
-// with a `(self.transport).call(..)` method — would read nicer and now *type-checks*
-// (with the bound on the struct + parens on the field receiver, both intended syntax;
-// README quirk 2), but it then *miscompiles* to the empty abstract trait method →
-// `undefined` (README quirk 3). A direct generic parameter, monomorphized at a
-// concrete call site, dispatches correctly — so that is the form here. The
-// `[service]` derive will want the object form, once that codegen bug is fixed.
-//
-// Mirrors `get_user(id: i32): Option<User>`, wrapped in `Result<_, RpcError>`
-// because the round-trip itself can fail.
-fun get_user<T: Transport>(transport: T, id: i32): Result<Option<User>, RpcError> {
-	let request = RpcRequest { method = "get_user", args = [id.to_json()] };
-	let reply_text = await transport.call(request.to_json());
-	match RpcReply::from_json(reply_text) {
-		// `from_json` infers its element type `User` through the `Ok` wrapper and
-		// the function's return type — the return-type-driven body inference plus
-		// the constructor propagation thread `Option<User>` all the way in.
-		RpcReply::Success(let json) => Ok(Option::from_json(json)),
-		RpcReply::Failure(let error) => Err(error),
+// The client is an object stub holding the transport — the form the `[service]`
+// derive will generate. The trait bound goes on the struct (so the field's type
+// carries it) and the field-projection receiver is parenthesized,
+// `(self.transport).call(..)` (both intended syntax; README quirk 2). The nested
+// generic dispatch through the `T`-typed field now monomorphizes to the concrete
+// transport (README quirk 3, fixed) — so this reads as the natural client.
+struct AccountsClient<T: Transport> { transport: T }
+impl AccountsClient<type T: Transport> {
+	// Mirrors `get_user(id: i32): Option<User>`, wrapped in `Result<_, RpcError>`
+	// because the round-trip itself can fail.
+	fun get_user(self, id: i32): Result<Option<User>, RpcError> {
+		let request = RpcRequest { method = "get_user", args = [id.to_json()] };
+		let reply_text = await (self.transport).call(request.to_json());
+		match RpcReply::from_json(reply_text) {
+			// `from_json` infers its element type `User` through the `Ok` wrapper and
+			// the function's return type — the return-type-driven body inference plus
+			// the constructor propagation thread `Option<User>` all the way in.
+			RpcReply::Success(let json) => Ok(Option::from_json(json)),
+			RpcReply::Failure(let error) => Err(error),
+		}
 	}
 }
 
@@ -86,11 +86,12 @@ fun get_user<T: Transport>(transport: T, id: i32): Result<Option<User>, RpcError
 fun main() {
 	// The transport routes every call to the server dispatcher, in-process.
 	let transport = LocalTransport { handler = |request| accounts_dispatch(request) };
+	let client = AccountsClient { transport = transport };
 
 	// A hit (id 1 -> Ada), a miss (id 9 -> None, an application-level absence), and
 	// a bogus call made directly through the transport (a clean RpcError, no crash).
-	show(get_user(transport, 1));
-	show(get_user(transport, 9));
+	show(client.get_user(1));
+	show(client.get_user(9));
 	show_raw(transport);
 }
 

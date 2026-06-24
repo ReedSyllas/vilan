@@ -5647,10 +5647,24 @@ impl<'src> Analyzer<'src> {
                 parameter.type_id.get_type(self)
             }
             Expr::StructInitializer(initializer_id, _initializer_fields) => {
-                // Look up the actual struct definition ID from the mapping.
-                // If not found, defer and let downstream constraints handle it.
+                // Reaching here means the initializer's own type isn't in
+                // `resolved_types` yet (the cache check above would have returned
+                // it) — it is still pending. For a *generic* struct the type
+                // arguments are inferred by `resolve_struct_initializer` and
+                // published there; until then the type is genuinely unknown, so
+                // return `Unresolved` and let a consumer (e.g. `let w = Wrap { .. }`)
+                // defer rather than ground on an argument-less `Wrap<>`. A
+                // non-generic struct has no arguments to wait for, so its type is
+                // final immediately.
                 if let Some(&struct_def_id) = self.struct_initializer_to_def.get(initializer_id) {
-                    Type::Struct(struct_def_id, Vec::new())
+                    let is_generic = self.structs.get(&struct_def_id).is_some_and(|struct_| {
+                        !struct_.generic_parameter_constraint_ids.is_empty()
+                    });
+                    if is_generic {
+                        Type::Unresolved
+                    } else {
+                        Type::Struct(struct_def_id, Vec::new())
+                    }
                 } else {
                     Type::Struct(*initializer_id, Vec::new())
                 }
@@ -7569,14 +7583,23 @@ impl<'src> Analyzer<'src> {
                     .insert(initializer_id, struct_id);
             }
         }
-        // Always store the initializer expression so `infer_type` can handle it
-        // (a partial store while deferred is overwritten on the resolving run).
+        // Always store the initializer expression so `infer_type` can find it.
         self.expr_id_to_expr_map.insert(
             initializer_id,
             Expr::StructInitializer(initializer_id, initializer_fields),
         );
         self.struct_initializer_to_def
             .insert(initializer_id, struct_id);
+        // While deferred (a field value not yet resolved), do *not* publish a type:
+        // the bindings are incomplete, so the type-argument fallback below would
+        // fill an unbound parameter with its own constraint id (`Wrap<Handler>`
+        // instead of `Wrap<Doubler>`). Publishing that wrong type lets a consumer —
+        // e.g. `let w = Wrap { inner = d }` grounding `w` — read it before the
+        // resolving run overwrites it, freezing in the abstract argument. Leaving it
+        // unresolved keeps the consumer deferred until the real type lands.
+        if deferred {
+            return Resolution::Deferred;
+        }
         // Fill the struct's type arguments from the bindings inferred above
         // (`Box { value = 5 }` -> `Box<i32>`), so methods called on the value
         // monomorphize against the concrete element type. A parameter no field
@@ -7592,11 +7615,7 @@ impl<'src> Analyzer<'src> {
             .collect();
         let type_id = Type::Struct(struct_id, type_arguments).get_type_id(self);
         self.resolved_types.insert(initializer_id, type_id);
-        if deferred {
-            Resolution::Deferred
-        } else {
-            Resolution::Resolved
-        }
+        Resolution::Resolved
     }
 
     /// `subject.field`: once the subject resolves to a struct, the accessor's type

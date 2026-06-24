@@ -930,6 +930,35 @@ fn generic_field_method_dispatch_runs() {
 }
 
 #[test]
+fn generic_field_from_a_variable_dispatches() {
+    // Same as above but the field value is a *variable*, so the `Wrap` initializer
+    // (priority 1) is reached before `d` is grounded (priority 10) and defers. It
+    // must not publish a type while deferred (the unbound parameter would fall back
+    // to its constraint, `Wrap<Handler>`), and a pending generic initializer infers
+    // as `Unresolved` so `let w = ..` defers instead of grounding on an abstract
+    // `Wrap`. With both, `w` grounds to `Wrap<Doubler>` once the initializer
+    // resolves, and the dispatch reaches the concrete `Doubler::handle`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Handler { fun handle(self, x: i32): i32; }
+        struct Doubler { factor: i32 }
+        impl Doubler with Handler { fun handle(self, x: i32): i32 { x * self.factor } }
+        struct Wrap<T: Handler> { inner: T }
+        impl Wrap<type T: Handler> {
+            fun run(self, x: i32): i32 { (self.inner).handle(x) }
+        }
+        fun main() {
+            let d = Doubler { factor = 3 };
+            let w = Wrap { inner = d };
+            print(w.run(7));
+        }
+        "#,
+        "21\n",
+    );
+}
+
+#[test]
 fn from_json_indirect_element_type_runs() {
     // `decode` returns `Result<Option<User>, str>`; its body is now inferred against
     // that return type (the `ReturnType` constraint), so `Ok(Option::from_json(text))`
