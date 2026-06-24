@@ -14,8 +14,11 @@ A staged plan to replace the ~25 ad-hoc deferred-work lists in `analyzer.rs`
 > corpus 69/69 byte-identical, full suite green, clippy ≤ baseline, and an old-vs-new
 > timing on a 200–1600-function synthetic shows v2 is performance-neutral (within
 > debug-build noise). `deep_dependency_chain_resolves_across_passes` pins the wake
-> path. The cleanup half of stage 15 (delete the now-unused channels / merge the
-> bindings recording per item 4) is still open.
+> path. **Stage 15 / item-4 tail — done** (commit 6b96d3f): the transformer's two
+> near-identical instance emitters and four call-emission branches collapsed to one
+> `emit_instance` + one `call_substitution` read. (`generic_dispatch` is a separate
+> concern — abstract-member re-dispatch, not a redundant binding channel — so it stays.)
+> See `type-solver.md` "Item-4 tail".
 
 ## Why (and an honest scope)
 

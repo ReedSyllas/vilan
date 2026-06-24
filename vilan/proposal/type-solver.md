@@ -92,10 +92,23 @@ class. In order:
    **Fixes class (B).** High blast radius (reworks the in-place-mutation model);
    follows v2, per the existing sequence.
 
-Plus the **item-4 tail**: once v2 lands, fold `method_call_substitution` into the one
-uniform binding-recording path (the deeper channel merge), so there is a single place
-a binding is written and read — removing the "recorded in one channel, missed in
-another" failure mode at the source.
+**Item-4 tail — ✅ resolved** (commit 6b96d3f). The duplication was in the transformer:
+two near-identical instance emitters (`get_or_create_instance` for free functions, keyed
+by positional type args; `emit_method_instance` for methods, keyed by a constraint→type
+substitution) plus four call-emission branches that each rebuilt the same lowering. Two
+emitters fed by two binding representations is the "recorded in one channel, read in
+another" shape. Collapsed to one path: `emit_instance(fn, substitution)` is the single
+emitter, and `call_substitution(call, target, args)` is the single place a call's binding
+is *read* — positional args (free call), else the analyzer-recorded
+`method_call_substitution` (method/operator), else the inherited slice. Corpus
+byte-identical (a function's constraint ids are minted in parameter order, so the
+sorted-by-constraint key matches the old positional key).
+
+Note: the originally-named pair `generic_dispatch` + `method_call_substitution` is *not*
+a redundant channel. `generic_dispatch` selects *which* concrete member an abstract trait
+call re-dispatches to (an early-return in the transformer); `method_call_substitution`
+drives monomorphization of a concrete generic callee. They are orthogonal, sequential
+concerns — co-locating them removes no failure mode, so they are left separate.
 
 ## Plan + verification
 
