@@ -1451,20 +1451,47 @@ fn generic_mut_view_aggregate_pointee_copies_in_place() {
 }
 
 #[test]
-#[ignore = "open (backlog B4): dispatch on a value whose declared type is a bare trait (`x: Display`) lowers to the abstract method -> undefined"]
-fn trait_typed_value_method_dispatch() {
-    // Calling a trait method on a value typed as the bare trait itself
-    // (`let x: Display = 5`) — trait-typed-value dispatch, deferred behind the
-    // generic-dispatch cluster. Today it prints `undefined`.
-    assert_compiles_and_runs(
+fn bare_trait_value_method_call_is_rejected() {
+    // Calling a method on a value typed as a *bare trait* (`let x: Display = 5`)
+    // has no concrete type to dispatch to — vilan has no trait objects — and used
+    // to silently lower to the empty abstract method (`undefined`). It is now a
+    // clean compile error pointing at the generic-parameter / concrete-type fix
+    // (backlog B4). The legitimate use of a bare-trait type is a *bound*
+    // (`<T: Display>`), exercised by `generic_dispatch_to_extern_impl` et al.
+    assert_fails(
         r#"
-        import std::print;
         import std::display::Display;
         fun main() {
             let x: Display = 5;
-            print(x.to_string());
+            let s = x.to_string();
         }
         "#,
-        "5\n",
+    );
+}
+
+#[test]
+fn trait_default_self_dispatch_still_runs() {
+    // The flip side of the rejection: inside a trait *default* body a `Self`
+    // receiver — including a chain through a `Self`-returning method and a
+    // non-`self` `Self`-typed parameter — is legitimate and re-dispatches to the
+    // concrete type at codegen. Guards that the bare-trait-value check doesn't
+    // catch these.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Stepper {
+            fun step(self): i32;
+            fun twice(self): i32 { self.step() + self.step() }
+            fun plus(self, other: Self): i32 { self.twice() + other.step() }
+        }
+        struct One {}
+        impl One with Stepper { fun step(self): i32 { 1 } }
+        fun main() {
+            let a = One {};
+            let b = One {};
+            print((a).plus(b));
+        }
+        "#,
+        "3\n",
     );
 }

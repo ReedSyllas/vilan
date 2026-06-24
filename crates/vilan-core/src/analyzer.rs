@@ -789,6 +789,12 @@ pub struct Analyzer<'src> {
     // True while walking a trait body, where a bodyless method is a legitimate
     // requirement; elsewhere a bodyless function must be declared `external`.
     walking_trait_body: bool,
+    // Body scopes of `trait` blocks. A method call whose scope descends from one
+    // is inside a trait default, where a `Type::Trait` (`Self`) receiver is
+    // re-dispatched at codegen to the concrete specialization — distinct from a
+    // bare-trait *value* receiver elsewhere, which has no concrete type and is
+    // rejected.
+    trait_body_scopes: HashSet<Id>,
     // The `std` `panic` intrinsic, if loaded. A call to it never returns, so it
     // types as `any` (unifying with any expected type) and lowers to a `throw`.
     panic_fn_id: Option<Id>,
@@ -915,6 +921,7 @@ impl<'src> Analyzer<'src> {
             type_id: 0,
             variables: IndexMap::new(),
             walking_trait_body: false,
+            trait_body_scopes: HashSet::new(),
             panic_fn_id: None,
             promise_struct_id: None,
         }
@@ -955,6 +962,22 @@ impl<'src> Analyzer<'src> {
             .and_then(|parameter_id| self.parameters.get(&parameter_id))
             .map(|parameter| parameter.name == "self")
             .unwrap_or(false)
+    }
+
+    /// Whether the expression `id` sits inside a trait default body — its scope
+    /// descends from a `trait` block's body scope. There a `Type::Trait` (`Self`)
+    /// receiver is legitimate: codegen re-dispatches it to the concrete type the
+    /// default is specialized for. Anywhere else a `Type::Trait` receiver is a
+    /// value typed as a bare trait, which has no concrete type to dispatch to.
+    fn is_in_trait_default(&self, id: Id) -> bool {
+        let mut scope_id = self.expr_id_to_scope_id_map.get(&id).copied();
+        while let Some(current) = scope_id {
+            if self.trait_body_scopes.contains(&current) {
+                return true;
+            }
+            scope_id = self.scopes.get(&current).and_then(|scope| scope.parent_id);
+        }
+        false
     }
 
     /// Whether a concrete `subject_type` implements `trait_id` — has an
@@ -4116,6 +4139,7 @@ impl<'src> Analyzer<'src> {
                 // calls against this trait's own declarations.
                 let self_type_id = Type::Trait(id, Vec::new()).get_type_id(self);
                 self.register_self_type(body_scope_id, self_type_id);
+                self.trait_body_scopes.insert(body_scope_id);
                 // Supertraits are resolved in the body scope so their generic
                 // arguments (`PartialEq<B>`) see the trait's parameters.
                 let supertraits = supertraits
@@ -6901,6 +6925,9 @@ impl<'src> Analyzer<'src> {
             NoMethod,
             Defer,
             NotCallable,
+            // The receiver is a value typed as a bare trait (not `self` in a trait
+            // default) — there is no concrete type to dispatch to.
+            BareTraitValue(Id),
         }
         let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
         let found = |member_id: Option<Id>| match member_id {
@@ -6958,29 +6985,39 @@ impl<'src> Analyzer<'src> {
                 let trait_id = *trait_id;
                 let trait_arguments = trait_arguments.clone();
                 let member = self.method_member_in_trait(trait_id, member_name);
-                // Inside a trait default body `self`/`Self` is `Type::Trait`; record
-                // the call so codegen re-dispatches it to whatever concrete type the
-                // default is specialized for.
-                if member.is_some() {
-                    self.generic_dispatch
-                        .insert(id, GenericDispatch::OnType(None, member_name));
-                    // A parameterized trait substitutes its generic parameters with
-                    // the concrete arguments, so the method's signature (`got(): T`)
-                    // types against them (`Get<i32>::got` -> `i32`).
-                    if !trait_arguments.is_empty() {
-                        let parameter_ids = self
-                            .traits
-                            .get(&trait_id)
-                            .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
-                            .unwrap_or_default();
-                        let substitution: SubstitutionContext =
-                            parameter_ids.into_iter().zip(trait_arguments).collect();
-                        if !substitution.is_empty() {
-                            self.method_call_substitution.insert(id, substitution);
+                // The only legitimate bare-`Type::Trait` receiver is `self`/`Self`
+                // inside a trait default body, re-dispatched at codegen to the
+                // concrete specialization. A *value* typed as a bare trait
+                // (`let x: Display = 5; x.to_string()`) has no concrete type to
+                // dispatch to — vilan has no trait objects — so reject it rather
+                // than silently lowering to the empty abstract method.
+                if member.is_some() && !self.is_in_trait_default(id) {
+                    MethodLookup::BareTraitValue(trait_id)
+                } else {
+                    // Inside a trait default body `self`/`Self` is `Type::Trait`;
+                    // record the call so codegen re-dispatches it to whatever
+                    // concrete type the default is specialized for.
+                    if member.is_some() {
+                        self.generic_dispatch
+                            .insert(id, GenericDispatch::OnType(None, member_name));
+                        // A parameterized trait substitutes its generic parameters
+                        // with the concrete arguments, so the method's signature
+                        // (`got(): T`) types against them (`Get<i32>::got` -> `i32`).
+                        if !trait_arguments.is_empty() {
+                            let parameter_ids = self
+                                .traits
+                                .get(&trait_id)
+                                .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
+                                .unwrap_or_default();
+                            let substitution: SubstitutionContext =
+                                parameter_ids.into_iter().zip(trait_arguments).collect();
+                            if !substitution.is_empty() {
+                                self.method_call_substitution.insert(id, substitution);
+                            }
                         }
                     }
+                    found(member)
                 }
-                found(member)
             }
             Type::Generic(constraint_id) => {
                 let bound_trait_ids = self.generic_bound_trait_ids(*constraint_id);
@@ -7066,6 +7103,24 @@ impl<'src> Analyzer<'src> {
                     span: arguments_span,
                     msg: format!("cannot call method '{}' on {}", member_name, type_str),
                 });
+                Resolution::Failed
+            }
+            MethodLookup::BareTraitValue(trait_id) => {
+                let trait_name = self
+                    .traits
+                    .get(&trait_id)
+                    .map(|trait_| trait_.name)
+                    .unwrap_or("trait");
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&subject_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!(
+                        "cannot call '{member_name}' on a value of bare trait type \
+                         '{trait_name}': a trait is not a value type (vilan has no trait \
+                         objects). Use a generic parameter (`<T: {trait_name}>`) or a \
+                         concrete type."
+                    ),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
                 Resolution::Failed
             }
         }
