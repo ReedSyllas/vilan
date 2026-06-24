@@ -871,3 +871,60 @@ fn must_use_consumed_result_no_warning() {
         "expected no warnings, got {messages:?}"
     );
 }
+
+// --- Known bugs: generic-binding flow (backlog B1, see proposal/type-solver.md) ---
+//
+// These assert the *desired* behaviour and are `#[ignore]`d because they currently
+// fail (both print/produce `undefined`). They are the two faces of the one remaining
+// solver weakness — a generic parameter's binding lost across a boundary — that B1's
+// item 5 v2 (dependency re-queue, class A) and item 6 (stable generic identity, class
+// B) close. Remove `#[ignore]` as each lands.
+
+#[test]
+#[ignore = "B1 class B: dispatch on a generic-typed field lowers to the abstract trait method"]
+fn generic_field_method_dispatch_runs() {
+    // `(self.inner).handle(x)` on a generic-bounded field type-checks but the nested
+    // generic dispatch isn't composed through `current_substitution` (the field's `T`
+    // id differs from the binding key), so it emits the empty abstract `handle`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Handler { fun handle(self, x: i32): i32; }
+        struct Doubler { factor: i32 }
+        impl Doubler with Handler { fun handle(self, x: i32): i32 { x * self.factor } }
+        struct Wrap<T: Handler> { inner: T }
+        impl Wrap<type T: Handler> {
+            fun run(self, x: i32): i32 { (self.inner).handle(x) }
+        }
+        fun main() { let w = Wrap { inner = Doubler { factor = 3 } }; print(w.run(7)); }
+        "#,
+        "21\n",
+    );
+}
+
+#[test]
+#[ignore = "B1 class A: from_json element type via an indirect path lowers to the abstract decoder"]
+fn from_json_indirect_element_type_runs() {
+    // The element type `User` arrives through the `Ok(..)` wrapper + return type,
+    // *after* the `Option::from_json` constraint resolved; with no dependency re-queue
+    // the binding is never recorded, so the decode lowers to the abstract
+    // `from_json_value` → `Some(undefined)`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        [derive(Json)] struct User { id: i32, name: str }
+        fun decode(text: str): Result<Option<User>, str> { Ok(Option::from_json(text)) }
+        fun main() {
+            match decode("{\"id\":1,\"name\":\"Ada\"}") {
+                Ok(Some(let u)) => print(u.name),
+                Ok(None) => print("none"),
+                Err(let e) => print(e),
+            }
+        }
+        "#,
+        "Ada\n",
+    );
+}
