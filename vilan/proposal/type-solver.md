@@ -169,11 +169,20 @@ expected type never reaches the call. Two leaks, both fixable directly:
    uses the natural `Ok(Option::from_json(json))` directly (quirk #4 retired).
 
 So the `from_json` class is **bidirectional flow**, more contained than the full
-dependency re-queue. **Re-queue (item 5 v2) is still the cure for the genuinely
-late-bound case** — bug c′ (`count.derive(|n| format(n))`), where an *unannotated
-closure parameter* types only after its enclosing call resolves; no amount of
-expected-type propagation helps there. Class (B) / #3 remains item 6 (stable generic
-identity). Net: the one "binding lost across a boundary" class has three distinct
-leaks — constructor propagation (fixed), return-type body inference (fixed, incl.
-through-match), and closure-parameter lateness (re-queue) — plus the nested-dispatch
-identity (item 6).
+dependency re-queue. **All of class (A) is now closed by targeted, general means:**
+constructor propagation (#1), return-type body inference incl. through-match (#2), and
+— already, before this work — the **late-bound closure-parameter case** (bug c′,
+`count.map(|n| format(n))`), fixed by *deferring a call while an argument is an unknown
+closure parameter* (the same rule the method-call resolver applies to an unknown
+closure receiver; pinned by `format_in_closure_argument`). So **item 5 v2 (dependency
+re-queue) no longer has a failing repro to gate it** — its targets are all closed. It
+remains available as a *generalization* (replace the targeted defers with one principled
+re-queue, per B1's "merge special cases into general code"), but that is now a refactor,
+not a bugfix, and the riskiest stage — to be undertaken on its own merits, not to chase
+a live bug.
+
+**The one genuinely-open B1 bug is class (B) / #3** — dispatch on a generic-typed field
+lowers to the abstract trait method (`generic_field_method_dispatch_runs`, the RPC
+client-object form). That is **item 6 (stable generic identity)**: a binding keyed by
+the caller's generic id doesn't compose with the callee's freshly-minted id. This is now
+the highest-value next target — it closes the last RPC quirk and the last class.
