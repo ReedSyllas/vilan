@@ -812,48 +812,23 @@ impl<'src> Transformer<'src> {
                                 Vec::new(),
                             ));
                         }
-                        // A call to a generic function is compiled to a
-                        // specialized variant chosen by its concrete type
-                        // arguments — no runtime dispatch.
-                        let is_generic = self
-                            .program
-                            .functions
-                            .get(&target_id)
-                            .map(|f| !f.generic_parameter_constraint_ids.is_empty())
-                            .unwrap_or(false);
-                        if is_generic && !function_call.generic_argument_ids.is_empty() {
-                            let name = self.get_or_create_instance(
-                                target_id,
-                                &function_call.generic_argument_ids,
-                            );
-                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                            return Some(self.maybe_await(target_id, call));
-                        }
-                        // A method on a generic impl whose generics bind to
-                        // concrete types from the receiver (`xs.sum()` on
-                        // `List<i32>`) is emitted as a monomorphized instance.
-                        if let Some(substitution) = self.program.method_call_substitution.get(&id) {
-                            let substitution = substitution.clone();
-                            let name = self.emit_method_instance(target_id, &substitution);
-                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                            return Some(self.maybe_await(target_id, call));
-                        }
-                        // A generic call nested in a monomorphized body that the
-                        // analysis didn't record a substitution for (its type
-                        // arguments come only from the enclosing instantiation, not
-                        // its own arguments) — e.g. `List::from_json_value` inside
-                        // `List::from_json`, both over the impl's `T`. Specialize it
-                        // for whatever signature generics the active substitution
-                        // binds, so the inner call resolves rather than staying
-                        // abstract.
-                        let inherited = self.inherited_substitution(target_id);
-                        if !inherited.is_empty() {
-                            let name = self.emit_method_instance(target_id, &inherited);
-                            let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                            return Some(self.maybe_await(target_id, call));
-                        }
-                        self.ensure_function_emitted(target_id);
-                        let name = self.ng.name_for(target_id);
+                        // A call to a generic function/method is compiled to a
+                        // specialized instance chosen by its concrete type arguments
+                        // — no runtime dispatch. The binding comes from whichever
+                        // channel carries it (see `call_substitution`); all feed the
+                        // one `emit_instance` path. A non-generic call (no binding)
+                        // is emitted as a plain function.
+                        let name = match self.call_substitution(
+                            *id,
+                            target_id,
+                            &function_call.generic_argument_ids,
+                        ) {
+                            Some(substitution) => self.emit_instance(target_id, &substitution),
+                            None => {
+                                self.ensure_function_emitted(target_id);
+                                self.ng.name_for(target_id)
+                            }
+                        };
                         let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
                         self.maybe_await(target_id, call)
                     }
@@ -942,7 +917,7 @@ impl<'src> Transformer<'src> {
                         self.program.method_call_substitution.get(&id)
                     {
                         let substitution = substitution.clone();
-                        self.emit_method_instance(method_id, &substitution)
+                        self.emit_instance(method_id, &substitution)
                     } else {
                         self.ensure_function_emitted(method_id);
                         self.ng.name_for(method_id)
@@ -2212,60 +2187,51 @@ impl<'src> Transformer<'src> {
 
     /// Returns the JS name of the monomorphized variant of `function_id` for
     /// the given concrete type arguments, generating it on first use.
-    fn get_or_create_instance(
-        &mut self,
-        function_id: Id,
+    /// The generic binding to monomorphize a call's callee with, drawn from
+    /// whichever channel carries it — so the transformer reads a call's binding in
+    /// one place and emits through the one [`Self::emit_instance`] path. In
+    /// precedence order: a free generic call's positional type arguments
+    /// (`id<i32>` -> `{T: i32}`); the receiver / own-generic substitution the
+    /// analyzer recorded for a method or operator (`xs.sum()` on `List<i32>`); or,
+    /// for a generic call nested in a monomorphized body whose arguments come only
+    /// from the enclosing instantiation, the inherited slice of the active
+    /// substitution. `None` means the callee is non-generic (or nothing binds it),
+    /// so it is emitted as a plain function.
+    fn call_substitution(
+        &self,
+        call_id: Id,
+        target_id: Id,
         generic_argument_ids: &[TypeId],
-    ) -> String {
-        let concrete_arguments: Vec<TypeId> = generic_argument_ids
-            .iter()
-            .map(|type_id| self.resolve_type_id(*type_id))
-            .collect();
-        let key = (
-            function_id,
-            concrete_arguments
-                .iter()
-                .map(|type_id| self.type_key(*type_id))
-                .collect::<Vec<_>>(),
-        );
-        if let Some(name) = self.instances.get(&key) {
-            return name.clone();
+    ) -> Option<HashMap<TypeId, TypeId>> {
+        let function = self.program.functions.get(&target_id);
+        let is_generic = function.is_some_and(|f| !f.generic_parameter_constraint_ids.is_empty());
+        if is_generic && !generic_argument_ids.is_empty() {
+            return Some(
+                function
+                    .unwrap()
+                    .generic_parameter_constraint_ids
+                    .iter()
+                    .copied()
+                    .zip(generic_argument_ids.iter().copied())
+                    .collect(),
+            );
         }
-
-        let constraint_ids = self
-            .program
-            .functions
-            .get(&function_id)
-            .map(|function| function.generic_parameter_constraint_ids.clone())
-            .unwrap_or_default();
-        let mut substitution = HashMap::new();
-        for (constraint_id, concrete_argument) in
-            constraint_ids.iter().zip(concrete_arguments.iter())
-        {
-            substitution.insert(*constraint_id, *concrete_argument);
+        if let Some(recorded) = self.program.method_call_substitution.get(&call_id) {
+            return Some(recorded.clone());
         }
-
-        let name = self.ng.next_name();
-        self.instances.insert(key, name.clone());
-        if let Some(function) = self.program.functions.get(&function_id) {
-            let saved = std::mem::replace(&mut self.current_substitution, substitution);
-            let js_function = self.function_with_name(function, name.clone());
-            self.current_substitution = saved;
-            self.monomorphized.push(js_function);
-        }
-        name
+        let inherited = self.inherited_substitution(target_id);
+        (!inherited.is_empty()).then_some(inherited)
     }
 
-    /// Emits a monomorphized instance of a method whose impl generics are bound
-    /// to concrete types (`xs.sum()` on `List<i32>` -> `sum` specialized with
-    /// `T = i32`), keyed by (method, bound types) so each instantiation is
-    /// emitted once. While walking the body, `current_substitution` is the
-    /// binding, so `T::default()` and `T`-typed values resolve concretely.
-    fn emit_method_instance(
-        &mut self,
-        method_id: Id,
-        substitution: &HashMap<TypeId, TypeId>,
-    ) -> String {
+    /// Emits (or reuses) a monomorphized instance of `function_id` specialized by
+    /// `substitution` (generic constraint id -> concrete type). This is the single
+    /// monomorphization path for *every* generic instantiation — free function,
+    /// impl/trait method, operator, nested call — so a binding flows through one
+    /// place regardless of how it was recorded. Keyed by (function, bound types)
+    /// so each instantiation is emitted once. While walking the body,
+    /// `current_substitution` is the binding, so `T::default()` and `T`-typed
+    /// values resolve concretely.
+    fn emit_instance(&mut self, function_id: Id, substitution: &HashMap<TypeId, TypeId>) -> String {
         // Resolve each bound type under the active substitution (so a nested
         // instantiation composes) and order by constraint id for a stable key.
         let mut entries: Vec<(TypeId, TypeId)> = substitution
@@ -2274,7 +2240,7 @@ impl<'src> Transformer<'src> {
             .collect();
         entries.sort_by_key(|(constraint_id, _)| constraint_id.0);
         let key = (
-            method_id,
+            function_id,
             entries
                 .iter()
                 .map(|(_, type_id)| self.type_key(*type_id))
@@ -2286,7 +2252,7 @@ impl<'src> Transformer<'src> {
         let substitution: HashMap<TypeId, TypeId> = entries.into_iter().collect();
         let name = self.ng.next_name();
         self.instances.insert(key, name.clone());
-        if let Some(function) = self.program.functions.get(&method_id) {
+        if let Some(function) = self.program.functions.get(&function_id) {
             let saved = std::mem::replace(&mut self.current_substitution, substitution);
             let js_function = self.function_with_name(function, name.clone());
             self.current_substitution = saved;
