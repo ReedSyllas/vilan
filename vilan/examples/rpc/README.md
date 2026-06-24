@@ -1,10 +1,11 @@
 # RPC example — the hand-written runtime (roadmap P6)
 
 A working, end-to-end RPC round-trip written out **by hand** — no `[service]`/`[rpc]`
-codegen sugar — so the whole system is visible in one file. It's the concrete form of
-Phase 1 of [`proposal/transport-rpc.md`](../../proposal/transport-rpc.md), and it
-exists to **surface compiler quirks** that the eventual `[service]` generation will
-have to deal with. Everything is in [`src/main.vl`](src/main.vl).
+codegen sugar — so the whole system is visible. It's the concrete form of Phase 1 of
+[`proposal/transport-rpc.md`](../../proposal/transport-rpc.md), and it exists to
+**surface compiler quirks** that the eventual `[service]` generation will have to deal
+with. The reusable runtime is in [`src/rpc.vl`](src/rpc.vl); the application — the
+shared contract, the server dispatcher, the client stub — in [`src/main.vl`](src/main.vl).
 
 ```sh
 vilan run vilan/examples/rpc
@@ -34,25 +35,25 @@ The server `lookup_user` returns `Option<User>` — `None` is an *application-le
 
 ## Quirks discovered
 
-The reason this example is worth keeping. **#1, #3, and #4 are bugs; #2 is intended
-syntax** (so it's documented as a gotcha, not a defect). **Bugs #3 and #4 are one
-underlying weakness: generic dispatch / monomorphization does not thread type
-arguments through indirect or nested contexts, so a call binds to the empty
-*abstract* trait method.** That's the analyzer's generic-resolution cluster (backlog
-B1 / `analyzer-refactor.md`), and P6 leans on it heavily.
+The reason this example is worth keeping. **#1 was a bug — now fixed; #3 and #4 are
+bugs; #2 is intended syntax.** **Bugs #3 and #4 are one underlying weakness: generic
+dispatch / monomorphization does not thread type arguments through indirect or nested
+contexts, so a call binds to the empty *abstract* trait method.** That's the
+analyzer's generic-resolution cluster (backlog B1 / `analyzer-refactor.md`), and P6
+leans on it heavily.
 
-### 1. `[derive(..)]` only expands in the entry file
+### 1. `[derive(..)]` only expanded in the entry file — ✅ FIXED
 
-Putting the runtime in a separate `src/rpc.vl` and importing it gave
-`cannot find 'from_json' in RpcRequest` and `RpcRequest has no method 'to_json'` for
-every imported derived type — while a `[derive(Json)]` struct *in* `main.vl` worked
-fine. `expand_derives` runs on the **entry program only**, not on imported/dependency
-modules.
+Originally, putting the runtime in a separate `src/rpc.vl` and importing it gave
+`cannot find 'from_json' in RpcRequest` for every imported derived type, while a
+`[derive(Json)]` struct *in* `main.vl` worked — `expand_derives` ran on the **entry
+program only**.
 
-- **Workaround here:** everything is in one file (`main.vl`).
-- **What the plan needs:** the proposal puts the shared contract types in a `common`
-  **library**, imported by both sides — so **derives must expand in dependency
-  modules** before that works. A hard prerequisite, surfaced immediately.
+**Fixed** (commit 3592343): derive expansion now runs in *every* module — each loaded
+module and each dependency `lib.vl` — so a derived type's `to_json`/`from_json`/… work
+wherever it's defined. This example now demonstrates it directly: the runtime and its
+derived envelope types live in `rpc.vl`, imported by `main.vl`. The proposal's shared
+`common` library of derived contract types is unblocked.
 
 ### 2. Calling a method on a generic field needs parens + a struct-level bound (intended syntax — *not* a bug)
 
@@ -127,8 +128,9 @@ Ok(user)
 ## What this validates for the plan
 
 The **wire model, codec, dispatcher, `Result`/`Option` error layering, and async
-round-trip all work today** — Phase 1 is real. But the ergonomic, generic surface the
-proposal wants (a `common` library of derived contract types, a pluggable generic
-client object) is **gated on the generic-dispatch / monomorphization cluster and on
-derives-in-dependencies**. Phase 0/1 should pull those in (or the generator must stay
-within the forms that work: one module, free generic functions, pinned `from_json`).
+round-trip all work today** — Phase 1 is real. **Derives-in-dependency-modules (#1) is
+now fixed**, so the shared `common` library of derived contract types works (this
+example imports its derived runtime from `rpc.vl`). The remaining gate on the
+ergonomic surface (a pluggable generic *client object*) is the **generic-dispatch /
+monomorphization cluster** (#3/#4 = B1/B5). Until that lands, the `[service]` generator
+must stay within the forms that work: free generic functions and pinned `from_json`.

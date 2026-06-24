@@ -1,0 +1,59 @@
+// The reusable RPC runtime (what `proposal/transport-rpc.md` calls `std::rpc`): the
+// `Transport` seam, the wire envelope types, and an in-process `LocalTransport`.
+// Imported by the app in `main.vl` — the derived envelope types work from this
+// imported module now that derive expansion runs in *every* module (was README
+// quirk 1, since fixed).
+
+import std::promise::Promise;
+
+// --- Transport: the pluggable seam -------------------------------------------
+
+// A request/response transport: send an encoded request, get the encoded reply. The
+// return is an explicit `Promise<str>` because a transport is dispatched indirectly
+// (through a generic bound) and today's async-effect inference only auto-awaits
+// *direct* calls — so a caller `await`s this Promise (see the stub in `main.vl`).
+trait Transport {
+	fun call(self, request: str): Promise<str>;
+}
+
+// The in-process transport: runs a request handler in the same process, wrapped as a
+// resolved Promise. No network — so none of the `fetch` POST / `http` body substrate
+// (now shipped) an `HttpTransport` would use. `handler` is the dispatcher.
+struct LocalTransport {
+	handler: |str| str,
+}
+
+impl LocalTransport with Transport {
+	fun call(self, request: str): Promise<str> {
+		async {
+			(self.handler)(request)
+		}
+	}
+}
+
+// --- The wire model ----------------------------------------------------------
+
+// An invocation: a procedure name plus its arguments, each pre-encoded to a JSON
+// fragment, so a heterogeneous argument list fits a homogeneous `List<str>`.
+[derive(Json)]
+struct RpcRequest {
+	method: str,
+	args: List<str>,
+}
+
+// An infrastructure-level failure — distinct from an application error, which is part
+// of a procedure's own return type (e.g. `Option<User>` for "might not exist").
+[derive(Json)]
+enum RpcError {
+	Transport(str),
+	Decode(str),
+	Remote(str),
+	Unauthorized,
+}
+
+// A reply: the procedure's JSON-encoded result, or an `RpcError`.
+[derive(Json)]
+enum RpcReply {
+	Success(str),
+	Failure(RpcError),
+}
