@@ -227,13 +227,13 @@ exactly like the current `common`/`client`/`server` workspace.
 
 Small, independently-useful std extensions (Phase 0) plus larger standing dependencies:
 
-- **`std::fetch` gains POST/body/headers** — today `async external fun fetch(url): Response`
-  is GET-only; the HTTP transport must POST the request body. A `fetch` options binding
-  (method, body, headers) over the host `fetch(url, options)`. *Independent value
-  beyond RPC.*
-- **`std::http` exposes the request body** — `Request` exposes only `path()`/`method()`;
-  the server dispatcher must read the POSTed body. Add `Request::body(): str` over the
-  raw `NodeRequest`. *Independent value.*
+- **`std::fetch` gains POST/body/headers** — ✅ **shipped** (commit 7340518). `post(url,
+  body)` / `get(url)` builders + `.header(..)` + `.send()`; the host `fetch(url, options)`
+  init object is built with `Object()` + `[extern(set,..)]` setters, headers ride as a
+  `List<Header>` (no compiler change). GET `fetch(url)` unchanged.
+- **`std::http` exposes the request body** — ✅ **shipped** (commit 593742a).
+  `request.body(): str`; `Server::start` reads the stream eagerly (`node:stream/consumers`
+  `text`) and passes it in, since the indirectly-called handler can't suspend.
 - **Generation mechanism** — `[service]` must generate code from a **trait's** method
   list. Today's derives target structs/enums (`expand_derives`); a service derive needs
   either (a) extending the derive mechanism to traits, or (b) the general macro engine
@@ -245,8 +245,9 @@ Small, independently-useful std extensions (Phase 0) plus larger standing depend
 
 ## 11. Phased plan (XL → shippable slices)
 
-0. **Substrate** (S) — `fetch` POST/body/headers; `http` `Request::body()`. Each lands
-   on its own, useful immediately.
+0. **Substrate** (S) — ✅ **SHIPPED** (commits 7340518, 593742a): `fetch` POST/body/headers
+   + `http` `Request::body()`. Each landed on its own, with the full round-trip verified
+   (a Vilan `fetch::post` → a Vilan `http` server reading `request.body()`).
 1. **Runtime, hand-written** (M) — `Transport`/`Codec`/`RpcError`, `JsonCodec`,
    `LocalTransport` + `HttpTransport`, the envelope types, and a **manually-written**
    service (dispatcher + stub) proving an end-to-end client↔server call with the
