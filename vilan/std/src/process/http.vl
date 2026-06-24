@@ -24,6 +24,11 @@ impl NodeRequest {
 	external fun method(self): str;
 }
 
+// Reads a request's full body (a stream) to text. `node:stream/consumers` `text`
+// resolves once the body has fully arrived; for a body-less request it's empty.
+[extern("node:stream/consumers", "text")]
+async external fun read_request_body(node: NodeRequest): str;
+
 external struct NodeResponse;
 
 impl NodeResponse {
@@ -41,6 +46,7 @@ impl NodeResponse {
 
 struct Request {
 	node: NodeRequest,
+	content: str,
 }
 
 impl Request {
@@ -52,6 +58,12 @@ impl Request {
 	// The HTTP method, e.g. `GET`.
 	fun method(self): str {
 		self.node.method()
+	}
+
+	// The full request body as text — empty for a body-less request (e.g. a GET).
+	// Collected eagerly when the request arrives (see `Server::start`).
+	fun body(self): str {
+		self.content
 	}
 }
 
@@ -73,12 +85,7 @@ struct ResponseBuilder {
 
 impl Response {
 	fun builder(): ResponseBuilder {
-		ResponseBuilder {
-			status = 200,
-			header_name = "Content-Type",
-			header_value = "text/plain",
-			body = "",
-		}
+		ResponseBuilder { status = 200, header_name = "Content-Type", header_value = "text/plain", body = "" }
 	}
 }
 
@@ -100,12 +107,7 @@ impl ResponseBuilder {
 	}
 
 	fun build(self): Response {
-		Response {
-			status = self.status,
-			header_name = self.header_name,
-			header_value = self.header_value,
-			body = self.body,
-		}
+		Response { status = self.status, header_name = self.header_name, header_value = self.header_value, body = self.body }
 	}
 }
 
@@ -126,12 +128,7 @@ struct ServerBuilder {
 
 impl Server {
 	fun builder(): ServerBuilder {
-		ServerBuilder {
-			port = 3000,
-			request_handler = |request| Response::builder().code(404).body("Not Found").build(),
-			on_start = |server| {},
-			on_stop = |server| {},
-		}
+		ServerBuilder { port = 3000, request_handler = |request| Response::builder().code(404).body("Not Found").build(), on_start = |server| {}, on_stop = |server| {} }
 	}
 
 	fun url(self): str {
@@ -144,7 +141,11 @@ impl Server {
 		let server = self;
 		let port = self.port;
 		let node_server = node_create_server(|node_request, node_response| {
-			let response = request_handler(Request { node = node_request });
+			// Collect the full request body before dispatching: the handler is
+			// called indirectly and so can't suspend, so it receives the body as a
+			// ready string (`request.body()`) rather than a stream.
+			let content = read_request_body(node_request);
+			let response = request_handler(Request { node = node_request, content = content });
 			node_response.set_status_code(response.status);
 			node_response.set_header_raw(response.header_name, response.header_value);
 			node_response.end(response.body);
@@ -177,10 +178,6 @@ impl ServerBuilder {
 	}
 
 	fun build(self): Server {
-		Server {
-			port = self.port,
-			request_handler = self.request_handler,
-			on_start = self.on_start,
-		}
+		Server { port = self.port, request_handler = self.request_handler, on_start = self.on_start }
 	}
 }
