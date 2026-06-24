@@ -88,10 +88,15 @@ dependencies. Unordered within a section.
    construction copy; **enforcement** of arity bounds `T: (2..)` and tuple element bounds
    `(..: Display)` (parsed, not checked); trait-typed-value dispatch (below).
 
-4. **Trait-typed-value dispatch** (L) — calling a trait method on a value whose type is a bare trait
-   (`Type::Trait(Id, args)`). Infrastructure landed (parameterized traits, impl trait-args), but
-   dispatch is deferred behind the generic-dispatch cluster and a blanket-`Into` ambiguity. `combine`
-   sidestepped it by taking concrete `Signal<U>`. Fold into B1.
+4. **Trait-typed-value dispatch** — the silent-miscompile half is **resolved** (fix 7db4705): a
+   method call on a value typed as a bare trait (`let x: Display = 5; x.to_string()`) used to lower
+   to the empty abstract method (`undefined`); it is now a clean compile error pointing at the
+   generic-parameter / concrete-type fix. The `self`/`Self` receiver inside a trait *default* (the
+   one legitimate `Type::Trait` receiver) is exempted via the call's scope chain. **Deferred as a
+   distinct feature: trait objects / dynamic dispatch** — making `x: Display` actually *work* by
+   value needs a runtime representation (a `(value, vtable)` pair or `Box<dyn>`-style), a real
+   language feature with its own proposal and demand; nothing uses it today. (`combine` sidestepped
+   it with concrete `Signal<U>`.)
 
 5. **Analyzer Bug C** (M; see `analyzer-refactor.md`) — transformer monomorphization through a nested
    generic call. Bugs A & B fixed; C open. Fold into B1.
