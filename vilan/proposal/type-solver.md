@@ -184,8 +184,30 @@ once an input lands, and a run-all backstop that keeps termination — and so th
 perf-neutral; details in `constraint-queue-plan.md` stage 14. A maintainability change,
 not a bugfix.
 
-**The one genuinely-open B1 bug is class (B) / #3** — dispatch on a generic-typed field
-lowers to the abstract trait method (`generic_field_method_dispatch_runs`, the RPC
-client-object form). That is **item 6 (stable generic identity)**: a binding keyed by
-the caller's generic id doesn't compose with the callee's freshly-minted id. This is now
-the highest-value next target — it closes the last RPC quirk and the last class.
+**Class (B) / #3 — ✅ fixed, without the full item-6 rework.** Dispatch on a
+generic-typed field (`(self.inner).handle(x)`, the RPC client-object form) lowered to
+the abstract trait method. The diagnosis pointed at "stable generic identity" (item 6,
+a high-blast-radius type-interning rework), but tracing it in the transformer localized
+the divergence precisely: the struct field's `T` carried the *struct definition's*
+generic id while the call binding was keyed by the *impl/receiver's* id, and
+`current_substitution` missed. Two contained root-cause fixes closed it — no global
+interning needed:
+
+1. **Field access substitutes the receiver's type arguments** (`resolve_field_accessor`
+   matched `Struct(id, _)`, discarding them). `self.inner` now resolves through the
+   subject's actual arguments, so it carries the receiver's `T` and the dispatch binding
+   composes. This is the id-divergence cure at the one place the two ids meet.
+2. **A generic struct initializer doesn't leak an abstract type while deferred.** The
+   object stub then exposed a second bug: `let client = Client { transport = t }` (field
+   from a variable) grounded `client` as `Client<TraitBound>` because the deferred
+   initializer published an unbound type (the type-arg fallback fills with the
+   constraint id) that a consumer read before the resolving run. `resolve_struct_initializer`
+   no longer publishes while deferred, and `infer_type` returns `Unresolved` for a
+   *pending* generic initializer, so the consumer defers until the real arguments land.
+
+Pinned by `generic_field_method_dispatch_runs` and
+`generic_field_from_a_variable_dispatches`; the RPC example uses the object stub
+directly. **All of B1 (classes A and B) is now closed**, and the full item-6 type
+interning is *not* required — the targeted fixes subsume it. Item 6 remains available
+only if a future case needs genuinely stable ids that these local substitutions can't
+reach; there is no such case today.
