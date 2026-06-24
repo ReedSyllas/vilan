@@ -61,23 +61,28 @@ The natural client stub is an object holding the transport, and the first instin
 errors:
 
 ```vilan
-struct AccountsClient<T> { transport: T }                       // bound only on the impl
-impl AccountsClient<type T: Transport> {
+struct AccountsClient<T> { transport: T }                       // no bound anywhere
+impl AccountsClient<type T> {
     fun get_user(self, id) { ... self.transport.call(..) ... }  // ✗ cannot call method 'call' on T
 }
 ```
 
 Two things are wrong, both **intended language rules**: a method call on a
 field-*projection* receiver must **parenthesize the receiver**, and the trait **bound
-must be on the struct definition** (so the field's type carries it). With both, it
-type-checks:
+must be declared on the struct definition** (so the field's type carries it). With
+both, it type-checks:
 
 ```vilan
 struct AccountsClient<T: Transport> { transport: T }            // bound on the struct
-impl AccountsClient<type T: Transport> {
+impl AccountsClient<type T> {                                   // impl infers it
     fun get_user(self, id) { ... (self.transport).call(..) ... }  // ✓ type-checks
 }
 ```
+
+The impl does **not** restate the bound: an `impl AccountsClient<type T>` can only
+apply to an `AccountsClient`, whose existence already requires `T: Transport`, so the
+binder inherits that bound. (Restating it, `impl AccountsClient<type T: Transport>`,
+is still accepted and means the same thing.)
 
 (`(self.transport).call(..)` is the same disambiguation that makes a *closure* field
 call `(self.handler)(request)` — which the runtime above uses.)

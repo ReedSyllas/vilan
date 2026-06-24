@@ -59,13 +59,15 @@ fun accounts_dispatch(request_text: str): str {
 // --- Client side: the typed stub ---------------------------------------------
 
 // The client is an object stub holding the transport — the form the `[service]`
-// derive will generate. The trait bound goes on the struct (so the field's type
-// carries it) and the field-projection receiver is parenthesized,
-// `(self.transport).call(..)` (both intended syntax; README quirk 2). The nested
+// derive will generate. The trait bound is declared once, on the struct (so the
+// field's type carries it); the impl infers it (`impl AccountsClient<type T>`, no
+// restated `: Transport`). The field-projection receiver is parenthesized,
+// `(self.transport).call(..)` (intended syntax; README quirk 2). The nested
 // generic dispatch through the `T`-typed field now monomorphizes to the concrete
 // transport (README quirk 3, fixed) — so this reads as the natural client.
 struct AccountsClient<T: Transport> { transport: T }
-impl AccountsClient<type T: Transport> {
+
+impl AccountsClient<type T> {
 	// Mirrors `get_user(id: i32): Option<User>`, wrapped in `Result<_, RpcError>`
 	// because the round-trip itself can fail.
 	fun get_user(self, id: i32): Result<Option<User>, RpcError> {

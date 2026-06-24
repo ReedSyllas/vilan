@@ -1574,3 +1574,187 @@ fn inline_match_on_method_result_field_access() {
         "42\n42\n",
     );
 }
+
+#[test]
+fn impl_binder_inherits_struct_bound() {
+    // `impl Wrapper<type T>` omits the bound the struct declares (`struct
+    // Wrapper<T: Greeter>`). The impl can only ever apply to a `Wrapper`, whose
+    // existence already requires `T: Greeter`, so the binder *inherits* that
+    // bound — and a trait method call on the `T`-typed field resolves, exactly as
+    // if `impl Wrapper<type T: Greeter>` had been written.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        struct Hello { name: str }
+        impl Hello with Greeter { fun greet(self): str { "hi " + self.name } }
+        struct Wrapper<T: Greeter> { inner: T }
+        impl Wrapper<type T> {
+            fun run(self): str { (self.inner).greet() }
+        }
+        fun main() {
+            print(Wrapper { inner = Hello { name = "x" } }.run());
+        }
+        "#,
+        "hi x\n",
+    );
+}
+
+#[test]
+fn impl_binder_inherits_multiple_bounds() {
+    // A multi-bound declared parameter (`T: A + B`) keeps *both* bounds when
+    // inherited: the extra bounds hang off the same constraint id the binder
+    // reuses, so methods from either trait resolve on the field.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Named { fun name(self): str; }
+        trait Aged { fun age(self): i32; }
+        struct Person { n: str, a: i32 }
+        impl Person with Named { fun name(self): str { self.n } }
+        impl Person with Aged { fun age(self): i32 { self.a } }
+        struct Card<T: Named + Aged> { who: T }
+        impl Card<type T> {
+            fun render(self): str { (self.who).name() }
+            fun years(self): i32 { (self.who).age() }
+        }
+        fun main() {
+            let card = Card { who = Person { n = "Ada", a = 36 } };
+            print(card.render());
+            print(card.years());
+        }
+        "#,
+        "Ada\n36\n",
+    );
+}
+
+#[test]
+fn impl_binder_inherits_per_position_with_multiple_params() {
+    // Two declared parameters with *different* bounds — the inherited constraint
+    // is matched to the binder by position, not conflated.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Named { fun name(self): str; }
+        trait Aged { fun age(self): i32; }
+        struct Tag { n: str }
+        impl Tag with Named { fun name(self): str { self.n } }
+        struct Years { y: i32 }
+        impl Years with Aged { fun age(self): i32 { self.y } }
+        struct Pair<A: Named, B: Aged> { left: A, right: B }
+        impl Pair<type A, type B> {
+            fun label(self): str { (self.left).name() }
+            fun count(self): i32 { (self.right).age() }
+        }
+        fun main() {
+            let pair = Pair { left = Tag { n = "Ada" }, right = Years { y = 7 } };
+            print(pair.label());
+            print(pair.count());
+        }
+        "#,
+        "Ada\n7\n",
+    );
+}
+
+#[test]
+fn impl_binder_mixes_explicit_and_inherited_bounds() {
+    // One binder restates its bound explicitly, the other infers it — both must
+    // resolve. The explicit one already worked; this pins that adding inheritance
+    // for the other did not break the mixed form.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Named { fun name(self): str; }
+        trait Aged { fun age(self): i32; }
+        struct Tag { n: str }
+        impl Tag with Named { fun name(self): str { self.n } }
+        struct Years { y: i32 }
+        impl Years with Aged { fun age(self): i32 { self.y } }
+        struct Pair<A: Named, B: Aged> { left: A, right: B }
+        impl Pair<type A: Named, type B> {
+            fun label(self): str { (self.left).name() }
+            fun count(self): i32 { (self.right).age() }
+        }
+        fun main() {
+            let pair = Pair { left = Tag { n = "Ada" }, right = Years { y = 7 } };
+            print(pair.label());
+            print(pair.count());
+        }
+        "#,
+        "Ada\n7\n",
+    );
+}
+
+#[test]
+fn impl_binder_inherits_enum_bound() {
+    // Inheritance works for an enum subject too, not just structs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        struct Hello { name: str }
+        impl Hello with Greeter { fun greet(self): str { "hi " + self.name } }
+        enum Box<T: Greeter> { Full(T), Empty }
+        impl Box<type T> {
+            fun shout(self): str {
+                match self {
+                    Box::Full(let inner) => inner.greet(),
+                    Box::Empty => "empty",
+                }
+            }
+        }
+        fun main() {
+            print(Box::Full(Hello { name = "x" }).shout());
+        }
+        "#,
+        "hi x\n",
+    );
+}
+
+#[test]
+fn impl_binder_without_a_declared_bound_stays_unconstrained() {
+    // Inheritance only borrows a bound the subject actually declares. An
+    // unconstrained `struct Plain<T>` confers nothing, so a trait method call on
+    // the `T`-typed field must still be rejected — the fix must not invent bounds.
+    assert_fails(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        struct Plain<T> { inner: T }
+        impl Plain<type T> {
+            fun run(self): str { (self.inner).greet() }
+        }
+        fun main() {
+            print(0);
+        }
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "bound inheritance needs the subject type walked first; \
+            forward-referencing a struct declared after the impl falls back to \
+            requiring the explicit bound"]
+fn impl_binder_inherits_bound_from_a_later_declared_struct() {
+    // The same program as `impl_binder_inherits_struct_bound`, but with the struct
+    // declared *after* the impl. The analyzer is single-pass and resolves the
+    // subject type only in `build()`, so the struct's declared bound is not yet
+    // available when the impl's binders are registered. Inheritance therefore does
+    // not fire here; the explicit `impl Wrapper<type T: Greeter>` form still works.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        struct Hello { name: str }
+        impl Hello with Greeter { fun greet(self): str { "hi " + self.name } }
+        impl Wrapper<type T> {
+            fun run(self): str { (self.inner).greet() }
+        }
+        struct Wrapper<T: Greeter> { inner: T }
+        fun main() {
+            print(Wrapper { inner = Hello { name = "x" } }.run());
+        }
+        "#,
+        "hi x\n",
+    );
+}

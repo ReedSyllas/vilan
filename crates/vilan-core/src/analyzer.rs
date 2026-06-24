@@ -3117,17 +3117,60 @@ impl<'src> Analyzer<'src> {
         constraint_type_id
     }
 
+    /// The declared generic-parameter constraint ids of the named type (struct,
+    /// enum, or trait), in order — for inheriting a subject binder's bound from
+    /// the type it implements. `None` if the name does not resolve to such a type
+    /// (e.g. it is declared later in the file, so not yet walked).
+    fn declared_generic_constraint_ids(&self, name: &str, scope_id: Id) -> Option<Vec<TypeId>> {
+        let id = self.try_get_type_id_by_name(name, scope_id)?;
+        if let Some(struct_) = self.structs.get(&id) {
+            return Some(struct_.generic_parameter_constraint_ids.clone());
+        }
+        if let Some(enum_) = self.enums.get(&id) {
+            return Some(enum_.generic_parameter_constraint_ids.clone());
+        }
+        if let Some(trait_) = self.traits.get(&id) {
+            return Some(trait_.generic_parameter_constraint_ids.clone());
+        }
+        None
+    }
+
     /// Registers every `type X` binder in an impl subject pattern as one of the
     /// impl's generic parameters — at the top level (`impl type T`), in generic
     /// arguments (`impl Option<type T>`), in tuples (`impl Option<(type T, type
     /// U)>`), and nested (`impl Option<Result<type T, type E>>`).
+    ///
+    /// A binder written without an explicit bound (`impl Wrapper<type T>`)
+    /// *inherits* the bound the subject type declares for that position (`struct
+    /// Wrapper<T: Transport>`): the impl can only ever apply to a `Wrapper`, whose
+    /// existence already requires `T: Transport`, so re-stating it is redundant.
+    /// Inheriting the subject's exact constraint id makes the binder identical to
+    /// having written the bound out — including multi-bound (`T: A + B`) cases,
+    /// whose extra bounds hang off that same id.
     fn register_subject_binders(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) {
         match &node.0 {
             Node::TypeBinder(name, bounds) => {
                 self.register_binder(name, &node.1, bounds, scope_id);
             }
-            Node::AccessorWithGenerics(_, generic_arguments) => {
-                for argument in &generic_arguments.0 {
+            Node::AccessorWithGenerics(subject_name, generic_arguments) => {
+                let inherited = self.declared_generic_constraint_ids(subject_name, scope_id);
+                for (position, argument) in generic_arguments.0.iter().enumerate() {
+                    // A bound-less `type T` directly under `Subject<..>` inherits
+                    // `Subject`'s declared bound for this position, if known.
+                    if let Node::TypeBinder(binder_name, bounds) = &argument.0
+                        && bounds.is_empty()
+                        && let Some(constraint_id) = inherited
+                            .as_ref()
+                            .and_then(|ids| ids.get(position).copied())
+                    {
+                        self.register_generic_parameter(
+                            binder_name,
+                            &argument.1,
+                            constraint_id,
+                            scope_id,
+                        );
+                        continue;
+                    }
                     self.register_subject_binders(argument, scope_id);
                 }
             }
