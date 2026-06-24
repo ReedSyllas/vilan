@@ -107,12 +107,25 @@ dependencies. Unordered within a section.
    workaround was `mut xs: List<T>`. Now a method on such a receiver **defers while a `push`/`run`
    to fill the slot is pending**, so `xs.filter(|p| p.x > 0)` / `xs.map(|p| p.x)` type the parameter
    concretely — parity with a literal list, no annotation. (The `filter().map()` form already
-   worked via the B1 re-queue.) **Two adjacent gaps remain, narrower and outside the closure-param
-   scope:** (a) **inline `match`** on an inferred-list method result — `match xs.get(0) { Some(let
-   p) => p.x }` — still fails (workaround: bind `let opt = xs.get(0)` first, which works); (b) a
-   method whose **result element** comes from a field-access closure return — `xs.map(|p| p.x)` as
-   `List<i32>` — stays `List<unknown>`, but this is **pre-existing and affects literal lists too**,
-   so it is a distinct issue, not B6.
+   worked via the B1 re-queue.) **Adjacent gaps:**
+   - (a) **inline `match` on an inferred-list method result — ✅ fixed** (3e5e1b1), and the root was a
+     *general* fixpoint-termination bug, not a special case: the run-all backstop ignored its
+     `wake_ready` result and could end the loop with a just-woken constraint left unrun. `match
+     xs.get(0) { Some(let p) => p.x }` (and `pop`) now resolve inline; the loop continues while a
+     wake is pending.
+   - (b) a method whose **result element** comes from a field-access closure return —
+     `xs.map(|p| p.x)` typing as `List<unknown>` instead of `List<i32>` — **still open** (pre-existing;
+     affects literal lists too, so a distinct issue from B6). Root: `map` binds its result generic
+     `U` from `infer_type(closure return)` while the closure's `p.field` accessor is still in-flight
+     (the accessor is priority 2 but needs `p`, which `map` types at priority 6), so `U` commits
+     wrong. A general fix was attempted — infer an in-flight field access as `Unresolved` + defer a
+     method while a closure argument's body is unresolved — and it *does* fix the literal case, but
+     it **regresses the slot case** (`List::new()`+`push`+`map(...).sum()`, which worked) into a
+     defer deadlock, so it was reverted. The clean general fix needs the slot/closure-return
+     interaction untangled (likely the same "in-flight type reports `Unresolved`, dependents defer
+     and wake" mechanism, but with the slot-fill and closure-return resolutions both made observable
+     to the wake — its own slice). Common uses (`sum`, `for`, arithmetic over the mapped element)
+     work for slot lists today.
 7. **`[must_use]`** (**done 2026-06-22**) — a general attribute marking a function's result
    must-be-consumed. A *dropped* result (a call that is a bare statement in a function body or block —
    not bound / `let _` / an argument) is a **warning** (a new, non-fatal `Program.warnings` list
