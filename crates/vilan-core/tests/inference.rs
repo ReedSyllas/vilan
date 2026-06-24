@@ -1179,3 +1179,219 @@ fn mixed_nested_container_from_json_roundtrips() {
         "[1,2,3]\n[1,null,3]\n[{\"x\":1},{\"x\":2}]\n",
     );
 }
+
+// --- Method & argument passing (a historically fragile area) -----------------
+//   Runtime checks, because the recurring failures here were silent miscompiles
+//   (a dispatch resolving to `undefined`, a `&mut` lowering to broken JS) that a
+//   compile-only test would pass. Covers: generic-bounded value dispatch
+//   (roadmap Tier 1.2 / M2), a method routing its own generic into a nested call
+//   (Bug C / B5), auto-deref through a view-returning call (B2), and `&`/`&mut`
+//   argument passing (C5 / R8). Two open cases are pinned as ignored tests.
+
+#[test]
+fn generic_bounded_value_method_dispatch() {
+    // A trait method called on a value of a generic-bounded type (`x: T: Display`)
+    // dispatches to the concrete impl per monomorphization, at each call type —
+    // not the abstract trait method (which would print `undefined`). Roadmap 1.2.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun describe<T: Display>(x: T): str { x.to_string() }
+        fun main() {
+            print(describe(42));
+            print(describe("hi"));
+        }
+        "#,
+        "42\nhi\n",
+    );
+}
+
+#[test]
+fn generic_bounded_value_operator_dispatch() {
+    // `==` on a value of a generic-bounded type (`a: T: PartialEq`) re-resolves to
+    // the concrete impl per monomorphization — for a primitive (native `===`) and
+    // a `str`. Roadmap 1.2 / generic-equality.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+        fun same<T: PartialEq>(a: T, b: T): bool { a == b }
+        fun main() {
+            if same(3, 3) { print("y") } else { print("n") }
+            if same(1, 2) { print("y") } else { print("n") }
+            if same("a", "a") { print("y") } else { print("n") }
+        }
+        "#,
+        "y\nn\ny\n",
+    );
+}
+
+#[test]
+fn method_routes_own_generic_to_nested_call() {
+    // A method on a generic impl passes the impl's type parameter into a *nested*
+    // generic call (`format(self.v)`), which must monomorphize for the concrete
+    // element at each instantiation (Bug C / B5). The receiver's `T` reaches the
+    // nested call through the field access + the inherited substitution.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::{ Display, format };
+        struct Wrap<T: Display> { v: T }
+        impl Wrap<type T: Display> {
+            fun render(self): str { format(self.v) }
+        }
+        fun main() {
+            print(Wrap { v = 7 }.render());
+            print(Wrap { v = "hi" }.render());
+        }
+        "#,
+        "7\nhi\n",
+    );
+}
+
+#[test]
+fn auto_deref_through_view_returning_call() {
+    // Field and method access on a `borrows` view-returning call: `o.slot().n` and
+    // `o.slot().get()` auto-deref the returned `&mut Inner` to reach the inner
+    // struct's member (backlog B2). Locks the behavior in (a regression would make
+    // the access miss the deref).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Inner { n: i32 }
+        impl Inner { fun get(self): i32 { self.n } }
+        struct Outer { inner: Inner }
+        impl Outer { fun slot(&mut self): &mut Inner borrows self { &mut self.inner } }
+        fun main() {
+            mut o = Outer { inner = Inner { n = 5 } };
+            print(o.slot().n);
+            print(o.slot().get());
+        }
+        "#,
+        "5\n5\n",
+    );
+}
+
+#[test]
+fn mut_view_argument_mutates_through_call_chain() {
+    // R8: a `&mut` argument is passed as an explicit `&mut place` and mutates the
+    // caller's place; forwarding the view to a further call (`via` -> `bump`)
+    // re-borrows it and keeps writing through. Runtime, so the `(base, key)`
+    // place-write is exercised end to end.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun bump(x: &mut i32) { x += 1; }
+        fun via(y: &mut i32) { bump(y); }
+        fun main() {
+            mut a = 0;
+            bump(&mut a);
+            print(a);
+            via(&mut a);
+            print(a);
+        }
+        "#,
+        "1\n2\n",
+    );
+}
+
+#[test]
+fn mut_view_as_method_argument_mutates() {
+    // A `&mut` parameter on a *non-`self`* method argument (`target`) mutates the
+    // caller's place across repeated calls — distinct from the implicitly-borrowed
+    // `self` receiver. C5 / R8.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Counter { n: i32 }
+        impl Counter { fun add_into(self, target: &mut i32) { target += self.n; } }
+        fun main() {
+            mut total = 10;
+            let c = Counter { n = 5 };
+            c.add_into(&mut total);
+            c.add_into(&mut total);
+            print(total);
+        }
+        "#,
+        "20\n",
+    );
+}
+
+#[test]
+fn mixed_value_view_and_own_arguments() {
+    // One call mixing the three argument modes: a by-value `base` (read), a `&mut`
+    // view `acc` (writes through to the caller), and an `own scratch` (a private
+    // mutable copy the caller never sees). Each must keep its own semantics.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun combine(base: i32, acc: &mut i32, own scratch: i32): i32 {
+            acc += base;
+            scratch += 100;
+            scratch
+        }
+        fun main() {
+            mut a = 1;
+            let s = combine(2, &mut a, 7);
+            print(a); // 3 — written through the view
+            print(s); // 107 — the own copy
+        }
+        "#,
+        "3\n107\n",
+    );
+}
+
+#[test]
+fn reject_bare_value_to_shared_reference_param() {
+    // R8 for a shared `&` parameter (the complement of `r8_reject_implicit_borrow`,
+    // which covers `&mut`): a bare value place is rejected — pass `& <place>`.
+    assert_fails(
+        r#"
+        fun read_it(x: &i32): i32 { *x }
+        fun main() { let a = 5; let n = read_it(a); }
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "open: a generic `&mut T` view parameter lowers `slot = value` to `Object.assign` instead of the scalar place-write, so a scalar pointee isn't written through"]
+fn generic_mut_view_parameter_writes_through() {
+    // A generic `&mut T` parameter: `slot = value` should write through to the
+    // caller's place. For a scalar pointee (`T = i32`) it must lower to the
+    // `(base, key)` place-write `slot[0][slot[1]] = value`; instead it emits the
+    // aggregate `Object.assign(slot, value)` (the scalar-vs-aggregate view choice
+    // is made at analysis time, when `T` is abstract, and never reconsidered at
+    // monomorphization). So the caller's `a` stays `1`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun replace<T>(slot: &mut T, value: T) { slot = value; }
+        fun main() {
+            mut a = 1;
+            replace(&mut a, 9);
+            print(a);
+        }
+        "#,
+        "9\n",
+    );
+}
+
+#[test]
+#[ignore = "open (backlog B4): dispatch on a value whose declared type is a bare trait (`x: Display`) lowers to the abstract method -> undefined"]
+fn trait_typed_value_method_dispatch() {
+    // Calling a trait method on a value typed as the bare trait itself
+    // (`let x: Display = 5`) — trait-typed-value dispatch, deferred behind the
+    // generic-dispatch cluster. Today it prints `undefined`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::Display;
+        fun main() {
+            let x: Display = 5;
+            print(x.to_string());
+        }
+        "#,
+        "5\n",
+    );
+}
