@@ -14,6 +14,49 @@ use crate::target::{Platform, PlatformPattern};
 use crate::type_::{SubstitutionContext, Type, TypeId};
 use crate::util::plural;
 
+/// Distinguishes the recursive type operations that resolve generics through a
+/// substitution context, so each [`TypeCycleGuard`] tracks its own active path (the
+/// operations can nest, and one's in-flight generic must not bail the other's).
+const CYCLE_SUBSTITUTE: u8 = 0;
+const CYCLE_RECONCILE: u8 = 1;
+
+thread_local! {
+    /// The `(operation, generic constraint id)` pairs currently being resolved on
+    /// the active recursion path, so a cyclic mapping terminates.
+    static RESOLVING_GENERICS: std::cell::RefCell<HashSet<(u8, TypeId)>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// Marks one generic constraint id as being resolved (for a given operation) while a
+/// recursive type traversal descends into its mapping, and clears the mark when the
+/// traversal unwinds. `enter` returns `None` if the id is already on this operation's
+/// active path — a cycle, whether the one-step self-map (`T -> T`, which an impl's
+/// own parameter produces) or a longer chain (`T -> U -> T`, or a structurally
+/// recursive binding `T = (.., T)`) — so the caller stops instead of recursing to the
+/// stack-overflowing backstop. RAII so the mark clears on every exit path, letting
+/// the same id resolve again on a sibling path.
+struct TypeCycleGuard(u8, TypeId);
+
+impl TypeCycleGuard {
+    fn enter(operation: u8, constraint_id: TypeId) -> Option<TypeCycleGuard> {
+        RESOLVING_GENERICS.with(|set| {
+            if set.borrow_mut().insert((operation, constraint_id)) {
+                Some(TypeCycleGuard(operation, constraint_id))
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl Drop for TypeCycleGuard {
+    fn drop(&mut self) {
+        RESOLVING_GENERICS.with(|set| {
+            set.borrow_mut().remove(&(self.0, self.1));
+        });
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Expr<'src> {
     // An assignment to a local: target accessor and the (possibly desugared,
@@ -6022,37 +6065,40 @@ impl<'src> Analyzer<'src> {
             (Type::Unresolved, _) | (_, Type::Unresolved) => {
                 return None;
             }
-            // A bound generic reconciles its resolved type against the other side.
-            // A self-mapping (`T -> T`, which reconciling an impl's own parameter
-            // against itself records into the context) must NOT recurse on the
-            // same generic, or reconciliation loops forever — the same guard
-            // `substitute_type` already applies.
-            (Type::Generic(constraint_id), _) => match substitution_context.get(constraint_id) {
-                Some(resolved_id) if !self.is_self_generic(*resolved_id, *constraint_id) => {
+            // A bound generic reconciles its resolved type against the other side,
+            // unless that would re-enter a generic already being reconciled on this
+            // path: the one-step self-map (`T -> T`, which reconciling an impl's own
+            // parameter against itself records), or a longer / structurally recursive
+            // binding (`T = (.., T)`, an occurs-check violation), would loop forever.
+            // The cycle guard bails to the plain bind in that case.
+            (Type::Generic(constraint_id), _) => {
+                if let Some(resolved_id) = substitution_context.get(constraint_id).copied()
+                    && !self.is_self_generic(resolved_id, *constraint_id)
+                    && let Some(_cycle) = TypeCycleGuard::enter(CYCLE_RECONCILE, *constraint_id)
+                {
                     let resolved = resolved_id.get_type(self);
                     let (unified, mut bindings) =
                         self.reconcile_type(&resolved, b, substitution_context)?;
                     bindings.push((*constraint_id, b.clone().get_type_id(self)));
-                    (unified, bindings)
+                    return Some((unified, bindings));
                 }
-                _ => {
-                    let bindings = vec![(*constraint_id, b.clone().get_type_id(self))];
-                    (a.clone(), bindings)
-                }
-            },
-            (_, Type::Generic(constraint_id)) => match substitution_context.get(constraint_id) {
-                Some(resolved_id) if !self.is_self_generic(*resolved_id, *constraint_id) => {
+                let bindings = vec![(*constraint_id, b.clone().get_type_id(self))];
+                (a.clone(), bindings)
+            }
+            (_, Type::Generic(constraint_id)) => {
+                if let Some(resolved_id) = substitution_context.get(constraint_id).copied()
+                    && !self.is_self_generic(resolved_id, *constraint_id)
+                    && let Some(_cycle) = TypeCycleGuard::enter(CYCLE_RECONCILE, *constraint_id)
+                {
                     let resolved = resolved_id.get_type(self);
                     let (unified, mut bindings) =
                         self.reconcile_type(a, &resolved, substitution_context)?;
                     bindings.push((*constraint_id, a.clone().get_type_id(self)));
-                    (unified, bindings)
+                    return Some((unified, bindings));
                 }
-                _ => {
-                    let bindings = vec![(*constraint_id, a.clone().get_type_id(self))];
-                    (b.clone(), bindings)
-                }
-            },
+                let bindings = vec![(*constraint_id, a.clone().get_type_id(self))];
+                (b.clone(), bindings)
+            }
             // A mapped tuple parameter `(U in T: F<U>)` reconciled against a
             // concrete argument tuple: invert the template per element to infer the
             // source tuple `T` (`combine((Source<A>, Source<B>))` binds `T = (A, B)`).
@@ -6306,19 +6352,23 @@ impl<'src> Analyzer<'src> {
             return type_.clone();
         };
         match type_ {
-            Type::Generic(constraint_id) => substitution_context
-                .get(constraint_id)
-                .map(|type_id| {
-                    let resolved = type_id.get_type(self);
-                    // Guard against a self-mapping (`T -> T`), which the receiver's
-                    // own impl parameter can produce, so substitution terminates.
-                    if matches!(&resolved, Type::Generic(c) if c == constraint_id) {
-                        resolved
-                    } else {
-                        self.substitute_type(&resolved, substitution_context)
-                    }
-                })
-                .unwrap_or_else(|| type_.clone()),
+            Type::Generic(constraint_id) => {
+                let Some(type_id) = substitution_context.get(constraint_id).copied() else {
+                    return type_.clone();
+                };
+                // Break a cyclic mapping so substitution terminates: a generic that
+                // resolves back — directly (`T -> T`, which the receiver's own impl
+                // parameter produces) or through a chain (`T -> U -> T`) — to one
+                // already being resolved on this path leaves the generic abstract
+                // rather than looping to the recursion backstop. `_cycle` removes the
+                // id again when this resolution unwinds, so a generic reached twice on
+                // *different* paths still resolves.
+                let Some(_cycle) = TypeCycleGuard::enter(CYCLE_SUBSTITUTE, *constraint_id) else {
+                    return type_.clone();
+                };
+                let resolved = type_id.get_type(self);
+                self.substitute_type(&resolved, substitution_context)
+            }
             // A nominal type substitutes its arguments (`Option<T>` -> `Option<i32>`
             // when `T` is bound).
             Type::Enum(id, arguments) => {
