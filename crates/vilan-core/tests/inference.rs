@@ -1758,3 +1758,141 @@ fn impl_binder_inherits_bound_from_a_later_declared_struct() {
         "hi x\n",
     );
 }
+
+#[test]
+fn async_trait_method_through_generic_bound_auto_awaits() {
+    // An inferred-async trait method (`fetch` awaits) dispatched through a generic
+    // bound (`self.inner: T`, `T: Fetcher`). The call graph used to mis-resolve the
+    // dispatch to the trait's *signature* (a bodyless method, never async — the
+    // dispatch is keyed by the call id, which `resolve_target` only consulted for
+    // `OnType`), so the enclosing `run` was left non-`async` while the transformer,
+    // resolving the concrete async impl, still inserted the `await` — `await` inside
+    // a non-async function, invalid JS that crashed at load. Async-ness now
+    // propagates through the dispatch's candidate impls, so `run` (and its caller
+    // `main`) are async and the program runs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        [extern("Promise.resolve")]
+        async external fun resolved(value: str): str;
+        trait Fetcher { fun fetch(self): str; }
+        struct Remote { tag: str }
+        impl Remote with Fetcher {
+            fun fetch(self): str { await resolved(self.tag) }
+        }
+        struct Wrapper<T: Fetcher> { inner: T }
+        impl Wrapper<type T> {
+            fun run(self): str { (self.inner).fetch() }
+        }
+        fun main() {
+            print(Wrapper { inner = Remote { tag = "hi" } }.run());
+        }
+        "#,
+        "hi\n",
+    );
+}
+
+#[test]
+fn async_impl_through_generic_bound_propagates_transitively() {
+    // The impl method is async *transitively* — it doesn't `await` itself, it calls
+    // an async function — so its async-ness is only settled by the fixpoint. The
+    // dispatch must pick that up after propagation, not just from a direct `await`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        [extern("Promise.resolve")]
+        async external fun resolved(value: str): str;
+        fun load(tag: str): str { await resolved(tag) }
+        trait Fetcher { fun fetch(self): str; }
+        struct Remote { tag: str }
+        impl Remote with Fetcher {
+            fun fetch(self): str { load(self.tag) }
+        }
+        struct Wrapper<T: Fetcher> { inner: T }
+        impl Wrapper<type T> {
+            fun run(self): str { (self.inner).fetch() }
+        }
+        fun main() {
+            print(Wrapper { inner = Remote { tag = "hey" } }.run());
+        }
+        "#,
+        "hey\n",
+    );
+}
+
+#[test]
+fn mixed_async_and_sync_impls_through_generic_bound_both_run() {
+    // Two impls of one trait — one async, one sync — both reached through the bound.
+    // The dispatch is conservatively async (some candidate impl awaits), so even the
+    // sync instance compiles to an async function; awaiting its non-promise result is
+    // a JS no-op, and both instantiations run correctly.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        [extern("Promise.resolve")]
+        async external fun resolved(value: str): str;
+        trait Fetcher { fun fetch(self): str; }
+        struct Remote { tag: str }
+        impl Remote with Fetcher { fun fetch(self): str { await resolved(self.tag) } }
+        struct Local { tag: str }
+        impl Local with Fetcher { fun fetch(self): str { self.tag } }
+        struct Wrapper<T: Fetcher> { inner: T }
+        impl Wrapper<type T> { fun run(self): str { (self.inner).fetch() } }
+        fun main() {
+            print(Wrapper { inner = Remote { tag = "remote" } }.run());
+            print(Wrapper { inner = Local { tag = "local" } }.run());
+        }
+        "#,
+        "remote\nlocal\n",
+    );
+}
+
+#[test]
+fn async_trait_default_body_through_generic_bound_auto_awaits() {
+    // The async method is the trait's *default* body (the impl doesn't override it),
+    // dispatched through the bound. The candidate is the trait default, not an impl
+    // member — so candidate resolution must consider the trait's own declarations.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        [extern("Promise.resolve")]
+        async external fun resolved(value: str): str;
+        trait Greeter {
+            fun name(self): str;
+            fun greet(self): str { await resolved(self.name()) }
+        }
+        struct Hello { who: str }
+        impl Hello with Greeter { fun name(self): str { self.who } }
+        struct Wrapper<T: Greeter> { inner: T }
+        impl Wrapper<type T> { fun run(self): str { (self.inner).greet() } }
+        fun main() {
+            print(Wrapper { inner = Hello { who = "ada" } }.run());
+        }
+        "#,
+        "ada\n",
+    );
+}
+
+#[test]
+fn sync_method_through_generic_bound_is_not_made_async() {
+    // The precision guard: a generic dispatch whose trait has *no* async impl must
+    // not become async. Asserted structurally — the emitted JS has no `async`/`await`
+    // anywhere — so an over-eager propagation (e.g. matching an async method of the
+    // same name in an unrelated trait) would fail here, not just slip past `runs`.
+    let js = compile(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        struct Hello { name: str }
+        impl Hello with Greeter { fun greet(self): str { "hi " + self.name } }
+        struct Wrapper<T: Greeter> { inner: T }
+        impl Wrapper<type T> { fun run(self): str { (self.inner).greet() } }
+        fun main() { print(Wrapper { inner = Hello { name = "x" } }.run()); }
+        "#,
+    )
+    .expect("compiles");
+    assert!(
+        !js.contains("async") && !js.contains("await"),
+        "a purely-sync generic dispatch must not be made async:\n{js}"
+    );
+}

@@ -418,18 +418,21 @@ fn resolve_target(program: &Program, call_id: Id) -> CallTarget {
         return CallTarget::Indirect(IndirectReason::Value);
     };
     // Codegen re-dispatches these per monomorphized instance, so the concrete
-    // callee isn't fixed at this granularity.
-    if matches!(
-        program.generic_dispatch.get(&call_id),
-        Some(GenericDispatch::OnType(..))
-    ) {
-        return CallTarget::Indirect(IndirectReason::TraitDispatch);
-    }
-    if matches!(
-        program.generic_dispatch.get(&function_call.subject_id),
-        Some(GenericDispatch::OnConstraint(..))
-    ) {
-        return CallTarget::Indirect(IndirectReason::GenericMember);
+    // callee isn't fixed at this granularity. The dispatch record is keyed by the
+    // call's subject (a `T::member` static accessor / field-projected generic) OR
+    // by the call id (an instance method call on a generic-bounded receiver, or an
+    // `OnType` re-dispatch) — the transformer checks both, so this must too, or an
+    // instance dispatch is mistaken for a direct call to the trait's signature.
+    for key in [call_id, function_call.subject_id] {
+        match program.generic_dispatch.get(&key) {
+            Some(GenericDispatch::OnConstraint(..)) => {
+                return CallTarget::Indirect(IndirectReason::GenericMember);
+            }
+            Some(GenericDispatch::OnType(..)) => {
+                return CallTarget::Indirect(IndirectReason::TraitDispatch);
+            }
+            None => {}
+        }
     }
     match program.entity_map.get(&function_call.subject_id) {
         Some(Expr::Local(target_id)) => classify_target(program, *target_id),

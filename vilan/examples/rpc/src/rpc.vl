@@ -9,9 +9,12 @@ import std::promise::Promise;
 // --- Transport: the pluggable seam -------------------------------------------
 
 // A request/response transport: send an encoded request, get the encoded reply. The
-// return is an explicit `Promise<str>` because a transport is dispatched indirectly
-// (through a generic bound) and today's async-effect inference only auto-awaits
-// *direct* calls — so a caller `await`s this Promise (see the stub in `main.vl`).
+// return is an explicit `Promise<str>` by *choice*: a network round-trip is exactly
+// where the caller should see the suspension and `await` it deliberately, rather than
+// have it auto-await as an inferred-async method would. (Auto-await now does work
+// through a generic bound — see the stub in `main.vl` — so an `async fun call(self,
+// request: str): str` would also type-check; the explicit `Promise` is the clearer
+// transport contract.)
 trait Transport {
 	fun call(self, request: str): Promise<str>;
 }

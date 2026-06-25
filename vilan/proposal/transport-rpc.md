@@ -70,9 +70,11 @@ WebSocket, in-process, and *custom* transports all satisfy the same contract:
 
 ```vilan
 trait Transport {
-    // Send an encoded request, get the encoded reply. `Promise<T>` is explicit
-    // because a trait-method call is indirect — today's async effect inference only
-    // auto-awaits *direct* calls (see §7), so the caller `await`s this Promise.
+    // Send an encoded request, get the encoded reply. `Promise<T>` is explicit by
+    // choice: a round-trip is where the caller should `await` deliberately (see §7).
+    // (Auto-await now works through a trait-bounded call, so an inferred-async
+    // `call(self, request: str): str` would also type-check — the explicit `Promise`
+    // is the clearer transport contract.)
     fun call(self, request: str): Promise<str>;
 }
 ```
@@ -173,10 +175,13 @@ impl Accounts for AccountsClient {
 
 - The **explicit `await`** on the Promise-returning trait method makes the stub itself
   async (the effect is inferred from the `await` node), so user code calling
-  `client.get_user(42)` **auto-awaits** (a direct call). This works with today's model;
-  the deferred *effect-polymorphic async* (auto-await through indirect calls) would let
-  `transport.call` drop the explicit `Promise`, a future simplification, **not** a
-  blocker.
+  `client.get_user(42)` **auto-awaits** (a direct call). *Effect-polymorphic async*
+  (auto-await through an indirect, trait-bounded call) is now **implemented** — async
+  inference propagates through a generic dispatch to its candidate impls, since with no
+  `dyn` every instance resolves to a statically-known impl — so `transport.call` *could*
+  drop the explicit `Promise` and be an inferred-async `call(self, request: str): str`.
+  We keep the explicit `Promise` as the clearer transport contract (§4), not out of
+  necessity.
 - **Error model: `Result<T, RpcError>` on the client.** The server `impl` returns the
   bare `T` (it's a local call there); the generated stub wraps it in `Result` because
   the round-trip can fail. `RpcError` is a derived enum:
@@ -241,7 +246,9 @@ Small, independently-useful std extensions (Phase 0) plus larger standing depend
 - **Codec derives** — Map serialization (backlog I1) and the `List<List<T>>` fix widen
   what crosses the wire; not blockers (work around as in §5).
 - **`Source`/`Signal` split** + **bidirectional transport** — for Phase 4 only.
-- **Effect-polymorphic async** — optional simplification (§7); not required.
+- **Effect-polymorphic async** — ✅ **shipped**: auto-await now propagates through a
+  trait-bounded dispatch (§7), so an inferred-async trait method works indirectly. The
+  transport keeps its explicit `Promise` by choice, not necessity.
 
 ## 11. Phased plan (XL → shippable slices)
 
