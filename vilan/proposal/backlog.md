@@ -296,6 +296,12 @@ dependencies. Unordered within a section.
 
 1. **Struct keys for `Map`/`Set`** (M; roadmap #3) — M2 gives value `==`, but JS Map/Set key objects
    by *reference*, so by-value aggregate keys need key-serialization or a custom table.
+2. **A proper array type (`[u8]` / `Bytes`, and `[T; n]` generally)** (M; RPC binary codec) — a
+   binary `Codec` produces *bytes*, and Vilan has no byte/array type today: `List<u8>` is the
+   stand-in (heap-boxed, length-mutable — workable but not ideal). A fixed-length / contiguous
+   array type — `[u8]` (and a `Bytes` view over one) as the immediate want, `[T; n]` as the
+   general feature — is the right substrate: cheaper, and the natural target for the
+   `Serializer`/binary-codec path (`transport-rpc.md` §6, §10).
 
 ---
 
