@@ -33,6 +33,16 @@
         "language": "vilan",
         "scopeName": "source.vilan",
         "path": "./syntaxes/vilan.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.vilan.codeblock",
+        "path": "./syntaxes/vilan.markdown.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.vilan": "vilan"
+        }
       }
     ],
     "commands": [
