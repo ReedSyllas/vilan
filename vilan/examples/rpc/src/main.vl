@@ -75,12 +75,10 @@ struct WiredUser {
 // (password and all). `None` is an application-level "not found" (part of the return
 // type), not an RpcError.
 fun lookup_user(id: i32): Option<User> {
-	if id == 1 {
-		Some(User { id = 1, username = "ada", password = Password::new("hunter2") })
-	} else if id == 2 {
-		Some(User { id = 2, username = "bob", password = Password::new("swordfish") })
-	} else {
-		None
+	match id {
+		1 => Some(User { id = 1, username = "ada", password = Password::new("hunter2") }),
+		2 => Some(User { id = 2, username = "bob", password = Password::new("swordfish") }),
+		_ => None
 	}
 }
 
@@ -152,9 +150,9 @@ fun main() {
 
 fun show(result: Result<Option<WiredUser>, RpcError>) {
 	match result {
-		Ok(Some(let user)) => print("ok: found " + user.username + " (" + user.handle + ")"),
+		Ok(Some(let user)) => print(i"ok: found {user.username} ({user.handle})"),
 		Ok(None) => print("ok: no such user"),
-		Err(let error) => print("rpc error: " + error.to_json()),
+		Err(let error) => print(i"rpc error: {error.to_json()}"),
 	}
 }
 
@@ -163,7 +161,7 @@ fun show_raw(transport: LocalTransport) {
 	let request = RpcRequest { method = "delete_everything", args = [] };
 	let reply_text = await transport.call(request.to_json());
 	match RpcReply::from_json(reply_text) {
-		RpcReply::Success(let json) => print("raw ok: " + json),
-		RpcReply::Failure(let error) => print("raw error: " + error.to_json()),
+		RpcReply::Success(let json) => print(i"raw ok: {json}"),
+		RpcReply::Failure(let error) => print(i"raw error: {error.to_json()}"),
 	}
 }
