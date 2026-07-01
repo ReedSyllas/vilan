@@ -175,56 +175,45 @@ function $S(self, b) {
 	}
 	return $U;
 }
-function $V(self, fallback) {
+function $V(self, b) {
 	const $W = self;
 	let $X = null;
 	if ($W[0] === 0) {
 		const x = $W[1];
-		$X = x;
+		$X = [ 0, x ];
 	} else {
-		$X = fallback;
+		$X = b;
 	}
 	return $X;
 }
-function $Y(self, b) {
+function $Y(self, fallback) {
 	const $Z = self;
 	let $aa = null;
 	if ($Z[0] === 0) {
 		const x = $Z[1];
-		$aa = [ 0, x ];
+		$aa = x;
 	} else {
-		$aa = b;
+		$aa = fallback;
 	}
 	return $aa;
 }
-function $ab(self, fallback) {
+function $ab(self) {
 	const $ac = self;
 	let $ad = null;
-	if ($ac[0] === 0) {
-		const x = $ac[1];
-		$ad = x;
+	if ($ac[0] === 0 && $ac[1][0] === 0) {
+		const x = $ac[1][1];
+		$ad = [ 0, [ 0, x ] ];
+	} else if ($ac[0] === 0 && $ac[1][0] === 1) {
+		$ad = [ 1 ];
 	} else {
-		$ad = fallback;
+		const e = $ac[1];
+		$ad = [ 0, [ 1, e ] ];
 	}
 	return $ad;
 }
 function $ae(self) {
 	const $af = self;
-	let $ag = null;
-	if ($af[0] === 0 && $af[1][0] === 0) {
-		const x = $af[1][1];
-		$ag = [ 0, [ 0, x ] ];
-	} else if ($af[0] === 0 && $af[1][0] === 1) {
-		$ag = [ 1 ];
-	} else {
-		const e = $af[1];
-		$ag = [ 0, [ 1, e ] ];
-	}
-	return $ag;
-}
-function $ah(self) {
-	const $ai = self;
-	return $ai[0] === 0;
+	return $af[0] === 0;
 }
 const ok = [ 0, 10 ];
 const err = [ 1, "boom" ];
@@ -252,7 +241,7 @@ console.log($B(err, (e) => {
 console.log($H($E(ok)));
 console.log($M($J(err), "none"));
 console.log($P(err));
-console.log($V($S(ok, [ 0, 5 ]), 0));
-console.log($ab($Y(err, [ 0, 3 ]), 0));
+console.log($d($S(ok, [ 0, 5 ]), 0));
+console.log($Y($V(err, [ 0, 3 ]), 0));
 const ro = [ 0, [ 0, 42 ] ];
-console.log($ah($ae(ro)));
+console.log($ae($ab(ro)));

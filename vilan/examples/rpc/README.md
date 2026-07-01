@@ -80,11 +80,10 @@ corpus stays byte-identical).
 ## Quirks discovered
 
 Part of why this example is worth keeping: it surfaces compiler quirks the eventual generation
-will lean on. **#1, #3, #4 were bugs — all fixed; #2 is intended syntax; #5 is a new limitation
-the reactive runtime surfaced, still open.** Bugs #3–#4 traced to one weakness — generic
-dispatch / monomorphization not threading type arguments through indirect or nested contexts —
-the analyzer's B1 cluster, now closed for the direct and nested cases (#5 is the remaining
-*closure-capture* case).
+will lean on. **#1, #3, #4, #5 were bugs — all fixed; #2 is intended syntax.** Bugs #3–#5 traced
+to one weakness — generic dispatch / monomorphization not threading type arguments through
+indirect, nested, or closure-capture contexts — the analyzer's B1 cluster, now closed across all
+three (#5 being the *closure-capture* case).
 
 ### 1. `[derive(..)]` only expanded in the entry file — ✅ FIXED
 
@@ -185,19 +184,19 @@ site, so `to_json` monomorphized to the empty abstract method (`undefined`). The
 abstract-dispatch failure as #3/#4, but reached through a *closure capture* of a generic,
 which the earlier B1 fixes didn't cover.
 
-**Fixed** by two analyzer changes: the `Type::Generic` method-resolution arm now substitutes
-a parameterized bound's arguments (so the closure parameter keeps its `T: Json`), and
+**Fixed** by three analyzer changes: the `Type::Generic` method-resolution arm now substitutes
+a parameterized bound's arguments (so the closure parameter keeps its `T: Json`);
 `resolve_call_subject` / `bind_method_own_generics` derive a bound-only generic from the
-concrete argument's impl. So `expose<T: Json, S: Source<T>>(source: S)` monomorphizes — the
-JSON erasure moved *inside* the runtime (a `Signal<str>` mirror per channel), off the
-application, which now just calls `server.expose(counter)`.
+concrete argument's impl (`derive_generics_from_bounds`); and `resolve_method_call` defers a
+call whose method still has an unbound own-generic while an argument is unresolved, so an
+*inferred* source (`let s = Signal::new(7)`, no annotation) re-derives once its type lands —
+the method path now matches the free-function path. So `expose<T: Json, S: Source<T>>(source: S)`
+monomorphizes — the JSON erasure moved *inside* the runtime (a `Signal<str>` mirror per
+channel), off the application, which now just calls `server.expose(counter)`.
 
-Two adjacent items remain, noted for honesty: **`param: SomeTrait` is not a generic bound**
+One adjacent item remains, noted for honesty: **`param: SomeTrait` is not a generic bound**
 (you write the explicit `<S: Source<T>>`, so the proposal's `fun stringify(value: ToJson)`
-sketch is aspirational syntax), and the derivation fires on the *method* path only when the
-argument's type is already resolved — an *inferred* argument (`let s = Signal::new(7)`, no
-annotation) is a deferral edge the free-function path handles but the method path doesn't yet
-(pinned as an `#[ignore]`d test). The capability table also still stores `str`, since it holds
+sketch is aspirational syntax). The capability table also still stores `str`, since it holds
 heterogeneous sources and vilan has no trait objects.
 
 ## What this validates for the plan

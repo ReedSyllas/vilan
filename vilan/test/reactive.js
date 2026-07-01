@@ -1,15 +1,12 @@
 function __shared_new(value) {
 	return { v: value };
 }
-function dispose(self) {
-
-}
 function fresh_id() {
 	const id = next_subscriber_id.v;
 	next_subscriber_id.v = id + 1;
 	return id;
 }
-function dispose2(self) {
+function dispose(self) {
 	let kept = [  ];
 	for (const subscriber of self[0].v) {
 		if (subscriber[0] !== self[1]) {
@@ -20,13 +17,6 @@ function dispose2(self) {
 }
 function new2() {
 	return [ __shared_new([  ]) ];
-}
-function take(self, item) {
-	self[0].v.push(() => {
-		dispose(item);
-		return;
-	});
-	return item;
 }
 function $a(value) {
 	let subscribers = [  ];
@@ -58,15 +48,15 @@ function $e(self, observer) {
 	observer($c(self));
 	return [ self[1], id ];
 }
-function $f(self, transform) {
-	$d(self, transform($c(self)));
-}
-function $g(self, item) {
+function $f(self, item) {
 	self[0].v.push(() => {
-		dispose2(item);
+		dispose(item);
 		return;
 	});
 	return item;
+}
+function $g(self, transform) {
+	$d(self, transform($c(self)));
 }
 const next_subscriber_id = __shared_new(0);
 const owner = new2();
@@ -74,15 +64,15 @@ const count = $a(0);
 const doubled = $b(count, (n) => {
 	return n * 2;
 });
-take(owner, $e(doubled, (n) => {
+$f(owner, $e(doubled, (n) => {
 	return console.log(n);
 }));
 $d(count, 1);
-$f(count, (n) => {
+$g(count, (n) => {
 	return n + 4;
 });
 console.log($c(doubled));
-$g(owner, $e(count, (n) => {
+$f(owner, $e(count, (n) => {
 	return console.log(n);
 }));
 $d(count, 20);

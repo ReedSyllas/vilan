@@ -7275,6 +7275,30 @@ impl<'src> Analyzer<'src> {
                 // Then bind generics fixed by a closure's return (`derive<U>`'s `U`),
                 // now that the closures are typed.
                 self.bind_method_own_generics(member_id, argument_ids, false, &mut substitution);
+                // If an own generic is still unbound because a (non-closure) argument is
+                // unresolved, defer so the binding — and any bound-only generic derived
+                // from it (`m<T, S: Source<T>>` called with an *inferred* argument, whose
+                // type lands only later) — completes on a retry. The free-function path in
+                // `resolve_call_subject` defers the same way; without it the generic stays
+                // abstract and monomorphizes to the empty abstract method.
+                if let Some((_, own_generics)) = self.method_signature(member_id) {
+                    let some_unbound = own_generics
+                        .iter()
+                        .any(|generic| !substitution.contains_key(generic));
+                    if some_unbound
+                        && argument_ids.iter().any(|argument_id| {
+                            !matches!(
+                                self.expr_id_to_expr_map.get(argument_id),
+                                Some(Expr::Closure(_))
+                            ) && matches!(
+                                self.infer_type(*argument_id, &Type::Unknown, &substitution),
+                                Type::Unresolved
+                            )
+                        })
+                    {
+                        return Resolution::Deferred;
+                    }
+                }
                 if !substitution.is_empty() {
                     self.method_call_substitution.insert(id, substitution);
                 }

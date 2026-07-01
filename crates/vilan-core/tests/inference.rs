@@ -1978,39 +1978,10 @@ fn generic_bound_derivation_through_a_method_call() {
     // `<T: Json, S: Source<T>>` whose `T` appears only in the bound, serializing the
     // element in a `sub` closure. Called as `sink.forward(signal, ..)`, `T` is derived
     // from the concrete signal's `Source` impl — the shape `examples/rpc`'s `expose` uses.
-    // The source argument is given a resolved type (see the `#[ignore]`d test below for
-    // the inferred-type edge the method path doesn't yet handle).
-    assert_compiles_and_runs(
-        r#"
-        import std::print;
-        import std::json::Json;
-        import std::reactive::{ Source, Signal, Subscription };
-        struct Sink {}
-        impl Sink {
-            fun forward<T: Json, S: Source<T>>(self, source: S, out: |str| void): Subscription {
-                source.sub(|value| out(value.to_json()))
-            }
-        }
-        fun main() {
-            let s: Signal<i32> = Signal::new(7);
-            let _ = Sink {}.forward(s, |json| print(json));
-            s.set(9);
-        }
-        "#,
-        "7\n9\n",
-    );
-}
-
-#[test]
-#[ignore = "the method path derives a generic from a parameterized bound only when the \
-            argument's type is already resolved; an inferred argument (`let s = \
-            Signal::new(7)`, no annotation) resolves after the call is analyzed, so the \
-            derivation isn't retried and `T` stays abstract. The free-function path (which \
-            defers on unresolved arguments) handles this; the method path does not yet."]
-fn method_bound_derivation_with_an_inferred_argument_type() {
-    // Same as `generic_bound_derivation_through_a_method_call`, but the source is inferred
-    // (no `: Signal<i32>` annotation). Un-ignore when the method resolution defers on an
-    // unresolved bound-owner and re-derives once it lands.
+    // The source argument is *inferred* (`let s = Signal::new(7)`, no annotation), so its
+    // type lands only after the call is first seen; `resolve_method_call` defers while the
+    // bound-owner is unresolved and re-derives on a later pass (mirroring the free-function
+    // path), so the inferred case works too.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -2029,5 +2000,37 @@ fn method_bound_derivation_with_an_inferred_argument_type() {
         }
         "#,
         "7\n9\n",
+    );
+}
+
+#[test]
+fn owner_take_disposes_a_mapped_and_a_root_subscription() {
+    // Pins `vilan/test/reactive.js`'s reachable miscompilation as *observable* runtime
+    // behaviour — the golden alone proved an unreliable gate (it drifted stale), so an
+    // executed assertion is the stronger pin. `Owner::take<T: Disposable>` (an *unparameterized*
+    // bound) stores `|| item.dispose()` in a cleanup closure for later. Two `take` sites are
+    // needed to trigger it: `take(mapped.sub(..))` where `mapped = root.map(..)` resolves its
+    // element *late* (through `map`'s generic), and `take(root.sub(..))` which resolves early.
+    // The pre-fix analyzer bound the *mapped* site's `T` before its argument landed and
+    // monomorphized that `take` to the empty abstract `Disposable::dispose` (the *root* site
+    // stayed concrete), so disposing the owner never removed the mapped subscriber and it
+    // leaked. reactive.js hides it (its owner is never disposed); here we dispose the owner,
+    // so a leaked subscription keeps firing: pre-fix this printed a trailing `a=10`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner };
+        fun main() {
+            let owner = Owner::new();
+            let count = Signal::new(0);
+            let doubled = count.map(|n| n * 2);
+            owner.take(doubled.sub(|n| print(i"a={n}")));   // mapped/late site
+            owner.take(count.sub(|n| print(i"b={n}")));     // root/early site
+            count.set(1);       // a=2, b=1
+            owner.dispose();    // the *real* dispose must remove BOTH subscribers
+            count.set(5);       // silent iff both disposed; leaks "a=10" if the mapped take went abstract
+        }
+        "#,
+        "a=0\nb=0\na=2\nb=1\n",
     );
 }
