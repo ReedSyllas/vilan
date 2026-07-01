@@ -26,25 +26,31 @@ today; what's left is to settle *how* one is meant to use it.
 - **The reactive north star** — a remote handle: the server holds a writable `Signal`,
   the client sees a read-only `Source` whose `.sub(..)` subscribes over the transport.
 
-## 2. The four pieces
+## 2. The pieces
 
 | Piece | Role | Form |
 |---|---|---|
-| **Transport** | sends an encoded message over the wire, gets the reply | a `trait` — HTTP / WebSocket / in-process / custom |
-| **Codec** | turns Wire values into bytes and back (the *format*) | a `trait` — JSON default; binary later |
-| **Service** | the shared contract — the remotely-callable surface | a `[service]` trait of `[rpc]` methods |
-| **Dispatcher + stub** | route a decoded call to a method (server) / send one (client) | **generated** from the service trait — the plumbing |
+| **Codec** | value ⇆ bytes — the *format* | a `trait` — JSON default; binary later |
+| **Transport** | moves frames over the wire — a dumb pipe | a `trait` — request/response (HTTP) or **duplex** (WebSocket) |
+| **Protocol** | the *semantics* over a transport + codec | **RPC** (request/response) and **Reactive** (pub/sub) — siblings |
+| **Service** | the shared contract the RPC protocol is generated from | a `[service]` trait of `[rpc]` methods |
 
-The first two are concrete library types and the stable core. The other two are where
-the **guide-not-generator** line is drawn precisely. The compiler *generates* the
-dispatch plumbing — the server router and the client stub — from a `[service]` trait
-(§4), so a remote call reads like a local one. But it generates **only the plumbing**:
-the *structure* — which types cross the wire (`[derive(Wire)]`, §3) and how a domain
-type projects to its wire shape (`to_wired`, §3) — stays the developer's, hand-written.
-The library never owns your data model or what a service *means*; it owns the
-mechanical encode→route→decode that is identical every time. Generating that boring
-half is exactly what makes a remote call *seamless* without the library dictating your
-shape — the "C" in RPC, paid for honestly (§7: latency and failure stay visible).
+The stack composes bottom-up: a **codec** turns values into bytes, a **transport** moves
+those bytes as frames, and a **protocol** layers the *meaning* on top — request/response
+for RPC, publish/subscribe for reactive. Keeping *protocol* distinct from *transport* is
+what lets a plain HTTP request/response transport carry RPC with no reactive machinery
+shoehorned in, and a reactive `Source` ride a duplex transport, without either concern
+leaking into the other (§5, §8). Transport and codec are a protocol's two dependencies —
+composed *under* it, as siblings.
+
+Within the RPC protocol the **guide-not-generator** line is drawn precisely: the compiler
+*generates* the dispatch plumbing — the server router and the client stub — from a
+`[service]` trait (§4), so a remote call reads like a local one. But it generates **only
+the plumbing**: the *structure* — which types cross the wire (`[derive(Wire)]`, §3) and how
+a domain type projects to its wire shape (`to_wired`, §3) — stays the developer's. The
+library owns the mechanical encode→route→decode that is identical every time; that is what
+makes a remote call *seamless* without dictating your shape — the "C" in RPC, paid for
+honestly (§7: latency and failure stay visible).
 
 It is **peer-symmetric**: "client" and "server" are just *who hosts the methods* vs
 *who calls them*. Server↔server is the same mechanism with an HTTP/WS transport between
@@ -263,36 +269,46 @@ server — the seamless "C" in RPC. This is the hand-written `accounts_dispatch`
 project's "prove it before generating it"). The generated halves are *only* this glue — the
 Wire types and the `to_wired` projections they carry stay yours (§2, §3).
 
-## 5. Transport — the sender
+## 5. Transport — the pipe (two shapes)
 
-A request/response transport is one method; making it a trait is what lets HTTP,
-WebSocket, in-process, and *custom* transports all satisfy the same contract:
+A transport is a dumb byte pipe; it moves encoded frames and knows nothing of methods or
+subscriptions (that is the protocol's job, §7/§8). It comes in **two shapes**, matched to
+what a protocol needs:
 
 ```vilan
+// request/response — the shape the RPC protocol needs (HTTP, in-process)
 trait Transport {
-	// Send an encoded request, get the encoded reply. `Promise<str>` is explicit by
-	// choice: a round-trip is where the caller should `await` deliberately (§6).
-	// (Auto-await now works through a trait-bounded call, so an inferred-async
-	// `call(self, request: str): str` would also type-check — the explicit `Promise`
-	// is the clearer transport contract.)
-	fun call(self, request: str): Promise<str>;
+	// Send an encoded request frame, get the encoded reply. The explicit `Promise` marks
+	// the round-trip as a place the caller `await`s deliberately (§7).
+	fun call(self, request: List<u8>): Promise<List<u8>>;
+}
+
+// full-duplex — the shape the reactive protocol needs (WebSocket): either end may send a
+// frame at any time, so the server can push unprompted.
+trait DuplexTransport {
+	fun send(self, frame: List<u8>);
+	[must_use] fun on_frame(self, handler: |List<u8>| void): Subscription;
 }
 ```
 
 Built-ins:
 
-- **HTTP** (`HttpTransport`) — the default client↔server transport. `call` POSTs the
-  request to an endpoint and reads the reply body. Built on the now-shipped `std::fetch`
-  POST/body support (§10).
-- **In-process** (`LocalTransport`) — `call` runs the server's dispatch in the same
-  process. The substrate for **unit tests** (no network) and for composing services
-  within one server. (This is the transport the current `examples/rpc` uses.)
-- **WebSocket** (`SocketTransport`) — a *bidirectional* transport (Phase 3), the
-  substrate for subscriptions/streaming and the reactive north star. It extends the
-  base with a server→client message channel.
+- **HTTP** (`HttpTransport`) — `impl Transport`: POSTs the request to an endpoint and reads
+  the reply body. The default client↔server transport, built on the shipped `std::fetch`
+  POST/body support (§10). Request/response only — no reactive over plain HTTP.
+- **In-process** (`LocalTransport`) — `impl Transport`: runs the server's dispatch in the
+  same process. The substrate for **unit tests** (no network). (What `examples/rpc` uses.)
+- **WebSocket** (`SocketTransport`) — `impl DuplexTransport`: a bidirectional frame pipe. It
+  can *also* `impl Transport` by correlating a reply frame with its request, so the RPC and
+  reactive protocols **multiplex over one socket**.
+- **Asymmetric duplex** (`SplitDuplex`) — a `DuplexTransport` *implementation* that composes
+  two directed channels internally (e.g. Server-Sent Events for server→client + HTTP POST for
+  client→server, when WebSocket isn't available). The protocol still sees one
+  `DuplexTransport`; the split is hidden in the transport — which is where the "duplex is two
+  pipes" case belongs, not in the protocol's interface.
 
-A custom transport (message queue, IPC pipe, WebRTC, a test double) is just an
-`impl Transport` — first-class, no registry.
+A custom transport (message queue, IPC pipe, WebRTC, a test double) is just an `impl` of the
+shape it can provide — first-class, no registry.
 
 ## 6. Codec — the format (data ⇆ bytes)
 
@@ -374,42 +390,73 @@ fun get_user(self, id: i32): Result<Option<WiredUser>, RpcError> {
   exactly one `Result` layer, applied by codegen, not by hand: the honest client without the
   noisy server.
 
-## 8. The reactive north star (the capstone)
+## 8. The reactive north star — a second protocol (the capstone)
 
-A Wire type can carry **reactive handles**, which is how a remote subscription falls out
-of the same model. `WiredUser` above can expose its username either as a `Signal<str>`
-field or via a hand-written `get_username(self): Source<str>` accessor; on the client,
-that `Source` is *remote* — its `.sub(..)` flows over a bidirectional transport:
+A `Signal`/`Source` is **not data** — it is a *capability*: a live reference to server state
+plus an ongoing event stream. So it does not ride the Wire/codec model as a value. It is the
+concern of a **second protocol**, sibling to RPC, that shares the same pure codec but requires
+a **duplex** transport (§5):
 
 ```vilan
-let accounts = Accounts::connect(transport, codec);
-let john = accounts.get_user(1);                        // the wire user (sketch elides Result/Option)
-let source = john.get_username();                       // a remote Source<str>
-let _ = source.sub(|name| print(i"username = {name}")); // subscribes over the transport
+struct ReactiveProtocol<Tx: DuplexTransport, Cx: Codec> {
+	transport: Tx,   // moves frames both ways (a WebSocket, or a `SplitDuplex`)
+	codec: Cx,       // the *same* pure Wire codec RPC uses
+	// the capability table: exported/imported `Source`s by channel id, and live subscriptions
+}
+
+// client code only ever sees a `Source<T>`; the protocol makes a *remote* one behave locally
+let reactive = ReactiveProtocol { transport = socket, codec = codec };
+let count: Source<i32> = reactive.source(handle);   // `handle` arrived over the wire (below)
+let _ = count.sub(|n| print(i"count = {n}"));        // subscribes over the socket
 ```
 
-This needs three things beyond the request/response core, hence its own phase:
+**How a capability crosses — the Cap'n Proto capability-table pattern.** A `Source<T>` never
+serializes as a value. Where a reply (or a `to_wired` projection) contains one, the reactive
+protocol *exports* it into a per-connection table and puts a plain-Wire **`ChannelId`** on the
+wire in its place; the receiving side *imports* that id into a `RemoteSource<T>` bound to its
+protocol. So the three worries dissolve, each landing in the right layer:
 
-1. **A `Source`/`Signal` split in `std::reactive`** — a read-only `Source<T>`
-   (`get`/`sub`/`map`) that `Signal<T>` implements (adding `set`/`set_with`). The remote
-   handle implements `Source`, so client code can't write a server signal. (The
-   reactive README already designs the API for this; it also intersects the batching
-   revision being drafted separately.)
-2. **A bidirectional transport** (WebSocket) — `sub` sends a subscribe message; the
-   server streams updates; the subscription's `dispose()` (the existing
-   `Disposable`/`Owner` machinery) sends an unsubscribe.
-3. **A reactive Wire convention** — how a `Signal<T>`/`Source<T>` field encodes (as a
-   subscription channel id, not a value snapshot) so the projection in `to_wired` can
-   hand the client a live handle. The manual `get_username` accessor is the escape hatch
-   when the convention doesn't fit.
+- the **handle** is a `ChannelId` — a Wire id in the capability table, nothing more, so the
+  codec only ever sees an integer;
+- the **update payloads** are plain Wire `T` values — the codec encodes/decodes those exactly
+  like any other value;
+- **subscribe / update / unsubscribe** are frames the *protocol* sends over the duplex
+  transport: `sub` sends a subscribe frame for the id, the server forwards its signal's updates
+  as encoded-`T` frames, and `dispose()` (the existing `Disposable`/`Owner` machinery) sends an
+  unsubscribe.
+
+None of that touches the codec (pure) or the transport (a dumb pipe): the signal semantics live
+in exactly one place, `ReactiveProtocol`. And because it is bound `Tx: DuplexTransport`, a
+reactive protocol over a plain `HttpTransport` is a **compile error** — you cannot claim a
+subscription works where the transport can't push. (A `Source` is therefore "Wire" only
+*through* a reactive protocol that supplies the table, so a payload carrying one must ride the
+reactive protocol, never plain RPC — the honest constraint.)
+
+The same export/import-by-id pattern is how *any* live reference would cross — a remote object,
+an arena `Handle`, a callback — so the capability table is worth designing generically even if
+`Source` is the first, and at first only, capability.
+
+The pieces this needs, all in the reactive phase:
+
+1. **A `Source`/`Signal` split in `std::reactive`** — a read-only `Source<T>` (`get`/`sub`/`map`)
+   that `Signal<T>` implements (adding `set`/`set_with`), so the remote handle implements
+   `Source` and client code can't write a server signal. (The reactive README designs the API
+   for this; it also intersects the signal-batching revision drafted separately.)
+2. **A `DuplexTransport`** (WebSocket, §5) — plus its `SplitDuplex` fallback (SSE + POST) for
+   WebSocket-less environments.
+3. **The `ReactiveProtocol` + capability table** — export/import of `Source`s by id, the
+   subscribe/update/unsubscribe frame protocol, and the connection-scoped lifecycle: exported
+   sources reclaimed when the connection drops or the client `Owner` disposes — a natural fit
+   for the existing `Owner` scopes.
 
 ## 9. Where it lives
 
 A `[library]` package, `std::rpc` (or a standalone `rpc` library), providing the stable
-core: the `Transport` trait + built-in transports, the `Codec` trait + `JsonCodec`,
-`RpcError`, and the envelope types. The `[derive(Wire)]` derive, the `[service]`/`[rpc]`
-generation (dispatcher + stub), and the `[trait_only]`/`[doc(hidden)]` attributes are
-**compiler** features, not library code (§10). The application's own domain types, their
+core: the `Transport` and `DuplexTransport` shapes + built-in transports, the `Codec` trait
++ `JsonCodec`, `RpcError`, the envelope types, and — in the reactive phase — the
+`ReactiveProtocol` and its capability table. The `[derive(Wire)]` derive, the
+`[service]`/`[rpc]` generation (dispatcher + stub), and the `[trait_only]`/`[doc(hidden)]`
+attributes are **compiler** features, not library code (§10). The application's own domain types, their
 Wire twins, the `to_wired` projections, and the `[service]` contract live in the app —
 typically a shared `common`-style `[library]` for the contract + Wire types both sides
 import, with the server and client packages depending on both, exactly like the current
@@ -445,7 +492,9 @@ paradigm needs:
   type is the real want (added to the backlog). JSON-only needs nothing here (UTF-8 `str`).
 - **Codec derives** — Map serialization (backlog I1) and the `List<List<T>>` fix widen what
   crosses; not blockers (work around as in §3.1).
-- **`Source`/`Signal` split** + **bidirectional transport** — for the reactive phase only.
+- **The reactive protocol** — the `Source`/`Signal` split, a `DuplexTransport` (+ its
+  `SplitDuplex` fallback), and `ReactiveProtocol` with its capability table (§8) — for the
+  reactive phase only.
 
 ## 11. Phased plan (XL → shippable slices)
 
@@ -472,10 +521,13 @@ paradigm needs:
    wrapping applied by codegen and `[rpc(auth)]` gating. This is the headline "C in RPC"
    and resolves Q1. Migrate `examples/rpc` from the hand-written dispatch/stub to the
    generated `[service]`, so the example always shows the current best form.
-4. **Bidirectional + server↔server** (L) — `SocketTransport` (WebSocket); in-process
-   service composition; a server calling another server; streaming replies.
-5. **Reactive north star** (L) — `Source`/`Signal` split; the reactive Wire convention;
-   remote `Source` with `sub` over the socket transport. The capstone.
+4. **`DuplexTransport` + server↔server** (L) — the WebSocket `SocketTransport` as a
+   `DuplexTransport` (also `impl Transport` by correlation, so RPC and reactive multiplex over
+   one socket), plus the `SplitDuplex` fallback; in-process service composition; a server
+   calling another server. The duplex substrate the reactive protocol builds on.
+5. **Reactive north star — `ReactiveProtocol`** (L) — the `Source`/`Signal` split, the
+   capability table (export/import `Source`s by id), and the subscribe/update/unsubscribe frame
+   protocol over the duplex transport (§8). The capstone.
 
 A **binary codec** (and the byte-array type it needs, §10) is an additive slice that can
 land any time after Phase 2 — the `Codec`/`Serializer` seam is designed for it; JSON is the
@@ -508,6 +560,10 @@ reach. Each is independently valuable and testable.
   trait bound but a clean compile *error* on the bare concrete type; a derived trait's
   methods are `[trait_only]` without annotation; a `[doc(hidden)]` method stays callable
   but is absent from the language server's completion list.
+- **Reactive protocol** (Phase 5) — a `Source` exported to a `ChannelId` round-trips to a
+  working `RemoteSource` over an in-memory `DuplexTransport` pair; `sub` receives the server
+  signal's updates and `dispose()` unsubscribes; and a `ReactiveProtocol` over a
+  request/response `Transport` is a clean compile *error* (the `DuplexTransport` bound).
 
 ## 13. Settled decisions vs open questions
 
@@ -521,9 +577,14 @@ marks the exposed surface with a Wire-compatibility signature check; `[trait_onl
 derived methods off the concrete type (default for derives) and `[doc(hidden)]` keeps them
 out of completion. The codec is the *format* (bytes, not `str`), chosen as a runtime value
 so JSON↔binary is a programmatic / env switch; JSON is the default and only codec at first.
-Pluggable `Transport` with HTTP/in-process/WebSocket built-ins; `Result<T, RpcError>` on
-the client, applied by codegen; effect-polymorphic async (auto-await through the indirect
-transport call); peer-symmetric.
+**Transport and codec compose *under* a protocol, not each other:** RPC (request/response) and
+Reactive (pub/sub) are sibling protocols over a transport + codec, so plain HTTP RPC carries no
+reactive machinery. The transport is a dumb pipe in two shapes — request/response (`Transport`;
+HTTP/in-process) and full-duplex (`DuplexTransport`; WebSocket, or a `SplitDuplex` of SSE+POST);
+the reactive protocol requires the duplex shape (a compile error otherwise). A `Signal`/`Source`
+is a *capability*, exported as a `ChannelId` into a per-connection table (Cap'n Proto style) so
+the codec stays pure. `Result<T, RpcError>` on the client, applied by codegen;
+effect-polymorphic async (auto-await through the indirect transport call); peer-symmetric.
 
 **Open questions** (Q1–Q3 settled by the latest round; kept numbered so cross-references hold):
 
