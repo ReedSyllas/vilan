@@ -1,27 +1,34 @@
-// The reusable RPC runtime (what `proposal/transport-rpc.md` calls `std::rpc`): the
-// `Transport` seam, the wire envelope types, and an in-process `LocalTransport`.
-// Imported by the app in `main.vl` — the derived envelope types work from this
-// imported module now that derive expansion runs in *every* module (was README
-// quirk 1, since fixed).
+// The reusable RPC runtime (what `proposal/transport-rpc.md` calls `std::rpc`), written
+// by hand — the codegen sugar (`[derive(Wire)]`, `[service]`, `[rpc]`) isn't built yet.
+// It layers the proposal's model (§2): a codec (JSON, via the derives), transports (a
+// request/response `Transport` and a full-duplex `DuplexTransport`), and two sibling
+// **protocols** over them — `RpcProtocol` (request/response) and `ReactiveProtocol`
+// (pub/sub, §8). In-process, so it builds and runs with no network.
+//
+// A note on genericity: the proposal's `ReactiveProtocol<Tx: DuplexTransport, Cx: Codec>`
+// is generic over the transport and the *element* type. Vilan can't monomorphize a
+// generic element serialized inside a closure yet (`value.to_json()` where `value: T` is
+// a closure parameter lowers to the abstract method), so this runtime stays monomorphic
+// over **`str`**: the application erases `T` at the concrete boundary with `.map` (a
+// `Signal<i32>` → `Signal<str>` of JSON on the server, and back on the client). When that
+// monomorphization gap closes, the `str`s become a generic `T` and the `.map`s vanish.
 
 import std::promise::Promise;
+import std::shared::Shared;
+import std::option::Option::{ self, Some, None };
+import std::json::{ Json, FromJson };
+import std::reactive::{ Source, Signal, Subscription, Disposable };
 
-// --- Transport: the pluggable seam -------------------------------------------
+// === Transport: request/response ============================================
 
-// A request/response transport: send an encoded request, get the encoded reply. The
-// return is an explicit `Promise<str>` by *choice*: a network round-trip is exactly
-// where the caller should see the suspension and `await` it deliberately, rather than
-// have it auto-await as an inferred-async method would. (Auto-await now does work
-// through a generic bound — see the stub in `main.vl` — so an `async fun call(self,
-// request: str): str` would also type-check; the explicit `Promise` is the clearer
-// transport contract.)
+// Send an encoded request frame, get the encoded reply. The explicit `Promise` marks the
+// round-trip as a place the caller `await`s deliberately.
 trait Transport {
 	fun call(self, request: str): Promise<str>;
 }
 
-// The in-process transport: runs a request handler in the same process, wrapped as a
-// resolved Promise. No network — so none of the `fetch` POST / `http` body substrate
-// (now shipped) an `HttpTransport` would use. `handler` is the dispatcher.
+// The in-process request/response transport: runs a handler in the same process, wrapped
+// as a resolved Promise. `handler` is a protocol's frame handler (an `RpcProtocol`).
 struct LocalTransport {
 	handler: |str| str,
 }
@@ -34,18 +41,67 @@ impl LocalTransport with Transport {
 	}
 }
 
-// --- The wire model ----------------------------------------------------------
+// === Transport: full-duplex =================================================
 
-// An invocation: a procedure name plus its arguments, each pre-encoded to a JSON
-// fragment, so a heterogeneous argument list fits a homogeneous `List<str>`.
+// A dumb, bidirectional frame pipe: either end may `send` at any time, so the server can
+// push unprompted (§5). This is the shape the reactive protocol needs.
+trait DuplexTransport {
+	fun send(self, frame: str);
+	fun on_frame(self, handler: |str| void);
+}
+
+// The in-process duplex end: a settable inbound-handler slot (`me`) and the peer's slot
+// (`peer`) that our `send` fires into. Two cross-linked ends (`duplex_pair`) form one
+// connection. `Shared` makes each slot one cell shared by both ends.
+struct DuplexEnd {
+	peer: Shared<Option<|str| void>>,
+	me: Shared<Option<|str| void>>,
+}
+
+impl DuplexEnd with DuplexTransport {
+	fun send(self, frame: str) {
+		match self.peer.read() {
+			Some(let handler) => handler(frame),
+			None => {},
+		}
+	}
+
+	fun on_frame(self, handler: |str| void) {
+		self.me.write() = Some(handler);
+	}
+}
+
+// Create two connected duplex ends: whatever one sends arrives at the other's handler.
+fun duplex_pair(): (DuplexEnd, DuplexEnd) {
+	let slot_a: Shared<Option<|str| void>> = Shared::new(None);
+	let slot_b: Shared<Option<|str| void>> = Shared::new(None);
+	let a = DuplexEnd { peer = slot_b, me = slot_a };
+	let b = DuplexEnd { peer = slot_a, me = slot_b };
+	(a, b)
+}
+
+// === Protocol ===============================================================
+
+// A protocol interprets one inbound frame from its transport and drives its own
+// semantics. A request/response protocol returns `Some(reply)`; a duplex one pushes via
+// the transport and returns `None`. Both `RpcProtocol` and the reactive protocols below
+// implement it — the shared seam over any transport + codec.
+trait Protocol {
+	fun receive(self, frame: str): Option<str>;
+}
+
+// === Wire envelope (RPC) ====================================================
+
+// An invocation: a method name plus positional arguments, each pre-encoded to a JSON
+// fragment so a heterogeneous argument list fits a homogeneous `List<str>`.
 [derive(Json)]
 struct RpcRequest {
 	method: str,
 	args: List<str>,
 }
 
-// An infrastructure-level failure — distinct from an application error, which is part
-// of a procedure's own return type (e.g. `Option<User>` for "might not exist").
+// An infrastructure-level failure — distinct from an application error, which is part of
+// a procedure's own return type (e.g. `Option<User>` for "might not exist").
 [derive(Json)]
 enum RpcError {
 	Transport(str),
@@ -59,4 +115,218 @@ enum RpcError {
 enum RpcReply {
 	Success(str),
 	Failure(RpcError),
+}
+
+// === RpcProtocol ============================================================
+
+// The request/response protocol: on an inbound request frame it decodes the envelope,
+// routes through the application `dispatch`, and encodes the reply. This is the
+// hand-written form of what a `[service]` derive would generate from a trait's `[rpc]`
+// methods (proposal §4).
+struct RpcProtocol {
+	dispatch: |RpcRequest| RpcReply,
+}
+
+impl RpcProtocol with Protocol {
+	fun receive(self, frame: str): Option<str> {
+		let request = RpcRequest::from_json(frame);
+		Some((self.dispatch)(request).to_json())
+	}
+}
+
+// A `LocalTransport` that routes every request through an `RpcProtocol` — the in-process
+// wiring of a client stub to its server dispatcher.
+fun local_rpc(protocol: RpcProtocol): LocalTransport {
+	LocalTransport {
+		handler = |frame| {
+			match protocol.receive(frame) {
+				Some(let reply) => reply,
+				None => RpcReply::Failure(RpcError::Remote("no reply")).to_json(),
+			}
+		},
+	}
+}
+
+// === Reactive protocol ======================================================
+
+// The frames the reactive protocol exchanges over a duplex transport. Payloads are the
+// JSON-encoded (`str`) values of the underlying source — the codec never sees a signal,
+// only its values (proposal §8).
+[derive(Json)]
+enum ReactiveFrame {
+	Subscribe(i32),
+	Unsubscribe(i32),
+	Update(i32, str),
+}
+
+// Channel ids — module-level, one counter for the program (mirrors reactive's
+// `next_subscriber_id`).
+let next_channel: Shared<i32> = Shared::new(0);
+
+fun fresh_channel(): i32 {
+	let id = next_channel.read();
+	next_channel.write() = id + 1;
+	id
+}
+
+// --- Server side: the capability table --------------------------------------
+
+// The reactive protocol's server half: a per-connection **capability table** mapping a
+// channel id to the exposed source (a JSON `Signal<str>`), plus the live forwards started
+// by client subscriptions. A `Signal`/`Source` never crosses as a value — it is exported
+// as an id, and its updates flow as `Update` frames (proposal §8).
+struct ReactiveServer {
+	transport: DuplexEnd,
+	sources: Shared<List<(i32, Signal<str>)>>,
+	live: Shared<List<(i32, Subscription)>>,
+}
+
+impl ReactiveServer {
+	fun new(transport: DuplexEnd): ReactiveServer {
+		let server = ReactiveServer {
+			transport,
+			sources = Shared::new([]),
+			live = Shared::new([]),
+		};
+		(server.transport).on_frame(|frame| {
+			match server.receive(frame) {
+				Some(let _) => {},
+				None => {},
+			}
+		});
+		server
+	}
+
+	// Export a JSON source under a fresh channel id; the id is what crosses the wire in
+	// place of the source. The application erases `T` by mapping its `Signal<T>` to a
+	// `Signal<str>` at the concrete call site (see `main.vl`).
+	fun expose(self, source: Signal<str>): i32 {
+		let channel = fresh_channel();
+		self.sources.write().push((channel, source));
+		channel
+	}
+
+	// A client subscribed: find the source and forward each of its values as an `Update`
+	// frame. `sub` fires immediately with the current value, so a subscriber gets the
+	// present state before any change.
+	fun start(self, channel: i32) {
+		let transport = self.transport;
+		for entry in self.sources.read() {
+			let (id, source) = entry;
+			if id == channel {
+				let subscription = source.sub(|json| {
+					(transport).send(ReactiveFrame::Update(channel, json).to_json());
+				});
+				self.live.write().push((channel, subscription));
+			}
+		}
+	}
+
+	// A client unsubscribed: dispose the forward for that channel.
+	fun stop(self, channel: i32) {
+		mut kept: List<(i32, Subscription)> = [];
+		for entry in self.live.read() {
+			let (id, subscription) = entry;
+			if id == channel {
+				subscription.dispose();
+			} else {
+				kept.push((id, subscription));
+			}
+		}
+		self.live.write() = kept;
+	}
+}
+
+impl ReactiveServer with Protocol {
+	fun receive(self, frame: str): Option<str> {
+		match ReactiveFrame::from_json(frame) {
+			ReactiveFrame::Subscribe(let channel) => {
+				self.start(channel);
+				None
+			},
+			ReactiveFrame::Unsubscribe(let channel) => {
+				self.stop(channel);
+				None
+			},
+			// The server never receives updates — those flow server → client.
+			ReactiveFrame::Update(let _channel, let _json) => None,
+		}
+	}
+}
+
+// --- Client side: the remote handle -----------------------------------------
+
+// The reactive protocol's client half: routes inbound `Update` frames to the local
+// mirror (`cache`) of each subscribed channel. `source` hands out a `RemoteSource`.
+struct ReactiveClient {
+	transport: DuplexEnd,
+	routes: Shared<List<(i32, Signal<str>)>>,
+}
+
+impl ReactiveClient {
+	fun new(transport: DuplexEnd): ReactiveClient {
+		let client = ReactiveClient {
+			transport,
+			routes = Shared::new([]),
+		};
+		(client.transport).on_frame(|frame| {
+			match client.receive(frame) {
+				Some(let _) => {},
+				None => {},
+			}
+		});
+		client
+	}
+
+	// A remote handle for a channel: a local `Signal<str>` mirror kept in sync by inbound
+	// `Update` frames, wrapped as a `RemoteSource` whose `sub` also opens the channel.
+	fun source(self, channel: i32): RemoteSource {
+		let cache: Signal<str> = Signal::new("");
+		self.routes.write().push((channel, cache));
+		RemoteSource {
+			channel,
+			transport = self.transport,
+			cache,
+		}
+	}
+}
+
+impl ReactiveClient with Protocol {
+	fun receive(self, frame: str): Option<str> {
+		match ReactiveFrame::from_json(frame) {
+			ReactiveFrame::Update(let channel, let json) => {
+				for route in self.routes.read() {
+					let (id, cache) = route;
+					if id == channel {
+						cache.set(json);
+					}
+				}
+				None
+			},
+			_ => None,
+		}
+	}
+}
+
+// A remote read-only handle: it implements `Source<str>` (the reactive split — client
+// code can't write a server signal), and its `sub` sends a `Subscribe` frame before
+// observing the local mirror. Because the in-process transport delivers synchronously,
+// the server's immediate current-value `Update` has already landed in the mirror by the
+// time we observe it, so the observer fires once with the present value.
+struct RemoteSource {
+	channel: i32,
+	transport: DuplexEnd,
+	cache: Signal<str>,
+}
+
+impl RemoteSource with Source<str> {
+	fun get(self): str {
+		self.cache.get()
+	}
+
+	[must_use]
+	fun sub(self, observer: |str| void): Subscription {
+		(self.transport).send(ReactiveFrame::Subscribe(self.channel).to_json());
+		self.cache.sub(observer)
+	}
 }

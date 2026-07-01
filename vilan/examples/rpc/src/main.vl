@@ -1,13 +1,13 @@
-// A hand-written RPC service (roadmap P6 / proposal/transport-rpc.md). The library is
-// a *guide*, not a generator: it gives you a `Transport` and a codec, and a paradigm
-// for using them. This file works that paradigm by hand — the reusable runtime is in
-// `rpc.vl`; here is the application: the data boundary, the server dispatch, the stub.
-// In-process (a `LocalTransport`), so it builds and runs with no network.
+// A hand-written RPC + reactive runtime (roadmap P6 / proposal/transport-rpc.md). The
+// library is a *guide*, not a generator: it gives you a codec, transports, and two
+// sibling **protocols** over them — request/response (`RpcProtocol`) and pub/sub
+// (`ReactiveProtocol`, §8) — and a paradigm for using them. This file works that paradigm
+// by hand; the reusable runtime is in `rpc.vl`. In-process, so it runs with no network.
 //
-// The `[derive(Wire)]` boundary and the `[rpc]` surface (proposal §3–4) aren't built
-// yet, so `[derive(Json)]` and a hand-written dispatcher stand in. The *paradigm* is
-// the real subject: a rich domain type, an explicit projection to a wire DTO, and a
-// sensitive type that simply cannot cross the wire.
+// The codegen sugar (`[derive(Wire)]`, `[service]`, `[rpc]`) isn't built yet, so
+// `[derive(Json)]` and hand-written dispatch stand in. The *paradigm* is the subject: a
+// rich domain type with an explicit projection to a wire DTO, a sensitive type that
+// cannot cross the wire, and a server `Signal` observed remotely as a `Source`.
 //
 //     vilan run vilan/examples/rpc
 
@@ -15,7 +15,12 @@ import std::print;
 import std::json::{ Json, FromJson };
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
-import pkg::rpc::{ Transport, LocalTransport, RpcRequest, RpcReply, RpcError };
+import std::reactive::{ Signal, Source };
+import pkg::rpc::{
+	Transport, LocalTransport, RpcRequest, RpcReply, RpcError,
+	RpcProtocol, local_rpc,
+	duplex_pair, ReactiveServer, ReactiveClient, RemoteSource,
+};
 
 // --- The data boundary (would live in a `common` library, on both sides) ------
 
@@ -82,14 +87,13 @@ fun lookup_user(id: i32): Option<User> {
 	}
 }
 
-// The dispatcher: decode an invocation, route on the method name, decode each argument
-// at its parameter type, call the impl, **project the domain result to its wire shape**,
-// encode the reply. The projection is the one place the boundary is crossed, and it is
-// explicit. (Hand-written here; a `Dispatcher` helper — proposal §2, a maybe — would
-// assemble this from `[rpc]` marks.)
-fun accounts_dispatch(request_text: str): str {
-	let request = RpcRequest::from_json(request_text);
-	let reply = match request.method {
+// The dispatcher: route on the method name, decode each argument at its parameter type,
+// call the impl, **project the domain result to its wire shape**, and return the reply.
+// The envelope decode/encode is the `RpcProtocol`'s job (rpc.vl); this is the pure
+// routing — exactly what a `[service]` derive would generate from a trait's `[rpc]`
+// methods (proposal §4). The projection is the one place the boundary is crossed.
+fun accounts_dispatch(request: RpcRequest): RpcReply {
+	match request.method {
 		"get_user" => match request.args.first() {
 			Some(let arg) => {
 				let id = i32::from_json(arg);
@@ -104,8 +108,7 @@ fun accounts_dispatch(request_text: str): str {
 			None => RpcReply::Failure(RpcError::Decode("get_user expects 1 argument")),
 		},
 		_ => RpcReply::Failure(RpcError::Remote("unknown method: " + request.method)),
-	};
-	reply.to_json()
+	}
 }
 
 // --- Client side: the typed stub ---------------------------------------------
@@ -137,8 +140,11 @@ impl AccountsClient<type T> {
 // --- Wiring + demo -----------------------------------------------------------
 
 fun main() {
-	// The transport routes every call to the server dispatcher, in-process.
-	let transport = LocalTransport { handler = |request| accounts_dispatch(request) };
+	// --- RPC over a request/response transport --------------------------------
+	// The `RpcProtocol` wraps the dispatcher (decode envelope → route → encode reply);
+	// `local_rpc` mounts it on an in-process transport — the wiring a client stub connects
+	// to. Both `RpcProtocol` and the reactive protocols below are `Protocol`s (§2).
+	let transport = local_rpc(RpcProtocol { dispatch = |request| accounts_dispatch(request) });
 	let client = AccountsClient { transport = transport };
 
 	// A hit (id 1 -> ada), a miss (id 9 -> None, an application-level absence), and a
@@ -146,6 +152,39 @@ fun main() {
 	show(client.get_user(1));
 	show(client.get_user(9));
 	show_raw(transport);
+
+	// --- Reactive over a duplex transport -------------------------------------
+	reactive_demo();
+}
+
+// The reactive north star (proposal §8), by hand: a server holds a `Signal<i32>` and
+// exposes it; a client subscribes to the remote handle and sees every change flow over a
+// duplex transport. The `Signal`/`Source` never crosses as a value — it is exported as a
+// channel id, and its updates cross as `Update` frames. The `.map(to_json)` /
+// `from_json` are the manual codec at the `T`⇆`str` boundary (see rpc.vl's note).
+fun reactive_demo() {
+	print("--- reactive: a remote Source<i32> ---");
+	let (client_end, server_end) = duplex_pair();
+
+	// Server: a counter, exposed as its JSON projection. `channel` is the handle that, in a
+	// real system, would cross to the client in an RPC reply; in-process we hand it over.
+	let counter: Signal<i32> = Signal::new(0);
+	let server = ReactiveServer::new(server_end);
+	let channel = server.expose(counter.map(|n| n.to_json()));
+
+	// Client: a remote `Source<str>`; `sub` opens the channel and observes it. Each JSON
+	// update is decoded at the concrete site — where `T` is known and monomorphizes.
+	let remote = ReactiveClient::new(client_end).source(channel);
+	let subscription = remote.sub(|json| {
+		let n: i32 = i32::from_json(json);
+		print(i"count = {n}");
+	});
+
+	// Every `set` on the server signal pushes an `Update` frame to the client's observer.
+	counter.set(1);
+	counter.set(2);
+	subscription.dispose();   // stop observing; the server's forward is a no-op with no client
+	counter.set(3);           // no output — unsubscribed
 }
 
 fun show(result: Result<Option<WireUser>, RpcError>) {
