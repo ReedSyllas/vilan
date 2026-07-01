@@ -50,8 +50,8 @@ impl User {
 	// crosses: it drops `password` (which has nowhere to go — `Password` isn't
 	// encodable) and adds a computed `handle` that the domain type has no field for.
 	// The wire shape diverges freely from the source.
-	fun to_wired(self): WiredUser {
-		WiredUser {
+	fun to_wire(self): WireUser {
+		WireUser {
 			id = self.id,
 			username = self.username,
 			handle = "@" + self.username,
@@ -63,7 +63,7 @@ impl User {
 // ever sees; it has never heard of `Password`. (`[derive(Json)]` stands in for the
 // proposed `[derive(Wire)]` until that derive ships.)
 [derive(Json)]
-struct WiredUser {
+struct WireUser {
 	id: i32,
 	username: str,
 	handle: str,
@@ -95,11 +95,11 @@ fun accounts_dispatch(request_text: str): str {
 				let id = i32::from_json(arg);
 				// `lookup_user(id).to_json()` would NOT compile — `User` has no codec.
 				// The projection is mandatory, which is the safety guarantee.
-				let wired = match lookup_user(id) {
-					Some(let user) => Some(user.to_wired()),
+				let wire_user = match lookup_user(id) {
+					Some(let user) => Some(user.to_wire()),
 					None => None,
 				};
-				RpcReply::Success(wired.to_json())
+				RpcReply::Success(wire_user.to_json())
 			}
 			None => RpcReply::Failure(RpcError::Decode("get_user expects 1 argument")),
 		},
@@ -119,15 +119,15 @@ fun accounts_dispatch(request_text: str): str {
 struct AccountsClient<T: Transport> { transport: T }
 
 impl AccountsClient<type T> {
-	// The client deals only in `WiredUser` — it has no `User`, and no `password` field
+	// The client deals only in `WireUser` — it has no `User`, and no `password` field
 	// to leak. The round-trip can fail, so the result is wrapped in `Result<_, RpcError>`.
-	fun get_user(self, id: i32): Result<Option<WiredUser>, RpcError> {
+	fun get_user(self, id: i32): Result<Option<WireUser>, RpcError> {
 		let request = RpcRequest { method = "get_user", args = [id.to_json()] };
 		let reply_text = await (self.transport).call(request.to_json());
 		match RpcReply::from_json(reply_text) {
-			// `from_json` infers its element type `WiredUser` through the `Ok` wrapper
+			// `from_json` infers its element type `WireUser` through the `Ok` wrapper
 			// and the function's return type — the return-type-driven body inference plus
-			// the constructor propagation thread `Option<WiredUser>` all the way in.
+			// the constructor propagation thread `Option<WireUser>` all the way in.
 			RpcReply::Success(let json) => Ok(Option::from_json(json)),
 			RpcReply::Failure(let error) => Err(error),
 		}
@@ -148,7 +148,7 @@ fun main() {
 	show_raw(transport);
 }
 
-fun show(result: Result<Option<WiredUser>, RpcError>) {
+fun show(result: Result<Option<WireUser>, RpcError>) {
 	match result {
 		Ok(Some(let user)) => print(i"ok: found {user.username} ({user.handle})"),
 		Ok(None) => print("ok: no such user"),

@@ -47,7 +47,7 @@ Within the RPC protocol the **guide-not-generator** line is drawn precisely: the
 *generates* the dispatch plumbing — the server router and the client stub — from a
 `[service]` trait (§4), so a remote call reads like a local one. But it generates **only
 the plumbing**: the *structure* — which types cross the wire (`[derive(Wire)]`, §3) and how
-a domain type projects to its wire shape (`to_wired`, §3) — stays the developer's. The
+a domain type projects to its wire shape (`to_wire`, §3) — stays the developer's. The
 library owns the mechanical encode→route→decode that is identical every time; that is what
 makes a remote call *seamless* without dictating your shape — the "C" in RPC, paid for
 honestly (§7: latency and failure stay visible).
@@ -107,8 +107,8 @@ struct User {
 impl User {
 	// The explicit projection from the domain type to its wire shape. Developer-
 	// written, so it can diverge from the source arbitrarily.
-	fun to_wired(self): WiredUser {
-		WiredUser {
+	fun to_wire(self): WireUser {
+		WireUser {
 			uuid = self.get_uuid(),     // a *computed* field — `User` has no `uuid`
 			username = self.username,   // `id` and `password` simply don't cross
 		}
@@ -116,12 +116,12 @@ impl User {
 }
 
 [derive(Wire)]
-struct WiredUser {
+struct WireUser {
 	uuid: Uuid,
 	username: str,   // or could be `username: Signal<str>` — see §7
 }
 
-impl WiredUser {
+impl WireUser {
 	// A manual subscription accessor: a plain `Signal<str>` field is the easy path,
 	// but writing the `Source` by hand is sometimes what you want.
 	fun get_username(self): Source<str> {
@@ -131,19 +131,19 @@ impl WiredUser {
 
 // A server method producing the wire shape — one `[rpc]` method of a `[service]` (§4).
 // The projection is the only place the boundary is crossed, and it is explicit.
-fun get_user(id: i32): Option<WiredUser> {
+fun get_user(id: i32): Option<WireUser> {
 	// ...look up the domain `User` (password and all), then project...
-	Some(user.to_wired())   // `User` itself never crosses; only the wire shape does
+	Some(user.to_wire())   // `User` itself never crosses; only the wire shape does
 }
 
 // client-side — the generated `[service]` stub reads like a local call (§4, §7)
-let john = accounts.get_user(1);   // -> Result<Option<WiredUser>, RpcError>
+let john = accounts.get_user(1);   // -> Result<Option<WireUser>, RpcError>
 ```
 
 What this buys, beyond the leak guarantee:
 
-- **The wire shape diverges freely from the source.** `WiredUser.uuid` is *computed* in
-  `to_wired` and is not a field of `User` at all; `User.id` and `User.password` never
+- **The wire shape diverges freely from the source.** `WireUser.uuid` is *computed* in
+  `to_wire` and is not a field of `User` at all; `User.id` and `User.password` never
   appear. The client's view of an entity is whatever the projection chooses to expose —
   nothing more.
 - **References travel as handles.** The same mechanism sends an arena `Handle` (or a
@@ -153,9 +153,9 @@ What this buys, beyond the leak guarantee:
   auto-projection; both were rejected. A skip-list is exactly the annotation a
   developer forgets. Here the boundary is a *type you write on purpose*, and the
   compiler refuses to let a non-Wire type slip across. Decode produces the Wire type
-  directly (a `WiredUser`), with no vestigial always-empty fields.
+  directly (a `WireUser`), with no vestigial always-empty fields.
 
-The cost is honest verbosity: a domain type and its wire twin, plus a `to_wired`. The
+The cost is honest verbosity: a domain type and its wire twin, plus a `to_wire`. The
 paradigm accepts that — the explicitness *is* the feature — but it is the first place
 **syntactic sugar** would earn its keep (a derive that scaffolds a projection for the
 encodable fields, which the developer then edits), and that sugar is a deliberately
@@ -234,8 +234,8 @@ marked `[rpc]`:
 // common/src/lib.vl — the contract, imported by BOTH sides
 [service]
 trait Accounts {
-    [rpc] fun get_user(id: i32): Option<WiredUser>;
-    [rpc(auth)] fun rename(id: i32, name: str): WiredUser;   // gated — needs auth
+    [rpc] fun get_user(id: i32): Option<WireUser>;
+    [rpc(auth)] fun rename(id: i32, name: str): WireUser;   // gated — needs auth
 }
 ```
 
@@ -267,7 +267,7 @@ no drift, and `accounts.get_user(42)` on the client reads exactly like the local
 server — the seamless "C" in RPC. This is the hand-written `accounts_dispatch` of
 `examples/rpc`, mechanized: the example proves the runtime first, before any generation (the
 project's "prove it before generating it"). The generated halves are *only* this glue — the
-Wire types and the `to_wired` projections they carry stay yours (§2, §3).
+Wire types and the `to_wire` projections they carry stay yours (§2, §3).
 
 ## 5. Transport — the pipe (two shapes)
 
@@ -368,10 +368,10 @@ The client stub generated from the `[service]` trait (§4) *is* the seamless cal
 
 ```vilan
 // generated `impl Accounts for AccountsClient` (one method shown)
-fun get_user(self, id: i32): Result<Option<WiredUser>, RpcError> {
+fun get_user(self, id: i32): Result<Option<WireUser>, RpcError> {
 	let request = encode_request(self.codec, "get_user", [self.codec.encode(id)]);
 	let reply = await (self.transport).call(request);     // round-trip
-	decode_reply(self.codec, reply)                       // Result<Option<WiredUser>, RpcError>
+	decode_reply(self.codec, reply)                       // Result<Option<WireUser>, RpcError>
 }
 ```
 
@@ -383,7 +383,7 @@ fun get_user(self, id: i32): Result<Option<WiredUser>, RpcError> {
   avoided.
 - **The `T` → `Result<T, _>` shift is the contract's, and the generator owns it (Q3,
   settled).** The `[service]` trait declares the *logical* signature — `get_user(id):
-  Option<WiredUser>` — and the server `impl` returns exactly that, a clean local body. The
+  Option<WireUser>` — and the server `impl` returns exactly that, a clean local body. The
   round-trip can fail, so the **generated client stub wraps the return in
   `Result<_, RpcError>`** — the developer never writes the wrapping. `RpcError` is a derived
   enum: `Transport(str) | Decode(str) | Remote(str) | Unauthorized`. The two sides differ by
@@ -411,7 +411,7 @@ let _ = count.sub(|n| print(i"count = {n}"));        // subscribes over the sock
 ```
 
 **How a capability crosses — the Cap'n Proto capability-table pattern.** A `Source<T>` never
-serializes as a value. Where a reply (or a `to_wired` projection) contains one, the reactive
+serializes as a value. Where a reply (or a `to_wire` projection) contains one, the reactive
 protocol *exports* it into a per-connection table and puts a plain-Wire **`ChannelId`** on the
 wire in its place; the receiving side *imports* that id into a `RemoteSource<T>` bound to its
 protocol. So the three worries dissolve, each landing in the right layer:
@@ -457,7 +457,7 @@ core: the `Transport` and `DuplexTransport` shapes + built-in transports, the `C
 `ReactiveProtocol` and its capability table. The `[derive(Wire)]` derive, the
 `[service]`/`[rpc]` generation (dispatcher + stub), and the `[trait_only]`/`[doc(hidden)]`
 attributes are **compiler** features, not library code (§10). The application's own domain types, their
-Wire twins, the `to_wired` projections, and the `[service]` contract live in the app —
+Wire twins, the `to_wire` projections, and the `[service]` contract live in the app —
 typically a shared `common`-style `[library]` for the contract + Wire types both sides
 import, with the server and client packages depending on both, exactly like the current
 `common`/`client`/`server` workspace.
@@ -512,7 +512,7 @@ paradigm needs:
    check, the `Wire` round-trip against the `Serializer` visitor, and the
    `[trait_only]`/`[doc(hidden)]` attributes so derived methods stay out of the way (§3.2,
    derived methods `[trait_only]` by default). Convert the `examples/rpc` payloads from
-   `[derive(Json)]` to `[derive(Wire)]` with explicit `to_wired` projections — the first
+   `[derive(Json)]` to `[derive(Wire)]` with explicit `to_wire` projections — the first
    dogfood. **In the same pass, bring every example up to the latest project structure**
    (platform model + library packages): current `vilan.toml` conventions, the shared
    `common` `[library]`, per-package `platform`.
@@ -570,9 +570,9 @@ reach. Each is independently valuable and testable.
 **Settled:** the library is a *guide* for structure and a *generator* for plumbing —
 Transport + Codec are the stable core; a `[service]` trait is the contract, and the
 compiler generates its dispatcher + client stub (only the glue — the Wire types and
-`to_wired` projections stay the developer's). `[derive(Wire)]` is the data boundary with
+`to_wire` projections stay the developer's). `[derive(Wire)]` is the data boundary with
 the all-fields-Wire rule (sensitivity is a type property; no skip-lists); explicit
-`to_wired` projections (the wire shape diverges freely from the domain type); `[rpc]`
+`to_wire` projections (the wire shape diverges freely from the domain type); `[rpc]`
 marks the exposed surface with a Wire-compatibility signature check; `[trait_only]` keeps
 derived methods off the concrete type (default for derives) and `[doc(hidden)]` keeps them
 out of completion. The codec is the *format* (bytes, not `str`), chosen as a runtime value
@@ -605,7 +605,7 @@ effect-polymorphic async (auto-await through the indirect transport call); peer-
 - **Q6 — versioning.** Client and server are built separately; a contract mismatch
   (renamed method, changed Wire shape) should fail *clearly*. A contract hash exchanged
   on connect, or rely on `err: Decode`? (Ties to the platform model's per-package builds.)
-- **Q7 — projection sugar.** When and how to add the scaffolding derive for `to_wired`
+- **Q7 — projection sugar.** When and how to add the scaffolding derive for `to_wire`
   (§3) — additive, and only once the explicit form has proven the paradigm.
 - **Q8 — `Map` payloads.** Is the no-`Map` codec gap acceptable to launch with (use
   structs / `List<Pair>`), or should Map serialization (backlog I1) be pulled into
