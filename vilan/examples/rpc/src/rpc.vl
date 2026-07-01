@@ -5,13 +5,14 @@
 // **protocols** over them — `RpcProtocol` (request/response) and `ReactiveProtocol`
 // (pub/sub, §8). In-process, so it builds and runs with no network.
 //
-// A note on genericity: the proposal's `ReactiveProtocol<Tx: DuplexTransport, Cx: Codec>`
-// is generic over the transport and the *element* type. Vilan can't monomorphize a
-// generic element serialized inside a closure yet (`value.to_json()` where `value: T` is
-// a closure parameter lowers to the abstract method), so this runtime stays monomorphic
-// over **`str`**: the application erases `T` at the concrete boundary with `.map` (a
-// `Signal<i32>` → `Signal<str>` of JSON on the server, and back on the client). When that
-// monomorphization gap closes, the `str`s become a generic `T` and the `.map`s vanish.
+// A note on genericity: `expose` is generic over any `Source<T>` — a generic element
+// serialized inside a closure (`value.to_json()` where `value: T` is a closure parameter)
+// now monomorphizes correctly (README quirk #5, fixed), so the JSON erasure moved *inside*
+// the runtime instead of being the application's chore. The capability table still stores
+// `str` (a `Signal<str>` mirror per channel), because it holds *heterogeneous* sources and
+// vilan has no trait objects. The transport stays a concrete `DuplexEnd`; a generic
+// `ReactiveServer<Tx: DuplexTransport>` (a `Tx` method called inside a stored forwarding
+// closure) is the next monomorphization step.
 
 import std::promise::Promise;
 import std::shared::Shared;
@@ -197,12 +198,15 @@ impl ReactiveServer {
 		server
 	}
 
-	// Export a JSON source under a fresh channel id; the id is what crosses the wire in
-	// place of the source. The application erases `T` by mapping its `Signal<T>` to a
-	// `Signal<str>` at the concrete call site (see `main.vl`).
-	fun expose(self, source: Signal<str>): i32 {
+	// Export a `Source<T>` under a fresh channel id; the id is what crosses the wire in
+	// place of the source. `T` is erased to a JSON `Signal<str>` mirror *here*, inside the
+	// runtime — the element serialized in the `get`/`sub` closures monomorphizes correctly
+	// now (the capability table is still `str`, since it holds heterogeneous sources).
+	fun expose<T: Json, S: Source<T>>(self, source: S): i32 {
 		let channel = fresh_channel();
-		self.sources.write().push((channel, source));
+		let json: Signal<str> = Signal::new(source.get().to_json());
+		let _ = source.sub(|value| json.set(value.to_json()));
+		self.sources.write().push((channel, json));
 		channel
 	}
 

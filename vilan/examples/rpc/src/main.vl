@@ -160,17 +160,18 @@ fun main() {
 // The reactive north star (proposal §8), by hand: a server holds a `Signal<i32>` and
 // exposes it; a client subscribes to the remote handle and sees every change flow over a
 // duplex transport. The `Signal`/`Source` never crosses as a value — it is exported as a
-// channel id, and its updates cross as `Update` frames. The `.map(to_json)` /
-// `from_json` are the manual codec at the `T`⇆`str` boundary (see rpc.vl's note).
+// channel id, and its updates cross as `Update` frames.
 fun reactive_demo() {
 	print("--- reactive: a remote Source<i32> ---");
 	let (client_end, server_end) = duplex_pair();
 
-	// Server: a counter, exposed as its JSON projection. `channel` is the handle that, in a
-	// real system, would cross to the client in an RPC reply; in-process we hand it over.
+	// Server: a counter, exposed directly — the runtime erases its `i32` to JSON (the
+	// generic `expose<T: Json, S: Source<T>>` monomorphizes now, so the app hands over a
+	// plain `Signal<i32>`). `channel` is the handle that, in a real system, would cross to
+	// the client in an RPC reply; in-process we hand it over.
 	let counter: Signal<i32> = Signal::new(0);
 	let server = ReactiveServer::new(server_end);
-	let channel = server.expose(counter.map(|n| n.to_json()));
+	let channel = server.expose(counter);
 
 	// Client: a remote `Source<str>`; `sub` opens the channel and observes it. Each JSON
 	// update is decoded at the concrete site — where `T` is known and monomorphizes.

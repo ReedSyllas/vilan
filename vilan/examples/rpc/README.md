@@ -174,27 +174,31 @@ arm → the `Ok(..)` wrapper → `Option::from_json`'s element. The stub above u
 natural indirect form directly — no pinning needed. (`enum_constructor_..` and
 `from_json_return_type_flows_through_match_arm` in `inference.rs` pin both halves.)
 
-### 5. Generic-through-closure monomorphization — the reactive runtime stays `str` (⚠️ open)
+### 5. Generic element serialized inside a closure — ✅ FIXED
 
-Building the reactive protocol surfaced two limits that shaped its shape. Neither is fixed;
-both are what the proposal's generic `ReactiveProtocol<Tx, Cx>` is waiting on.
+Building the reactive protocol surfaced a monomorphization gap that shaped `expose`. With
+`S: Source<T>`, `T: Json`, `source.sub(|value| value.to_json())` used to fail *two* ways:
+the closure parameter `value` lost its `T: Json` bound (a compile error, `cannot call method
+'to_json' on T`), and — since `T` appears only in the bound `F: Source<T>`, not a direct
+parameter — `T` was never derived from the concrete `Signal<i32>: Source<i32>` at the call
+site, so `to_json` monomorphized to the empty abstract method (`undefined`). The same
+abstract-dispatch failure as #3/#4, but reached through a *closure capture* of a generic,
+which the earlier B1 fixes didn't cover.
 
-- **`param: SomeTrait` is not a generic bound.** `fun expose(source: Source<T>)` is rejected —
-  *"a trait is not a value type (vilan has no trait objects)"*; you must write the explicit
-  `fun expose<T, S: Source<T>>(source: S)`. (So the proposal's `fun stringify(value: ToJson)`
-  sketch is aspirational, not current syntax.)
-- **A generic *element* serialized inside a closure doesn't monomorphize.** With
-  `S: Source<T>`, `T: Json`, `source.sub(|value| value.to_json())` fails to compile
-  (`cannot call method 'to_json' on T`); routing through a free `encode<T: Json>` helper
-  compiles but emits `undefined` — the same abstract-dispatch failure as #3/#4, but reached
-  through a *closure capture* of a generic, which the B1 fixes didn't cover.
+**Fixed** by two analyzer changes: the `Type::Generic` method-resolution arm now substitutes
+a parameterized bound's arguments (so the closure parameter keeps its `T: Json`), and
+`resolve_call_subject` / `bind_method_own_generics` derive a bound-only generic from the
+concrete argument's impl. So `expose<T: Json, S: Source<T>>(source: S)` monomorphizes — the
+JSON erasure moved *inside* the runtime (a `Signal<str>` mirror per channel), off the
+application, which now just calls `server.expose(counter)`.
 
-So the runtime is **monomorphic over `str`**: the capability table stores `Signal<str>`, and
-the application erases `T` at the concrete boundary — `counter.map(|n| n.to_json())` on the
-server, `i32::from_json(json)` in the client's observer — where `T` is concrete and
-monomorphizes fine. When generic-through-closure monomorphization lands, those `str`s become a
-generic `T` and the `.map`s vanish, yielding the proposal's `ReactiveProtocol<Cx: Codec>`
-directly.
+Two adjacent items remain, noted for honesty: **`param: SomeTrait` is not a generic bound**
+(you write the explicit `<S: Source<T>>`, so the proposal's `fun stringify(value: ToJson)`
+sketch is aspirational syntax), and the derivation fires on the *method* path only when the
+argument's type is already resolved — an *inferred* argument (`let s = Signal::new(7)`, no
+annotation) is a deferral edge the free-function path handles but the method path doesn't yet
+(pinned as an `#[ignore]`d test). The capability table also still stores `str`, since it holds
+heterogeneous sources and vilan has no trait objects.
 
 ## What this validates for the plan
 
@@ -202,11 +206,9 @@ The **data boundary, both transports, the codec, both protocols (RPC and reactiv
 capability table, over-the-wire subscription, and the `Result`/`Option` error layering all work
 today** — the hand-written core is real, and the *paradigm* (a domain type, an explicit
 `to_wire` projection, a sensitive type that can't cross, a signal observed remotely) holds with
-today's features. The generic-dispatch cluster (B1) that P6 leaned on is closed for the direct
-and nested cases; the remaining closure-capture case (#5) is the concrete compiler work the
-*generic* `ReactiveProtocol<Cx: Codec>` needs.
+today's features. The generic-dispatch cluster (B1) that P6 leaned on is now closed through the
+closure-capture case too (#5), so `expose` is generic over any `Source<T>`.
 
 What's left is additive and stays in the spirit of "guide, not generator": `[derive(Wire)]`
-(the boundary, friendlier diagnostics), `[service]`/`[rpc]` (generate the dispatcher + stub),
-and closing #5 (to make the protocols generic over the codec) — none of them *replace* the
-paradigm this example works.
+(the boundary, friendlier diagnostics) and `[service]`/`[rpc]` (generate the dispatcher +
+stub) — neither *replaces* the paradigm this example works.
