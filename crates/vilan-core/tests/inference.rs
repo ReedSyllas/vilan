@@ -1896,3 +1896,138 @@ fn sync_method_through_generic_bound_is_not_made_async() {
         "a purely-sync generic dispatch must not be made async:\n{js}"
     );
 }
+
+#[test]
+fn generic_element_serialized_in_a_closure_through_a_bounded_method() {
+    // A closure passed to a generic method (`feed.each(|T| ..)`) on a parameterized-bound
+    // receiver (`F: Feed<T>`), serializing the element `T` inside the closure. Two gaps
+    // used to break this: the closure parameter lost its `T: Json` bound — a compile error
+    // ("cannot call method 'to_json' on T") — and `T`, which appears *only* in the bound
+    // `F: Feed<T>`, was never derived from the concrete `Nums: Feed<i32>` at the call site,
+    // so `to_json` monomorphized to the empty abstract method and yielded `undefined`.
+    // Both are fixed (the parameterized-bound substitution in the `Type::Generic` method
+    // arm, and the derive-from-bound step in `resolve_call_subject`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::Json;
+        trait Feed<T> { fun each(self, observer: |T| void); }
+        struct Nums {}
+        impl Nums with Feed<i32> {
+            fun each(self, observer: |i32| void) { observer(7); observer(9); }
+        }
+        fun pump<T: Json, F: Feed<T>>(feed: F, out: |str| void) {
+            feed.each(|value| out(value.to_json()))
+        }
+        fun main() { pump(Nums {}, |s| print(s)); }
+        "#,
+        "7\n9\n",
+    );
+}
+
+#[test]
+fn generic_source_element_serialized_in_a_sub_closure() {
+    // The reactive shape the fix unblocks: forward a `Source<T>`'s values, serialized
+    // inside the `sub` closure, where `T` appears only in the `S: Source<T>` bound.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::Json;
+        import std::reactive::{ Source, Signal, Subscription };
+        fun forward<T: Json, S: Source<T>>(source: S, out: |str| void): Subscription {
+            source.sub(|value| out(value.to_json()))
+        }
+        fun main() {
+            let s = Signal::new(7);
+            let _ = forward(s, |json| print(json));
+            s.set(9);
+        }
+        "#,
+        "7\n9\n",
+    );
+}
+
+#[test]
+fn generic_element_type_derived_from_a_parameterized_bound() {
+    // A struct payload `T` (not a scalar) crosses the same paths: the element flows
+    // through the closure and a `[derive(Json)]` `to_json`, and `T` is derived from the
+    // bound. Pins that the fix threads a concrete *aggregate* type, not just `i32`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::Json;
+        trait Feed<T> { fun each(self, observer: |T| void); }
+        [derive(Json)]
+        struct Point { x: i32, y: i32 }
+        struct Points {}
+        impl Points with Feed<Point> {
+            fun each(self, observer: |Point| void) { observer(Point { x = 1, y = 2 }); }
+        }
+        fun dump<T: Json, F: Feed<T>>(feed: F) {
+            feed.each(|point| print(point.to_json()))
+        }
+        fun main() { dump(Points {}); }
+        "#,
+        "{\"x\":1,\"y\":2}\n",
+    );
+}
+
+#[test]
+fn generic_bound_derivation_through_a_method_call() {
+    // The same fix on the *method* path (`bind_method_own_generics`): a struct method
+    // `<T: Json, S: Source<T>>` whose `T` appears only in the bound, serializing the
+    // element in a `sub` closure. Called as `sink.forward(signal, ..)`, `T` is derived
+    // from the concrete signal's `Source` impl — the shape `examples/rpc`'s `expose` uses.
+    // The source argument is given a resolved type (see the `#[ignore]`d test below for
+    // the inferred-type edge the method path doesn't yet handle).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::Json;
+        import std::reactive::{ Source, Signal, Subscription };
+        struct Sink {}
+        impl Sink {
+            fun forward<T: Json, S: Source<T>>(self, source: S, out: |str| void): Subscription {
+                source.sub(|value| out(value.to_json()))
+            }
+        }
+        fun main() {
+            let s: Signal<i32> = Signal::new(7);
+            let _ = Sink {}.forward(s, |json| print(json));
+            s.set(9);
+        }
+        "#,
+        "7\n9\n",
+    );
+}
+
+#[test]
+#[ignore = "the method path derives a generic from a parameterized bound only when the \
+            argument's type is already resolved; an inferred argument (`let s = \
+            Signal::new(7)`, no annotation) resolves after the call is analyzed, so the \
+            derivation isn't retried and `T` stays abstract. The free-function path (which \
+            defers on unresolved arguments) handles this; the method path does not yet."]
+fn method_bound_derivation_with_an_inferred_argument_type() {
+    // Same as `generic_bound_derivation_through_a_method_call`, but the source is inferred
+    // (no `: Signal<i32>` annotation). Un-ignore when the method resolution defers on an
+    // unresolved bound-owner and re-derives once it lands.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::Json;
+        import std::reactive::{ Source, Signal, Subscription };
+        struct Sink {}
+        impl Sink {
+            fun forward<T: Json, S: Source<T>>(self, source: S, out: |str| void): Subscription {
+                source.sub(|value| out(value.to_json()))
+            }
+        }
+        fun main() {
+            let s = Signal::new(7);
+            let _ = Sink {}.forward(s, |json| print(json));
+            s.set(9);
+        }
+        "#,
+        "7\n9\n",
+    );
+}

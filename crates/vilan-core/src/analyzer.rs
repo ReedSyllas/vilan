@@ -3280,6 +3280,17 @@ impl<'src> Analyzer<'src> {
     /// itself. Empty if the parameter is unconstrained or its bounds are
     /// unresolved/non-trait. Must be called in `build()`, once types resolve.
     fn generic_bound_trait_ids(&self, constraint_id: TypeId) -> Vec<Id> {
+        self.generic_bound_traits(constraint_id)
+            .into_iter()
+            .map(|(trait_id, _)| trait_id)
+            .collect()
+    }
+
+    /// The bound traits of a generic parameter as `(trait id, trait arguments)` — like
+    /// [`generic_bound_trait_ids`], but keeping each parameterized bound's arguments
+    /// (`F: Feed<T>` -> `[(feed_id, [T])]`), so a method call on the parameter can
+    /// substitute the trait's parameters with the caller's concrete arguments.
+    fn generic_bound_traits(&self, constraint_id: TypeId) -> Vec<(Id, Vec<TypeId>)> {
         let bound_type_ids = self
             .generic_bounds
             .get(&constraint_id)
@@ -3288,7 +3299,7 @@ impl<'src> Analyzer<'src> {
         bound_type_ids
             .iter()
             .filter_map(|type_id| match type_id.get_type(self) {
-                Type::Trait(trait_id, _) => Some(trait_id),
+                Type::Trait(trait_id, arguments) => Some((trait_id, arguments)),
                 _ => None,
             })
             .collect()
@@ -5144,6 +5155,10 @@ impl<'src> Analyzer<'src> {
                 }
             }
         }
+        // An own generic that appears only in another own generic's parameterized bound
+        // (`m<T, S: Source<T>>(source: S)`): recover `T` from the concrete `S`'s impl,
+        // the same as the free-function path in `resolve_call_subject`.
+        self.derive_generics_from_bounds(&own_generics, &own_generics, substitution);
     }
 
     fn infer_closure_args_against_params(
@@ -6023,6 +6038,49 @@ impl<'src> Analyzer<'src> {
             }
         }
         None
+    }
+
+    /// Binds a generic that appears only in another generic's *parameterized bound*
+    /// (`S: Source<T>`), once that other generic is bound to a concrete type — recovering
+    /// the bound's arguments from the concrete type's impl (`Signal<i32>: Source<i32>`
+    /// binds `T = i32`). Without this the inner generic stays abstract and a call
+    /// monomorphizes to the empty abstract method (a `to_json` inside a `|T| ..` closure
+    /// yields `undefined`). `bound_owners` are the constraints whose bounds to inspect;
+    /// only bindings for a constraint in `record` are kept (so a method call binds only
+    /// its own generics, not the enclosing scope's).
+    fn derive_generics_from_bounds(
+        &mut self,
+        bound_owners: &[TypeId],
+        record: &[TypeId],
+        substitution: &mut SubstitutionContext,
+    ) {
+        for owner in bound_owners {
+            let Some(concrete_id) = substitution.get(owner).copied() else {
+                continue;
+            };
+            let concrete = concrete_id.get_type(self);
+            for (trait_id, trait_arguments) in self.generic_bound_traits(*owner) {
+                if trait_arguments.is_empty() {
+                    continue;
+                }
+                let Some(impl_arguments) = self.trait_args_for(&concrete, trait_id) else {
+                    continue;
+                };
+                for (trait_argument, impl_argument) in trait_arguments.iter().zip(impl_arguments) {
+                    let trait_argument_type = trait_argument.get_type(self);
+                    let impl_argument_type = impl_argument.get_type(self);
+                    if let Some((_, bindings)) =
+                        self.reconcile_type(&trait_argument_type, &impl_argument_type, substitution)
+                    {
+                        for (bound_constraint, bound_type) in bindings {
+                            if record.contains(&bound_constraint) {
+                                substitution.insert(bound_constraint, bound_type);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Expands a mapped tuple type whose source is concrete (`(U in (A,B): F<U>)`
@@ -6917,6 +6975,15 @@ impl<'src> Analyzer<'src> {
                             }
                         }
                     }
+                    // Bind a generic that appears only in another parameter's
+                    // *parameterized bound* (`fun f<T, F: Feed<T>>(feed: F)`): once `F`
+                    // is bound to a concrete type, recover `T` from that type's `Feed`
+                    // impl (`Nums: Feed<i32>` binds `T = i32`).
+                    self.derive_generics_from_bounds(
+                        &generic_parameter_constraint_ids,
+                        &generic_parameter_constraint_ids,
+                        &mut substitution_context,
+                    );
                     self.wire_call(
                         call_id,
                         subject_id,
@@ -7131,17 +7198,45 @@ impl<'src> Analyzer<'src> {
                 }
             }
             Type::Generic(constraint_id) => {
-                let bound_trait_ids = self.generic_bound_trait_ids(*constraint_id);
-                if bound_trait_ids.is_empty() {
+                let bound_traits = self.generic_bound_traits(*constraint_id);
+                if bound_traits.is_empty() {
                     match constraint_id.get_type(self) {
                         Type::Unresolved => MethodLookup::Defer,
                         _ => MethodLookup::NotCallable,
                     }
                 } else {
                     // Search every bound trait (`T: A + B`) for the method.
-                    let member = bound_trait_ids
-                        .iter()
-                        .find_map(|trait_id| self.method_member_in_trait(*trait_id, member_name));
+                    let mut member = None;
+                    for (trait_id, trait_arguments) in &bound_traits {
+                        let Some(found_member) =
+                            self.method_member_in_trait(*trait_id, member_name)
+                        else {
+                            continue;
+                        };
+                        member = Some(found_member);
+                        // A parameterized bound (`F: Feed<T>`) substitutes the trait's
+                        // parameters with the bound's arguments, so a method parameter
+                        // typed in the trait's terms (`each(observer: |T| ..)`) is typed
+                        // with the caller's `T` — and its constraints — rather than the
+                        // trait's abstract parameter. Without this, a closure argument's
+                        // parameter loses its bound and a trait-method call on it fails
+                        // to resolve. (Mirrors the `Type::Trait` arm above.)
+                        if !trait_arguments.is_empty() {
+                            let parameter_ids = self
+                                .traits
+                                .get(trait_id)
+                                .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
+                                .unwrap_or_default();
+                            let substitution: SubstitutionContext = parameter_ids
+                                .into_iter()
+                                .zip(trait_arguments.clone())
+                                .collect();
+                            if !substitution.is_empty() {
+                                self.method_call_substitution.insert(id, substitution);
+                            }
+                        }
+                        break;
+                    }
                     // The member may be an abstract (bodyless) required method, so
                     // record the call for codegen to re-dispatch to the concrete
                     // type `T` is bound to at each monomorphization.
