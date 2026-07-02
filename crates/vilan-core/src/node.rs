@@ -57,6 +57,11 @@ pub enum ExternBinding<'src> {
     Set {
         symbol: &'src str,
     },
+    // `[extern(new, "TextDecoder")]` — `new symbol(args)`: construct a host class
+    // instance (host constructors reject a plain call).
+    New {
+        symbol: &'src str,
+    },
 }
 
 #[derive(Debug)]

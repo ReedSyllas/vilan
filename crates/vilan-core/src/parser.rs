@@ -47,6 +47,7 @@ fn extern_binding_from_args<'src>(args: &[ExternArg<'src>]) -> ExternBinding<'sr
         },
         [Word("get"), Text(symbol)] => ExternBinding::Get { symbol },
         [Word("set"), Text(symbol)] => ExternBinding::Set { symbol },
+        [Word("new"), Text(symbol)] => ExternBinding::New { symbol },
         // A malformed attribute (author error) lowers to an empty global symbol.
         _ => ExternBinding::Function {
             module: None,

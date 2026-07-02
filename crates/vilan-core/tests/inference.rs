@@ -2697,6 +2697,73 @@ fn rpc_rejects_a_missing_return() {
 }
 
 #[test]
+fn a_discarded_async_block_still_runs() {
+    // `async { .. }` is an *invoked* async arrow: its body starts executing
+    // immediately (up to the first await), so it is effectful even when the
+    // promise is discarded. The transformer's side-effect analysis used to
+    // classify it as pure and elide the whole statement — `let _ = async { pump
+    // loop }` silently vanished from codegen (found via SplitDuplex's pump).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let _ = async {
+                print("ran");
+            };
+            print("after");
+        }
+        "#,
+        "ran\nafter\n",
+    );
+}
+
+#[test]
+fn a_parenthesized_type_is_grouping_not_a_tuple() {
+    // `(T)` in type position is grouping, not a one-tuple — required to write a
+    // closure-typed closure parameter (`|(|| void)| void`, the host-Promise
+    // executor shape `std::time::sleep` uses). The inner closure is passed AND
+    // called through the parenthesized annotation.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun run_with(callback: |(|| void)| void) {
+            callback(|| print("called"));
+        }
+        fun main() {
+            run_with(|done: || void| {
+                done();
+            });
+        }
+        "#,
+        "called\n",
+    );
+}
+
+#[test]
+#[ignore = "pre-existing deferral gap (independent of the `(T)` transparency fix — bug C′ \
+            covered unknown-closure-parameter *arguments* and method *receivers*): a free \
+            call whose SUBJECT is an unannotated closure parameter (`|done| { done(); }`) \
+            resolves before the parameter's type lands and fails with `cannot call a \
+            non-function value` instead of deferring. Annotating the parameter \
+            (`|done: || void|`) works."]
+fn calling_an_unannotated_closure_parameter_defers() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun run_with(callback: |(|| void)| void) {
+            callback(|| print("called"));
+        }
+        fun main() {
+            run_with(|done| {
+                done();
+            });
+        }
+        "#,
+        "called\n",
+    );
+}
+
+#[test]
 fn doc_hidden_method_stays_callable() {
     // `[doc(hidden)]` is tooling-only: completion omits it, resolution doesn't.
     assert_compiles_and_runs(

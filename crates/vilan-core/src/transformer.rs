@@ -517,6 +517,10 @@ impl<'src> Transformer<'src> {
     fn expr_has_side_effects(&self, expr_id: Id) -> bool {
         match self.program.entity_map.get(&expr_id) {
             Some(Expr::Call(_)) | Some(Expr::Await(_)) | Some(Expr::Assignment(_, _)) => true,
+            // An `async { .. }` block is an *invoked* async arrow — it starts
+            // executing its body immediately, so it is effectful even when its
+            // promise is discarded (`let _ = async { pump loop }`).
+            Some(Expr::Async(_)) => true,
             Some(Expr::Binary(_, lhs, rhs)) => {
                 self.expr_has_side_effects(*lhs) || self.expr_has_side_effects(*rhs)
             }
@@ -1769,6 +1773,11 @@ impl<'src> Transformer<'src> {
                     Box::new(js::Node::Property(Box::new(receiver), symbol.to_string())),
                     Box::new(value),
                 )
+            }
+            // `new Symbol(args)` — the callee renders verbatim, and an extern is
+            // only ever emitted as a direct call, so the textual form is exact.
+            ExternBinding::New { symbol } => {
+                js::Node::Call(Box::new(js::Node::Local(format!("new {symbol}"))), args)
             }
         }
     }

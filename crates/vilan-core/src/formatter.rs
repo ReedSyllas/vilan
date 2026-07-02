@@ -644,6 +644,11 @@ impl<'src> Printer<'src> {
                 self.out.push_str(symbol);
                 self.out.push('"');
             }
+            ExternBinding::New { symbol } => {
+                self.out.push_str("new, \"");
+                self.out.push_str(symbol);
+                self.out.push('"');
+            }
             ExternBinding::Get { symbol } => {
                 self.out.push_str("get, \"");
                 self.out.push_str(symbol);

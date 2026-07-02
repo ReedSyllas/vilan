@@ -5248,6 +5248,11 @@ impl<'src> Analyzer<'src> {
                 ));
                 None
             }
+            // `(T)` is grouping, not a one-tuple — it types as the inner `T`
+            // (needed to write a closure-typed closure parameter: `|(|| void)| void`).
+            Node::Tuple(types) if types.len() == 1 => {
+                return self.walk_type_node(&types[0], scope_id);
+            }
             Node::Tuple(types) => Some(Type::Tuple(
                 types
                     .iter()
