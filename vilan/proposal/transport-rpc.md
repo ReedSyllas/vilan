@@ -28,12 +28,12 @@ today; what's left is to settle *how* one is meant to use it.
 
 ## 2. The pieces
 
-| Piece | Role | Form |
-|---|---|---|
-| **Codec** | value ⇆ bytes — the *format* | a `trait` — JSON default; binary later |
-| **Transport** | moves frames over the wire — a dumb pipe | a `trait` — request/response (HTTP) or **duplex** (WebSocket) |
-| **Protocol** | the *semantics* over a transport + codec | **RPC** (request/response) and **Reactive** (pub/sub) — siblings |
-| **Service** | the *server* surface; the client requestor is a generated projection of it (two signatures — §4) | a hand-writable foundation (`call` + `Dispatcher`), optionally sugared by a `[service(Client)]` struct (`[rpc]` methods + `[expose]` signals) |
+| Piece         | Role                                                                                             | Form                                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Codec**     | value ⇆ bytes — the *format*                                                                     | a `trait` — JSON default; binary later                                                                                                        |
+| **Transport** | moves frames over the wire — a dumb pipe                                                         | a `trait` — request/response (HTTP) or **duplex** (WebSocket)                                                                                 |
+| **Protocol**  | the *semantics* over a transport + codec                                                         | **RPC** (request/response) and **Reactive** (pub/sub) — siblings                                                                              |
+| **Service**   | the *server* surface; the client requestor is a generated projection of it (two signatures — §4) | a hand-writable foundation (`call` + `Dispatcher`), optionally sugared by a `[service(Client)]` struct (`[rpc]` methods + `[expose]` signals) |
 
 The stack composes bottom-up: a **codec** turns values into bytes, a **transport** moves
 those bytes as frames, and a **protocol** layers the *meaning* on top — request/response
@@ -582,8 +582,14 @@ paradigm needs:
 - **`[derive(Wire)]`** — a new derive: the all-fields-Wire check (the §3 rule, the safety
   boundary) plus the encode/decode glue against the `Serializer` visitor (§6). A *derive over
   a struct/enum* — squarely in the shape `expand_derives` already handles.
-- **`[rpc]` attribute + signature check** — mark a method exposed and verify its
-  parameters/return are Wire-compatible. A focused analyzer check.
+- **`[rpc]` + `[expose]` attributes + signature checks — ✅ shipped (2026-07-02).** `[rpc]`
+  marks a method callable over the wire; every non-`self` parameter and the return must be
+  Wire (checked with a clear, spanned diagnostic; a typeless parameter is rejected — the
+  dispatcher decodes at declared types). `[expose]` marks a struct field observable by the
+  client; it must be a `Signal` of a Wire element. Both are syntactic checks over the same
+  `is_wire_type` as `[derive(Wire)]` (trait-satisfaction is unsound for containers), collected
+  during the walk and validated once all modules' Wire names are known. Inert markers until
+  `[service(Client)]` generation consumes them.
 - **`[service]` generation** — generate the server dispatcher + client stub from a
   `[service(Client)]` struct's `[rpc]` methods + `[expose]` fields (§4.2). This is generation *over a struct+impl*, beyond today's
   struct/enum derives — the one genuinely new piece of codegen — and resolves Q1. It is the
@@ -635,6 +641,17 @@ paradigm needs:
 5. **Reactive north star — `ReactiveProtocol`** (L) — the `Source`/`Signal` split, the
    capability table (export/import `Source`s by id), and the subscribe/update/unsubscribe frame
    protocol over the duplex transport (§8). The capstone.
+6. **Validation: example apps + benchmarks** (M; agreed 2026-07-02) — build/update the example
+   projects on the finished stack. Headline: a **todo app with server-side data storage**
+   (browser client ↔ server over HTTP RPC), whose milestone is **realtime sync over WebSocket** —
+   multiple sessions connected and subscribed to the todo list, every mutation flowing to all of
+   them through the reactive protocol + wire turn. Plus **network benchmarks** (throughput,
+   frames-per-mutation / coalescing efficiency, payload sizes — JSON vs the later binary codec)
+   so the transport and batching claims are measured, not asserted.
+
+The agreed build order within phases 2–3 (2026-07-02): the `[rpc]`/`[expose]` checks first, then
+the `[trait_only]`/`[doc(hidden)]` hygiene attributes (§3.2), then `[service(Client)]`
+generation, then the real transports (phase 4), then phase 6's apps + benchmarks.
 
 A **binary codec** (and the byte-array type it needs, §10) is an additive slice that can
 land any time after Phase 2 — the `Codec`/`Serializer` seam is designed for it; JSON is the
@@ -697,10 +714,6 @@ the reactive protocol requires the duplex shape (a compile error otherwise). A `
 is a *capability*, exported as a `ChannelId` into a per-connection table (Cap'n Proto style) so
 the codec stays pure. `Result<T, RpcError>` on the client, applied by codegen;
 effect-polymorphic async (auto-await through the indirect transport call); peer-symmetric.
-**Addressing is programmatic** (a transport is constructed with its endpoint; how the string is
-loaded is the developer's business — no library config surface). **Versioning:** v1 relies on
-single-workspace builds + clean runtime errors; v2 adds a generated contract hash with
-`[service]` generation (Q6).
 
 **Open questions** (Q1–Q9 settled; Q10 parked on a general `?`/try operator; kept numbered so
 cross-references hold):

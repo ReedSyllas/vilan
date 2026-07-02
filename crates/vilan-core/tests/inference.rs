@@ -2300,3 +2300,106 @@ fn wire_rejects_a_list_of_non_wire() {
         "#,
     );
 }
+
+// === [rpc] / [expose] — the service-surface checks (transport-rpc.md §4.2) ========
+
+#[test]
+fn rpc_accepts_a_wire_signature() {
+    // An `[rpc]` method whose whole signature is Wire compiles: multiple parameters,
+    // a container (`List<str>`), a nested `[derive(Wire)]` struct, an `Option` return —
+    // and `self` is exempt from the check.
+    assert_compiles(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        [derive(Wire)]
+        struct Pt { x: i32 }
+        struct Service {}
+        impl Service {
+            [rpc] fun locate(self, id: i32, tags: List<str>, at: Pt): Option<Pt> {
+                Some(at)
+            }
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn rpc_rejects_a_non_wire_parameter() {
+    // The exposure rule: an `[rpc]` method cannot take a non-Wire type — the
+    // dispatcher would have to decode it off the wire.
+    assert_fails(
+        r#"
+        struct Password { hash: str }
+        struct Service {}
+        impl Service {
+            [rpc] fun store(self, secret: Password) {}
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn rpc_rejects_a_non_wire_return() {
+    // ...nor return one — the reply crosses the wire.
+    assert_fails(
+        r#"
+        struct Password { hash: str }
+        struct Service {}
+        impl Service {
+            [rpc] fun leak(self): Password {
+                Password { hash = "x" }
+            }
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn expose_accepts_a_signal_of_wire() {
+    // An `[expose]`d field must be a `Signal` of a Wire element — a scalar and a
+    // `[derive(Wire)]` struct both qualify.
+    assert_compiles(
+        r#"
+        import std::reactive::Signal;
+        [derive(Wire)]
+        struct Pt { x: i32 }
+        struct Session {
+            [expose] status: Signal<str>,
+            [expose] cursor: Signal<Pt>,
+            hidden: i32,
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn expose_rejects_a_non_signal_field() {
+    // Exposure is observation: a plain value has nothing to subscribe to.
+    assert_fails(
+        r#"
+        struct Session {
+            [expose] name: str,
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn expose_rejects_a_signal_of_non_wire() {
+    // The observed values cross the wire, so the element must be Wire.
+    assert_fails(
+        r#"
+        import std::reactive::Signal;
+        struct Password { hash: str }
+        struct Session {
+            [expose] secret: Signal<Password>,
+        }
+        fun main() {}
+        "#,
+    );
+}

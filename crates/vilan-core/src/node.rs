@@ -76,6 +76,10 @@ pub struct Func<'src> {
     // Declared `[must_use]`: dropping a call's result (a bare statement that
     // discards it) is a warning.
     pub must_use: bool,
+    // Declared `[rpc]`: callable over the wire as part of a service's surface.
+    // Its parameters and return must be Wire types — checked by the analyzer
+    // (`proposal/transport-rpc.md` §4.2).
+    pub rpc: bool,
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<Parameter<'src>>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
@@ -270,7 +274,7 @@ pub enum Node<'src> {
         Spanned<&'src str>,
         Option<GenericParameters<'src>>,
         bool,
-        Option<Spanned<Vec<Spanned<(&'src str, Option<Spanned<Self>>)>>>>,
+        Option<Spanned<Vec<Spanned<StructField<'src>>>>>,
     ),
     StructInitializer(
         &'src str,
@@ -301,6 +305,11 @@ pub enum Node<'src> {
 // One enum variant: name, the types of its optional data, and an optional
 // explicit integer discriminant (`Less = -1`).
 pub type EnumVariant<'src> = (&'src str, Vec<Spanned<Node<'src>>>, Option<i64>);
+
+// One struct field: its name (with the name's own span), optional type
+// annotation, and whether it is `[expose]`d — observable by a service's client
+// as a mirrored `Source` (`proposal/transport-rpc.md` §4.2).
+pub type StructField<'src> = (Spanned<&'src str>, Option<Spanned<Node<'src>>>, bool);
 
 // A match-leg pattern.
 #[derive(Debug)]

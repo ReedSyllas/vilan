@@ -155,17 +155,20 @@ impl AccountsClient<type T> {
 // handlers, so its state persists across the connection's calls. Mutable state lives in
 // `Signal`/`Shared` handles — the struct is a lightweight handle, and a plain field
 // write would only mutate a closure's *copy* (value semantics); the shared cells are
-// what make the state one. `status` is the would-be `[expose]`d field, mirrored to the
-// client via the reactive protocol (§8); `user_id` is private — it never crosses.
+// what make the state one. `status` is `[expose]`d — the compiler checks it is a
+// `Signal` of a Wire type (only observable state can be exposed), and the client
+// mirrors it via the reactive protocol (§8); `user_id` is private — it never crosses.
 struct Session {
-	status: Signal<str>,
+	[expose] status: Signal<str>,
 	user_id: Shared<Option<i32>>,
 }
 
 impl Session {
-	// A would-be `[rpc]` method. Verification happens entirely server-side (`Password`
+	// An `[rpc]` method — callable over the wire; the compiler checks its parameters
+	// and return are Wire. Verification happens entirely server-side (`Password`
 	// never crosses); on success the session records who is logged in and flips the
 	// exposed `status` — which the wire turn delivers alongside the reply.
+	[rpc]
 	fun login(self, username: str, password: str): bool {
 		match find_user(username) {
 			Some(let user) => {
@@ -183,6 +186,7 @@ impl Session {
 
 	// Manual auth (Q4): ordinary body logic over the state `login` populated — no
 	// `[rpc(auth)]` attribute. Unauthenticated is an application-level `None`.
+	[rpc]
 	fun whoami(self): Option<WireUser> {
 		match self.user_id.read() {
 			Some(let id) => match lookup_user(id) {

@@ -755,6 +755,14 @@ where
         .labelled("must_use attribute")
         .boxed();
 
+    // `[rpc]` — the method is callable over the wire (a service-surface marker;
+    // its signature must be Wire, checked by the analyzer).
+    let rpc_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("rpc") => () }.labelled("`rpc`"))
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("rpc attribute")
+        .boxed();
+
     let function = extern_attribute
         .or_not()
         .then(
@@ -762,6 +770,7 @@ where
                 .or_not()
                 .map(|must_use| must_use.is_some()),
         )
+        .then(rpc_attribute.or_not().map(|rpc| rpc.is_some()))
         .then(just(Token::Async).or_not().map(|async_| async_.is_some()))
         .then(
             just(Token::External)
@@ -848,7 +857,7 @@ where
                     (
                         (
                             (
-                                ((((extern_binding, must_use), is_async), external), name),
+                                (((((extern_binding, must_use), rpc), is_async), external), name),
                                 generic_parameters,
                             ),
                             parameters,
@@ -867,6 +876,7 @@ where
                         external,
                         extern_binding,
                         must_use,
+                        rpc,
                         generic_parameters,
                         parameters,
                         return_type,
@@ -884,9 +894,20 @@ where
         .ignore_then(expression.clone())
         .map_with(|x, e| (Node::FuncReturn(Box::new(x)), e.span()));
 
-    let struct_field = identifier
+    // `[expose]` — the field is observable by the service's client as a mirrored
+    // `Source` (must be a `Signal` of a Wire type, checked by the analyzer).
+    let expose_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("expose") => () }.labelled("`expose`"))
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("expose attribute")
+        .boxed();
+
+    let struct_field = expose_attribute
+        .or_not()
+        .map(|expose| expose.is_some())
+        .then(identifier.map_with(|name, e| (name, e.span())))
         .then(just(Token::Op(":")).ignore_then(type_.clone()).or_not())
-        .map_with(|(name, type_), e| ((name, type_), e.span()));
+        .map_with(|((exposed, name), type_), e| ((name, type_, exposed), e.span()));
 
     let struct_ = just(Token::External)
         .or_not()

@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::error::Error;
 use crate::id::Id;
 use crate::node::{
-    BinaryOp, Convention, ExternBinding, GenericParameters, ImportBranch, Node, NodeIfBranch,
+    BinaryOp, Convention, ExternBinding, Func, GenericParameters, ImportBranch, Node, NodeIfBranch,
     NodeList, Pattern,
 };
 use crate::span::{Span, Spanned};
@@ -195,6 +195,9 @@ pub struct Function<'src> {
     pub returns_mut_view: bool,
     /// Declared `[must_use]`: dropping a call's result is a warning.
     pub must_use: bool,
+    /// Declared `[rpc]`: callable over the wire as part of a service's surface
+    /// (its signature is Wire-checked; `[service(Client)]` generation reads it).
+    pub rpc: bool,
 }
 
 #[derive(Debug)]
@@ -653,6 +656,16 @@ pub struct Scope<'src> {
 /// member as `(label, type node, span)` (see `check_wire_boundary`).
 type WireTypeCheck<'src> = (&'src str, Vec<(String, &'src Node<'src>, Span)>);
 
+/// An `[rpc]` method awaiting its Wire-signature check: its name, plus each
+/// parameter and the return as `(label, declared type node, span)` — `None` for
+/// a parameter that declares no type (see `check_rpc_signatures`).
+type RpcSignatureCheck<'src> = (&'src str, Vec<(String, Option<&'src Node<'src>>, Span)>);
+
+/// An `[expose]`d struct field awaiting its `Signal`-of-Wire check: a label
+/// naming the struct + field, its declared type node (`None` if missing), and
+/// the span to report at (see `check_expose_fields`).
+type ExposeFieldCheck<'src> = (String, Option<&'src Node<'src>>, Span);
+
 #[derive(Debug)]
 pub struct Analyzer<'src> {
     assignment_values: IndexMap<Id, Vec<Id>>,
@@ -666,6 +679,12 @@ pub struct Analyzer<'src> {
     /// walked, validated once `wire_names` is complete: `(type name, [(member
     /// label, member type node, span)])`.
     wire_types_to_check: Vec<WireTypeCheck<'src>>,
+    /// `[rpc]` methods awaiting the Wire-signature check (`check_rpc_signatures`),
+    /// collected as each is walked, validated once `wire_names` is complete.
+    rpc_signatures_to_check: Vec<RpcSignatureCheck<'src>>,
+    /// `[expose]`d fields awaiting the `Signal`-of-Wire check
+    /// (`check_expose_fields`), collected at the struct walk.
+    expose_fields_to_check: Vec<ExposeFieldCheck<'src>>,
     /// Non-fatal diagnostics (e.g. an unused `[must_use]` result). Rendered as
     /// warnings; they do not block codegen.
     warnings: Vec<Error>,
@@ -918,6 +937,8 @@ impl<'src> Analyzer<'src> {
             diagnostics: Vec::new(),
             wire_names: HashSet::new(),
             wire_types_to_check: Vec::new(),
+            rpc_signatures_to_check: Vec::new(),
+            expose_fields_to_check: Vec::new(),
             warnings: Vec::new(),
             entity_id: 0,
             enums: IndexMap::new(),
@@ -1060,7 +1081,7 @@ impl<'src> Analyzer<'src> {
                 self.wire_names.insert(name.0);
                 let mut members = Vec::new();
                 for field in &body.0 {
-                    let field_name = field.0.0;
+                    let field_name = field.0.0.0;
                     if let Some((type_node, type_span)) = field.0.1.as_ref() {
                         members.push((format!("field `{field_name}`"), type_node, *type_span));
                     }
@@ -1122,6 +1143,119 @@ impl<'src> Analyzer<'src> {
                              which is not Wire — every field of a Wire type must itself be Wire \
                              (a scalar, `str`, `bool`, `List`/`Option` of Wire, or another \
                              `[derive(Wire)]` type)"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Record an `[rpc]` method's declared signature for the Wire-signature
+    /// check: each non-`self` parameter's type node and the return type node,
+    /// validated once `wire_names` is complete (`check_rpc_signatures`).
+    fn collect_rpc_signature(&mut self, function: &'src Func<'src>) {
+        let mut members = Vec::new();
+        for parameter in &function.parameters.0 {
+            let parameter_name = match &parameter.0 {
+                Pattern::Binding(name, _) => name,
+                _ => "_",
+            };
+            if parameter_name == "self" {
+                continue;
+            }
+            match parameter.1.as_deref() {
+                Some(type_node) => members.push((
+                    format!("parameter `{parameter_name}`"),
+                    Some(&type_node.0),
+                    type_node.1,
+                )),
+                None => members.push((format!("parameter `{parameter_name}`"), None, parameter.3)),
+            }
+        }
+        if let Some(return_type) = function.return_type.as_deref() {
+            members.push((
+                "return type".to_string(),
+                Some(&return_type.0),
+                return_type.1,
+            ));
+        }
+        self.rpc_signatures_to_check
+            .push((function.name.0, members));
+    }
+
+    /// Enforce the `[rpc]` Wire-signature rule (`proposal/transport-rpc.md`
+    /// §4.2): every parameter and the return of an `[rpc]` method must be Wire —
+    /// the dispatcher decodes arguments at their declared types, and the reply
+    /// crosses the wire. Runs after all modules are walked.
+    fn check_rpc_signatures(&mut self) {
+        let checks = std::mem::take(&mut self.rpc_signatures_to_check);
+        for (method_name, members) in checks {
+            for (label, type_node, span) in members {
+                match type_node {
+                    Some(type_node) if self.is_wire_type(type_node) => {}
+                    Some(type_node) => {
+                        let rendered = render_type(type_node);
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!(
+                                "{label} of `[rpc]` method `{method_name}` is `{rendered}`, \
+                                 which is not Wire — every `[rpc]` parameter and return must be \
+                                 Wire (a scalar, `str`, `bool`, `List`/`Option` of Wire, or a \
+                                 `[derive(Wire)]` type)"
+                            ),
+                        });
+                    }
+                    None => {
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!(
+                                "{label} of `[rpc]` method `{method_name}` must declare a Wire \
+                                 type — the dispatcher decodes each argument at its declared type"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enforce the `[expose]` rule (`proposal/transport-rpc.md` §4.2): an
+    /// exposed field must be a `Signal` of a Wire type — exposure is
+    /// observation, and the observed values cross the wire. Runs after all
+    /// modules are walked.
+    fn check_expose_fields(&mut self) {
+        let checks = std::mem::take(&mut self.expose_fields_to_check);
+        for (label, type_node, span) in checks {
+            let signal_element = match type_node {
+                Some(Node::AccessorWithGenerics("Signal", arguments)) if arguments.0.len() == 1 => {
+                    Some(&arguments.0[0].0)
+                }
+                _ => None,
+            };
+            match signal_element {
+                Some(element) if self.is_wire_type(element) => {}
+                Some(element) => {
+                    let rendered = render_type(element);
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "{label} is `[expose]`d, but its element `{rendered}` is not Wire — \
+                             an exposed signal's values cross the wire, so the element must be \
+                             Wire (a scalar, `str`, `bool`, `List`/`Option` of Wire, or a \
+                             `[derive(Wire)]` type)"
+                        ),
+                    });
+                }
+                None => {
+                    let rendered = type_node
+                        .map(render_type)
+                        .unwrap_or_else(|| "_".to_string());
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "{label} is `[expose]`d, but its type `{rendered}` is not a \
+                             `Signal` — only observable state (`Signal<T>` with a Wire `T`) can \
+                             be exposed; a plain value has nothing to subscribe to"
                         ),
                     });
                 }
@@ -3890,8 +4024,14 @@ impl<'src> Analyzer<'src> {
                                 Some(Node::Reference(true, _))
                             ),
                             must_use: function.must_use,
+                            rpc: function.rpc,
                         },
                     );
+                    // An `[rpc]` method's declared signature must be Wire —
+                    // recorded now, checked once `wire_names` is complete.
+                    if function.rpc {
+                        self.collect_rpc_signature(function);
+                    }
                     Some(Expr::Function(id))
                 }
             }
@@ -4079,11 +4219,22 @@ impl<'src> Analyzer<'src> {
                 }
                 let mut fields = Vec::new();
                 for child in body.iter().flat_map(|body| &body.0) {
-                    let name = child.0.0;
-                    // The field's name sits at the start of its declaration span.
-                    let field_range = child.1.into_range();
-                    let name_span: Span =
-                        (field_range.start..field_range.start + name.len()).into();
+                    let (field_name, field_name_span) = child.0.0;
+                    // An `[expose]`d field must be a `Signal` of a Wire type —
+                    // recorded now, checked once every module's Wire names are
+                    // collected (`check_expose_fields`).
+                    if child.0.2 {
+                        self.expose_fields_to_check.push((
+                            format!("field `{field_name}` of struct `{name}`"),
+                            child.0.1.as_ref().map(|type_node| &type_node.0),
+                            child
+                                .0
+                                .1
+                                .as_ref()
+                                .map(|type_node| type_node.1)
+                                .unwrap_or(child.1),
+                        ));
+                    }
                     let type_id = child
                         .0
                         .1
@@ -4091,8 +4242,8 @@ impl<'src> Analyzer<'src> {
                         .map(|x| self.walk_type_node(x, body_scope_id))
                         .unwrap_or(Type::Unknown.get_type_id(self));
                     fields.push(Field {
-                        name,
-                        name_span,
+                        name: field_name,
+                        name_span: field_name_span,
                         type_id,
                     });
                 }
@@ -9760,7 +9911,7 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
         .0
         .iter()
         .map(|field| {
-            let field_name = field.0.0;
+            let field_name = field.0.0.0;
             let field_type = field
                 .0
                 .1
@@ -11031,6 +11182,8 @@ pub fn analyze<'src>(
     analyzer.check_invalidation();
     analyzer.check_reseat_escape();
     analyzer.check_wire_boundary();
+    analyzer.check_rpc_signatures();
+    analyzer.check_expose_fields();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

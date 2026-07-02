@@ -268,14 +268,17 @@ impl<'src> Printer<'src> {
                         self.out.push_str(" {");
                         self.indent += 1;
                         let mut prev_end = fields.1.into_range().start + 1;
-                        for ((field_name, field_type), span) in &fields.0 {
+                        for ((field_name, field_type, exposed), span) in &fields.0 {
                             let range = span.into_range();
                             let after_comments = self.flush_comments_before(range.start, prev_end);
                             if self.has_blank_between(after_comments, range.start) {
                                 self.blank_line();
                             }
                             self.line();
-                            self.out.push_str(field_name);
+                            if *exposed {
+                                self.out.push_str("[expose] ");
+                            }
+                            self.out.push_str(field_name.0);
                             if let Some(field_type) = field_type {
                                 self.out.push_str(": ");
                                 self.print_type(&field_type.0);
@@ -546,12 +549,21 @@ impl<'src> Printer<'src> {
         self.out.push('}');
     }
 
-    /// Prints a function declaration: its `[extern]` attribute (if any) on its own
-    /// line, then `[async ][external ]fun name[<…>](…)[: T][ borrows p]` followed
-    /// by the body block, or a `;` for a signature with no body.
+    /// Prints a function declaration: its `[extern]`/`[must_use]`/`[rpc]`
+    /// attributes (if any) each on their own line, then
+    /// `[async ][external ]fun name[<…>](…)[: T][ borrows p]` followed by the
+    /// body block, or a `;` for a signature with no body.
     fn print_func(&mut self, func: &Func<'src>) {
         if let Some(binding) = &func.extern_binding {
             self.print_extern_attribute(binding);
+            self.line();
+        }
+        if func.must_use {
+            self.out.push_str("[must_use]");
+            self.line();
+        }
+        if func.rpc {
+            self.out.push_str("[rpc]");
             self.line();
         }
         if func.is_async {
@@ -1349,7 +1361,9 @@ mod idempotency {
     }
 
     // A spread of std modules exercising functions, impls, traits, generics,
-    // enums with payloads, matches, closures, and `[extern]` bindings.
+    // enums with payloads, matches, closures, and `[extern]` bindings —
+    // `reactive.vl` also exercises `[must_use]` (which the formatter once
+    // dropped, tripping its safety check into a silent no-op).
     fixed_point_tests! {
         null_vl => "null.vl",
         boolean_vl => "boolean.vl",
@@ -1362,5 +1376,31 @@ mod idempotency {
         arena_vl => "arena.vl",
         shared_vl => "shared.vl",
         display_vl => "display.vl",
+        reactive_vl => "reactive.vl",
+    }
+
+    /// Attributes must be *retained*, not just idempotent — a formatter that
+    /// deterministically deleted an attribute would still be a fixed point, so
+    /// the retention is asserted directly. (Dropping one used to trip the
+    /// safety check, silently leaving the whole file unformatted.)
+    #[test]
+    fn attributes_round_trip() {
+        let source = "trait Source {\n\t[must_use]\n\tfun sub(self): i32;\n}\n\
+                      struct Sess {\n\t[expose] status: Signal<str>,\n\thidden: i32,\n}\n\
+                      impl Sess {\n\t[rpc]\n\tfun login(self, name: str): bool {\n\t\ttrue\n\t}\n}\n";
+        let formatted = format(source);
+        assert!(
+            formatted.contains("[must_use]"),
+            "must_use attribute lost:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("[expose] status"),
+            "expose attribute lost:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("[rpc]"),
+            "rpc attribute lost:\n{formatted}"
+        );
+        assert_fixed_point("attributes", source);
     }
 }

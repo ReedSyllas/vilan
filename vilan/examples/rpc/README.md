@@ -120,7 +120,9 @@ the turn's end via `transport.flush()`.
 `[service(Client)]` isn't implemented yet, so the demo writes out **exactly what it will
 generate**: a per-connection `Session` struct (the source of truth) and its *sibling* `Client`
 (the two-signature split made visible — `Session::login(..): bool` vs
-`Client::login(..): Result<bool, RpcError>`).
+`Client::login(..): Result<bool, RpcError>`). The `[rpc]` and `[expose]` **attributes are real
+and checked** (an `[rpc]` signature must be Wire; an `[expose]`d field must be a `Signal` of a
+Wire element) — generation is what's still to come, and it will consume these same markers.
 
 - **Per-connection state (Q9).** One `Session` is created "on connect"; the dispatcher's
   handlers capture it, so state persists across the connection's calls (`login` then `whoami`).
