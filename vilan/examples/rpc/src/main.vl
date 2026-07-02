@@ -17,6 +17,7 @@ import std::print;
 import std::json::{ Json, FromJson };
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
+import std::shared::Shared;
 import std::reactive::{ batch, Signal, Source };
 import pkg::rpc::{
 	Transport, LocalTransport, RpcRequest, RpcReply, RpcError,
@@ -39,6 +40,12 @@ impl Password {
 	// stored form is derived from the plaintext and never leaves the server.
 	fun new(plaintext: str): Password {
 		Password { hash = "sha256:" + plaintext }
+	}
+
+	// Server-side verification: the stored hash never leaves this type, let alone the
+	// server — comparison is the only operation exposed.
+	fun matches(self, plaintext: str): bool {
+		self.hash == "sha256:" + plaintext
 	}
 }
 
@@ -89,6 +96,15 @@ fun lookup_user(id: i32): Option<User> {
 	}
 }
 
+// Find a user by name — `login`'s lookup (a real database would index by username).
+fun find_user(username: str): Option<User> {
+	match username {
+		"ada" => lookup_user(1),
+		"bob" => lookup_user(2),
+		_ => None,
+	}
+}
+
 // The dispatcher: register each method's handler over the `Dispatcher` router (rpc.vl §4.1).
 // A handler decodes its arguments at their parameter type (`arg`), calls the impl, **projects
 // the domain result to its wire shape**, and encodes the reply (`reply`). Envelope decode/encode
@@ -128,6 +144,88 @@ impl AccountsClient<type T> {
 	}
 }
 
+// --- The [service] paradigm, by hand (proposal §4.2) --------------------------
+//
+// What `[service(Client)]` will generate, written out manually until the sugar ships: a
+// per-connection `Session` struct is the source of truth, and `Client` is its *sibling*
+// projection — the two-signature split made visible (`Session` methods return `T`;
+// `Client` methods return `Result<T, RpcError>`).
+
+// The per-connection session (Q9): created on connect, captured by the dispatcher's
+// handlers, so its state persists across the connection's calls. Mutable state lives in
+// `Signal`/`Shared` handles — the struct is a lightweight handle, and a plain field
+// write would only mutate a closure's *copy* (value semantics); the shared cells are
+// what make the state one. `status` is the would-be `[expose]`d field, mirrored to the
+// client via the reactive protocol (§8); `user_id` is private — it never crosses.
+struct Session {
+	status: Signal<str>,
+	user_id: Shared<Option<i32>>,
+}
+
+impl Session {
+	// A would-be `[rpc]` method. Verification happens entirely server-side (`Password`
+	// never crosses); on success the session records who is logged in and flips the
+	// exposed `status` — which the wire turn delivers alongside the reply.
+	fun login(self, username: str, password: str): bool {
+		match find_user(username) {
+			Some(let user) => {
+				if user.password.matches(password) {
+					self.user_id.write() = Some(user.id);
+					self.status.set("online");
+					true
+				} else {
+					false
+				}
+			},
+			None => false,
+		}
+	}
+
+	// Manual auth (Q4): ordinary body logic over the state `login` populated — no
+	// `[rpc(auth)]` attribute. Unauthenticated is an application-level `None`.
+	fun whoami(self): Option<WireUser> {
+		match self.user_id.read() {
+			Some(let id) => match lookup_user(id) {
+				Some(let user) => Some(user.to_wire()),
+				None => None,
+			},
+			None => None,
+		}
+	}
+}
+
+// The dispatcher `[service(Client)]` would generate: one route per `[rpc]` method, each
+// handler capturing the connection's session.
+fun session_dispatcher(session: Session): Dispatcher {
+	Dispatcher::new()
+		.on("login", |request| {
+			let username: str = arg(request, 0);
+			let password: str = arg(request, 1);
+			reply(session.login(username, password))
+		})
+		.on("whoami", |_| reply(session.whoami()))
+}
+
+// The client `[service(Client)]` would generate: a *sibling* of `Session`, not an impl
+// of anything it wrote — each `[rpc]` method is the `Result`-wrapped `call`, and the
+// `[expose]`d `status` surfaces as a read-only mirror (a §8 `RemoteSource`; observers
+// decode the JSON-encoded value at the concrete site — a typed wrapper is the sugar's
+// job).
+struct Client<T: Transport> {
+	transport: T,
+	status: RemoteSource,
+}
+
+impl Client<type T> {
+	fun login(self, username: str, password: str): Result<bool, RpcError> {
+		call(self.transport, "login", [username.to_json(), password.to_json()])
+	}
+
+	fun whoami(self): Result<Option<WireUser>, RpcError> {
+		call(self.transport, "whoami", [])
+	}
+}
+
 // --- Wiring + demo -----------------------------------------------------------
 
 fun main() {
@@ -147,6 +245,9 @@ fun main() {
 
 	// --- Reactive over a duplex transport -------------------------------------
 	reactive_demo();
+
+	// --- Per-connection state + manual auth + an exposed field ----------------
+	session_demo();
 }
 
 // The reactive north star (proposal §8), by hand: a server holds a `Signal<i32>` and
@@ -205,6 +306,56 @@ fun reactive_demo() {
 
 	subscription.dispose();   // stop observing; the server's forward is a no-op with no client
 	counter.set(99);          // no output — unsubscribed
+}
+
+// The session demo — the `[service]` paradigm end-to-end, by hand: per-connection state,
+// manual auth, and an exposed signal the client observes.
+fun session_demo() {
+	print("--- session: the [service] paradigm, by hand ---");
+
+	// Server, on connect: ONE session per connection; the dispatcher's handlers share its
+	// handles. The exposed `status` is exported under a channel id (§8) — the id is what
+	// a connect handshake would carry; in-process we just hand it over.
+	let session = Session { status = Signal::new("offline"), user_id = Shared::new(None) };
+	let rpc_transport = local_rpc(session_dispatcher(session).into_protocol());
+	let (client_end, server_end) = duplex_pair();
+	let status_channel = ReactiveServer::new(server_end).expose(session.status);
+
+	// Client: what `Client::connect` will assemble — the RPC transport plus a mirror for
+	// each exposed field.
+	let client = Client {
+		transport = rpc_transport,
+		status = ReactiveClient::new(client_end).source(status_channel),
+	};
+
+	// Observe the mirrored session state: "offline" now, "online" once login lands —
+	// delivered in the same wire turn as login's reply.
+	let watching = client.status.sub(|json| {
+		let s: str = str::from_json(json);
+		print(i"status = {s}");
+	});
+
+	show_whoami(client.whoami());               // manual auth refuses: not logged in
+	show_login(client.login("ada", "wrong"));   // bad password -> false, status unchanged
+	show_login(client.login("ada", "hunter2")); // -> true; "status = online" in the same turn
+	show_whoami(client.whoami());               // the session remembers -> ada (@ada)
+
+	watching.dispose();
+}
+
+fun show_login(result: Result<bool, RpcError>) {
+	match result {
+		Ok(let ok) => print(i"login -> {ok}"),
+		Err(let error) => print(i"login rpc error: {error.to_json()}"),
+	}
+}
+
+fun show_whoami(result: Result<Option<WireUser>, RpcError>) {
+	match result {
+		Ok(Some(let user)) => print(i"whoami -> {user.username} ({user.handle})"),
+		Ok(None) => print("whoami -> not logged in"),
+		Err(let error) => print(i"whoami rpc error: {error.to_json()}"),
+	}
 }
 
 fun show(result: Result<Option<WireUser>, RpcError>) {

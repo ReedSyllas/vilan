@@ -21,6 +21,13 @@ count = 2
 count = 10
 count = 16
 rpc add -> 16
+--- session: the [service] paradigm, by hand ---
+status = offline
+whoami -> not logged in
+login -> false
+status = online
+login -> true
+whoami -> ada (@ada)
 ```
 
 In-process, so it builds and runs today with **no network** — none of the Phase-0
@@ -55,7 +62,7 @@ The pieces of the proposal, bottom-up — a codec, transports, and protocols ove
 | **codec** (§6) | the `Json`/`FromJson` derives, used directly (frames are JSON `str`) |
 | **transport** (§5) | `trait Transport` (request/response) + `LocalTransport`; `trait DuplexTransport` + `DuplexEnd` / `duplex_pair` (full-duplex, in-process) |
 | **protocol** (§2) | `trait Protocol { receive }` — `RpcProtocol` (request/response) and `ReactiveServer`/`ReactiveClient` (pub/sub) all implement it |
-| **service** (§4.1, the *foundation*) | the ergonomic hand-written API the `[service]` sugar would generate: a `Dispatcher` of `[rpc]` handlers (`accounts_dispatcher()`, mounted via `into_protocol`), and the `AccountsClient` stub over the `call` helper |
+| **service** (§4.1 foundation + §4.2 by hand) | the ergonomic hand-written API the `[service]` sugar would generate: a `Dispatcher` of `[rpc]` handlers over the `call` helper (`accounts_dispatcher()` + `AccountsClient`), and the stateful pair — a per-connection `Session` and its sibling `Client` |
 | **the turn** (`reactive-batching.md`) | every inbound frame is handled in a `batch` (`local_rpc`, both duplex `on_frame`s) — a handler's signal writes coalesce into one `Update` per source, delivered with the reply |
 
 The client and server now go through the §4.1 **foundation** — `call<T>` collapses a client
@@ -107,6 +114,27 @@ duplex `on_frame`s). The demo shows all three behaviours:
 In-process the update lands just before the reply (delivery is synchronous); a buffering
 transport (WebSocket, plan phase 4) would flush the coalesced frames and the reply together at
 the turn's end via `transport.flush()`.
+
+## The session service (proposal §4.2, by hand)
+
+`[service(Client)]` isn't implemented yet, so the demo writes out **exactly what it will
+generate**: a per-connection `Session` struct (the source of truth) and its *sibling* `Client`
+(the two-signature split made visible — `Session::login(..): bool` vs
+`Client::login(..): Result<bool, RpcError>`).
+
+- **Per-connection state (Q9).** One `Session` is created "on connect"; the dispatcher's
+  handlers capture it, so state persists across the connection's calls (`login` then `whoami`).
+  Mutable state lives in `Signal`/`Shared` handles — closures capture a *copy* of the struct
+  (value semantics), so the shared cells are what make the state one.
+- **Manual auth (Q4).** `whoami` is ordinary body logic over the state `login` populated —
+  unauthenticated is an application-level `None` (`whoami -> not logged in`), no `[rpc(auth)]`
+  attribute. The `Password` check happens entirely server-side (`matches` is the only operation
+  the type exposes; the hash never leaves).
+- **An exposed field (`[expose]`, §8).** `Session.status` is exported under a channel id; the
+  `Client` carries a `RemoteSource` mirror for it. A successful login flips it — and the wire
+  turn delivers `status = online` in the same turn as `login -> true` (the failed login changes
+  nothing). Observers decode the JSON-encoded value at the concrete site; the typed wrapper is
+  the sugar's job.
 
 ## Quirks discovered
 
@@ -239,13 +267,14 @@ heterogeneous sources and vilan has no trait objects.
 
 The **data boundary, both transports, the codec, both protocols (RPC and reactive), the
 capability table, over-the-wire subscription, the wire turn (reactive batching — an RPC
-handler's writes coalescing with its reply), and the `Result`/`Option` error layering all work
+handler's writes coalescing with its reply), the per-connection session (state + manual auth +
+an exposed, client-mirrored signal), and the `Result`/`Option` error layering all work
 today** — the hand-written core is real, and the *paradigm* (a domain type, an explicit
 `to_wire` projection, a sensitive type that can't cross, a signal observed remotely) holds with
 today's features. The generic-dispatch cluster (B1) that P6 leaned on is now closed through the
 closure-capture case too (#5), so `expose` is generic over any `Source<T>`.
 
-What's left is additive and stays in the spirit of "guide, not generator": the
-`[service(Client)]`/`[rpc]` sugar (generate the client + dispatcher from a session struct),
-which does not *replace* the paradigm this example works. (`[derive(Wire)]` — the data boundary
-— and the `call`/`Dispatcher` foundation are now real.)
+What's left is purely mechanical, in the spirit of "guide, not generator": the
+`[service(Client)]`/`[rpc]`/`[expose]` sugar generates exactly the `Session` → `Client` +
+dispatcher pair this example now writes by hand — it replaces none of the paradigm.
+(`[derive(Wire)]`, the `call`/`Dispatcher` foundation, and the wire turn are already real.)
