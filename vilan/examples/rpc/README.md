@@ -51,7 +51,12 @@ The pieces of the proposal, bottom-up — a codec, transports, and protocols ove
 | **codec** (§6) | the `Json`/`FromJson` derives, used directly (frames are JSON `str`) |
 | **transport** (§5) | `trait Transport` (request/response) + `LocalTransport`; `trait DuplexTransport` + `DuplexEnd` / `duplex_pair` (full-duplex, in-process) |
 | **protocol** (§2) | `trait Protocol { receive }` — `RpcProtocol` (request/response) and `ReactiveServer`/`ReactiveClient` (pub/sub) all implement it |
-| **service** (§4, a *paradigm*) | the would-be `[service]`/`[rpc]` surface — here `accounts_dispatch` routed through an `RpcProtocol`, plus the `AccountsClient` stub |
+| **service** (§4.1, the *foundation*) | the ergonomic hand-written API the `[service]` sugar would generate: a `Dispatcher` of `[rpc]` handlers (`accounts_dispatcher()`, mounted via `into_protocol`), and the `AccountsClient` stub over the `call` helper |
+
+The client and server now go through the §4.1 **foundation** — `call<T>` collapses a client
+round-trip (build envelope → `await` → decode) into one line, and `Dispatcher` + `arg`/`reply`
+replace the hand-rolled envelope/`match`. It is plain Vilan (no compiler feature); the eventual
+`[service(Client)]` sugar just generates it, which is why it's built and proven first.
 
 The server `lookup_user` returns `Option<User>` — `None` is an *application-level* "not found"
 (part of the return type), separate from an `RpcError` (an *infrastructure* failure). The
@@ -128,7 +133,10 @@ binder inherits that bound. (Restating it, `impl AccountsClient<type T: Transpor
 is still accepted and means the same thing.)
 
 (`(self.transport).call(..)` is the same disambiguation that makes a *closure* field
-call `(self.handler)(request)` — which the runtime above uses.)
+call `(self.handler)(request)` — which the runtime uses throughout, e.g. `Dispatcher`'s
+`(route.handler)(request)` and `ReactiveServer`'s `(self.transport).send(..)`. The
+`AccountsClient` stub above no longer needs it: `get_user` now passes the transport to the
+free `call` helper (§4.1), so the method-on-a-field form lives in `rpc.vl`, not `main.vl`.)
 
 ### 3. …and that object stub used to *miscompile* — ✅ FIXED
 
@@ -150,10 +158,12 @@ was keyed by the impl/receiver's id — `current_substitution` missed and the ab
    initializer published an unbound type before the field value resolved. It now defers
    cleanly, so `client` grounds to `AccountsClient<LocalTransport>`.
 
-So the **object stub is the form used here** — `AccountsClient<T: Transport>` with a
-`(self.transport).call(..)` method, constructed and called from `main`. (The
-`generic_field_method_dispatch_runs` and `generic_field_from_a_variable_dispatches`
-tests in `inference.rs` pin both halves.)
+So the **object stub is the form used here** — `AccountsClient<T: Transport>`, constructed
+and called from `main`. Its `get_user` now passes the `T`-typed field to the generic `call`
+helper (§4.1) rather than dispatching on it directly; the same field-substitution fix makes
+that generic-through-generic path monomorphize (pinned by `generic_field_method_dispatch_runs`,
+`generic_field_from_a_variable_dispatches`, and `generic_call_over_a_bounded_transport_decodes`
+in `inference.rs`).
 
 ### 4. `from_json` element-type inference through an indirect path — ✅ FIXED
 

@@ -17,6 +17,7 @@
 import std::promise::Promise;
 import std::shared::Shared;
 import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
 import std::json::{ Json, FromJson };
 import std::reactive::{ Source, Signal, Subscription, Disposable };
 
@@ -145,6 +146,71 @@ fun local_rpc(protocol: RpcProtocol): LocalTransport {
 				None => RpcReply::Failure(RpcError::Remote("no reply")).to_json(),
 			}
 		},
+	}
+}
+
+// === Foundation helpers: the ergonomic client + server API (proposal §4.1) ===
+//
+// `call<T>` collapses a client round-trip (envelope -> await -> decode) into one line;
+// `Dispatcher` routes decoded requests to typed handlers, `arg`/`reply` carrying the codec.
+// These are the hand-written foundation the `[service]` sugar would eventually generate.
+
+// One over-the-wire call: build the envelope, await the round-trip, and decode the success
+// payload as `T` (inferred from the call site). Infrastructure failures — transport, decode, a
+// remote error — surface as `Err(RpcError)`.
+fun call<T: FromJson, Tx: Transport>(transport: Tx, method: str, args: List<str>): Result<T, RpcError> {
+	let reply_text = await transport.call(RpcRequest { method, args }.to_json());
+	match RpcReply::from_json(reply_text) {
+		RpcReply::Success(let json) => Ok(T::from_json(json)),
+		RpcReply::Failure(let error) => Err(error),
+	}
+}
+
+// Decode positional argument `index` at type `T` (inferred). Happy-path: a missing/garbled
+// argument decodes to garbage — a robust `arg -> Result` awaits `?` (proposal Q10).
+fun arg<T: FromJson>(request: RpcRequest, index: i32): T {
+	T::from_json(request.args[index])
+}
+
+// Encode a procedure's result as a success reply.
+fun reply<T: Json>(value: T): RpcReply {
+	RpcReply::Success(value.to_json())
+}
+
+// One route: a method name and the handler that decodes the request and produces a reply.
+struct Route {
+	method: str,
+	handler: |RpcRequest| RpcReply,
+}
+
+// The server router: register handlers by method name, then route each request to its match
+// (or an `unknown method` failure). `into_protocol` wraps it as an `RpcProtocol` for a transport.
+struct Dispatcher {
+	routes: Shared<List<Route>>,
+}
+
+impl Dispatcher {
+	fun new(): Dispatcher {
+		Dispatcher { routes = Shared::new([]) }
+	}
+
+	// Register a handler for a method name, returning `self` so registrations chain.
+	fun on(self, method: str, handler: |RpcRequest| RpcReply): Dispatcher {
+		self.routes.write().push(Route { method, handler });
+		self
+	}
+
+	// Route a request to its handler, or fail with `unknown method`.
+	fun handle(self, request: RpcRequest): RpcReply {
+		match self.routes.read().filter(|route| route.method == request.method).first() {
+			Some(let route) => (route.handler)(request),
+			None => RpcReply::Failure(RpcError::Remote("unknown method: " + request.method)),
+		}
+	}
+
+	// Wrap as an `RpcProtocol`, ready to mount on a transport (e.g. `local_rpc`).
+	fun into_protocol(self): RpcProtocol {
+		RpcProtocol { dispatch = |request| self.handle(request) }
 	}
 }
 

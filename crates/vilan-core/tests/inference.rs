@@ -2199,3 +2199,46 @@ fn dispose_in_a_batch_scrubs_the_pending_notify() {
         "tick 0\ndone\n",
     );
 }
+
+// === RPC foundation: the generic `call` helper (examples/rpc §4.1) ================
+
+#[test]
+fn generic_call_over_a_bounded_transport_decodes() {
+    // The RPC foundation's `call<T, Tx: Transport>` shape: a generic function that calls a trait
+    // method on a bound-generic transport, `await`s it, and decodes the reply as a generic
+    // `T: FromJson` — invoked from a *generic* client that passes its own `Tx`-typed field. Pins
+    // that this whole generic-through-generic path monomorphizes (the example isn't auto-run).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ Json, FromJson };
+        import std::result::Result::{ self, Ok, Err };
+        import std::promise::Promise;
+        trait Wire { fun send(self, msg: str): Promise<str>; }
+        struct Echo {}
+        impl Echo with Wire {
+            fun send(self, msg: str): Promise<str> { async { msg } }   // echoes the request
+        }
+        [derive(Json)]
+        struct Pt { x: i32 }
+        fun fetch<T: FromJson, Tx: Wire>(transport: Tx, msg: str): Result<T, str> {
+            let reply = await transport.send(msg);
+            Ok(T::from_json(reply))                       // decode the generic T from the reply
+        }
+        struct Client<Tx: Wire> { transport: Tx }
+        impl Client<type Tx> {
+            fun get(self): Result<Pt, str> {
+                fetch(self.transport, "{\"x\":42}")        // T=Pt inferred from the return type
+            }
+        }
+        fun main() {
+            let c = Client { transport = Echo {} };
+            match c.get() {
+                Ok(let p) => print(i"x={p.x}"),
+                Err(let e) => print(i"err {e}"),
+            }
+        }
+        "#,
+        "x=42\n",
+    );
+}
