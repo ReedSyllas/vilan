@@ -19,7 +19,7 @@ import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
 import std::shared::Shared;
 import std::reactive::{ batch, Signal, Source };
-import pkg::rpc::{
+import std::rpc::{
 	Transport, LocalTransport, RpcRequest, RpcReply, RpcError,
 	local_rpc, Dispatcher, call, arg, reply,
 	duplex_pair, ReactiveServer, ReactiveClient, RemoteSource,

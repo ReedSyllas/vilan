@@ -1,25 +1,26 @@
-// The reusable RPC runtime (what `proposal/transport-rpc.md` calls `std::rpc`), written
-// by hand — the codegen sugar (`[derive(Wire)]`, `[service]`, `[rpc]`) isn't built yet.
-// It layers the proposal's model (§2): a codec (JSON, via the derives), transports (a
-// request/response `Transport` and a full-duplex `DuplexTransport`), and two sibling
-// **protocols** over them — `RpcProtocol` (request/response) and `ReactiveProtocol`
-// (pub/sub, §8). In-process, so it builds and runs with no network.
+// The RPC runtime (`proposal/transport-rpc.md`): a codec (JSON, via the derives),
+// transports (a request/response `Transport` and a full-duplex `DuplexTransport`), and two
+// sibling **protocols** over them — `RpcProtocol` (request/response) and the reactive
+// protocol (`ReactiveServer`/`ReactiveClient`, pub/sub, §8) — plus the §4.1 foundation
+// (`call`, `Dispatcher`, `arg`, `reply`) that `[service(Client)]` generation targets.
 //
-// A note on genericity: `expose` is generic over any `Source<T>` — a generic element
-// serialized inside a closure (`value.to_json()` where `value: T` is a closure parameter)
-// now monomorphizes correctly (README quirk #5, fixed), so the JSON erasure moved *inside*
-// the runtime instead of being the application's chore. The capability table still stores
-// `str` (a `Signal<str>` mirror per channel), because it holds *heterogeneous* sources and
-// vilan has no trait objects. The transport stays a concrete `DuplexEnd`; a generic
-// `ReactiveServer<Tx: DuplexTransport>` (a `Tx` method called inside a stored forwarding
-// closure) is the next monomorphization step.
+// Inbound frames are handled in a reactive `batch` — the **wire turn**
+// (proposal/reactive-batching.md): signal writes made while dispatching are deferred to the
+// turn's flush, so a handler that mutates subscribed state produces ONE coalesced `Update`
+// per source alongside its reply.
+//
+// A note on genericity: `expose` is generic over any `Source<T>`; the element is erased to
+// a JSON `Signal<str>` mirror *inside* the runtime (the capability table holds heterogeneous
+// sources, and vilan has no trait objects). The in-process transports (`LocalTransport`,
+// `DuplexEnd`) make everything runnable with no network; real transports mount the same
+// protocols.
 
-import std::promise::Promise;
-import std::shared::Shared;
-import std::option::Option::{ self, Some, None };
-import std::result::Result::{ self, Ok, Err };
-import std::json::{ Json, FromJson };
-import std::reactive::{ batch, Source, Signal, Subscription, Disposable };
+import pkg::promise::Promise;
+import pkg::shared::Shared;
+import pkg::option::Option::{ self, Some, None };
+import pkg::result::Result::{ self, Ok, Err };
+import pkg::json::{ Json, FromJson };
+import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
 
 // === Transport: request/response ============================================
 
@@ -122,9 +123,8 @@ enum RpcReply {
 // === RpcProtocol ============================================================
 
 // The request/response protocol: on an inbound request frame it decodes the envelope,
-// routes through the application `dispatch`, and encodes the reply. This is the
-// hand-written form of what a `[service]` derive would generate from a trait's `[rpc]`
-// methods (proposal §4).
+// routes through the application `dispatch`, and encodes the reply. `[service(Client)]`
+// generation emits the dispatch routing; `Dispatcher` below is the hand-written form.
 struct RpcProtocol {
 	dispatch: |RpcRequest| RpcReply,
 }
@@ -154,11 +154,12 @@ fun local_rpc(protocol: RpcProtocol): LocalTransport {
 	}
 }
 
-// === Foundation helpers: the ergonomic client + server API (proposal §4.1) ===
+// === Foundation: the ergonomic client + server API (proposal §4.1) ==========
 //
 // `call<T>` collapses a client round-trip (envelope -> await -> decode) into one line;
 // `Dispatcher` routes decoded requests to typed handlers, `arg`/`reply` carrying the codec.
-// These are the hand-written foundation the `[service]` sugar would eventually generate.
+// This is the foundation `[service(Client)]` generation emits over — and the API to use
+// directly when writing the plumbing by hand.
 
 // One over-the-wire call: build the envelope, await the round-trip, and decode the success
 // payload as `T` (inferred from the call site). Infrastructure failures — transport, decode, a
@@ -274,8 +275,7 @@ impl ReactiveServer {
 
 	// Export a `Source<T>` under a fresh channel id; the id is what crosses the wire in
 	// place of the source. `T` is erased to a JSON `Signal<str>` mirror *here*, inside the
-	// runtime — the element serialized in the `get`/`sub` closures monomorphizes correctly
-	// now (the capability table is still `str`, since it holds heterogeneous sources).
+	// runtime (the capability table is `str`, since it holds heterogeneous sources).
 	fun expose<T: Json, S: Source<T>>(self, source: S): i32 {
 		let channel = fresh_channel();
 		let json: Signal<str> = Signal::new(source.get().to_json());
