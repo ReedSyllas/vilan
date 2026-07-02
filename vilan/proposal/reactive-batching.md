@@ -58,11 +58,11 @@ it more cheaply because our reads are explicit and our values commit eagerly.
 
 ## Semantics
 
-- **`set` commits the value immediately, defers the notification.** `self.value` is written at once,
-  so `s.set(5); s.get()` is still `5` — no "stale until flush" surprise. What defers is the
-  subscriber *notify*: `set` enqueues `self`'s subscribers into a module-level scheduler.
-- **Outside a `batch`, the enqueue drains at once.** A lone top-level `set` runs its subscribers
-  synchronously, exactly as today — so existing single-write code is behavior-identical.
+- **`set` commits the value immediately.** `self.value` is written at once, so `s.set(5); s.get()`
+  is still `5` — no "stale until flush" surprise. What a `batch` defers is the subscriber *notify*.
+- **Outside a `batch`, `set` notifies inline — eager, depth-first, byte-for-byte today's behaviour**
+  (order included), so existing single-write code is untouched. Only *inside* a `batch` does `set`
+  route notifications through the scheduler (enqueue + coalesced flush).
 - **Inside a `batch(body)`, enqueues accumulate and drain once** when the outermost batch returns.
   Nested batches fold into the outermost boundary.
 - **Glitch-freeness by dedup-on-enqueue.** The pending queue is a *set* keyed by subscriber id: a
@@ -91,24 +91,31 @@ required here.
 
 ## API
 
-New in `std::reactive`, alongside the existing `next_subscriber_id` counter:
+New in `std::reactive`, alongside the existing `next_subscriber_id` counter. Two public
+primitives: **`flush()`** drains the pending notifications now; **`batch(body)`** defers them
+through `body` then `flush`es (it is `flush` under the hood). A lone `set` outside a `batch`
+notifies inline (eager), so today's single-write behaviour is unchanged.
 
 ```vilan
-// The reactive scheduler: subscribers pending notification, and the current
-// batch depth. Module-level, one per program (like `next_subscriber_id`).
+// The reactive scheduler: subscribers pending notification, the current batch
+// depth, and a re-entrancy guard. Module-level, one per program (like
+// `next_subscriber_id`).
 struct Scheduler {
     pending: Shared<List<Subscriber>>,
     depth: Shared<i32>,
+    draining: Shared<bool>,
 }
 
 let scheduler: Scheduler = Scheduler {
     pending = Shared::new([]),
     depth = Shared::new(0),
+    draining = Shared::new(false),
 };
 
 // Enqueue a signal's subscribers, deduped by id so a subscriber fed by several
-// inputs in one batch fires once. Outside a batch (depth 0) this drains at once,
-// so a lone `set` is synchronous — unchanged from today.
+// inputs in one batch fires once. The dedup is *mandatory* — it is the
+// glitch-freeness — so it stays even as this linear scan (a keyed set can
+// replace it later without changing semantics).
 fun enqueue(subscribers: List<Subscriber>) {
     for subscriber in subscribers {
         mut seen = false;
@@ -121,44 +128,61 @@ fun enqueue(subscribers: List<Subscriber>) {
             scheduler.pending.write().push(subscriber);
         }
     }
-    if scheduler.depth.read() == 0 {
-        drain();
-    }
 }
 
-// Run every pending notify until quiescent. A notify may enqueue more (a derived
-// propagating), which this same loop drains — so a cascade settles in one drain.
-fun drain() {
-    for !scheduler.pending.read().is_empty() {
-        let wave = scheduler.pending.read();
-        scheduler.pending.write() = [];
-        for subscriber in wave {
-            (subscriber.notify)();
+// Drain every pending notify until quiescent — the public "settle now" primitive.
+// A notify may enqueue more (a derived propagating), which this same loop drains,
+// so a cascade settles in one flush. Re-entrancy-guarded: a `set` from inside a
+// notify only enqueues (the running loop picks it up), never nests a `flush`.
+// Bounded by a budget: a feedback loop that never converges stops here instead of
+// hanging (a settled graph never approaches it; hitting it is a feedback-loop bug).
+fun flush() {
+    if !scheduler.draining.read() {
+        scheduler.draining.write() = true;
+        mut budget = 100000;
+        for !scheduler.pending.read().is_empty() && budget > 0 {   // `for cond` is Vilan's while
+            let wave = scheduler.pending.read();
+            scheduler.pending.write() = [];
+            for subscriber in wave {
+                (subscriber.notify)();
+                budget -= 1;
+            }
         }
+        scheduler.draining.write() = false;
     }
 }
 
-// The turn: run `body` with notifications deferred, then drain once. Groups a set
-// of writes so their observers see them settled, together. Nested batches fold
-// into the outermost. Returns `body`'s value.
+// The turn: run `body` with notifications deferred, then `flush` once. Groups a
+// set of writes so their observers see them settled, together. Nested batches
+// fold into the outermost. Returns `body`'s value — `batch` is `flush` under the
+// hood, bracketing the deferral.
 fun batch<T>(body: || T): T {
     scheduler.depth.write() = scheduler.depth.read() + 1;
     let result = body();
-    scheduler.depth.write() = scheduler.depth.read() - 1;
-    if scheduler.depth.read() == 0 {
-        drain();
+    // flush while still "in batch" (depth 1) so cascading sets during the drain keep deferring
+    if scheduler.depth.read() == 1 {
+        flush();
     }
+    scheduler.depth.write() = scheduler.depth.read() - 1;
     result
 }
 ```
 
-`Signal::set` shrinks to a value write plus an enqueue; `set_with`/`map`/`combine` are unchanged and
-inherit batching for free (their internal `set`s go through the scheduler):
+`Signal::set` writes the value; **outside** a `batch` it notifies inline (eager, depth-first —
+byte-for-byte today's order); **inside** a `batch` it defers to the flush boundary, where writes
+coalesce glitch-free. `set_with`/`map`/`combine` are unchanged and inherit batching (their internal
+`set`s route through the scheduler):
 
 ```vilan
 fun set(self, value: T) {
     self.value.write() = value;
-    enqueue(self.subscribers.read());
+    if scheduler.depth.read() == 0 {
+        for subscriber in self.subscribers.read() {   // eager, inline — unchanged from today
+            (subscriber.notify)();
+        }
+    } else {
+        enqueue(self.subscribers.read());             // deferred to the batch's flush
+    }
 }
 ```
 
@@ -229,20 +253,27 @@ generic over a zero-arg closure (the same shape `Owner::take` already relies on)
 - **Wire turn:** an RPC handler that sets N subscribed signals produces one coalesced flush (in
   `transport-rpc`'s example harness).
 
-## Open questions
+## Resolved (was: open questions)
 
-- **Naming.** `batch(body)` (we defer + drain) vs. Solid's `flush` (it forces a drain). `batch` reads
-  right for a synchronous-by-default model — the scope's job is to *group*, not to *force*. Confirm.
-- **Dispose during drain.** A subscriber already pending when its `Subscription` is disposed mid-drain
-  still fires once this wave (it's popped from the queue, not the signal list). Acceptable, or should
-  `drain` re-check liveness? (Cheap liveness check ≈ the leak-fix concern in `reactive-ownership.md`.)
-- **Re-entrant feedback.** An observer that writes a signal it (transitively) observes loops the drain
-  — the same infinite loop it would cause synchronously today. Add an iteration cap / dev diagnostic,
-  or leave as a user bug?
-- **Dedup cost.** The pending set is scanned linearly on enqueue (O(n²) worst case). Fine at current
-  scale; a keyed set is a later optimization.
-- **Ambient microtask flush** (Solid's default) as a *future* ergonomic layer for UI event handlers —
-  deferred for the same reason `reactive-ownership.md` deferred the ambient owner: no magic until it's
-  proven against `async` and indirection.
-</content>
-</invoke>
+- **Naming. ✅ Both `flush()` and `batch(body)`.** `flush()` is the "settle now" primitive; `batch`
+  defers through its body then calls `flush` — `batch` is `flush` under the hood. A lone `set` outside
+  a batch `flush`es itself, so today's behaviour is unchanged.
+- **Dispose during drain. ✅ `dispose` scrubs the pending queue.** A subscriber enqueued by a `set`
+  and then disposed *before* the drain reaches it would otherwise fire once more (it sits in the
+  pending queue, not just the signal's list). So `Subscription::dispose` removes the subscriber from
+  `scheduler.pending` by id as well as from the signal's list — a disposed observer never fires again,
+  matching the leak-fix intent of `reactive-ownership.md`. This diverges from today's eager model only
+  for *set-then-dispose inside one `batch`* (which no existing code does — lone sets flush before any
+  dispose), and the divergence is toward the correct *disposed-is-silent* behaviour.
+- **Re-entrant feedback. ✅ Bounded — never recurses infinitely.** `flush` is re-entrancy-guarded (a
+  `set` from inside a notify only enqueues; the running loop picks it up, no nested `flush`), and the
+  drain is bounded by a budget, so an observer that writes a signal it (transitively) observes stops at
+  the budget rather than hanging. A converged graph never approaches the budget; hitting it signals a
+  feedback-loop bug (ideally reported — mechanism TBD).
+- **Dedup cost. ✅ Mandatory; linear now, keyed later.** The dedup is not optional — it *is* the
+  glitch-freeness — so it stays even as a linear scan on enqueue (O(n²) worst case). A keyed set is a
+  later optimization, not a semantic change.
+- **Ambient microtask flush. ✅ Deferred, but committed.** Auto-`flush` on the next microtask (Solid's
+  default, for UI event handlers) is a *future* addition — deferred like `reactive-ownership.md`'s
+  ambient owner (no magic until proven against `async` and indirection) — but it *will* land; the
+  explicit `flush`/`batch` primitives are the foundation it builds on.
