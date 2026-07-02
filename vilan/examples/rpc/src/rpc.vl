@@ -19,7 +19,7 @@ import std::shared::Shared;
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
 import std::json::{ Json, FromJson };
-import std::reactive::{ Source, Signal, Subscription, Disposable };
+import std::reactive::{ batch, Source, Signal, Subscription, Disposable };
 
 // === Transport: request/response ============================================
 
@@ -137,14 +137,19 @@ impl RpcProtocol with Protocol {
 }
 
 // A `LocalTransport` that routes every request through an `RpcProtocol` — the in-process
-// wiring of a client stub to its server dispatcher.
+// wiring of a client stub to its server dispatcher. The handler runs in a `batch` — the
+// **wire turn** (proposal/reactive-batching.md): signal writes made while dispatching are
+// deferred to the turn's flush, so a method that mutates subscribed state produces ONE
+// coalesced `Update` per source alongside its reply, not one per write.
 fun local_rpc(protocol: RpcProtocol): LocalTransport {
 	LocalTransport {
 		handler = |frame| {
-			match protocol.receive(frame) {
-				Some(let reply) => reply,
-				None => RpcReply::Failure(RpcError::Remote("no reply")).to_json(),
-			}
+			batch(|| {
+				match protocol.receive(frame) {
+					Some(let reply) => reply,
+					None => RpcReply::Failure(RpcError::Remote("no reply")).to_json(),
+				}
+			})
 		},
 	}
 }
@@ -256,10 +261,13 @@ impl ReactiveServer {
 			live = Shared::new([]),
 		};
 		(server.transport).on_frame(|frame| {
-			match server.receive(frame) {
-				Some(let _) => {},
-				None => {},
-			}
+			// every inbound frame is handled in a turn (proposal/reactive-batching.md)
+			batch(|| {
+				match server.receive(frame) {
+					Some(let _) => {},
+					None => {},
+				}
+			});
 		});
 		server
 	}
@@ -340,10 +348,13 @@ impl ReactiveClient {
 			routes = Shared::new([]),
 		};
 		(client.transport).on_frame(|frame| {
-			match client.receive(frame) {
-				Some(let _) => {},
-				None => {},
-			}
+			// every inbound frame is handled in a turn (proposal/reactive-batching.md)
+			batch(|| {
+				match client.receive(frame) {
+					Some(let _) => {},
+					None => {},
+				}
+			});
 		});
 		client
 	}

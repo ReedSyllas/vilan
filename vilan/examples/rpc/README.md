@@ -18,6 +18,9 @@ raw error: {"Remote":"unknown method: delete_everything"}
 count = 0
 count = 1
 count = 2
+count = 10
+count = 16
+rpc add -> 16
 ```
 
 In-process, so it builds and runs today with **no network** — none of the Phase-0
@@ -53,6 +56,7 @@ The pieces of the proposal, bottom-up — a codec, transports, and protocols ove
 | **transport** (§5) | `trait Transport` (request/response) + `LocalTransport`; `trait DuplexTransport` + `DuplexEnd` / `duplex_pair` (full-duplex, in-process) |
 | **protocol** (§2) | `trait Protocol { receive }` — `RpcProtocol` (request/response) and `ReactiveServer`/`ReactiveClient` (pub/sub) all implement it |
 | **service** (§4.1, the *foundation*) | the ergonomic hand-written API the `[service]` sugar would generate: a `Dispatcher` of `[rpc]` handlers (`accounts_dispatcher()`, mounted via `into_protocol`), and the `AccountsClient` stub over the `call` helper |
+| **the turn** (`reactive-batching.md`) | every inbound frame is handled in a `batch` (`local_rpc`, both duplex `on_frame`s) — a handler's signal writes coalesce into one `Update` per source, delivered with the reply |
 
 The client and server now go through the §4.1 **foundation** — `call<T>` collapses a client
 round-trip (build envelope → `await` → decode) into one line, and `Dispatcher` + `arg`/`reply`
@@ -82,6 +86,27 @@ sibling to RPC over a **duplex** transport:
 The `Source` trait itself is a small, additive `std::reactive` change: `Signal`'s read-only
 `get`/`sub` moved into `trait Source<T>`, which both `Signal` and `RemoteSource` implement (the
 corpus stays byte-identical).
+
+## The wire turn (reactive batching)
+
+The scenario that motivated `std::reactive`'s batching (`proposal/reactive-batching.md`): an
+**RPC call mutates a signal the client is subscribed to**. Without a boundary, every `set`
+inside the handler pushes its own `Update` frame, mid-handler, before the reply even exists.
+So the runtime handles **every inbound frame in a `batch`** — the *turn* (`local_rpc` and both
+duplex `on_frame`s). The demo shows all three behaviours:
+
+- A lone `set` outside any batch stays **eager** — one write, one `Update` (`count = 1`, `2`),
+  byte-for-byte the pre-batching behaviour.
+- An explicit `batch(|| { counter.set(5); counter.set(10); })` **coalesces**: the mirror
+  recomputes once, so ONE frame crosses (`count = 10` — the intermediate 5 is never observed).
+- The `add` RPC method writes the counter **twice** in its handler; `local_rpc`'s turn defers
+  both, so a single `Update` (`count = 16`) is delivered in the same turn as the reply
+  (`rpc add -> 16`). Values commit eagerly — the second write reads the first's result — only
+  the *notification* defers.
+
+In-process the update lands just before the reply (delivery is synchronous); a buffering
+transport (WebSocket, plan phase 4) would flush the coalesced frames and the reply together at
+the turn's end via `transport.flush()`.
 
 ## Quirks discovered
 
@@ -213,7 +238,8 @@ heterogeneous sources and vilan has no trait objects.
 ## What this validates for the plan
 
 The **data boundary, both transports, the codec, both protocols (RPC and reactive), the
-capability table, over-the-wire subscription, and the `Result`/`Option` error layering all work
+capability table, over-the-wire subscription, the wire turn (reactive batching — an RPC
+handler's writes coalescing with its reply), and the `Result`/`Option` error layering all work
 today** — the hand-written core is real, and the *paradigm* (a domain type, an explicit
 `to_wire` projection, a sensitive type that can't cross, a signal observed remotely) holds with
 today's features. The generic-dispatch cluster (B1) that P6 leaned on is now closed through the

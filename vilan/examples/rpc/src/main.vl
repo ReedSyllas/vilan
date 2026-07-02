@@ -8,7 +8,8 @@
 // `Dispatcher` foundation (rpc.vl §4.1) stands in for the generated stub/dispatcher;
 // `[derive(Wire)]` — the data boundary (§3) — is real. The *paradigm* is the subject: a
 // rich domain type with an explicit projection to a wire DTO, a sensitive type that
-// cannot cross the wire, and a server `Signal` observed remotely as a `Source`.
+// cannot cross the wire, and a server `Signal` observed remotely as a `Source` — with
+// writes coalesced per wire turn (reactive batching: `batch` around inbound handling).
 //
 //     vilan run vilan/examples/rpc
 
@@ -16,7 +17,7 @@ import std::print;
 import std::json::{ Json, FromJson };
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
-import std::reactive::{ Signal, Source };
+import std::reactive::{ batch, Signal, Source };
 import pkg::rpc::{
 	Transport, LocalTransport, RpcRequest, RpcReply, RpcError,
 	local_rpc, Dispatcher, call, arg, reply,
@@ -172,11 +173,38 @@ fun reactive_demo() {
 		print(i"count = {n}");
 	});
 
-	// Every `set` on the server signal pushes an `Update` frame to the client's observer.
+	// Every lone `set` pushes one `Update` frame — eager, exactly as before batching.
 	counter.set(1);
 	counter.set(2);
+
+	// A `batch` (std::reactive) coalesces: two writes, ONE `Update` frame — the observer
+	// sees only the settled 10; the intermediate 5 never crosses the wire.
+	batch(|| {
+		counter.set(5);
+		counter.set(10);
+	});
+
+	// The wire turn (proposal/reactive-batching.md) — the scenario that motivated it: an
+	// *RPC call* mutates the signal the client is subscribed to. `local_rpc` handles the
+	// request in a `batch`, so the handler's two writes coalesce into one `Update`,
+	// delivered in the same turn as the reply. (In-process the update lands first —
+	// delivery is synchronous; a buffering transport would flush both together.)
+	let dispatcher = Dispatcher::new().on("add", |request| {
+		let amount: i32 = arg(request, 0);
+		counter.set(counter.get() + amount);   // 13 — the value commits at once...
+		counter.set(counter.get() + amount);   // 16 — ...so the second write sees it
+		reply(counter.get())
+	});
+	let rpc_transport = local_rpc(dispatcher.into_protocol());
+	let amount = 3;
+	let added: Result<i32, RpcError> = call(rpc_transport, "add", [amount.to_json()]);
+	match added {
+		Ok(let n) => print(i"rpc add -> {n}"),
+		Err(let error) => print(i"rpc error: {error.to_json()}"),
+	}
+
 	subscription.dispose();   // stop observing; the server's forward is a no-op with no client
-	counter.set(3);           // no output — unsubscribed
+	counter.set(99);          // no output — unsubscribed
 }
 
 fun show(result: Result<Option<WireUser>, RpcError>) {
