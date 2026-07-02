@@ -33,7 +33,7 @@ today; what's left is to settle *how* one is meant to use it.
 | **Codec** | value ⇆ bytes — the *format* | a `trait` — JSON default; binary later |
 | **Transport** | moves frames over the wire — a dumb pipe | a `trait` — request/response (HTTP) or **duplex** (WebSocket) |
 | **Protocol** | the *semantics* over a transport + codec | **RPC** (request/response) and **Reactive** (pub/sub) — siblings |
-| **Service** | the shared contract the RPC protocol is generated from | a `[service]` trait of `[rpc]` methods |
+| **Service** | the *server* surface; the client requestor is a generated projection of it (two signatures — §4) | a hand-writable foundation (`call` + `Dispatcher`), optionally sugared by a `[service(Client)]` struct (`[rpc]` methods + `[expose]` signals) |
 
 The stack composes bottom-up: a **codec** turns values into bytes, a **transport** moves
 those bytes as frames, and a **protocol** layers the *meaning* on top — request/response
@@ -43,9 +43,10 @@ shoehorned in, and a reactive `Source` ride a duplex transport, without either c
 leaking into the other (§5, §8). Transport and codec are a protocol's two dependencies —
 composed *under* it, as siblings.
 
-Within the RPC protocol the **guide-not-generator** line is drawn precisely: the compiler
-*generates* the dispatch plumbing — the server router and the client stub — from a
-`[service]` trait (§4), so a remote call reads like a local one. But it generates **only
+Within the RPC protocol the **guide-not-generator** line is drawn precisely: the dispatch
+plumbing — the server router and the client requestor — is a hand-writable foundation
+(`call` + `Dispatcher`, §4.1), which the compiler can *generate* from a `[service(Client)]` struct
+(§4.2) as sugar, so a remote call reads like a local one. But it generates **only
 the plumbing**: the *structure* — which types cross the wire (`[derive(Wire)]`, §3) and how
 a domain type projects to its wire shape (`to_wire`, §3) — stays the developer's. The
 library owns the mechanical encode→route→decode that is identical every time; that is what
@@ -224,50 +225,145 @@ are what makes ubiquitous `Wire` livable.
   you want reachable-if-typed but not in the `.` menu. Where `[trait_only]` changes *what
   resolves*, `[doc(hidden)]` changes only *what is suggested*.
 
-## 4. Exposure: `[rpc]` methods, the `[service]` trait, and generated stubs
+## 4. Exposure: the two-signature split, the foundation, then `[service]` sugar
 
-A **`[service]` trait** is the shared contract — the whole remotely-callable surface, and
-nothing else is reachable. It lives in `common`, imported by both sides; its methods are
-marked `[rpc]`:
+An RPC endpoint has **two faces with different types**, and getting that right is the whole
+design:
 
 ```vilan
-// common/src/lib.vl — the contract, imported by BOTH sides
-[service]
-trait Accounts {
-    [rpc] fun get_user(id: i32): Option<WireUser>;
-    [rpc(auth)] fun rename(id: i32, name: str): WireUser;   // gated — needs auth
+// server — the real implementation, a clean local body
+fun get_user(uuid: str): Option<WireUser> { /* look it up */ }
+
+// client — a requestor that can fail at the wire
+fun get_user(uuid: str): Result<Option<WireUser>, RpcError> { /* send, await, decode */ }
+```
+
+They differ by a `Result<_, RpcError>` layer *and* by their body. Crucially, they **cannot be
+one function whose signature varies by caller**: that would require the compiler to know each
+call site's "side," which is *undefined* for server↔server — a server calling another
+server's endpoint is a *client* of it yet a *server* in its own right, so there is no global
+side to switch on. So the two faces are **two functions in different namespaces**, not one
+function the compiler bends. The **server face is the source of truth** (real logic); the
+**client face is a mechanical projection** of it — wrap the return in `Result`, swap the body
+for a wire call.
+
+That reframes `[service]`/`[rpc]` as **sugar over a foundation that stands on its own**
+(§4.1), not a mandatory system: both faces are ordinary Vilan, hand-writable, and read well
+*without* the sugar. The sugar (§4.2) only generates the client face — and the server
+routing — from the server declaration.
+
+### 4.1 The foundation — an ergonomic hand-written API (no compiler features)
+
+**Client:** one helper turns a typed call into a wire round-trip; the developer never touches
+the envelope, the await, or the error layer:
+
+```vilan
+// Build the envelope, await the round-trip, decode the success payload as `T`
+// (inferred from the call site). Infrastructure failures — transport, decode, a
+// remote error — surface as `Err(RpcError)`. Generic over the codec (§6); JSON shown.
+fun call<T: FromJson, Tx: Transport>(transport: Tx, method: str, args: List<str>): Result<T, RpcError> {
+    let reply = await transport.call(RpcRequest { method, args }.to_json());
+    match RpcReply::from_json(reply) {
+        RpcReply::Success(let json) => Ok(T::from_json(json)),   // bound-derived decode (now compiles)
+        RpcReply::Failure(let error) => Err(error),
+    }
+}
+
+// A typed client is a thin holder over a transport; each method is one line.
+struct AccountsClient<Tx: Transport> { transport: Tx }
+impl AccountsClient<type Tx> {
+    fun get_user(self, uuid: str): Result<Option<WireUser>, RpcError> {
+        call(self.transport, "get_user", [uuid.to_json()])
+    }
 }
 ```
 
-- `[rpc]` marks a method **callable over the wire**. The `[rpc]` methods of a `[service]`
-  trait *are* the surface — opt-in, nothing else reachable; a method without `[rpc]`, or any
-  function outside the trait, cannot be invoked remotely. That *is* the attack-surface
-  guarantee.
-- **The signature must be Wire-compatible** — every parameter and the return type must be
-  Wire (or `Option`/`Result`/`List` of Wire). The compiler checks it and rejects, with a
-  clear diagnostic, an `[rpc]` method that takes or returns a non-Wire type (e.g. a raw
-  `User`). This is what makes the exposure *typed*: you cannot expose a method whose data
-  can't legally cross.
-- **Gating** rides as an attribute argument: `[rpc(auth)]` requires an authenticated caller,
-  resolved from the transport (a header, a connection-bound session) and rejected with
-  `err: unauthorized` *before* the body runs. (Whether finer authorization lives in the
-  attribute or the body is Q4.)
+**Server:** a `Dispatcher` routes decoded requests to your handlers; the handlers stay plain
+functions returning domain types (`Dispatcher`, `arg`, and `reply` are small `std::rpc`
+primitives — the router plus typed decode/encode helpers):
 
-From that one trait the compiler generates **two implementations of it** — the plumbing:
+```vilan
+// `into_protocol()` makes the Dispatcher the `RpcProtocol` `dispatch`, so it drops
+// onto any transport. `arg`/`reply` carry the codec; each handler is one line.
+Dispatcher::new()
+    .on("get_user", |req| reply(get_user(arg(req, 0)).map(|u| u.to_wire())))
+    .on("rename",   |req| reply(rename(arg(req, 0), arg(req, 1)).to_wire()))
+```
 
-- a **server dispatcher** that decodes the envelope, routes on the method name, decodes each
-  argument at its parameter type, calls *your* `impl Accounts for ServerState`, and encodes
-  the reply; and
-- a **client stub**, `Accounts::connect(transport, codec) -> impl Accounts`, whose every
-  method encodes its args, builds the envelope, `await`s `transport.call`, and decodes the
-  reply.
+This is exactly `examples/rpc`'s hand-written dispatch/stub, **distilled into a reusable
+API**: the archaic `RpcRequest { method = "get_user", args = [id.to_json()] }` + `match
+RpcReply::from_json(..)` collapses into `call(..)` on the client and `.on(..)` on the server.
+It is the API the developer wants *whether or not* the sugar exists — which is why it is built
+first, and why the sugar is optional.
 
-Because both sides *implement the same trait*, the contract is one type-checked thing with
-no drift, and `accounts.get_user(42)` on the client reads exactly like the local call on the
-server — the seamless "C" in RPC. This is the hand-written `accounts_dispatch` of
-`examples/rpc`, mechanized: the example proves the runtime first, before any generation (the
-project's "prove it before generating it"). The generated halves are *only* this glue — the
-Wire types and the `to_wire` projections they carry stay yours (§2, §3).
+### 4.2 `[service]` / `[rpc]` / `[expose]` — sugar that generates the client from the server
+
+The service is a **per-connection struct + impl** — the source of truth. `[service(Client)]`
+on it generates a sibling client type (named by the argument — `[service]` alone defaults to
+`<Struct>Client`); `[rpc]` marks a method callable over the wire; `[expose]` marks a `Signal`
+field the client may observe:
+
+```vilan
+[service(Client)]
+struct Session {
+    [expose] status: Signal<str>,        // observable by the client (mirrored — §8)
+    user_id: Shared<Option<i32>>,        // private session state — never crosses the wire
+}
+
+impl Session {
+    // an async action: takes `self` (it awaits), mutating through the Signal/Shared handles
+    [rpc] fun login(self, name: str, password: str): Result<void, LoginError> {
+        let ok = await verify(name, password);
+        if ok {
+            self.user_id.write() = Some(id_of(name));
+            self.status.set("online");
+            Ok()
+        } else {
+            Err(LoginError::BadCredentials)
+        }
+    }
+    [rpc(auth)] fun rename(self, name: str): WireUser { /* gated — needs auth */ }
+}
+
+// the server instantiates one per connection; the generated dispatcher owns it
+fun on_connect(): Session {
+    Session { status = Signal::new("offline"), user_id = Shared::new(None) }
+}
+```
+
+- **`[service(Client)]`** names the generated client type. The struct *instance is the
+  connection's session* — created on connect, owned by the generated dispatcher, so its state
+  persists across that connection's calls (Q9).
+- **`[rpc]`** marks a method **callable over the wire** — opt-in; the `[rpc]` methods *are* the
+  surface (anything else is unreachable remotely — the attack-surface guarantee). Its signature
+  must be **Wire-compatible** (every parameter and the return Wire, or `Option`/`Result`/`List`
+  of Wire); a non-Wire `[rpc]` method is a clear compile error. `[rpc(auth)]` gates on an
+  authenticated caller, rejected `err: unauthorized` *before* the body runs (Q4).
+- **`[expose]`** marks a `Signal<T>` field the client may observe — private by default,
+  observable only when marked, and only a `Signal` can be (exposure *is* observation; a plain
+  value has nothing to subscribe to — Q9). `T` must be Wire. Any `[expose]`d field pulls in the
+  reactive protocol, so the connection must be **duplex** (a pure-`[rpc]` service stays
+  request/response).
+
+From that the compiler emits the §4.1 foundation:
+
+- a **dispatcher** that owns the per-connection `Session`, routes each `[rpc]` frame to
+  `session.method(..)` (decode → call → encode), and registers each `[expose]`d signal in the
+  §8 capability table; and
+- a **client**, `Client::connect(transport)`, whose `[rpc]` methods are the `Result`-wrapped
+  `call(..)`s (round-trip; §7) and whose `[expose]`d fields surface as read-only `Source<T>`
+  mirrors (§8 `RemoteSource`).
+
+```vilan
+let client = Client::connect(socket);     // duplex — because `status` is exposed
+await client.login("john", "hunter2");    // round-trip -> Result<Result<void, LoginError>, RpcError>
+client.status.sub(|s| print(s));          // observe the mirrored server signal locally
+```
+
+The client is a **sibling type, not an `impl`** of anything the server wrote — its `[rpc]`
+returns carry the extra `Result<_, RpcError>` layer (§7) and its `[expose]`d state is read-only
+`Source<T>`, so it *cannot* share a signature with the server struct. The generated halves are
+*only* this glue; the Wire types and `to_wire` projections stay yours (§2, §3).
 
 ## 5. Transport — the pipe (two shapes)
 
@@ -363,11 +459,12 @@ at the *i*-th parameter's type.
 
 ## 7. The generated stub: async and errors
 
-The client stub generated from the `[service]` trait (§4) *is* the seamless call —
+The client requestor generated from the `[service(Client)]` struct (§4.2) *is* the seamless call —
 `accounts.get_user(42)` reads like a method call. Sketched:
 
 ```vilan
-// generated `impl Accounts for AccountsClient` (one method shown)
+// generated client requestor — a *sibling* type, not an impl of the service struct
+// (its return carries the extra `Result` layer; §4.2). One method shown.
 fun get_user(self, id: i32): Result<Option<WireUser>, RpcError> {
 	let request = encode_request(self.codec, "get_user", [self.codec.encode(id)]);
 	let reply = await (self.transport).call(request);     // round-trip
@@ -382,7 +479,7 @@ fun get_user(self, id: i32): Result<Option<WireUser>, RpcError> {
   an `await`: the stub reads like a method call, not like a free local one — the RPC fallacy
   avoided.
 - **The `T` → `Result<T, _>` shift is the contract's, and the generator owns it (Q3,
-  settled).** The `[service]` trait declares the *logical* signature — `get_user(id):
+  settled).** The `[service]` method declares the *logical* signature — `get_user(id):
   Option<WireUser>` — and the server `impl` returns exactly that, a clean local body. The
   round-trip can fail, so the **generated client stub wraps the return in
   `Result<_, RpcError>`** — the developer never writes the wrapping. `RpcError` is a derived
@@ -480,7 +577,7 @@ paradigm needs:
 - **`[rpc]` attribute + signature check** — mark a method exposed and verify its
   parameters/return are Wire-compatible. A focused analyzer check.
 - **`[service]` generation** — generate the server dispatcher + client stub from a
-  `[service]` trait's `[rpc]` methods (§4). This is generation *over a trait*, beyond today's
+  `[service(Client)]` struct's `[rpc]` methods + `[expose]` fields (§4.2). This is generation *over a struct+impl*, beyond today's
   struct/enum derives — the one genuinely new piece of codegen — and resolves Q1. It is the
   headline "seamless remote functions"; the hand-written `examples/rpc` is its proof.
 - **`[trait_only]` + `[doc(hidden)]`** — the namespace-hygiene attributes (§3.2): a
@@ -517,10 +614,10 @@ paradigm needs:
    (platform model + library packages): current `vilan.toml` conventions, the shared
    `common` `[library]`, per-package `platform`.
 3. **`[service]` generation — seamless remote functions** (L) — generate the server
-   dispatcher and the client stub from a `[service]` trait (§4, §7), with the `Result`
+   dispatcher and the client stub from a `[service(Client)]` struct (§4.2, §7), with the `Result`
    wrapping applied by codegen and `[rpc(auth)]` gating. This is the headline "C in RPC"
    and resolves Q1. Migrate `examples/rpc` from the hand-written dispatch/stub to the
-   generated `[service]`, so the example always shows the current best form.
+   generated `[service(Client)]` struct, so the example always shows the current best form.
 4. **`DuplexTransport` + server↔server** (L) — the WebSocket `SocketTransport` as a
    `DuplexTransport` (also `impl Transport` by correlation, so RPC and reactive multiplex over
    one socket), plus the `SplitDuplex` fallback; in-process service composition; a server
@@ -568,12 +665,17 @@ reach. Each is independently valuable and testable.
 ## 13. Settled decisions vs open questions
 
 **Settled:** the library is a *guide* for structure and a *generator* for plumbing —
-Transport + Codec are the stable core; a `[service]` trait is the contract, and the
-compiler generates its dispatcher + client stub (only the glue — the Wire types and
-`to_wire` projections stay the developer's). `[derive(Wire)]` is the data boundary with
+Transport + Codec are the stable core; the dispatch plumbing is a **hand-writable
+foundation** (`call` on the client, a `Dispatcher` on the server; §4.1) that a `[service(Client)]`
+struct can *sugar* by generating it (§4.2), never a mandatory system. An endpoint has **two
+signatures** — the server face returns `T`, the client face `Result<T, RpcError>` — so they
+are **two functions**, not one the compiler bends by caller side (undefined for
+server↔server); the server face is the source of truth and the client a generated *sibling*
+projection (only the glue — the Wire types and `to_wire` projections stay the developer's). `[derive(Wire)]` is the data boundary with
 the all-fields-Wire rule (sensitivity is a type property; no skip-lists); explicit
 `to_wire` projections (the wire shape diverges freely from the domain type); `[rpc]`
-marks the exposed surface with a Wire-compatibility signature check; `[trait_only]` keeps
+marks the exposed surface with a Wire-compatibility signature check; `[expose]` publishes a
+`Signal` field to the client as a mirrored `Source` (§8); `[trait_only]` keeps
 derived methods off the concrete type (default for derives) and `[doc(hidden)]` keeps them
 out of completion. The codec is the *format* (bytes, not `str`), chosen as a runtime value
 so JSON↔binary is a programmatic / env switch; JSON is the default and only codec at first.
@@ -586,27 +688,83 @@ is a *capability*, exported as a `ChannelId` into a per-connection table (Cap'n 
 the codec stays pure. `Result<T, RpcError>` on the client, applied by codegen;
 effect-polymorphic async (auto-await through the indirect transport call); peer-symmetric.
 
-**Open questions** (Q1–Q3 settled by the latest round; kept numbered so cross-references hold):
+**Open questions** (Q1–Q3, Q7–Q9 settled; kept numbered so cross-references hold):
 
-- **Q1 — client invocation form. ✅ Settled:** generate the dispatcher + client stub from a
-  `[service]` trait (§4). The seamless call is the point of RPC; the compiler generates only
-  the glue, never the structure.
+- **Q1 — client invocation form. ✅ Settled (refined):** the seamless call is **sugar over a
+  hand-writable foundation** (§4.1) — `call<T>` on the client, a `Dispatcher` on the server —
+  not a mandatory system. A `[service(Client)]` struct (§4.2) generates that foundation; the client is
+  a generated *sibling*, not an `impl` of the trait (the two-signature split). The compiler
+  generates only the glue, never the structure.
 - **Q2 — codec abstraction. ✅ Settled:** ship the `Codec` trait now, with the *format*
   behind it — bytes output and a `Serializer` visitor so a binary codec is zero-overhead
   (§6). JSON is the default and only codec at first.
-- **Q3 — the `T` vs `Result<T, _>` asymmetry. ✅ Settled:** the `[service]` trait declares
+- **Q3 — the `T` vs `Result<T, _>` asymmetry. ✅ Settled:** the `[service]` method declares
   `T`, the server `impl` returns `T`, and the generated client stub wraps it in
   `Result<T, RpcError>` — codegen owns the one-layer difference, not the developer (§7).
-- **Q4 — exposure granularity & auth.** Is `[rpc(auth)]` the right vocabulary, and how is
-  a caller identity supplied (a transport header, a connection-bound session)? Where does
-  *authorization* (not just authentication) live — in the attribute, or the body?
+- **Q4 — auth. (Partly settled by the session struct — §4.2.)** Identity now has a clear
+  home: the **per-connection session struct**, populated on connect or by an auth `[rpc]`
+  (`login`), so authorization is ordinary body logic reading session state
+  (`if !self.authenticated.read() { Err(Unauthorized) }`). Residual, not build-blocking: is a
+  dedicated `[rpc(auth)]` gate worth the magic — and if so, how does it learn the predicate (a
+  convention like a `fun authorized(self): bool`?) — or do we drop it and leave auth to the
+  body? A later-phase refinement.
 - **Q5 — addressing/config.** How does a client learn the server endpoint and a method
   learn its mount path — `vilan.toml` config, a constructor argument, both?
 - **Q6 — versioning.** Client and server are built separately; a contract mismatch
   (renamed method, changed Wire shape) should fail *clearly*. A contract hash exchanged
   on connect, or rely on `err: Decode`? (Ties to the platform model's per-package builds.)
-- **Q7 — projection sugar.** When and how to add the scaffolding derive for `to_wire`
-  (§3) — additive, and only once the explicit form has proven the paradigm.
-- **Q8 — `Map` payloads.** Is the no-`Map` codec gap acceptable to launch with (use
-  structs / `List<Pair>`), or should Map serialization (backlog I1) be pulled into
-  Phase 0?
+- **Q7 — projection sugar. ✅ Deferred by decision.** `to_wire` stays explicit — it *is* the
+  paradigm (the wire shape diverges freely from the domain type, §3). A scaffolding derive is
+  additive and waits until the explicit form has proven itself; out of scope for the initial
+  build.
+- **Q8 — `Map` payloads. ✅ Launch without.** Structs / `List<Pair>` cover the initial
+  payloads; Map serialization (backlog I1) is pulled in when a real payload needs it
+  (prove-first), not up front.
+- **Q9 — service-declaration form. ✅ Settled — the canonical §4.2 form.**
+  The form is `[service(Client)] struct Session { .. } impl Session { .. }`, generating
+  a sibling `Client` requestor — *not* a `[service]` trait or a `mod` of free functions. The
+  decisive advantage is **per-connection state**: the struct *instance* is the connection's
+  session (created on connect, owned by the generated dispatcher so state persists
+  across a connection's calls), which a trait/module has nowhere to hold. It subsumes the
+  stateless case (a fieldless struct) and converges with the connection/turn layer
+  (`reactive-batching.md`) — one object carries session state, the method surface, and the
+  flush turn. The generated client stays a *sibling type* (§4.2). Three sub-questions, now resolved:
+  - **Reader methods. ✅ Round-trip.** Every client method is a wire round-trip (`async` +
+    `Result`) — simplest, uniform. The reactive-mirror path (a `Signal` field mirrored via §8,
+    read cheaply and locally — the RPC+reactive+batching north star) is **deferred**; the escape
+    hatch is that a client can read the mirrored signal directly, or hand-add a method to the
+    generated `Client`.
+  - **Error layering. ✅ Keep the uniform wrap — nested `Result` and all.** The client wraps the
+    server's *exact* return `T` in `Result<T, RpcError>`, always — so a server method returning
+    `Result<void, LoginError>` yields `Result<Result<void, LoginError>, RpcError>` on the client.
+    Clunky to match, but `RpcError` stays the *uniform outer error* across every method, which is
+    what lets generic client code (retry wrappers, error boundaries) hold; a merged
+    `CallError<App>` would vary the error type per-method and break those consumers. No merging.
+  - **Field exposure. ✅ Private by default; `[expose]` a `Signal` field.** Service-struct fields
+    are server-private session state; a field is client-visible only via an explicit `[expose]`,
+    and only if it is a `Signal<T>` (Source) — exposure *means* the client observes it, and only
+    something observable can be mirrored (a plain value has nothing to subscribe to; a one-time
+    read is what a method is for). The generated `Client` then carries a `Source<T>` for it (a §8
+    `RemoteSource`), so `client.x` is a local, always-current mirror — the cheap read the
+    round-trip default deferred, recovered per-field. The element `T` must be Wire; and reactive
+    push needs a duplex transport (§8), so exposing any field constrains the connection to duplex
+    (a pure-RPC service with no exposed fields stays request/response). Net split at the service
+    surface: **methods = RPC actions (round-trip); `[expose]`d Signals = observable state.**
+  - **Mutable session state. ✅ By nature — `&mut self`+plain for sync, `Signal`/`Shared` for
+    async/exposed.** `&mut self` is the idiomatic in-place receiver (as `Arena`/`List`/`Map` use),
+    so the connection *owns* the session and re-borrows `&mut self` per call with no `Shared` —
+    ideal for *synchronous* state transitions with plain fields. But a view can't be held across an
+    `await` (no-view-across-await, an intended-but-deferred rule), so an async method takes `self`
+    by value (as every transport's `async fun call(self, ..)` already does); persisting a mutation
+    through a by-value `self` then requires a `Shared<T>`/`Signal<T>` field (`self.x.write() = ..`).
+    So: exposed or async-touched state → `Signal`/`Shared`; sync-only private state → plain field +
+    `&mut self`. Default lean: `Signal`/`Shared` (await-safe, matches the reactive code), plain
+    `&mut self` as the sync optimization — a `&mut self` method is itself a promise that it does
+    not await. No auto-wrapping magic; the field type is the developer's and signals the method's
+    nature.
+- **Q10 — server-handler decode ergonomics.** `arg(req, i)` reads clean on the happy path; a
+  malformed argument wants `arg -> Result<T, RpcError>` + a `?`/try to stay terse (else a
+  handler regrows a per-argument match). This is really a **general error-handling dependency**
+  (a `?`/try operator), not an RPC-specific decision — the foundation works today with the
+  happy path plus an explicit decode-failure reply. Track as a prerequisite; revisit when
+  `?`/try lands.
