@@ -302,6 +302,13 @@ dependencies. Unordered within a section.
    array type — `[u8]` (and a `Bytes` view over one) as the immediate want, `[T; n]` as the
    general feature — is the right substrate: cheaper, and the natural target for the
    `Serializer`/binary-codec path (`transport-rpc.md` §6, §10).
+3. **Validating `from_json` — decode errors instead of `undefined`** (M; codec hardening,
+   `transport-rpc.md` Q6) — `from_json` doesn't validate: a missing/mistyped field decodes to
+   `undefined` and flows onward as garbage — the *silent* failure mode, worse than a crash. It
+   surfaces under RPC version skew (a changed Wire shape), but hurts on **any** malformed input.
+   Wanted: decode reports an error (a `Result`, or at minimum a `panic` naming the field) when a
+   field is absent or the wrong shape. Interacts with the `?`/try story (transport-rpc.md Q10)
+   for how handlers/stubs propagate it tersely.
 
 ---
 

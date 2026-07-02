@@ -623,7 +623,9 @@ paradigm needs:
    `common` `[library]`, per-package `platform`.
 3. **`[service]` generation — seamless remote functions** (L) — generate the server
    dispatcher and the client stub from a `[service(Client)]` struct (§4.2, §7), with the `Result`
-   wrapping applied by codegen (auth stays manual body logic — Q4). This is the headline "C in RPC"
+   wrapping applied by codegen (auth stays manual body logic — Q4) and the **contract hash**
+   (Q6 v2: the generator hashes the service surface; a mismatch on connect is a clean
+   `RpcError` instead of silent decode garbage). This is the headline "C in RPC"
    and resolves Q1. Migrate `examples/rpc` from the hand-written dispatch/stub to the
    generated `[service(Client)]` struct, so the example always shows the current best form.
 4. **`DuplexTransport` + server↔server** (L) — the WebSocket `SocketTransport` as a
@@ -695,8 +697,13 @@ the reactive protocol requires the duplex shape (a compile error otherwise). A `
 is a *capability*, exported as a `ChannelId` into a per-connection table (Cap'n Proto style) so
 the codec stays pure. `Result<T, RpcError>` on the client, applied by codegen;
 effect-polymorphic async (auto-await through the indirect transport call); peer-symmetric.
+**Addressing is programmatic** (a transport is constructed with its endpoint; how the string is
+loaded is the developer's business — no library config surface). **Versioning:** v1 relies on
+single-workspace builds + clean runtime errors; v2 adds a generated contract hash with
+`[service]` generation (Q6).
 
-**Open questions** (Q1–Q3, Q7–Q9 settled; kept numbered so cross-references hold):
+**Open questions** (Q1–Q9 settled; Q10 parked on a general `?`/try operator; kept numbered so
+cross-references hold):
 
 - **Q1 — client invocation form. ✅ Settled (refined):** the seamless call is **sugar over a
   hand-writable foundation** (§4.1) — `call<T>` on the client, a `Dispatcher` on the server —
@@ -716,11 +723,26 @@ effect-polymorphic async (auto-await through the indirect transport call); peer-
   attribute: a declarative gate is deferred sugar, revisited only if real services show the
   check as repeated boilerplate (it would then need a predicate convention, e.g.
   `fun authorized(self): bool`).
-- **Q5 — addressing/config.** How does a client learn the server endpoint and a method
-  learn its mount path — `vilan.toml` config, a constructor argument, both?
-- **Q6 — versioning.** Client and server are built separately; a contract mismatch
-  (renamed method, changed Wire shape) should fail *clearly*. A contract hash exchanged
-  on connect, or rely on `err: Decode`? (Ties to the platform model's per-package builds.)
+- **Q5 — addressing/config. ✅ Settled: programmatic — the transport owns its address.** A
+  transport is constructed with its endpoint (`HttpTransport::new("https://api.example.com/rpc")`;
+  a port + mount path on the server side); the client type stays address-agnostic (it just holds
+  a transport), and *where* the string comes from — hardcoded, env var, config file, CLI flag —
+  is the developer's choice, not a library config surface. One endpoint serves the whole service
+  (the envelope carries the method name), so there are no per-method routes to configure. A
+  browser transport may later default to same-origin (a transport nicety). The one residual —
+  multi-service on one server (a mount path per service vs a service field in the envelope) — is
+  decided with `[service(Client)]` generation.
+- **Q6 — versioning. ✅ Settled: runtime errors for v1; a contract hash in v2 (rides with
+  `[service]` generation).** v1: both sides build from one workspace, so the compiler guarantees
+  the contract at build time and drift is deploy hygiene. The shipped failure modes: a renamed or
+  removed method → a clean `RpcError::Remote("unknown method: …")`; a changed Wire *shape* →
+  silent garbage (`from_json` doesn't validate — missing fields decode to `undefined`), the mode
+  v2 exists to close. v2, with `[service(Client)]` generation (which holds the whole surface):
+  emit a **contract hash** (method names + Wire shapes, normalized), sent on connect (WS) or as a
+  header (HTTP); a mismatch is a clean `RpcError` *before* any decode — and can drive a "new
+  version, please refresh" UX for the stale-browser-tab case. Separately backlogged (I3):
+  **validating `from_json`** — decode errors instead of `undefined`, codec hardening that closes
+  silent garbage for *all* malformed input, beyond version skew.
 - **Q7 — projection sugar. ✅ Deferred by decision.** `to_wire` stays explicit — it *is* the
   paradigm (the wire shape diverges freely from the domain type, §3). A scaffolding derive is
   additive and waits until the explicit form has proven itself; out of scope for the initial
