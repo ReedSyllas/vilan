@@ -649,11 +649,23 @@ pub struct Scope<'src> {
     pub name_to_id_map: IndexMap<&'src str, Id>,
 }
 
+/// A `[derive(Wire)]` type awaiting the all-fields-Wire check: its name, plus each
+/// member as `(label, type node, span)` (see `check_wire_boundary`).
+type WireTypeCheck<'src> = (&'src str, Vec<(String, &'src Node<'src>, Span)>);
+
 #[derive(Debug)]
 pub struct Analyzer<'src> {
     assignment_values: IndexMap<Id, Vec<Id>>,
     closures: IndexMap<Id, Closure>,
     diagnostics: Vec<Error>,
+    /// Names of `[derive(Wire)]` structs/enums. The all-fields-Wire check
+    /// (`check_wire_boundary`) treats these as Wire, alongside the Wire scalars
+    /// and `List`/`Option` of Wire.
+    wire_names: HashSet<&'src str>,
+    /// `[derive(Wire)]` types awaiting the all-fields check — collected as each is
+    /// walked, validated once `wire_names` is complete: `(type name, [(member
+    /// label, member type node, span)])`.
+    wire_types_to_check: Vec<WireTypeCheck<'src>>,
     /// Non-fatal diagnostics (e.g. an unused `[must_use]` result). Rendered as
     /// warnings; they do not block codegen.
     warnings: Vec<Error>,
@@ -904,6 +916,8 @@ impl<'src> Analyzer<'src> {
             assignment_values: IndexMap::new(),
             closures: IndexMap::new(),
             diagnostics: Vec::new(),
+            wire_names: HashSet::new(),
+            wire_types_to_check: Vec::new(),
             warnings: Vec::new(),
             entity_id: 0,
             enums: IndexMap::new(),
@@ -1035,6 +1049,84 @@ impl<'src> Analyzer<'src> {
                     &HashMap::new(),
                 )
         })
+    }
+
+    /// Record a `[derive(Wire)]` struct/enum for the all-fields-Wire check: mark its
+    /// name Wire, and stash each field (struct) or variant payload (enum) with its
+    /// type node + span, validated once every module's Wire names are collected.
+    fn collect_wire_type(&mut self, item: &'src Node<'src>) {
+        match item {
+            Node::Struct(name, _generics, _external, Some(body)) => {
+                self.wire_names.insert(name.0);
+                let mut members = Vec::new();
+                for field in &body.0 {
+                    let field_name = field.0.0;
+                    if let Some((type_node, type_span)) = field.0.1.as_ref() {
+                        members.push((format!("field `{field_name}`"), type_node, *type_span));
+                    }
+                }
+                self.wire_types_to_check.push((name.0, members));
+            }
+            Node::Enum(name, _generics, variants) => {
+                self.wire_names.insert(name.0);
+                let mut members = Vec::new();
+                for variant in &variants.0 {
+                    let variant_name = variant.0.0;
+                    for (index, payload) in variant.0.1.iter().enumerate() {
+                        members.push((
+                            format!("variant `{variant_name}` payload {index}"),
+                            &payload.0,
+                            payload.1,
+                        ));
+                    }
+                }
+                self.wire_types_to_check.push((name.0, members));
+            }
+            _ => {}
+        }
+    }
+
+    /// A field type is Wire iff it is a Wire scalar (`str`/`i32`/`u32`/`f64`/`bool`),
+    /// a `List`/`Option` of Wire (recursing into the element), or a named
+    /// `[derive(Wire)]` type. Everything else is not Wire.
+    fn is_wire_type(&self, node: &Node) -> bool {
+        match node {
+            Node::Accessor(name) => {
+                matches!(*name, "str" | "i32" | "u32" | "f64" | "bool")
+                    || self.wire_names.contains(*name)
+            }
+            Node::AccessorWithGenerics(name, arguments) => {
+                matches!(*name, "List" | "Option")
+                    && arguments
+                        .0
+                        .iter()
+                        .all(|argument| self.is_wire_type(&argument.0))
+            }
+            _ => false,
+        }
+    }
+
+    /// Enforce the Wire boundary (`proposal/transport-rpc.md` §3): every field of a
+    /// `[derive(Wire)]` type must itself be Wire, else a compile diagnostic. Runs
+    /// after all modules are walked, so `wire_names` sees cross-module Wire types.
+    fn check_wire_boundary(&mut self) {
+        let checks = std::mem::take(&mut self.wire_types_to_check);
+        for (type_name, members) in &checks {
+            for (label, type_node, span) in members {
+                if !self.is_wire_type(type_node) {
+                    let rendered = render_type(type_node);
+                    self.diagnostics.push(Error {
+                        span: *span,
+                        msg: format!(
+                            "{label} of `[derive(Wire)]` type `{type_name}` is `{rendered}`, \
+                             which is not Wire — every field of a Wire type must itself be Wire \
+                             (a scalar, `str`, `bool`, `List`/`Option` of Wire, or another \
+                             `[derive(Wire)]` type)"
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     /// Resolves a method `member_name` callable on a concrete `subject_type`
@@ -3616,7 +3708,12 @@ impl<'src> Analyzer<'src> {
             }
             // `[derive(..)]` is transparent: walk the wrapped item; the synthesized
             // trait impls are appended separately (see `derive_impl_source`).
-            Node::Derive(_derives, inner) => {
+            Node::Derive(derives, inner) => {
+                // Collect `[derive(Wire)]` types for the all-fields-Wire check
+                // (`check_wire_boundary`), which runs once every module is walked.
+                if derives.contains(&"Wire") {
+                    self.collect_wire_type(&inner.0);
+                }
                 self.walk_expr_node(inner, scope_id);
                 None
             }
@@ -9565,7 +9662,7 @@ fn derive_enum_impls(
                      }}\n"
                 ));
             }
-            "Json" => {
+            "Json" | "Wire" => {
                 // Externally tagged: no payload -> `"V"`; one -> `{"V":<p>}`;
                 // many -> `{"V":[<p0>,<p1>]}`.
                 let mut arms = String::new();
@@ -9732,7 +9829,7 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
                      }}\n"
                 ));
             }
-            "Json" => {
+            "Json" | "Wire" => {
                 // `"{" + "\"a\":" + self.a.to_json() + "," + "\"b\":" +
                 // self.b.to_json() + "}"` — a JSON object with the real field
                 // names; each value serializes via its own `to_json`.
@@ -9796,7 +9893,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     for (node, _span) in nodes {
         if let Node::Derive(derives, item) = node {
             traits.extend(derives.iter().copied());
-            if derives.contains(&"Json") && matches!(item.0, Node::Enum(..)) {
+            if (derives.contains(&"Json") || derives.contains(&"Wire"))
+                && matches!(item.0, Node::Enum(..))
+            {
                 enum_derives_json = true;
             }
             source.push_str(&derive_impl_source(derives, item));
@@ -9814,7 +9913,7 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     if traits.contains("Default") {
         prelude.push_str("import std::default::Default;\n");
     }
-    if traits.contains("Json") {
+    if traits.contains("Json") || traits.contains("Wire") {
         prelude.push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
     }
     if enum_derives_json {
@@ -10931,6 +11030,7 @@ pub fn analyze<'src>(
     analyzer.check_view_escape();
     analyzer.check_invalidation();
     analyzer.check_reseat_escape();
+    analyzer.check_wire_boundary();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

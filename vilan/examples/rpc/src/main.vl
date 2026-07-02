@@ -4,8 +4,9 @@
 // (`ReactiveProtocol`, §8) — and a paradigm for using them. This file works that paradigm
 // by hand; the reusable runtime is in `rpc.vl`. In-process, so it runs with no network.
 //
-// The codegen sugar (`[derive(Wire)]`, `[service]`, `[rpc]`) isn't built yet, so
-// `[derive(Json)]` and hand-written dispatch stand in. The *paradigm* is the subject: a
+// The `[service]`/`[rpc]` codegen sugar isn't built yet, so the hand-written `call`/
+// `Dispatcher` foundation (rpc.vl §4.1) stands in for the generated stub/dispatcher;
+// `[derive(Wire)]` — the data boundary (§3) — is real. The *paradigm* is the subject: a
 // rich domain type with an explicit projection to a wire DTO, a sensitive type that
 // cannot cross the wire, and a server `Signal` observed remotely as a `Source`.
 //
@@ -40,10 +41,10 @@ impl Password {
 	}
 }
 
-// The rich, server-side domain type. It holds a `Password`, so it CANNOT derive a
-// codec — `[derive(Json)] struct User { .. }` would not compile (no `Password::to_json`),
-// which is exactly the boundary `[derive(Wire)]` will formalize. `User` therefore never
-// crosses the wire; only its explicit projection does.
+// The rich, server-side domain type. It holds a `Password`, so it CANNOT be Wire —
+// `[derive(Wire)] struct User { .. }` does not compile: `Password` is not Wire, so the
+// compiler rejects the field (the boundary, enforced by construction — §3). `User`
+// therefore never crosses the wire; only its explicit projection does.
 struct User {
 	id: i32,
 	username: str,
@@ -64,10 +65,10 @@ impl User {
 	}
 }
 
-// The wire DTO — every field encodable, so the whole struct is. This is all the client
-// ever sees; it has never heard of `Password`. (`[derive(Json)]` stands in for the
-// proposed `[derive(Wire)]` until that derive ships.)
-[derive(Json)]
+// The wire DTO — every field is Wire, so the whole struct is. This is all the client
+// ever sees; it has never heard of `Password`. `[derive(Wire)]` enforces exactly that: a
+// non-Wire field (like `Password`) would be a compile error (§3).
+[derive(Wire)]
 struct WireUser {
 	id: i32,
 	username: str,

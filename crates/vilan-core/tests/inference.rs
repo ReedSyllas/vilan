@@ -2242,3 +2242,61 @@ fn generic_call_over_a_bounded_transport_decodes() {
         "x=42\n",
     );
 }
+
+// === [derive(Wire)] — the data boundary (proposal/transport-rpc.md §3) ============
+
+#[test]
+fn wire_derives_the_json_round_trip() {
+    // `[derive(Wire)]` reuses the Json round-trip: a Wire struct/enum encodes and decodes,
+    // including nested Wire structs, `List<Wire>`, and Wire enums.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        [derive(Wire)]
+        struct Point { x: i32, y: i32 }
+        [derive(Wire)]
+        struct Line { from: Point, to: Point, tags: List<str> }
+        [derive(Wire)]
+        enum Shape { Seg(Line), Empty }
+        fun main() {
+            let line = Line { from = Point { x = 1, y = 2 }, to = Point { x = 3, y = 4 }, tags = ["a"] };
+            let back = Line::from_json(line.to_json());
+            print(i"{back.from.x} {back.from.y} {back.to.x} {back.to.y}");   // 1 2 3 4
+            match Shape::from_json(Shape::Seg(back).to_json()) {
+                Shape::Seg(let l) => print(i"seg {l.from.x}"),               // seg 1
+                Shape::Empty => print("empty"),
+            }
+        }
+        "#,
+        "1 2 3 4\nseg 1\n",
+    );
+}
+
+#[test]
+fn wire_rejects_a_non_wire_field() {
+    // The boundary: a `[derive(Wire)]` type with a non-Wire field (`Password` has no codec)
+    // is a compile error — the leak the type system prevents by construction.
+    assert_fails(
+        r#"
+        struct Password { hash: str }
+        [derive(Wire)]
+        struct User { id: i32, password: Password }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn wire_rejects_a_list_of_non_wire() {
+    // The recursive rule: `List<Secret>` is not Wire because `Secret` is not. This pins the
+    // Wire check specifically — without it, the conditional `List<T: Json>` impl would let
+    // `List<Secret>` slip through the codegen unchecked (the conditional-bound gap).
+    assert_fails(
+        r#"
+        struct Secret { s: str }
+        [derive(Wire)]
+        struct Bag { items: List<Secret> }
+        fun main() {}
+        "#,
+    );
+}

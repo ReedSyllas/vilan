@@ -96,7 +96,7 @@ trait Protocol {
 
 // An invocation: a method name plus positional arguments, each pre-encoded to a JSON
 // fragment so a heterogeneous argument list fits a homogeneous `List<str>`.
-[derive(Json)]
+[derive(Wire)]
 struct RpcRequest {
 	method: str,
 	args: List<str>,
@@ -104,7 +104,7 @@ struct RpcRequest {
 
 // An infrastructure-level failure — distinct from an application error, which is part of
 // a procedure's own return type (e.g. `Option<User>` for "might not exist").
-[derive(Json)]
+[derive(Wire)]
 enum RpcError {
 	Transport(str),
 	Decode(str),
@@ -113,7 +113,7 @@ enum RpcError {
 }
 
 // A reply: the procedure's JSON-encoded result, or an `RpcError`.
-[derive(Json)]
+[derive(Wire)]
 enum RpcReply {
 	Success(str),
 	Failure(RpcError),
@@ -219,7 +219,7 @@ impl Dispatcher {
 // The frames the reactive protocol exchanges over a duplex transport. Payloads are the
 // JSON-encoded (`str`) values of the underlying source — the codec never sees a signal,
 // only its values (proposal §8).
-[derive(Json)]
+[derive(Wire)]
 enum ReactiveFrame {
 	Subscribe(i32),
 	Unsubscribe(i32),

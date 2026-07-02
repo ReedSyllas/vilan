@@ -28,19 +28,20 @@ In-process, so it builds and runs today with **no network** — none of the Phas
 The headline of the paradigm: **data crosses the wire only as an explicit *wire type*, and
 sensitive data is simply a type that cannot cross.**
 
-- `Password` has **no codec** — no `[derive(Json)]`. A value of it cannot be encoded, so
-  `[derive(Json)] struct User { password: Password, .. }` *will not compile*
-  (`Password has no method 'to_json'`). The boundary is enforced by the type system, not by
-  a per-field reminder you might forget.
+- `Password` is **not Wire** — no `[derive(Wire)]`. So `[derive(Wire)] struct User { password:
+  Password, .. }` *will not compile*: the field `password` of type `Password` is not Wire, a
+  clear compile error. The boundary is enforced by the type system, not by a per-field reminder
+  you might forget.
 - `User` is the rich, server-side domain type; it holds a `Password`, so it never crosses.
-- `WireUser` is the **explicit projection** (`User::to_wire`), a `[derive(Json)]` DTO of only
-  encodable fields. It drops `password` and *adds* a computed `handle` the domain type has no
-  field for — the wire shape diverges freely from the source. The client only ever sees
-  `WireUser`; it has no `password` field to leak.
+- `WireUser` is the **explicit projection** (`User::to_wire`), a `[derive(Wire)]` DTO of only
+  Wire fields. It drops `password` and *adds* a computed `handle` the domain type has no field
+  for — the wire shape diverges freely from the source. The client only ever sees `WireUser`;
+  it has no `password` field to leak.
 
-`[derive(Json)]` stands in for the proposed `[derive(Wire)]`; the all-fields-encodable
-property already holds (a struct with a non-encodable field can't derive), and `[derive(Wire)]`
-will formalize it with a friendlier diagnostic and an exposure marker.
+`[derive(Wire)]` enforces the rule directly (proposal §3): **every field of a Wire type must
+itself be Wire** — a scalar, `str`, `bool`, `List`/`Option` of Wire, or another `[derive(Wire)]`
+type; anything else is a compile error. It reuses the `Json` round-trip for encode/decode, so a
+Wire type serializes like a `[derive(Json)]` one — the difference is the boundary check.
 
 ## The layered runtime
 
@@ -218,6 +219,7 @@ today** — the hand-written core is real, and the *paradigm* (a domain type, an
 today's features. The generic-dispatch cluster (B1) that P6 leaned on is now closed through the
 closure-capture case too (#5), so `expose` is generic over any `Source<T>`.
 
-What's left is additive and stays in the spirit of "guide, not generator": `[derive(Wire)]`
-(the boundary, friendlier diagnostics) and `[service]`/`[rpc]` (generate the dispatcher +
-stub) — neither *replaces* the paradigm this example works.
+What's left is additive and stays in the spirit of "guide, not generator": the
+`[service(Client)]`/`[rpc]` sugar (generate the client + dispatcher from a session struct),
+which does not *replace* the paradigm this example works. (`[derive(Wire)]` — the data boundary
+— and the `call`/`Dispatcher` foundation are now real.)
