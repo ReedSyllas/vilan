@@ -566,6 +566,14 @@ impl<'src> Printer<'src> {
             self.out.push_str("[rpc]");
             self.line();
         }
+        if func.trait_only {
+            self.out.push_str("[trait_only]");
+            self.line();
+        }
+        if func.doc_hidden {
+            self.out.push_str("[doc(hidden)]");
+            self.line();
+        }
         if func.is_async {
             self.out.push_str("async ");
         }
@@ -1385,7 +1393,9 @@ mod idempotency {
     /// safety check, silently leaving the whole file unformatted.)
     #[test]
     fn attributes_round_trip() {
-        let source = "trait Source {\n\t[must_use]\n\tfun sub(self): i32;\n}\n\
+        let source = "trait Source {\n\t[must_use]\n\tfun sub(self): i32;\n\
+                      \t[trait_only]\n\tfun tag(self): str;\n\
+                      \t[doc(hidden)]\n\tfun internal(self): i32;\n}\n\
                       struct Sess {\n\t[expose] status: Signal<str>,\n\thidden: i32,\n}\n\
                       impl Sess {\n\t[rpc]\n\tfun login(self, name: str): bool {\n\t\ttrue\n\t}\n}\n";
         let formatted = format(source);
@@ -1400,6 +1410,14 @@ mod idempotency {
         assert!(
             formatted.contains("[rpc]"),
             "rpc attribute lost:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("[trait_only]"),
+            "trait_only attribute lost:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("[doc(hidden)]"),
+            "doc(hidden) attribute lost:\n{formatted}"
         );
         assert_fixed_point("attributes", source);
     }

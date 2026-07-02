@@ -198,6 +198,13 @@ pub struct Function<'src> {
     /// Declared `[rpc]`: callable over the wire as part of a service's surface
     /// (its signature is Wire-checked; `[service(Client)]` generation reads it).
     pub rpc: bool,
+    /// Declared `[trait_only]` (meaningful on a trait's method declaration):
+    /// reachable only through a trait bound, never on a concrete type's own
+    /// surface (`proposal/transport-rpc.md` §3.2).
+    pub trait_only: bool,
+    /// Declared `[doc(hidden)]`: callable, but omitted from editor completion
+    /// (a tooling marker for the language server; no resolution change).
+    pub doc_hidden: bool,
 }
 
 #[derive(Debug)]
@@ -1289,12 +1296,65 @@ impl<'src> Analyzer<'src> {
                 )
             })
             .find_map(|implementation| {
+                // A `[trait_only]` trait method never resolves on the concrete
+                // type's own surface — only through a trait bound (§3.2). An
+                // inherent impl has no trait ids, so a type's *own* method with
+                // the same name stays reachable (the collision-safety point).
+                if self.member_is_trait_only(implementation, member_name) {
+                    return None;
+                }
                 let member_id = implementation
                     .declarations
                     .get(member_name)
                     .copied()
                     .filter(|member_id| self.is_self_method(*member_id))?;
                 Some((member_id, implementation.subject))
+            })
+    }
+
+    /// Whether `member_name`, as provided by `implementation`, is a
+    /// `[trait_only]` trait method — declared `[trait_only]` by one of the
+    /// impl's traits, and so excluded from the concrete type's member surface
+    /// (`proposal/transport-rpc.md` §3.2).
+    fn member_is_trait_only(&self, implementation: &Implementation, member_name: &str) -> bool {
+        implementation.trait_ids.iter().any(|trait_id| {
+            self.traits
+                .get(trait_id)
+                .and_then(|trait_| trait_.declarations.get(member_name))
+                .is_some_and(|declaration_id| self.declaration_is_trait_only(*declaration_id))
+        })
+    }
+
+    /// Whether a trait's method declaration is marked `[trait_only]`.
+    fn declaration_is_trait_only(&self, member_id: Id) -> bool {
+        match self.get_entity_by_id(member_id) {
+            Expr::Function(function_id) => self
+                .functions
+                .get(function_id)
+                .is_some_and(|function| function.trait_only),
+            _ => false,
+        }
+    }
+
+    /// If `member_name` exists on `subject_type` but only as a `[trait_only]`
+    /// trait method, the providing trait's name — so the "no method" / "cannot
+    /// find" diagnostics can say *why* it didn't resolve.
+    fn trait_only_provider(&self, subject_type: &Type, member_name: &str) -> Option<&'src str> {
+        self.implementations
+            .iter()
+            .filter(|implementation| {
+                self.compare_type(
+                    subject_type,
+                    &implementation.subject.get_type(self),
+                    &HashMap::new(),
+                )
+            })
+            .flat_map(|implementation| implementation.trait_ids.iter())
+            .find_map(|trait_id| {
+                let trait_ = self.traits.get(trait_id)?;
+                let declaration_id = trait_.declarations.get(member_name)?;
+                self.declaration_is_trait_only(*declaration_id)
+                    .then_some(trait_.name)
             })
     }
 
@@ -1413,7 +1473,11 @@ impl<'src> Analyzer<'src> {
             .flat_map(|implementation| implementation.trait_ids.iter().copied())
             .find_map(|trait_id| {
                 let member_id = self.method_member_in_trait(trait_id, member_name)?;
-                self.member_has_default_body(member_id).then_some(member_id)
+                // A `[trait_only]` default method is likewise not inherited onto
+                // the concrete surface — only reachable through a bound (§3.2).
+                (self.member_has_default_body(member_id)
+                    && !self.declaration_is_trait_only(member_id))
+                .then_some(member_id)
             })
     }
 
@@ -4025,6 +4089,8 @@ impl<'src> Analyzer<'src> {
                             ),
                             must_use: function.must_use,
                             rpc: function.rpc,
+                            trait_only: function.trait_only,
+                            doc_hidden: function.doc_hidden,
                         },
                     );
                     // An `[rpc]` method's declared signature must be Wire —
@@ -7567,9 +7633,23 @@ impl<'src> Analyzer<'src> {
             }
             MethodLookup::NoMethod => {
                 let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                // If the method exists but is `[trait_only]`, say so — the fix
+                // is to reach it through a bound, not to define the method.
+                let trait_only_note = self
+                    .trait_only_provider(&subject_type, member_name)
+                    .map(|trait_name| {
+                        format!(
+                            " — it is `[trait_only]` on trait `{trait_name}`: reach it through \
+                             a `{trait_name}` bound, not the concrete type"
+                        )
+                    })
+                    .unwrap_or_default();
                 self.diagnostics.push(Error {
                     span: arguments_span,
-                    msg: format!("{} has no method '{}'", type_str, member_name),
+                    msg: format!(
+                        "{} has no method '{}'{}",
+                        type_str, member_name, trait_only_note
+                    ),
                 });
                 self.expr_id_to_expr_map.insert(id, Expr::Error);
                 Resolution::Failed
@@ -8577,6 +8657,38 @@ impl<'src> Analyzer<'src> {
             }
         }
 
+        // Record each `impl … with Trait`'s resolved trait ids (and its `with`
+        // reference) BEFORE static access resolves, so the `[trait_only]`
+        // exclusion can see an impl's traits. The conformance check itself (with
+        // its diagnostics) still runs below — an unknown trait is skipped here
+        // silently and diagnosed there.
+        for check_index in 0..self.prepped_trait_impls.len() {
+            let (trait_name, scope_id, implementation_index, trait_arguments, span, source_id) = {
+                let check = &self.prepped_trait_impls[check_index];
+                (
+                    check.trait_name,
+                    check.scope_id,
+                    check.implementation_index,
+                    check.trait_arguments.clone(),
+                    check.span,
+                    check.source_id,
+                )
+            };
+            let Some(trait_id) = self.try_get_expr_id_by_name(trait_name, scope_id) else {
+                continue;
+            };
+            if !self.traits.contains_key(&trait_id) {
+                continue;
+            }
+            if let Some(implementation) = self.implementations.get_mut(implementation_index) {
+                implementation.trait_ids.push(trait_id);
+                implementation.trait_args.push((trait_id, trait_arguments));
+            }
+            let trait_type_id = Type::Trait(trait_id, Vec::new()).get_type_id(self);
+            self.type_references
+                .push((source_id, span, Some(trait_id), trait_type_id));
+        }
+
         for (id, subject_type_id, member_name) in self.prepped_static_accessors.clone() {
             let subject_type = subject_type_id.get_type(self);
             match subject_type {
@@ -8596,6 +8708,10 @@ impl<'src> Analyzer<'src> {
                         }
                         _ => None,
                     };
+                    // A `[trait_only]` static resolves through the trait or a
+                    // bound (`T::from_json`), not on the concrete type (§3.2) —
+                    // access *on the trait itself* stays allowed.
+                    let subject_is_trait = matches!(subject_type, Type::Trait(_, _));
                     let member_id = variant_id.or_else(|| {
                         self.implementations
                             .iter()
@@ -8606,7 +8722,12 @@ impl<'src> Analyzer<'src> {
                                     &HashMap::new(),
                                 )
                             })
-                            .find_map(|x| x.declarations.get(member_name))
+                            .find_map(|x| {
+                                if !subject_is_trait && self.member_is_trait_only(x, member_name) {
+                                    return None;
+                                }
+                                x.declarations.get(member_name)
+                            })
                             .copied()
                     });
                     match member_id {
@@ -8618,9 +8739,24 @@ impl<'src> Analyzer<'src> {
                         None => {
                             let subject_str =
                                 self.pretty_print_type(&subject_type, &HashMap::new());
+                            let trait_only_note = if subject_is_trait {
+                                None
+                            } else {
+                                self.trait_only_provider(&subject_type, member_name)
+                            }
+                            .map(|trait_name| {
+                                format!(
+                                    " — it is `[trait_only]` on trait `{trait_name}`: reach it \
+                                     through a `{trait_name}` bound, not the concrete type"
+                                )
+                            })
+                            .unwrap_or_default();
                             self.diagnostics.push(Error {
                                 span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                                msg: format!("cannot find '{}' in {}", member_name, subject_str),
+                                msg: format!(
+                                    "cannot find '{}' in {}{}",
+                                    member_name, subject_str, trait_only_note
+                                ),
                             });
                         }
                     }
@@ -8723,18 +8859,8 @@ impl<'src> Analyzer<'src> {
                 });
                 continue;
             }
-            // Record the trait on its impl so method calls on the subject can
-            // fall back to the trait's inherited default methods.
-            if let Some(implementation) = self.implementations.get_mut(check.implementation_index) {
-                implementation.trait_ids.push(trait_id);
-                implementation
-                    .trait_args
-                    .push((trait_id, check.trait_arguments.clone()));
-            }
-            // Record the `with <trait>` reference for go-to-definition / hover.
-            let trait_type_id = Type::Trait(trait_id, Vec::new()).get_type_id(self);
-            self.type_references
-                .push((check.source_id, check.span, Some(trait_id), trait_type_id));
+            // (The trait was already recorded on its impl — and the `with`
+            // reference indexed — in the pre-static pass above.)
             // Required members are the signature-only declarations of the trait
             // AND its supertraits (a member with a default body is inherited, so
             // an impl need not provide it). Implementing `X with Ord` thus

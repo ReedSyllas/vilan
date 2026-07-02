@@ -763,6 +763,28 @@ where
         .labelled("rpc attribute")
         .boxed();
 
+    // `[trait_only]` — on a trait's method declaration: the method is reachable
+    // only through a trait bound, never on a concrete type's own surface
+    // (namespace hygiene — `proposal/transport-rpc.md` §3.2).
+    let trait_only_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("trait_only") => () }.labelled("`trait_only`"))
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("trait_only attribute")
+        .boxed();
+
+    // `[doc(hidden)]` — tooling only: the method stays fully callable, but the
+    // language server omits it from completion. No resolution change.
+    let doc_hidden_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("doc") => () }.labelled("`doc`"))
+        .ignore_then(
+            select! { Token::Ident("hidden") => () }
+                .labelled("`hidden`")
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+        )
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("doc(hidden) attribute")
+        .boxed();
+
     let function = extern_attribute
         .or_not()
         .then(
@@ -771,6 +793,16 @@ where
                 .map(|must_use| must_use.is_some()),
         )
         .then(rpc_attribute.or_not().map(|rpc| rpc.is_some()))
+        .then(
+            trait_only_attribute
+                .or_not()
+                .map(|trait_only| trait_only.is_some()),
+        )
+        .then(
+            doc_hidden_attribute
+                .or_not()
+                .map(|doc_hidden| doc_hidden.is_some()),
+        )
         .then(just(Token::Async).or_not().map(|async_| async_.is_some()))
         .then(
             just(Token::External)
@@ -857,7 +889,19 @@ where
                     (
                         (
                             (
-                                (((((extern_binding, must_use), rpc), is_async), external), name),
+                                (
+                                    (
+                                        (
+                                            (
+                                                (((extern_binding, must_use), rpc), trait_only),
+                                                doc_hidden,
+                                            ),
+                                            is_async,
+                                        ),
+                                        external,
+                                    ),
+                                    name,
+                                ),
                                 generic_parameters,
                             ),
                             parameters,
@@ -877,6 +921,8 @@ where
                         extern_binding,
                         must_use,
                         rpc,
+                        trait_only,
+                        doc_hidden,
                         generic_parameters,
                         parameters,
                         return_type,

@@ -2403,3 +2403,149 @@ fn expose_rejects_a_signal_of_non_wire() {
         "#,
     );
 }
+
+// === [trait_only] / [doc(hidden)] — namespace hygiene (transport-rpc.md §3.2) =====
+
+#[test]
+fn trait_only_method_is_hidden_from_the_concrete_type() {
+    // A `[trait_only]` trait method never resolves on the concrete type's own
+    // surface — the direct call is an error even though the impl provides it.
+    assert_fails(
+        r#"
+        import std::print;
+        trait Marker { [trait_only] fun tag(self): str; }
+        struct Pt { x: i32 }
+        impl Pt with Marker { fun tag(self): str { "pt" } }
+        fun main() { print(Pt { x = 1 }.tag()); }
+        "#,
+    );
+}
+
+#[test]
+fn trait_only_method_resolves_through_a_bound() {
+    // ...but through a trait bound it resolves and monomorphizes normally.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Marker { [trait_only] fun tag(self): str; }
+        struct Pt { x: i32 }
+        impl Pt with Marker { fun tag(self): str { "pt" } }
+        fun describe<T: Marker>(value: T): str { value.tag() }
+        fun main() { print(describe(Pt { x = 1 })); }
+        "#,
+        "pt\n",
+    );
+}
+
+#[test]
+fn trait_only_static_is_hidden_from_the_concrete_type() {
+    // The same exclusion covers statics: `Pt::make()` is an error when `make`
+    // is `[trait_only]` — the `from_json`-style surface stays clean.
+    assert_fails(
+        r#"
+        trait Factory { [trait_only] fun make(): i32; }
+        struct Pt {}
+        impl Pt with Factory { fun make(): i32 { 7 } }
+        fun main() { let n = Pt::make(); }
+        "#,
+    );
+}
+
+#[test]
+fn trait_only_static_resolves_through_a_bound() {
+    // ...while `T::make()` through the bound stays the sanctioned path.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Factory { [trait_only] fun make(): i32; }
+        struct Pt {}
+        impl Pt with Factory { fun make(): i32 { 7 } }
+        fun build<T: Factory>(witness: T): i32 { T::make() }
+        fun main() { print(build(Pt {})); }
+        "#,
+        "7\n",
+    );
+}
+
+#[test]
+fn trait_only_default_method_is_bound_reachable_but_hidden() {
+    // A `[trait_only]` *default* method: an empty impl inherits it for the
+    // bound path, but it is not promoted onto the concrete surface.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Marker { [trait_only] fun tag(self): str { "default" } }
+        struct Pt { x: i32 }
+        impl Pt with Marker {}
+        fun via_bound<T: Marker>(value: T): str { value.tag() }
+        fun main() { print(via_bound(Pt { x = 1 })); }
+        "#,
+        "default\n",
+    );
+    assert_fails(
+        r#"
+        import std::print;
+        trait Marker { [trait_only] fun tag(self): str { "default" } }
+        struct Pt { x: i32 }
+        impl Pt with Marker {}
+        fun main() { print(Pt { x = 1 }.tag()); }
+        "#,
+    );
+}
+
+#[test]
+fn trait_only_does_not_shadow_an_inherent_method() {
+    // The collision-safety point: a type's OWN method with the same name stays
+    // reachable on the concrete surface — the `[trait_only]` trait method never
+    // shadows it (nor is shadowed by it at the bound).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Marker { [trait_only] fun tag(self): str { "trait-default" } }
+        struct Pt { x: i32 }
+        impl Pt { fun tag(self): str { "own" } }
+        impl Pt with Marker {}
+        fun main() { print(Pt { x = 1 }.tag()); }
+        "#,
+        "own\n",
+    );
+}
+
+#[test]
+#[ignore = "pre-existing dispatch shadowing (independent of [trait_only], reproduces \
+            without it): a bound call's monomorphized dispatch resolves the concrete \
+            type's *inherent* same-name method instead of the trait's inherited default \
+            — `via_bound(Pt {..})` prints `own` instead of `trait-default`. The analyzer \
+            resolves the bound path correctly; the transformer's name-based dispatch \
+            lookup does not distinguish the inherent method from the trait member."]
+fn bound_dispatch_prefers_the_trait_method_on_a_name_collision() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Marker { fun tag(self): str { "trait-default" } }
+        struct Pt { x: i32 }
+        impl Pt { fun tag(self): str { "own" } }
+        impl Pt with Marker {}
+        fun via_bound<T: Marker>(value: T): str { value.tag() }
+        fun main() { print(via_bound(Pt { x = 1 })); }
+        "#,
+        "trait-default\n",
+    );
+}
+
+#[test]
+fn doc_hidden_method_stays_callable() {
+    // `[doc(hidden)]` is tooling-only: completion omits it, resolution doesn't.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Pt { x: i32 }
+        impl Pt {
+            [doc(hidden)]
+            fun secret(self): i32 { self.x }
+        }
+        fun main() { print(Pt { x = 9 }.secret()); }
+        "#,
+        "9\n",
+    );
+}

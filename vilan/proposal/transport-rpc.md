@@ -212,18 +212,35 @@ are what makes ubiquitous `Wire` livable.
   cost is that the convenient `point.to_json()` is gone — you go through the trait
   deliberately.
 
-  **Derived trait methods are `[trait_only]` by default.** A `[derive(Wire)]` /
-  `[derive(Json)]` / `[derive(Debug)]` generates `[trait_only]` methods, so "derive on
-  everything, clutter nothing" is the default rather than a per-method chore; a trait opts a
-  method back *out* when the concrete-type call is genuinely wanted. Mechanically it is a
-  small hook on resolution paths the analyzer already has — a `[trait_only]` method stays in
-  the trait-bound (`OnConstraint`) dispatch and is excluded from concrete-type member
-  resolution; no new subsystem.
+  **✅ The mechanism shipped (2026-07-02):** `[trait_only]` on a trait's method declaration
+  excludes it from concrete-type member resolution — instance calls, statics
+  (`Pt::make()`), and inherited defaults alike — while the trait-bound paths (`value.tag()`
+  under `T: Marker`, `T::make()`) resolve as before; the "no method" diagnostics say *why*
+  and name the trait. An inherent same-name method stays reachable (the collision-safety
+  point, pinned by test). One pre-existing, independent gap surfaced and is pinned
+  `#[ignore]`d: on a name collision, a *bound call's* monomorphized dispatch resolves the
+  concrete type's inherent method instead of the trait's inherited default (the
+  transformer's name-based dispatch lookup — reproduces without `[trait_only]`).
+
+  **Derived trait methods are `[trait_only]` by default — settled, but the flip is
+  deferred.** A `[derive(Wire)]` / `[derive(Json)]` / `[derive(Debug)]` should generate
+  `[trait_only]` methods, so "derive on everything, clutter nothing" is the default; a trait
+  opts a method back *out* when the concrete-type call is genuinely wanted. **Why deferred:**
+  the derive-generated bodies themselves call the methods *concretely* — a derived `to_json`
+  emits `self.field.to_json()` on concrete field types, and decode emits
+  `Point::from_json_value(..)` statics — so flipping the std trait declarations today would
+  break the generated code (and every direct `.to_json()` in the corpus, the rpc example's
+  envelope handling, …). The flip needs the derive codegen (and the touched call sites) to
+  route through bound-generic helpers (`fun encode<T: Json>(value: T): str`) first — its own
+  migration slice, best taken with (or after) `[service(Client)]` generation so the
+  generated client/dispatcher is born bound-clean.
 
 - **`[doc(hidden)]`** — Rust-style: the method stays fully callable, but the language server
   omits it from completion. A *tooling* concern only, with no resolution change, for methods
   you want reachable-if-typed but not in the `.` menu. Where `[trait_only]` changes *what
-  resolves*, `[doc(hidden)]` changes only *what is suggested*.
+  resolves*, `[doc(hidden)]` changes only *what is suggested*. **✅ Shipped as a parsed,
+  recorded marker (2026-07-02)** — its consumer is editor *completion*, which the language
+  server doesn't offer yet; the flag is on `Function` for when it does.
 
 ## 4. Exposure: the two-signature split, the foundation, then `[service]` sugar
 
@@ -594,10 +611,13 @@ paradigm needs:
   `[service(Client)]` struct's `[rpc]` methods + `[expose]` fields (§4.2). This is generation *over a struct+impl*, beyond today's
   struct/enum derives — the one genuinely new piece of codegen — and resolves Q1. It is the
   headline "seamless remote functions"; the hand-written `examples/rpc` is its proof.
-- **`[trait_only]` + `[doc(hidden)]`** — the namespace-hygiene attributes (§3.2): a
-  resolution hook excluding `[trait_only]` methods from concrete-type member lookup, and an
-  LSP filter for `[doc(hidden)]` in completion. General language features (their own small
-  proposal) that make ubiquitous `Wire`/`Debug` derives livable.
+- **`[trait_only]` + `[doc(hidden)]` — ✅ shipped (2026-07-02).** The namespace-hygiene
+  attributes (§3.2): `[trait_only]` excludes a trait method from concrete-type member lookup
+  (instance, static, and inherited-default paths) while trait-bound resolution is untouched,
+  with the "no method" diagnostics naming the trait; `[doc(hidden)]` is a parsed, recorded
+  marker awaiting LSP completion. The **derived-methods-`[trait_only]`-by-default flip is
+  deferred** (§3.2: the derive codegen itself calls concretely; needs bound-helper routing —
+  its own migration slice with/after `[service(Client)]` generation).
 - **A byte-array type for binary codecs** — a binary `Codec` produces bytes, not text (§6).
   `List<u8>` is the stand-in for now (probably easiest); a proper fixed `[u8]`/`Bytes` array
   type is the real want (added to the backlog). JSON-only needs nothing here (UTF-8 `str`).

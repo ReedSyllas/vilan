@@ -80,6 +80,13 @@ pub struct Func<'src> {
     // Its parameters and return must be Wire types — checked by the analyzer
     // (`proposal/transport-rpc.md` §4.2).
     pub rpc: bool,
+    // Declared `[trait_only]` (on a trait's method declaration): reachable only
+    // through a trait bound, never on a concrete type's own surface
+    // (`proposal/transport-rpc.md` §3.2).
+    pub trait_only: bool,
+    // Declared `[doc(hidden)]`: fully callable, but omitted from editor
+    // completion (a tooling marker — no resolution change).
+    pub doc_hidden: bool,
     pub generic_parameters: Option<GenericParameters<'src>>,
     pub parameters: Spanned<Vec<Parameter<'src>>>,
     pub return_type: Option<Box<Spanned<Node<'src>>>>,
