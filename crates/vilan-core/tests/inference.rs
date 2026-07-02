@@ -2034,3 +2034,168 @@ fn owner_take_disposes_a_mapped_and_a_root_subscription() {
         "a=0\nb=0\na=2\nb=1\n",
     );
 }
+
+// === Reactive batching (proposal/reactive-batching.md) ============================
+
+#[test]
+fn lone_set_notifies_synchronously() {
+    // Outside a `batch`, `set` notifies inline (eager) — a lone set fires its observers
+    // before the next statement, exactly as before batching existed.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal };
+        fun main() {
+            let a = Signal::new(0);
+            let _ = a.sub(|v| print(i"a={v}"));   // immediate: a=0
+            a.set(1);                             // eager -> a=1 now
+            print("after");
+            a.set(2);                             // a=2
+        }
+        "#,
+        "a=0\na=1\nafter\na=2\n",
+    );
+}
+
+#[test]
+fn batch_commits_value_immediately_but_defers_notification() {
+    // Inside a `batch`, a root's value is committed at once (`s.get()` is fresh), but a
+    // *derived* value recomputes only at the flush boundary — so mid-batch it is stale,
+    // then settles. Pins the "defer notification, not the value" divergence.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, batch };
+        fun main() {
+            let s = Signal::new(0);
+            let doubled = s.map(|n| n * 2);
+            batch(|| {
+                s.set(5);
+                print(i"in-batch s={s.get()} doubled={doubled.get()}");   // s=5 fresh, doubled=0 stale
+            });
+            print(i"after doubled={doubled.get()}");                      // 10 (settled at flush)
+        }
+        "#,
+        "in-batch s=5 doubled=0\nafter doubled=10\n",
+    );
+}
+
+#[test]
+fn batch_coalesces_a_multi_input_observer() {
+    // A node fed by two inputs (hand-rolled `d = a + b`, recomputed when either changes)
+    // recomputes with both inputs settled inside a `batch` — glitch-free. The `d` observer
+    // fires once (11 -> 22), with no intermediate (a-new, b-old) reading.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, batch };
+        fun main() {
+            let a = Signal::new(1);
+            let b = Signal::new(10);
+            let d = Signal::new(a.get() + b.get());
+            let _ = a.sub(|_| { d.set(a.get() + b.get()); });
+            let _ = b.sub(|_| { d.set(a.get() + b.get()); });
+            let _ = d.sub(|v| print(i"d={v}"));   // immediate: d=11
+            batch(|| {
+                a.set(2);
+                b.set(20);
+            });                                    // coalesced -> d=22 once
+        }
+        "#,
+        "d=11\nd=22\n",
+    );
+}
+
+#[test]
+fn without_a_batch_a_multi_input_observer_glitches() {
+    // The same graph without a `batch`: each eager `set` fires the observer, so it sees the
+    // intermediate (a=2, b=10) state — the glitch (`d=12`) the batch above elides. Pins that
+    // batching is what removes it (the opt-in boundary).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal };
+        fun main() {
+            let a = Signal::new(1);
+            let b = Signal::new(10);
+            let d = Signal::new(a.get() + b.get());
+            let _ = a.sub(|_| { d.set(a.get() + b.get()); });
+            let _ = b.sub(|_| { d.set(a.get() + b.get()); });
+            let _ = d.sub(|v| print(i"d={v}"));   // d=11
+            a.set(2);                              // d=12 (glitch: b still 10)
+            b.set(20);                             // d=22
+        }
+        "#,
+        "d=11\nd=12\nd=22\n",
+    );
+}
+
+#[test]
+fn batch_cascade_settles_in_one_flush() {
+    // A linear cascade `a -> map -> map -> observer` settles to its final value in one flush
+    // when the root is set inside a `batch` — the observer fires once with the fully-cascaded
+    // value (20 -> 60), never an intermediate.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, batch };
+        fun main() {
+            let a = Signal::new(1);
+            let b = a.map(|n| n + 1);      // b = a + 1
+            let c = b.map(|n| n * 10);     // c = b * 10
+            let _ = c.sub(|v| print(i"c={v}"));   // immediate: c=20
+            batch(|| { a.set(5); });               // a=5 -> b=6 -> c=60
+        }
+        "#,
+        "c=20\nc=60\n",
+    );
+}
+
+#[test]
+fn nested_batches_flush_at_the_outer_boundary() {
+    // An inner `batch` does not flush (depth stays > 0) — notifications wait for the outermost
+    // boundary and coalesce to the final value. `mid` prints before any observer fires.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, batch };
+        fun main() {
+            let a = Signal::new(0);
+            let _ = a.sub(|v| print(i"a={v}"));   // immediate: a=0
+            batch(|| {
+                a.set(1);
+                batch(|| {
+                    a.set(2);
+                });
+                print("mid");        // inner batch did NOT flush -> no a-notify yet
+                a.set(3);
+            });                       // outer flush -> a=3 (once, final)
+        }
+        "#,
+        "a=0\nmid\na=3\n",
+    );
+}
+
+#[test]
+fn dispose_in_a_batch_scrubs_the_pending_notify() {
+    // A subscription disposed *after* its source was set in the same `batch` must not fire:
+    // `dispose` scrubs the pending queue, so the enqueued notify is removed before the flush.
+    // Pins the "disposed is silent" resolution (no `tick 1` from the batch, no `tick 2` after).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, batch };
+        fun main() {
+            let counter = Signal::new(0);
+            let sub = counter.sub(|n| print(i"tick {n}"));   // immediate: tick 0
+            batch(|| {
+                counter.set(1);     // enqueues `sub`'s notify
+                sub.dispose();      // scrubs it from the pending queue
+            });                      // flush -> nothing
+            print("done");
+            counter.set(2);          // sub disposed -> silent
+        }
+        "#,
+        "tick 0\ndone\n",
+    );
+}

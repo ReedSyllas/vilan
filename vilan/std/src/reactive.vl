@@ -23,6 +23,75 @@ fun fresh_id(): i32 {
 	id
 }
 
+// === Batching scheduler (`proposal/reactive-batching.md`) ===
+//
+// A `set` commits its value immediately, but *notification* is coalesced to a flush
+// boundary when it happens inside a `batch`. `flush()` drains the pending notifies now;
+// `batch(body)` defers them through `body` then flushes once, so observers see a set of
+// writes settled together (glitch-free). Outside a `batch`, `set` notifies inline, exactly
+// as before — batching is opt-in.
+struct Scheduler {
+	pending: Shared<List<Subscriber>>,
+	depth: Shared<i32>,
+	draining: Shared<bool>,
+}
+
+let scheduler: Scheduler = Scheduler {
+	pending = Shared::new([]),
+	depth = Shared::new(0),
+	draining = Shared::new(false),
+};
+
+// Enqueue a signal's subscribers, deduped by id so a subscriber fed by several inputs in
+// one batch fires once — the dedup *is* the glitch-freeness. (A keyed set can replace this
+// linear scan later without changing semantics.)
+fun enqueue(subscribers: List<Subscriber>) {
+	for subscriber in subscribers {
+		mut seen = false;
+		for queued in scheduler.pending.read() {
+			if queued.id == subscriber.id {
+				seen = true;
+			}
+		}
+		if !seen {
+			scheduler.pending.write().push(subscriber);
+		}
+	}
+}
+
+// Drain every pending notify until quiescent — the "settle now" primitive. A notify may
+// enqueue more (a derived propagating), which this same loop drains. Re-entrancy-guarded (a
+// `set` from inside a notify only enqueues; the running loop picks it up) and budget-bounded
+// (a feedback loop that never converges stops here instead of hanging).
+fun flush() {
+	if !scheduler.draining.read() {
+		scheduler.draining.write() = true;
+		mut budget = 100000;
+		for !scheduler.pending.read().is_empty() && budget > 0 {
+			let wave = scheduler.pending.read();
+			scheduler.pending.write() = [];
+			for subscriber in wave {
+				(subscriber.notify)();
+				budget -= 1;
+			}
+		}
+		scheduler.draining.write() = false;
+	}
+}
+
+// Run `body` with notifications deferred, then `flush` once — the "turn". Nested batches
+// fold into the outermost. Returns `body`'s value.
+fun batch<T>(body: || T): T {
+	scheduler.depth.write() = scheduler.depth.read() + 1;
+	let result = body();
+	// flush while still "in batch" (depth 1) so cascading sets during the drain keep deferring
+	if scheduler.depth.read() == 1 {
+		flush();
+	}
+	scheduler.depth.write() = scheduler.depth.read() - 1;
+	result
+}
+
 // A live subscription. Dropping it does NOT stop it (an owner scope is
 // responsible for that — see the proposal); call `dispose` to stop early.
 struct Subscription {
@@ -39,6 +108,16 @@ impl Subscription with Disposable {
 			}
 		}
 		self.subscribers.write() = kept;
+
+		// Scrub the scheduler's pending queue too: a disposed observer never fires, even if a
+		// `set` earlier in the same `batch` already enqueued it (proposal/reactive-batching.md).
+		mut kept_pending: List<Subscriber> = [];
+		for subscriber in scheduler.pending.read() {
+			if subscriber.id != self.id {
+				kept_pending.push(subscriber);
+			}
+		}
+		scheduler.pending.write() = kept_pending;
 	}
 }
 
@@ -120,8 +199,15 @@ impl Signal<type T> {
 	fun set(self, value: T) {
 		self.value.write() = value;
 
-		for subscriber in self.subscribers.read() {
-			(subscriber.notify)();
+		// Outside a `batch`, notify inline (eager, depth-first) — unchanged from before.
+		// Inside a `batch`, defer to the flush boundary, where writes coalesce glitch-free
+		// (proposal/reactive-batching.md).
+		if scheduler.depth.read() == 0 {
+			for subscriber in self.subscribers.read() {
+				(subscriber.notify)();
+			}
+		} else {
+			enqueue(self.subscribers.read());
 		}
 	}
 
