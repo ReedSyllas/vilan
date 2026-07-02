@@ -243,6 +243,7 @@ impl<'src> Printer<'src> {
                 | Node::Trait(_, _, _, _)
                 | Node::Module(_, _)
                 | Node::Derive(_, _)
+                | Node::Service(_, _)
                 | Node::Export(_)
                 | Node::Use(_)
                 | Node::Import(_)
@@ -372,6 +373,18 @@ impl<'src> Printer<'src> {
                 self.out.push_str(")]");
                 self.line();
                 self.print_item(derived);
+            }
+            // `[service]` / `[service(Client)]` likewise sits above its struct.
+            Node::Service(client_name, item) => {
+                self.out.push_str("[service");
+                if let Some(client_name) = client_name {
+                    self.out.push('(');
+                    self.out.push_str(client_name);
+                    self.out.push(')');
+                }
+                self.out.push(']');
+                self.line();
+                self.print_item(item);
             }
             Node::Export(exported) => {
                 self.out.push_str("export ");
@@ -1396,9 +1409,14 @@ mod idempotency {
         let source = "trait Source {\n\t[must_use]\n\tfun sub(self): i32;\n\
                       \t[trait_only]\n\tfun tag(self): str;\n\
                       \t[doc(hidden)]\n\tfun internal(self): i32;\n}\n\
+                      [service(Client)]\n\
                       struct Sess {\n\t[expose] status: Signal<str>,\n\thidden: i32,\n}\n\
                       impl Sess {\n\t[rpc]\n\tfun login(self, name: str): bool {\n\t\ttrue\n\t}\n}\n";
         let formatted = format(source);
+        assert!(
+            formatted.contains("[service(Client)]"),
+            "service attribute lost:\n{formatted}"
+        );
         assert!(
             formatted.contains("[must_use]"),
             "must_use attribute lost:\n{formatted}"

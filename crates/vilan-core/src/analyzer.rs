@@ -1179,12 +1179,15 @@ impl<'src> Analyzer<'src> {
                 None => members.push((format!("parameter `{parameter_name}`"), None, parameter.3)),
             }
         }
-        if let Some(return_type) = function.return_type.as_deref() {
-            members.push((
+        match function.return_type.as_deref() {
+            Some(return_type) => members.push((
                 "return type".to_string(),
                 Some(&return_type.0),
                 return_type.1,
-            ));
+            )),
+            // A void `[rpc]` method has no reply payload to encode — require a
+            // declared Wire return (fire-and-forget needs its own design).
+            None => members.push(("return type".to_string(), None, function.name.1)),
         }
         self.rpc_signatures_to_check
             .push((function.name.0, members));
@@ -1217,7 +1220,8 @@ impl<'src> Analyzer<'src> {
                             span,
                             msg: format!(
                                 "{label} of `[rpc]` method `{method_name}` must declare a Wire \
-                                 type — the dispatcher decodes each argument at its declared type"
+                                 type — arguments are decoded, and the reply encoded, at their \
+                                 declared types"
                             ),
                         });
                     }
@@ -3912,6 +3916,13 @@ impl<'src> Analyzer<'src> {
                 if derives.contains(&"Wire") {
                     self.collect_wire_type(&inner.0);
                 }
+                self.walk_expr_node(inner, scope_id);
+                None
+            }
+            // `[service(..)]` is transparent to analysis: walk the wrapped
+            // struct; the generated dispatcher/client are appended separately
+            // (`service_impl_source`).
+            Node::Service(_client_name, inner) => {
                 self.walk_expr_node(inner, scope_id);
                 None
             }
@@ -10025,6 +10036,175 @@ fn derive_enum_impls(
     out
 }
 
+/// A stable fingerprint of a service's surface (Q6 v2): method names, parameter
+/// types, return types, and exposed fields — djb2 over the canonical string, so
+/// the same contract always hashes the same and any drift changes it.
+fn service_contract_hash(surface: &str) -> String {
+    let mut hash: u32 = 5381;
+    for byte in surface.bytes() {
+        hash = hash.wrapping_mul(33) ^ (byte as u32);
+    }
+    format!("{hash:08x}")
+}
+
+/// The synthesized source for a `[service(Client)]` struct (transport-rpc.md
+/// §4.2): a `dispatcher(self)` method routing each `[rpc]` method through the
+/// §4.1 `Dispatcher` (the handlers capture `self`, the per-connection session),
+/// a sibling client struct over a generic `Transport` whose methods are the
+/// `Result`-wrapped `call(..)`s and whose `[expose]`d fields surface as
+/// `RemoteSource` mirrors, and a shared `contract_hash()` on both sides. The
+/// service's `[rpc]` methods are gathered from the *same module's* inherent
+/// `impl` blocks (`nodes`).
+fn service_impl_source(
+    client_name: Option<&str>,
+    item: &Spanned<Node<'_>>,
+    nodes: &NodeList<'_>,
+) -> String {
+    let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
+        return String::new();
+    };
+    let service_name = name.0;
+    let client_name = client_name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{service_name}Client"));
+    // The `[expose]`d fields — each becomes a `RemoteSource` mirror on the client.
+    let exposed: Vec<&str> = fields
+        .0
+        .iter()
+        .filter(|field| field.0.2)
+        .map(|field| field.0.0.0)
+        .collect();
+    // The `[rpc]` methods: (name, [(parameter, type)], return type), from this
+    // module's inherent impls of the service struct.
+    let mut methods: Vec<(&str, Vec<(String, String)>, String)> = Vec::new();
+    for (node, _span) in nodes {
+        let Node::Impl(subject, impl_traits, body) = node else {
+            continue;
+        };
+        if !impl_traits.is_empty() {
+            continue;
+        }
+        let Node::Accessor(subject_name) = &subject.0 else {
+            continue;
+        };
+        if *subject_name != service_name {
+            continue;
+        }
+        for (member, _member_span) in &body.0 {
+            let Node::Func(function) = member else {
+                continue;
+            };
+            if !function.rpc {
+                continue;
+            }
+            let mut parameters = Vec::new();
+            for parameter in &function.parameters.0 {
+                let parameter_name = match &parameter.0 {
+                    Pattern::Binding(name, _) => *name,
+                    _ => "_",
+                };
+                if parameter_name == "self" {
+                    continue;
+                }
+                let type_string = parameter
+                    .1
+                    .as_deref()
+                    .map(|type_| render_type(&type_.0))
+                    .unwrap_or_else(|| "_".to_string());
+                parameters.push((parameter_name.to_string(), type_string));
+            }
+            let return_string = function
+                .return_type
+                .as_deref()
+                .map(|type_| render_type(&type_.0))
+                .unwrap_or_else(|| "void".to_string());
+            methods.push((function.name.0, parameters, return_string));
+        }
+    }
+    // The contract surface + its hash — shared verbatim by both sides.
+    let mut surface = String::new();
+    for (method_name, parameters, return_string) in &methods {
+        surface.push_str(method_name);
+        surface.push('(');
+        for (index, (_, type_string)) in parameters.iter().enumerate() {
+            if index > 0 {
+                surface.push(',');
+            }
+            surface.push_str(type_string);
+        }
+        surface.push_str(")->");
+        surface.push_str(return_string);
+        surface.push(';');
+    }
+    for field_name in &exposed {
+        surface.push_str("expose:");
+        surface.push_str(field_name);
+        surface.push(';');
+    }
+    let hash = service_contract_hash(&surface);
+
+    let mut out = String::new();
+    // --- The dispatcher: one route per [rpc] method, handlers capturing `self`.
+    out.push_str(&format!("impl {service_name} {{\n"));
+    out.push_str("\tfun dispatcher(self): Dispatcher {\n\t\tDispatcher::new()");
+    for (method_name, parameters, _) in &methods {
+        if parameters.is_empty() {
+            out.push_str(&format!(
+                "\n\t\t\t.on(\"{method_name}\", |_| reply(self.{method_name}()))"
+            ));
+        } else {
+            out.push_str(&format!("\n\t\t\t.on(\"{method_name}\", |request| {{\n"));
+            for (index, (parameter_name, type_string)) in parameters.iter().enumerate() {
+                out.push_str(&format!(
+                    "\t\t\t\tlet {parameter_name}: {type_string} = arg(request, {index});\n"
+                ));
+            }
+            let argument_list = parameters
+                .iter()
+                .map(|(parameter_name, _)| parameter_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "\t\t\t\treply(self.{method_name}({argument_list}))\n\t\t\t}})"
+            ));
+        }
+    }
+    out.push_str("\n\t}\n");
+    out.push_str(&format!(
+        "\tfun contract_hash(self): str {{\n\t\t\"{hash}\"\n\t}}\n}}\n"
+    ));
+    // --- The client sibling: a transport + a mirror per exposed field.
+    out.push_str(&format!(
+        "struct {client_name}<T: Transport> {{\n\ttransport: T,\n"
+    ));
+    for field_name in &exposed {
+        out.push_str(&format!("\t{field_name}: RemoteSource,\n"));
+    }
+    out.push_str("}\n");
+    out.push_str(&format!("impl {client_name}<type T> {{\n"));
+    for (method_name, parameters, return_string) in &methods {
+        let parameter_list = parameters
+            .iter()
+            .map(|(parameter_name, type_string)| format!(", {parameter_name}: {type_string}"))
+            .collect::<Vec<_>>()
+            .join("");
+        let argument_list = parameters
+            .iter()
+            .map(|(parameter_name, _)| format!("{parameter_name}.to_json()"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "\tfun {method_name}(self{parameter_list}): Result<{return_string}, RpcError> {{\n\
+             \t\tcall(self.transport, \"{method_name}\", [{argument_list}])\n\
+             \t}}\n"
+        ));
+    }
+    out.push_str(&format!(
+        "\tfun contract_hash(self): str {{\n\t\t\"{hash}\"\n\t}}\n}}\n"
+    ));
+    out
+}
+
 fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
     if let Node::Enum(name, _generics, variants) = &item.0 {
         return derive_enum_impls(derives, name.0, variants);
@@ -10167,15 +10347,26 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     // references `FromJson`/`JsonValue`/`parse_json_value`; the enum form also
     // calls `panic` on an unknown tag.
     let mut enum_derives_json = false;
+    let mut any_service = false;
     for (node, _span) in nodes {
-        if let Node::Derive(derives, item) = node {
-            traits.extend(derives.iter().copied());
-            if (derives.contains(&"Json") || derives.contains(&"Wire"))
-                && matches!(item.0, Node::Enum(..))
-            {
-                enum_derives_json = true;
+        match node {
+            Node::Derive(derives, item) => {
+                traits.extend(derives.iter().copied());
+                if (derives.contains(&"Json") || derives.contains(&"Wire"))
+                    && matches!(item.0, Node::Enum(..))
+                {
+                    enum_derives_json = true;
+                }
+                source.push_str(&derive_impl_source(derives, item));
             }
-            source.push_str(&derive_impl_source(derives, item));
+            // `[service(Client)]` — generate the dispatcher + client sibling +
+            // contract hash from the struct's same-module `[rpc]` impl methods
+            // and `[expose]`d fields (transport-rpc.md §4.2).
+            Node::Service(client_name, item) => {
+                source.push_str(&service_impl_source(*client_name, item, nodes));
+                any_service = true;
+            }
+            _ => {}
         }
     }
     if source.trim().is_empty() {
@@ -10198,6 +10389,15 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     }
     if traits.contains("Debug") {
         prelude.push_str("import std::debug::Debug;\n");
+    }
+    // The generated service dispatcher/client reference the std::rpc foundation
+    // (the user's own types resolve in the module's scope, where the generated
+    // items are walked).
+    if any_service {
+        prelude.push_str(
+            "import std::rpc::{ Transport, Dispatcher, RpcError, RemoteSource, call, arg, reply };\n",
+        );
+        prelude.push_str("import std::result::Result;\n");
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;

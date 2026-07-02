@@ -1247,8 +1247,27 @@ where
         .map_with(|(derives, item), e| (Node::Derive(derives, Box::new(item)), e.span()))
         .boxed();
 
+    // `[service(Name)] struct …` — a per-connection service struct; a
+    // pre-analysis pass generates its dispatcher + client sibling from the
+    // `[rpc]`/`[expose]` markers (transport-rpc.md §4.2). The argument names the
+    // generated client type; bare `[service]` defaults to `<Struct>Client`.
+    let service_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("service") => () }.labelled("`service`"))
+        .ignore_then(
+            identifier
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                .or_not(),
+        )
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("service attribute");
+    let service_item = service_attribute
+        .then(struct_.clone())
+        .map_with(|(client_name, item), e| (Node::Service(client_name, Box::new(item)), e.span()))
+        .boxed();
+
     statement.define(choice((
         derived_item,
+        service_item,
         export_,
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_.then_ignore(not_block_end.clone()),

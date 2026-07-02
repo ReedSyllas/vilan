@@ -607,10 +607,19 @@ paradigm needs:
   `is_wire_type` as `[derive(Wire)]` (trait-satisfaction is unsound for containers), collected
   during the walk and validated once all modules' Wire names are known. Inert markers until
   `[service(Client)]` generation consumes them.
-- **`[service]` generation** — generate the server dispatcher + client stub from a
-  `[service(Client)]` struct's `[rpc]` methods + `[expose]` fields (§4.2). This is generation *over a struct+impl*, beyond today's
-  struct/enum derives — the one genuinely new piece of codegen — and resolves Q1. It is the
-  headline "seamless remote functions"; the hand-written `examples/rpc` is its proof.
+- **`[service]` generation — ✅ shipped (2026-07-02).** From a `[service(Client)]` struct's
+  same-module `[rpc]` impl methods + `[expose]` fields, the compiler generates:
+  `Session::dispatcher(self)` (one route per `[rpc]` method over the §4.1 `Dispatcher`,
+  handlers capturing the session), the sibling `Client<T: Transport>` (`Result`-wrapped
+  requestor methods + a `RemoteSource` mirror per `[expose]`d field), and a shared
+  `contract_hash(self)` on both sides (djb2 over the canonical surface). Generation *over a
+  struct+impl*, beyond the struct/enum derives; resolves Q1; the runtime it emits over is
+  `std::rpc` (§9, also shipped). `examples/rpc` runs byte-identically on the generated code.
+  **v1 scope:** the service struct and its `[rpc]` impls must share a module; service structs
+  are concrete (no generics); the client is constructed literally
+  (`Client { transport, status = … }` — `Client::connect` + hash *enforcement* on connect
+  arrive with the real transports, phase 4); mirror observers decode the JSON value at the
+  concrete site (a typed mirror wrapper is a later refinement).
 - **`[trait_only]` + `[doc(hidden)]` — ✅ shipped (2026-07-02).** The namespace-hygiene
   attributes (§3.2): `[trait_only]` excludes a trait method from concrete-type member lookup
   (instance, static, and inherited-default paths) while trait-bound resolution is untouched,
@@ -647,13 +656,13 @@ paradigm needs:
    dogfood. **In the same pass, bring every example up to the latest project structure**
    (platform model + library packages): current `vilan.toml` conventions, the shared
    `common` `[library]`, per-package `platform`.
-3. **`[service]` generation — seamless remote functions** (L) — generate the server
-   dispatcher and the client stub from a `[service(Client)]` struct (§4.2, §7), with the `Result`
-   wrapping applied by codegen (auth stays manual body logic — Q4) and the **contract hash**
-   (Q6 v2: the generator hashes the service surface; a mismatch on connect is a clean
-   `RpcError` instead of silent decode garbage). This is the headline "C in RPC"
-   and resolves Q1. Migrate `examples/rpc` from the hand-written dispatch/stub to the
-   generated `[service(Client)]` struct, so the example always shows the current best form.
+3. **`[service]` generation — seamless remote functions** (L) — **✅ shipped (2026-07-02)**:
+   the dispatcher + client sibling generated from a `[service(Client)]` struct (§4.2, §7),
+   `Result` wrapping applied by codegen (auth stays manual body logic — Q4), and the
+   **contract hash** emitted on both sides (Q6 v2 — *enforcement* on connect lands with
+   phase 4's real transports, where a mismatch becomes a clean `RpcError` instead of silent
+   decode garbage). `examples/rpc` migrated to the generated form (byte-identical output),
+   and the runtime moved to `std::rpc` (§9).
 4. **`DuplexTransport` + server↔server** (L) — the WebSocket `SocketTransport` as a
    `DuplexTransport` (also `impl Transport` by correlation, so RPC and reactive multiplex over
    one socket), plus the `SplitDuplex` fallback; in-process service composition; a server

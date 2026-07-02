@@ -144,20 +144,23 @@ impl AccountsClient<type T> {
 	}
 }
 
-// --- The [service] paradigm, by hand (proposal §4.2) --------------------------
+// --- The [service(Client)] paradigm — GENERATED (proposal §4.2) ---------------
 //
-// What `[service(Client)]` will generate, written out manually until the sugar ships: a
-// per-connection `Session` struct is the source of truth, and `Client` is its *sibling*
-// projection — the two-signature split made visible (`Session` methods return `T`;
-// `Client` methods return `Result<T, RpcError>`).
+// `[service(Client)]` generates the plumbing from this struct + its `[rpc]` impl
+// methods: `Session::dispatcher(self)` (one route per `[rpc]` method over the §4.1
+// `Dispatcher`, handlers capturing the session), the sibling `Client<T: Transport>`
+// (the two-signature split — `Session` methods return `T`, `Client` methods return
+// `Result<T, RpcError>`; each `[expose]`d field surfaces as a `RemoteSource` mirror),
+// and a shared `contract_hash()` on both sides (Q6 v2).
 
-// The per-connection session (Q9): created on connect, captured by the dispatcher's
-// handlers, so its state persists across the connection's calls. Mutable state lives in
-// `Signal`/`Shared` handles — the struct is a lightweight handle, and a plain field
-// write would only mutate a closure's *copy* (value semantics); the shared cells are
-// what make the state one. `status` is `[expose]`d — the compiler checks it is a
-// `Signal` of a Wire type (only observable state can be exposed), and the client
+// The per-connection session (Q9): created on connect, captured by the generated
+// dispatcher's handlers, so its state persists across the connection's calls. Mutable
+// state lives in `Signal`/`Shared` handles — the struct is a lightweight handle, and a
+// plain field write would only mutate a closure's *copy* (value semantics); the shared
+// cells are what make the state one. `status` is `[expose]`d — the compiler checks it is
+// a `Signal` of a Wire type (only observable state can be exposed), and the client
 // mirrors it via the reactive protocol (§8); `user_id` is private — it never crosses.
+[service(Client)]
 struct Session {
 	[expose] status: Signal<str>,
 	user_id: Shared<Option<i32>>,
@@ -198,37 +201,12 @@ impl Session {
 	}
 }
 
-// The dispatcher `[service(Client)]` would generate: one route per `[rpc]` method, each
-// handler capturing the connection's session.
-fun session_dispatcher(session: Session): Dispatcher {
-	Dispatcher::new()
-		.on("login", |request| {
-			let username: str = arg(request, 0);
-			let password: str = arg(request, 1);
-			reply(session.login(username, password))
-		})
-		.on("whoami", |_| reply(session.whoami()))
-}
-
-// The client `[service(Client)]` would generate: a *sibling* of `Session`, not an impl
-// of anything it wrote — each `[rpc]` method is the `Result`-wrapped `call`, and the
-// `[expose]`d `status` surfaces as a read-only mirror (a §8 `RemoteSource`; observers
-// decode the JSON-encoded value at the concrete site — a typed wrapper is the sugar's
-// job).
-struct Client<T: Transport> {
-	transport: T,
-	status: RemoteSource,
-}
-
-impl Client<type T> {
-	fun login(self, username: str, password: str): Result<bool, RpcError> {
-		call(self.transport, "login", [username.to_json(), password.to_json()])
-	}
-
-	fun whoami(self): Result<Option<WireUser>, RpcError> {
-		call(self.transport, "whoami", [])
-	}
-}
+// The dispatcher and the `Client` sibling that used to be written out here BY HAND are
+// now **generated** from the `[service(Client)]` struct above: `Session::dispatcher(self)`
+// routes each `[rpc]` method (handlers capture the session), and `Client<T: Transport>`
+// carries the `Result`-wrapped requestor methods plus a `RemoteSource` mirror per
+// `[expose]`d field. Observers still decode the mirror's JSON-encoded value at the
+// concrete site (a typed wrapper is a later refinement).
 
 // --- Wiring + demo -----------------------------------------------------------
 
@@ -315,13 +293,13 @@ fun reactive_demo() {
 // The session demo — the `[service]` paradigm end-to-end, by hand: per-connection state,
 // manual auth, and an exposed signal the client observes.
 fun session_demo() {
-	print("--- session: the [service] paradigm, by hand ---");
+	print("--- session: the [service(Client)] paradigm, generated ---");
 
 	// Server, on connect: ONE session per connection; the dispatcher's handlers share its
 	// handles. The exposed `status` is exported under a channel id (§8) — the id is what
 	// a connect handshake would carry; in-process we just hand it over.
 	let session = Session { status = Signal::new("offline"), user_id = Shared::new(None) };
-	let rpc_transport = local_rpc(session_dispatcher(session).into_protocol());
+	let rpc_transport = local_rpc(session.dispatcher().into_protocol());
 	let (client_end, server_end) = duplex_pair();
 	let status_channel = ReactiveServer::new(server_end).expose(session.status);
 

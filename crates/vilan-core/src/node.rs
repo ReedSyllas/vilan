@@ -245,6 +245,12 @@ pub enum Node<'src> {
     // annotate. Transparent to analysis (the inner item is walked normally); a
     // pre-analysis pass generates the trait impls from the item's fields.
     Derive(Vec<&'src str>, Box<Spanned<Self>>),
+    // `[service(Client)] struct …` — a per-connection service struct
+    // (`proposal/transport-rpc.md` §4.2). Transparent to analysis; a
+    // pre-analysis pass generates its dispatcher, its client sibling (named by
+    // the argument, defaulting to `<Struct>Client`), and the contract hash from
+    // the struct's `[rpc]` impl methods and `[expose]`d fields.
+    Service(Option<&'src str>, Box<Spanned<Self>>),
     // `let`/`mut` binding: name, type annotation, value, mutability.
     Let(
         Spanned<&'src str>,

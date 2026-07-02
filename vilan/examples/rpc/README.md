@@ -21,7 +21,7 @@ count = 2
 count = 10
 count = 16
 rpc add -> 16
---- session: the [service] paradigm, by hand ---
+--- session: the [service(Client)] paradigm, generated ---
 status = offline
 whoami -> not logged in
 login -> false
@@ -62,7 +62,7 @@ The pieces of the proposal, bottom-up — a codec, transports, and protocols ove
 | **codec** (§6) | the `Json`/`FromJson` derives, used directly (frames are JSON `str`) |
 | **transport** (§5) | `trait Transport` (request/response) + `LocalTransport`; `trait DuplexTransport` + `DuplexEnd` / `duplex_pair` (full-duplex, in-process) |
 | **protocol** (§2) | `trait Protocol { receive }` — `RpcProtocol` (request/response) and `ReactiveServer`/`ReactiveClient` (pub/sub) all implement it |
-| **service** (§4.1 foundation + §4.2 by hand) | the ergonomic hand-written API the `[service]` sugar would generate: a `Dispatcher` of `[rpc]` handlers over the `call` helper (`accounts_dispatcher()` + `AccountsClient`), and the stateful pair — a per-connection `Session` and its sibling `Client` |
+| **service** (§4.1 foundation + §4.2 generated) | the hand-written foundation (`accounts_dispatcher()` + `AccountsClient` over `call`/`Dispatcher`) **and** the generated form: `[service(Client)] struct Session` → `Session::dispatcher()`, the `Client` sibling, and `contract_hash()` |
 | **the turn** (`reactive-batching.md`) | every inbound frame is handled in a `batch` (`local_rpc`, both duplex `on_frame`s) — a handler's signal writes coalesce into one `Update` per source, delivered with the reply |
 
 The client and server now go through the §4.1 **foundation** — `call<T>` collapses a client
@@ -117,12 +117,16 @@ the turn's end via `transport.flush()`.
 
 ## The session service (proposal §4.2, by hand)
 
-`[service(Client)]` isn't implemented yet, so the demo writes out **exactly what it will
-generate**: a per-connection `Session` struct (the source of truth) and its *sibling* `Client`
-(the two-signature split made visible — `Session::login(..): bool` vs
-`Client::login(..): Result<bool, RpcError>`). The `[rpc]` and `[expose]` **attributes are real
-and checked** (an `[rpc]` signature must be Wire; an `[expose]`d field must be a `Signal` of a
-Wire element) — generation is what's still to come, and it will consume these same markers.
+`[service(Client)]` is **implemented — this section is generated**. From the annotated
+`Session` struct and its `[rpc]` impl methods, the compiler generates
+`Session::dispatcher(self)` (one route per `[rpc]` method; handlers capture the session), the
+*sibling* `Client<T: Transport>` (the two-signature split — `Session::login(..): bool` vs
+`Client::login(..): Result<bool, RpcError>`; the `[expose]`d `status` surfaces as a
+`RemoteSource` mirror), and a shared `contract_hash()` on both sides. The `[rpc]`/`[expose]`
+attributes are checked (an `[rpc]` signature must be Wire and declare a return; an `[expose]`d
+field must be a `Signal` of a Wire element). This demo previously wrote all of that out by
+hand; the generated code produces **byte-identical output** — the sugar mechanized the
+paradigm without replacing it.
 
 - **Per-connection state (Q9).** One `Session` is created "on connect"; the dispatcher's
   handlers capture it, so state persists across the connection's calls (`login` then `whoami`).
@@ -276,7 +280,9 @@ today** — the hand-written core is real, and the *paradigm* (a domain type, an
 today's features. The generic-dispatch cluster (B1) that P6 leaned on is now closed through the
 closure-capture case too (#5), so `expose` is generic over any `Source<T>`.
 
-What's left is purely mechanical, in the spirit of "guide, not generator": the
-`[service(Client)]`/`[rpc]`/`[expose]` sugar generates exactly the `Session` → `Client` +
-dispatcher pair this example now writes by hand — it replaces none of the paradigm.
-(`[derive(Wire)]`, the `call`/`Dispatcher` foundation, and the wire turn are already real.)
+The whole §4.2 sugar is now real: `[derive(Wire)]`, the `call`/`Dispatcher` foundation, the
+wire turn, and `[service(Client)]` generation (this example runs byte-identically on the
+generated `Session::dispatcher()`/`Client` — the sugar mechanized the paradigm without
+replacing it; the runtime lives in `std::rpc`). What's left is the *wire itself*: the real
+transports (HTTP + WebSocket, plan phase 4), which bring `Client::connect`, contract-hash
+enforcement on connect, and `transport.flush()` for the buffered turn.

@@ -2533,6 +2533,123 @@ fn bound_dispatch_prefers_the_trait_method_on_a_name_collision() {
     );
 }
 
+// === [service(Client)] generation (transport-rpc.md §4.2) =========================
+
+#[test]
+fn service_generates_dispatcher_client_and_mirror() {
+    // The whole §4.2 surface, end to end and in-process: `[service(Client)]` generates
+    // `Session::dispatcher(self)` (routes both `[rpc]` methods — multi-arg and no-arg),
+    // the sibling `Client<T: Transport>` with `Result`-wrapped requestors, and a
+    // `RemoteSource` mirror for the `[expose]`d field (whose update arrives in the same
+    // wire turn as the mutating call's reply — hence `status = bumped` before `bump -> 5`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::reactive::Signal;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, FromJson };
+        import std::rpc::{ local_rpc, duplex_pair, ReactiveServer, ReactiveClient };
+
+        [service(Client)]
+        struct Session {
+            [expose] status: Signal<str>,
+            count: Shared<i32>,
+        }
+
+        impl Session {
+            [rpc]
+            fun bump(self, by: i32): i32 {
+                self.count.write() = self.count.read() + by;
+                self.status.set("bumped");
+                self.count.read()
+            }
+
+            [rpc]
+            fun total(self): i32 {
+                self.count.read()
+            }
+        }
+
+        fun main() {
+            let session = Session { status = Signal::new("idle"), count = Shared::new(0) };
+            let transport = local_rpc(session.dispatcher().into_protocol());
+            let (client_end, server_end) = duplex_pair();
+            let channel = ReactiveServer::new(server_end).expose(session.status);
+            let client = Client { transport, status = ReactiveClient::new(client_end).source(channel) };
+            let watching = client.status.sub(|json| {
+                let s: str = str::from_json(json);
+                print(i"status = {s}");
+            });
+            match client.bump(5) {
+                Ok(let n) => print(i"bump -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            match client.total() {
+                Ok(let n) => print(i"total -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            let hashes_match = session.contract_hash() == client.contract_hash();
+            print(i"hashes match = {hashes_match}");
+            watching.dispose();
+        }
+        "#,
+        "status = idle\nstatus = bumped\nbump -> 5\ntotal -> 5\nhashes match = true\n",
+    );
+}
+
+#[test]
+fn service_client_name_defaults_to_struct_client() {
+    // Bare `[service]` names the generated client `<Struct>Client`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::Json;
+        import std::rpc::{ local_rpc };
+
+        [service]
+        struct Counter {
+            count: Shared<i32>,
+        }
+
+        impl Counter {
+            [rpc]
+            fun get(self): i32 {
+                self.count.read()
+            }
+        }
+
+        fun main() {
+            let counter = Counter { count = Shared::new(41) };
+            let transport = local_rpc(counter.dispatcher().into_protocol());
+            let client = CounterClient { transport };
+            match client.get() {
+                Ok(let n) => print(i"n = {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+        }
+        "#,
+        "n = 41\n",
+    );
+}
+
+#[test]
+fn rpc_rejects_a_missing_return() {
+    // A void `[rpc]` method has no reply payload to encode — the return must be a
+    // declared Wire type (fire-and-forget needs its own design).
+    assert_fails(
+        r#"
+        struct Service {}
+        impl Service {
+            [rpc] fun ping(self) {}
+        }
+        fun main() {}
+        "#,
+    );
+}
+
 #[test]
 fn doc_hidden_method_stays_callable() {
     // `[doc(hidden)]` is tooling-only: completion omits it, resolution doesn't.
