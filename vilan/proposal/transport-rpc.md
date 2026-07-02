@@ -322,7 +322,13 @@ impl Session {
             Err(LoginError::BadCredentials)
         }
     }
-    [rpc(auth)] fun rename(self, name: str): WireUser { /* gated — needs auth */ }
+    // auth is manual (Q4): ordinary body logic over the session state `login` populated
+    [rpc] fun rename(self, name: str): Result<WireUser, LoginError> {
+        match self.user_id.read() {
+            Some(let id) => Ok(rename_user(id, name)),
+            None => Err(LoginError::NotAuthenticated),
+        }
+    }
 }
 
 // the server instantiates one per connection; the generated dispatcher owns it
@@ -337,8 +343,10 @@ fun on_connect(): Session {
 - **`[rpc]`** marks a method **callable over the wire** — opt-in; the `[rpc]` methods *are* the
   surface (anything else is unreachable remotely — the attack-surface guarantee). Its signature
   must be **Wire-compatible** (every parameter and the return Wire, or `Option`/`Result`/`List`
-  of Wire); a non-Wire `[rpc]` method is a clear compile error. `[rpc(auth)]` gates on an
-  authenticated caller, rejected `err: unauthorized` *before* the body runs (Q4).
+  of Wire); a non-Wire `[rpc]` method is a clear compile error. **Auth is manual (Q4):** an
+  auth `[rpc]` (`login`) populates session state and other methods check it in their body —
+  no auth attribute; a declarative `[rpc(auth)]` gate is deferred sugar, reconsidered only if
+  real services show the check as repeated boilerplate.
 - **`[expose]`** marks a `Signal<T>` field the client may observe — private by default,
   observable only when marked, and only a `Signal` can be (exposure *is* observation; a plain
   value has nothing to subscribe to — Q9). `T` must be Wire. Any `[expose]`d field pulls in the
@@ -615,7 +623,7 @@ paradigm needs:
    `common` `[library]`, per-package `platform`.
 3. **`[service]` generation — seamless remote functions** (L) — generate the server
    dispatcher and the client stub from a `[service(Client)]` struct (§4.2, §7), with the `Result`
-   wrapping applied by codegen and `[rpc(auth)]` gating. This is the headline "C in RPC"
+   wrapping applied by codegen (auth stays manual body logic — Q4). This is the headline "C in RPC"
    and resolves Q1. Migrate `examples/rpc` from the hand-written dispatch/stub to the
    generated `[service(Client)]` struct, so the example always shows the current best form.
 4. **`DuplexTransport` + server↔server** (L) — the WebSocket `SocketTransport` as a
@@ -644,7 +652,7 @@ reach. Each is independently valuable and testable.
   fails to compile; a Wire-compatible one passes.
 - **`LocalTransport` end-to-end** — an invocation dispatched in-process, no network:
   request → dispatch → reply → decoded result; plus the error paths (unknown method →
-  `err`, malformed args → `Decode`, `[rpc(auth)]` without identity → `Unauthorized`).
+  `err`, malformed args → `Decode`, a manual auth check without identity → its app error).
 - **HTTP transport** — a CLI/integration test (like `workspace.rs`) builds a tiny
   client/server workspace and exercises a real `fetch`→`http` round-trip under Node.
 - **Exposure** — a non-`[rpc]` method is *not* dispatchable; an off-surface method name
@@ -701,13 +709,13 @@ effect-polymorphic async (auto-await through the indirect transport call); peer-
 - **Q3 — the `T` vs `Result<T, _>` asymmetry. ✅ Settled:** the `[service]` method declares
   `T`, the server `impl` returns `T`, and the generated client stub wraps it in
   `Result<T, RpcError>` — codegen owns the one-layer difference, not the developer (§7).
-- **Q4 — auth. (Partly settled by the session struct — §4.2.)** Identity now has a clear
-  home: the **per-connection session struct**, populated on connect or by an auth `[rpc]`
-  (`login`), so authorization is ordinary body logic reading session state
-  (`if !self.authenticated.read() { Err(Unauthorized) }`). Residual, not build-blocking: is a
-  dedicated `[rpc(auth)]` gate worth the magic — and if so, how does it learn the predicate (a
-  convention like a `fun authorized(self): bool`?) — or do we drop it and leave auth to the
-  body? A later-phase refinement.
+- **Q4 — auth. ✅ Settled: manual (for now).** Identity lives in the **per-connection session
+  struct**, populated on connect or by an auth `[rpc]` (`login`); authorization is ordinary
+  body logic reading that state — §4.2's `rename` shows the pattern
+  (`match self.user_id.read() { None => Err(NotAuthenticated), .. }`). No `[rpc(auth)]`
+  attribute: a declarative gate is deferred sugar, revisited only if real services show the
+  check as repeated boilerplate (it would then need a predicate convention, e.g.
+  `fun authorized(self): bool`).
 - **Q5 — addressing/config.** How does a client learn the server endpoint and a method
   learn its mount path — `vilan.toml` config, a constructor argument, both?
 - **Q6 — versioning.** Client and server are built separately; a contract mismatch
