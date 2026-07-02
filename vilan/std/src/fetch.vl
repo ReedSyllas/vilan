@@ -23,6 +23,59 @@ impl Response {
 	async external fun text(self): str;
 }
 
+// --- Streaming responses -------------------------------------------------------
+
+// For long-lived responses — an SSE event stream, say — where `text()` would
+// never resolve: read the body chunk by chunk (`response.body.getReader()`),
+// decoding each with a `TextDecoder`. Works in the browser and node/deno/bun.
+
+// The host `ReadableStream` (a `Response.body`).
+external struct BodyStream;
+
+// A `ReadableStreamDefaultReader` over it.
+external struct BodyReader;
+
+// One `reader.read()` result: `{ done, value }`.
+external struct ChunkResult;
+
+// A raw byte chunk (`Uint8Array`) — opaque here; decode it with `TextDecoder`.
+external struct Bytes;
+
+impl Response {
+	[extern(get, "body")]
+	external fun body_stream(self): BodyStream;
+}
+
+impl BodyStream {
+	[extern(method, "getReader")]
+	external fun reader(self): BodyReader;
+}
+
+impl BodyReader {
+	// Await the next chunk; `finished()` turns true once the stream closes.
+	[extern(method, "read")]
+	async external fun read_chunk(self): ChunkResult;
+}
+
+impl ChunkResult {
+	[extern(get, "done")]
+	external fun finished(self): bool;
+
+	[extern(get, "value")]
+	external fun payload(self): Bytes;
+}
+
+// A UTF-8 decoder for byte chunks (the host `TextDecoder` class).
+external struct TextDecoder;
+
+[extern(new, "TextDecoder")]
+external fun new_text_decoder(): TextDecoder;
+
+impl TextDecoder {
+	[extern(method)]
+	external fun decode(self, bytes: Bytes): str;
+}
+
 // --- Configurable requests ---------------------------------------------------
 
 // One request header. A two-field struct lowers to the `[name, value]` array that

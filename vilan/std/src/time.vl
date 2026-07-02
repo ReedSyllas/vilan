@@ -1,3 +1,23 @@
+import pkg::promise::Promise;
+
 // Milliseconds since the Unix epoch, read from the host clock (`Date.now`).
 [extern("Date.now")]
 external fun now(): f64;
+
+// --- Sleeping ------------------------------------------------------------------
+
+[extern("setTimeout")]
+external fun set_timeout(callback: || void, ms: i32);
+
+// The host `Promise` constructor: resolves once the executor calls `resolve`.
+// (The element type is nominal — the resolved value is never read.)
+[extern(new, "Promise")]
+external fun timer_promise(executor: |(|| void)| void): Promise<i32>;
+
+// Pause the current async flow for `ms` milliseconds (`setTimeout` as a promise).
+// Async — a caller awaits it implicitly.
+fun sleep(ms: i32) {
+	let _ = await timer_promise(|resolve| {
+		set_timeout(resolve, ms);
+	});
+}

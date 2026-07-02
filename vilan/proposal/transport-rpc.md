@@ -427,11 +427,17 @@ Built-ins:
 - **WebSocket** (`SocketTransport`) — `impl DuplexTransport`: a bidirectional frame pipe. It
   can *also* `impl Transport` by correlating a reply frame with its request, so the RPC and
   reactive protocols **multiplex over one socket**.
-- **Asymmetric duplex** (`SplitDuplex`) — a `DuplexTransport` *implementation* that composes
-  two directed channels internally (e.g. Server-Sent Events for server→client + HTTP POST for
-  client→server, when WebSocket isn't available). The protocol still sees one
-  `DuplexTransport`; the split is hidden in the transport — which is where the "duplex is two
-  pipes" case belongs, not in the protocol's interface.
+- **Asymmetric duplex** (`SplitDuplex`) — **✅ shipped (2026-07-02)** — a `DuplexTransport`
+  *implementation* composing two directed channels internally: Server-Sent Events for
+  server→client (`GET {base}/events`, read via fetch streaming + `TextDecoder` — works in the
+  browser and node/deno/bun alike) and HTTP POST for client→server (`{base}/send?c=<conn>`).
+  The server side is `std::http::serve_connected` (SSE + send + `/rpc` + a fallback route,
+  every inbound frame a wire turn); each connection hands the app a fresh `DuplexEnd`, and the
+  client `bridge`s its `SplitDuplex` into one — so `ReactiveServer`/`ReactiveClient` ride the
+  real wire *unchanged*. The protocol still sees one `DuplexTransport`; the split is hidden in
+  the transport — which is where the "duplex is two pipes" case belongs, not in the protocol's
+  interface. Verified by a CLI test: two sessions over real SSE, one RPC mutation observed by
+  both.
 
 A custom transport (message queue, IPC pipe, WebRTC, a test double) is just an `impl` of the
 shape it can provide — first-class, no registry.
@@ -671,14 +677,16 @@ paradigm needs:
 4. **`DuplexTransport` + server↔server** (L) — **HTTP half ✅ shipped (2026-07-02)**:
    `HttpTransport` + the `std::http` RPC mount + generated `verify()` contract enforcement,
    with a real-network CLI test (server↔itself over localhost is server↔server in mechanism —
-   same binary, two roles). Remaining: the **duplex wire** — the WebSocket `SocketTransport`
-   (also `impl Transport` by correlation, so RPC and reactive multiplex over one socket)
-   and/or the `SplitDuplex` (SSE + POST) fallback, plus `transport.flush()` for the buffered
-   turn. **A finding gates true WebSocket:** Node has no built-in WS *server*, and
-   implementing RFC 6455 framing in-language is blocked on bitwise ops + a byte type
-   (backlog I2) — the options are the SSE+POST `SplitDuplex` (pure `std::http`/`fetch`, no
-   new bindings, covers realtime sync today), a deno-layer native `upgradeWebSocket`
-   transport, or a host-shim decision.
+   same binary, two roles). **Duplex half ✅ shipped (2026-07-02) as the `SplitDuplex`
+   fallback** (settled): SSE + POST over pure `std::http`/`fetch`, `serve_connected` on the
+   server, `connect_split` + `bridge` on the client — the reactive runtime rides it unchanged,
+   and the multi-session realtime CLI test passes (two sessions, one mutation, both observe).
+   Remaining, non-blocking: the true WebSocket `SocketTransport` (also `impl Transport` by
+   correlation, so RPC and reactive multiplex over one socket) — **gated by a finding**: Node
+   has no built-in WS *server*, and RFC 6455 framing in-language is blocked on bitwise ops + a
+   byte type (backlog I2); when either lands (or a deno-layer/host-shim route is chosen), WS
+   becomes a drop-in `DuplexTransport` swap. `transport.flush()` (the buffered turn) waits for
+   a transport that actually buffers — WS.
 5. **Reactive north star — `ReactiveProtocol`** (L) — the `Source`/`Signal` split, the
    capability table (export/import `Source`s by id), and the subscribe/update/unsubscribe frame
    protocol over the duplex transport (§8). The capstone.

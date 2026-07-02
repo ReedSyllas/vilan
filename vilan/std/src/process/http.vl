@@ -3,8 +3,9 @@
 // host bindings used internally; everything else is ordinary Vilan.
 
 import pkg::option::Option::{ Some, None };
+import pkg::shared::Shared;
 import pkg::reactive::batch;
-import pkg::rpc::RpcProtocol;
+import pkg::rpc::{ RpcProtocol, DuplexEnd, duplex_pair };
 
 // --- Raw node:http bindings ---
 
@@ -44,6 +45,10 @@ impl NodeResponse {
 
 	[extern(method, "end")]
 	external fun end(self, body: str);
+
+	// Write a chunk WITHOUT ending the response — a streaming response (SSE).
+	[extern(method, "write")]
+	external fun write(self, chunk: str);
 }
 
 // --- Request ---
@@ -213,4 +218,94 @@ fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
 		.on_start(on_ready)
 		.build()
 		.start()
+}
+
+// --- Connected server: RPC + a duplex wire per client -------------------------
+
+// Live SplitDuplex connections: each client's wire-side `DuplexEnd`, keyed by the
+// connection id announced on its SSE stream.
+let connections: Shared<List<(i32, DuplexEnd)>> = Shared::new([]);
+
+// Connection ids — module-level, one counter for the program.
+let next_connection: Shared<i32> = Shared::new(0);
+
+fun fresh_connection(): i32 {
+	let id = next_connection.read();
+	next_connection.write() = id + 1;
+	id
+}
+
+// The full-stack server (the `SplitDuplex` counterpart — proposal §5): one
+// `node:http` server routing
+//   `GET  /events`     → a long-lived SSE stream; announces `__conn:<id>`, then
+//                        carries server→client frames. Each connection hands the
+//                        app a fresh `DuplexEnd` via `on_connect(id, end)` — give
+//                        it to a `ReactiveServer` to serve signals over the wire.
+//   `POST /send?c=<id>` → one client→server frame for that connection (a turn).
+//   `POST /rpc`         → an RPC request frame (a turn).
+//   everything else     → `fallback` (static files, 404s).
+fun serve_connected(
+	port: i32,
+	protocol: RpcProtocol,
+	on_connect: |i32, DuplexEnd| void,
+	fallback: |Request| Response,
+	on_ready: || void,
+) {
+	let node_server = node_create_server(|node_request, node_response| {
+		let path = node_request.url();
+		if path.starts_with("/events") {
+			node_response.set_status_code(200);
+			node_response.set_header_raw("Content-Type", "text/event-stream");
+			node_response.set_header_raw("Cache-Control", "no-cache");
+			let id = fresh_connection();
+			node_response.write(i"data: __conn:{id}\n\n");
+			let (app_end, wire_end) = duplex_pair();
+			wire_end.on_frame(|frame| {
+				node_response.write(i"data: {frame}\n\n");
+			});
+			connections.write().push((id, wire_end));
+			on_connect(id, app_end);
+		} else if path.starts_with("/send") {
+			let content = read_request_body(node_request);
+			let target = i32::from_json(connection_id_of(path));
+			for entry in connections.read() {
+				let (id, wire) = entry;
+				if id == target {
+					// the wire turn: the frame's signal writes coalesce
+					batch(|| {
+						wire.send(content);
+					});
+				}
+			}
+			node_response.set_status_code(204);
+			node_response.end("");
+		} else if path.starts_with("/rpc") {
+			let content = read_request_body(node_request);
+			let reply = batch(|| protocol.receive(content));
+			match reply {
+				Some(let frame) => {
+					node_response.set_status_code(200);
+					node_response.set_header_raw("Content-Type", "application/json");
+					node_response.end(frame);
+				},
+				None => {
+					node_response.set_status_code(500);
+					node_response.end("no reply");
+				},
+			}
+		} else {
+			let content = read_request_body(node_request);
+			let response = fallback(Request { node = node_request, content = content });
+			node_response.set_status_code(response.status);
+			node_response.set_header_raw(response.header_name, response.header_value);
+			node_response.end(response.body);
+		}
+	});
+	node_server.listen(port, on_ready);
+}
+
+// `/send?c=<id>` → `<id>`.
+fun connection_id_of(path: str): str {
+	let parts = path.split("c=");
+	parts[parts.len() - 1]
 }

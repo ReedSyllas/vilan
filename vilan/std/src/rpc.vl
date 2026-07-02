@@ -21,7 +21,7 @@ import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::json::{ Json, FromJson };
 import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
-import pkg::fetch::{ post };
+import pkg::fetch::{ get, post, new_text_decoder };
 
 // === Transport: request/response ============================================
 
@@ -104,6 +104,128 @@ fun duplex_pair(): (DuplexEnd, DuplexEnd) {
 	let a = DuplexEnd { peer = slot_b, me = slot_a };
 	let b = DuplexEnd { peer = slot_a, me = slot_b };
 	(a, b)
+}
+
+// Bridge an in-process `DuplexEnd` to any real `DuplexTransport`: frames flow both
+// ways. The reactive runtime (`ReactiveServer`/`ReactiveClient`) holds a concrete
+// `DuplexEnd`, so this is how it rides a real wire (`SplitDuplex`, a future
+// WebSocket) unchanged: hand it `bridge(wire)`.
+fun bridge<Tx: DuplexTransport>(wire: Tx): DuplexEnd {
+	let (inner, outer) = duplex_pair();
+	outer.on_frame(|frame| wire.send(frame));
+	wire.on_frame(|frame| outer.send(frame));
+	inner
+}
+
+// === Transport: SSE + POST (SplitDuplex) ====================================
+
+// The real duplex transport over plain HTTP (§5's fallback, no WebSocket needed):
+// server→client frames arrive on a long-lived SSE stream (`GET {base}/events`),
+// and client→server frames POST to `{base}/send?c=<connection>`. The server side
+// is `std::http`'s `serve_connected`; open one with `connect_split(base_url)`.
+// A true WebSocket transport becomes a drop-in sibling once it lands.
+struct SplitDuplex {
+	// The connection id the server announced — apps use it to correlate this
+	// duplex connection with RPC calls (e.g. an `attach(connection)` method).
+	connection: str,
+	send_url: str,
+	inbound: Shared<Option<|str| void>>,
+	// Frames that arrived before `on_frame` was set (e.g. pushed by the server
+	// during the handshake) — queued, then flushed to the first handler.
+	early: Shared<List<str>>,
+}
+
+impl SplitDuplex with DuplexTransport {
+	// Fire-and-forget POST. Ordering across rapid sends is not guaranteed
+	// (separate requests); the reactive protocol's client→server traffic
+	// (subscribe/unsubscribe) is insensitive to it.
+	fun send(self, frame: str) {
+		let _ = post(self.send_url, frame).send();
+	}
+
+	fun on_frame(self, handler: |str| void) {
+		self.inbound.write() = Some(handler);
+		for frame in self.early.read() {
+			handler(frame);
+		}
+		self.early.write() = [];
+	}
+}
+
+// Split complete SSE events off `buffer`, dispatching each `data:` payload, and
+// return the incomplete remainder (an event ends at a blank line).
+fun drain_sse(buffer: str, dispatch: |str| void): str {
+	let parts = buffer.split("\n\n");
+	mut remainder = "";
+	mut index = 0;
+	for part in parts {
+		if index == parts.len() - 1 {
+			remainder = part;
+		} else {
+			for line in part.split("\n") {
+				if line.starts_with("data: ") {
+					dispatch(line.substring(6, line.len()));
+				}
+			}
+		}
+		index += 1;
+	}
+	remainder
+}
+
+// Open a SplitDuplex connection to `base_url` (e.g. `http://localhost:4000`):
+// waits for the server's connection announcement (`__conn:<id>`, the stream's
+// first event), then keeps pumping inbound events to the transport's handler in
+// the background for the connection's lifetime.
+fun connect_split(base_url: str): SplitDuplex {
+	let response = get(i"{base_url}/events").send();
+	let reader = response.body_stream().reader();
+	let decoder = new_text_decoder();
+	let inbound: Shared<Option<|str| void>> = Shared::new(None);
+	let early: Shared<List<str>> = Shared::new([]);
+	let connection: Shared<str> = Shared::new("");
+	// Route one inbound frame: the handler if one is set, else the early queue
+	// (flushed to the first handler by `on_frame`).
+	let dispatch = |frame: str| {
+		match inbound.read() {
+			Some(let handler) => handler(frame),
+			None => early.write().push(frame),
+		}
+	};
+	mut buffer = "";
+	for connection.read() == "" {
+		let chunk = reader.read_chunk();
+		if chunk.finished() {
+			jump break;
+		}
+		buffer += decoder.decode(chunk.payload());
+		buffer = drain_sse(buffer, |frame| {
+			if frame.starts_with("__conn:") {
+				connection.write() = frame.substring(7, frame.len());
+			} else {
+				dispatch(frame);
+			}
+		});
+	}
+	// Pump the rest of the stream for the connection's lifetime.
+	let leftover = buffer;
+	let _ = async {
+		mut rest = leftover;
+		for {
+			let chunk = reader.read_chunk();
+			if chunk.finished() {
+				jump break;
+			}
+			rest += decoder.decode(chunk.payload());
+			rest = drain_sse(rest, dispatch);
+		}
+	};
+	SplitDuplex {
+		connection = connection.read(),
+		send_url = i"{base_url}/send?c={connection.read()}",
+		inbound,
+		early,
+	}
 }
 
 // === Protocol ===============================================================
@@ -414,9 +536,12 @@ impl ReactiveClient with Protocol {
 
 // A remote read-only handle: it implements `Source<str>` (the reactive split — client
 // code can't write a server signal), and its `sub` sends a `Subscribe` frame before
-// observing the local mirror. Because the in-process transport delivers synchronously,
-// the server's immediate current-value `Update` has already landed in the mirror by the
-// time we observe it, so the observer fires once with the present value.
+// observing the local mirror. Over an in-process transport the server's immediate
+// current-value `Update` lands in the mirror synchronously, so the observer fires at
+// once with the present value; over a real wire it arrives asynchronously, so the
+// observer first fires when that `Update` lands. The mirror's pristine `""` is a safe
+// "no value yet" sentinel — a JSON-encoded value is never the empty string — and is
+// never forwarded to the observer.
 struct RemoteSource {
 	channel: i32,
 	transport: DuplexEnd,
@@ -431,6 +556,10 @@ impl RemoteSource with Source<str> {
 	[must_use]
 	fun sub(self, observer: |str| void): Subscription {
 		(self.transport).send(ReactiveFrame::Subscribe(self.channel).to_json());
-		self.cache.sub(observer)
+		self.cache.sub(|value| {
+			if value != "" {
+				observer(value);
+			}
+		})
 	}
 }

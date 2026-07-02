@@ -135,3 +135,124 @@ fun run_client() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn realtime_sync_reaches_every_session_over_sse() {
+    // The realtime milestone's mechanics: two sessions connect over SplitDuplex
+    // (SSE + POST), both subscribe to the server's signal through their own
+    // reactive channels, and one session's RPC mutation is observed by BOTH —
+    // multi-session sync over a real wire.
+    let dir = temp_project("realtime");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(
+        &dir,
+        "src/main.vl",
+        r#"import std::print;
+import std::shared::Shared;
+import std::process::exit;
+import std::time::sleep;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::json::{ Json, FromJson };
+import std::reactive::Signal;
+import std::rpc::{
+	HttpTransport, connect_split, bridge,
+	ReactiveServer, ReactiveClient, DuplexEnd,
+};
+import std::http::{ serve_connected, Response };
+
+// Per-connection reactive servers, so `attach` can expose the board's signal on
+// the caller's own wire.
+let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+[service(Client)]
+struct Board {
+	count: Signal<i32>,
+}
+
+impl Board {
+	// Expose the shared counter on the calling connection's wire; the returned
+	// channel id is what the client's RemoteSource subscribes to.
+	[rpc]
+	fun attach(self, connection: i32): i32 {
+		mut channel = 0 - 1;
+		for entry in sessions.read() {
+			let (id, reactive) = entry;
+			if id == connection {
+				channel = reactive.expose(self.count);
+			}
+		}
+		channel
+	}
+
+	[rpc]
+	fun add(self, by: i32): i32 {
+		self.count.set(self.count.get() + by);
+		self.count.get()
+	}
+}
+
+fun main() {
+	let board = Board { count = Signal::new(0) };
+	serve_connected(
+		9273,
+		board.dispatcher().into_protocol(),
+		|id, end| {
+			sessions.write().push((id, ReactiveServer::new(end)));
+		},
+		|request| Response::builder().code(404).body("nope").build(),
+		|| {
+			run_clients();
+		},
+	);
+}
+
+fun watch(name: str, base: str): Client<HttpTransport> {
+	let split = connect_split(base);
+	let reactive = ReactiveClient::new(bridge(split));
+	let client = Client { transport = HttpTransport { url = i"{base}/rpc" } };
+	match client.attach(i32::from_json(split.connection)) {
+		Ok(let channel) => {
+			let _ = reactive.source(channel).sub(|json| {
+				let n: i32 = i32::from_json(json);
+				print(i"{name} sees {n}");
+			});
+		},
+		Err(let error) => print(i"{name} attach err {error.to_json()}"),
+	}
+	client
+}
+
+fun run_clients() {
+	let base = "http://localhost:9273";
+	let alice = watch("alice", base);
+	let bob = watch("bob", base);
+	sleep(300);   // let both Subscribe frames land
+	match alice.add(7) {
+		Ok(let n) => print(i"alice add -> {n}"),
+		Err(let error) => print(i"add err {error.to_json()}"),
+	}
+	sleep(300);   // let the SSE deliveries land
+	exit(0);
+}
+"#,
+    );
+    let stdout = vilan_run_with_timeout(&dir, Duration::from_secs(60));
+    for expected in [
+        "alice sees 0",
+        "bob sees 0",
+        "alice sees 7",
+        "bob sees 7",
+        "alice add -> 7",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in realtime output:\n{stdout}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
