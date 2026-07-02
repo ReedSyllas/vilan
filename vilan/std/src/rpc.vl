@@ -21,6 +21,7 @@ import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::json::{ Json, FromJson };
 import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
+import pkg::fetch::{ post };
 
 // === Transport: request/response ============================================
 
@@ -40,6 +41,28 @@ impl LocalTransport with Transport {
 	fun call(self, request: str): Promise<str> {
 		async {
 			(self.handler)(request)
+		}
+	}
+}
+
+// === Transport: HTTP ========================================================
+
+// The real request/response transport (§5): POSTs each request frame to the
+// endpoint and reads the reply frame from the response body. Works wherever the
+// host `fetch` does — browser, node, deno, bun — so it is the default
+// client↔server transport. The address is programmatic (Q5): construct it with
+// the endpoint URL (`HttpTransport { url = "http://localhost:4000/rpc" }`);
+// where the string comes from — hardcoded, env, config — is the app's choice.
+// The server side is `std::http`'s `serve_rpc` / `rpc_response` mount.
+struct HttpTransport {
+	url: str,
+}
+
+impl HttpTransport with Transport {
+	fun call(self, request: str): Promise<str> {
+		async {
+			let response = post(self.url, request).send();
+			response.text()
 		}
 	}
 }

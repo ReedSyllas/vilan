@@ -2636,6 +2636,52 @@ fn service_client_name_defaults_to_struct_client() {
 }
 
 #[test]
+fn service_contract_verify_matches_and_catches_drift() {
+    // The generated `verify()` (Q6 v2): a client fetches the server's contract hash
+    // over the built-in `__contract` route and compares. Against its own service:
+    // `Ok(true)`. Against a *different* service's dispatcher (a drifted contract —
+    // the versioning failure mode): `Ok(false)`, a clean signal instead of decode
+    // garbage.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::Json;
+        import std::rpc::{ local_rpc };
+
+        [service(AClient)]
+        struct Alpha { count: Shared<i32> }
+        impl Alpha {
+            [rpc] fun ping(self): i32 { 1 }
+        }
+
+        [service(BClient)]
+        struct Beta { count: Shared<i32> }
+        impl Beta {
+            [rpc] fun rename(self, name: str): str { name }
+        }
+
+        fun main() {
+            let alpha_transport = local_rpc(Alpha { count = Shared::new(0) }.dispatcher().into_protocol());
+            let matching = AClient { transport = alpha_transport };
+            match matching.verify() {
+                Ok(let same) => print(i"self = {same}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            // A BClient pointed at Alpha's dispatcher — the drift case.
+            let drifted = BClient { transport = alpha_transport };
+            match drifted.verify() {
+                Ok(let same) => print(i"drift = {same}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+        }
+        "#,
+        "self = true\ndrift = false\n",
+    );
+}
+
+#[test]
 fn rpc_rejects_a_missing_return() {
     // A void `[rpc]` method has no reply payload to encode — the return must be a
     // declared Wire type (fire-and-forget needs its own design).

@@ -2,6 +2,10 @@
 // abstract `Server`/`Response` API. The raw `node:http` calls are `[extern]`
 // host bindings used internally; everything else is ordinary Vilan.
 
+import pkg::option::Option::{ Some, None };
+import pkg::reactive::batch;
+import pkg::rpc::RpcProtocol;
+
 // --- Raw node:http bindings ---
 
 [extern("node:http", "createServer")]
@@ -180,4 +184,33 @@ impl ServerBuilder {
 	fun build(self): Server {
 		Server { port = self.port, request_handler = self.request_handler, on_start = self.on_start }
 	}
+}
+
+// --- RPC mount (`std::rpc` over this server) ----------------------------------
+
+// Answer one RPC-over-HTTP request: the POST body is the request frame, and the
+// protocol's reply frame is the response body. The frame is handled in a `batch`
+// — the wire turn (proposal/reactive-batching.md) — so signal writes made while
+// dispatching coalesce. Compose this into a `Server`'s `on_request` alongside
+// other routes, or mount it alone with `serve_rpc`.
+fun rpc_response(protocol: RpcProtocol, request: Request): Response {
+	let reply = batch(|| protocol.receive(request.body()));
+	match reply {
+		Some(let frame) => Response::builder()
+			.set_header("Content-Type", "application/json")
+			.body(frame)
+			.build(),
+		None => Response::builder().code(500).body("no reply").build(),
+	}
+}
+
+// Serve one RPC protocol on `port`: every request is dispatched through it. The
+// client side is `std::rpc`'s `HttpTransport { url = "http://host:port/" }`.
+fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
+	Server::builder()
+		.port(port)
+		.on_request(|request| rpc_response(protocol, request))
+		.on_start(on_ready)
+		.build()
+		.start()
 }

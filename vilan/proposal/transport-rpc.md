@@ -414,9 +414,14 @@ trait DuplexTransport {
 
 Built-ins:
 
-- **HTTP** (`HttpTransport`) — `impl Transport`: POSTs the request to an endpoint and reads
-  the reply body. The default client↔server transport, built on the shipped `std::fetch`
-  POST/body support (§10). Request/response only — no reactive over plain HTTP.
+- **HTTP** (`HttpTransport`) — **✅ shipped (2026-07-02)** — `impl Transport`: POSTs the
+  request frame to the endpoint URL and reads the reply frame from the response body, over
+  the host `fetch` (browser/node/deno/bun — a *base* std module). The server side is
+  `std::http`'s `rpc_response` (composable into any `on_request`) / `serve_rpc` mount, which
+  runs each frame in the wire-turn `batch`. Verified end-to-end by a CLI test: a Node process
+  serves a generated dispatcher and calls itself over localhost — `verify()` (the generated
+  Q6 contract check over the built-in `__contract` route) plus stateful round-trips.
+  Request/response only — no reactive over plain HTTP.
 - **In-process** (`LocalTransport`) — `impl Transport`: runs the server's dispatch in the
   same process. The substrate for **unit tests** (no network). (What `examples/rpc` uses.)
 - **WebSocket** (`SocketTransport`) — `impl DuplexTransport`: a bidirectional frame pipe. It
@@ -663,10 +668,17 @@ paradigm needs:
    phase 4's real transports, where a mismatch becomes a clean `RpcError` instead of silent
    decode garbage). `examples/rpc` migrated to the generated form (byte-identical output),
    and the runtime moved to `std::rpc` (§9).
-4. **`DuplexTransport` + server↔server** (L) — the WebSocket `SocketTransport` as a
-   `DuplexTransport` (also `impl Transport` by correlation, so RPC and reactive multiplex over
-   one socket), plus the `SplitDuplex` fallback; in-process service composition; a server
-   calling another server. The duplex substrate the reactive protocol builds on.
+4. **`DuplexTransport` + server↔server** (L) — **HTTP half ✅ shipped (2026-07-02)**:
+   `HttpTransport` + the `std::http` RPC mount + generated `verify()` contract enforcement,
+   with a real-network CLI test (server↔itself over localhost is server↔server in mechanism —
+   same binary, two roles). Remaining: the **duplex wire** — the WebSocket `SocketTransport`
+   (also `impl Transport` by correlation, so RPC and reactive multiplex over one socket)
+   and/or the `SplitDuplex` (SSE + POST) fallback, plus `transport.flush()` for the buffered
+   turn. **A finding gates true WebSocket:** Node has no built-in WS *server*, and
+   implementing RFC 6455 framing in-language is blocked on bitwise ops + a byte type
+   (backlog I2) — the options are the SSE+POST `SplitDuplex` (pure `std::http`/`fetch`, no
+   new bindings, covers realtime sync today), a deno-layer native `upgradeWebSocket`
+   transport, or a host-shim decision.
 5. **Reactive north star — `ReactiveProtocol`** (L) — the `Source`/`Signal` split, the
    capability table (export/import `Source`s by id), and the subscribe/update/unsubscribe frame
    protocol over the duplex transport (§8). The capstone.

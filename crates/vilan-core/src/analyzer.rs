@@ -10169,6 +10169,9 @@ fn service_impl_source(
             ));
         }
     }
+    // The built-in contract route (Q6 v2): the client's `verify()` calls it and
+    // compares the two sides' hashes — a clean mismatch instead of decode garbage.
+    out.push_str("\n\t\t\t.on(\"__contract\", |_| reply(self.contract_hash()))");
     out.push_str("\n\t}\n");
     out.push_str(&format!(
         "\tfun contract_hash(self): str {{\n\t\t\"{hash}\"\n\t}}\n}}\n"
@@ -10199,6 +10202,17 @@ fn service_impl_source(
              \t}}\n"
         ));
     }
+    // Contract verification (Q6 v2): fetch the server's hash over the wire and
+    // compare — `Ok(true)` is a matching contract, `Ok(false)` a drifted one.
+    out.push_str(
+        "\tfun verify(self): Result<bool, RpcError> {\n\
+         \t\tlet remote: Result<str, RpcError> = call(self.transport, \"__contract\", []);\n\
+         \t\tmatch remote {\n\
+         \t\t\tResult::Ok(let hash) => Result::Ok(hash == self.contract_hash()),\n\
+         \t\t\tResult::Err(let error) => Result::Err(error),\n\
+         \t\t}\n\
+         \t}\n",
+    );
     out.push_str(&format!(
         "\tfun contract_hash(self): str {{\n\t\t\"{hash}\"\n\t}}\n}}\n"
     ));
