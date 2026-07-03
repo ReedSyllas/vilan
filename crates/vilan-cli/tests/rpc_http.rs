@@ -1,14 +1,18 @@
-//! End-to-end test for RPC over a real HTTP transport: one Node process serves a
-//! generated `[service(Client)]` dispatcher via `std::http::serve_rpc` and calls
-//! itself through `std::rpc::HttpTransport` (host `fetch` → `node:http` on
-//! localhost) — contract verification plus two state-mutating round-trips.
+//! End-to-end tests for RPC over a real HTTP transport: a Node process serves a
+//! generated `[service(Client)]` dispatcher via the `std::http` mounts and is
+//! driven through `std::rpc`'s transports (host `fetch` → `node:http` on
+//! localhost) — request/response round-trips, multi-session realtime sync over
+//! SSE, and connection-close teardown.
 //!
-//! The test writes a throwaway project and drives the built `vilan` binary; the
-//! app `exit(0)`s after its calls, and a watchdog kills it if it ever hangs.
+//! Each test writes a throwaway project and drives the built `vilan` binary;
+//! self-contained apps `exit(0)` after their calls (a watchdog kills a hang),
+//! and the disconnect test keeps a server child running while separate client
+//! processes come and go.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 /// A fresh temp directory for the test's project tree.
@@ -65,6 +69,75 @@ fn vilan_run_with_timeout(dir: &Path, timeout: Duration) -> String {
         "vilan run wrote to stderr:\n{stderr}\nstdout:\n{stdout}"
     );
     stdout
+}
+
+/// A long-running server child whose stdout lines stream to a channel (a reader
+/// thread forwards them), killed on drop so a panic can't leak a listener. The
+/// project is built with `vilan build` first and the bundle run under `node`
+/// directly — killing a `vilan run` child would orphan its node grandchild,
+/// which keeps the port bound across test runs.
+struct StreamingServer {
+    child: Child,
+    lines: Receiver<String>,
+}
+
+impl StreamingServer {
+    fn spawn(dir: &Path) -> StreamingServer {
+        let build = Command::new(env!("CARGO_BIN_EXE_vilan"))
+            .args(["build", dir.to_str().unwrap()])
+            .output()
+            .expect("run vilan build");
+        assert!(
+            build.status.success(),
+            "server build failed:\n{}{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let mut child = Command::new("node")
+            .arg(dir.join("src/main.js"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn node");
+        let stdout = child.stdout.take().unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        StreamingServer { child, lines }
+    }
+
+    /// Blocks until a stdout line containing `needle` arrives.
+    fn await_line(&self, needle: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for `{needle}` from the server"
+            );
+            match self.lines.recv_timeout(remaining) {
+                Ok(line) if line.contains(needle) => return,
+                Ok(_other) => {}
+                Err(_) => panic!("server stdout ended or timed out before `{needle}`"),
+            }
+        }
+    }
+}
+
+impl Drop for StreamingServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 #[test]
@@ -204,6 +277,7 @@ fun main() {
 		|id, end| {
 			sessions.write().push((id, ReactiveServer::new(end)));
 		},
+		|id| {},
 		|request| Response::builder().code(404).body("nope").build(),
 		|| {
 			run_clients();
@@ -255,4 +329,172 @@ fun run_clients() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_closed_connection_tears_its_session_down_and_spares_the_rest() {
+    // Connection lifecycle over SplitDuplex: a subscribed client PROCESS dies
+    // (its SSE socket closes), which must fire `serve_connected`'s
+    // `on_disconnect` so the app can dispose that session's `ReactiveServer` —
+    // and disposing it must not disturb another session subscribed to the SAME
+    // signal, which still sees a later mutation.
+    let server_dir = temp_project("close_server");
+    write(
+        &server_dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(
+        &server_dir,
+        "src/main.vl",
+        r#"import std::print;
+import std::shared::Shared;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::json::{ Json, FromJson };
+import std::reactive::Signal;
+import std::rpc::{ ReactiveServer, DuplexEnd };
+import std::http::{ serve_connected, Response };
+
+let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+[service(Client)]
+struct Board {
+	count: Signal<i32>,
+}
+
+impl Board {
+	[rpc]
+	fun attach(self, connection: i32): i32 {
+		mut channel = 0 - 1;
+		for entry in sessions.read() {
+			let (id, reactive) = entry;
+			if id == connection {
+				channel = reactive.expose(self.count);
+			}
+		}
+		channel
+	}
+
+	[rpc]
+	fun add(self, by: i32): i32 {
+		self.count.set(self.count.get() + by);
+		self.count.get()
+	}
+}
+
+fun drop_session(target: i32) {
+	mut kept: List<(i32, ReactiveServer)> = [];
+	for entry in sessions.read() {
+		let (id, session) = entry;
+		if id == target {
+			session.dispose();
+		} else {
+			kept.push((id, session));
+		}
+	}
+	sessions.write() = kept;
+}
+
+fun main() {
+	let board = Board { count = Signal::new(0) };
+	serve_connected(
+		47161,
+		board.dispatcher().into_protocol(),
+		|id, end| {
+			sessions.write().push((id, ReactiveServer::new(end)));
+		},
+		|id| {
+			drop_session(id);
+			print(i"closed {id}");
+		},
+		|request| Response::builder().code(404).body("nope").build(),
+		|| print("ready"),
+	);
+}
+"#,
+    );
+
+    // The client processes speak the §4.1 foundation directly (`call`), since
+    // the generated `Client` lives in the server's package.
+    let watcher = |name: &str, also_add: &str| {
+        format!(
+            r#"import std::print;
+import std::time::sleep;
+import std::process::exit;
+import std::json::{{ Json, FromJson }};
+import std::result::Result::{{ self, Ok, Err }};
+import std::rpc::{{ HttpTransport, RpcError, call, connect_split, bridge, ReactiveClient }};
+
+fun main() {{
+	let base = "http://localhost:47161";
+	let split = connect_split(base);
+	let reactive = ReactiveClient::new(bridge(split));
+	let transport = HttpTransport {{ url = i"{{base}}/rpc" }};
+	let attached: Result<i32, RpcError> = call(transport, "attach", [i32::from_json(split.connection).to_json()]);
+	match attached {{
+		Ok(let channel) => {{
+			let watching = reactive.source(channel).sub(|json| {{
+				let n: i32 = i32::from_json(json);
+				print(i"{name} sees {{n}}");
+			}});
+		}},
+		Err(let error) => print(i"attach err {{error.to_json()}}"),
+	}}
+	sleep(200);
+{also_add}	exit(0);
+}}
+"#
+        )
+    };
+
+    let doomed_dir = temp_project("close_doomed");
+    write(
+        &doomed_dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(&doomed_dir, "src/main.vl", &watcher("doomed", ""));
+
+    let survivor_dir = temp_project("close_survivor");
+    write(
+        &survivor_dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(
+        &survivor_dir,
+        "src/main.vl",
+        &watcher(
+            "survivor",
+            "\tlet by = 5;\n\tlet added: Result<i32, RpcError> = call(transport, \"add\", [by.to_json()]);\n\tmatch added {\n\t\tOk(let n) => print(i\"add -> {n}\"),\n\t\tErr(let error) => print(i\"add err {error.to_json()}\"),\n\t}\n\tsleep(300);\n",
+        ),
+    );
+
+    let server = StreamingServer::spawn(&server_dir);
+    server.await_line("ready", Duration::from_secs(60));
+
+    // Session 0 subscribes, then its process exits — the socket close must
+    // reach the app as a disconnect.
+    let doomed_out = vilan_run_with_timeout(&doomed_dir, Duration::from_secs(60));
+    assert!(
+        doomed_out.contains("doomed sees 0"),
+        "the doomed session never saw the initial value:\n{doomed_out}"
+    );
+    server.await_line("closed 0", Duration::from_secs(10));
+
+    // A fresh session subscribes and mutates: the disposed session must not
+    // have taken the signal's other observers with it.
+    let survivor_out = vilan_run_with_timeout(&survivor_dir, Duration::from_secs(60));
+    for expected in ["survivor sees 0", "add -> 5", "survivor sees 5"] {
+        assert!(
+            survivor_out.contains(expected),
+            "missing `{expected}` in survivor output:\n{survivor_out}"
+        );
+    }
+
+    drop(server);
+    let _ = std::fs::remove_dir_all(&server_dir);
+    let _ = std::fs::remove_dir_all(&doomed_dir);
+    let _ = std::fs::remove_dir_all(&survivor_dir);
 }

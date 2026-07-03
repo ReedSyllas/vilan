@@ -47,8 +47,15 @@ impl NodeResponse {
 	external fun end(self, body: str);
 
 	// Write a chunk WITHOUT ending the response — a streaming response (SSE).
+	// The host silently drops writes to a destroyed response, so a frame sent
+	// to a just-closed connection is discarded, not an error.
 	[extern(method, "write")]
 	external fun write(self, chunk: str);
+
+	// Subscribe to a response stream event (`"close"` fires when the connection
+	// ends — for a never-`end`ed SSE response that means the client went away).
+	[extern(method, "on")]
+	external fun on_event(self, event: str, callback: || void);
 }
 
 // --- Request ---
@@ -244,10 +251,16 @@ fun fresh_connection(): i32 {
 //   `POST /send?c=<id>` → one client→server frame for that connection (a turn).
 //   `POST /rpc`         → an RPC request frame (a turn).
 //   everything else     → `fallback` (static files, 404s).
+//
+// A connection ends when its SSE stream closes (tab closed, network gone): the
+// wire is forgotten here, and `on_disconnect(id)` tells the app to drop its own
+// per-connection state (dispose a `ReactiveServer` session, say) — otherwise a
+// long-running server leaks a session per ever-connected client.
 fun serve_connected(
 	port: i32,
 	protocol: RpcProtocol,
 	on_connect: |i32, DuplexEnd| void,
+	on_disconnect: |i32| void,
 	fallback: |Request| Response,
 	on_ready: || void,
 ) {
@@ -264,6 +277,10 @@ fun serve_connected(
 				node_response.write(i"data: {frame}\n\n");
 			});
 			connections.write().push((id, wire_end));
+			node_response.on_event("close", || {
+				drop_connection(id);
+				on_disconnect(id);
+			});
 			on_connect(id, app_end);
 		} else if path.starts_with("/send") {
 			let content = read_request_body(node_request);
@@ -302,6 +319,19 @@ fun serve_connected(
 		}
 	});
 	node_server.listen(port, on_ready);
+}
+
+// Forget a closed connection's wire (frames already in flight to it are
+// silently dropped by the host — see `NodeResponse.write`).
+fun drop_connection(target: i32) {
+	mut kept: List<(i32, DuplexEnd)> = [];
+	for entry in connections.read() {
+		let (id, wire) = entry;
+		if id != target {
+			kept.push((id, wire));
+		}
+	}
+	connections.write() = kept;
 }
 
 // `/send?c=<id>` → `<id>`.

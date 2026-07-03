@@ -396,6 +396,9 @@ fun fresh_channel(): i32 {
 struct ReactiveServer {
 	transport: DuplexEnd,
 	sources: Shared<List<(i32, Signal<str>)>>,
+	// The erasure forwards `expose` creates (source → JSON mirror), retained so
+	// disposing the server releases every exposed source.
+	mirrors: Shared<List<Subscription>>,
 	live: Shared<List<(i32, Subscription)>>,
 }
 
@@ -404,6 +407,7 @@ impl ReactiveServer {
 		let server = ReactiveServer {
 			transport,
 			sources = Shared::new([]),
+			mirrors = Shared::new([]),
 			live = Shared::new([]),
 		};
 		(server.transport).on_frame(|frame| {
@@ -424,7 +428,7 @@ impl ReactiveServer {
 	fun expose<T: Json, S: Source<T>>(self, source: S): i32 {
 		let channel = fresh_channel();
 		let json: Signal<str> = Signal::new(source.get().to_json());
-		let _ = source.sub(|value| json.set(value.to_json()));
+		self.mirrors.write().push(source.sub(|value| json.set(value.to_json())));
 		self.sources.write().push((channel, json));
 		channel
 	}
@@ -457,6 +461,24 @@ impl ReactiveServer {
 			}
 		}
 		self.live.write() = kept;
+	}
+}
+
+impl ReactiveServer with Disposable {
+	// Tear the session down: stop every live forward and release every exposed
+	// source. A connected server calls this when the connection closes — after
+	// it, changes to the app's signals no longer reach (or reference) this wire.
+	fun dispose(self) {
+		for entry in self.live.read() {
+			let (channel, subscription) = entry;
+			subscription.dispose();
+		}
+		self.live.write() = [];
+		for subscription in self.mirrors.read() {
+			subscription.dispose();
+		}
+		self.mirrors.write() = [];
+		self.sources.write() = [];
 	}
 }
 
