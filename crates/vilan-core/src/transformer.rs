@@ -2620,6 +2620,44 @@ impl Formatter {
             .join(self.line_break)
     }
 
+    /// A binary operator's JavaScript binding precedence (higher binds tighter),
+    /// used to parenthesize operands. Note this is JS's C-style order — distinct
+    /// from vilan's source precedence (bitwise binds tighter than comparison in
+    /// vilan, looser in JS), which is exactly why emission must parenthesize by
+    /// THIS table, not the parser's.
+    fn js_binary_precedence(op: BinaryOp) -> u8 {
+        match op {
+            BinaryOp::Or => 0,
+            BinaryOp::And => 1,
+            // Gaps 2–4 are reserved for JS `|`, `^`, `&` when the bitwise
+            // operators land.
+            BinaryOp::Eq | BinaryOp::NotEq => 5,
+            BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq => 6,
+            // Gap 7 is reserved for the shifts.
+            BinaryOp::Add | BinaryOp::Sub => 8,
+            BinaryOp::Mul | BinaryOp::Div => 9,
+        }
+    }
+
+    /// Renders a binary node's operand, parenthesizing when its own binding is
+    /// too loose to survive unwrapped: a nested binary whose precedence fails
+    /// `keeps(child)`, or an assignment (which JS parses greedily as an
+    /// expression). Atoms, calls, and property accesses bind tighter than any
+    /// binary operator and pass through bare.
+    fn operand(&self, node: &js::Node, level: usize, keeps: impl Fn(u8) -> bool) -> String {
+        let rendered = self.node(node, "", level);
+        let wrap = match node {
+            js::Node::Binary(op, _, _) => !keeps(Self::js_binary_precedence(*op)),
+            js::Node::Assignment(_, _) => true,
+            _ => false,
+        };
+        if wrap {
+            format!("({rendered})")
+        } else {
+            rendered
+        }
+    }
+
     /// Renders one JavaScript node at block-nesting `level` (used to indent the
     /// bodies of any nested blocks). It emits no leading indent of its own — a
     /// statement's indent is added by `sequence`, an expression is rendered inline
@@ -2725,14 +2763,18 @@ impl Formatter {
                     BinaryOp::And => "&&",
                     BinaryOp::Or => "||",
                 };
+                // Operands are parenthesized by JS precedence, or grouping is
+                // lost — `(1 + 2) * 3` must not print as `1 + 2 * 3`. The left
+                // operand needs parens when it binds looser than this node; the
+                // right also at EQUAL precedence (`-`/`/` are non-associative,
+                // and `+` mixes strings and numbers, so `1 + (2 + "x")` differs
+                // from `1 + 2 + "x"`).
+                let parent = Self::js_binary_precedence(*op);
+                let s_lhs = self.operand(lhs, level, |child| child >= parent);
+                let s_rhs = self.operand(rhs, level, |child| child > parent);
                 format!(
                     "{}{}{}{}{}{}",
-                    self.node(lhs, "", level),
-                    self.space,
-                    s_op,
-                    self.space,
-                    self.node(rhs, "", level),
-                    terminator
+                    s_lhs, self.space, s_op, self.space, s_rhs, terminator
                 )
             }
             js::Node::Unary(operator, operand) => {

@@ -2779,3 +2779,43 @@ fn doc_hidden_method_stays_callable() {
         "9\n",
     );
 }
+
+#[test]
+fn emitted_js_preserves_grouping_across_precedence() {
+    // A latent emitter miscompile (found by the bits-and-bytes probe,
+    // proposal/bits-and-bytes.md §0): the JS printer rendered binary operands
+    // flat, so `(1 + 2) * 3` emitted as `1 + 2 * 3` and printed 7. Operands are
+    // now parenthesized by JS precedence.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print((1 + 2) * 3);
+            let a = 1;
+            let b = 2;
+            let c = 3;
+            print((a + b) * c);
+            print(0 - (a - b));
+            print(a - (b - c));
+            print((a + b) / (b + c) + 1);
+        }
+        "#,
+        "9\n9\n1\n2\n1.6\n",
+    );
+}
+
+#[test]
+fn emitted_js_parenthesizes_right_nested_string_concat() {
+    // `+` is left-associative but not insensitive to grouping once strings mix
+    // in: `1 + (2 + "x")` is "12x", while flat `1 + 2 + "x"` would be "3x".
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let suffix = "x";
+            print(1 + (2 + suffix));
+        }
+        "#,
+        "12x\n",
+    );
+}
