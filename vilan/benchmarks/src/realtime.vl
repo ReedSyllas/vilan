@@ -8,7 +8,7 @@ import std::shared::Shared;
 import std::time::{ now, sleep };
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
-import std::json::{ Json, FromJson };
+import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{
 	HttpTransport, SplitDuplex, DuplexTransport, DuplexEnd, connect_split, bridge,
@@ -75,7 +75,7 @@ fun watch(base: str): Session {
 	let counting = CountingDuplex { inner = split, inbound = frames };
 	let reactive = ReactiveClient::new(bridge(counting));
 	let last_seen: Shared<i32> = Shared::new(0 - 1);
-	let client = Client { transport = HttpTransport { url = i"{base}/rpc" } };
+	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 	match client.attach(i32::from_json(split.connection)) {
 		Ok(let channel) => {
 			let _watching = reactive.source(channel).sub(|json| {
@@ -92,7 +92,7 @@ fun run(finished: || void) {
 	let board = Board { count = Signal::new(0) };
 	serve_connected(
 		48232,
-		board.dispatcher().into_protocol(),
+		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
 			sessions.write().push((id, ReactiveServer::new(end)));
 		},
@@ -110,7 +110,7 @@ fun drive(finished: || void) {
 	let bob = watch(base);
 	let carol = watch(base);
 	sleep(200); // let the subscribe frames land
-	let driver = Client { transport = HttpTransport { url = i"{base}/rpc" } };
+	let driver = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 
 	let mutations = 50;
 	let started = now();

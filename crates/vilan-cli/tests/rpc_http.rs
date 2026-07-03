@@ -156,6 +156,7 @@ import std::shared::Shared;
 import std::process::exit;
 import std::result::Result::{ self, Ok, Err };
 import std::json::Json;
+import std::json::json_codec;
 import std::rpc::HttpTransport;
 import std::rpc_server::serve_rpc;
 
@@ -174,13 +175,13 @@ impl Counter {
 
 fun main() {
 	let counter = Counter { count = Shared::new(0) };
-	serve_rpc(45177, counter.dispatcher().into_protocol(), |server| {
+	serve_rpc(45177, counter.dispatcher().into_protocol(json_codec()), |server| {
 		run_client();
 	});
 }
 
 fun run_client() {
-	let client = Client { transport = HttpTransport { url = "http://localhost:45177/" } };
+	let client = Client { transport = HttpTransport { url = "http://localhost:45177/" }, codec = json_codec() };
 	match client.verify() {
 		Ok(let same) => print(i"verify = {same}"),
 		Err(let error) => print(i"verify err {error.to_json()}"),
@@ -230,7 +231,7 @@ import std::process::exit;
 import std::time::sleep;
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
-import std::json::{ Json, FromJson };
+import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{
 	HttpTransport, connect_split, bridge,
@@ -274,7 +275,7 @@ fun main() {
 	let board = Board { count = Signal::new(0) };
 	serve_connected(
 		9273,
-		board.dispatcher().into_protocol(),
+		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
 			sessions.write().push((id, ReactiveServer::new(end)));
 		},
@@ -289,7 +290,7 @@ fun main() {
 fun watch(name: str, base: str): Client<HttpTransport> {
 	let split = connect_split(base);
 	let reactive = ReactiveClient::new(bridge(split));
-	let client = Client { transport = HttpTransport { url = i"{base}/rpc" } };
+	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 	match client.attach(i32::from_json(split.connection)) {
 		Ok(let channel) => {
 			let _ = reactive.source(channel).sub(|json| {
@@ -352,7 +353,7 @@ fn a_closed_connection_tears_its_session_down_and_spares_the_rest() {
 import std::shared::Shared;
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
-import std::json::{ Json, FromJson };
+import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{ ReactiveServer, DuplexEnd };
 import std::http::Response;
@@ -402,7 +403,7 @@ fun main() {
 	let board = Board { count = Signal::new(0) };
 	serve_connected(
 		47161,
-		board.dispatcher().into_protocol(),
+		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
 			sessions.write().push((id, ReactiveServer::new(end)));
 		},
@@ -424,7 +425,8 @@ fun main() {
             r#"import std::print;
 import std::time::sleep;
 import std::process::exit;
-import std::json::{{ Json, FromJson }};
+import std::json::{{ Json, FromJson, json_codec }};
+import std::wire::Serializer;
 import std::result::Result::{{ self, Ok, Err }};
 import std::rpc::{{ HttpTransport, RpcError, call, connect_split, bridge, ReactiveClient }};
 
@@ -433,7 +435,8 @@ fun main() {{
 	let split = connect_split(base);
 	let reactive = ReactiveClient::new(bridge(split));
 	let transport = HttpTransport {{ url = i"{{base}}/rpc" }};
-	let attached: Result<i32, RpcError> = call(transport, "attach", [i32::from_json(split.connection).to_json()]);
+	let connection = i32::from_json(split.connection);
+	let attached: Result<i32, RpcError> = call(transport, json_codec(), "attach", [|s: Serializer| connection.describe(s)]);
 	match attached {{
 		Ok(let channel) => {{
 			let watching = reactive.source(channel).sub(|json| {{
@@ -469,7 +472,7 @@ fun main() {{
         "src/main.vl",
         &watcher(
             "survivor",
-            "\tlet by = 5;\n\tlet added: Result<i32, RpcError> = call(transport, \"add\", [by.to_json()]);\n\tmatch added {\n\t\tOk(let n) => print(i\"add -> {n}\"),\n\t\tErr(let error) => print(i\"add err {error.to_json()}\"),\n\t}\n\tsleep(300);\n",
+            "\tlet by = 5;\n\tlet added: Result<i32, RpcError> = call(transport, json_codec(), \"add\", [|s: Serializer| by.describe(s)]);\n\tmatch added {\n\t\tOk(let n) => print(i\"add -> {n}\"),\n\t\tErr(let error) => print(i\"add err {error.to_json()}\"),\n\t}\n\tsleep(300);\n",
         ),
     );
 

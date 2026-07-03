@@ -10,6 +10,7 @@
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::shared::Shared;
+import pkg::bytes::decode_utf8;
 import pkg::wire::{ Wire, Serializer, Deserializer, Codec, Frame };
 
 // --- Serialization (`to_json`) ------------------------------------------------
@@ -335,7 +336,12 @@ impl JsonReader {
 		}
 		match self.stack.write().pop() {
 			Some(let value) => value,
-			None => parse_json_value("null"),
+			None => {
+				// A balanced rebuild never underflows — reading past the
+				// document is a structural mismatch, not a zero value.
+				self.report("unexpected end of document");
+				parse_json_value("null")
+			},
 		}
 	}
 
@@ -458,13 +464,11 @@ fun json_codec(): Codec {
 			(writer.serializer(), || Frame::Text(writer.result()))
 		},
 		reader = |frame| {
+			// Liberal in what it accepts: a binary frame is read as UTF-8 JSON
+			// (server mounts read request bodies as bytes without sniffing).
 			match frame {
 				Frame::Text(let text) => JsonReader::new(parse_json_value(text)).deserializer(),
-				Frame::Binary(let bytes) => {
-					let reader = JsonReader::new(parse_json_value("null"));
-					reader.report("json codec: received a binary frame");
-					reader.deserializer()
-				},
+				Frame::Binary(let bytes) => JsonReader::new(parse_json_value(decode_utf8(bytes))).deserializer(),
 			}
 		},
 	}

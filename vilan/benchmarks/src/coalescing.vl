@@ -4,12 +4,13 @@
 
 import std::print;
 import std::shared::Shared;
-import std::json::Json;
+import std::json::{ Json, json_codec };
+import std::wire::Serializer;
 import std::option::Option::{ Some, None };
 import std::result::Result::{ self, Ok, Err };
 import std::reactive::{ batch, Signal };
 import std::rpc::{
-	duplex_pair, local_rpc, Dispatcher, RpcError, call, arg, reply,
+	duplex_pair, local_rpc, Dispatcher, RpcError, RpcOutcome, call, arg, reply, decode_failed,
 	ReactiveServer, ReactiveClient,
 };
 import pkg::report::section;
@@ -65,14 +66,19 @@ fun run() {
 	let before_turn = server_to_client.read();
 	let dispatcher = Dispatcher::new().on("bump", |request| {
 		let by: i32 = arg(request, 0);
-		counter.set(counter.get() + by);
-		counter.set(counter.get() + by);
-		counter.set(counter.get() + by);
-		reply(counter.get())
+		match decode_failed(request) {
+			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
+			None => {
+				counter.set(counter.get() + by);
+				counter.set(counter.get() + by);
+				counter.set(counter.get() + by);
+				reply(counter.get())
+			},
+		}
 	});
-	let transport = local_rpc(dispatcher.into_protocol());
+	let transport = local_rpc(dispatcher.into_protocol(json_codec()));
 	let amount = 1;
-	let outcome: Result<i32, RpcError> = call(transport, "bump", [amount.to_json()]);
+	let outcome: Result<i32, RpcError> = call(transport, json_codec(), "bump", [|s: Serializer| amount.describe(s)]);
 	match outcome {
 		Ok(let value) => {},
 		Err(let error) => print("bump failed"),

@@ -21,25 +21,27 @@ import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::json::{ Json, FromJson };
 import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
+import pkg::wire::{ Wire, Serializer, Deserializer, Codec, Frame };
 import pkg::bytes::new_text_decoder;
-import pkg::fetch::{ get, post };
+import pkg::fetch::{ get, post, post_bytes };
 
 // === Transport: request/response ============================================
 
 // Send an encoded request frame, get the encoded reply. The explicit `Promise` marks the
-// round-trip as a place the caller `await`s deliberately.
+// round-trip as a place the caller `await`s deliberately. Frames carry either
+// format (§6.2) — the codec is chosen at wiring time, not here.
 trait Transport {
-	fun call(self, request: str): Promise<str>;
+	fun call(self, request: Frame): Promise<Frame>;
 }
 
 // The in-process request/response transport: runs a handler in the same process, wrapped
 // as a resolved Promise. `handler` is a protocol's frame handler (an `RpcProtocol`).
 struct LocalTransport {
-	handler: |str| str,
+	handler: |Frame| Frame,
 }
 
 impl LocalTransport with Transport {
-	fun call(self, request: str): Promise<str> {
+	fun call(self, request: Frame): Promise<Frame> {
 		async {
 			(self.handler)(request)
 		}
@@ -60,10 +62,20 @@ struct HttpTransport {
 }
 
 impl HttpTransport with Transport {
-	fun call(self, request: str): Promise<str> {
+	// The reply is read in the request's format — both sides run one codec
+	// (deployment-wide, Q6), so the kinds always match.
+	fun call(self, request: Frame): Promise<Frame> {
 		async {
-			let response = post(self.url, request).send();
-			response.text()
+			match request {
+				Frame::Text(let body) => {
+					let response = post(self.url, body).send();
+					Frame::Text(response.text())
+				},
+				Frame::Binary(let body) => {
+					let response = post_bytes(self.url, body);
+					Frame::Binary(response.bytes())
+				},
+			}
 		}
 	}
 }
@@ -241,12 +253,22 @@ trait Protocol {
 
 // === Wire envelope (RPC) ====================================================
 
-// An invocation: a method name plus positional arguments, each pre-encoded to a JSON
-// fragment so a heterogeneous argument list fits a homogeneous `List<str>`.
-[derive(Wire)]
+// The request handle a dispatcher hands to handlers: the method that routed it
+// plus the request's deserializer, positioned at the first argument. `arg`
+// pulls the NEXT argument — arguments are read in declaration order, exactly
+// once (the schema-ordered binary format requires it; generated handlers obey
+// by construction, hand-written ones by contract — proposal §4.1).
 struct RpcRequest {
 	method: str,
-	args: List<str>,
+	deserializer: Deserializer,
+	arity: i32,
+}
+
+// What a handler returns: a result that describes itself into the reply
+// envelope (single-pass — no intermediate encoding), or a failure.
+enum RpcOutcome {
+	Success(|Serializer| void),
+	Failure(RpcError),
 }
 
 // An infrastructure-level failure — distinct from an application error, which is part of
@@ -259,26 +281,78 @@ enum RpcError {
 	Unauthorized,
 }
 
-// A reply: the procedure's JSON-encoded result, or an `RpcError`.
-[derive(Wire)]
-enum RpcReply {
-	Success(str),
-	Failure(RpcError),
+// --- Envelope encode/decode (shared by `call`, the protocol, and benchmarks) --
+
+// One request envelope, written in a single pass: the method, then each
+// argument described straight into the same serializer. On the JSON codec the
+// args are plain values (`{"method":"add","args":[1]}` — no escaping).
+fun encode_request(codec: Codec, method: str, args: List<|Serializer| void>): Frame {
+	let (serializer, finish) = (codec.writer)();
+	(serializer.begin_struct)(2);
+	(serializer.field)("method");
+	(serializer.str_value)(method);
+	(serializer.field)("args");
+	(serializer.begin_list)(args.len());
+	for describe in args {
+		describe(serializer);
+	}
+	(serializer.end_list)();
+	(serializer.end_struct)();
+	finish()
+}
+
+// Open a request frame into the handle handlers consume. A corrupt frame
+// leaves the deserializer poisoned; the protocol turns that into a `Decode`
+// failure before routing.
+fun open_request(codec: Codec, frame: Frame): RpcRequest {
+	let deserializer = (codec.reader)(frame);
+	(deserializer.begin_struct)();
+	(deserializer.field)("method");
+	let method = (deserializer.str_value)();
+	(deserializer.field)("args");
+	let arity = (deserializer.begin_list)();
+	RpcRequest { method = method, deserializer = deserializer, arity = arity }
+}
+
+// One reply envelope: an externally-tagged `Success` carrying the described
+// result, or `Failure` carrying the `RpcError`.
+fun encode_reply(codec: Codec, outcome: RpcOutcome): Frame {
+	let (serializer, finish) = (codec.writer)();
+	match outcome {
+		RpcOutcome::Success(let describe) => {
+			(serializer.begin_variant)("Success", 1);
+			describe(serializer);
+			(serializer.end_variant)();
+		},
+		RpcOutcome::Failure(let error) => {
+			(serializer.begin_variant)("Failure", 1);
+			error.describe(serializer);
+			(serializer.end_variant)();
+		},
+	}
+	finish()
 }
 
 // === RpcProtocol ============================================================
 
-// The request/response protocol: on an inbound request frame it decodes the envelope,
-// routes through the application `dispatch`, and encodes the reply. `[service(Client)]`
-// generation emits the dispatch routing; `Dispatcher` below is the hand-written form.
+// The request/response protocol over one codec: open the request envelope,
+// route through the application `dispatch`, encode the outcome. It always
+// replies — an unknown method or a corrupt frame is a `Failure` envelope, not
+// silence. `[service(Client)]` generation emits the dispatch routing;
+// `Dispatcher` below is the hand-written form.
 struct RpcProtocol {
-	dispatch: |RpcRequest| RpcReply,
+	codec: Codec,
+	dispatch: |RpcRequest| RpcOutcome,
 }
 
-impl RpcProtocol with Protocol {
-	fun receive(self, frame: str): Option<str> {
-		let request = RpcRequest::from_json(frame);
-		Some((self.dispatch)(request).to_json())
+impl RpcProtocol {
+	fun respond(self, frame: Frame): Frame {
+		let request = open_request(self.codec, frame);
+		let outcome = match (request.deserializer.failed)() {
+			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
+			None => (self.dispatch)(request),
+		};
+		encode_reply(self.codec, outcome)
 	}
 }
 
@@ -289,51 +363,77 @@ impl RpcProtocol with Protocol {
 // coalesced `Update` per source alongside its reply, not one per write.
 fun local_rpc(protocol: RpcProtocol): LocalTransport {
 	LocalTransport {
-		handler = |frame| {
-			batch(|| {
-				match protocol.receive(frame) {
-					Some(let reply) => reply,
-					None => RpcReply::Failure(RpcError::Remote("no reply")).to_json(),
-				}
-			})
-		},
+		handler = |frame| batch(|| protocol.respond(frame)),
 	}
 }
 
 // === Foundation: the ergonomic client + server API (proposal §4.1) ==========
 //
 // `call<T>` collapses a client round-trip (envelope -> await -> decode) into one line;
-// `Dispatcher` routes decoded requests to typed handlers, `arg`/`reply` doing the
-// encode/decode (JSON, hardwired — proposal §6's codec seam is future work).
+// `Dispatcher` routes requests to typed handlers, `arg`/`reply` pulling and
+// describing values through the wiring-time codec (§6.2) — single-pass, no
+// intermediate encoding.
 // This is the foundation `[service(Client)]` generation emits over — and the API to use
 // directly when writing the plumbing by hand.
 
-// One over-the-wire call: build the envelope, await the round-trip, and decode the success
-// payload as `T` (inferred from the call site). Infrastructure failures — transport, decode, a
-// remote error — surface as `Err(RpcError)`.
-fun call<T: FromJson, Tx: Transport>(transport: Tx, method: str, args: List<str>): Result<T, RpcError> {
-	let reply_text = await transport.call(RpcRequest { method, args }.to_json());
-	match RpcReply::from_json(reply_text) {
-		RpcReply::Success(let json) => Ok(T::from_json(json)),
-		RpcReply::Failure(let error) => Err(error),
+// One over-the-wire call: encode the request in a single pass (each argument
+// describes itself into the envelope's serializer), await the round-trip, and
+// decode the reply as `T` (inferred from the call site). Infrastructure
+// failures — transport, decode, a remote error — surface as `Err(RpcError)`.
+fun call<T: Wire, Tx: Transport>(
+	transport: Tx,
+	codec: Codec,
+	method: str,
+	args: List<|Serializer| void>,
+): Result<T, RpcError> {
+	let reply_frame = await transport.call(encode_request(codec, method, args));
+	let deserializer = (codec.reader)(reply_frame);
+	let tag = (deserializer.variant_tag)();
+	match tag {
+		"Success" => {
+			(deserializer.begin_variant)("Success", 1);
+			let value: T = T::rebuild(deserializer);
+			match (deserializer.failed)() {
+				None => Ok(value),
+				Some(let reason) => Err(RpcError::Decode(reason)),
+			}
+		},
+		"Failure" => {
+			(deserializer.begin_variant)("Failure", 1);
+			let error: RpcError = RpcError::rebuild(deserializer);
+			(deserializer.end_variant)();
+			Err(error)
+		},
+		_ => Err(RpcError::Decode("unrecognized reply envelope")),
 	}
 }
 
-// Decode positional argument `index` at type `T` (inferred). Happy-path: a missing/garbled
-// argument decodes to garbage — a robust `arg -> Result` awaits `?` (proposal Q10).
-fun arg<T: FromJson>(request: RpcRequest, index: i32): T {
-	T::from_json(request.args[index])
+// Pull the NEXT argument at the parameter's type (`index` documents the
+// position at the call site — reads are positional and once-each; see
+// `RpcRequest`). A missing/garbled argument poisons the request's
+// deserializer; check `decode_failed` before running the impl.
+fun arg<T: Wire>(request: RpcRequest, index: i32): T {
+	T::rebuild(request.deserializer)
 }
 
-// Encode a procedure's result as a success reply.
-fun reply<T: Json>(value: T): RpcReply {
-	RpcReply::Success(value.to_json())
+// Whether decoding this request has failed so far — the gate between the
+// `arg` pulls and the impl call, turning a garbled request into a clean
+// `RpcError::Decode` instead of an impl run on zero values.
+fun decode_failed(request: RpcRequest): Option<str> {
+	(request.deserializer.failed)()
 }
 
-// One route: a method name and the handler that decodes the request and produces a reply.
+// Capture a procedure's result as a success outcome — described into the
+// reply envelope when the protocol encodes it.
+fun reply<T: Wire>(value: T): RpcOutcome {
+	RpcOutcome::Success(|serializer: Serializer| value.describe(serializer))
+}
+
+// One route: a method name and the handler that consumes the request handle
+// and produces an outcome.
 struct Route {
 	method: str,
-	handler: |RpcRequest| RpcReply,
+	handler: |RpcRequest| RpcOutcome,
 }
 
 // The server router: register handlers by method name, then route each request to its match
@@ -348,22 +448,23 @@ impl Dispatcher {
 	}
 
 	// Register a handler for a method name, returning `self` so registrations chain.
-	fun on(self, method: str, handler: |RpcRequest| RpcReply): Dispatcher {
+	fun on(self, method: str, handler: |RpcRequest| RpcOutcome): Dispatcher {
 		self.routes.write().push(Route { method, handler });
 		self
 	}
 
 	// Route a request to its handler, or fail with `unknown method`.
-	fun handle(self, request: RpcRequest): RpcReply {
+	fun handle(self, request: RpcRequest): RpcOutcome {
 		match self.routes.read().filter(|route| route.method == request.method).first() {
 			Some(let route) => (route.handler)(request),
-			None => RpcReply::Failure(RpcError::Remote("unknown method: " + request.method)),
+			None => RpcOutcome::Failure(RpcError::Remote("unknown method: " + request.method)),
 		}
 	}
 
-	// Wrap as an `RpcProtocol`, ready to mount on a transport (e.g. `local_rpc`).
-	fun into_protocol(self): RpcProtocol {
-		RpcProtocol { dispatch = |request| self.handle(request) }
+	// Wrap as an `RpcProtocol` over `codec` — the wiring-time format choice
+	// (§6.2) — ready to mount on a transport (e.g. `local_rpc`).
+	fun into_protocol(self, codec: Codec): RpcProtocol {
+		RpcProtocol { codec = codec, dispatch = |request| self.handle(request) }
 	}
 }
 

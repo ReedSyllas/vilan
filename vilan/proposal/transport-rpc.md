@@ -271,47 +271,60 @@ routing — from the server declaration.
 
 ### 4.1 The foundation — an ergonomic hand-written API (no compiler features)
 
+> **Re-plumbed onto the codec, single-pass (settled 2026-07-02).** The original foundation
+> carried args/results as pre-encoded JSON strings inside a JSON envelope — the measured
+> ~15% double-encoding. The envelope is now written in ONE pass through §6.2's `Codec`:
+> args describe themselves directly into the envelope's serializer (heterogeneous args as
+> a list of describe-closures), and the server pulls each argument straight from the
+> positioned deserializer — **in declaration order, exactly once** (the schema-ordered
+> binary format requires it; generated handlers obey by construction, hand-written ones
+> by contract). On the wire, JSON args are now plain values (`{"method":"add","args":[1]}`
+> — no escaping), and the reply is `{"Success":<value>}`. A decode failure poisons the
+> request's deserializer; the handler checks `decode_failed(request)` BEFORE running the
+> impl and returns `RpcError::Decode(reason)` — validating decode, end to end. The codec
+> is chosen at wiring time on both sides (`Client { transport, codec }`,
+> `dispatcher().into_protocol(codec)`); format choice stays deployment-wide (Q6). The
+> reactive protocol stays JSON-over-text until the WebSocket slice (SSE is text-only).
+
 **Client:** one helper turns a typed call into a wire round-trip; the developer never touches
 the envelope, the await, or the error layer:
 
 ```vilan
-// Build the envelope, await the round-trip, decode the success payload as `T`
-// (inferred from the call site). Infrastructure failures — transport, decode, a
-// remote error — surface as `Err(RpcError)`. Generic over the codec (§6); JSON shown.
-fun call<T: FromJson, Tx: Transport>(transport: Tx, method: str, args: List<str>): Result<T, RpcError> {
-    let reply = await transport.call(RpcRequest { method, args }.to_json());
-    match RpcReply::from_json(reply) {
-        RpcReply::Success(let json) => Ok(T::from_json(json)),   // bound-derived decode (now compiles)
-        RpcReply::Failure(let error) => Err(error),
-    }
-}
+// Encode the request in one pass, await the round-trip, decode the reply as `T`.
+// Infrastructure failures — transport, decode, a remote error — are `Err(RpcError)`.
+fun call<T: Wire, Tx: Transport>(
+    transport: Tx, codec: Codec, method: str, args: List<|Serializer| void>,
+): Result<T, RpcError>
 
-// A typed client is a thin holder over a transport; each method is one line.
-struct AccountsClient<Tx: Transport> { transport: Tx }
+// A typed client is a thin holder over a transport + codec; each method is one line.
+struct AccountsClient<Tx: Transport> { transport: Tx, codec: Codec }
 impl AccountsClient<type Tx> {
     fun get_user(self, uuid: str): Result<Option<WireUser>, RpcError> {
-        call(self.transport, "get_user", [uuid.to_json()])
+        call(self.transport, self.codec, "get_user", [|s: Serializer| uuid.describe(s)])
     }
 }
 ```
 
-**Server:** a `Dispatcher` routes decoded requests to your handlers; the handlers stay plain
-functions returning domain types (`Dispatcher`, `arg`, and `reply` are small `std::rpc`
-primitives — the router plus typed decode/encode helpers):
+**Server:** a `Dispatcher` routes requests to your handlers; the handlers stay plain
+functions returning domain values. `RpcRequest` is a *handle* over the request's
+deserializer (not decoded data); `arg` pulls the next argument at its parameter type,
+`decode_failed` gates the impl, `reply` captures the result as a describe-closure
+(`RpcOutcome`) that the protocol encodes into the reply envelope:
 
 ```vilan
-// `into_protocol()` makes the Dispatcher the `RpcProtocol` `dispatch`, so it drops
-// onto any transport. `arg`/`reply` carry the codec; each handler is one line.
 Dispatcher::new()
-    .on("get_user", |req| reply(get_user(arg(req, 0)).map(|u| u.to_wire())))
-    .on("rename",   |req| reply(rename(arg(req, 0), arg(req, 1)).to_wire()))
+    .on("get_user", |req| {
+        let id: i32 = arg(req, 0);
+        match decode_failed(req) {
+            Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
+            None => reply(lookup(id).map(|u| u.to_wire())),
+        }
+    })
 ```
 
 This is exactly `examples/rpc`'s hand-written dispatch/stub, **distilled into a reusable
-API**: the archaic `RpcRequest { method = "get_user", args = [id.to_json()] }` + `match
-RpcReply::from_json(..)` collapses into `call(..)` on the client and `.on(..)` on the server.
-It is the API the developer wants *whether or not* the sugar exists — which is why it is built
-first, and why the sugar is optional.
+API** — and it is the API the developer wants *whether or not* the sugar exists, which is
+why it is built first and why the sugar is optional.
 
 ### 4.2 `[service]` / `[rpc]` / `[expose]` — sugar that generates the client from the server
 
@@ -679,12 +692,23 @@ called by `Option::describe` before a present value. JSON's writer no-ops it
 binary writes the `0x01`. Without it, `Some(0)` and `None` would both start
 `0x00` — schema-ordered bytes have no self-description to disambiguate with.
 
-**Remaining after the codecs themselves**: the runtime re-plumb — envelopes,
-`call`/`arg`/`reply`, the protocols and transports move `Frame` and take a
-codec value at wiring time (Q2's `Accounts::connect(transport, codec)` shape) —
-and the phase-6 benchmarks measuring JSON double-encoding against the binary
-frames. Format choice is deployment-wide (both sides must agree — the Q6
-contract-hash/negotiation concern; a content-type announced on connect).
+**The runtime re-plumb ✅ shipped (2026-07-02, single-pass — §4.1)**: `Transport`
+moves `Frame` (HTTP POSTs text or bytes and reads the reply in kind); the
+envelope is written in one pass (request args describe into the envelope's
+serializer; the reply is `{"Success":<value>}` — measured overhead fell from
+~15% to ~0.2%, 27 bytes of framing on a 14 KB payload); `RpcRequest` is a
+deserializer handle, `arg` pulls positionally, `decode_failed` gates generated
+impls (a garbled request is `RpcError::Decode`, pinned — the JSON reader also
+fails sticky on document underflow now); the codec is chosen at wiring time on
+both sides (`Client { transport, codec }`, `into_protocol(codec)`), and binary
+RPC runs end-to-end over real HTTP via `serve_connected`'s byte-reading `/rpc`
+(the JSON codec reads binary frames as UTF-8, so byte mounts need no
+sniffing). Benchmarks now bracket both codecs live (~855 binary vs ~778 JSON
+calls/sec over localhost; half the bytes on the wire). Known bounds:
+`rpc_response`/`serve_rpc` ride the text `Server` API and serve text codecs
+only (binary belongs on `serve_connected`); the reactive protocol stays
+JSON-over-text until the WebSocket slice. Format choice is deployment-wide
+(both sides must agree — the Q6 contract-hash/negotiation concern).
 
 ## 7. The generated stub: async and errors
 

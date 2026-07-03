@@ -5,7 +5,7 @@
 
 import std::print;
 import std::reactive::Signal;
-import std::json::{ Json, FromJson };
+import std::json::{ Json, FromJson, json_codec };
 import std::result::Result::{ Ok, Err };
 import std::rpc::{ HttpTransport, connect_split, bridge, ReactiveClient };
 import std::ui::mount;
@@ -15,7 +15,7 @@ import pkg::todos::todos;
 async fun main() {
 	// The local mirror of the server's list — the wire is its only writer.
 	let items: Signal<List<Todo>> = Signal::new([]);
-	let client = TodoClient { transport = HttpTransport { url = "/rpc" } };
+	let client = TodoClient { transport = HttpTransport { url = "/rpc" }, codec = json_codec() };
 	mount("app", todos(client, items));
 
 	// SplitDuplex to the same origin: SSE down, POSTs up. `attach` exposes the

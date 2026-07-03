@@ -19,9 +19,11 @@ import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
 import std::shared::Shared;
 import std::reactive::{ batch, Signal, Source };
+import std::wire::{ Serializer, Codec };
+import std::json::json_codec;
 import std::rpc::{
-	Transport, LocalTransport, RpcRequest, RpcReply, RpcError,
-	local_rpc, Dispatcher, call, arg, reply,
+	Transport, LocalTransport, RpcError, RpcOutcome,
+	local_rpc, Dispatcher, call, arg, reply, decode_failed,
 	duplex_pair, ReactiveServer, ReactiveClient, RemoteSource,
 };
 
@@ -114,13 +116,20 @@ fun find_user(username: str): Option<User> {
 fun accounts_dispatcher(): Dispatcher {
 	Dispatcher::new().on("get_user", |request| {
 		let id: i32 = arg(request, 0);
-		// `lookup_user(id).to_json()` would NOT compile — `User` has no codec. The projection
-		// to the wire shape is mandatory, which is the safety guarantee.
-		let wire_user = match lookup_user(id) {
-			Some(let user) => Some(user.to_wire()),
-			None => None,
-		};
-		reply(wire_user)
+		// A garbled request never reaches the impl: the decode gate turns it
+		// into a clean `RpcError::Decode` (§4.1 single-pass).
+		match decode_failed(request) {
+			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
+			None => {
+				// `reply(lookup_user(id))` would NOT compile — `User` has no codec.
+				// The projection to the wire shape is mandatory: the safety guarantee.
+				let wire_user = match lookup_user(id) {
+					Some(let user) => Some(user.to_wire()),
+					None => None,
+				};
+				reply(wire_user)
+			},
+		}
 	})
 }
 
@@ -132,15 +141,17 @@ fun accounts_dispatcher(): Dispatcher {
 // `call` helper (rpc.vl §4.1): it passes the `T`-typed transport to a generic
 // `call<_, Tx: Transport>`, which monomorphizes to the concrete transport — so the stub reads
 // as the natural client, with no hand-rolled envelope.
-struct AccountsClient<T: Transport> { transport: T }
+struct AccountsClient<T: Transport> { transport: T, codec: Codec }
 
 impl AccountsClient<type T> {
 	// The client deals only in `WireUser` — it has no `User`, and no `password` field to
 	// leak. The round-trip can fail, so the result is wrapped in `Result<_, RpcError>`.
 	fun get_user(self, id: i32): Result<Option<WireUser>, RpcError> {
-		// `call` builds the envelope, awaits the round-trip, and decodes the success payload as
-		// `Option<WireUser>` — inferred from this return type; infra failures become `Err`.
-		call(self.transport, "get_user", [id.to_json()])
+		// `call` writes the envelope in one pass (the argument describes itself
+		// into the envelope's serializer — §4.1), awaits the round-trip, and
+		// decodes the reply as `Option<WireUser>` — inferred from this return
+		// type; infra failures become `Err`.
+		call(self.transport, self.codec, "get_user", [|s: Serializer| id.describe(s)])
 	}
 }
 
@@ -216,8 +227,8 @@ fun main() {
 	// (decode envelope → route → encode reply); `local_rpc` mounts that on an in-process
 	// transport — the wiring a client stub connects to. Both the RPC and reactive protocols
 	// below are `Protocol`s (§2).
-	let transport = local_rpc(accounts_dispatcher().into_protocol());
-	let client = AccountsClient { transport = transport };
+	let transport = local_rpc(accounts_dispatcher().into_protocol(json_codec()));
+	let client = AccountsClient { transport = transport, codec = json_codec() };
 
 	// A hit (id 1 -> ada), a miss (id 9 -> None, an application-level absence), and a
 	// bogus call made directly through the transport (a clean RpcError, no crash).
@@ -278,9 +289,9 @@ fun reactive_demo() {
 		counter.set(counter.get() + amount);   // 16 — ...so the second write sees it
 		reply(counter.get())
 	});
-	let rpc_transport = local_rpc(dispatcher.into_protocol());
+	let rpc_transport = local_rpc(dispatcher.into_protocol(json_codec()));
 	let amount = 3;
-	let added: Result<i32, RpcError> = call(rpc_transport, "add", [amount.to_json()]);
+	let added: Result<i32, RpcError> = call(rpc_transport, json_codec(), "add", [|s: Serializer| amount.describe(s)]);
 	match added {
 		Ok(let n) => print(i"rpc add -> {n}"),
 		Err(let error) => print(i"rpc error: {error.to_json()}"),
@@ -299,7 +310,7 @@ fun session_demo() {
 	// handles. The exposed `status` is exported under a channel id (§8) — the id is what
 	// a connect handshake would carry; in-process we just hand it over.
 	let session = Session { status = Signal::new("offline"), user_id = Shared::new(None) };
-	let rpc_transport = local_rpc(session.dispatcher().into_protocol());
+	let rpc_transport = local_rpc(session.dispatcher().into_protocol(json_codec()));
 	let (client_end, server_end) = duplex_pair();
 	let status_channel = ReactiveServer::new(server_end).expose(session.status);
 
@@ -307,6 +318,7 @@ fun session_demo() {
 	// each exposed field.
 	let client = Client {
 		transport = rpc_transport,
+		codec = json_codec(),
 		status = ReactiveClient::new(client_end).source(status_channel),
 	};
 
@@ -348,12 +360,12 @@ fun show(result: Result<Option<WireUser>, RpcError>) {
 	}
 }
 
-// Exercise the error path: invoke a method the dispatcher doesn't know, by hand.
+// Exercise the error path: invoke a method the dispatcher doesn't know — a clean
+// `RpcError::Remote`, no crash.
 fun show_raw(transport: LocalTransport) {
-	let request = RpcRequest { method = "delete_everything", args = [] };
-	let reply_text = await transport.call(request.to_json());
-	match RpcReply::from_json(reply_text) {
-		RpcReply::Success(let json) => print(i"raw ok: {json}"),
-		RpcReply::Failure(let error) => print(i"raw error: {error.to_json()}"),
+	let bogus: Result<i32, RpcError> = call(transport, json_codec(), "delete_everything", []);
+	match bogus {
+		Ok(let value) => print(i"raw ok: {value}"),
+		Err(let error) => print(i"raw error: {error.to_json()}"),
 	}
 }

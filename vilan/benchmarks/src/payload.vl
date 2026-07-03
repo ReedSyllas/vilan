@@ -1,14 +1,16 @@
-// Payload sizes: the same values as JSON text, as binary frames, and inside
-// the RPC envelopes — making the JSON double-encoding (§6 status) a number.
-// Sizes are real UTF-8 byte counts, not code units.
+// Payload sizes: the same values as bare frames and inside the RPC envelopes,
+// in both codecs. The §4.1 single-pass envelope writes args/results directly
+// into the envelope's serializer, so the envelope overhead is framing only —
+// compare the enveloped sizes against the bare values. Sizes are real UTF-8
+// byte counts, not code units.
 
 import std::print;
 import std::option::Option::{ self, Some, None };
 import std::bytes::encode_utf8;
-import std::json::{ Json, encode_json, json_codec };
+import std::json::{ Json, json_codec };
 import std::binary::binary_codec;
-import std::wire::{ Wire, Frame, encode };
-import std::rpc::{ RpcRequest, RpcReply };
+import std::wire::{ Wire, Frame, Codec, Serializer, encode };
+import std::rpc::{ encode_request, encode_reply, reply };
 import pkg::report::section;
 
 [derive(Wire)]
@@ -43,15 +45,15 @@ fun frame_bytes(frame: Frame): i32 {
 
 fun measure(label: str, count: i32) {
 	let todos = sample_list(count);
-	let json_bytes = frame_bytes(encode(json_codec(), todos));
-	let binary_bytes = frame_bytes(encode(binary_codec(), todos));
-	// The request envelope carrying the list as one pre-encoded argument, and
-	// the success reply carrying it as the pre-encoded result — today's wire
-	// format, where the payload is JSON-escaped inside JSON.
-	let request = RpcRequest { method = "sync", args = [todos.to_json()] };
-	let request_bytes = encode_utf8(request.to_json()).len();
-	let reply_bytes = encode_utf8(RpcReply::Success(todos.to_json()).to_json()).len();
-	print(i"{label}: value {json_bytes} B json / {binary_bytes} B binary; enveloped {request_bytes} B request / {reply_bytes} B reply");
+	let bare_json = frame_bytes(encode(json_codec(), todos));
+	let bare_binary = frame_bytes(encode(binary_codec(), todos));
+	// The request envelope carrying the list as its one argument, and the
+	// success reply carrying it as the result — single-pass, both codecs.
+	let request_json = frame_bytes(encode_request(json_codec(), "sync", [|s: Serializer| todos.describe(s)]));
+	let request_binary = frame_bytes(encode_request(binary_codec(), "sync", [|s: Serializer| todos.describe(s)]));
+	let reply_json = frame_bytes(encode_reply(json_codec(), reply(todos)));
+	let reply_binary = frame_bytes(encode_reply(binary_codec(), reply(todos)));
+	print(i"{label}: bare {bare_json} B json / {bare_binary} B binary; request {request_json} / {request_binary}; reply {reply_json} / {reply_binary}");
 }
 
 fun run() {

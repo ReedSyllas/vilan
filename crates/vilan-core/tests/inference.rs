@@ -2549,6 +2549,7 @@ fn service_generates_dispatcher_client_and_mirror() {
         import std::reactive::Signal;
         import std::result::Result::{ self, Ok, Err };
         import std::json::{ Json, FromJson };
+        import std::json::json_codec;
         import std::rpc::{ local_rpc, duplex_pair, ReactiveServer, ReactiveClient };
 
         [service(Client)]
@@ -2573,10 +2574,10 @@ fn service_generates_dispatcher_client_and_mirror() {
 
         fun main() {
             let session = Session { status = Signal::new("idle"), count = Shared::new(0) };
-            let transport = local_rpc(session.dispatcher().into_protocol());
+            let transport = local_rpc(session.dispatcher().into_protocol(json_codec()));
             let (client_end, server_end) = duplex_pair();
             let channel = ReactiveServer::new(server_end).expose(session.status);
-            let client = Client { transport, status = ReactiveClient::new(client_end).source(channel) };
+            let client = Client { transport, codec = json_codec(), status = ReactiveClient::new(client_end).source(channel) };
             let watching = client.status.sub(|json| {
                 let s: str = str::from_json(json);
                 print(i"status = {s}");
@@ -2606,7 +2607,7 @@ fn service_client_name_defaults_to_struct_client() {
         import std::print;
         import std::shared::Shared;
         import std::result::Result::{ self, Ok, Err };
-        import std::json::Json;
+        import std::json::{ Json, json_codec };
         import std::rpc::{ local_rpc };
 
         [service]
@@ -2623,8 +2624,8 @@ fn service_client_name_defaults_to_struct_client() {
 
         fun main() {
             let counter = Counter { count = Shared::new(41) };
-            let transport = local_rpc(counter.dispatcher().into_protocol());
-            let client = CounterClient { transport };
+            let transport = local_rpc(counter.dispatcher().into_protocol(json_codec()));
+            let client = CounterClient { transport, codec = json_codec() };
             match client.get() {
                 Ok(let n) => print(i"n = {n}"),
                 Err(let error) => print(i"err {error.to_json()}"),
@@ -2647,7 +2648,7 @@ fn service_contract_verify_matches_and_catches_drift() {
         import std::print;
         import std::shared::Shared;
         import std::result::Result::{ self, Ok, Err };
-        import std::json::Json;
+        import std::json::{ Json, json_codec };
         import std::rpc::{ local_rpc };
 
         [service(AClient)]
@@ -2663,14 +2664,14 @@ fn service_contract_verify_matches_and_catches_drift() {
         }
 
         fun main() {
-            let alpha_transport = local_rpc(Alpha { count = Shared::new(0) }.dispatcher().into_protocol());
-            let matching = AClient { transport = alpha_transport };
+            let alpha_transport = local_rpc(Alpha { count = Shared::new(0) }.dispatcher().into_protocol(json_codec()));
+            let matching = AClient { transport = alpha_transport, codec = json_codec() };
             match matching.verify() {
                 Ok(let same) => print(i"self = {same}"),
                 Err(let error) => print(i"err {error.to_json()}"),
             }
             // A BClient pointed at Alpha's dispatcher — the drift case.
-            let drifted = BClient { transport = alpha_transport };
+            let drifted = BClient { transport = alpha_transport, codec = json_codec() };
             match drifted.verify() {
                 Ok(let same) => print(i"drift = {same}"),
                 Err(let error) => print(i"err {error.to_json()}"),
@@ -3469,5 +3470,51 @@ fn both_codecs_round_trip_derived_wire_values() {
         }
         "#,
         "json intact = true\njson zero = 0\nbinary intact = true\nbinary zero = 0\nbinary-none intact = true\nbinary-none zero = none\nerr: binary codec: received a text frame\nerr: unexpected end of frame\n",
+    );
+}
+
+#[test]
+fn generated_decode_gate_rejects_a_garbled_request() {
+    // The §4.1 validating decode, end to end through GENERATED code: a raw
+    // envelope calling `add` with no arguments makes the handler's arg pull
+    // fail (binary: out of bounds), and the generated `decode_failed` gate
+    // returns `RpcError::Decode` instead of running the impl on zero values —
+    // the server's counter must still be 0 afterwards.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::Json;
+        import std::binary::binary_codec;
+        import std::rpc::{ local_rpc, RpcError, call };
+
+        [service(Client)]
+        struct Counter {
+            count: Shared<i32>,
+        }
+
+        impl Counter {
+            [rpc]
+            fun add(self, by: i32): i32 {
+                self.count.write() = self.count.read() + by;
+                self.count.read()
+            }
+        }
+
+        fun main() {
+            let counter = Counter { count = Shared::new(0) };
+            let transport = local_rpc(counter.dispatcher().into_protocol(binary_codec()));
+            // A hand-built envelope with ZERO args for a one-arg method.
+            let garbled: Result<i32, RpcError> = call(transport, binary_codec(), "add", []);
+            match garbled {
+                Ok(let value) => print("should have failed"),
+                Err(let error) => print(i"err: {error.to_json()}"),
+            }
+            let untouched = counter.count.read();
+            print(i"count still {untouched}");
+        }
+        "#,
+        "err: {\"Decode\":\"unexpected end of frame\"}\ncount still 0\n",
     );
 }

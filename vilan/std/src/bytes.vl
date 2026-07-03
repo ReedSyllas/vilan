@@ -75,6 +75,11 @@ impl Bytes {
 	external fun buffer(self): ByteBuffer;
 }
 
+// A whole `ArrayBuffer` viewed as bytes (`new Uint8Array(buffer)`) — how a
+// binary fetch response body becomes a `Bytes`.
+[extern(new, "Uint8Array")]
+external fun bytes_of_buffer(buffer: ByteBuffer): Bytes;
+
 external struct DataView;
 
 [extern(new, "DataView")]

@@ -4,6 +4,8 @@
 // writes for SSE); everything else is ordinary Vilan. This module is pure HTTP —
 // protocol mounts (RPC, the connected server) live in `std::rpc_server`.
 
+import pkg::bytes::Bytes;
+
 // --- Raw node:http bindings ---
 
 [extern("node:http", "createServer")]
@@ -31,6 +33,11 @@ impl NodeRequest {
 [extern("node:stream/consumers", "text")]
 async external fun read_request_body(node: NodeRequest): str;
 
+// The same body as raw bytes (a node `Buffer` IS a Uint8Array) — for frames
+// that may be binary (`std::rpc_server`'s `/rpc`).
+[extern("node:stream/consumers", "buffer")]
+async external fun read_request_bytes(node: NodeRequest): Bytes;
+
 external struct NodeResponse;
 
 impl NodeResponse {
@@ -53,6 +60,10 @@ impl NodeResponse {
 	// ends — for a never-`end`ed SSE response that means the client went away).
 	[extern(method, "on")]
 	external fun on_event(self, event: str, callback: || void);
+
+	// End the response with a binary body (the host accepts a Uint8Array).
+	[extern(method, "end")]
+	external fun end_bytes(self, body: Bytes);
 }
 
 // --- Request ---

@@ -10,7 +10,7 @@
 import std::print;
 import std::reactive::Signal;
 import std::shared::Shared;
-import std::json::{ Json, FromJson };
+import std::json::{ Json, FromJson, json_codec };
 import std::fs::{ exists, read_file_to_str, write_file };
 import std::http::Response;
 import std::rpc_server::serve_connected;
@@ -41,7 +41,7 @@ async fun main() {
 
 	serve_connected(
 		59386,
-		store.dispatcher().into_protocol(),
+		store.dispatcher().into_protocol(json_codec()),
 		|connection, wire| store.connect(connection, wire),
 		|connection| store.disconnect(connection),
 		|request| {

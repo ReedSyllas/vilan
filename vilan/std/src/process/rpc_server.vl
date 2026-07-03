@@ -13,9 +13,10 @@
 import pkg::option::Option::{ Some, None };
 import pkg::shared::Shared;
 import pkg::reactive::batch;
+import pkg::wire::Frame;
 import pkg::rpc::{ RpcProtocol, DuplexEnd, duplex_pair };
 import pkg::http::{
-	node_create_server, read_request_body,
+	node_create_server, read_request_body, read_request_bytes,
 	Request, Response, Server,
 };
 
@@ -25,15 +26,20 @@ import pkg::http::{
 // protocol's reply frame is the response body. The frame is handled in a `batch`
 // — the wire turn (proposal/reactive-batching.md) — so signal writes made while
 // dispatching coalesce. Compose this into a `Server`'s `on_request` alongside
-// other routes, or mount it alone with `serve_rpc`.
+// other routes, or mount it alone with `serve_rpc`. This mount rides the text
+// `Server` API, so it serves TEXT codecs (JSON); a binary protocol belongs on
+// `serve_connected`'s raw `/rpc` route.
 fun rpc_response(protocol: RpcProtocol, request: Request): Response {
-	let reply = batch(|| protocol.receive(request.body()));
+	let reply = batch(|| protocol.respond(Frame::Text(request.body())));
 	match reply {
-		Some(let frame) => Response::builder()
+		Frame::Text(let frame) => Response::builder()
 			.set_header("Content-Type", "application/json")
 			.body(frame)
 			.build(),
-		None => Response::builder().code(500).body("no reply").build(),
+		Frame::Binary(let frame) => Response::builder()
+			.code(500)
+			.body("binary reply over a text mount")
+			.build(),
 	}
 }
 
@@ -118,17 +124,20 @@ fun serve_connected(
 			node_response.set_status_code(204);
 			node_response.end("");
 		} else if path.starts_with("/rpc") {
-			let content = read_request_body(node_request);
-			let reply = batch(|| protocol.receive(content));
+			// Read the body as bytes, no sniffing: the JSON codec's reader
+			// accepts a binary frame as UTF-8 (both sides run one codec, Q6).
+			let content = read_request_bytes(node_request);
+			let reply = batch(|| protocol.respond(Frame::Binary(content)));
 			match reply {
-				Some(let frame) => {
+				Frame::Text(let frame) => {
 					node_response.set_status_code(200);
 					node_response.set_header_raw("Content-Type", "application/json");
 					node_response.end(frame);
 				},
-				None => {
-					node_response.set_status_code(500);
-					node_response.end("no reply");
+				Frame::Binary(let frame) => {
+					node_response.set_status_code(200);
+					node_response.set_header_raw("Content-Type", "application/octet-stream");
+					node_response.end_bytes(frame);
 				},
 			}
 		} else {

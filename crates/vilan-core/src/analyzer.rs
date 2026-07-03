@@ -10200,6 +10200,10 @@ fn service_impl_source(
                 "\n\t\t\t.on(\"{method_name}\", |_| reply(self.{method_name}()))"
             ));
         } else {
+            // Args are pulled from the request's deserializer in declaration
+            // order (§4.1 single-pass), then `decode_failed` gates the impl —
+            // a garbled request becomes RpcError::Decode, not an impl run on
+            // zero values.
             out.push_str(&format!("\n\t\t\t.on(\"{method_name}\", |request| {{\n"));
             for (index, (parameter_name, type_string)) in parameters.iter().enumerate() {
                 out.push_str(&format!(
@@ -10212,7 +10216,10 @@ fn service_impl_source(
                 .collect::<Vec<_>>()
                 .join(", ");
             out.push_str(&format!(
-                "\t\t\t\treply(self.{method_name}({argument_list}))\n\t\t\t}})"
+                "\t\t\t\tmatch decode_failed(request) {{\n\
+                 \t\t\t\t\tOption::Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),\n\
+                 \t\t\t\t\tOption::None => reply(self.{method_name}({argument_list})),\n\
+                 \t\t\t\t}}\n\t\t\t}})"
             ));
         }
     }
@@ -10225,7 +10232,7 @@ fn service_impl_source(
     ));
     // --- The client sibling: a transport + a mirror per exposed field.
     out.push_str(&format!(
-        "struct {client_name}<T: Transport> {{\n\ttransport: T,\n"
+        "struct {client_name}<T: Transport> {{\n\ttransport: T,\n\tcodec: Codec,\n"
     ));
     for field_name in &exposed {
         out.push_str(&format!("\t{field_name}: RemoteSource,\n"));
@@ -10240,12 +10247,14 @@ fn service_impl_source(
             .join("");
         let argument_list = parameters
             .iter()
-            .map(|(parameter_name, _)| format!("{parameter_name}.to_json()"))
+            .map(|(parameter_name, _)| {
+                format!("|serializer: Serializer| {parameter_name}.describe(serializer)")
+            })
             .collect::<Vec<_>>()
             .join(", ");
         out.push_str(&format!(
             "\tfun {method_name}(self{parameter_list}): Result<{return_string}, RpcError> {{\n\
-             \t\tcall(self.transport, \"{method_name}\", [{argument_list}])\n\
+             \t\tcall(self.transport, self.codec, \"{method_name}\", [{argument_list}])\n\
              \t}}\n"
         ));
     }
@@ -10253,7 +10262,7 @@ fn service_impl_source(
     // compare — `Ok(true)` is a matching contract, `Ok(false)` a drifted one.
     out.push_str(
         "\tfun verify(self): Result<bool, RpcError> {\n\
-         \t\tlet remote: Result<str, RpcError> = call(self.transport, \"__contract\", []);\n\
+         \t\tlet remote: Result<str, RpcError> = call(self.transport, self.codec, \"__contract\", []);\n\
          \t\tmatch remote {\n\
          \t\t\tResult::Ok(let hash) => Result::Ok(hash == self.contract_hash()),\n\
          \t\t\tResult::Err(let error) => Result::Err(error),\n\
@@ -10601,9 +10610,11 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     // items are walked).
     if any_service {
         prelude.push_str(
-            "import std::rpc::{ Transport, Dispatcher, RpcError, RemoteSource, call, arg, reply };\n",
+            "import std::rpc::{ Transport, Dispatcher, RpcError, RpcOutcome, RemoteSource, call, arg, reply, decode_failed };\n",
         );
+        prelude.push_str("import std::wire::{ Codec, Serializer };\n");
         prelude.push_str("import std::result::Result;\n");
+        prelude.push_str("import std::option::Option;\n");
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;

@@ -8,7 +8,7 @@
 // `fetch`/`send` and `Response::text` are async (the host returns promises), so calls
 // to them are implicitly awaited.
 
-import pkg::bytes::Bytes;
+import pkg::bytes::{ Bytes, ByteBuffer, bytes_of_buffer };
 
 external struct Response;
 
@@ -23,6 +23,15 @@ impl Response {
 	// The response body as text. Async (it awaits the host `Response.text()`).
 	[extern(method, "text")]
 	async external fun text(self): str;
+
+	// The raw response body (`Response.arrayBuffer()`), for binary frames.
+	[extern(method, "arrayBuffer")]
+	async external fun raw_body(self): ByteBuffer;
+
+	// The response body as bytes.
+	fun bytes(self): Bytes {
+		bytes_of_buffer(self.raw_body())
+	}
 }
 
 // --- Streaming responses -------------------------------------------------------
@@ -90,6 +99,10 @@ impl RequestInit {
 	[extern(set, "body")]
 	external fun set_body(self, value: str);
 
+	// A binary request body (the host accepts a Uint8Array directly).
+	[extern(set, "body")]
+	external fun set_body_bytes(self, value: Bytes);
+
 	[extern(set, "headers")]
 	external fun set_headers(self, value: List<Header>);
 }
@@ -113,6 +126,15 @@ fun get(url: str): Request {
 // Start a POST request carrying `body`.
 fun post(url: str, body: str): Request {
 	Request { url = url, method = "POST", body = body, headers = [] }
+}
+
+// A one-shot binary POST (no header chaining): send `body` as bytes and await
+// the response — the byte-capable leg of the RPC transport (§6.2).
+fun post_bytes(url: str, body: Bytes): Response {
+	let options = new_request_init();
+	options.set_method("POST");
+	options.set_body_bytes(body);
+	fetch_with(url, options)
 }
 
 impl Request {
