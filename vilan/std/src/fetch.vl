@@ -8,6 +8,8 @@
 // `fetch`/`send` and `Response::text` are async (the host returns promises), so calls
 // to them are implicitly awaited.
 
+import pkg::bytes::Bytes;
+
 external struct Response;
 
 [extern("fetch")]
@@ -27,7 +29,8 @@ impl Response {
 
 // For long-lived responses — an SSE event stream, say — where `text()` would
 // never resolve: read the body chunk by chunk (`response.body.getReader()`),
-// decoding each with a `TextDecoder`. Works in the browser and node/deno/bun.
+// decoding each with a `std::bytes` `TextDecoder`. Works in the browser and
+// node/deno/bun.
 
 // The host `ReadableStream` (a `Response.body`).
 external struct BodyStream;
@@ -37,9 +40,6 @@ external struct BodyReader;
 
 // One `reader.read()` result: `{ done, value }`.
 external struct ChunkResult;
-
-// A raw byte chunk (`Uint8Array`) — opaque here; decode it with `TextDecoder`.
-external struct Bytes;
 
 impl Response {
 	[extern(get, "body")]
@@ -63,17 +63,6 @@ impl ChunkResult {
 
 	[extern(get, "value")]
 	external fun payload(self): Bytes;
-}
-
-// A UTF-8 decoder for byte chunks (the host `TextDecoder` class).
-external struct TextDecoder;
-
-[extern(new, "TextDecoder")]
-external fun new_text_decoder(): TextDecoder;
-
-impl TextDecoder {
-	[extern(method)]
-	external fun decode(self, bytes: Bytes): str;
 }
 
 // --- Configurable requests ---------------------------------------------------

@@ -2985,3 +2985,32 @@ fn missing_bitwise_impl_names_the_trait() {
         "#,
     );
 }
+
+#[test]
+fn bytes_buffers_round_trip() {
+    // `std::bytes` (proposal/bits-and-bytes.md §3): alloc/len/get/set with the
+    // host's `& 0xFF` store semantics, slice, concat, and a multibyte UTF-8
+    // round-trip. The codec substrate.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::bytes::{ Bytes, encode_utf8, decode_utf8 };
+        fun main() {
+            let buffer = Bytes::alloc(4);
+            print(buffer.len());
+            buffer.set(0, 0xDE);
+            buffer.set(1, 0x1FF);
+            print(buffer.get(0));
+            print(buffer.get(1));
+            print(buffer.get(2));
+            let joined = Bytes::concat(buffer.slice(0, 2), buffer);
+            print(joined.len());
+            let text = "héllo 🎉";
+            let encoded = encode_utf8(text);
+            print(encoded.len());
+            print(decode_utf8(encoded) == text);
+        }
+        "#,
+        "4\n222\n255\n0\n6\n11\ntrue\n",
+    );
+}

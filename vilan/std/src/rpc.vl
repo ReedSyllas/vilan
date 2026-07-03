@@ -21,7 +21,8 @@ import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::json::{ Json, FromJson };
 import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
-import pkg::fetch::{ get, post, new_text_decoder };
+import pkg::bytes::new_text_decoder;
+import pkg::fetch::{ get, post };
 
 // === Transport: request/response ============================================
 

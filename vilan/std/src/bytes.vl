@@ -1,0 +1,84 @@
+// `std::bytes` — byte buffers over the host `Uint8Array`
+// (proposal/bits-and-bytes.md §3): the binary codec's output/input and the
+// future WebSocket frame unit. `Uint8Array`, `TextEncoder`, and `TextDecoder`
+// exist in the browser, node, deno, and bun alike, so this is a core module.
+
+// A byte buffer (the host `Uint8Array`). Fixed-length; build incrementally by
+// writing into an allocation, growing with `concat` when needed.
+external struct Bytes;
+
+impl Bytes {
+	// A zero-filled buffer of `size` bytes.
+	[extern(new, "Uint8Array")]
+	external fun alloc(size: i32): Bytes;
+
+	// The byte count.
+	[extern(get, "length")]
+	external fun len(self): i32;
+
+	// The byte at `index` (0–255).
+	[extern(method, "at")]
+	external fun get(self, index: i32): i32;
+
+	// Overwrite `from..to` (exclusive) with `value` — host semantics: the
+	// stored byte is `value & 0xFF`.
+	[extern(method, "fill")]
+	external fun fill(self, value: i32, from: i32, to: i32): Bytes;
+
+	// Copy all of `source` into this buffer starting at `offset` (the host
+	// `TypedArray.set` — errors if it would overflow).
+	[extern(method, "set")]
+	external fun copy_into(self, source: Bytes, offset: i32);
+
+	// A copy of `from..to` (`to` exclusive).
+	[extern(method, "slice")]
+	external fun slice(self, from: i32, to: i32): Bytes;
+
+	// Store one byte (`value & 0xFF`) at `index`.
+	fun set(self, index: i32, value: i32) {
+		let _ = self.fill(value, index, index + 1);
+	}
+
+	// A new buffer holding `a` then `b`.
+	fun concat(a: Bytes, b: Bytes): Bytes {
+		let joined = Bytes::alloc(a.len() + b.len());
+		joined.copy_into(a, 0);
+		joined.copy_into(b, a.len());
+		joined
+	}
+}
+
+// --- UTF-8 ----------------------------------------------------------------
+
+// The host `TextEncoder`/`TextDecoder` classes. The struct + constructor are
+// exposed (not just the `encode_utf8`/`decode_utf8` shorthands) for streaming
+// use — `std::fetch`'s chunked body reads decode with a long-lived decoder.
+external struct TextEncoder;
+
+[extern(new, "TextEncoder")]
+external fun new_text_encoder(): TextEncoder;
+
+impl TextEncoder {
+	[extern(method)]
+	external fun encode(self, text: str): Bytes;
+}
+
+external struct TextDecoder;
+
+[extern(new, "TextDecoder")]
+external fun new_text_decoder(): TextDecoder;
+
+impl TextDecoder {
+	[extern(method)]
+	external fun decode(self, bytes: Bytes): str;
+}
+
+// `text` as UTF-8 bytes.
+fun encode_utf8(text: str): Bytes {
+	new_text_encoder().encode(text)
+}
+
+// UTF-8 `bytes` as text.
+fun decode_utf8(bytes: Bytes): str {
+	new_text_decoder().decode(bytes)
+}
