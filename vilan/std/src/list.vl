@@ -3,6 +3,7 @@
 // `push` is the native `.push`. Iterating a `List` uses a native `for...of`.
 import pkg::default::Default;
 import pkg::operators::{ Add, Mul };
+import pkg::option::Option;
 
 external struct List<T>;
 
@@ -10,6 +11,10 @@ impl List<type T> {
 	external fun new(): List<T>;
 
 	external fun push(&mut self, item: T): void;
+
+	// Removes and returns the last element — `None` when empty (an intrinsic:
+	// the compiler lowers it over the native `.pop`).
+	external fun pop(&mut self): Option<T>;
 
 	external fun len(self): i32;
 

@@ -1,4 +1,5 @@
-// `std::json` — JSON serialization (`to_json`) and parsing (`from_json`).
+// `std::json` — JSON serialization (`to_json`) and parsing (`from_json`), plus
+// the JSON pair of the wire visitor (`JsonWriter`/`JsonReader`, §6.1).
 //
 // `[derive(Json)]` on a struct synthesizes BOTH directions from its fields: a
 // faithful JSON object with real field names (which a bare host-`JSON.stringify`
@@ -6,7 +7,10 @@
 // a `from_json` that rebuilds the struct from that object. The scalar impls bind
 // to the host `JSON.stringify`/`JSON.parse` and the host coercions.
 
-import pkg::option::Option;
+import pkg::option::Option::{ self, Some, None };
+import pkg::result::Result::{ self, Ok, Err };
+import pkg::shared::Shared;
+import pkg::wire::{ Wire, Serializer, Deserializer };
 
 // --- Serialization (`to_json`) ------------------------------------------------
 
@@ -161,5 +165,283 @@ impl List<type T: FromJson> with FromJson {
 			result.push(T::from_json_value(element));
 		}
 		result
+	}
+}
+
+// --- The wire visitor's JSON pair (transport-rpc.md §6.1) -----------------------
+
+// Whether a parsed object has a named field (`Object.hasOwn`) — the missing-
+// field check behind the reader's sticky decode errors.
+[extern("Object.hasOwn")]
+external fun has_json_field(value: JsonValue, name: str): bool;
+
+// The write side: builds the JSON text as a `Wire` value describes itself.
+// Separator discipline is one flag plus a stack: `pending_comma` says whether
+// the next value at the current level needs a `,` first; opening an aggregate
+// saves the parent's flag and starts fresh, closing restores it. A `field`
+// writes its own separator and glues its value (no comma between `"name":` and
+// the value). Variant arities are tracked so `end_variant` knows what to close.
+struct JsonWriter {
+	out: Shared<str>,
+	pending_comma: Shared<bool>,
+	saved_commas: Shared<List<bool>>,
+	variant_arities: Shared<List<i32>>,
+}
+
+impl JsonWriter {
+	fun new(): JsonWriter {
+		JsonWriter {
+			out = Shared::new(""),
+			pending_comma = Shared::new(false),
+			saved_commas = Shared::new([]),
+			variant_arities = Shared::new([]),
+		}
+	}
+
+	// Appends `text` as one value at the current level: separator first, and
+	// the NEXT value here will need one too.
+	fun value(self, text: str) {
+		if self.pending_comma.read() {
+			self.out.write() = self.out.read() + ",";
+		}
+		self.out.write() = self.out.read() + text;
+		self.pending_comma.write() = true;
+	}
+
+	// Opens an aggregate: the opener is a value at the parent level; inside,
+	// the first item needs no separator.
+	fun open(self, opener: str) {
+		self.value(opener);
+		self.saved_commas.write().push(true);
+		self.pending_comma.write() = false;
+	}
+
+	// Closes an aggregate and restores the parent level's separator state.
+	fun close(self, closer: str) {
+		self.out.write() = self.out.read() + closer;
+		self.pending_comma.write() = match self.saved_commas.write().pop() {
+			Some(let saved) => saved,
+			None => false,
+		};
+	}
+
+	// The finished document.
+	fun result(self): str {
+		self.out.read()
+	}
+
+	// The closure record a `Wire` value describes itself to.
+	fun serializer(self): Serializer {
+		Serializer {
+			begin_struct = |fields| self.open("{"),
+			field = |name| {
+				if self.pending_comma.read() {
+					self.out.write() = self.out.read() + ",";
+				}
+				self.out.write() = self.out.read() + name.to_json() + ":";
+				self.pending_comma.write() = false;
+			},
+			end_struct = || self.close("}"),
+			begin_list = |length| self.open("["),
+			end_list = || self.close("]"),
+			begin_variant = |name, arity| {
+				self.variant_arities.write().push(arity);
+				if arity == 0 {
+					// A payload-less variant is its bare name: `"Ready"`.
+					self.value(name.to_json());
+				} else {
+					self.open("{");
+					self.out.write() = self.out.read() + name.to_json() + ":";
+					self.pending_comma.write() = false;
+					if arity > 1 {
+						// Several payloads ride in an array: `{"Pair":[1,2]}`.
+						self.out.write() = self.out.read() + "[";
+					}
+				}
+			},
+			end_variant = || {
+				let arity = match self.variant_arities.write().pop() {
+					Some(let opened) => opened,
+					None => 0,
+				};
+				if arity > 1 {
+					self.out.write() = self.out.read() + "]";
+				}
+				if arity > 0 {
+					self.close("}");
+				}
+			},
+			null_value = || self.value("null"),
+			str_value = |value| self.value(value.to_json()),
+			i32_value = |value| self.value(i"{value}"),
+			u32_value = |value| self.value(i"{value}"),
+			f64_value = |value| self.value(i"{value}"),
+			bool_value = |value| self.value(i"{value}"),
+		}
+	}
+}
+
+// The read side: walks a parsed `JsonValue` with a value stack. `field(name)`
+// pushes the named member (or fails and pushes a null sentinel); scalar reads
+// pop; `begin_list`/arity>0 variants replace their aggregate with its elements
+// (reversed, so pops come off in order). Errors are sticky: after `fail`, every
+// operation is a no-op returning a zero value, and `decode_json` reports the
+// first reason.
+struct JsonReader {
+	stack: Shared<List<JsonValue>>,
+	error: Shared<Option<str>>,
+}
+
+impl JsonReader {
+	fun new(root: JsonValue): JsonReader {
+		let stack: Shared<List<JsonValue>> = Shared::new([]);
+		stack.write().push(root);
+		JsonReader { stack = stack, error = Shared::new(None) }
+	}
+
+	fun ok(self): bool {
+		match self.error.read() {
+			Some(let _reason) => false,
+			None => true,
+		}
+	}
+
+	fun report(self, reason: str) {
+		match self.error.read() {
+			Some(let _first) => {},
+			None => {
+				self.error.write() = Some(reason);
+			},
+		}
+	}
+
+	// The current value without consuming it (a null sentinel when poisoned
+	// or unbalanced — reads stay crash-free either way).
+	fun top(self): JsonValue {
+		if !self.ok() || self.stack.read().is_empty() {
+			parse_json_value("null")
+		} else {
+			let values = self.stack.read();
+			values[values.len() - 1]
+		}
+	}
+
+	fun take(self): JsonValue {
+		if !self.ok() {
+			ret parse_json_value("null");
+		}
+		match self.stack.write().pop() {
+			Some(let value) => value,
+			None => parse_json_value("null"),
+		}
+	}
+
+	// The closure record a `Wire` value rebuilds itself from.
+	fun deserializer(self): Deserializer {
+		Deserializer {
+			begin_struct = || {},
+			field = |name| {
+				let subject = self.top();
+				if self.ok() {
+					if has_json_field(subject, name) {
+						self.stack.write().push(subject.field(name));
+					} else {
+						self.report(i"missing field '{name}'");
+					}
+				}
+			},
+			end_struct = || {
+				let _ = self.take();
+			},
+			begin_list = || {
+				let subject = self.take();
+				if self.ok() {
+					let elements = subject.elements();
+					mut index = elements.len() - 1;
+					for index >= 0 {
+						self.stack.write().push(elements[index]);
+						index -= 1;
+					}
+					elements.len()
+				} else {
+					0
+				}
+			},
+			end_list = || {},
+			variant_tag = || {
+				if self.ok() {
+					self.top().tag()
+				} else {
+					""
+				}
+			},
+			begin_variant = |name, arity| {
+				let subject = self.take();
+				if self.ok() && arity > 0 {
+					if has_json_field(subject, name) {
+						let payload = subject.field(name);
+						if arity == 1 {
+							self.stack.write().push(payload);
+						} else {
+							let elements = payload.elements();
+							mut index = elements.len() - 1;
+							for index >= 0 {
+								self.stack.write().push(elements[index]);
+								index -= 1;
+							}
+						}
+					} else {
+						self.report(i"missing payload for variant '{name}'");
+					}
+				}
+			},
+			end_variant = || {},
+			is_null = || self.ok() && self.top().is_null(),
+			null_value = || {
+				let _ = self.take();
+			},
+			str_value = || {
+				let value = self.take();
+				if self.ok() { str::from_json_value(value) } else { "" }
+			},
+			i32_value = || {
+				let value = self.take();
+				if self.ok() { i32::from_json_value(value) } else { 0 }
+			},
+			u32_value = || {
+				let value = self.take();
+				if self.ok() { u32::from_json_value(value) } else { 0 }
+			},
+			f64_value = || {
+				let value = self.take();
+				if self.ok() { f64::from_json_value(value) } else { 0.0 }
+			},
+			bool_value = || {
+				let value = self.take();
+				if self.ok() { bool::from_json_value(value) } else { false }
+			},
+			fail = |reason| self.report(reason),
+			failed = || self.error.read(),
+		}
+	}
+}
+
+// Encode a `Wire` value as JSON text.
+fun encode_json<T: Wire>(value: T): str {
+	let writer = JsonWriter::new();
+	value.describe(writer.serializer());
+	writer.result()
+}
+
+// Decode JSON text as a `Wire` value: `Err(reason)` names the first structural
+// failure (missing field, missing variant payload) instead of half-decoding.
+// (Malformed JSON *syntax* still throws at `parse_json_value` — the guarded
+// parse is Q10/`?` territory.)
+fun decode_json<T: Wire>(text: str): Result<T, str> {
+	let reader = JsonReader::new(parse_json_value(text));
+	let value = T::rebuild(reader.deserializer());
+	match reader.error.read() {
+		None => Ok(value),
+		Some(let reason) => Err(reason),
 	}
 }

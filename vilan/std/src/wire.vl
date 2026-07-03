@@ -1,0 +1,170 @@
+// `std::wire` — the codec-neutral serialization vocabulary (transport-rpc.md
+// §6.1): a `Wire` value *describes itself* to a `Serializer` and *rebuilds
+// itself* from a `Deserializer`; a codec (JSON today, binary next) owns the
+// actual bytes behind the record. `[derive(Wire)]` will emit these impls; the
+// scalar/`List`/`Option` impls here are the leaves the derived code bottoms
+// out in.
+//
+// The serializer/deserializer are CLOSURE RECORDS, not traits — the house
+// trait-object stand-in (`Dispatcher`/`DuplexEnd` precedent). The trait-shaped
+// zero-cost design is blocked on two pinned compiler gaps (generic trait
+// methods no-op through bounds; impls can't bind a trait argument) and becomes
+// a drop-in upgrade when either closes.
+
+import pkg::option::Option::{ self, Some, None };
+
+// The self-description contract. `describe` narrates the value's structure to
+// the serializer; `rebuild` pulls the same structure back out of a
+// deserializer. The two must mirror each other exactly — the derive guarantees
+// it; hand-written impls promise it.
+trait Wire {
+	fun describe(self, serializer: Serializer);
+	fun rebuild(deserializer: Deserializer): Wire;
+}
+
+// The write side. Aggregates narrate as: a struct is `begin_struct(n)`, then
+// per field `field(name)` + the value's own describe, then `end_struct`; a
+// list is `begin_list(n)` + one describe per element + `end_list`; an enum
+// variant is `begin_variant(name, arity)` + its payloads + `end_variant`
+// (externally tagged, matching the JSON shape). `Option::None` is `null_value`;
+// `Some` describes its value bare.
+struct Serializer {
+	begin_struct: |i32| void,
+	field: |str| void,
+	end_struct: || void,
+	begin_list: |i32| void,
+	end_list: || void,
+	begin_variant: |str, i32| void,
+	end_variant: || void,
+	null_value: || void,
+	str_value: |str| void,
+	i32_value: |i32| void,
+	u32_value: |u32| void,
+	f64_value: |f64| void,
+	bool_value: |bool| void,
+}
+
+// The read side — the mirror, pull-based. `field(name)` positions the cursor
+// (a JSON deserializer looks the name up, order-independent; a binary one
+// advances positionally and ignores it — the shared Wire type IS the schema).
+// `variant_tag` reads the discriminator for the rebuild's match; `begin_list`
+// returns the element count; `is_null` peeks and `null_value` consumes a null.
+//
+// Errors are STICKY: a missing field, wrong shape, or unknown variant calls
+// `fail(reason)` once; every later read returns a zero value without side
+// effects, so rebuild code stays straight-line. The top-level decode checks
+// `failed()` and discards the half-built value on `Some(reason)`.
+struct Deserializer {
+	begin_struct: || void,
+	field: |str| void,
+	end_struct: || void,
+	begin_list: || i32,
+	end_list: || void,
+	variant_tag: || str,
+	begin_variant: |str, i32| void,
+	end_variant: || void,
+	is_null: || bool,
+	null_value: || void,
+	str_value: || str,
+	i32_value: || i32,
+	u32_value: || u32,
+	f64_value: || f64,
+	bool_value: || bool,
+	fail: |str| void,
+	failed: || Option<str>,
+}
+
+// --- The leaves -------------------------------------------------------------
+
+impl str with Wire {
+	fun describe(self, serializer: Serializer) {
+		(serializer.str_value)(self);
+	}
+
+	fun rebuild(deserializer: Deserializer): str {
+		(deserializer.str_value)()
+	}
+}
+
+impl i32 with Wire {
+	fun describe(self, serializer: Serializer) {
+		(serializer.i32_value)(self);
+	}
+
+	fun rebuild(deserializer: Deserializer): i32 {
+		(deserializer.i32_value)()
+	}
+}
+
+impl u32 with Wire {
+	fun describe(self, serializer: Serializer) {
+		(serializer.u32_value)(self);
+	}
+
+	fun rebuild(deserializer: Deserializer): u32 {
+		(deserializer.u32_value)()
+	}
+}
+
+impl f64 with Wire {
+	fun describe(self, serializer: Serializer) {
+		(serializer.f64_value)(self);
+	}
+
+	fun rebuild(deserializer: Deserializer): f64 {
+		(deserializer.f64_value)()
+	}
+}
+
+impl bool with Wire {
+	fun describe(self, serializer: Serializer) {
+		(serializer.bool_value)(self);
+	}
+
+	fun rebuild(deserializer: Deserializer): bool {
+		(deserializer.bool_value)()
+	}
+}
+
+// A list narrates element by element; rebuild trusts `begin_list`'s count.
+impl List<type T: Wire> with Wire {
+	fun describe(self, serializer: Serializer) {
+		(serializer.begin_list)(self.len());
+		for element in self {
+			element.describe(serializer);
+		}
+		(serializer.end_list)();
+	}
+
+	fun rebuild(deserializer: Deserializer): List<T> {
+		let length = (deserializer.begin_list)();
+		mut result: List<T> = [];
+		mut index = 0;
+		for index < length {
+			result.push(T::rebuild(deserializer));
+			index += 1;
+		}
+		(deserializer.end_list)();
+		result
+	}
+}
+
+// An absent option is a null; a present one describes its value bare (the
+// JSON-compatible shape — `Some(5)` crosses as `5`).
+impl Option<type T: Wire> with Wire {
+	fun describe(self, serializer: Serializer) {
+		match self {
+			Some(let value) => value.describe(serializer),
+			None => (serializer.null_value)(),
+		}
+	}
+
+	fun rebuild(deserializer: Deserializer): Option<T> {
+		if (deserializer.is_null)() {
+			(deserializer.null_value)();
+			None
+		} else {
+			Some(T::rebuild(deserializer))
+		}
+	}
+}

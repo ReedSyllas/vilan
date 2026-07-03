@@ -3014,3 +3014,237 @@ fn bytes_buffers_round_trip() {
         "4\n222\n255\n0\n6\n11\ntrue\n",
     );
 }
+
+#[test]
+#[ignore = "generic trait methods silently no-op through a generic bound (found by the wire-visitor probe)"]
+fn generic_trait_method_dispatches_through_a_bound() {
+    // A trait method with its OWN generic parameters compiles and dispatches
+    // correctly on a concrete receiver, but through `T: Describable` the call
+    // silently does nothing — a miscompile, not an error. The wire visitor
+    // pivoted to closure records because of this (transport-rpc.md §6.1).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        trait Sink { fun put(self, value: i32); }
+        struct Collector { total: Shared<i32> }
+        impl Collector with Sink {
+            fun put(self, value: i32) {
+                self.total.write() = self.total.read() + value;
+            }
+        }
+        trait Describable {
+            fun describe<S: Sink>(self, sink: S);
+        }
+        struct Point { x: i32, y: i32 }
+        impl Point with Describable {
+            fun describe<S: Sink>(self, sink: S) {
+                sink.put(self.x);
+                sink.put(self.y);
+            }
+        }
+        fun encode<T: Describable, S: Sink>(value: T, sink: S) {
+            value.describe(sink);
+        }
+        fun main() {
+            let collector = Collector { total = Shared::new(0) };
+            let point = Point { x = 3, y = 4 };
+            point.describe(collector);
+            print(collector.total.read());
+            encode(point, collector);
+            print(collector.total.read());
+        }
+        "#,
+        "7\n14\n",
+    );
+}
+
+#[test]
+#[ignore = "an impl cannot bind a trait's generic argument (`impl T with Trait<type S: Bound>`)"]
+fn impl_binder_in_trait_argument_position() {
+    // One impl serving every sink: the binder sits in the TRAIT argument. The
+    // analyzer reports "cannot find type 'S'" — unsupported, so a per-serializer
+    // generic impl can't be written (transport-rpc.md §6.1's other gap).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        trait Sink { fun put(self, value: i32); }
+        struct Collector { total: Shared<i32> }
+        impl Collector with Sink {
+            fun put(self, value: i32) {
+                self.total.write() = self.total.read() + value;
+            }
+        }
+        trait DescribeInto<S> {
+            fun describe_into(self, sink: S);
+        }
+        struct Point { x: i32 }
+        impl Point with DescribeInto<type S: Sink> {
+            fun describe_into(self, sink: S) {
+                sink.put(self.x);
+            }
+        }
+        fun main() {
+            let point = Point { x = 3 };
+            let collector = Collector { total = Shared::new(0) };
+            point.describe_into(collector);
+            print(collector.total.read());
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn hand_written_wire_impls_round_trip_through_json() {
+    // The §6.1 visitor, proven hand-written before the derive targets it: a
+    // struct (scalar/list/option/nested-enum fields) and an enum (0/1/2-arity
+    // variants) describe to `JsonWriter` and rebuild from `JsonReader`. The
+    // encoded text must match the established `to_json` wire format exactly
+    // (externally-tagged variants, arity>1 payload arrays, bare `Some`,
+    // `null` for `None`), and structural failures are sticky decode errors —
+    // backlog I3's validating decode.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::wire::{ Wire, Serializer, Deserializer };
+        import std::json::{ encode_json, decode_json };
+
+        enum Status {
+            Offline,
+            Away(str),
+            Busy(str, i32),
+        }
+
+        impl Status with Wire {
+            fun describe(self, serializer: Serializer) {
+                match self {
+                    Status::Offline => {
+                        (serializer.begin_variant)("Offline", 0);
+                        (serializer.end_variant)();
+                    },
+                    Status::Away(let reason) => {
+                        (serializer.begin_variant)("Away", 1);
+                        reason.describe(serializer);
+                        (serializer.end_variant)();
+                    },
+                    Status::Busy(let task, let minutes) => {
+                        (serializer.begin_variant)("Busy", 2);
+                        task.describe(serializer);
+                        minutes.describe(serializer);
+                        (serializer.end_variant)();
+                    },
+                }
+            }
+
+            fun rebuild(deserializer: Deserializer): Status {
+                let tag = (deserializer.variant_tag)();
+                match tag {
+                    "Offline" => {
+                        (deserializer.begin_variant)("Offline", 0);
+                        (deserializer.end_variant)();
+                        Status::Offline
+                    },
+                    "Away" => {
+                        (deserializer.begin_variant)("Away", 1);
+                        let reason = str::rebuild(deserializer);
+                        (deserializer.end_variant)();
+                        Status::Away(reason)
+                    },
+                    "Busy" => {
+                        (deserializer.begin_variant)("Busy", 2);
+                        let task = str::rebuild(deserializer);
+                        let minutes = i32::rebuild(deserializer);
+                        (deserializer.end_variant)();
+                        Status::Busy(task, minutes)
+                    },
+                    _ => {
+                        (deserializer.fail)(i"unknown variant '{tag}'");
+                        Status::Offline
+                    },
+                }
+            }
+        }
+
+        struct Profile {
+            id: i32,
+            name: str,
+            scores: List<i32>,
+            nickname: Option<str>,
+            status: Status,
+        }
+
+        impl Profile with Wire {
+            fun describe(self, serializer: Serializer) {
+                (serializer.begin_struct)(5);
+                (serializer.field)("id");
+                self.id.describe(serializer);
+                (serializer.field)("name");
+                self.name.describe(serializer);
+                (serializer.field)("scores");
+                self.scores.describe(serializer);
+                (serializer.field)("nickname");
+                self.nickname.describe(serializer);
+                (serializer.field)("status");
+                self.status.describe(serializer);
+                (serializer.end_struct)();
+            }
+
+            fun rebuild(deserializer: Deserializer): Profile {
+                (deserializer.begin_struct)();
+                (deserializer.field)("id");
+                let id = i32::rebuild(deserializer);
+                (deserializer.field)("name");
+                let name = str::rebuild(deserializer);
+                (deserializer.field)("scores");
+                let scores: List<i32> = List::rebuild(deserializer);
+                (deserializer.field)("nickname");
+                let nickname: Option<str> = Option::rebuild(deserializer);
+                (deserializer.field)("status");
+                let status = Status::rebuild(deserializer);
+                (deserializer.end_struct)();
+                Profile { id = id, name = name, scores = scores, nickname = nickname, status = status }
+            }
+        }
+
+        fun main() {
+            let profile = Profile {
+                id = 7,
+                name = "ada \"the\" first",
+                scores = [3, 1, 4],
+                nickname = None,
+                status = Status::Busy("proofs", 45),
+            };
+            let encoded = encode_json(profile);
+            print(encoded);
+            let decoded: Result<Profile, str> = decode_json(encoded);
+            match decoded {
+                Ok(let back) => {
+                    print(back.id);
+                    print(back.scores.len());
+                    match back.status {
+                        Status::Busy(let task, let minutes) => print(i"busy {task} {minutes}"),
+                        _ => print("wrong status"),
+                    }
+                },
+                Err(let reason) => print(i"decode failed: {reason}"),
+            }
+            print(encode_json(Profile { id = 1, name = "bob", scores = [], nickname = Some("bo"), status = Status::Away("lunch") }));
+            let missing: Result<Profile, str> = decode_json("{\"id\":1,\"name\":\"x\",\"scores\":[]}");
+            match missing {
+                Ok(let value) => print("should have failed"),
+                Err(let reason) => print(i"err: {reason}"),
+            }
+            let unknown: Result<Status, str> = decode_json("{\"Vanished\":1}");
+            match unknown {
+                Ok(let value) => print("should have failed"),
+                Err(let reason) => print(i"err: {reason}"),
+            }
+        }
+        "#,
+        "{\"id\":7,\"name\":\"ada \\\"the\\\" first\",\"scores\":[3,1,4],\"nickname\":null,\"status\":{\"Busy\":[\"proofs\",45]}}\n7\n3\nbusy proofs 45\n{\"id\":1,\"name\":\"bob\",\"scores\":[],\"nickname\":\"bo\",\"status\":{\"Away\":\"lunch\"}}\nerr: missing field 'nickname'\nerr: unknown variant 'Vanished'\n",
+    );
+}

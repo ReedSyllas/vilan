@@ -525,6 +525,104 @@ The method name is a string (debuggable; a numeric id is a later compaction); `a
 positional — the dispatcher knows each method's parameter order, so it decodes argument *i*
 at the *i*-th parameter's type.
 
+### 6.1 The visitor, in detail (codec prerequisite 3 — agreed 2026-07-02)
+
+The format-independence mechanism: a Wire value *describes itself* to a `Serializer`, and
+*rebuilds itself* from a `Deserializer` — the derive emits the description, the codec owns
+the bytes. Proven hand-written first (a struct + enum with hand impls against
+`JsonSerializer`), then generated.
+
+> **v1 shape (settled by probe, 2026-07-02): the serializer/deserializer are CLOSURE
+> RECORDS, not traits.** The trait design below hit two compiler gaps: a trait method
+> with its own generics (`fun describe<S: Serializer>`) **silently no-ops when
+> dispatched through a generic bound** (a miscompile — pinned `#[ignore]`), and an impl
+> can't bind a trait's argument (`impl T with Describe<type S: Serializer>` — "cannot
+> find type 'S'"). So v1 uses the house trait-object stand-in (`Dispatcher`/`DuplexEnd`
+> precedent): `struct Serializer`/`struct Deserializer` whose fields are closures, and
+> `trait Wire` has plain methods `describe(self, serializer: Serializer)` /
+> `rebuild(deserializer: Deserializer)` — bound dispatch of plain trait methods is
+> proven. A codec constructs the record once per encode/decode (closures capturing its
+> state); the cost is dynamic calls through the record, not intermediate allocations.
+> When either compiler gap closes, the records become traits and monomorphize to zero
+> cost — signature-compatible for derived code either way. Also settled: the
+> deserializer, too, takes `begin_variant(name, arity)` (JSON wraps arity>1 payloads in
+> an array), plus `null_value()` so `Option::None` is consumed, not just peeked.
+
+The trait-shaped target (post-gap):
+
+```vilan
+// std::wire — the codec-neutral vocabulary (base layer).
+trait Wire {
+	fun describe<S: Serializer>(self, serializer: S);
+	fun rebuild<D: Deserializer>(deserializer: D): Wire;   // static, like FromJson
+}
+
+trait Serializer {
+	// Aggregates: a struct is `begin_struct(n)`, then per field
+	// `field(name)` + the value's own describe, then `end_struct`. A list is
+	// `begin_list(n)` + elements; an enum variant `begin_variant(name, arity)` +
+	// payloads (externally tagged — today's JSON shape). `Option::None` is
+	// `null()`; `Some` describes its value bare (JSON compat).
+	fun begin_struct(self, fields: i32);
+	fun field(self, name: str);
+	fun end_struct(self);
+	fun begin_list(self, length: i32);
+	fun end_list(self);
+	fun begin_variant(self, name: str, arity: i32);
+	fun end_variant(self);
+	fun null(self);
+	fun str_value(self, value: str);
+	fun i32_value(self, value: i32);
+	fun u32_value(self, value: u32);
+	fun f64_value(self, value: f64);
+	fun bool_value(self, value: bool);
+}
+
+trait Deserializer {
+	// The mirror, pull-based. `field(name)` positions the cursor: a JSON
+	// deserializer looks the name up (order-independent, self-describing); a
+	// binary one advances positionally and ignores the name — the shared Wire
+	// type IS the schema (§6's compact-format note). `variant_tag()` reads the
+	// enum discriminator for the rebuild's match; `begin_list` returns the
+	// element count; `is_null()` distinguishes `None` before a value read.
+	fun begin_struct(self);
+	fun field(self, name: str);
+	fun end_struct(self);
+	fun begin_list(self): i32;
+	fun end_list(self);
+	fun variant_tag(self): str;
+	fun begin_variant(self, name: str);
+	fun end_variant(self);
+	fun is_null(self): bool;
+	fun str_value(self): str;
+	fun i32_value(self): i32;
+	fun u32_value(self): u32;
+	fun f64_value(self): f64;
+	fun bool_value(self): bool;
+	// The sticky error (below).
+	fun fail(self, reason: str);
+	fun failed(self): Option<str>;
+}
+```
+
+- **Errors are sticky, not thrown** (the I3 design, absent `?`/try — Q10): a missing
+  field, wrong-shaped value, or unknown variant calls `fail(reason)` once; every
+  subsequent value read returns a zero value without side effects, so the generated
+  rebuild stays linear straight-line code (no per-read `Result` matching). The
+  top-level `decode` checks `failed()` at the end and returns
+  `Err(RpcError::Decode(reason))` — the first failure, named precisely (field/type).
+  A poisoned deserializer never half-succeeds: the decode result is discarded.
+- **Scalars, `List`, `Option`** get hand-written `Wire` impls in `std::wire`,
+  mirroring `std::json`'s. `JsonSerializer`/`JsonDeserializer` live in `std::json`
+  (over its existing `JsonValue` infrastructure); the binary pair comes with the
+  codec slice, writing/reading `std::bytes` `Bytes`.
+- **The derive retarget is additive**: `[derive(Wire)]` emits `describe`/`rebuild`
+  impls ALONGSIDE today's `to_json`/`from_json` (everything shipped stays green);
+  the codec slice then re-plumbs the RPC runtime onto `Codec`, and the JSON pair
+  becomes one codec among two. `[derive(Json)]` is untouched throughout.
+- **Order of work**: hand-written proof first (std::wire + the JSON pair + tests
+  over hand impls), derive retarget second, codec third — prove before generating.
+
 ## 7. The generated stub: async and errors
 
 The client requestor generated from the `[service(Client)]` struct (§4.2) *is* the seamless call —
