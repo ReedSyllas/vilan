@@ -1,0 +1,85 @@
+// Frames-per-mutation: the reactive-batching claims counted at the wire, over
+// an in-process duplex with a counting bridge. These counts are exact
+// invariants (CI pins them), not timings.
+
+import std::print;
+import std::shared::Shared;
+import std::json::Json;
+import std::option::Option::{ Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::reactive::{ batch, Signal };
+import std::rpc::{
+	duplex_pair, local_rpc, Dispatcher, RpcError, call, arg, reply,
+	ReactiveServer, ReactiveClient,
+};
+import pkg::report::section;
+
+fun run() {
+	section("coalescing (update frames counted at the wire)");
+
+	// server end <-> counting bridge <-> client end
+	let (server_end, server_outer) = duplex_pair();
+	let (client_end, client_outer) = duplex_pair();
+	let server_to_client: Shared<i32> = Shared::new(0);
+	server_outer.on_frame(|frame| {
+		server_to_client.write() = server_to_client.read() + 1;
+		client_outer.send(frame);
+	});
+	client_outer.on_frame(|frame| {
+		server_outer.send(frame);
+	});
+
+	let counter: Signal<i32> = Signal::new(0);
+	let server = ReactiveServer::new(server_end);
+	let channel = server.expose(counter);
+	let deliveries: Shared<i32> = Shared::new(0);
+	let watching = ReactiveClient::new(client_end).source(channel).sub(|json| {
+		deliveries.write() = deliveries.read() + 1;
+	});
+
+	// The subscribe handshake delivers the current value once.
+	let baseline = server_to_client.read();
+	print(i"subscribe -> {baseline} update frame(s)");
+
+	mut index = 0;
+	for index < 100 {
+		counter.set(counter.get() + 1);
+		index += 1;
+	}
+	let unbatched = server_to_client.read() - baseline;
+	print(i"100 lone sets -> {unbatched} update frames");
+
+	let before_batch = server_to_client.read();
+	batch(|| {
+		mut inner = 0;
+		for inner < 100 {
+			counter.set(counter.get() + 1);
+			inner += 1;
+		}
+	});
+	let batched = server_to_client.read() - before_batch;
+	print(i"100 sets in one batch -> {batched} update frame(s)");
+
+	// The wire turn: an RPC handler's writes coalesce into one update
+	// alongside the reply.
+	let before_turn = server_to_client.read();
+	let dispatcher = Dispatcher::new().on("bump", |request| {
+		let by: i32 = arg(request, 0);
+		counter.set(counter.get() + by);
+		counter.set(counter.get() + by);
+		counter.set(counter.get() + by);
+		reply(counter.get())
+	});
+	let transport = local_rpc(dispatcher.into_protocol());
+	let amount = 1;
+	let outcome: Result<i32, RpcError> = call(transport, "bump", [amount.to_json()]);
+	match outcome {
+		Ok(let value) => {},
+		Err(let error) => print("bump failed"),
+	}
+	let turn = server_to_client.read() - before_turn;
+	print(i"3 writes in one rpc handler -> {turn} update frame(s)");
+	print(i"deliveries observed by the subscriber = {deliveries.read()}");
+
+	watching.dispose();
+}

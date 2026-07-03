@@ -1,0 +1,55 @@
+// RPC round-trip throughput: sequential calls (each awaited — honest latency,
+// no pipelining) over the in-process transport and over real HTTP on
+// localhost. Timings vary by machine; the report prints rates, not asserts.
+
+import std::print;
+import std::shared::Shared;
+import std::json::Json;
+import std::result::Result::{ self, Ok, Err };
+import std::time::now;
+import std::rpc::{ local_rpc, Dispatcher, RpcError, RpcProtocol, HttpTransport, Transport, call, arg, reply };
+import std::rpc_server::serve_rpc;
+import pkg::report::{ section, rate, round };
+
+fun add_protocol(): RpcProtocol {
+	let total: Shared<i32> = Shared::new(0);
+	Dispatcher::new()
+		.on("add", |request| {
+			let by: i32 = arg(request, 0);
+			total.write() = total.read() + by;
+			reply(total.read())
+		})
+		.into_protocol()
+}
+
+// `calls` sequential round-trips over `transport`; returns elapsed ms.
+fun drive<T: Transport>(transport: T, calls: i32): f64 {
+	let started = now();
+	mut index = 0;
+	for index < calls {
+		let one = 1;
+		let outcome: Result<i32, RpcError> = call(transport, "add", [one.to_json()]);
+		match outcome {
+			Ok(let value) => {},
+			Err(let error) => print("call failed"),
+		}
+		index += 1;
+	}
+	now() - started
+}
+
+fun run(finished: || void) {
+	section("rpc round-trip throughput (sequential)");
+
+	let local_calls = 2000;
+	let local_elapsed = drive(local_rpc(add_protocol()), local_calls);
+	print(i"in-process: {local_calls} calls in {round(local_elapsed)} ms -> {rate(local_calls, local_elapsed)} calls/sec");
+
+	let http_calls = 200;
+	serve_rpc(48231, add_protocol(), |server| {
+		let elapsed = drive(HttpTransport { url = "http://localhost:48231/" }, http_calls);
+		let average_us = round(elapsed * 1000.0 / http_calls);
+		print(i"http localhost: {http_calls} calls in {round(elapsed)} ms -> {rate(http_calls, elapsed)} calls/sec ({average_us} us avg)");
+		finished();
+	});
+}

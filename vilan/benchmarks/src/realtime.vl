@@ -1,0 +1,139 @@
+// Realtime fan-out over the real wire (SplitDuplex: SSE + POST): several
+// sessions subscribed to one signal, one driver mutating it. Reports the
+// per-session update-frame counts (deterministic) and the settle time from
+// first mutation to every session having observed the final value.
+
+import std::print;
+import std::shared::Shared;
+import std::time::{ now, sleep };
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::json::{ Json, FromJson };
+import std::reactive::Signal;
+import std::rpc::{
+	HttpTransport, SplitDuplex, DuplexTransport, DuplexEnd, connect_split, bridge,
+	ReactiveServer, ReactiveClient,
+};
+import std::rpc_server::serve_connected;
+import std::http::Response;
+import pkg::report::{ section, round };
+
+let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+[service(Client)]
+struct Board {
+	count: Signal<i32>,
+}
+
+impl Board {
+	[rpc]
+	fun attach(self, connection: i32): i32 {
+		mut channel = 0 - 1;
+		for entry in sessions.read() {
+			let (id, reactive) = entry;
+			if id == connection {
+				channel = reactive.expose(self.count);
+			}
+		}
+		channel
+	}
+
+	[rpc]
+	fun add(self, by: i32): i32 {
+		self.count.set(self.count.get() + by);
+		self.count.get()
+	}
+}
+
+// A DuplexTransport shim counting inbound (server->client) frames.
+struct CountingDuplex {
+	inner: SplitDuplex,
+	inbound: Shared<i32>,
+}
+
+impl CountingDuplex with DuplexTransport {
+	fun send(self, frame: str) {
+		self.inner.send(frame);
+	}
+
+	fun on_frame(self, handler: |str| void) {
+		self.inner.on_frame(|frame| {
+			self.inbound.write() = self.inbound.read() + 1;
+			handler(frame);
+		});
+	}
+}
+
+struct Session {
+	frames: Shared<i32>,
+	last_seen: Shared<i32>,
+}
+
+fun watch(base: str): Session {
+	let split = connect_split(base);
+	let frames: Shared<i32> = Shared::new(0);
+	let counting = CountingDuplex { inner = split, inbound = frames };
+	let reactive = ReactiveClient::new(bridge(counting));
+	let last_seen: Shared<i32> = Shared::new(0 - 1);
+	let client = Client { transport = HttpTransport { url = i"{base}/rpc" } };
+	match client.attach(i32::from_json(split.connection)) {
+		Ok(let channel) => {
+			let _watching = reactive.source(channel).sub(|json| {
+				last_seen.write() = i32::from_json(json);
+			});
+		},
+		Err(let error) => print("attach failed"),
+	}
+	Session { frames = frames, last_seen = last_seen }
+}
+
+fun run(finished: || void) {
+	section("realtime fan-out (sse + post, 3 sessions, 50 mutations)");
+	let board = Board { count = Signal::new(0) };
+	serve_connected(
+		48232,
+		board.dispatcher().into_protocol(),
+		|id, end| {
+			sessions.write().push((id, ReactiveServer::new(end)));
+		},
+		|id| {},
+		|request| Response::builder().code(404).body("benchmark").build(),
+		|| {
+			drive(finished);
+		},
+	);
+}
+
+fun drive(finished: || void) {
+	let base = "http://localhost:48232";
+	let alice = watch(base);
+	let bob = watch(base);
+	let carol = watch(base);
+	sleep(200); // let the subscribe frames land
+	let driver = Client { transport = HttpTransport { url = i"{base}/rpc" } };
+
+	let mutations = 50;
+	let started = now();
+	mut index = 0;
+	for index < mutations {
+		let one = 1;
+		match driver.add(one) {
+			Ok(let value) => {},
+			Err(let error) => print("add failed"),
+		}
+		index += 1;
+	}
+	// Poll until every session has observed the final value (or 5s).
+	mut waited = 0;
+	for (alice.last_seen.read() != mutations
+		|| bob.last_seen.read() != mutations
+		|| carol.last_seen.read() != mutations)
+		&& waited < 5000 {
+		sleep(20);
+		waited += 20;
+	}
+	let settled = now() - started;
+	print(i"per-session update frames: {alice.frames.read()} {bob.frames.read()} {carol.frames.read()} (subscribe + 1 per mutation)");
+	print(i"all sessions settled at {mutations} after {round(settled)} ms ({round(settled * 1000.0 / mutations)} us per mutation fan-out)");
+	finished();
+}

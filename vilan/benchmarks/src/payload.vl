@@ -1,0 +1,62 @@
+// Payload sizes: the same values as JSON text, as binary frames, and inside
+// the RPC envelopes — making the JSON double-encoding (§6 status) a number.
+// Sizes are real UTF-8 byte counts, not code units.
+
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::bytes::encode_utf8;
+import std::json::{ Json, encode_json, json_codec };
+import std::binary::binary_codec;
+import std::wire::{ Wire, Frame, encode };
+import std::rpc::{ RpcRequest, RpcReply };
+import pkg::report::section;
+
+[derive(Wire)]
+struct BenchTodo {
+	id: i32,
+	label: str,
+	done: bool,
+	notes: Option<str>,
+}
+
+fun sample_list(count: i32): List<BenchTodo> {
+	mut todos: List<BenchTodo> = [];
+	mut index = 0;
+	for index < count {
+		todos.push(BenchTodo {
+			id = index,
+			label = i"todo item number {index}",
+			done = index & 1 == 1,
+			notes = if index & 3 == 0 { Some("with a note attached") } else { None },
+		});
+		index += 1;
+	}
+	todos
+}
+
+fun frame_bytes(frame: Frame): i32 {
+	match frame {
+		Frame::Text(let text) => encode_utf8(text).len(),
+		Frame::Binary(let bytes) => bytes.len(),
+	}
+}
+
+fun measure(label: str, count: i32) {
+	let todos = sample_list(count);
+	let json_bytes = frame_bytes(encode(json_codec(), todos));
+	let binary_bytes = frame_bytes(encode(binary_codec(), todos));
+	// The request envelope carrying the list as one pre-encoded argument, and
+	// the success reply carrying it as the pre-encoded result — today's wire
+	// format, where the payload is JSON-escaped inside JSON.
+	let request = RpcRequest { method = "sync", args = [todos.to_json()] };
+	let request_bytes = encode_utf8(request.to_json()).len();
+	let reply_bytes = encode_utf8(RpcReply::Success(todos.to_json()).to_json()).len();
+	print(i"{label}: value {json_bytes} B json / {binary_bytes} B binary; enveloped {request_bytes} B request / {reply_bytes} B reply");
+}
+
+fun run() {
+	section("payload sizes");
+	measure("1 todo", 1);
+	measure("25 todos", 25);
+	measure("200 todos", 200);
+}

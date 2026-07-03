@@ -902,10 +902,17 @@ paradigm needs:
    tells the app), and `ReactiveServer` is now `Disposable` — `expose` *retains* its
    source→mirror subscriptions (previously discarded, so a session could never be torn down)
    and `dispose()` releases every forward and mirror; pinned by a CLI test where a subscribed
-   client process dies and a surviving session still observes later mutations. *Remaining in
-   this phase:* **network benchmarks** (throughput, frames-per-mutation / coalescing
-   efficiency, payload sizes — JSON vs the later binary codec) so the transport and batching
-   claims are measured, not asserted.
+   client process dies and a surviving session still observes later mutations.
+   **Benchmarks ✅ shipped (2026-07-02)** as `vilan/benchmarks` (`vilan run vilan/benchmarks`;
+   harness + deterministic frame counts CI-pinned): payload sizes make the JSON
+   double-encoding a number (~15% envelope overhead on a 200-item list; the §6.2 binary codec
+   halves the payload — 7,094 vs 14,181 B — before the runtime even rides it); coalescing
+   counted at the wire (100 lone sets → 100 update frames, 100 in one `batch` → **1**, an RPC
+   handler's 3 writes → **1** alongside the reply); sequential round-trip throughput
+   (~286k calls/sec in-process vs ~820 over localhost HTTP on the dev machine — illustrative,
+   machine-dependent); and realtime fan-out (3 real SSE sessions × 50 mutations settle in
+   ~75 ms, a deterministic subscribe+1-per-mutation frame count per session). Re-run after
+   the §6.2 re-plumb for the binary-frames comparison. **Phase 6 is complete.**
 
 The agreed build order within phases 2–3 (2026-07-02): the `[rpc]`/`[expose]` checks first, then
 the `[trait_only]`/`[doc(hidden)]` hygiene attributes (§3.2), then `[service(Client)]`

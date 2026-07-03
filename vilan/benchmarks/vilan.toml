@@ -1,0 +1,7 @@
+# The P6 network benchmarks (transport-rpc.md §11 phase 6): measure the
+# transport and batching claims instead of asserting them.
+#
+#   vilan run vilan/benchmarks
+[package]
+name = "benchmarks"
+target = "node"

@@ -1,0 +1,19 @@
+// Shared report helpers.
+
+import std::print;
+
+[extern("Math.round")]
+external fun round(value: f64): i32;
+
+fun section(title: str) {
+	print("");
+	print(i"== {title} ==");
+}
+
+// `n` per second given a count and elapsed milliseconds.
+fun rate(count: i32, elapsed_ms: f64): i32 {
+	if elapsed_ms <= 0.0 {
+		ret 0;
+	}
+	round(1000.0 * count / elapsed_ms)
+}

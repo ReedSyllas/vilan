@@ -1,0 +1,26 @@
+// The P6 network benchmarks (transport-rpc.md §11 phase 6): payload sizes
+// (including the JSON envelope double-encoding and the binary codec), exact
+// frames-per-mutation coalescing counts, RPC round-trip throughput, and
+// realtime fan-out over the real SSE wire.
+//
+//     vilan run vilan/benchmarks
+
+import std::print;
+import std::process::exit;
+import pkg::payload;
+import pkg::coalescing;
+import pkg::throughput;
+import pkg::realtime;
+
+fun main() {
+	print("vilan network benchmarks");
+	payload::run();
+	coalescing::run();
+	throughput::run(|| {
+		realtime::run(|| {
+			print("");
+			print("done");
+			exit(0);
+		});
+	});
+}
