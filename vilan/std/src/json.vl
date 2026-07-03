@@ -10,7 +10,7 @@
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::shared::Shared;
-import pkg::wire::{ Wire, Serializer, Deserializer };
+import pkg::wire::{ Wire, Serializer, Deserializer, Codec, Frame };
 
 // --- Serialization (`to_json`) ------------------------------------------------
 
@@ -272,6 +272,9 @@ impl JsonWriter {
 				}
 			},
 			null_value = || self.value("null"),
+			// JSON has no Some marker — a present Option is its bare value
+			// (which keeps the format's Some(None) ≡ None collapse).
+			some_value = || {},
 			str_value = |value| self.value(value.to_json()),
 			i32_value = |value| self.value(i"{value}"),
 			u32_value = |value| self.value(i"{value}"),
@@ -443,5 +446,26 @@ fun decode_json<T: Wire>(text: str): Result<T, str> {
 	match reader.error.read() {
 		None => Ok(value),
 		Some(let reason) => Err(reason),
+	}
+}
+
+// The JSON codec (§6.2): text frames over the writer/reader pair. A binary
+// frame poisons the reader — a sticky decode error, never a crash.
+fun json_codec(): Codec {
+	Codec {
+		writer = || {
+			let writer = JsonWriter::new();
+			(writer.serializer(), || Frame::Text(writer.result()))
+		},
+		reader = |frame| {
+			match frame {
+				Frame::Text(let text) => JsonReader::new(parse_json_value(text)).deserializer(),
+				Frame::Binary(let bytes) => {
+					let reader = JsonReader::new(parse_json_value("null"));
+					reader.report("json codec: received a binary frame");
+					reader.deserializer()
+				},
+			}
+		},
 	}
 }

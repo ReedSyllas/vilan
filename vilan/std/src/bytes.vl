@@ -20,6 +20,11 @@ impl Bytes {
 	[extern(method, "at")]
 	external fun get(self, index: i32): i32;
 
+	// The same byte `u32`-typed — for unsigned reassembly (`b0 | b1 << 8 …`),
+	// where the operand type selects the unsigned shift/wrap emission.
+	[extern(method, "at")]
+	external fun get_u32(self, index: i32): u32;
+
 	// Overwrite `from..to` (exclusive) with `value` — host semantics: the
 	// stored byte is `value & 0xFF`.
 	[extern(method, "fill")]
@@ -39,6 +44,15 @@ impl Bytes {
 		let _ = self.fill(value, index, index + 1);
 	}
 
+	// The same store `u32`-typed (the host coerces `& 0xFF` either way) — for
+	// byte extraction done in `u32` arithmetic, mirroring `get_u32`.
+	[extern(method, "fill")]
+	external fun fill_u32(self, value: u32, from: i32, to: i32): Bytes;
+
+	fun set_u32(self, index: i32, value: u32) {
+		let _ = self.fill_u32(value, index, index + 1);
+	}
+
 	// A new buffer holding `a` then `b`.
 	fun concat(a: Bytes, b: Bytes): Bytes {
 		let joined = Bytes::alloc(a.len() + b.len());
@@ -46,6 +60,34 @@ impl Bytes {
 		joined.copy_into(b, a.len());
 		joined
 	}
+}
+
+// --- Float access -----------------------------------------------------------
+
+// The buffer under a `Bytes` (the host `ArrayBuffer`) and a `DataView` over it
+// — the standard route to IEEE-754 bytes, used by the binary codec for `f64`.
+// A `Bytes` produced by `slice`/`alloc` owns its whole buffer, so offset 0 of
+// the view is offset 0 of the bytes.
+external struct ByteBuffer;
+
+impl Bytes {
+	[extern(get, "buffer")]
+	external fun buffer(self): ByteBuffer;
+}
+
+external struct DataView;
+
+[extern(new, "DataView")]
+external fun data_view(buffer: ByteBuffer): DataView;
+
+impl DataView {
+	// Read/write an IEEE-754 double at `offset`; `little_endian` selects the
+	// byte order.
+	[extern(method, "getFloat64")]
+	external fun read_f64(self, offset: i32, little_endian: bool): f64;
+
+	[extern(method, "setFloat64")]
+	external fun write_f64(self, offset: i32, value: f64, little_endian: bool);
 }
 
 // --- UTF-8 ----------------------------------------------------------------

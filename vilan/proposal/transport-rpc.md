@@ -623,6 +623,69 @@ trait Deserializer {
 - **Order of work**: hand-written proof first (std::wire + the JSON pair + tests
   over hand impls), derive retarget second, codec third — prove before generating.
 
+### 6.2 The codec, concretely (settled 2026-07-02)
+
+The frame and the codec value (both in `std::wire`; the compiler gaps shape the codec
+as a record factory, like the serializer records themselves):
+
+```vilan
+// What a transport moves. JSON rides text transports allocation-free (SSE is
+// text-only, so SplitDuplex's server→client leg REQUIRES this arm); binary
+// rides byte-capable ones (HTTP POST bodies today, WebSocket later).
+enum Frame {
+	Text(str),
+	Binary(Bytes),
+}
+
+// A codec is a factory of encoder/decoder records: `writer()` yields a fresh
+// Serializer plus the finisher that produces the frame; `reader(frame)` yields
+// the Deserializer a value rebuilds from (handed a frame of the wrong kind, it
+// arrives pre-poisoned — a sticky decode error, not a crash).
+struct Codec {
+	writer: || (Serializer, || Frame),
+	reader: |Frame| Deserializer,
+}
+
+fun encode<T: Wire>(codec: Codec, value: T): Frame;             // describe + finish
+fun decode<T: Wire>(codec: Codec, frame: Frame): Result<T, str>; // rebuild + failed()
+```
+
+`std::json::json_codec()` wraps the existing `JsonWriter`/`JsonReader`.
+`std::binary::binary_codec()` is the compact pair over `std::bytes` —
+**schema-ordered and length-prefixed**: the shared Wire type is the schema, so
+structs write no field names or counts and lists write a `u32` count then bare
+elements. Little-endian throughout:
+
+| value            | encoding                                                      |
+| ---------------- | ------------------------------------------------------------- |
+| `i32` / `u32`    | 4 bytes LE                                                    |
+| `f64`            | 8 bytes IEEE-754 LE (a `DataView` extern joins `std::bytes`)  |
+| `bool`           | 1 byte (0/1)                                                  |
+| `str`            | `u32` byte length + UTF-8 bytes                               |
+| `List`           | `u32` count + elements                                        |
+| struct           | fields in declaration order, nothing else                     |
+| enum variant     | tag as a `str` (length-prefixed name) + payloads in order     |
+| `Option`         | 1 marker byte: `0x00` = None, `0x01` + value = Some           |
+
+The variant tag stays the *name* for v1 (robust to reordering, debuggable); a
+numeric-index compaction is the same later step as method-name→id (§6). A
+truncated frame fails sticky (`unexpected end of frame`) — the validating
+decode covers hostile input in both formats.
+
+The `Option` marker forced one visitor addition: `Serializer.some_value()`,
+called by `Option::describe` before a present value. JSON's writer no-ops it
+(a bare value, exactly today's format — which also keeps JSON's pre-existing
+`Some(None)` ≡ `None` collapse, a property of the format, not the visitor);
+binary writes the `0x01`. Without it, `Some(0)` and `None` would both start
+`0x00` — schema-ordered bytes have no self-description to disambiguate with.
+
+**Remaining after the codecs themselves**: the runtime re-plumb — envelopes,
+`call`/`arg`/`reply`, the protocols and transports move `Frame` and take a
+codec value at wiring time (Q2's `Accounts::connect(transport, codec)` shape) —
+and the phase-6 benchmarks measuring JSON double-encoding against the binary
+frames. Format choice is deployment-wide (both sides must agree — the Q6
+contract-hash/negotiation concern; a content-type announced on connect).
+
 ## 7. The generated stub: async and errors
 
 The client requestor generated from the `[service(Client)]` struct (§4.2) *is* the seamless call —

@@ -11,7 +11,9 @@
 // methods no-op through bounds; impls can't bind a trait argument) and becomes
 // a drop-in upgrade when either closes.
 
+import pkg::bytes::Bytes;
 import pkg::option::Option::{ self, Some, None };
+import pkg::result::Result::{ self, Ok, Err };
 
 // The self-description contract. `describe` narrates the value's structure to
 // the serializer; `rebuild` pulls the same structure back out of a
@@ -37,6 +39,10 @@ struct Serializer {
 	begin_variant: |str, i32| void,
 	end_variant: || void,
 	null_value: || void,
+	// Announces a PRESENT `Option` before its value. JSON no-ops it (a bare
+	// value, today's format); binary writes the `0x01` marker — without it,
+	// `Some(0)` and `None` would both start `0x00` in schema-ordered bytes.
+	some_value: || void,
 	str_value: |str| void,
 	i32_value: |i32| void,
 	u32_value: |u32| void,
@@ -149,12 +155,15 @@ impl List<type T: Wire> with Wire {
 	}
 }
 
-// An absent option is a null; a present one describes its value bare (the
-// JSON-compatible shape — `Some(5)` crosses as `5`).
+// An absent option is a null; a present one announces itself (`some_value` —
+// a no-op in JSON, a marker byte in binary) and describes its value.
 impl Option<type T: Wire> with Wire {
 	fun describe(self, serializer: Serializer) {
 		match self {
-			Some(let value) => value.describe(serializer),
+			Some(let value) => {
+				(serializer.some_value)();
+				value.describe(serializer);
+			},
 			None => (serializer.null_value)(),
 		}
 	}
@@ -166,5 +175,41 @@ impl Option<type T: Wire> with Wire {
 		} else {
 			Some(T::rebuild(deserializer))
 		}
+	}
+}
+
+// --- The codec (§6.2) --------------------------------------------------------
+
+// What a transport moves. JSON rides text transports allocation-free (SSE is
+// text-only, so SplitDuplex's server→client leg requires the `Text` arm);
+// binary rides byte-capable ones (HTTP POST bodies today, WebSocket later).
+enum Frame {
+	Text(str),
+	Binary(Bytes),
+}
+
+// A codec is a factory of encoder/decoder records: `writer()` yields a fresh
+// `Serializer` plus the finisher that produces the frame; `reader(frame)`
+// yields the `Deserializer` a value rebuilds from. Handed a frame of the wrong
+// kind, a reader arrives pre-poisoned — a sticky decode error, not a crash.
+struct Codec {
+	writer: || (Serializer, || Frame),
+	reader: |Frame| Deserializer,
+}
+
+// One value to one frame.
+fun encode<T: Wire>(codec: Codec, value: T): Frame {
+	let (serializer, finish) = (codec.writer)();
+	value.describe(serializer);
+	finish()
+}
+
+// One frame back to a value; `Err(reason)` names the first structural failure.
+fun decode<T: Wire>(codec: Codec, frame: Frame): Result<T, str> {
+	let deserializer = (codec.reader)(frame);
+	let value = T::rebuild(deserializer);
+	match (deserializer.failed)() {
+		None => Ok(value),
+		Some(let reason) => Err(reason),
 	}
 }

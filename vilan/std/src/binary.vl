@@ -1,0 +1,286 @@
+// `std::binary` — the compact codec pair (transport-rpc.md §6.2): schema-
+// ordered, length-prefixed bytes over `std::bytes`. The shared Wire type IS
+// the schema, so structs write no field names or counts; lists write a `u32`
+// count then bare elements; enum variants write their tag as a length-prefixed
+// name (a numeric-index compaction is a later step); `Option` is one marker
+// byte. Little-endian throughout. A truncated or over-declared frame fails
+// sticky (`unexpected end of frame`) — validating decode, same as JSON's.
+
+import pkg::bytes::{ Bytes, data_view, encode_utf8, decode_utf8 };
+import pkg::option::Option::{ self, Some, None };
+import pkg::shared::Shared;
+import pkg::wire::{ Serializer, Deserializer, Codec, Frame };
+
+// --- The write side ----------------------------------------------------------
+
+// A growable byte sink: amortized-doubling buffer, `finish` slices to the
+// written length.
+struct BinaryWriter {
+	buffer: Shared<Bytes>,
+	used: Shared<i32>,
+}
+
+impl BinaryWriter {
+	fun new(): BinaryWriter {
+		BinaryWriter { buffer = Shared::new(Bytes::alloc(64)), used = Shared::new(0) }
+	}
+
+	// Grow (doubling) until `extra` more bytes fit.
+	fun ensure(self, extra: i32) {
+		let needed = self.used.read() + extra;
+		mut capacity = self.buffer.read().len();
+		if needed > capacity {
+			for needed > capacity {
+				capacity = capacity * 2;
+			}
+			let grown = Bytes::alloc(capacity);
+			grown.copy_into(self.buffer.read(), 0);
+			self.buffer.write() = grown;
+		}
+	}
+
+	fun write_byte(self, value: i32) {
+		self.ensure(1);
+		self.buffer.read().set(self.used.read(), value);
+		self.used.write() = self.used.read() + 1;
+	}
+
+	// 4 bytes little-endian (i32 and u32 share the two's-complement bit
+	// pattern; `set` stores `& 0xFF`, so bare shifts suffice).
+	fun write_i32(self, value: i32) {
+		self.write_byte(value);
+		self.write_byte(value >> 8);
+		self.write_byte(value >> 16);
+		self.write_byte(value >> 24);
+	}
+
+	fun write_byte_u32(self, value: u32) {
+		self.ensure(1);
+		self.buffer.read().set_u32(self.used.read(), value);
+		self.used.write() = self.used.read() + 1;
+	}
+
+	fun write_u32(self, value: u32) {
+		self.write_byte_u32(value & 0xFF);
+		self.write_byte_u32(value >> 8 & 0xFF);
+		self.write_byte_u32(value >> 16 & 0xFF);
+		self.write_byte_u32(value >> 24);
+	}
+
+	// 8 bytes IEEE-754 LE, via a DataView over a scratch buffer.
+	fun write_f64(self, value: f64) {
+		let scratch = Bytes::alloc(8);
+		data_view(scratch.buffer()).write_f64(0, value, true);
+		self.ensure(8);
+		self.buffer.read().copy_into(scratch, self.used.read());
+		self.used.write() = self.used.read() + 8;
+	}
+
+	// `u32` byte length + UTF-8 bytes.
+	fun write_str(self, value: str) {
+		let encoded = encode_utf8(value);
+		self.write_i32(encoded.len());
+		self.ensure(encoded.len());
+		self.buffer.read().copy_into(encoded, self.used.read());
+		self.used.write() = self.used.read() + encoded.len();
+	}
+
+	fun finish(self): Bytes {
+		self.buffer.read().slice(0, self.used.read())
+	}
+
+	// The closure record a `Wire` value describes itself to. Structure calls
+	// that the schema already carries (struct shape, list/variant ends) write
+	// nothing.
+	fun serializer(self): Serializer {
+		Serializer {
+			begin_struct = |fields| {},
+			field = |name| {},
+			end_struct = || {},
+			begin_list = |length| self.write_i32(length),
+			end_list = || {},
+			begin_variant = |name, arity| self.write_str(name),
+			end_variant = || {},
+			null_value = || self.write_byte(0),
+			some_value = || self.write_byte(1),
+			str_value = |value| self.write_str(value),
+			i32_value = |value| self.write_i32(value),
+			u32_value = |value| self.write_u32(value),
+			f64_value = |value| self.write_f64(value),
+			bool_value = |value| self.write_byte(if value { 1 } else { 0 }),
+		}
+	}
+}
+
+// --- The read side -------------------------------------------------------------
+
+// A bounds-checked cursor over one frame, with the sticky error the visitor
+// contract requires: past the first failure every read is a zero-value no-op.
+struct BinaryReader {
+	bytes: Bytes,
+	cursor: Shared<i32>,
+	error: Shared<Option<str>>,
+}
+
+impl BinaryReader {
+	fun new(bytes: Bytes): BinaryReader {
+		BinaryReader { bytes = bytes, cursor = Shared::new(0), error = Shared::new(None) }
+	}
+
+	fun ok(self): bool {
+		match self.error.read() {
+			Some(let _reason) => false,
+			None => true,
+		}
+	}
+
+	fun report(self, reason: str) {
+		match self.error.read() {
+			Some(let _first) => {},
+			None => {
+				self.error.write() = Some(reason);
+			},
+		}
+	}
+
+	// Whether `count` more bytes exist; fails sticky when they don't.
+	fun expect(self, count: i32): bool {
+		if !self.ok() {
+			ret false;
+		}
+		if self.cursor.read() + count > self.bytes.len() {
+			self.report("unexpected end of frame");
+			ret false;
+		}
+		true
+	}
+
+	fun read_byte(self): i32 {
+		if !self.expect(1) {
+			ret 0;
+		}
+		let value = self.bytes.get(self.cursor.read());
+		self.cursor.write() = self.cursor.read() + 1;
+		value
+	}
+
+	fun read_i32(self): i32 {
+		if !self.expect(4) {
+			ret 0;
+		}
+		let at = self.cursor.read();
+		let value = self.bytes.get(at)
+			| self.bytes.get(at + 1) << 8
+			| self.bytes.get(at + 2) << 16
+			| self.bytes.get(at + 3) << 24;
+		self.cursor.write() = at + 4;
+		value
+	}
+
+	fun read_u32(self): u32 {
+		if !self.expect(4) {
+			ret 0;
+		}
+		let at = self.cursor.read();
+		let value = self.bytes.get_u32(at)
+			| self.bytes.get_u32(at + 1) << 8
+			| self.bytes.get_u32(at + 2) << 16
+			| self.bytes.get_u32(at + 3) << 24;
+		self.cursor.write() = at + 4;
+		value
+	}
+
+	fun read_f64(self): f64 {
+		if !self.expect(8) {
+			ret 0.0;
+		}
+		let at = self.cursor.read();
+		let scratch = self.bytes.slice(at, at + 8);
+		self.cursor.write() = at + 8;
+		data_view(scratch.buffer()).read_f64(0, true)
+	}
+
+	// A length prefix that must fit the remaining frame (each prefixed item is
+	// at least one byte, so a larger claim is hostile or truncated).
+	fun read_length(self): i32 {
+		let length = self.read_i32();
+		if length < 0 || self.cursor.read() + length > self.bytes.len() {
+			self.report("length prefix exceeds frame");
+			ret 0;
+		}
+		length
+	}
+
+	fun read_str(self): str {
+		let length = self.read_length();
+		if !self.expect(length) {
+			ret "";
+		}
+		let at = self.cursor.read();
+		let piece = self.bytes.slice(at, at + length);
+		self.cursor.write() = at + length;
+		decode_utf8(piece)
+	}
+
+	// The closure record a `Wire` value rebuilds itself from. `variant_tag`
+	// consumes the tag (so `begin_variant` is a no-op — the mirror of the
+	// write side, where `begin_variant` writes it); `is_null` peeks the Option
+	// marker and consumes it only for `Some`, leaving `None`'s `0x00` for
+	// `null_value`.
+	fun deserializer(self): Deserializer {
+		Deserializer {
+			begin_struct = || {},
+			field = |name| {},
+			end_struct = || {},
+			begin_list = || self.read_length(),
+			end_list = || {},
+			variant_tag = || self.read_str(),
+			begin_variant = |name, arity| {},
+			end_variant = || {},
+			is_null = || {
+				if !self.expect(1) {
+					ret false;
+				}
+				if self.bytes.get(self.cursor.read()) == 0 {
+					true
+				} else {
+					// A present Option: consume the `0x01` marker; the value
+					// follows.
+					self.cursor.write() = self.cursor.read() + 1;
+					false
+				}
+			},
+			null_value = || {
+				let _ = self.read_byte();
+			},
+			str_value = || self.read_str(),
+			i32_value = || self.read_i32(),
+			u32_value = || self.read_u32(),
+			f64_value = || self.read_f64(),
+			bool_value = || self.read_byte() != 0,
+			fail = |reason| self.report(reason),
+			failed = || self.error.read(),
+		}
+	}
+}
+
+// The binary codec (§6.2): byte frames over the writer/reader pair. A text
+// frame poisons the reader — a sticky decode error, never a crash.
+fun binary_codec(): Codec {
+	Codec {
+		writer = || {
+			let writer = BinaryWriter::new();
+			(writer.serializer(), || Frame::Binary(writer.finish()))
+		},
+		reader = |frame| {
+			match frame {
+				Frame::Binary(let bytes) => BinaryReader::new(bytes).deserializer(),
+				Frame::Text(let text) => {
+					let reader = BinaryReader::new(Bytes::alloc(0));
+					reader.report("binary codec: received a text frame");
+					reader.deserializer()
+				},
+			}
+		},
+	}
+}

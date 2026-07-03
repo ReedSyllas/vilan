@@ -3348,3 +3348,126 @@ fn derived_wire_visitor_matches_to_json_and_round_trips() {
         "true\n7\nbusy proofs 45\nerr: missing field 'name'\nerr: unknown variant 'Vanished'\n",
     );
 }
+
+#[test]
+#[ignore = "derived qualified-generic statics mis-unify two differently-typed Option fields (pre-existing; same root as the qualified-static gap)"]
+fn derived_struct_with_two_differently_typed_options() {
+    // Pre-existing (reproduces with [derive(Json)] alone, no codec involved):
+    // the derive emits `Option<str>::from_json_value(..)` and
+    // `Option<i32>::from_json_value(..)` in one generated function, and the
+    // two instantiations unify — use sites then fail with "Expected
+    // Option<i32>, but got Option<str>". A plain struct (no derive) is fine.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        [derive(Json)]
+        struct OnlyOptions {
+            nick: Option<str>,
+            zero: Option<i32>,
+        }
+        fun main() {
+            let value = OnlyOptions { nick = Some("bo"), zero = Some(0) };
+            match value.nick {
+                Some(let nick) => print(i"nick {nick}"),
+                None => print("no nick"),
+            }
+            match value.zero {
+                Some(let zero) => print(i"zero {zero}"),
+                None => print("no zero"),
+            }
+        }
+        "#,
+        "nick bo\nzero 0\n",
+    );
+}
+
+#[test]
+fn both_codecs_round_trip_derived_wire_values() {
+    // §6.2 end-to-end: one derived value through `json_codec()` and
+    // `binary_codec()` — negative i32, high-bit u32, f64, multibyte str,
+    // List, BOTH Option marker paths (Some(0) is exactly what the binary
+    // `0x01` marker disambiguates from None's `0x00`), and a 2-arity enum.
+    // Plus the failure modes: a frame of the wrong kind arrives pre-poisoned,
+    // and a truncated binary frame fails sticky instead of crashing.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::wire::{ Wire, Frame, Codec, encode, decode };
+        import std::json::{ Json, json_codec };
+        import std::binary::binary_codec;
+
+        [derive(Wire)]
+        enum Status {
+            Offline,
+            Busy(str, i32),
+        }
+
+        [derive(Wire)]
+        struct Probe {
+            id: i32,
+            big: u32,
+            ratio: f64,
+            label: str,
+            flags: List<bool>,
+            zero: Option<i32>,
+            status: Status,
+        }
+
+        fun sample(zero: Option<i32>): Probe {
+            Probe {
+                id = 0 - 42,
+                big = 0xDEADBEEF,
+                ratio = 0.5,
+                label = "héllo 🎉",
+                flags = [true, false, true],
+                zero = zero,
+                status = Status::Busy("proofs", 45),
+            }
+        }
+
+        fun check(name: str, back: Result<Probe, str>) {
+            match back {
+                Ok(let value) => {
+                    let intact =
+                        value.id == 0 - 42 && value.big == 0xDEADBEEFu32
+                        && value.ratio == 0.5 && value.label == "héllo 🎉"
+                        && value.flags.len() == 3;
+                    print(i"{name} intact = {intact}");
+                    match value.zero {
+                        Some(let n) => print(i"{name} zero = {n}"),
+                        None => print(i"{name} zero = none"),
+                    }
+                },
+                Err(let reason) => print(i"{name} failed: {reason}"),
+            }
+        }
+
+        fun main() {
+            let json = json_codec();
+            let binary = binary_codec();
+            check("json", decode(json, encode(json, sample(Some(0)))));
+            check("binary", decode(binary, encode(binary, sample(Some(0)))));
+            check("binary-none", decode(binary, encode(binary, sample(None))));
+            let crossed: Result<Probe, str> = decode(binary, encode(json, sample(Some(0))));
+            match crossed {
+                Ok(let value) => print("should fail"),
+                Err(let reason) => print(i"err: {reason}"),
+            }
+            match encode(binary, sample(Some(0))) {
+                Frame::Binary(let whole) => {
+                    let cut: Result<Probe, str> = decode(binary, Frame::Binary(whole.slice(0, 9)));
+                    match cut {
+                        Ok(let value) => print("should fail"),
+                        Err(let reason) => print(i"err: {reason}"),
+                    }
+                },
+                Frame::Text(let text) => print("unexpected"),
+            }
+        }
+        "#,
+        "json intact = true\njson zero = 0\nbinary intact = true\nbinary zero = 0\nbinary-none intact = true\nbinary-none zero = none\nerr: binary codec: received a text frame\nerr: unexpected end of frame\n",
+    );
+}
