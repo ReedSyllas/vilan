@@ -296,19 +296,26 @@ dependencies. Unordered within a section.
 
 1. **Struct keys for `Map`/`Set`** (M; roadmap #3) — M2 gives value `==`, but JS Map/Set key objects
    by *reference*, so by-value aggregate keys need key-serialization or a custom table.
-2. **A proper array type (`[u8]` / `Bytes`, and `[T; n]` generally)** (M; RPC binary codec) — a
-   binary `Codec` produces *bytes*, and Vilan has no byte/array type today: `List<u8>` is the
-   stand-in (heap-boxed, length-mutable — workable but not ideal). A fixed-length / contiguous
-   array type — `[u8]` (and a `Bytes` view over one) as the immediate want, `[T; n]` as the
-   general feature — is the right substrate: cheaper, and the natural target for the
-   `Serializer`/binary-codec path (`transport-rpc.md` §6, §10).
+2. **A proper array type (`[u8]` / `Bytes`, and `[T; n]` generally)** (M; RPC binary codec;
+   **NEXT UP — codec prerequisite, agreed 2026-07-02**) — a binary `Codec` produces *bytes*,
+   and Vilan has no byte/array type today: `List<u8>` is the stand-in (heap-boxed,
+   length-mutable — workable but not ideal). A fixed-length / contiguous array type — `[u8]`
+   (and a `Bytes` view over one) as the immediate want, `[T; n]` as the general feature — is
+   the right substrate: cheaper, and the natural target for the `Serializer`/binary-codec
+   path (`transport-rpc.md` §6, §10). The same item covers the binary-framing *language*
+   floor: **hex literals (`0xFF`) and bitwise/shift operators (`&`/`|`/`^`/`<<`/`>>`)** —
+   also what the WebSocket frame codec is gated on. The codec slice takes `Bytes` (a view
+   over the host `Uint8Array`) + hex/bitwise first; `[T; n]` generally stays here.
 3. **Validating `from_json` — decode errors instead of `undefined`** (M; codec hardening,
-   `transport-rpc.md` Q6) — `from_json` doesn't validate: a missing/mistyped field decodes to
-   `undefined` and flows onward as garbage — the *silent* failure mode, worse than a crash. It
-   surfaces under RPC version skew (a changed Wire shape), but hurts on **any** malformed input.
-   Wanted: decode reports an error (a `Result`, or at minimum a `panic` naming the field) when a
-   field is absent or the wrong shape. Interacts with the `?`/try story (transport-rpc.md Q10)
-   for how handlers/stubs propagate it tersely.
+   `transport-rpc.md` Q6; **folded into the codec slice's prerequisites, agreed 2026-07-02**:
+   the `Deserializer` returns `Result`, finally constructing the never-yet-used
+   `RpcError::Decode` — transport-rpc.md §6 status) — `from_json` doesn't validate: a
+   missing/mistyped field decodes to `undefined` and flows onward as garbage — the *silent*
+   failure mode, worse than a crash. It surfaces under RPC version skew (a changed Wire
+   shape), but hurts on **any** malformed input. Wanted: decode reports an error (a `Result`,
+   or at minimum a `panic` naming the field) when a field is absent or the wrong shape.
+   Interacts with the `?`/try story (transport-rpc.md Q10) for how handlers/stubs propagate
+   it tersely.
 
 ---
 

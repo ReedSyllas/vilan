@@ -302,7 +302,8 @@ fun local_rpc(protocol: RpcProtocol): LocalTransport {
 // === Foundation: the ergonomic client + server API (proposal §4.1) ==========
 //
 // `call<T>` collapses a client round-trip (envelope -> await -> decode) into one line;
-// `Dispatcher` routes decoded requests to typed handlers, `arg`/`reply` carrying the codec.
+// `Dispatcher` routes decoded requests to typed handlers, `arg`/`reply` doing the
+// encode/decode (JSON, hardwired — proposal §6's codec seam is future work).
 // This is the foundation `[service(Client)]` generation emits over — and the API to use
 // directly when writing the plumbing by hand.
 
@@ -368,7 +369,7 @@ impl Dispatcher {
 // === Reactive protocol ======================================================
 
 // The frames the reactive protocol exchanges over a duplex transport. Payloads are the
-// JSON-encoded (`str`) values of the underlying source — the codec never sees a signal,
+// JSON-encoded (`str`) values of the underlying source — the wire never sees a signal,
 // only its values (proposal §8).
 [derive(Wire)]
 enum ReactiveFrame {

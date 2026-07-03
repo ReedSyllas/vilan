@@ -448,6 +448,34 @@ shape it can provide — first-class, no registry.
 
 ## 6. Codec — the format (data ⇆ bytes)
 
+> **Status (record corrected 2026-07-02): designed, NOT implemented.** Earlier revisions
+> marked the `Codec` trait shipped (Q2, phase 1); it never was — no `Codec`, no
+> `JsonCodec` exists anywhere. What shipped hardwires JSON at every seam:
+> `[derive(Wire)]` expands to the same `to_json`/`from_json` as `[derive(Json)]` (plus
+> the boundary check — that check is Wire's real identity today); transports move `str`
+> frames; the §4.1 foundation (`call`/`arg`/`reply`) and the protocol envelopes are
+> `Json`/`FromJson`-bound, and `[service(Client)]` generation emits over them; the
+> reactive runtime erases to JSON `Signal<str>` mirrors and `Update(i32, str)` frames.
+> Two costs are already visible: **double encoding** (args/results are individually
+> encoded, then the envelope is encoded again — JSON-escaped-inside-JSON on every call;
+> quantify in the phase-6 benchmarks), and `RpcError::Decode` is declared but never
+> constructed (decode is happy-path — backlog I3).
+>
+> **Agreed plan (2026-07-02): prerequisites first, codec last.**
+> 1. **Hex literals + bitwise/shift operators** (compiler; backlog I2) — binary framing
+>    needs `0xFF`, `&`/`|`/`^`/`<<`/`>>`.
+> 2. **`Bytes`** (std over the host `Uint8Array`; backlog I2's immediate want) — a
+>    binary codec produces bytes, not text.
+> 3. **The `Serializer`/`Deserializer` visitor + `[derive(Wire)]` retarget** — derived
+>    code *describes* fields to a serializer instead of concatenating JSON;
+>    `[derive(Json)]` stays as-is.
+> 4. **Validating decode** (backlog I3, folded in) — the `Deserializer` returns
+>    `Result`, finally constructing `RpcError::Decode`.
+> 5. **The `Codec` trait + `JsonCodec` + a binary codec**, and protocols/transports
+>    parameterized by it. Note the transport asymmetry: HTTP POST bodies carry bytes
+>    fine, but SSE is a text protocol — `SplitDuplex`'s server→client leg stays textual
+>    (JSON or base64) until the WebSocket transport (gated on the same I2) lands.
+
 `[derive(Wire)]` settles *what* crosses and its *structure*; the **codec** settles the
 *format* — the actual bytes. Keeping the two apart is what lets the same Wire types ride
 JSON (readable, for development) or a compact binary format (fast, for production) with no
@@ -589,9 +617,10 @@ The pieces this needs, all in the reactive phase:
 ## 9. Where it lives
 
 A `[library]` package, `std::rpc` (or a standalone `rpc` library), providing the stable
-core: the `Transport` and `DuplexTransport` shapes + built-in transports, the `Codec` trait
-+ `JsonCodec`, `RpcError`, the envelope types, and — in the reactive phase — the
-`ReactiveProtocol` and its capability table. The `[derive(Wire)]` derive, the
+core: the `Transport` and `DuplexTransport` shapes + built-in transports, `RpcError`, the
+envelope types, and the reactive runtime with its capability table (all shipped; the
+server-side mounts live in the process-layer `std::rpc_server`). The `Codec` trait +
+`JsonCodec` join it once §6's prerequisites land — they are not there yet (§6 status). The `[derive(Wire)]` derive, the
 `[service]`/`[rpc]` generation (dispatcher + stub), and the `[trait_only]`/`[doc(hidden)]`
 attributes are **compiler** features, not library code (§10). The application's own domain types, their
 Wire twins, the `to_wire` projections, and the `[service]` contract live in the app —
@@ -644,7 +673,9 @@ paradigm needs:
   its own migration slice with/after `[service(Client)]` generation).
 - **A byte-array type for binary codecs** — a binary `Codec` produces bytes, not text (§6).
   `List<u8>` is the stand-in for now (probably easiest); a proper fixed `[u8]`/`Bytes` array
-  type is the real want (added to the backlog). JSON-only needs nothing here (UTF-8 `str`).
+  type is the real want (added to the backlog). Binary *framing* also needs hex literals and
+  bitwise/shift operators — the same backlog item (I2) gating the WebSocket frame codec.
+  JSON-only needs nothing here (UTF-8 `str`).
 - **Codec derives** — Map serialization (backlog I1) and the `List<List<T>>` fix widen what
   crosses; not blockers (work around as in §3.1).
 - **The reactive protocol** — the `Source`/`Signal` split, a `DuplexTransport` (+ its
@@ -655,13 +686,14 @@ paradigm needs:
 
 0. **Substrate** (S) — ✅ **SHIPPED** (commits 7340518, 593742a): `fetch` POST/body/headers
    + `http` `Request::body()`, with the full round-trip verified end-to-end.
-1. **Runtime, hand-written** (M) — ✅ **largely done** in `examples/rpc`:
-   `Transport`/`Codec`/`RpcError`, `JsonCodec`, `LocalTransport` + `HttpTransport`, the
-   envelope types, and a **manually-written** dispatcher + stub proving an end-to-end
-   client↔server call with the `Result` error model and async. Pins the wire format and
-   the runtime first (the project's "prove it before generating it"). *Remaining:* an
-   `HttpTransport` example over a real socket (the in-process `LocalTransport` is
-   proven).
+1. **Runtime, hand-written** (M) — ✅ **done** (record corrected 2026-07-02: an earlier
+   revision of this line claimed `Codec`/`JsonCodec` here — they were never written; the
+   codec seam remains §6 design): `Transport`/`RpcError`, `LocalTransport` +
+   `HttpTransport`, the envelope types, and a **manually-written** dispatcher + stub
+   proving an end-to-end client↔server call with the `Result` error model and async.
+   Pinned the wire format and the runtime first (the project's "prove it before
+   generating it"); the runtime has since been promoted to `std::rpc` (phase 3) and
+   `HttpTransport` is proven over a real socket (phase 4).
 2. **`[derive(Wire)]`, `[rpc]`, and `[trait_only]`** (L) — the data boundary and the
    exposure check: the all-fields-Wire rule and its diagnostics, the `[rpc]` signature
    check, the `Wire` round-trip against the `Serializer` visitor, and the
@@ -718,11 +750,14 @@ The agreed build order within phases 2–3 (2026-07-02): the `[rpc]`/`[expose]` 
 the `[trait_only]`/`[doc(hidden)]` hygiene attributes (§3.2), then `[service(Client)]`
 generation, then the real transports (phase 4), then phase 6's apps + benchmarks.
 
-A **binary codec** (and the byte-array type it needs, §10) is an additive slice that can
-land any time after Phase 2 — the `Codec`/`Serializer` seam is designed for it; JSON is the
-default throughout. Phases 0–2 are the usable core (typed request/response with the Wire
-boundary); 3 makes the calls seamless (generated stubs); 4–5 are the reactive/streaming
-reach. Each is independently valuable and testable.
+The **codec** is the next slice (agreed 2026-07-02, after the phase-6 todo app): JSON is
+currently *hardwired*, not a default behind a seam — see §6's status block for the honest
+inventory and the agreed order (hex + bitwise operators → `Bytes` → the `Serializer`
+visitor retarget of `[derive(Wire)]` + validating decode → the `Codec` trait with
+`JsonCodec` and a binary codec). The phase-6 benchmarks bracket it: measure the JSON
+double-encoding before, the binary win after. Phases 0–2 are the usable core (typed
+request/response with the Wire boundary); 3 makes the calls seamless (generated stubs);
+4–5 are the reactive/streaming reach. Each is independently valuable and testable.
 
 ## 12. Test plan
 
@@ -788,9 +823,13 @@ cross-references hold):
   not a mandatory system. A `[service(Client)]` struct (§4.2) generates that foundation; the client is
   a generated *sibling*, not an `impl` of the trait (the two-signature split). The compiler
   generates only the glue, never the structure.
-- **Q2 — codec abstraction. ✅ Settled:** ship the `Codec` trait now, with the *format*
-  behind it — bytes output and a `Serializer` visitor so a binary codec is zero-overhead
-  (§6). JSON is the default and only codec at first.
+- **Q2 — codec abstraction. ✅ Settled in design; record corrected 2026-07-02.** An
+  earlier revision said "ship the `Codec` trait now" and later notes marked it done — it
+  never shipped. Implementation hardwired JSON end-to-end instead (`Wire` derives =
+  `Json`+`FromJson`, `str` frames, a Json-bound foundation — §6 status block). The design
+  stands: bytes output and a `Serializer` visitor so a binary codec is zero-overhead.
+  Agreed order: prerequisites (hex/bitwise, `Bytes`, the visitor retarget, validating
+  decode), then the `Codec` trait with `JsonCodec` + a binary codec (§6).
 - **Q3 — the `T` vs `Result<T, _>` asymmetry. ✅ Settled:** the `[service]` method declares
   `T`, the server `impl` returns `T`, and the generated client stub wraps it in
   `Result<T, RpcError>` — codegen owns the one-layer difference, not the developer (§7).
