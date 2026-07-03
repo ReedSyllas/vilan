@@ -593,6 +593,27 @@ impl<'src> Transformer<'src> {
         )
     }
 
+    /// Whether a bitwise/shift binary's operands are `u32` — the emission
+    /// switch between JS's signed operators and the `>>>`-based unsigned forms.
+    /// A concrete-`u32` verdict was recorded by the analyzer; a generic operand
+    /// recorded its constraint, resolved here under the active
+    /// monomorphization's substitution.
+    fn binary_operands_are_u32(&self, binary_id: Id) -> bool {
+        if self.program.bitwise_u32.contains(&binary_id) {
+            return true;
+        }
+        let Some(constraint_id) = self.program.bitwise_generic_lhs.get(&binary_id) else {
+            return false;
+        };
+        matches!(
+            self.program
+                .type_id_to_type_map
+                .get(&self.resolve_type_id(*constraint_id)),
+            Some(Type::Struct(id, _))
+                if self.program.structs.get(id).is_some_and(|struct_| struct_.name == "u32")
+        )
+    }
+
     /// Whether a local is boxed into a `[value]` cell at this monomorphization: a
     /// concrete scalar root (`boxed_locals`), or a generic-typed `&`-referenced
     /// root that resolves here to a scalar primitive (decided now, not in the
@@ -1011,6 +1032,30 @@ impl<'src> Transformer<'src> {
                     } else {
                         call
                     });
+                }
+                // JS bitwise is signed: on `u32` operands `>>` must be the
+                // logical `>>>`, and the value-producing ops re-wrap with
+                // `>>> 0` so a set high bit stays a large unsigned value
+                // instead of going negative. `i32` keeps the native ops (JS
+                // ToInt32 IS i32 semantics), and `BigInt` must NOT wrap
+                // (arbitrary precision). Proposal/bits-and-bytes.md §2.
+                if matches!(
+                    op,
+                    BinaryOp::Shl
+                        | BinaryOp::Shr
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitXor
+                        | BinaryOp::BitOr
+                ) && self.binary_operands_are_u32(id)
+                {
+                    if matches!(op, BinaryOp::Shr) {
+                        return Some(binary(BinaryOp::UShr, lhs, rhs));
+                    }
+                    return Some(binary(
+                        BinaryOp::UShr,
+                        binary(*op, lhs, rhs),
+                        js::Node::Number("0".to_string(), None),
+                    ));
                 }
                 binary(*op, lhs, rhs)
             }
@@ -2629,11 +2674,15 @@ impl Formatter {
         match op {
             BinaryOp::Or => 0,
             BinaryOp::And => 1,
-            // Gaps 2–4 are reserved for JS `|`, `^`, `&` when the bitwise
-            // operators land.
+            // JS's C-style order: the bitwise ops bind LOOSER than comparison —
+            // the opposite of vilan's source precedence, so a vilan
+            // `(a & b) == c` tree emits with parentheses.
+            BinaryOp::BitOr => 2,
+            BinaryOp::BitXor => 3,
+            BinaryOp::BitAnd => 4,
             BinaryOp::Eq | BinaryOp::NotEq => 5,
             BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq => 6,
-            // Gap 7 is reserved for the shifts.
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => 7,
             BinaryOp::Add | BinaryOp::Sub => 8,
             BinaryOp::Mul | BinaryOp::Div => 9,
         }
@@ -2754,6 +2803,12 @@ impl Formatter {
                     BinaryOp::Sub => "-",
                     BinaryOp::Mul => "*",
                     BinaryOp::Div => "/",
+                    BinaryOp::Shl => "<<",
+                    BinaryOp::Shr => ">>",
+                    BinaryOp::UShr => ">>>",
+                    BinaryOp::BitAnd => "&",
+                    BinaryOp::BitXor => "^",
+                    BinaryOp::BitOr => "|",
                     BinaryOp::Eq => "===",
                     BinaryOp::NotEq => "!==",
                     BinaryOp::Lt => "<",

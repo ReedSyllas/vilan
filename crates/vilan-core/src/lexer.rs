@@ -13,6 +13,17 @@ pub fn lexer<'src>()
         .then(text::ascii::ident().or_not())
         .map(|((whole, fraction), suffix)| Token::Number(whole, fraction, suffix));
 
+    // A hex integer literal (`0xFF`, `0x80000000u32`, `0xDEADn`) — an integer in
+    // another spelling, kept verbatim as the whole part (valid JS as-is). Must
+    // precede `number`, which would otherwise read `0xFF` as `0` with suffix
+    // `xFF`. The digit munch is maximal, so `f` in `0xFFf` is a digit — a type
+    // suffix must start with a non-hex letter (`u32`, `n`).
+    let hex = just("0x")
+        .then(one_of("0123456789abcdefABCDEF").repeated().at_least(1))
+        .to_slice()
+        .then(text::ascii::ident().or_not())
+        .map(|(whole, suffix)| Token::Number(whole, None, suffix));
+
     // A parser for strings. A backslash escapes the next character, so `\"` and
     // `\\` don't terminate the string; the raw (still-escaped) slice is kept and
     // the escapes are interpreted at code generation.
@@ -26,8 +37,10 @@ pub fn lexer<'src>()
     // operator charset alone would split `=>` into `=` and `>`.
     let arrow = just("=>").to(Token::Op("=>"));
 
-    // A parser for operators
-    let op = one_of("-:!*/+=|&")
+    // A parser for operators. `^` is bitwise-xor; `<`/`>` are control tokens
+    // (generics), so the shifts have no token here — the parser reads two
+    // adjacent `<`/`>` controls in expression position.
+    let op = one_of("-:!*/+=|&^")
         .repeated()
         .at_least(1)
         .to_slice()
@@ -74,6 +87,7 @@ pub fn lexer<'src>()
 
     // A single, self-contained token.
     let single = choice((
+        hex.clone(),
         number.clone(),
         string.clone(),
         arrow,
@@ -95,7 +109,7 @@ pub fn lexer<'src>()
         // braces, which delimit the hole. (Strings are still lexed whole, so a
         // `}` inside a hole's string literal is not mistaken for the close.)
         let hole_ctrl = one_of("()[]<>;,.").map(Token::Ctrl);
-        let hole_token = choice((number, string, op, hole_ctrl, identifier))
+        let hole_token = choice((hex, number, string, op, hole_ctrl, identifier))
             .map_with(|token, e| (token, e.span()))
             .padded();
         // The hole's tokens, wrapped in parentheses so the expression is parsed

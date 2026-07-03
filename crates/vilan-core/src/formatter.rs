@@ -770,8 +770,15 @@ impl<'src> Printer<'src> {
             | BinaryOp::Gt
             | BinaryOp::LtEq
             | BinaryOp::GtEq => 3,
-            BinaryOp::Add | BinaryOp::Sub => 4,
-            BinaryOp::Mul | BinaryOp::Div => 5,
+            // Vilan's source order (Rust-style): bitwise binds tighter than
+            // comparison, looser than arithmetic. (JS's differs; the
+            // transformer's own table handles emission.)
+            BinaryOp::BitOr => 4,
+            BinaryOp::BitXor => 5,
+            BinaryOp::BitAnd => 6,
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => 7,
+            BinaryOp::Add | BinaryOp::Sub => 8,
+            BinaryOp::Mul | BinaryOp::Div => 9,
         }
     }
 
@@ -786,7 +793,7 @@ impl<'src> Printer<'src> {
             | Node::Reference(_, _)
             | Node::Dereference(_)
             | Node::Await(_)
-            | Node::Async(_) => 6,
+            | Node::Async(_) => 10,
             Node::Assign(_, _, _)
             | Node::Let(_, _, _, _)
             | Node::Closure(_)
@@ -1215,6 +1222,14 @@ fn binary_operator_symbol(operator: BinaryOp) -> &'static str {
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
         BinaryOp::Div => "/",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        // JS-only (the transformer's unsigned right shift); never in a parsed
+        // source tree, but total for safety.
+        BinaryOp::UShr => ">>",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitXor => "^",
+        BinaryOp::BitOr => "|",
         BinaryOp::Eq => "==",
         BinaryOp::NotEq => "!=",
         BinaryOp::Lt => "<",
@@ -1403,6 +1418,15 @@ mod idempotency {
         shared_vl => "shared.vl",
         display_vl => "display.vl",
         reactive_vl => "reactive.vl",
+    }
+
+    /// The bitwise/shift operators and hex literals print back exactly —
+    /// well-formatted source containing them is a fixed point (`<<`/`>>` must
+    /// re-lex as adjacent control tokens, `0xFF` keeps its spelling).
+    #[test]
+    fn bitwise_operators_and_hex_are_a_fixed_point() {
+        let source = "fun main() {\n\tlet mask = 0xFFu32;\n\tlet mixed = 1 << 2 & 3 ^ 4 | 5;\n\tlet shifted = mask >> 4;\n\tlet big = 0xDEADn;\n}\n";
+        assert_fixed_point("bitwise", source);
     }
 
     /// Attributes must be *retained*, not just idempotent — a formatter that

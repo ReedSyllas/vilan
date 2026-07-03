@@ -360,6 +360,19 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    // Bitwise/shift operators (proposal/bits-and-bytes.md §2) — integer-typed,
+    // overloadable via `std::operators` like the arithmetic four. Vilan
+    // precedence (Rust's order, not C's): `<< >>` over `&` over `^` over `|`,
+    // all over comparisons.
+    Shl,
+    Shr,
+    // JS-only: the logical right shift `>>>`. The parser never produces it —
+    // the transformer rewrites `Shr` to it when the operand type is `u32`
+    // (JS `>>` is arithmetic, which is `i32`'s semantics, not `u32`'s).
+    UShr,
+    BitAnd,
+    BitXor,
+    BitOr,
     Eq,
     NotEq,
     Lt,

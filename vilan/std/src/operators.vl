@@ -23,3 +23,33 @@ trait Div<B = Self> {
 		panic("not implemented yet");
 	}
 }
+
+trait Shl<B = Self> {
+	fun shl(self, b: B): Self {
+		panic("not implemented yet");
+	}
+}
+
+trait Shr<B = Self> {
+	fun shr(self, b: B): Self {
+		panic("not implemented yet");
+	}
+}
+
+trait BitAnd<B = Self> {
+	fun bit_and(self, b: B): Self {
+		panic("not implemented yet");
+	}
+}
+
+trait BitXor<B = Self> {
+	fun bit_xor(self, b: B): Self {
+		panic("not implemented yet");
+	}
+}
+
+trait BitOr<B = Self> {
+	fun bit_or(self, b: B): Self {
+		panic("not implemented yet");
+	}
+}

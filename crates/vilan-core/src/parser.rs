@@ -1581,6 +1581,66 @@ where
         })
         .boxed();
 
+    // Shifts. `<`/`>` are control tokens (generics), so `<<`/`>>` are two
+    // control tokens that must be SPAN-ADJACENT — `a << b` is a shift while
+    // `a < < b` stays the parse error it always was, and `List<List<T>>`
+    // (type position) never meets this parser. On a lone `<`/`>` the second
+    // token fails and the fold backtracks, leaving it for `compare` below.
+    let half = |symbol: char| just(Token::Ctrl(symbol)).map_with(|_, extra| extra.span());
+    let adjacent_pair = |symbol: char, op: BinaryOp| {
+        half(symbol)
+            .then(half(symbol))
+            .try_map(move |(first, second): (Span, Span), span| {
+                if first.into_range().end == second.into_range().start {
+                    Ok(op)
+                } else {
+                    Err(Rich::custom(span, "split shift operator"))
+                }
+            })
+    };
+    let op = adjacent_pair('<', BinaryOp::Shl).or(adjacent_pair('>', BinaryOp::Shr));
+    let shift = sum
+        .clone()
+        .foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
+            (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
+        })
+        .boxed();
+
+    // The bitwise ops, each its own level (Rust's order): `&` over `^` over
+    // `|`, all tighter than comparisons — so `a & b == c` is `(a & b) == c`,
+    // not C's footgun. Infix `&`/`|` are unambiguous against prefix `&`
+    // (views) and closure literals, which occupy operand position.
+    let bit_and = shift
+        .clone()
+        .foldl_with(
+            just(Token::Op("&"))
+                .to(BinaryOp::BitAnd)
+                .then(shift)
+                .repeated(),
+            |a, (op, b), e| (Node::Binary(op, Box::new(a), Box::new(b)), e.span()),
+        )
+        .boxed();
+    let bit_xor = bit_and
+        .clone()
+        .foldl_with(
+            just(Token::Op("^"))
+                .to(BinaryOp::BitXor)
+                .then(bit_and)
+                .repeated(),
+            |a, (op, b), e| (Node::Binary(op, Box::new(a), Box::new(b)), e.span()),
+        )
+        .boxed();
+    let bit_or = bit_xor
+        .clone()
+        .foldl_with(
+            just(Token::Op("|"))
+                .to(BinaryOp::BitOr)
+                .then(bit_xor)
+                .repeated(),
+            |a, (op, b), e| (Node::Binary(op, Box::new(a), Box::new(b)), e.span()),
+        )
+        .boxed();
+
     // Comparison ops have equal precedence. `<` and `>` are control tokens
     // (also used for generics), and `<=`/`>=` lex as `<`/`>` followed by `=`.
     let op = choice((
@@ -1605,9 +1665,9 @@ where
                 }
             }),
     ));
-    let compare = sum
+    let compare = bit_or
         .clone()
-        .foldl_with(op.then(sum).repeated(), |a, (op, b), e| {
+        .foldl_with(op.then(bit_or).repeated(), |a, (op, b), e| {
             (Node::Binary(op, Box::new(a), Box::new(b)), e.span())
         })
         .boxed();

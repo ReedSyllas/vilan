@@ -2819,3 +2819,169 @@ fn emitted_js_parenthesizes_right_nested_string_concat() {
         "12x\n",
     );
 }
+
+#[test]
+fn hex_literals_type_and_evaluate_like_decimal() {
+    // `0x` is a spelling, not a type: suffix, context, and the i32 default all
+    // apply, and the literal reaches JS verbatim (proposal/bits-and-bytes.md §1).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(0xFF);
+            print(0x10 + 1);
+            let big = 0xDEADn;
+            print(big);
+            print(i"masked = {0xF0 & 0x1F}");
+        }
+        "#,
+        "255\n17\n57005n\nmasked = 16\n",
+    );
+}
+
+#[test]
+fn bitwise_operators_on_i32_use_signed_js_semantics() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(12 & 10);
+            print(12 | 3);
+            print(12 ^ 10);
+            print(1 << 5);
+            print(0 - 8 >> 1);
+        }
+        "#,
+        "8\n15\n6\n32\n-4\n",
+    );
+}
+
+#[test]
+fn bitwise_operators_on_u32_stay_unsigned() {
+    // JS bitwise is signed; `u32` results re-wrap with `>>> 0` and `>>` is the
+    // logical `>>>` — a set high bit must come back as a large unsigned value
+    // (proposal/bits-and-bytes.md §2).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let high: u32 = 0x80000000;
+            print(high | 0);
+            print(high >> 4);
+            print(0xFFFFFFFFu32 >> 28);
+            let one: u32 = 1;
+            print(one << 31);
+            print(0xF0F0F0F0u32 ^ 0xFFFFFFFFu32);
+        }
+        "#,
+        "2147483648\n134217728\n15\n2147483648\n252645135\n",
+    );
+}
+
+#[test]
+fn bitwise_operators_on_bigint_do_not_wrap() {
+    // BigInt is arbitrary-precision: the native JS operators apply and the u32
+    // `>>> 0` normalization must NOT — `1n << 64n` exceeds 64 bits intact.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(0xFFn & 0x0Fn);
+            print(1n << 64n);
+        }
+        "#,
+        "15n\n18446744073709551616n\n",
+    );
+}
+
+#[test]
+fn bitwise_precedence_is_rust_order_not_c_order() {
+    // `<< >>` over `&` over `^` over `|`, all over comparisons — so
+    // `1 << 2 == 4` is `(1 << 2) == 4` and `1 | 2 ^ 2 & 3` is `1 | (2 ^ (2 & 3))`.
+    // Emission must survive JS's DIFFERENT (C-style) order via parentheses.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(1 << 2 == 4);
+            print(1 | 2 ^ 2 & 3);
+            print((1 | 2) & 3 == 3);
+            let masked = 0xFF & 0x0F;
+            print(masked == 15);
+        }
+        "#,
+        "true\n1\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn shifts_coexist_with_nested_generics() {
+    // `<<`/`>>` are two ADJACENT control tokens in expression position;
+    // `List<List<i32>>` (type position) and comparisons are untouched.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let nested: List<List<i32>> = [[1, 2], [3]];
+            let shifted = nested.len() << 2;
+            print(shifted);
+            print(1 < 2);
+        }
+        "#,
+        "8\ntrue\n",
+    );
+}
+
+#[test]
+fn split_shift_stays_a_parse_error() {
+    // Adjacency is load-bearing: `a < < b` must not silently become a shift.
+    assert_fails(
+        r#"
+        fun main() {
+            let a = 1;
+            let b = 2;
+            let c = a < < b;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn bitand_dispatches_to_the_operator_trait() {
+    // `&` on a struct routes through `std::operators::BitAnd::bit_and`,
+    // mirroring `+`/`Add`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::operators::BitAnd;
+        struct Flags { bits: i32 }
+        impl Flags with BitAnd {
+            fun bit_and(self, other: Flags): Flags {
+                Flags { bits = self.bits & other.bits }
+            }
+        }
+        fun main() {
+            let a = Flags { bits = 12 };
+            let b = Flags { bits = 10 };
+            print((a & b).bits);
+        }
+        "#,
+        "8\n",
+    );
+}
+
+#[test]
+fn missing_bitwise_impl_names_the_trait() {
+    // A non-native type without the impl gets the operator diagnostic naming
+    // the trait, mirroring `Add`.
+    assert_fails(
+        r#"
+        struct Flags { bits: i32 }
+        fun main() {
+            let a = Flags { bits = 1 };
+            let b = Flags { bits = 2 };
+            let c = a ^ b;
+        }
+        "#,
+    );
+}

@@ -835,6 +835,12 @@ pub struct Analyzer<'src> {
     // matching operator trait: the resolved method id, so codegen emits
     // `add(lhs, rhs)` instead of `lhs + rhs`.
     binary_op_dispatch: HashMap<Id, Id>,
+    // Bitwise/shift binaries whose operands are `u32` — either settled here
+    // (`true` entries via the set) or generic, resolved per monomorphization by
+    // the transformer (the constraint's TypeId). Drives the `>>>`-based
+    // unsigned emission (proposal/bits-and-bytes.md §2).
+    bitwise_u32: HashSet<Id>,
+    bitwise_generic_lhs: HashMap<Id, TypeId>,
     // Method calls (by call id) on a generic impl whose generic parameters bind
     // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
@@ -907,6 +913,11 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
         BinaryOp::Sub => Some(("Sub", "sub")),
         BinaryOp::Mul => Some(("Mul", "mul")),
         BinaryOp::Div => Some(("Div", "div")),
+        BinaryOp::Shl => Some(("Shl", "shl")),
+        BinaryOp::Shr => Some(("Shr", "shr")),
+        BinaryOp::BitAnd => Some(("BitAnd", "bit_and")),
+        BinaryOp::BitXor => Some(("BitXor", "bit_xor")),
+        BinaryOp::BitOr => Some(("BitOr", "bit_or")),
         // `!=` dispatches to `eq` too; the transformer negates it. (Resolving the
         // `ne` default here would miss impls that only provide `eq`.)
         BinaryOp::Eq | BinaryOp::NotEq => Some(("PartialEq", "eq")),
@@ -987,6 +998,8 @@ impl<'src> Analyzer<'src> {
             wrapped_view_captures: HashMap::new(),
             prepped_binary_ops: Vec::new(),
             binary_op_dispatch: HashMap::new(),
+            bitwise_u32: HashSet::new(),
+            bitwise_generic_lhs: HashMap::new(),
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
@@ -9023,6 +9036,28 @@ impl<'src> Analyzer<'src> {
         // else (numbers, strings) keeps native JS arithmetic.
         for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {
             let lhs_type = self.infer_type(lhs_id, &Type::Unknown, &HashMap::new());
+            // Record the unsigned-emission verdict for bitwise/shift binaries
+            // while the operand's type is in hand: concrete `u32` settles here;
+            // a generic operand records its constraint for the transformer to
+            // resolve under each monomorphization's substitution.
+            if matches!(
+                op,
+                BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitOr
+            ) {
+                match &lhs_type {
+                    Type::Struct(id, _) if *id == self.primitive_struct_ids["u32"] => {
+                        self.bitwise_u32.insert(binary_id);
+                    }
+                    Type::Generic(constraint_id) => {
+                        self.bitwise_generic_lhs.insert(binary_id, *constraint_id);
+                    }
+                    _ => {}
+                }
+            }
             // A generic-bounded operand (`x == y` where `x: T: PartialEq`, e.g. the
             // element compare inside `Option<T>::eq`) dispatches to the operator
             // trait method, re-resolved to T's concrete impl at each monomorphization
@@ -9683,6 +9718,8 @@ pub struct Program<'src> {
     // `for e in &mut list` loop bindings → whether the element view is `&mut`.
     pub for_each_views: HashMap<Id, bool>,
     pub binary_op_dispatch: HashMap<Id, Id>,
+    pub bitwise_u32: HashSet<Id>,
+    pub bitwise_generic_lhs: HashMap<Id, TypeId>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
@@ -11851,6 +11888,8 @@ pub fn analyze<'src>(
         for_each_next: analyzer.for_each_next,
         for_each_views: analyzer.for_each_views,
         binary_op_dispatch: analyzer.binary_op_dispatch,
+        bitwise_u32: analyzer.bitwise_u32,
+        bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,
         intrinsics,
         global_scope_id,
