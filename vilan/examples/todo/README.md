@@ -30,7 +30,7 @@ both, so a stale bundle is detectable, not mysterious.
 ## How the data flows
 
 The server holds the list in a `Signal<List<Todo>>` and mounts the generated
-dispatcher on `std::http::serve_connected`, which speaks SplitDuplex — plain
+dispatcher on `std::rpc_server::serve_connected`, which speaks SplitDuplex — plain
 HTTP standing in for a WebSocket (`GET /events` is a long-lived SSE stream down,
 `POST /send` and `POST /rpc` go up). Each tab:
 

@@ -1,7 +1,7 @@
 // The server: owns the one authoritative `TodoStore`, serves the browser bundle,
 // and mounts the store's generated dispatcher on a connected server
-// (`std::http::serve_connected`) — `POST /rpc` carries the client's calls, and
-// each session's SSE stream (`GET /events`) carries the list's changes back out
+// (`std::rpc_server::serve_connected`) — `POST /rpc` carries the client's calls,
+// and each session's SSE stream (`GET /events`) carries the list's changes out
 // to every subscribed tab.
 //
 // Persistence is just another subscription: the same `Signal` the wire fans out
@@ -12,7 +12,8 @@ import std::reactive::Signal;
 import std::shared::Shared;
 import std::json::{ Json, FromJson };
 import std::fs::{ exists, read_file_to_str, write_file };
-import std::http::{ serve_connected, Response };
+import std::http::Response;
+import std::rpc_server::serve_connected;
 import common::{ Todo, TodoStore };
 
 // Where the list lives between runs — reloaded on boot, rewritten on change.

@@ -53,7 +53,7 @@ impl LocalTransport with Transport {
 // client↔server transport. The address is programmatic (Q5): construct it with
 // the endpoint URL (`HttpTransport { url = "http://localhost:4000/rpc" }`);
 // where the string comes from — hardcoded, env, config — is the app's choice.
-// The server side is `std::http`'s `serve_rpc` / `rpc_response` mount.
+// The server side is `std::rpc_server`'s `serve_rpc` / `rpc_response` mount.
 struct HttpTransport {
 	url: str,
 }
@@ -122,7 +122,7 @@ fun bridge<Tx: DuplexTransport>(wire: Tx): DuplexEnd {
 // The real duplex transport over plain HTTP (§5's fallback, no WebSocket needed):
 // server→client frames arrive on a long-lived SSE stream (`GET {base}/events`),
 // and client→server frames POST to `{base}/send?c=<connection>`. The server side
-// is `std::http`'s `serve_connected`; open one with `connect_split(base_url)`.
+// is `std::rpc_server`'s `serve_connected`; open one with `connect_split(base_url)`.
 // A true WebSocket transport becomes a drop-in sibling once it lands.
 struct SplitDuplex {
 	// The connection id the server announced — apps use it to correlate this

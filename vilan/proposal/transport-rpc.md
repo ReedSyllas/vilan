@@ -417,7 +417,7 @@ Built-ins:
 - **HTTP** (`HttpTransport`) — **✅ shipped (2026-07-02)** — `impl Transport`: POSTs the
   request frame to the endpoint URL and reads the reply frame from the response body, over
   the host `fetch` (browser/node/deno/bun — a *base* std module). The server side is
-  `std::http`'s `rpc_response` (composable into any `on_request`) / `serve_rpc` mount, which
+  `std::rpc_server`'s `rpc_response` (composable into any `on_request`) / `serve_rpc` mount, which
   runs each frame in the wire-turn `batch`. Verified end-to-end by a CLI test: a Node process
   serves a generated dispatcher and calls itself over localhost — `verify()` (the generated
   Q6 contract check over the built-in `__contract` route) plus stateful round-trips.
@@ -431,7 +431,7 @@ Built-ins:
   *implementation* composing two directed channels internally: Server-Sent Events for
   server→client (`GET {base}/events`, read via fetch streaming + `TextDecoder` — works in the
   browser and node/deno/bun alike) and HTTP POST for client→server (`{base}/send?c=<conn>`).
-  The server side is `std::http::serve_connected` (SSE + send + `/rpc` + a fallback route,
+  The server side is `std::rpc_server::serve_connected` (SSE + send + `/rpc` + a fallback route,
   every inbound frame a wire turn); each connection hands the app a fresh `DuplexEnd`, and the
   client `bridge`s its `SplitDuplex` into one — so `ReactiveServer`/`ReactiveClient` ride the
   real wire *unchanged*. The protocol still sees one `DuplexTransport`; the split is hidden in
@@ -679,7 +679,7 @@ paradigm needs:
    decode garbage). `examples/rpc` migrated to the generated form (byte-identical output),
    and the runtime moved to `std::rpc` (§9).
 4. **`DuplexTransport` + server↔server** (L) — **HTTP half ✅ shipped (2026-07-02)**:
-   `HttpTransport` + the `std::http` RPC mount + generated `verify()` contract enforcement,
+   `HttpTransport` + the RPC mount (now `std::rpc_server`) + generated `verify()` contract enforcement,
    with a real-network CLI test (server↔itself over localhost is server↔server in mechanism —
    same binary, two roles). **Duplex half ✅ shipped (2026-07-02) as the `SplitDuplex`
    fallback** (settled): SSE + POST over pure `std::http`/`fetch`, `serve_connected` on the

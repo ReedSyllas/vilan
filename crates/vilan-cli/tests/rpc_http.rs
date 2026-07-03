@@ -157,7 +157,7 @@ import std::process::exit;
 import std::result::Result::{ self, Ok, Err };
 import std::json::Json;
 import std::rpc::HttpTransport;
-import std::http::serve_rpc;
+import std::rpc_server::serve_rpc;
 
 [service(Client)]
 struct Counter {
@@ -236,7 +236,8 @@ import std::rpc::{
 	HttpTransport, connect_split, bridge,
 	ReactiveServer, ReactiveClient, DuplexEnd,
 };
-import std::http::{ serve_connected, Response };
+import std::http::Response;
+import std::rpc_server::serve_connected;
 
 // Per-connection reactive servers, so `attach` can expose the board's signal on
 // the caller's own wire.
@@ -354,7 +355,8 @@ import std::result::Result::{ self, Ok, Err };
 import std::json::{ Json, FromJson };
 import std::reactive::Signal;
 import std::rpc::{ ReactiveServer, DuplexEnd };
-import std::http::{ serve_connected, Response };
+import std::http::Response;
+import std::rpc_server::serve_connected;
 
 let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
 
