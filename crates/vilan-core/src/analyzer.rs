@@ -10071,6 +10071,11 @@ fn derive_enum_impls(
                      \t}}\n\
                      }}\n"
                 ));
+                // `[derive(Wire)]` also targets the §6.1 visitor (see the
+                // struct arm's note).
+                if *derive == "Wire" {
+                    out.push_str(&enum_wire_visitor_impls(enum_name, &variants));
+                }
             }
             _ => {}
         }
@@ -10385,11 +10390,153 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
                      \t}}\n\
                      }}\n"
                 ));
+                // `[derive(Wire)]` also targets the §6.1 visitor — additive
+                // beside the JSON impls until the codec re-plumb consumes it.
+                if *derive == "Wire" {
+                    out.push_str(&struct_wire_visitor_impls(struct_name, &fields));
+                }
             }
             _ => {}
         }
     }
     out
+}
+
+/// The §6.1 visitor impls for a `[derive(Wire)]` struct: `describe` narrates
+/// each field (name, then the value's own describe) to the serializer, and
+/// `rebuild` pulls them back in declaration order — the field's source type
+/// text carries the static dispatch, exactly like the derived `from_json`.
+/// A type's head name (`List<i32>` -> `List`): rebuilds are emitted
+/// annotation-directed (`let x: List<i32> = List::rebuild(..)`) because the
+/// qualified-generic static spelling (`List<i32>::rebuild(..)`) mis-binds the
+/// impl binder for the INNER `T::rebuild` (pinned #[ignore]) — the annotated
+/// form is the hand-proven shape.
+fn type_head(type_text: &str) -> &str {
+    type_text.split('<').next().unwrap_or(type_text)
+}
+
+fn struct_wire_visitor_impls(struct_name: &str, fields: &[(&str, String)]) -> String {
+    let mut describe = format!("\t\t(serializer.begin_struct)({});\n", fields.len());
+    for (field, _) in fields {
+        describe.push_str(&format!("\t\t(serializer.field)(\"{field}\");\n"));
+        describe.push_str(&format!("\t\tself.{field}.describe(serializer);\n"));
+    }
+    describe.push_str("\t\t(serializer.end_struct)();");
+    let mut rebuild = String::from("\t\t(deserializer.begin_struct)();\n");
+    for (field, field_type) in fields {
+        rebuild.push_str(&format!("\t\t(deserializer.field)(\"{field}\");\n"));
+        rebuild.push_str(&format!(
+            "\t\tlet {field}: {field_type} = {}::rebuild(deserializer);\n",
+            type_head(field_type)
+        ));
+    }
+    rebuild.push_str("\t\t(deserializer.end_struct)();\n");
+    let initializers = fields
+        .iter()
+        .map(|(field, _)| format!("{field} = {field}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    rebuild.push_str(&format!("\t\t{struct_name} {{ {initializers} }}"));
+    format!(
+        "impl {struct_name} with Wire {{\n\
+         \tfun describe(self, serializer: Serializer) {{\n{describe}\n\t}}\n\
+         \tfun rebuild(deserializer: Deserializer): {struct_name} {{\n{rebuild}\n\t}}\n\
+         }}\n"
+    )
+}
+
+/// The §6.1 visitor impls for a `[derive(Wire)]` enum, mirroring the derived
+/// JSON shape: externally-tagged variants, arity>1 payloads as an array. The
+/// unknown-tag arm reports a sticky decode failure and zero-constructs the
+/// first variant through the (now poisoned) deserializer — the caller
+/// discards the value on `Err`. An empty enum gets no impls (nothing to
+/// construct; the missing impl surfaces naturally at a use site).
+fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) -> String {
+    if variants.is_empty() {
+        return String::new();
+    }
+    let mut describe_arms = String::new();
+    for (name, payload_types) in variants {
+        let arity = payload_types.len();
+        if arity == 0 {
+            describe_arms.push_str(&format!(
+                "\t\t\t{enum_name}::{name} => {{\n\
+                 \t\t\t\t(serializer.begin_variant)(\"{name}\", 0);\n\
+                 \t\t\t\t(serializer.end_variant)();\n\
+                 \t\t\t}},\n"
+            ));
+        } else {
+            let binds = (0..arity)
+                .map(|i| format!("let p{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut body = format!("\t\t\t\t(serializer.begin_variant)(\"{name}\", {arity});\n");
+            for index in 0..arity {
+                body.push_str(&format!("\t\t\t\tp{index}.describe(serializer);\n"));
+            }
+            body.push_str("\t\t\t\t(serializer.end_variant)();\n");
+            describe_arms.push_str(&format!(
+                "\t\t\t{enum_name}::{name}({binds}) => {{\n{body}\t\t\t}},\n"
+            ));
+        }
+    }
+    let mut rebuild_arms = String::new();
+    for (name, payload_types) in variants {
+        let arity = payload_types.len();
+        let mut body = format!("\t\t\t\t(deserializer.begin_variant)(\"{name}\", {arity});\n");
+        for (index, payload_type) in payload_types.iter().enumerate() {
+            body.push_str(&format!(
+                "\t\t\t\tlet p{index}: {payload_type} = {}::rebuild(deserializer);\n",
+                type_head(payload_type)
+            ));
+        }
+        body.push_str("\t\t\t\t(deserializer.end_variant)();\n");
+        let construct = if arity == 0 {
+            format!("{enum_name}::{name}")
+        } else {
+            let args = (0..arity)
+                .map(|i| format!("p{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{enum_name}::{name}({args})")
+        };
+        body.push_str(&format!("\t\t\t\t{construct}\n"));
+        rebuild_arms.push_str(&format!("\t\t\t\"{name}\" => {{\n{body}\t\t\t}},\n"));
+    }
+    let (first_name, first_payloads) = &variants[0];
+    let mut fallback_body = String::new();
+    for (index, payload_type) in first_payloads.iter().enumerate() {
+        fallback_body.push_str(&format!(
+            "\t\t\t\tlet f{index}: {payload_type} = {}::rebuild(deserializer);\n",
+            type_head(payload_type)
+        ));
+    }
+    let fallback = if first_payloads.is_empty() {
+        format!("{enum_name}::{first_name}")
+    } else {
+        let args = (0..first_payloads.len())
+            .map(|index| format!("f{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{enum_name}::{first_name}({args})")
+    };
+    rebuild_arms.push_str(&format!(
+        "\t\t\t_ => {{\n\
+         \t\t\t\t(deserializer.fail)(i\"unknown variant '{{tag}}'\");\n{fallback_body}\
+         \t\t\t\t{fallback}\n\
+         \t\t\t}},\n"
+    ));
+    format!(
+        "impl {enum_name} with Wire {{\n\
+         \tfun describe(self, serializer: Serializer) {{\n\
+         \t\tmatch self {{\n{describe_arms}\t\t}}\n\
+         \t}}\n\
+         \tfun rebuild(deserializer: Deserializer): {enum_name} {{\n\
+         \t\tlet tag = (deserializer.variant_tag)();\n\
+         \t\tmatch tag {{\n{rebuild_arms}\t\t}}\n\
+         \t}}\n\
+         }}\n"
+    )
 }
 
 /// Synthesizes and parses the trait impls for every `[derive(..)]` item at the top
@@ -10439,6 +10586,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     }
     if traits.contains("Json") || traits.contains("Wire") {
         prelude.push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
+    }
+    if traits.contains("Wire") {
+        prelude.push_str("import std::wire::{ Wire, Serializer, Deserializer };\n");
     }
     if enum_derives_json {
         prelude.push_str("import std::io::panic;\n");

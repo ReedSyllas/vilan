@@ -3248,3 +3248,103 @@ fn hand_written_wire_impls_round_trip_through_json() {
         "{\"id\":7,\"name\":\"ada \\\"the\\\" first\",\"scores\":[3,1,4],\"nickname\":null,\"status\":{\"Busy\":[\"proofs\",45]}}\n7\n3\nbusy proofs 45\n{\"id\":1,\"name\":\"bob\",\"scores\":[],\"nickname\":\"bo\",\"status\":{\"Away\":\"lunch\"}}\nerr: missing field 'nickname'\nerr: unknown variant 'Vanished'\n",
     );
 }
+
+#[test]
+#[ignore = "a qualified-generic static call mis-binds the impl binder for INNER trait statics"]
+fn qualified_generic_static_resolves_inner_trait_statics() {
+    // `List<i32>::rebuild(d)` (the qualified-generic spelling) emits the inner
+    // `T::rebuild` as an EMPTY function — T never binds — while the
+    // annotation-directed `let x: List<i32> = List::rebuild(d)` works. The
+    // Wire derive emits the annotated form because of this.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Build {
+            fun build(seed: i32): Build;
+        }
+        impl i32 with Build {
+            fun build(seed: i32): i32 { seed + 1 }
+        }
+        struct Boxy<T> { value: T }
+        impl Boxy<type T: Build> {
+            fun make(seed: i32): Boxy<T> {
+                Boxy { value = T::build(seed) }
+            }
+        }
+        fun main() {
+            let via_annotation: Boxy<i32> = Boxy::make(1);
+            print(via_annotation.value);
+            let via_qualified = Boxy<i32>::make(1);
+            print(via_qualified.value);
+        }
+        "#,
+        "2\n2\n",
+    );
+}
+
+#[test]
+fn derived_wire_visitor_matches_to_json_and_round_trips() {
+    // `[derive(Wire)]` now also emits the §6.1 visitor impls: the described
+    // output must equal the derived `to_json` byte-for-byte, rebuild must
+    // round-trip (scalars, List, Option, a nested derived enum), and
+    // structural failures surface as sticky decode errors through the
+    // GENERATED rebuilds.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, encode_json, decode_json };
+
+        [derive(Wire)]
+        enum Status {
+            Offline,
+            Away(str),
+            Busy(str, i32),
+        }
+
+        [derive(Wire)]
+        struct Profile {
+            id: i32,
+            name: str,
+            scores: List<i32>,
+            nickname: Option<str>,
+            status: Status,
+        }
+
+        fun main() {
+            let profile = Profile {
+                id = 7,
+                name = "ada",
+                scores = [3, 1, 4],
+                nickname = None,
+                status = Status::Busy("proofs", 45),
+            };
+            let via_visitor = encode_json(profile);
+            print(via_visitor == profile.to_json());
+            let decoded: Result<Profile, str> = decode_json(via_visitor);
+            match decoded {
+                Ok(let back) => {
+                    print(back.id);
+                    match back.status {
+                        Status::Busy(let task, let minutes) => print(i"busy {task} {minutes}"),
+                        _ => print("wrong"),
+                    }
+                },
+                Err(let reason) => print(i"failed: {reason}"),
+            }
+            let missing: Result<Profile, str> = decode_json("{\"id\":1}");
+            match missing {
+                Ok(let value) => print("should fail"),
+                Err(let reason) => print(i"err: {reason}"),
+            }
+            let unknown: Result<Status, str> = decode_json("\"Vanished\"");
+            match unknown {
+                Ok(let value) => print("should fail"),
+                Err(let reason) => print(i"err: {reason}"),
+            }
+        }
+        "#,
+        "true\n7\nbusy proofs 45\nerr: missing field 'name'\nerr: unknown variant 'Vanished'\n",
+    );
+}
