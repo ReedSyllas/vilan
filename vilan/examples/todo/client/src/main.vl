@@ -1,27 +1,35 @@
-import std::dom::{ Element, get_element_by_id, create_element };
-import std::fetch::{ fetch, Response };
-import std::ui::{ mount, view, View };
+// The wiring: mount the UI immediately, then connect to the server (same
+// origin), attach this connection to the shared list, and let updates stream
+// into `items`. The UI never writes `items` itself — the server owns the data,
+// and every change (this tab's included) arrives over the wire.
+
+import std::print;
 import std::reactive::Signal;
+import std::json::{ Json, FromJson };
+import std::result::Result::{ Ok, Err };
+import std::rpc::{ HttpTransport, connect_split, bridge, ReactiveClient };
+import std::ui::mount;
+import common::{ Todo, TodoClient };
 import pkg::todos::todos;
 
-fun main() {
-	mount("app", app());
-}
+async fun main() {
+	// The local mirror of the server's list — the wire is its only writer.
+	let items: Signal<List<Todo>> = Signal::new([]);
+	let client = TodoClient { transport = HttpTransport { url = "/rpc" } };
+	mount("app", todos(client, items));
 
-fun app(): View {
-	todos()
-}
-
-fun counter(): View {
-	let count = Signal::new(0);
-
-	view("section")
-		.class("counter")
-		.child(view("h2").text("Counter"))
-		// `bind_text` binds to a `Source<str>`; derive one from `count`. The
-		// i-string renders the number directly (host coercion) — see the README
-		// note on calling a generic like `format` inside a binding closure.
-		.child(view("p").bind_text(count.map(|n| i"Count: {n}")))
-		.child(view("button").text("−").on("click", || count.set_with(|n| n - 1)))
-		.child(view("button").text("+").on("click", || count.set_with(|n| n + 1)))
+	// SplitDuplex to the same origin: SSE down, POSTs up. `attach` exposes the
+	// server's signal on THIS connection; subscribing delivers the current list
+	// at once, then every change as it lands.
+	let split = connect_split("");
+	let reactive = ReactiveClient::new(bridge(split));
+	match client.attach(i32::from_json(split.connection)) {
+		Ok(let channel) => {
+			let syncing = reactive.source(channel).sub(|json| {
+				let synced: List<Todo> = List::from_json(json);
+				items.set(synced);
+			});
+		},
+		Err(let error) => print(i"attach failed: {error.to_json()}"),
+	}
 }

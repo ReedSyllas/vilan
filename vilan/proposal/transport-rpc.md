@@ -437,7 +437,11 @@ Built-ins:
   real wire *unchanged*. The protocol still sees one `DuplexTransport`; the split is hidden in
   the transport — which is where the "duplex is two pipes" case belongs, not in the protocol's
   interface. Verified by a CLI test: two sessions over real SSE, one RPC mutation observed by
-  both.
+  both. Connections also **end**: the SSE stream's `close` (tab closed, network gone) scrubs
+  the server-side wire and fires `serve_connected`'s `on_disconnect(id)`, and the app disposes
+  that session's `ReactiveServer` (now `Disposable`; `expose` retains its source→mirror
+  subscriptions so teardown actually releases the exposed sources) — without this a
+  long-running server leaks a session per ever-connected client.
 
 A custom transport (message queue, IPC pipe, WebRTC, a test double) is just an `impl` of the
 shape it can provide — first-class, no registry.
@@ -692,11 +696,23 @@ paradigm needs:
    protocol over the duplex transport (§8). The capstone.
 6. **Validation: example apps + benchmarks** (M; agreed 2026-07-02) — build/update the example
    projects on the finished stack. Headline: a **todo app with server-side data storage**
-   (browser client ↔ server over HTTP RPC), whose milestone is **realtime sync over WebSocket** —
+   (browser client ↔ server over HTTP RPC), whose milestone is **realtime sync** —
    multiple sessions connected and subscribed to the todo list, every mutation flowing to all of
-   them through the reactive protocol + wire turn. Plus **network benchmarks** (throughput,
-   frames-per-mutation / coalescing efficiency, payload sizes — JSON vs the later binary codec)
-   so the transport and batching claims are measured, not asserted.
+   them through the reactive protocol + wire turn. **Todo app ✅ shipped (2026-07-02)** as
+   `examples/todo`: a three-package workspace (`common` holds `[derive(Wire)] Todo` +
+   `[service(TodoClient)] TodoStore`; the generated `TodoClient` imports cleanly into the
+   browser bundle), realtime sync over SplitDuplex verified end-to-end (two live sessions each
+   observing the other's add/toggle/remove), and persistence as a plain signal subscription
+   (`todos.sub → fs::write_file`, reloaded via the new `fs::exists` on boot, ids seeded past
+   the stored maximum). The slice also closed the **connection lifecycle** gap it exposed:
+   `serve_connected` gained `on_disconnect(id)` (an SSE stream's `close` scrubs the wire and
+   tells the app), and `ReactiveServer` is now `Disposable` — `expose` *retains* its
+   source→mirror subscriptions (previously discarded, so a session could never be torn down)
+   and `dispose()` releases every forward and mirror; pinned by a CLI test where a subscribed
+   client process dies and a surviving session still observes later mutations. *Remaining in
+   this phase:* **network benchmarks** (throughput, frames-per-mutation / coalescing
+   efficiency, payload sizes — JSON vs the later binary codec) so the transport and batching
+   claims are measured, not asserted.
 
 The agreed build order within phases 2–3 (2026-07-02): the `[rpc]`/`[expose]` checks first, then
 the `[trait_only]`/`[doc(hidden)]` hygiene attributes (§3.2), then `[service(Client)]`

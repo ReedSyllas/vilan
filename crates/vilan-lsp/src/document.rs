@@ -1048,9 +1048,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn std_root() -> PathBuf {
+        // The std PACKAGE directory (holding `vilan.toml`), like the server's
+        // `discover_std_dir` — pointing at the bare source root instead would
+        // drop the manifest's platform layers (no `std::fs`/`std::http`/…).
         std::env::var_os("VILAN_STD")
             .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src"))
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"))
     }
 
     /// The completion labels offered at the cursor marked `|` in `src`.
@@ -1116,12 +1119,22 @@ mod tests {
 
     #[test]
     fn rpc_example_analyzes_without_diagnostics() {
-        // The entry: the object-stub client + cross-file `pkg::rpc` imports.
+        // The entry: the generated `[service(Client)]` paradigm over `std::rpc`
+        // (the runtime module itself now lives in std).
         assert_example_analyzes_clean("../../vilan/examples/rpc/src/main.vl");
-        // The library module it imports: a non-entry file (no `main`) must analyze
-        // as a package module via project context, not be rejected for lacking a
-        // `main` the way a bare `vilan check <file>` would.
-        assert_example_analyzes_clean("../../vilan/examples/rpc/src/rpc.vl");
+    }
+
+    #[test]
+    fn todo_example_analyzes_without_diagnostics() {
+        // The realtime workspace: both entries import the shared `common`
+        // library (`[derive(Wire)]` + a generated `[service(TodoClient)]`), and
+        // the non-entry files (a package module, a `[library]` module — neither
+        // has a `main`) must analyze via project context, not be rejected the
+        // way a bare `vilan check <file>` would.
+        assert_example_analyzes_clean("../../vilan/examples/todo/server/src/main.vl");
+        assert_example_analyzes_clean("../../vilan/examples/todo/client/src/main.vl");
+        assert_example_analyzes_clean("../../vilan/examples/todo/client/src/todos.vl");
+        assert_example_analyzes_clean("../../vilan/examples/todo/common/src/lib.vl");
     }
 
     #[test]

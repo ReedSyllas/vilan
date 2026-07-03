@@ -1,3 +1,6 @@
 [package]
 name = "server"
 target = "node"
+
+[package.dependencies]
+common = { path = "../common" }

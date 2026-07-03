@@ -1,43 +1,41 @@
-// todos.vl — the fuller picture on the explicit-dependency core: derived signals
-// (`derive`), a two-input dependency (`combine`), a reactive keyed list, and
-// conditional rendering. The dependency graph is literally the combinator tree.
+// The UI over the server's list. `items` is fed by the wire (the server owns
+// the data); `draft` and `filter` are view-state and stay client-local — the
+// split the derived-signal combinators are for: `remaining` derives from the
+// shared list, `visible` combines it with this tab's own filter.
 //
-// NOTE: this is an API design proposal — not implemented yet.
+// Mutations go through the typed `TodoClient` stub. Note what's ABSENT: no
+// local list edit, no refetch — the change comes back over the wire and lands
+// in `items` like anyone else's would.
 
+import std::print;
 import std::ui::{ view, View };
 import std::reactive::{ Signal, combine };
 import std::display::format;
+import std::json::Json;
+import std::result::Result::{ self, Ok, Err };
+import std::rpc::{ HttpTransport, RpcError };
+import common::{ Todo, TodoClient };
 
-struct Todo {
-	id: i32,
-	label: str,
-	done: bool,
-}
-
-fun todos(): View {
-	// All state is plain signals. Value semantics means `set_with` hands the body
-	// an owned copy of the current value to mutate and return.
-	let items: Signal<List<Todo>> = Signal::new([]);
+fun todos(client: TodoClient<HttpTransport>, items: Signal<List<Todo>>): View {
 	let draft = Signal::new("");
 	let filter = Signal::new("all"); // "all" | "active" | "done"
-	let next_id = Signal::new(0);
 
 	let remaining: Signal<i32> = items.map(|list| {
 		mut open = 0;
 		for todo in list {
 			if !todo.done {
-				open = open + 1;
+				open += 1;
 			}
 		}
 		open
 	});
 
 	let visible: Signal<List<Todo>> =
-		combine((items, filter)).map(|(list, filter)| {
+		combine((items, filter)).map(|(list, current)| {
 			mut shown: List<Todo> = [];
 			for todo in list {
 				let keep =
-					filter == "all" || (filter == "active" && !todo.done) || (filter == "done" && todo.done);
+					current == "all" || (current == "active" && !todo.done) || (current == "done" && todo.done);
 				if keep {
 					shown.push(todo);
 				}
@@ -48,13 +46,7 @@ fun todos(): View {
 	let add = || {
 		let label = draft.get(); // a one-shot SAMPLE — we want the value, not a dependency
 		if label != "" {
-			let id = next_id.get();
-			next_id.set(id + 1);
-			items.set_with(|list| {
-				mut next = list;
-				next.push(Todo { id = id, label = label, done = false });
-				next
-			});
+			report(client.add(label));
 			draft.set("");
 		}
 	};
@@ -77,15 +69,13 @@ fun todos(): View {
 				.child(filter_button(filter, "active", "Active"))
 				.child(filter_button(filter, "done", "Done"))
 		)
-		// `bind_each` renders one view per element, keyed by `Todo.id`, and
-		// reconciles the DOM against `visible` as it changes.
-		.child(view("ul").bind_each(visible, |todo| todo.id, |todo| todo_row(items, todo)))
-		// `show` includes/removes a node on a reactive condition.
+		// `bind_each` renders one row per element and re-renders as `visible`
+		// changes — whether this tab caused the change or another one did.
+		.child(view("ul").bind_each(visible, |todo| todo.id, |todo| todo_row(client, todo)))
 		.child(view("p").class("empty").text("Nothing here 🎉").show(visible.map(|list| list.len() == 0)))
 }
 
-// A filter button highlights itself when its value is the active filter — a
-// single-dependency `derive` over `filter`.
+// A filter button highlights itself when its value is the active filter.
 fun filter_button(filter: Signal<str>, value: str, label: str): View {
 	view("button")
 		.text(label)
@@ -93,40 +83,30 @@ fun filter_button(filter: Signal<str>, value: str, label: str): View {
 		.on("click", || filter.set(value))
 }
 
-// One row. `todo` is a plain value (a snapshot from `bind_each`), so its styling
-// is static for this render; toggling rebuilds `items`, which re-renders the row.
-// It takes the shared `items` signal so the checkbox / remove button can update
-// the list everyone reads from.
-fun todo_row(items: Signal<List<Todo>>, todo: Todo): View {
+// One row — a snapshot from `bind_each`; any change to the list re-renders it.
+// The checkbox reflects `done` and its edits go through the client stub.
+fun todo_row(client: TodoClient<HttpTransport>, todo: Todo): View {
 	view("li")
 		.class(if todo.done { "done" } else { "" })
-		.child(view("input").attr("type", "checkbox").on("change", || toggle(items, todo.id)))
+		.child(checkbox(client, todo))
 		.child(view("span").text(todo.label))
-		.child(view("button").class("remove").text("✕").on("click", || remove(items, todo.id)))
+		.child(view("button").class("remove").text("✕").on("click", || report(client.remove(todo.id))))
 }
 
-fun toggle(items: Signal<List<Todo>>, id: i32) {
-	items.set_with(|list| {
-		mut next: List<Todo> = [];
-		for todo in list {
-			if todo.id == id {
-				next.push(Todo { id = todo.id, label = todo.label, done = !todo.done });
-			} else {
-				next.push(todo);
-			}
-		}
-		next
-	});
+fun checkbox(client: TodoClient<HttpTransport>, todo: Todo): View {
+	let box = view("input").attr("type", "checkbox").on("change", || report(client.toggle(todo.id)));
+	if todo.done {
+		box.attr("checked", "checked")
+	} else {
+		box
+	}
 }
 
-fun remove(items: Signal<List<Todo>>, id: i32) {
-	items.set_with(|list| {
-		mut kept: List<Todo> = [];
-		for todo in list {
-			if todo.id != id {
-				kept.push(todo);
-			}
-		}
-		kept
-	});
+// RPC outcomes: the authoritative state comes back over the wire, so success
+// needs no handling here; a failure is worth a console line.
+fun report<T>(outcome: Result<T, RpcError>) {
+	match outcome {
+		Ok(let value) => {},
+		Err(let error) => print(i"rpc error: {error.to_json()}"),
+	}
 }
