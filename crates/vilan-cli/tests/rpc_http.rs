@@ -503,3 +503,129 @@ fun main() {{
     let _ = std::fs::remove_dir_all(&doomed_dir);
     let _ = std::fs::remove_dir_all(&survivor_dir);
 }
+
+#[test]
+fn realtime_sync_over_a_true_websocket() {
+    // The WebSocket transport end to end (transport-rpc.md §5): the RFC 6455
+    // handshake vector, the in-language server half (upgrade + frame layer on
+    // serve_connected's port), the host-WebSocket client, and the drop-in
+    // promise — this is the SSE realtime test with `connect_split` swapped for
+    // `connect_socket`, nothing else.
+    let dir = temp_project("websocket");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(
+        &dir,
+        "src/main.vl",
+        r#"import std::print;
+import std::shared::Shared;
+import std::process::exit;
+import std::time::sleep;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::json::{ Json, FromJson, json_codec };
+import std::wire::Serializer;
+import std::reactive::Signal;
+import std::rpc::{
+	HttpTransport, connect_socket, bridge,
+	ReactiveServer, ReactiveClient, DuplexEnd,
+};
+import std::rpc_server::{ serve_connected, ws_accept_key };
+import std::http::Response;
+
+let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+[service(Client)]
+struct Board {
+	count: Signal<i32>,
+}
+
+impl Board {
+	[rpc]
+	fun attach(self, connection: i32): i32 {
+		mut channel = 0 - 1;
+		for entry in sessions.read() {
+			let (id, reactive) = entry;
+			if id == connection {
+				channel = reactive.expose(self.count);
+			}
+		}
+		channel
+	}
+
+	[rpc]
+	fun add(self, by: i32): i32 {
+		self.count.set(self.count.get() + by);
+		self.count.get()
+	}
+}
+
+fun main() {
+	// RFC 6455 §1.3's worked handshake example.
+	let accept = ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==");
+	print(i"accept ok = {accept == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="}");
+
+	let board = Board { count = Signal::new(0) };
+	serve_connected(
+		9291,
+		board.dispatcher().into_protocol(json_codec()),
+		|id, end| {
+			sessions.write().push((id, ReactiveServer::new(end)));
+		},
+		|id| print(i"closed {id}"),
+		|request| Response::builder().code(404).body("nope").build(),
+		|| {
+			run_clients();
+		},
+	);
+}
+
+fun watch(name: str, base: str): Client<HttpTransport> {
+	let socket = connect_socket("ws://localhost:9291");
+	let reactive = ReactiveClient::new(bridge(socket));
+	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
+	match client.attach(i32::from_json(socket.connection)) {
+		Ok(let channel) => {
+			let watching = reactive.source(channel).sub(|json| {
+				let n: i32 = i32::from_json(json);
+				print(i"{name} sees {n}");
+			});
+		},
+		Err(let error) => print(i"{name} attach err {error.to_json()}"),
+	}
+	client
+}
+
+fun run_clients() {
+	let base = "http://localhost:9291";
+	let alice = watch("alice", base);
+	let bob = watch("bob", base);
+	sleep(300);
+	match alice.add(7) {
+		Ok(let n) => print(i"alice add -> {n}"),
+		Err(let error) => print(i"add err {error.to_json()}"),
+	}
+	sleep(300);
+	exit(0);
+}
+"#,
+    );
+    let stdout = vilan_run_with_timeout(&dir, Duration::from_secs(60));
+    for expected in [
+        "accept ok = true",
+        "alice sees 0",
+        "bob sees 0",
+        "alice sees 7",
+        "bob sees 7",
+        "alice add -> 7",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in websocket output:\n{stdout}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -5,6 +5,7 @@
 // protocol mounts (RPC, the connected server) live in `std::rpc_server`.
 
 import pkg::bytes::Bytes;
+import pkg::json::JsonValue;
 
 // --- Raw node:http bindings ---
 
@@ -16,6 +17,11 @@ external struct NodeServer;
 impl NodeServer {
 	[extern(method)]
 	external fun listen(self, port: i32, on_ready: || void);
+
+	// Subscribe to the server's `upgrade` event — a WebSocket handshake
+	// arrives as `(request, raw socket, head)` instead of a normal request.
+	[extern(method, "on")]
+	external fun on_upgrade(self, event: str, handler: |NodeRequest, NodeSocket, Bytes| void);
 }
 
 external struct NodeRequest;
@@ -26,6 +32,35 @@ impl NodeRequest {
 
 	[extern(get, "method")]
 	external fun method(self): str;
+
+	// The (lowercased) request headers, as an opaque host object — read named
+	// entries with `std::json`'s `JsonValue` accessors (dynamic property access
+	// has no plain extern shape).
+	[extern(get, "headers")]
+	external fun headers(self): JsonValue;
+}
+
+// A raw TCP socket (`net.Socket`), handed over on a protocol upgrade. Frames
+// are written as bytes; the handshake response is plain text.
+external struct NodeSocket;
+
+impl NodeSocket {
+	[extern(method, "write")]
+	external fun write_text(self, data: str);
+
+	[extern(method, "write")]
+	external fun write_bytes(self, data: Bytes);
+
+	// Inbound chunks (`"data"` — node hands a Buffer, which IS a Uint8Array).
+	[extern(method, "on")]
+	external fun on_bytes(self, event: str, handler: |Bytes| void);
+
+	// Lifecycle events with no payload (`"close"`, `"error"`).
+	[extern(method, "on")]
+	external fun on_signal(self, event: str, handler: || void);
+
+	[extern(method, "destroy")]
+	external fun destroy(self);
 }
 
 // Reads a request's full body (a stream) to text. `node:stream/consumers` `text`

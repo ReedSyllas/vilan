@@ -1,0 +1,218 @@
+// `std::ws` — the RFC 6455 WebSocket frame layer (transport-rpc.md §5): pure
+// byte logic, shared by the in-language server half (`std::rpc_server`'s
+// upgrade path — node has no WS server) and unit tests. Clients don't need it:
+// every host (browser, node 22+, deno, bun) provides the `WebSocket` class,
+// which does its own framing.
+//
+// Scope (v1): unfragmented and fragmented text/binary, client masking
+// (client→server frames are masked; server→client frames are written bare),
+// ping/pong, close. Lengths use the 7/16/64-bit ladder; a 64-bit length above
+// 2^31-1 is treated as a protocol violation (nothing that big is a frame).
+
+import pkg::shared::Shared;
+import pkg::bytes::{ Bytes, encode_utf8, decode_utf8 };
+
+// --- Encoding (server → client: FIN set, unmasked) ---------------------------
+
+// One complete frame: FIN | `opcode`, the length ladder, then the payload.
+fun encode_frame(opcode: i32, payload: Bytes): Bytes {
+	let length = payload.len();
+	mut header = Bytes::alloc(2);
+	if length < 126 {
+		header.set(1, length);
+	} else if length < 65536 {
+		header = Bytes::alloc(4);
+		header.set(1, 126);
+		header.set(2, length >> 8);
+		header.set(3, length);
+	} else {
+		header = Bytes::alloc(10);
+		header.set(1, 127);
+		// Bytes 2–5 stay zero (payloads are capped well under 2^32).
+		header.set(6, length >> 24);
+		header.set(7, length >> 16);
+		header.set(8, length >> 8);
+		header.set(9, length);
+	}
+	header.set(0, 0x80 | opcode);
+	Bytes::concat(header, payload)
+}
+
+fun text_frame(text: str): Bytes {
+	encode_frame(0x1, encode_utf8(text))
+}
+
+fun pong_frame(payload: Bytes): Bytes {
+	encode_frame(0xA, payload)
+}
+
+fun close_frame(): Bytes {
+	encode_frame(0x8, Bytes::alloc(0))
+}
+
+// --- Parsing (client → server) ------------------------------------------------
+
+// What one `feed` can surface. Pongs are consumed silently; a `Ping` asks the
+// caller to write `pong_frame(payload)` back; `Closed` ends the connection
+// (sent close, or a protocol violation).
+enum WsEvent {
+	Text(str),
+	Binary(Bytes),
+	Ping(Bytes),
+	Closed,
+}
+
+// A stateful frame parser: feed it raw socket chunks, get complete events.
+// Partial frames wait in `buffer`; fragmented messages accumulate in
+// `fragment_*` until their FIN.
+struct WsParser {
+	buffer: Shared<Bytes>,
+	fragment_opcode: Shared<i32>,
+	fragment_payload: Shared<Bytes>,
+	violated: Shared<bool>,
+}
+
+impl WsParser {
+	fun new(): WsParser {
+		WsParser {
+			buffer = Shared::new(Bytes::alloc(0)),
+			fragment_opcode = Shared::new(0),
+			fragment_payload = Shared::new(Bytes::alloc(0)),
+			violated = Shared::new(false),
+		}
+	}
+
+	// Consume `chunk`, returning every event completed by it, in order.
+	fun feed(self, chunk: Bytes): List<WsEvent> {
+		mut events: List<WsEvent> = [];
+		if self.violated.read() {
+			ret events;
+		}
+		self.buffer.write() = Bytes::concat(self.buffer.read(), chunk);
+		mut scanning = true;
+		for scanning {
+			let buffer = self.buffer.read();
+			let available = buffer.len();
+			if available < 2 {
+				scanning = false;
+			} else {
+				let first = buffer.get(0);
+				let second = buffer.get(1);
+				let fin = first & 0x80 != 0;
+				let opcode = first & 0x0F;
+				let masked = second & 0x80 != 0;
+				mut length = second & 0x7F;
+				mut header = 2;
+				mut valid = true;
+				if length == 126 {
+					if available < 4 {
+						valid = false;
+						scanning = false;
+					} else {
+						length = buffer.get(2) << 8 | buffer.get(3);
+						header = 4;
+					}
+				} else if length == 127 {
+					if available < 10 {
+						valid = false;
+						scanning = false;
+					} else {
+						// The high 5 bytes must be zero AND the low 31 bits
+						// must not carry the sign — anything larger is hostile.
+						let oversized =
+							buffer.get(2) != 0 || buffer.get(3) != 0 || buffer.get(4) != 0
+							|| buffer.get(5) != 0 || buffer.get(6) & 0x80 != 0;
+						if oversized {
+							self.violated.write() = true;
+							events.push(WsEvent::Closed);
+							ret events;
+						}
+						length = buffer.get(6) << 24 | buffer.get(7) << 16 | buffer.get(8) << 8 | buffer.get(9);
+						header = 10;
+					}
+				}
+				if valid {
+					let mask_at = header;
+					let total = if masked { header + 4 + length } else { header + length };
+					if available < total {
+						scanning = false;
+					} else {
+						let payload_at = if masked { mask_at + 4 } else { mask_at };
+						let payload = buffer.slice(payload_at, payload_at + length);
+						if masked {
+							mut index = 0;
+							for index < length {
+								payload.set(index, payload.get(index) ^ buffer.get(mask_at + (index & 3)));
+								index += 1;
+							}
+						}
+						self.buffer.write() = buffer.slice(total, available);
+						for event in self.dispatch(fin, opcode, payload) {
+							events.push(event);
+						}
+						if self.violated.read() {
+							ret events;
+						}
+					}
+				}
+			}
+		}
+		events
+	}
+
+	// Route one complete frame, reassembling fragments; returns the events it
+	// completed (empty for a fragment start, a pong, or a swallowed frame).
+	fun dispatch(self, fin: bool, opcode: i32, payload: Bytes): List<WsEvent> {
+		mut events: List<WsEvent> = [];
+		if opcode == 0x9 {
+			events.push(WsEvent::Ping(payload));
+			ret events;
+		}
+		if opcode == 0xA {
+			ret events; // pong — nothing to do
+		}
+		if opcode == 0x8 {
+			self.violated.write() = true; // no frames after close
+			events.push(WsEvent::Closed);
+			ret events;
+		}
+		if opcode == 0x0 {
+			// Continuation of a pending fragmented message.
+			if self.fragment_opcode.read() == 0 {
+				self.violated.write() = true;
+				events.push(WsEvent::Closed);
+				ret events;
+			}
+			self.fragment_payload.write() = Bytes::concat(self.fragment_payload.read(), payload);
+			if fin {
+				let complete_opcode = self.fragment_opcode.read();
+				let complete = self.fragment_payload.read();
+				self.fragment_opcode.write() = 0;
+				self.fragment_payload.write() = Bytes::alloc(0);
+				events.push(self.emit(complete_opcode, complete));
+			}
+			ret events;
+		}
+		if opcode == 0x1 || opcode == 0x2 {
+			if fin {
+				events.push(self.emit(opcode, payload));
+			} else {
+				self.fragment_opcode.write() = opcode;
+				self.fragment_payload.write() = payload;
+			}
+			ret events;
+		}
+		// Unknown opcode — a violation.
+		self.violated.write() = true;
+		events.push(WsEvent::Closed);
+		events
+	}
+
+	fun emit(self, opcode: i32, payload: Bytes): WsEvent {
+		if opcode == 0x1 {
+			WsEvent::Text(decode_utf8(payload))
+		} else {
+			WsEvent::Binary(payload)
+		}
+	}
+}

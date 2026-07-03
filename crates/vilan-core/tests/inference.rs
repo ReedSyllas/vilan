@@ -3518,3 +3518,71 @@ fn generated_decode_gate_rejects_a_garbled_request() {
         "err: {\"Decode\":\"unexpected end of frame\"}\ncount still 0\n",
     );
 }
+
+#[test]
+fn ws_parser_handles_the_rfc_vectors() {
+    // std::ws (transport-rpc.md §5): the RFC 6455 masked "Hello" vector, the
+    // same frame split across two feeds, our own encoder round-tripped, the
+    // 16-bit length ladder, fragmentation reassembly, ping surfacing, and
+    // close ending the stream (later frames ignored).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::bytes::{ Bytes, encode_utf8 };
+        import std::ws::{ WsParser, WsEvent, text_frame, encode_frame, close_frame };
+
+        fun show(events: List<WsEvent>) {
+            for event in events {
+                match event {
+                    WsEvent::Text(let text) => print(i"text: {text}"),
+                    WsEvent::Binary(let bytes) => print(i"binary: {bytes.len()} bytes"),
+                    WsEvent::Ping(let payload) => print(i"ping: {payload.len()} bytes"),
+                    WsEvent::Closed => print("closed"),
+                }
+            }
+        }
+
+        fun masked_hello(): Bytes {
+            let masked = Bytes::alloc(11);
+            masked.set(0, 0x81);
+            masked.set(1, 0x85);
+            masked.set(2, 0x37);
+            masked.set(3, 0xFA);
+            masked.set(4, 0x21);
+            masked.set(5, 0x3D);
+            masked.set(6, 0x7F);
+            masked.set(7, 0x9F);
+            masked.set(8, 0x4D);
+            masked.set(9, 0x51);
+            masked.set(10, 0x58);
+            masked
+        }
+
+        fun main() {
+            let parser = WsParser::new();
+            show(parser.feed(masked_hello()));
+            let splitter = WsParser::new();
+            show(splitter.feed(masked_hello().slice(0, 5)));
+            print("(partial fed)");
+            show(splitter.feed(masked_hello().slice(5, 11)));
+            let echo = WsParser::new();
+            show(echo.feed(text_frame("server says hi")));
+            let big = encode_frame(0x2, Bytes::alloc(200));
+            print(i"200B frame = {big.len()} bytes on the wire");
+            show(echo.feed(big));
+            let part1 = text_frame("Hel");
+            part1.set(0, 0x01);
+            let part2 = text_frame("lo");
+            part2.set(0, 0x80);
+            let fragmented = WsParser::new();
+            show(fragmented.feed(Bytes::concat(part1, part2)));
+            let control = WsParser::new();
+            show(control.feed(encode_frame(0x9, encode_utf8("hb"))));
+            show(control.feed(close_frame()));
+            show(control.feed(text_frame("after close")));
+            print("done");
+        }
+        "#,
+        "text: Hello\n(partial fed)\ntext: Hello\ntext: server says hi\n200B frame = 204 bytes on the wire\nbinary: 200 bytes\ntext: Hello\nping: 2 bytes\nclosed\ndone\n",
+    );
+}

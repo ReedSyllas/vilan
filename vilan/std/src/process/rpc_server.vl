@@ -14,11 +14,37 @@ import pkg::option::Option::{ Some, None };
 import pkg::shared::Shared;
 import pkg::reactive::batch;
 import pkg::wire::Frame;
+import pkg::bytes::Bytes;
+import pkg::json::{ JsonValue, FromJson, has_json_field };
+import pkg::ws::{ WsParser, WsEvent, text_frame, pong_frame, close_frame };
 import pkg::rpc::{ RpcProtocol, DuplexEnd, duplex_pair };
 import pkg::http::{
 	node_create_server, read_request_body, read_request_bytes,
+	NodeRequest, NodeSocket,
 	Request, Response, Server,
 };
+
+// --- WebSocket handshake (node:crypto) ------------------------------------------
+
+external struct Hash;
+
+[extern("node:crypto", "createHash")]
+external fun create_hash(algorithm: str): Hash;
+
+impl Hash {
+	[extern(method, "update")]
+	external fun update(self, data: str): Hash;
+
+	[extern(method, "digest")]
+	external fun digest(self, encoding: str): str;
+}
+
+// RFC 6455 §4.2.2: the `Sec-WebSocket-Accept` proof — base64(SHA-1(key+GUID)).
+fun ws_accept_key(key: str): str {
+	create_hash("sha1")
+		.update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+		.digest("base64")
+}
 
 // --- Request/response mount ----------------------------------------------------
 
@@ -148,7 +174,79 @@ fun serve_connected(
 			node_response.end(response.body);
 		}
 	});
+	// A WebSocket upgrade is the same connection contract over the true duplex
+	// wire (§5): handshake, then the socket joins `connections` exactly like an
+	// SSE stream — same `__conn` announcement, same `on_connect`/`on_disconnect`,
+	// same app code. Clients pick the transport (`connect_socket` here,
+	// `connect_split` for SSE).
+	node_server.on_upgrade("upgrade", |request, socket, head| {
+		accept_socket(request, socket, head, on_connect, on_disconnect);
+	});
 	node_server.listen(port, on_ready);
+}
+
+// Perform the RFC 6455 handshake and wire the socket into the connection
+// registry. Client→server text frames are wire turns; pings are answered;
+// close (or a protocol violation) tears the session down like an SSE close.
+fun accept_socket(
+	request: NodeRequest,
+	socket: NodeSocket,
+	head: Bytes,
+	on_connect: |i32, DuplexEnd| void,
+	on_disconnect: |i32| void,
+) {
+	let headers = request.headers();
+	if !has_json_field(headers, "sec-websocket-key") {
+		socket.destroy();
+		ret;
+	}
+	let key: str = str::from_json_value(headers.field("sec-websocket-key"));
+	socket.write_text(
+		"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "
+			+ ws_accept_key(key)
+			+ "\r\n\r\n",
+	);
+	let id = fresh_connection();
+	let (app_end, wire_end) = duplex_pair();
+	wire_end.on_frame(|frame| {
+		socket.write_bytes(text_frame(frame));
+	});
+	connections.write().push((id, wire_end));
+	let closed: Shared<bool> = Shared::new(false);
+	let teardown = || {
+		if !closed.read() {
+			closed.write() = true;
+			drop_connection(id);
+			on_disconnect(id);
+		}
+	};
+	let parser = WsParser::new();
+	let receive = |chunk: Bytes| {
+		for event in parser.feed(chunk) {
+			match event {
+				WsEvent::Text(let frame) => {
+					// the wire turn: the frame's signal writes coalesce
+					batch(|| {
+						wire_end.send(frame);
+					});
+				},
+				WsEvent::Ping(let payload) => socket.write_bytes(pong_frame(payload)),
+				WsEvent::Closed => {
+					socket.write_bytes(close_frame());
+					socket.destroy();
+				},
+				WsEvent::Binary(let bytes) => {},
+			}
+		}
+	};
+	if head.len() > 0 {
+		receive(head);
+	}
+	socket.on_bytes("data", receive);
+	socket.on_signal("close", teardown);
+	socket.on_signal("error", || socket.destroy());
+	socket.write_bytes(text_frame(i"__conn:{id}"));
+	on_connect(id, app_end);
 }
 
 // Forget a closed connection's wire (frames already in flight to it are

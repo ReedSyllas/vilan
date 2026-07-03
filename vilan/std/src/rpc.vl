@@ -241,6 +241,91 @@ fun connect_split(base_url: str): SplitDuplex {
 	}
 }
 
+// === Transport: WebSocket (SocketDuplex) ====================================
+
+// The host `WebSocket` class — browser, node (22+), deno, and bun all provide
+// it globally, framing included; only the SERVER half needs `std::ws`.
+external struct WebSocket;
+
+[extern(new, "WebSocket")]
+external fun new_web_socket(url: str): WebSocket;
+
+external struct SocketMessage;
+
+impl SocketMessage {
+	[extern(get, "data")]
+	external fun data(self): str;
+}
+
+impl WebSocket {
+	[extern(method, "send")]
+	external fun transmit(self, data: str);
+
+	[extern(set, "onmessage")]
+	external fun set_on_message(self, handler: |SocketMessage| void);
+}
+
+[extern(new, "Promise")]
+external fun handshake_promise(executor: |(|| void)| void): Promise<i32>;
+
+// The true duplex transport (§5): one WebSocket, text frames both ways. The
+// server side is `serve_connected`'s upgrade path; open one with
+// `connect_socket(url)` — the drop-in swap for `connect_split`, same
+// `__conn:<id>` handshake, same `.connection` for RPC correlation.
+struct SocketDuplex {
+	socket: WebSocket,
+	// The connection id the server announced — correlates this duplex with
+	// RPC calls (e.g. an `attach(connection)` method), like `SplitDuplex`.
+	connection: str,
+	inbound: Shared<Option<|str| void>>,
+	// Frames that arrived before `on_frame` was set — queued, then flushed.
+	early: Shared<List<str>>,
+}
+
+impl SocketDuplex with DuplexTransport {
+	fun send(self, frame: str) {
+		self.socket.transmit(frame);
+	}
+
+	fun on_frame(self, handler: |str| void) {
+		self.inbound.write() = Some(handler);
+		for frame in self.early.read() {
+			handler(frame);
+		}
+		self.early.write() = [];
+	}
+}
+
+// Open a WebSocket connection to `url` (e.g. `ws://localhost:4000`): resolves
+// once the server's `__conn:<id>` announcement lands (which also proves the
+// socket is open — sends are safe after this returns).
+fun connect_socket(url: str): SocketDuplex {
+	let socket = new_web_socket(url);
+	let inbound: Shared<Option<|str| void>> = Shared::new(None);
+	let early: Shared<List<str>> = Shared::new([]);
+	let connection: Shared<str> = Shared::new("");
+	let _ = await handshake_promise(|resolve: || void| {
+		socket.set_on_message(|message| {
+			let frame = message.data();
+			if connection.read() == "" && frame.starts_with("__conn:") {
+				connection.write() = frame.substring(7, frame.len());
+				resolve();
+			} else {
+				match inbound.read() {
+					Some(let handler) => handler(frame),
+					None => early.write().push(frame),
+				}
+			}
+		});
+	});
+	SocketDuplex {
+		socket,
+		connection = connection.read(),
+		inbound,
+		early,
+	}
+}
+
 // === Protocol ===============================================================
 
 // A protocol interprets one inbound frame from its transport and drives its own

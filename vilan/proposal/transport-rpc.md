@@ -437,9 +437,31 @@ Built-ins:
   Request/response only — no reactive over plain HTTP.
 - **In-process** (`LocalTransport`) — `impl Transport`: runs the server's dispatch in the
   same process. The substrate for **unit tests** (no network). (What `examples/rpc` uses.)
-- **WebSocket** (`SocketTransport`) — `impl DuplexTransport`: a bidirectional frame pipe. It
-  can *also* `impl Transport` by correlating a reply frame with its request, so the RPC and
-  reactive protocols **multiplex over one socket**.
+- **WebSocket** (`SocketDuplex`) — `impl DuplexTransport`: the true bidirectional pipe.
+  **✅ shipped 2026-07-02** (unblocked by bits-and-bytes — the I2 gate; the RFC 6455
+  parser is vector-pinned, and the realtime CLI test runs the SSE scenario verbatim over
+  the socket — the drop-in promise held at one changed line):
+  - **Client** (`connect_socket(url)`, base-layer `std::rpc`): the HOST `WebSocket` class,
+    which browser, node (22+), deno, and bun all provide globally — no framing in-language.
+    `connect_socket` awaits `open`, then the server announces `__conn:<id>` as its first
+    text frame (the same handshake `SplitDuplex` speaks), so `.connection` and the app's
+    `attach` flow are IDENTICAL — the literal drop-in swap: `connect_split(base)` →
+    `connect_socket(url)`, nothing else changes.
+  - **Server** (in `serve_connected`): node has no WS server, so the RFC 6455 server half
+    is written in vilan — the `Upgrade` handshake on the http server's `upgrade` event
+    (`Sec-WebSocket-Accept` = base64(SHA-1(key+GUID)) via a `node:crypto` extern) and the
+    frame layer over the raw socket. `serve_connected` serves BOTH wires on one port:
+    upgrade requests become WS connections, `/events`+`/send` stay SSE+POST — same
+    `on_connect(id, DuplexEnd)`/`on_disconnect(id)`, same app code, clients pick.
+  - **The frame layer** (`std::ws`, base — pure byte logic, unit-testable off-node):
+    encode (unmasked server frames; 7/16/64-bit lengths) and a stateful parser (partial
+    buffers, client masking via XOR, fragmentation reassembly, ping→pong, close). v1
+    carries the duplex/reactive traffic as TEXT frames (opcode 0x1) — the reactive
+    protocol is JSON-over-text either way; binary frames are wired when the reactive
+    protocol goes codec.
+  - **Follow-up, not v1**: `impl Transport` by correlating a reply frame with its request,
+    so the RPC and reactive protocols **multiplex over one socket** (today RPC rides
+    HTTP POST beside the socket, exactly as beside SSE).
 - **Asymmetric duplex** (`SplitDuplex`) — **✅ shipped (2026-07-02)** — a `DuplexTransport`
   *implementation* composing two directed channels internally: Server-Sent Events for
   server→client (`GET {base}/events`, read via fetch streaming + `TextDecoder` — works in the
