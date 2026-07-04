@@ -3582,3 +3582,111 @@ fn ws_parser_handles_the_rfc_vectors() {
         "text: Hello\n(partial fed)\ntext: Hello\ntext: server says hi\n200B frame = 204 bytes on the wire\nbinary: 200 bytes\ntext: Hello\nping: 2 bytes\nclosed\ndone\n",
     );
 }
+
+#[test]
+fn client_connect_enforces_the_contract_and_wires_mirrors() {
+    // §4.2's Client::connect, end to end over a real WebSocket: one generated
+    // call opens the socket, VERIFIES the contract hash (Q6 enforcement — the
+    // drift case below refuses with Err(Contract) before any decode), calls
+    // the generated __attach against the runtime session registry
+    // (serve_service), and wires one RemoteSource mirror per [expose]d field
+    // in declaration order — both mirrors deliver.
+    assert_compiles_and_runs(
+        r#"
+import std::print;
+        import std::process::exit;
+        import std::time::sleep;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, FromJson, json_codec };
+        import std::reactive::Signal;
+        import std::shared::Shared;
+        import std::rpc_server::serve_service;
+        import std::http::Response;
+        
+        // The whole paradigm, zero manual wiring: [expose]d state + [rpc] methods,
+        // serve_service on the server, Client::connect on the client.
+        [service(Client)]
+        struct Board {
+        	[expose] count: Signal<i32>,
+        	[expose] label: Signal<str>,
+        	total: Shared<i32>,
+        }
+        
+        impl Board {
+        	[rpc]
+        	fun add(self, by: i32): i32 {
+        		self.count.set(self.count.get() + by);
+        		self.total.write() = self.total.read() + by;
+        		self.label.set(i"sum {self.count.get()}");
+        		self.count.get()
+        	}
+        }
+        
+        // A second, DIFFERENT service on another port — the drift case.
+        [service(OtherClient)]
+        struct Other {
+        	value: Shared<i32>,
+        }
+        
+        impl Other {
+        	[rpc]
+        	fun ping(self): i32 { 1 }
+        }
+        
+        fun main() {
+        	let board = Board { count = Signal::new(0), label = Signal::new(""), total = Shared::new(0) };
+        	serve_service(
+        		48411,
+        		board.dispatcher().into_protocol(json_codec()),
+        		|request| Response::builder().code(404).body("probe").build(),
+        		|| {
+        			let other = Other { value = Shared::new(0) };
+        			serve_service(
+        				48412,
+        				other.dispatcher().into_protocol(json_codec()),
+        				|request| Response::builder().code(404).body("probe").build(),
+        				|| drive(),
+        			);
+        		},
+        	);
+        }
+        
+        fun drive() {
+        	// One call: socket + contract enforcement + attach + mirrors.
+        	match Client::connect("ws://localhost:48411", json_codec()) {
+        		Ok(let client) => {
+        			let counting = client.count.sub(|json| {
+        				let n: i32 = i32::from_json(json);
+        				print(i"count = {n}");
+        			});
+        			let labeling = client.label.sub(|json| {
+        				let s: str = str::from_json(json);
+        				if s != "" {
+        					print(i"label = {s}");
+        				}
+        			});
+        			match client.add(7) {
+        				Ok(let n) => print(i"add -> {n}"),
+        				Err(let error) => print(i"add err {error.to_json()}"),
+        			}
+        			sleep(300);
+        			// Drift: a Board client pointed at Other's server refuses cleanly.
+        			match Client::connect("ws://localhost:48412", json_codec()) {
+        				Ok(let wrong) => print("drift NOT caught"),
+        				Err(let error) => print(i"drift: {error.to_json()}"),
+        			}
+        			sleep(100);
+        			exit(0);
+        		},
+        		Err(let error) => {
+        			print(i"connect failed: {error.to_json()}");
+        			exit(1);
+        		},
+        	}
+        }
+
+        "#,
+        "count = 0\ncount = 7\nlabel = sum 7\nadd -> 7\ndrift: {\"Contract\":\"the server reports a different service surface\"}\n",
+    );
+}

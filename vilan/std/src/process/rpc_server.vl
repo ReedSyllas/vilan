@@ -17,7 +17,7 @@ import pkg::wire::Frame;
 import pkg::bytes::Bytes;
 import pkg::json::{ JsonValue, FromJson, has_json_field };
 import pkg::ws::{ WsParser, WsEvent, text_frame, pong_frame, close_frame };
-import pkg::rpc::{ RpcProtocol, DuplexEnd, duplex_pair };
+import pkg::rpc::{ RpcProtocol, DuplexEnd, duplex_pair, register_session, drop_session };
 import pkg::http::{
 	node_create_server, read_request_body, read_request_bytes,
 	NodeRequest, NodeSocket,
@@ -78,6 +78,27 @@ fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
 		.on_start(on_ready)
 		.build()
 		.start()
+}
+
+// The `Client::connect` server (§4.2): `serve_connected` with the runtime's
+// session registry as its connection lifecycle — every connection gets a
+// reactive session the generated `__attach` route can answer from, disposed
+// on disconnect. Apps needing custom per-connection state (auth identity, an
+// app-written attach) use `serve_connected` directly.
+fun serve_service(
+	port: i32,
+	protocol: RpcProtocol,
+	fallback: |Request| Response,
+	on_ready: || void,
+) {
+	serve_connected(
+		port,
+		protocol,
+		|connection, wire| register_session(connection, wire),
+		|connection| drop_session(connection),
+		fallback,
+		on_ready,
+	)
 }
 
 // --- Connected server: RPC + a duplex wire per client ---------------------------

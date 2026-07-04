@@ -466,6 +466,9 @@ enum RpcError {
 	Transport(str),
 	Decode(str),
 	Remote(str),
+	// The connect-time contract check refused a drifted server (Q6): the two
+	// sides were built against different service surfaces.
+	Contract(str),
 	Unauthorized,
 }
 
@@ -666,6 +669,45 @@ enum ReactiveFrame {
 	Subscribe(i32),
 	Unsubscribe(i32),
 	Update(i32, str),
+}
+
+// --- The session registry (Client::connect's server half, §4.2) -------------
+
+// Per-connection reactive sessions, keyed by connection id — what the
+// generated `__attach` route answers from. `serve_service` populates it on
+// connect and disposes on disconnect; apps wanting custom per-connection
+// state keep the manual pattern (`serve_connected` + their own registry).
+let reactive_sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+// Adopt a fresh connection: one reactive session on its wire.
+fun register_session(connection: i32, wire: DuplexEnd) {
+	reactive_sessions.write().push((connection, ReactiveServer::new(wire)));
+}
+
+// The connection closed: dispose its session so signal changes stop fanning
+// out to (or retaining) the dead wire.
+fun drop_session(connection: i32) {
+	mut kept: List<(i32, ReactiveServer)> = [];
+	for entry in reactive_sessions.read() {
+		let (id, session) = entry;
+		if id == connection {
+			session.dispose();
+		} else {
+			kept.push((id, session));
+		}
+	}
+	reactive_sessions.write() = kept;
+}
+
+// The live session for a connection, if it is still connected.
+fun session_of(connection: i32): Option<ReactiveServer> {
+	for entry in reactive_sessions.read() {
+		let (id, session) = entry;
+		if id == connection {
+			ret Some(session);
+		}
+	}
+	None
 }
 
 // Channel ids — module-level, one counter for the program (mirrors reactive's

@@ -13,10 +13,10 @@ import std::reactive::{ Signal, combine };
 import std::display::format;
 import std::json::Json;
 import std::result::Result::{ self, Ok, Err };
-import std::rpc::{ HttpTransport, RpcError };
+import std::rpc::{ SocketTransport, RpcError };
 import common::{ Todo, TodoClient };
 
-fun todos(client: TodoClient<HttpTransport>, items: Signal<List<Todo>>): View {
+fun todos(client: TodoClient<SocketTransport>, items: Signal<List<Todo>>): View {
 	let draft = Signal::new("");
 	let filter = Signal::new("all"); // "all" | "active" | "done"
 
@@ -85,7 +85,7 @@ fun filter_button(filter: Signal<str>, value: str, label: str): View {
 
 // One row — a snapshot from `bind_each`; any change to the list re-renders it.
 // The checkbox reflects `done` and its edits go through the client stub.
-fun todo_row(client: TodoClient<HttpTransport>, todo: Todo): View {
+fun todo_row(client: TodoClient<SocketTransport>, todo: Todo): View {
 	view("li")
 		.class(if todo.done { "done" } else { "" })
 		.child(checkbox(client, todo))
@@ -93,7 +93,7 @@ fun todo_row(client: TodoClient<HttpTransport>, todo: Todo): View {
 		.child(view("button").class("remove").text("✕").on("click", || report(client.remove(todo.id))))
 }
 
-fun checkbox(client: TodoClient<HttpTransport>, todo: Todo): View {
+fun checkbox(client: TodoClient<SocketTransport>, todo: Todo): View {
 	let box = view("input").attr("type", "checkbox").on("change", || report(client.toggle(todo.id)));
 	if todo.done {
 		box.attr("checked", "checked")

@@ -52,7 +52,7 @@ fn json_usage_stays_within_the_sanctioned_sites() {
         // connection-id parses (the recorded small fix), error rendering, and
         // the todo server's JSON-at-rest persistence.
         ("examples/todo/server/src/main.vl", 2),
-        ("examples/todo/client/src/main.vl", 3),
+        ("examples/todo/client/src/main.vl", 2),
         ("examples/todo/client/src/todos.vl", 1),
         ("examples/rpc/src/main.vl", 7),
         ("benchmarks/src/throughput.vl", 1),

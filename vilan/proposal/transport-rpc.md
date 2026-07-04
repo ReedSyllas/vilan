@@ -328,6 +328,22 @@ why it is built first and why the sugar is optional.
 
 ### 4.2 `[service]` / `[rpc]` / `[expose]` — sugar that generates the client from the server
 
+> **`Client::connect` (settled + shipped 2026-07-02)** — the promised connect-time
+> enforcement, fully generated. `Client::connect(url, codec)` (a static on the concrete
+> `impl Client<SocketTransport>`) opens the WebSocket, **verifies the contract hash
+> first** — a drifted server is a clean `Err(RpcError::Contract(..))`, never decode
+> garbage (Q6's enforcement, finally) — then calls the generated `__attach` route with
+> the socket's connection id and wires one `RemoteSource` mirror per `[expose]`d field
+> from the returned channel list (declaration order). The server half is symmetric:
+> the generated dispatcher gains `__attach`, answered from a runtime **session
+> registry** (`std::rpc`'s `register_session`/`drop_session`/`session_of`), and
+> `std::rpc_server::serve_service(port, protocol, fallback, on_ready)` is
+> `serve_connected` with that registry as its connection lifecycle — the whole
+> manual dance (per-connection `ReactiveServer`s, an app-written `attach`, mirror
+> construction) collapses. Manual wiring stays available (`serve_connected` +
+> your own attach) for SSE clients and custom session state; `connect` is the
+> WebSocket path.
+
 The service is a **per-connection struct + impl** — the source of truth. `[service(Client)]`
 on it generates a sibling client type (named by the argument — `[service]` alone defaults to
 `<Struct>Client`); `[rpc]` marks a method callable over the wire; `[expose]` marks a `Signal`

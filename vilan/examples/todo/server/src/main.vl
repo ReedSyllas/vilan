@@ -13,7 +13,7 @@ import std::shared::Shared;
 import std::json::{ Json, FromJson, json_codec };
 import std::fs::{ exists, read_file_to_str, write_file };
 import std::http::Response;
-import std::rpc_server::serve_connected;
+import std::rpc_server::serve_service;
 import common::{ Todo, TodoStore };
 
 // Where the list lives between runs — reloaded on boot, rewritten on change.
@@ -28,7 +28,6 @@ async fun main() {
 	let store = TodoStore {
 		todos = Signal::new(stored),
 		next_id = Shared::new(next_id_after(stored)),
-		sessions = Shared::new([]),
 	};
 
 	// The persistence subscription. `sub` fires immediately with the current
@@ -39,11 +38,9 @@ async fun main() {
 		write_file(storage, list.to_json());
 	});
 
-	serve_connected(
+	serve_service(
 		59386,
 		store.dispatcher().into_protocol(json_codec()),
-		|connection, wire| store.connect(connection, wire),
-		|connection| store.disconnect(connection),
 		|request| {
 			match request.path() {
 				"/client.js" => Response::builder()

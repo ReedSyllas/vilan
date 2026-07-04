@@ -1,13 +1,13 @@
-// The wiring: mount the UI immediately, then connect to the server (same
-// origin), attach this connection to the shared list, and let updates stream
-// into `items`. The UI never writes `items` itself — the server owns the data,
-// and every change (this tab's included) arrives over the wire.
+// The wiring — now ONE generated call (§4.2): `TodoClient::connect` opens the
+// WebSocket, enforces the contract hash (a stale bundle is a clean error, not
+// mystery decode garbage), and wires the `todos` mirror. The UI never writes
+// `items` itself — the server owns the data, and every change (this tab's
+// included) arrives over the wire.
 
 import std::print;
 import std::reactive::Signal;
 import std::json::{ Json, FromJson, json_codec };
 import std::result::Result::{ Ok, Err };
-import std::rpc::{ HttpTransport, connect_split, bridge, ReactiveClient };
 import std::ui::mount;
 import common::{ Todo, TodoClient };
 import pkg::todos::todos;
@@ -15,21 +15,16 @@ import pkg::todos::todos;
 async fun main() {
 	// The local mirror of the server's list — the wire is its only writer.
 	let items: Signal<List<Todo>> = Signal::new([]);
-	let client = TodoClient { transport = HttpTransport { url = "/rpc" }, codec = json_codec() };
-	mount("app", todos(client, items));
-
-	// SplitDuplex to the same origin: SSE down, POSTs up. `attach` exposes the
-	// server's signal on THIS connection; subscribing delivers the current list
-	// at once, then every change as it lands.
-	let split = connect_split("");
-	let reactive = ReactiveClient::new(bridge(split));
-	match client.attach(i32::from_json(split.connection)) {
-		Ok(let channel) => {
-			let syncing = reactive.source(channel).sub(|json| {
+	// A relative WebSocket URL resolves against the page's origin (modern
+	// browsers); node clients pass an absolute ws:// URL.
+	match TodoClient::connect("/", json_codec()) {
+		Ok(let client) => {
+			mount("app", todos(client, items));
+			let syncing = client.todos.sub(|json| {
 				let synced: List<Todo> = List::from_json(json);
 				items.set(synced);
 			});
 		},
-		Err(let error) => print(i"attach failed: {error.to_json()}"),
+		Err(let error) => print(i"connect failed: {error.to_json()}"),
 	}
 }

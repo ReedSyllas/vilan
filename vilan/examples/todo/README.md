@@ -29,16 +29,17 @@ both, so a stale bundle is detectable, not mysterious.
 
 ## How the data flows
 
-The server holds the list in a `Signal<List<Todo>>` and mounts the generated
-dispatcher on `std::rpc_server::serve_connected`, which speaks SplitDuplex — plain
-HTTP standing in for a WebSocket (`GET /events` is a long-lived SSE stream down,
-`POST /send` and `POST /rpc` go up). Each tab:
+The server holds the list in an `[expose]`d `Signal<List<Todo>>` and mounts the
+generated dispatcher with `std::rpc_server::serve_service` — one port serving
+the page, the WebSocket upgrade, and the RPC/SSE routes. Each tab makes ONE
+generated call:
 
-1. `connect_split("")` — opens the SSE stream, learns its connection id;
-2. `client.attach(connection)` — an ordinary `[rpc]` call that exposes the
-   server's signal **on this connection's wire** and returns a channel id;
-3. `reactive.source(channel).sub(…)` — the remote handle: the current list
-   arrives at once, then every change as it lands.
+1. `TodoClient::connect("/", json_codec())` — opens the WebSocket, **verifies
+   the contract hash** (a stale bundle is a clean `Err(Contract)`, not decode
+   garbage), attaches this connection, and wires the `todos` mirror;
+2. `client.todos.sub(…)` — the remote handle: the current list arrives at
+   once, then every change as it lands. RPC calls ride the same socket
+   (multiplexed), so there are no further HTTP requests at all.
 
 Mutations go the other way: the checkbox calls `client.toggle(id)`, the server
 mutates its signal, and the change fans out to **every** subscribed session —
@@ -58,12 +59,13 @@ graph.
 
 ## Where the seams are (deliberately)
 
-- `attach` is a hand-written bootstrap: the client learns its channel id through
-  an ordinary RPC. A future `Client::connect` automates exactly this handshake
-  (and enforces the contract hash at connect time).
-- SplitDuplex is the no-WebSocket duplex; a true `WebSocket` transport is a
-  drop-in `DuplexTransport` swap when it lands (`bridge` keeps the reactive
-  runtime unchanged either way).
-- Sessions end: when a tab closes, `serve_connected` reports the disconnect and
-  the server disposes that session's `ReactiveServer`, so a long-running server
-  doesn't accumulate dead wires.
+- The connect handshake, the per-connection sessions, and the mirror wiring are
+  all generated/runtime now (§4.2's `Client::connect` + the session registry) —
+  this example used to hand-write an `attach` method and a sessions map; apps
+  needing custom per-connection state (auth identity, say) still can, via
+  `serve_connected` and their own registry.
+- The mirror still delivers JSON strings the client decodes at the site
+  (`List::from_json`) — typed mirrors land with the reactive-on-codec
+  follow-up.
+- Sessions end: when a tab closes (socket or SSE), the runtime disposes that
+  connection's session, so a long-running server doesn't accumulate dead wires.

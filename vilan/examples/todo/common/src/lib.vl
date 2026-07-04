@@ -8,7 +8,6 @@
 import std::reactive::Signal;
 import std::shared::Shared;
 import std::json::Json;
-import std::rpc::{ DuplexEnd, ReactiveServer };
 
 [derive(Wire)]
 struct Todo {
@@ -19,55 +18,18 @@ struct Todo {
 
 [service(TodoClient)]
 struct TodoStore {
-	// The one authoritative list. A `Signal`, so the server can expose it on
-	// each connection's wire — every subscribed session (and the persistence
-	// subscription) sees each change as it lands.
-	todos: Signal<List<Todo>>,
+	// The one authoritative list. `[expose]`d, so the generated
+	// `TodoClient::connect` mirrors it on every connection's wire — each
+	// subscribed session (and the persistence subscription) sees every change
+	// as it lands. The whole per-connection session dance this example used to
+	// hand-write (a sessions map, an `attach` method, connect/disconnect
+	// plumbing) is now the runtime's (§4.2).
+	[expose] todos: Signal<List<Todo>>,
 	// Ids stay unique across restarts: the server seeds this past the stored list.
 	next_id: Shared<i32>,
-	// Per-connection reactive channels — `connect` fills it, `attach` reads it,
-	// `disconnect` tears one down.
-	sessions: Shared<List<(i32, ReactiveServer)>>,
 }
 
 impl TodoStore {
-	// Server-side (not `[rpc]`): adopt a fresh connection — `serve_connected`
-	// hands each SSE stream's app end here.
-	fun connect(self, connection: i32, wire: DuplexEnd) {
-		self.sessions.write().push((connection, ReactiveServer::new(wire)));
-	}
-
-	// Server-side: the connection closed — dispose its session so the list's
-	// changes stop fanning out to a dead wire.
-	fun disconnect(self, connection: i32) {
-		mut kept: List<(i32, ReactiveServer)> = [];
-		for entry in self.sessions.read() {
-			let (id, session) = entry;
-			if id == connection {
-				session.dispose();
-			} else {
-				kept.push((id, session));
-			}
-		}
-		self.sessions.write() = kept;
-	}
-
-	// Expose the list on the calling connection's wire; the returned channel id
-	// is what the client's `RemoteSource` subscribes to (`0 - 1`: unknown
-	// connection). This manual bootstrap is what `Client::connect` automates
-	// later (proposal §4.2).
-	[rpc]
-	fun attach(self, connection: i32): i32 {
-		mut channel = 0 - 1;
-		for entry in self.sessions.read() {
-			let (id, session) = entry;
-			if id == connection {
-				channel = session.expose(self.todos);
-			}
-		}
-		channel
-	}
-
 	[rpc]
 	fun add(self, label: str): i32 {
 		let id = self.next_id.read();

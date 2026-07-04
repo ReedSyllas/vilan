@@ -44,7 +44,7 @@ Trait<type S: Bound>`) are a missing *feature* with a clean error — notable as
 the alternative route to the trait-shaped visitor (#4); and the **impl-binder
 declaration-order** pin has a trivial workaround (reorder declarations).
 
-## 3. `Client::connect` — small, closes a promised loop
+## 3. `Client::connect` — ✅ DONE (2026-07-02)
 
 §4.2 promised connect-time contract enforcement; apps hand-roll it (the todo
 client's connect → attach → subscribe dance, plus an optional `verify()`). A

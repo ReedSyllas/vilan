@@ -10311,6 +10311,28 @@ fn service_impl_source(
     // The built-in contract route (Q6 v2): the client's `verify()` calls it and
     // compares the two sides' hashes — a clean mismatch instead of decode garbage.
     out.push_str("\n\t\t\t.on(\"__contract\", |_| reply(self.contract_hash()))");
+    // The built-in attach route (§4.2): expose every `[expose]`d field on the
+    // calling connection's registry session (declaration order) and return the
+    // channel ids — what the generated `Client::connect` wires mirrors from.
+    let exposures = exposed
+        .iter()
+        .map(|field_name| format!("session.expose(self.{field_name})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "\n\t\t\t.on(\"__attach\", |request| {{\n\
+         \t\t\t\tlet connection: i32 = arg(request, 0);\n\
+         \t\t\t\tmatch decode_failed(request) {{\n\
+         \t\t\t\t\tOption::Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),\n\
+         \t\t\t\t\tOption::None => match session_of(connection) {{\n\
+         \t\t\t\t\t\tOption::Some(let session) => {{\n\
+         \t\t\t\t\t\t\tlet channels: List<i32> = [{exposures}];\n\
+         \t\t\t\t\t\t\treply(channels)\n\
+         \t\t\t\t\t\t}},\n\
+         \t\t\t\t\t\tOption::None => RpcOutcome::Failure(RpcError::Remote(\"unknown connection\")),\n\
+         \t\t\t\t\t}},\n\
+         \t\t\t\t}}\n\t\t\t}})"
+    ));
     out.push_str("\n\t}\n");
     out.push_str(&format!(
         "\tfun contract_hash(self): str {{\n\t\t\"{hash}\"\n\t}}\n}}\n"
@@ -10356,6 +10378,49 @@ fn service_impl_source(
     );
     out.push_str(&format!(
         "\tfun contract_hash(self): str {{\n\t\t\"{hash}\"\n\t}}\n}}\n"
+    ));
+    // Client::connect (§4.2): the whole handshake, generated — open the socket,
+    // ENFORCE the contract hash (a drifted server is Err(Contract), before
+    // anything else), __attach with the connection id, and wire one mirror per
+    // [expose]d field from the returned channels (declaration order).
+    let mirror_fields = exposed
+        .iter()
+        .enumerate()
+        .map(|(index, field_name)| {
+            format!(",\n\t\t\t\t\t{field_name} = reactive.source(channels[{index}])")
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    out.push_str(&format!(
+        "impl {client_name}<SocketTransport> {{\n\
+         \tfun connect(url: str, codec: Codec): Result<{client_name}<SocketTransport>, RpcError> {{\n\
+         \t\tlet socket = connect_socket(url);\n\
+         \t\tlet transport = socket.transport();\n\
+         \t\tlet remote: Result<str, RpcError> = call(transport, codec, \"__contract\", []);\n\
+         \t\tmatch remote {{\n\
+         \t\t\tResult::Ok(let hash) => {{\n\
+         \t\t\t\tif hash != \"{hash}\" {{\n\
+         \t\t\t\t\tret Result::Err(RpcError::Contract(\"the server reports a different service surface\"));\n\
+         \t\t\t\t}}\n\
+         \t\t\t}},\n\
+         \t\t\tResult::Err(let error) => {{\n\
+         \t\t\t\tret Result::Err(error);\n\
+         \t\t\t}},\n\
+         \t\t}}\n\
+         \t\tlet connection = i32::from_json(socket.connection);\n\
+         \t\tlet attached: Result<List<i32>, RpcError> = call(transport, codec, \"__attach\", [|serializer: Serializer| connection.describe(serializer)]);\n\
+         \t\tmatch attached {{\n\
+         \t\t\tResult::Ok(let channels) => {{\n\
+         \t\t\t\tlet reactive = ReactiveClient::new(bridge(socket));\n\
+         \t\t\t\tResult::Ok({client_name} {{\n\
+         \t\t\t\t\ttransport = transport,\n\
+         \t\t\t\t\tcodec = codec{mirror_fields},\n\
+         \t\t\t\t}})\n\
+         \t\t\t}},\n\
+         \t\t\tResult::Err(let error) => Result::Err(error),\n\
+         \t\t}}\n\
+         \t}}\n\
+         }}\n"
     ));
     out
 }
@@ -10683,11 +10748,17 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     // items are walked).
     if any_service {
         prelude.push_str(
-            "import std::rpc::{ Transport, Dispatcher, RpcError, RpcOutcome, RemoteSource, call, arg, reply, decode_failed };\n",
+            "import std::rpc::{ Transport, Dispatcher, RpcError, RpcOutcome, RemoteSource, call, arg, reply, decode_failed, session_of, connect_socket, SocketTransport, bridge, ReactiveClient };\n",
         );
         prelude.push_str("import std::wire::{ Codec, Serializer };\n");
         prelude.push_str("import std::result::Result;\n");
         prelude.push_str("import std::option::Option;\n");
+        // `connect` parses the socket's connection id with `i32::from_json`;
+        // the Json/Wire prelude line already imports FromJson when a derive is
+        // present — only add it otherwise (a duplicate import would collide).
+        if !traits.contains("Json") && !traits.contains("Wire") {
+            prelude.push_str("import std::json::FromJson;\n");
+        }
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;
