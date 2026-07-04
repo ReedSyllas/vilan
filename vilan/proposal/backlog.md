@@ -166,9 +166,14 @@ have gaps.
      differs. Needs **backend-gating on layers** (`LayerDecl` carries only `platform` today;
      `Layer.backend: Option<Backend>` per §7.1) — the one piece of platform-model scaffolding
      deferred from the stabilizing slice.
-   - **Memory-model lowering** — no JS GC, so value semantics / `Shared` / `Arena` / `__clone`
-     need a linear-memory allocator plus a GC or refcount scheme. This is the heavy part and is
-     **shared with F4**; do it once. Targets both `browser` and `@process` (WASM runs in each).
+   - **Memory-model lowering** — the model is GC-free by design
+     (`memory-management-rev-1.md`, goal #1): values are scope-owned copies, views are
+     second-class (never outlive a frame), and `Arena` owns its slots outright with
+     generational handles — none of these need collection. What a non-JS backend needs is a
+     linear-memory allocator, **scope-end destruction (C4 — the linchpin**, deferred today
+     precisely because the JS GC makes deferral free), and an **ARC lowering for `Shared`**
+     (+ `Weak`, C1, for cycles). This is the heavy part and is **shared with F4**; do it
+     once. Targets both `browser` and `@process` (WASM runs in each).
 
 4. **Native backend — server performance** (XL; far future) — a third `Backend` emitting native
    machine code, motivated by server throughput (no V8/JS overhead). For comparison, **Rust**
@@ -179,9 +184,11 @@ have gaps.
      simplest to maintain — Nim/V do this) ▸ **Cranelift** (Rust-native, fast compiles, solid
      codegen; the natural fit for a Rust project) ▸ **LLVM** (peak performance, heavy dependency,
      slow builds).
-   - **Memory model** — the central challenge (bigger than codegen): JS's GC currently backs the
-     whole value-semantics/`Shared`/`Arena` model, so native needs either a **bundled GC runtime**
-     or the ownership/view model **lowered to manual/ARC**. Shares the F3 lowering work.
+   - **Memory model** — the central challenge (bigger than codegen), but smaller than
+     "build a GC": the model is deterministic by design, so the lowering is allocator +
+     scope-end drops (C4) + ARC for `Shared` (+ `Weak`, C1). A bundled tracing GC would
+     *contradict* rev-1's goal #1 (deterministic, GC-free memory) and is not on the table.
+     Shares the F3 lowering work.
    - **Standing cost:** maintaining ≥3 backends is a real tax (each language feature must lower to
      each). Gate this behind a **stable backend abstraction + a shared lowered IR**, and prove the
      seam with a *single* non-JS backend (F3) before committing to a third. Far future — flagged
