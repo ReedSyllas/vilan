@@ -8441,9 +8441,9 @@ impl<'src> Analyzer<'src> {
             return Resolution::Deferred;
         }
         let span = **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN);
-        // v1 lowers the std pair; the `Lift` marker is the opt-in seam, and any
-        // other implementor is recognized but its lowering is the recorded
-        // follow-up (user containers need closure-argument emission).
+        // The std pair lowers inline; any other type goes through its `Lift`
+        // opt-in (the marker gates it — having a `map` alone is not consent)
+        // and dispatches to its `map`/`and_then` members.
         let (family_id, arguments) = match &subject_type {
             Type::Enum(enum_id, arguments)
                 if Some(*enum_id) == self.option_enum_id
@@ -8452,14 +8452,13 @@ impl<'src> Analyzer<'src> {
                 (*enum_id, arguments.clone())
             }
             other => {
-                let rendered = self.pretty_print_type(other, &HashMap::new());
-                self.diagnostics.push(Error {
+                return self.resolve_lift_trait(
+                    id,
+                    binder_id,
+                    continuation_id,
+                    other.clone(),
                     span,
-                    msg: format!(
-                        "`?.` lifts an `Option` or `Result` (user `Lift` types are not supported yet) — this is {rendered}"
-                    ),
-                });
-                return Resolution::Failed;
+                );
             }
         };
         let element = arguments
@@ -8526,6 +8525,138 @@ impl<'src> Analyzer<'src> {
             LiftDispatch::Std {
                 flatten,
                 enum_id: family_id,
+            },
+        );
+        let result_id = result.get_type_id(self);
+        self.resolved_types.insert(id, result_id);
+        Resolution::Resolved
+    }
+
+    /// `?.` on a user `Lift` container (proposal/try-and-lift.md §3): the
+    /// element is the container's first type argument (the `M<T, ..>`
+    /// convention), the continuation types against it, and the chain lowers to
+    /// the container's own `map` (or `and_then`, when the continuation yields
+    /// the container's type — the flattening rule) with the continuation as a
+    /// closure argument.
+    fn resolve_lift_trait(
+        &mut self,
+        id: Id,
+        binder_id: Id,
+        continuation_id: Id,
+        subject_type: Type,
+        span: Span,
+    ) -> Resolution {
+        // The opt-in gate: an `impl .. with Lift` whose subject reconciles.
+        let lift_subjects: Vec<TypeId> = match self.lift_trait_id {
+            Some(lift_id) => self
+                .implementations
+                .iter()
+                .filter(|implementation| implementation.trait_ids.contains(&lift_id))
+                .map(|implementation| implementation.subject)
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut opted_in = false;
+        for subject in lift_subjects {
+            let candidate = subject.get_type(self);
+            if self
+                .reconcile_type(&subject_type, &candidate, &HashMap::new())
+                .is_some()
+            {
+                opted_in = true;
+                break;
+            }
+        }
+        if !opted_in {
+            let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
+            self.diagnostics.push(Error {
+                span,
+                msg: format!(
+                    "`?.` lifts an `Option`, a `Result`, or a type opting in with `impl .. with Lift` — this is {rendered}"
+                ),
+            });
+            return Resolution::Failed;
+        }
+        // The element: the container's first type argument.
+        let (nominal_id, arguments) = match &subject_type {
+            Type::Enum(nominal, arguments) | Type::Struct(nominal, arguments) => {
+                (*nominal, arguments.clone())
+            }
+            other => {
+                let rendered = self.pretty_print_type(other, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span,
+                    msg: format!(
+                        "`?.` needs a container with an element type — this is {rendered}"
+                    ),
+                });
+                return Resolution::Failed;
+            }
+        };
+        let element = arguments
+            .first()
+            .map(|type_id| type_id.get_type(self))
+            .unwrap_or(Type::Unknown);
+        let element_id = element.get_type_id(self);
+        if self.resolved_types.get(&binder_id) != Some(&element_id) {
+            self.resolved_types.insert(binder_id, element_id);
+        }
+        let continuation_type = self.infer_type(continuation_id, &Type::Unknown, &HashMap::new());
+        if matches!(continuation_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        let flatten = matches!(
+            &continuation_type,
+            Type::Enum(other, _) | Type::Struct(other, _) if *other == nominal_id
+        );
+        let member_name = if flatten { "and_then" } else { "map" };
+        let Some((member_id, impl_subject)) =
+            self.method_member_impl_subject(&subject_type, member_name)
+        else {
+            let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
+            self.diagnostics.push(Error {
+                span,
+                msg: format!(
+                    "`?.` on {rendered} needs a `{member_name}` method — the Lift contract (`map<U>(self, |T| U)`, `and_then<U>(self, |T| Self-of-U)`)"
+                ),
+            });
+            return Resolution::Failed;
+        };
+        // The member's own generic `U`: the continuation's result for `map`,
+        // its element for `and_then`. The result type follows the same split.
+        let continuation_type_id = continuation_type.clone().get_type_id(self);
+        let (own_generic_value, result) = if flatten {
+            let inner = match &continuation_type {
+                Type::Enum(_, continuation_arguments) | Type::Struct(_, continuation_arguments) => {
+                    continuation_arguments
+                        .first()
+                        .copied()
+                        .unwrap_or_else(|| Type::Unknown.get_type_id(self))
+                }
+                _ => Type::Unknown.get_type_id(self),
+            };
+            (inner, continuation_type)
+        } else {
+            let mut result_arguments = arguments.clone();
+            if result_arguments.is_empty() {
+                result_arguments.push(continuation_type_id);
+            } else {
+                result_arguments[0] = continuation_type_id;
+            }
+            let result = match &subject_type {
+                Type::Struct(..) => Type::Struct(nominal_id, result_arguments),
+                _ => Type::Enum(nominal_id, result_arguments),
+            };
+            (continuation_type_id, result)
+        };
+        let subject_type_id = subject_type.get_type_id(self);
+        self.lift_dispatch.insert(
+            id,
+            LiftDispatch::Trait {
+                member_id,
+                impl_subject,
+                subject_type_id,
+                own_generic_value,
             },
         );
         let result_id = result.get_type_id(self);
@@ -10633,6 +10764,16 @@ pub enum LiftDispatch {
         /// The subject's enum (`Option`/`Result`) — the map wrap rebuilds its
         /// good variant (index 0) around the continuation's value.
         enum_id: Id,
+    },
+    /// A user `Lift` container: dispatch to its `map`/`and_then` impl member
+    /// (chosen by the flattening rule), the continuation emitted as a closure
+    /// argument. `own_generic_value` is the member's `U` — the continuation's
+    /// result for `map`, its element for `and_then`.
+    Trait {
+        member_id: Id,
+        impl_subject: TypeId,
+        subject_type_id: TypeId,
+        own_generic_value: TypeId,
     },
 }
 

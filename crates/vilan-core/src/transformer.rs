@@ -1041,6 +1041,47 @@ impl<'src> Transformer<'src> {
                 let subject = self
                     .walk_entity(*subject_id, block)
                     .unwrap_or(js::Node::Void);
+                // A user `Lift` container: `map_instance(subject, (x) => cont)`
+                // — the continuation becomes a closure whose parameter aliases
+                // the binder (proposal/try-and-lift.md §4's trait path).
+                if let Some(LiftDispatch::Trait {
+                    member_id,
+                    impl_subject,
+                    subject_type_id,
+                    own_generic_value,
+                }) = self.program.lift_dispatch.get(&id).cloned()
+                {
+                    let dispatch = self.dispatch_to_member(
+                        member_id,
+                        impl_subject,
+                        subject_type_id,
+                        &[own_generic_value],
+                    );
+                    let Dispatch::Call(member_name, _) = dispatch else {
+                        // A Lift impl's members are ordinary vilan methods.
+                        return Some(js::Node::Void);
+                    };
+                    let parameter = self.ng.next_name();
+                    self.is_bindings
+                        .insert(*binder_id, js::Node::Local(parameter.clone()));
+                    let mut closure_body = Vec::new();
+                    let value = self
+                        .walk_entity(*continuation_id, &mut closure_body)
+                        .unwrap_or(js::Node::Void);
+                    self.is_bindings.remove(binder_id);
+                    closure_body.push(js::Node::Return(Box::new(value)));
+                    return Some(js::Node::Call(
+                        Box::new(js::Node::Local(member_name)),
+                        vec![
+                            subject,
+                            js::Node::Closure(js::Closure {
+                                parameters: vec![js::Parameter { name: parameter }],
+                                body: closure_body,
+                                is_async: false,
+                            }),
+                        ],
+                    ));
+                }
                 let subject_name = self.ng.next_name();
                 block.push(js::Node::ConstVariable(js::Variable {
                     name: subject_name.clone(),
@@ -1073,6 +1114,8 @@ impl<'src> Transformer<'src> {
                         flatten: false,
                         enum_id,
                     }) => self.variant_value(*enum_id, 0, vec![value]),
+                    // Handled by the early trait-path branch above.
+                    Some(LiftDispatch::Trait { .. }) => unreachable!(),
                 };
                 good_body.push(js::Node::Assignment(
                     Box::new(js::Node::Local(result_name.clone())),

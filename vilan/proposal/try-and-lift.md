@@ -11,8 +11,12 @@ flatten checks the error types), and records the lowering; the transformer emits
 match-shaped inline form — bad tag short-circuits AS-IS, the element aliases into the
 continuation (no closure), map rewraps via the container's good variant. A lifted chain
 is rejected as an assignment target. The `Lift` marker + Option/Result impls ship in std;
-user `Lift` lowering (closure-argument emission) is the recorded follow-up with a clean
-error. LSP: completion after `a?.` offers the ELEMENT's members. Ten `?.` pins + corpus
+user `Lift` lowering shipped in the stabilization pass: a marked container dispatches to
+its own `map`/`and_then` instance (the flattening rule picks; the member's `U` binds from
+the continuation), the continuation emitted as a closure whose parameter aliases the
+binder — the element convention is the container's FIRST type argument (`M<T, ..>`), and
+the marker stays the gate (a mappable type without `impl .. with Lift` refuses, pinned).
+LSP: completion after `a?.` offers the ELEMENT's members. Ten `?.` pins + corpus
 `lift-chain.vl` cover §7's rows.
 The two-operator design, the four refinements in §0, and the §8 resolutions (opt-in
 `Lift`; the `Try`/`Lift`/`Verdict` names; `Try` as a real trait from day one) are all
@@ -245,8 +249,10 @@ transformer-emitted):
 
 - Expression-level lifting (`a? + 10`) and the applicative form (`a? + b?`) — §0.3.
 - Error conversion across types (`Option` in a `Result` fn; `From`-style `E1 → E2`).
-- `!` inside closures/async blocks (first follow-up; wants contextually-known closure
-  return types — the RPC-handler case).
+- `!` inside closures/async blocks — kept deferred through the stabilization pass: its
+  real payoff needs the `arg → Result` API redesign (the RPC-handler case), and a
+  bang-in-tail closure is semantically invalid anyway (`|k| lookup(k)!` cannot rebuild
+  the bad half into its own unwrapped return); the future check can say so precisely.
 - `Signal`/`Promise` opting into `Lift` (each its own review).
 - User-`Try` types returning a *different* instantiation than the receiver (needs
   associated-type machinery).

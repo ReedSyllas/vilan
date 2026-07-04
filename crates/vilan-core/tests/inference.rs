@@ -4765,7 +4765,7 @@ fn lift_on_a_non_lift_type_is_rejected() {
         }
         "#,
         "n?.max(1)",
-        "`?.` lifts an `Option` or `Result`",
+        "`?.` lifts an `Option`, a `Result`, or a type opting in",
     );
 }
 
@@ -4950,5 +4950,82 @@ fn async_block_rets_check_against_the_tail() {
         "#,
         "ret \"mismatched\"",
         "but the closure's body yields",
+    );
+}
+
+// A user `Lift` container: `?.` dispatches to ITS `map`/`and_then` (the tag
+// concatenation proves the user's and_then body ran on the flatten path).
+#[test]
+fn a_user_lift_container_dispatches_to_its_own_map_and_and_then() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::operators::Lift;
+
+        struct Boxy<T> {
+        	value: T,
+        	tag: str,
+        }
+
+        impl Boxy<type T> with Lift {}
+
+        impl Boxy<type T> {
+        	fun map<U>(self, fn: |T| U): Boxy<U> {
+        		Boxy { value = fn(self.value), tag = self.tag }
+        	}
+
+        	fun and_then<U>(self, fn: |T| Boxy<U>): Boxy<U> {
+        		let inner = fn(self.value);
+        		Boxy { value = inner.value, tag = self.tag + "+" + inner.tag }
+        	}
+        }
+
+        struct Profile {
+        	name: str,
+        }
+
+        impl Profile {
+        	fun boxed_name(self): Boxy<str> {
+        		Boxy { value = self.name, tag = "inner" }
+        	}
+        }
+
+        fun main() {
+        	let boxed = Boxy { value = Profile { name = "ada" }, tag = "outer" };
+        	let mapped: Boxy<str> = boxed?.name;
+        	print(i"{mapped.value} [{mapped.tag}]");
+        	let lengths: Boxy<i32> = boxed?.name.len();
+        	print(format(lengths.value));
+        	let flat: Boxy<str> = boxed?.boxed_name();
+        	print(i"{flat.value} [{flat.tag}]");
+        }
+        "#,
+        "ada [outer]\n3\nada [outer+inner]\n",
+    );
+}
+
+// The marker is the gate: a mappable type WITHOUT `impl .. with Lift` refuses.
+#[test]
+fn a_mappable_type_without_the_lift_marker_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        struct Sneaky<T> {
+        	value: T,
+        }
+
+        impl Sneaky<type T> {
+        	fun map<U>(self, fn: |T| U): Sneaky<U> {
+        		Sneaky { value = fn(self.value) }
+        	}
+        }
+
+        fun main() {
+        	let s = Sneaky { value = 1 };
+        	let _ = s?.max(2);
+        }
+        "#,
+        "s?.max(2)",
+        "opting in with `impl .. with Lift`",
     );
 }
