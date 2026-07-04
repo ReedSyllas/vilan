@@ -104,13 +104,13 @@ trait Try<T, B> {
 // Option's residual is the absence itself — `void`, which in vilan IS the
 // unit type (an empty tuple; a prettier alias for `()`). It instantiates
 // generics like any type (probed: `Result<void, str>` / `Option<void>`
-// construct, match, and run); the unit expression is the empty block `{}`
-// (probed — `()` is not an expression today).
+// construct, match, and run), and `void` is also the unit EXPRESSION —
+// the type's one value (`Verdict::Bad(void)`, `Some(void)`).
 impl Option<type T> with Try<T, void> {
 	fun verdict(self): Verdict<T, void> {
 		match self {
 			Some(let value) => Verdict::Good(value),
-			None => Verdict::Bad({}),
+			None => Verdict::Bad(void),
 		}
 	}
 

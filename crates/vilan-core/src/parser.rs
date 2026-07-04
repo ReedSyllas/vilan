@@ -104,6 +104,10 @@ where
         Token::Bool(x) => Node::Bool(x),
         Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix),
         Token::String(s) => Node::String(s),
+        // `void` is the unit type AND its one value — the unit expression
+        // (`Some(void)`, `Verdict::Bad(void)`). In expression position the
+        // name is the literal; type position resolves it separately.
+        Token::Ident("void") => Node::Void,
     }
     .labelled("value")
     .map_with(|x, e| (x, e.span()));

@@ -4571,3 +4571,42 @@ fn user_try_requires_the_exact_return_type() {
         "must match exactly",
     );
 }
+
+// `void` is the unit expression — the unit type's one value, usable wherever a
+// void-typed value is (generic arguments included).
+#[test]
+fn void_is_the_unit_expression() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+
+        fun consume(value: void): i32 {
+        	7
+        }
+
+        fun confirm(flag: bool): Result<void, str> {
+        	if flag {
+        		Ok(void)
+        	} else {
+        		Err("refused")
+        	}
+        }
+
+        fun main() {
+        	print(consume(void));
+        	let unit: Option<void> = Some(void);
+        	match unit {
+        		Some(let _v) => print("some unit"),
+        		None => print("none"),
+        	}
+        	match confirm(true) {
+        		Ok(let _v) => print("confirmed"),
+        		Err(let e) => print(e),
+        	}
+        }
+        "#,
+        "7\nsome unit\nconfirmed\n",
+    );
+}

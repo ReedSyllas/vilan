@@ -18,7 +18,7 @@ impl Option<type T> with Try<T, void> {
 	fun verdict(self): Verdict<T, void> {
 		match self {
 			Some(let value) => Verdict::Good(value),
-			None => Verdict::Bad({}),
+			None => Verdict::Bad(void),
 		}
 	}
 
