@@ -88,19 +88,20 @@ trait Try<T, B> {
 	fun from_bad(bad: B): Self;
 }
 
-// Option's residual is the absence itself — a dedicated std unit type, so the
-// impl is expressible without a void type parameter.
-struct Absent {}
-
-impl Option<type T> with Try<T, Absent> {
-	fun verdict(self): Verdict<T, Absent> {
+// Option's residual is the absence itself — `void`, the canonical nothing.
+// `void` instantiates generics like any type (probed: `Result<void, str>` /
+// `Option<void>` construct, match, and run); the only wrinkle is that vilan
+// has no void LITERAL, so producing the residual uses a void expression (an
+// empty block / a void call — settle the spelling with slice 1's probes).
+impl Option<type T> with Try<T, void> {
+	fun verdict(self): Verdict<T, void> {
 		match self {
 			Some(let value) => Verdict::Good(value),
-			None => Verdict::Bad(Absent {}),
+			None => Verdict::Bad({}),
 		}
 	}
 
-	fun from_bad(bad: Absent): Option<T> {
+	fun from_bad(bad: void): Option<T> {
 		None
 	}
 }
@@ -236,7 +237,10 @@ transformer-emitted):
 
 1. **`Lift` is an opt-in marker trait** — silent lifting over any mappable type reads as
    a footgun.
-2. **The names stand:** `Try`, `Lift`, `Verdict` (and `Absent` for Option's residual).
+2. **The names stand:** `Try`, `Lift`, `Verdict`. (A fourth name, `Absent`, was briefly
+   proposed as Option's residual and dropped: `void` instantiates generics fine — probed —
+   and is the canonical nothing, so `Try<T, void>` needs no new type. `Result<void, str>`
+   stays exactly `Result<void, str>` everywhere.)
 3. **`Try` is a real trait from day one** — the trait, `Verdict`, `Absent`, and the
    `Option`/`Result` impls ship as std source in slice 1; the compiler's inline lowering
    is an optimization over those impls, not a substitute for them (pinned equivalent: a
