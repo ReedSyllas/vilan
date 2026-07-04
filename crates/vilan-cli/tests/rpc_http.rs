@@ -235,7 +235,7 @@ import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{
 	HttpTransport, connect_split, bridge,
-	ReactiveServer, ReactiveClient, DuplexEnd,
+	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
 };
 import std::http::Response;
 import std::rpc_server::serve_connected;
@@ -277,7 +277,7 @@ fun main() {
 		9273,
 		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
-			sessions.write().push((id, ReactiveServer::new(end)));
+			sessions.write().push((id, ReactiveServer::new(end, json_codec())));
 		},
 		|id| {},
 		|request| Response::builder().code(404).body("nope").build(),
@@ -289,12 +289,12 @@ fun main() {
 
 fun watch(name: str, base: str): Client<HttpTransport> {
 	let split = connect_split(base);
-	let reactive = ReactiveClient::new(bridge(split));
+	let reactive = ReactiveClient::new(bridge(split), json_codec());
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 	match client.attach(i32::from_json(split.connection)) {
 		Ok(let channel) => {
-			let _ = reactive.source(channel).sub(|json| {
-				let n: i32 = i32::from_json(json);
+			let mirror: RemoteSource<i32> = reactive.source(channel);
+			let _ = mirror.sub(|n| {
 				print(i"{name} sees {n}");
 			});
 		},
@@ -405,7 +405,7 @@ fun main() {
 		47161,
 		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
-			sessions.write().push((id, ReactiveServer::new(end)));
+			sessions.write().push((id, ReactiveServer::new(end, json_codec())));
 		},
 		|id| {
 			drop_session(id);
@@ -428,19 +428,19 @@ import std::process::exit;
 import std::json::{{ Json, FromJson, json_codec }};
 import std::wire::Serializer;
 import std::result::Result::{{ self, Ok, Err }};
-import std::rpc::{{ HttpTransport, RpcError, call, connect_split, bridge, ReactiveClient }};
+import std::rpc::{{ HttpTransport, RpcError, call, connect_split, bridge, ReactiveClient, RemoteSource }};
 
 fun main() {{
 	let base = "http://localhost:47161";
 	let split = connect_split(base);
-	let reactive = ReactiveClient::new(bridge(split));
+	let reactive = ReactiveClient::new(bridge(split), json_codec());
 	let transport = HttpTransport {{ url = i"{{base}}/rpc" }};
 	let connection = i32::from_json(split.connection);
 	let attached: Result<i32, RpcError> = call(transport, json_codec(), "attach", [|s: Serializer| connection.describe(s)]);
 	match attached {{
 		Ok(let channel) => {{
-			let watching = reactive.source(channel).sub(|json| {{
-				let n: i32 = i32::from_json(json);
+			let mirror: RemoteSource<i32> = reactive.source(channel);
+			let watching = mirror.sub(|n| {{
 				print(i"{name} sees {{n}}");
 			}});
 		}},
@@ -531,7 +531,7 @@ import std::wire::Serializer;
 import std::reactive::Signal;
 import std::rpc::{
 	HttpTransport, connect_socket, bridge,
-	ReactiveServer, ReactiveClient, DuplexEnd,
+	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
 };
 import std::rpc_server::{ serve_connected, ws_accept_key };
 import std::http::Response;
@@ -573,7 +573,7 @@ fun main() {
 		9291,
 		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
-			sessions.write().push((id, ReactiveServer::new(end)));
+			sessions.write().push((id, ReactiveServer::new(end, json_codec())));
 		},
 		|id| print(i"closed {id}"),
 		|request| Response::builder().code(404).body("nope").build(),
@@ -585,12 +585,12 @@ fun main() {
 
 fun watch(name: str, base: str): Client<HttpTransport> {
 	let socket = connect_socket("ws://localhost:9291");
-	let reactive = ReactiveClient::new(bridge(socket));
+	let reactive = ReactiveClient::new(bridge(socket), json_codec());
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 	match client.attach(i32::from_json(socket.connection)) {
 		Ok(let channel) => {
-			let watching = reactive.source(channel).sub(|json| {
-				let n: i32 = i32::from_json(json);
+			let mirror: RemoteSource<i32> = reactive.source(channel);
+			let watching = mirror.sub(|n| {
 				print(i"{name} sees {n}");
 			});
 		},
@@ -654,7 +654,7 @@ import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{
 	connect_socket, bridge, SocketTransport,
-	ReactiveServer, ReactiveClient, DuplexEnd,
+	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
 };
 import std::rpc_server::serve_connected;
 import std::http::Response;
@@ -692,7 +692,7 @@ fun main() {
 		9293,
 		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
-			sessions.write().push((id, ReactiveServer::new(end)));
+			sessions.write().push((id, ReactiveServer::new(end, json_codec())));
 		},
 		|id| {},
 		|request| Response::builder().code(404).body("nope").build(),
@@ -707,11 +707,11 @@ fun main() {
 fun watch(name: str): Client<SocketTransport> {
 	let socket = connect_socket("ws://localhost:9293");
 	let client = Client { transport = socket.transport(), codec = json_codec() };
-	let reactive = ReactiveClient::new(bridge(socket));
+	let reactive = ReactiveClient::new(bridge(socket), json_codec());
 	match client.attach(i32::from_json(socket.connection)) {
 		Ok(let channel) => {
-			let watching = reactive.source(channel).sub(|json| {
-				let n: i32 = i32::from_json(json);
+			let mirror: RemoteSource<i32> = reactive.source(channel);
+			let watching = mirror.sub(|n| {
 				print(i"{name} sees {n}");
 			});
 		},
@@ -757,6 +757,140 @@ fun run_clients() {
         assert!(
             stdout.contains(expected),
             "missing `{expected}` in multiplex output:\n{stdout}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_binary_codec_rides_the_socket_end_to_end() {
+    // The reactive-on-codec slice's new capability: with `binary_codec()` on
+    // both sides, RPC requests/replies AND reactive updates cross the one
+    // WebSocket as BINARY messages (the tag-byte lanes: 0x64 duplex,
+    // 0x72 + LE id RPC) — exercising `transmit_bytes`/`binaryType` and the
+    // text/binary discrimination on the client, and the `WsEvent::Binary`
+    // lanes answering in kind on the server. Same scenario as the text
+    // multiplex test: interleaved adds from two clients, fan-out to both.
+    let dir = temp_project("binary-socket");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(
+        &dir,
+        "src/main.vl",
+        r#"import std::print;
+import std::shared::Shared;
+import std::process::exit;
+import std::time::sleep;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::json::{ Json, FromJson };
+import std::binary::binary_codec;
+import std::reactive::Signal;
+import std::rpc::{
+	connect_socket, bridge, SocketTransport,
+	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
+};
+import std::rpc_server::serve_connected;
+import std::http::Response;
+
+let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+[service(Client)]
+struct Board {
+	count: Signal<i32>,
+}
+
+impl Board {
+	[rpc]
+	fun attach(self, connection: i32): i32 {
+		mut channel = 0 - 1;
+		for entry in sessions.read() {
+			let (id, reactive) = entry;
+			if id == connection {
+				channel = reactive.expose(self.count);
+			}
+		}
+		channel
+	}
+
+	[rpc]
+	fun add(self, by: i32): i32 {
+		self.count.set(self.count.get() + by);
+		self.count.get()
+	}
+}
+
+fun main() {
+	let board = Board { count = Signal::new(0) };
+	serve_connected(
+		9294,
+		board.dispatcher().into_protocol(binary_codec()),
+		|id, end| {
+			sessions.write().push((id, ReactiveServer::new(end, binary_codec())));
+		},
+		|id| {},
+		|request| Response::builder().code(404).body("nope").build(),
+		|| {
+			run_clients();
+		},
+	);
+}
+
+fun watch(name: str): Client<SocketTransport> {
+	let socket = connect_socket("ws://localhost:9294");
+	let client = Client { transport = socket.transport(), codec = binary_codec() };
+	let reactive = ReactiveClient::new(bridge(socket), binary_codec());
+	match client.attach(i32::from_json(socket.connection)) {
+		Ok(let channel) => {
+			let mirror: RemoteSource<i32> = reactive.source(channel);
+			let watching = mirror.sub(|n| {
+				print(i"{name} sees {n}");
+			});
+		},
+		Err(let error) => print(i"{name} attach err {error.to_json()}"),
+	}
+	client
+}
+
+fun run_clients() {
+	let alice = watch("alice");
+	let bob = watch("bob");
+	sleep(300);
+	match alice.verify() {
+		Ok(let same) => print(i"verify over binary socket = {same}"),
+		Err(let error) => print(i"verify err {error.to_json()}"),
+	}
+	match alice.add(7) {
+		Ok(let n) => print(i"alice add -> {n}"),
+		Err(let error) => print(i"add err {error.to_json()}"),
+	}
+	match bob.add(1) {
+		Ok(let n) => print(i"bob add -> {n}"),
+		Err(let error) => print(i"add err {error.to_json()}"),
+	}
+	sleep(300);
+	exit(0);
+}
+"#,
+    );
+    let stdout = vilan_run_with_timeout(&dir, Duration::from_secs(60));
+    for expected in [
+        "alice sees 0",
+        "bob sees 0",
+        "verify over binary socket = true",
+        "alice add -> 7",
+        "alice sees 7",
+        "bob sees 7",
+        "bob add -> 8",
+        "alice sees 8",
+        "bob sees 8",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in binary-socket output:\n{stdout}"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);

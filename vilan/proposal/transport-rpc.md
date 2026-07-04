@@ -284,7 +284,8 @@ routing — from the server declaration.
 > impl and returns `RpcError::Decode(reason)` — validating decode, end to end. The codec
 > is chosen at wiring time on both sides (`Client { transport, codec }`,
 > `dispatcher().into_protocol(codec)`); format choice stays deployment-wide (Q6). The
-> reactive protocol stays JSON-over-text until the WebSocket slice (SSE is text-only).
+> reactive protocol rides the codec too since the reactive-on-codec follow-up (§8's
+> amendment): typed mirrors, single-pass `Update` envelopes, binary over WS.
 
 **Client:** one helper turns a typed call into a wire round-trip; the developer never touches
 the envelope, the await, or the error layer:
@@ -484,9 +485,10 @@ Built-ins:
     reply lands; the server's upgrade path routes `r:` frames through the mounted
     protocol (a wire turn, reply written back with the same id) and `d:` frames to the
     app's `DuplexEnd`. The `__conn` announcement stays unprefixed (it precedes routing).
-    v1 multiplexes TEXT frames (the JSON codec); a binary request over the socket
-    transport is a wiring error (panics with direction) — WS binary frames land with
-    the reactive-on-codec slice, which needs the same event-kind plumbing on both ends.
+    Since the reactive-on-codec follow-up the socket carries BOTH kinds: text frames
+    keep these prefixes, binary WS messages use tag bytes (`0x64` duplex, `0x72` +
+    4-byte LE id RPC) — so a binary codec's requests AND updates ride the socket
+    natively (`binaryType = "arraybuffer"` + a host-level kind check on `data`).
 - **Asymmetric duplex** (`SplitDuplex`) — **✅ shipped (2026-07-02)** — a `DuplexTransport`
   *implementation* composing two directed channels internally: Server-Sent Events for
   server→client (`GET {base}/events`, read via fetch streaming + `TextDecoder` — works in the
@@ -804,6 +806,35 @@ fun get_user(self, id: i32): Result<Option<WireUser>, RpcError> {
   noisy server.
 
 ## 8. The reactive north star — a second protocol (the capstone)
+
+> **SHIPPED ON THE CODEC (2026-07-03, follow-up #5).** The section below described the
+> protocol before the codec existed; the built runtime kept its shape (capability table,
+> channel ids, subscribe/update/unsubscribe) and moved everything JSON-shaped onto §6.2:
+>
+> - **`DuplexTransport` carries `Frame`**, not `str`. `SplitDuplex` stays text-only (its
+>   server→client leg is SSE): sending a binary frame through it **panics** client-side —
+>   a loud wiring error the moment a binary codec first subscribes — and the server's SSE
+>   leg drops binary defensively. `SocketDuplex` carries both: WS *text* messages keep the
+>   `d:`/`r:<id>:` prefixes; WS *binary* messages carry a 1-byte channel tag (`0x64` 'd' =
+>   duplex frame, `0x72` 'r' + 4-byte LE request id = RPC) — which also removes
+>   `SocketTransport`'s binary panic: **binary RPC rides the socket**.
+> - **The reactive envelopes are single-pass over the codec** (`encode_update` writes
+>   `Update{channel, payload}` with the payload *described inline* — the last
+>   double-encoding, gone). The `ReactiveFrame` derive type and the per-source JSON
+>   mirror `Signal<str>`s are deleted. `expose<T: Wire>` now stores a **starter** per
+>   channel — a closure that subs the *typed* source on the client's first Subscribe —
+>   so an unsubscribed exposed source retains nothing at all.
+> - **Mirrors are typed end to end**: `source<T: Wire>(channel)` returns a
+>   `RemoteSource<T>` (`cache: Signal<Option<T>>`, `get(): Option<T>`, `sub(|T| void)`) —
+>   `T` binds from the annotated `let` at the call site; the generated client emits
+>   `RemoteSource<Element>` from the `[expose]`d field's `Signal<Element>` type, and app
+>   code subscribes to *values*, not JSON (`client.todos.sub(|list| …)`). `RemoteSource`
+>   no longer implements `Source<str>`; the `Option` replaces the `""` sentinel. A
+>   malformed update is dropped (sticky decode error checked per frame), never delivered.
+> - `ReactiveServer::new(wire, codec)` / `ReactiveClient::new(wire, codec)`: the codec is
+>   chosen at wiring time like RPC's; `register_session` threads the `RpcProtocol`'s, so
+>   `serve_service` keeps its signature. The vestigial `Protocol` trait (nothing consumed
+>   it) is retired.
 
 A `Signal`/`Source` is **not data** — it is a *capability*: a live reference to server state
 plus an ongoing event stream. So it does not ride the Wire/codec model as a value. It is the

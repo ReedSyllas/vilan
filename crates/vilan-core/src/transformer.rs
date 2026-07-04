@@ -1011,8 +1011,12 @@ impl<'src> Transformer<'src> {
                 let inner = self.walk_entity(*inner, block).unwrap_or(js::Node::Void);
                 js::Node::Await(Box::new(inner))
             }
+            // A bare `ret` returns void — emitted as `return;` (the emitter
+            // special-cases a `Void` child).
             Expr::FunctionReturn(value) => js::Node::Return(Box::new(
-                self.walk_entity(*value, block).unwrap_or(js::Node::Void),
+                value
+                    .and_then(|value| self.walk_entity(value, block))
+                    .unwrap_or(js::Node::Void),
             )),
             Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.walk_entity(*lhs, block).unwrap_or(js::Node::Void);

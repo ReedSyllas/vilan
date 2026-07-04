@@ -85,14 +85,17 @@ sibling to RPC over a **duplex** transport:
   registers a source under a fresh **channel id** — the id is what crosses the wire in place of
   the signal. On a `Subscribe(id)` frame it forwards that source's values as `Update(id, json)`
   frames.
-- The client `RemoteSource` implements **`Source<str>`** (the read-only half of the reactive
-  split — client code can't write a server signal). Its `sub` opens the channel and observes a
-  local mirror that inbound `Update` frames keep in sync; `count = 0` is the current value,
-  delivered on subscribe, then `1` and `2` as the server `set`s it.
+- The client holds a **typed `RemoteSource<i32>`** (the read-only half of the reactive
+  split — client code can't write a server signal; `get`/`sub` only, no `set`). Its `sub`
+  opens the channel and observes a local mirror (`Signal<Option<i32>>`, `None` until the
+  first update) that inbound `Update` frames keep in sync; `count = 0` is the current
+  value, delivered on subscribe, then `1` and `2` as the server `set`s it — the observer
+  receives decoded values, never wire text.
 
 The `Source` trait itself is a small, additive `std::reactive` change: `Signal`'s read-only
-`get`/`sub` moved into `trait Source<T>`, which both `Signal` and `RemoteSource` implement (the
-corpus stays byte-identical).
+`get`/`sub` moved into `trait Source<T>` (which `expose` is generic over). `RemoteSource<T>`
+mirrors the same `get`/`sub` shape without implementing the trait — its `get` is
+`Option<T>` (no value before the first update), the honest remote signature.
 
 ## The wire turn (reactive batching)
 
@@ -139,8 +142,8 @@ paradigm without replacing it.
 - **An exposed field (`[expose]`, §8).** `Session.status` is exported under a channel id; the
   `Client` carries a `RemoteSource` mirror for it. A successful login flips it — and the wire
   turn delivers `status = online` in the same turn as `login -> true` (the failed login changes
-  nothing). Observers decode the JSON-encoded value at the concrete site; the typed wrapper is
-  the sugar's job.
+  nothing). The mirror is typed (`RemoteSource<str>`): observers receive decoded values — the
+  codec chosen at wiring time is the only (de)serialization anywhere on the path.
 
 ## Quirks discovered
 

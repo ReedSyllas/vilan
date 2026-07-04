@@ -95,7 +95,7 @@ pub enum Expr<'src> {
     // for `_`), and the body. Lowers to a native JS `for...of`.
     ForEach(Id, Option<Id>, (Vec<Id>, Id)),
     Function(Id),
-    FunctionReturn(Id),
+    FunctionReturn(Option<Id>),
     Generic(TypeId),
     If(ExprIfBranch),
     Impl(Id),
@@ -2015,7 +2015,7 @@ impl<'src> Analyzer<'src> {
         let mut escapes: Vec<Id> = Vec::new();
         for expr in self.expr_id_to_expr_map.values() {
             match expr {
-                Expr::FunctionReturn(value_id)
+                Expr::FunctionReturn(Some(value_id))
                     if self.escapes_as_view(*value_id, &view_bindings, &capturing) =>
                 {
                     escapes.push(*value_id);
@@ -2158,7 +2158,7 @@ impl<'src> Analyzer<'src> {
                 self.scan_view_param_ref(subject, captured, visited);
                 self.scan_view_param_ref(index, captured, visited);
             }
-            Expr::FunctionReturn(value) | Expr::Await(value) => {
+            Expr::FunctionReturn(Some(value)) | Expr::Await(value) => {
                 self.scan_view_param_ref(value, captured, visited)
             }
             Expr::Call(call_id) => {
@@ -2783,7 +2783,7 @@ impl<'src> Analyzer<'src> {
                 self.scan_invalidation(subject, view_origins, live, violations);
                 self.scan_invalidation(index, view_origins, live, violations);
             }
-            Expr::FunctionReturn(value) | Expr::Await(value) => {
+            Expr::FunctionReturn(Some(value)) | Expr::Await(value) => {
                 self.scan_invalidation(value, view_origins, live, violations)
             }
             Expr::Call(call_id) => {
@@ -3281,7 +3281,7 @@ impl<'src> Analyzer<'src> {
                 self.mark_repeatable(*subject_id, depth, interior, visited);
                 self.mark_repeatable(*index_id, depth, interior, visited);
             }
-            Expr::FunctionReturn(value_id) => {
+            Expr::FunctionReturn(Some(value_id)) => {
                 self.mark_repeatable(*value_id, depth, interior, visited)
             }
             Expr::Binary(_, lhs, rhs) => {
@@ -4170,7 +4170,9 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Call(id))
             }
             Node::FuncReturn(value) => {
-                let id = self.walk_expr_node(value, scope_id);
+                let id = value
+                    .as_ref()
+                    .map(|value| self.walk_expr_node(value, scope_id));
                 Some(Expr::FunctionReturn(id))
             }
             Node::Binary(op, lhs, rhs) => {
@@ -9939,7 +9941,19 @@ impl<'src> Program<'src> {
 /// resulting tree so they live for the whole compilation. Used to pull the
 /// `std` package's modules in from source. Returns `None` if the file can't be
 /// read or fails to lex/parse.
-fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>> {
+/// A package module loaded from disk: the (possibly error-recovered) AST plus
+/// any lex/parse errors, pre-rendered with their line and column. The AST stays
+/// usable — recovery leaves `Node::Error` subtrees — but the errors MUST reach
+/// the caller's diagnostics: a silently recovered module *compiles*, with the
+/// unparsed statements simply gone (a miscompile that hides until the dropped
+/// path runs).
+#[derive(Clone, Copy)]
+struct LoadedModule {
+    ast: &'static crate::span::Spanned<NodeList<'static>>,
+    parse_errors: &'static [String],
+}
+
+fn load_package_module(path: &str) -> Option<LoadedModule> {
     use chumsky::prelude::*;
     use std::collections::HashMap;
     use std::collections::hash_map::DefaultHasher;
@@ -9951,8 +9965,7 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
     // (and the language server re-analyzes on each keystroke), but their source
     // rarely changes — so reuse the parse, and leak the source + tree only once
     // per distinct content instead of once per analysis.
-    static CACHE: OnceLock<Mutex<HashMap<u64, &'static crate::span::Spanned<NodeList<'static>>>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<u64, LoadedModule>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     let source = std::fs::read_to_string(path).ok()?;
@@ -9961,27 +9974,82 @@ fn load_package_module(path: &str) -> Option<&'static Spanned<NodeList<'static>>
         source.hash(&mut hasher);
         hasher.finish()
     };
-    if let Some(ast) = cache.lock().unwrap().get(&key) {
-        return Some(*ast);
+    if let Some(loaded) = cache.lock().unwrap().get(&key) {
+        return Some(*loaded);
+    }
+
+    // Renders an error at a source offset as `line N, column M: reason`.
+    fn render_at(source: &str, offset: usize, reason: String) -> String {
+        let offset = offset.min(source.len());
+        let line = source[..offset].matches('\n').count() + 1;
+        let column = offset - source[..offset].rfind('\n').map(|at| at + 1).unwrap_or(0) + 1;
+        format!("line {line}, column {column}: {reason}")
     }
 
     // Cache miss: lex and parse. The source is leaked so the parsed tree (which
     // borrows it) can live for the whole compilation. The token vector is
     // transient — the AST holds `&'static str` slices into the source.
     let source: &'static str = Box::leak(source.into_boxed_str());
-    let tokens = crate::lexer::lexer().parse(source).into_output()?;
-    let end = source.len();
-    let (root, _file_span) = crate::parser::parser()
-        .map_with(|ast, e| (ast, e.span()))
-        .parse(
-            tokens
-                .as_slice()
-                .map((end..end).into(), |(token, span)| (token, span)),
-        )
-        .into_output()?;
-    let ast = Box::leak(Box::new(root));
-    cache.lock().unwrap().insert(key, ast);
-    Some(ast)
+    let mut errors: Vec<String> = Vec::new();
+    fn empty_ast() -> &'static crate::span::Spanned<NodeList<'static>> {
+        &*Box::leak(Box::new((Vec::new(), (0..0).into())))
+    }
+    let (tokens, lex_errors) = crate::lexer::lexer().parse(source).into_output_errors();
+    errors.extend(
+        lex_errors
+            .into_iter()
+            .map(|error| render_at(source, error.span().start, error.to_string())),
+    );
+    let root: &'static crate::span::Spanned<NodeList<'static>> = match tokens {
+        Some(tokens) => {
+            let end = source.len();
+            let (root, parse_errors) = crate::parser::parser()
+                .map_with(|ast, e| (ast, e.span()))
+                .parse(
+                    tokens
+                        .as_slice()
+                        .map((end..end).into(), |(token, span)| (token, span)),
+                )
+                .into_output_errors();
+            errors.extend(
+                parse_errors
+                    .into_iter()
+                    .map(|error| render_at(source, error.span().start, error.to_string())),
+            );
+            match root {
+                Some((root, _file_span)) => &*Box::leak(Box::new(root)),
+                // Recovery failed outright: an empty module + the errors above —
+                // loud, instead of pretending the file doesn't exist.
+                None => empty_ast(),
+            }
+        }
+        None => empty_ast(),
+    };
+    let loaded = LoadedModule {
+        ast: root,
+        parse_errors: Box::leak(errors.into_boxed_slice()),
+    };
+    cache.lock().unwrap().insert(key, loaded);
+    Some(loaded)
+}
+
+/// Pushes one diagnostic per swallowed lex/parse error in a loaded package
+/// module, naming the file (module spans are offsets into *that* file, so the
+/// rendered position rides in the message).
+fn report_module_parse_errors(diagnostics: &mut Vec<Error>, path: &str, loaded: &LoadedModule) {
+    for rendered in loaded.parse_errors {
+        let msg = format!("parse error in `{path}`: {rendered}");
+        // The same module loads through several seams (a lib re-export and a
+        // direct import, say) and the cache hands each the same errors — one
+        // diagnostic per distinct error is enough.
+        if diagnostics.iter().any(|error| error.msg == msg) {
+            continue;
+        }
+        diagnostics.push(Error {
+            span: EMPTY_SPAN,
+            msg,
+        });
+    }
 }
 
 /// The synthesized trait-impl source for one `[derive(..)]` item. Only structs
@@ -10222,12 +10290,23 @@ fn service_impl_source(
     let client_name = client_name
         .map(str::to_string)
         .unwrap_or_else(|| format!("{service_name}Client"));
-    // The `[expose]`d fields — each becomes a `RemoteSource` mirror on the client.
-    let exposed: Vec<&str> = fields
+    // The `[expose]`d fields — each becomes a typed `RemoteSource<Element>`
+    // mirror on the client. The element comes off the field's `Signal<Element>`
+    // type (the `[expose]` check guarantees that shape); a malformed field
+    // renders `_`, surfacing a clear error at the generated use site.
+    let exposed: Vec<(&str, String)> = fields
         .0
         .iter()
         .filter(|field| field.0.2)
-        .map(|field| field.0.0.0)
+        .map(|field| {
+            let element = match field.0.1.as_ref().map(|type_node| &type_node.0) {
+                Some(Node::AccessorWithGenerics("Signal", arguments)) if arguments.0.len() == 1 => {
+                    render_type(&arguments.0[0].0)
+                }
+                _ => "_".to_string(),
+            };
+            (field.0.0.0, element)
+        })
         .collect();
     // The `[rpc]` methods: (name, [(parameter, type)], return type), from this
     // module's inherent impls of the service struct.
@@ -10291,9 +10370,11 @@ fn service_impl_source(
         surface.push_str(return_string);
         surface.push(';');
     }
-    for field_name in &exposed {
+    for (field_name, element) in &exposed {
         surface.push_str("expose:");
         surface.push_str(field_name);
+        surface.push(':');
+        surface.push_str(element);
         surface.push(';');
     }
     let hash = service_contract_hash(&surface);
@@ -10339,7 +10420,7 @@ fn service_impl_source(
     // channel ids — what the generated `Client::connect` wires mirrors from.
     let exposures = exposed
         .iter()
-        .map(|field_name| format!("session.expose(self.{field_name})"))
+        .map(|(field_name, _)| format!("session.expose(self.{field_name})"))
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!(
@@ -10364,8 +10445,8 @@ fn service_impl_source(
     out.push_str(&format!(
         "struct {client_name}<T: Transport> {{\n\ttransport: T,\n\tcodec: Codec,\n"
     ));
-    for field_name in &exposed {
-        out.push_str(&format!("\t{field_name}: RemoteSource,\n"));
+    for (field_name, element) in &exposed {
+        out.push_str(&format!("\t{field_name}: RemoteSource<{element}>,\n"));
     }
     out.push_str("}\n");
     out.push_str(&format!("impl {client_name}<type T> {{\n"));
@@ -10406,12 +10487,22 @@ fn service_impl_source(
     // ENFORCE the contract hash (a drifted server is Err(Contract), before
     // anything else), __attach with the connection id, and wire one mirror per
     // [expose]d field from the returned channels (declaration order).
-    let mirror_fields = exposed
+    // Each mirror binds `source<T>` through an annotated let (a struct-literal
+    // field does not direct a generic call's type parameter; a let does).
+    let mirror_lets = exposed
         .iter()
         .enumerate()
-        .map(|(index, field_name)| {
-            format!(",\n\t\t\t\t\t{field_name} = reactive.source(channels[{index}])")
+        .map(|(index, (field_name, element))| {
+            format!(
+                "\t\t\t\tlet mirror_{field_name}: RemoteSource<{element}> = \
+                 reactive.source(channels[{index}]);\n"
+            )
         })
+        .collect::<Vec<_>>()
+        .join("");
+    let mirror_fields = exposed
+        .iter()
+        .map(|(field_name, _)| format!(",\n\t\t\t\t\t{field_name} = mirror_{field_name}"))
         .collect::<Vec<_>>()
         .join("");
     out.push_str(&format!(
@@ -10434,7 +10525,8 @@ fn service_impl_source(
          \t\tlet attached: Result<List<i32>, RpcError> = call(transport, codec, \"__attach\", [|serializer: Serializer| connection.describe(serializer)]);\n\
          \t\tmatch attached {{\n\
          \t\t\tResult::Ok(let channels) => {{\n\
-         \t\t\t\tlet reactive = ReactiveClient::new(bridge(socket));\n\
+         \t\t\t\tlet reactive = ReactiveClient::new(bridge(socket), codec);\n\
+{mirror_lets}\
          \t\t\t\tResult::Ok({client_name} {{\n\
          \t\t\t\t\ttransport = transport,\n\
          \t\t\t\t\tcodec = codec{mirror_fields},\n\
@@ -10965,9 +11057,11 @@ pub fn check_library_contract(spec: &PackageSpec) -> Vec<Error> {
     let all_roots = spec.search_roots(Platform::None);
     for (served, root) in &layers {
         for (importer, path) in modules_in_root(root) {
-            let Some(ast) = load_package_module(&path.to_string_lossy()) else {
+            let Some(loaded) = load_package_module(&path.to_string_lossy()) else {
                 continue;
             };
+            report_module_parse_errors(&mut diagnostics, &path.to_string_lossy(), &loaded);
+            let ast = loaded.ast;
             for (module, span) in collect_module_refs(&ast.0, "pkg") {
                 if resolve_module_in_roots(&all_roots, module).0.is_none() {
                     continue; // not a module file anywhere — an item re-export or a typo
@@ -11198,7 +11292,11 @@ pub fn analyze<'src>(
     // bodies are walked after all are registered so cross-module references
     // resolve during `build()`.
     let lib_path = std_module_path(&std.base_root, "lib.vl");
-    let lib_ast = load_package_module(&lib_path);
+    let lib_loaded = load_package_module(&lib_path);
+    if let Some(loaded) = &lib_loaded {
+        report_module_parse_errors(&mut analyzer.diagnostics, &lib_path, loaded);
+    }
+    let lib_ast = lib_loaded.map(|loaded| loaded.ast);
     sources.push(PathBuf::from(&lib_path));
     let lib_source_id = SourceId((sources.len() - 1) as u32);
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
@@ -11398,13 +11496,15 @@ pub fn analyze<'src>(
             // A library's public surface is its base `lib.vl` (the base layer is
             // target-agnostic), loaded once for every target.
             let lib_path = std_module_path(&spec.base_root, "lib.vl");
-            let Some(lib_ast) = load_package_module(&lib_path) else {
+            let Some(lib_loaded) = load_package_module(&lib_path) else {
                 analyzer.diagnostics.push(Error {
                     span: EMPTY_SPAN,
                     msg: format!("library at `{}` has no `lib.vl`", spec.base_root.display()),
                 });
                 continue;
             };
+            report_module_parse_errors(&mut analyzer.diagnostics, &lib_path, &lib_loaded);
+            let lib_ast = lib_loaded.ast;
             sources.push(PathBuf::from(&lib_path));
             let lib_source_id = SourceId((sources.len() - 1) as u32);
             analyzer
@@ -11520,11 +11620,12 @@ pub fn analyze<'src>(
             entry_is_module = true;
             (nodes, SourceId(0))
         } else {
-            let Some(loaded_ast) = load_package_module(&module_path) else {
+            let Some(loaded) = load_package_module(&module_path) else {
                 continue;
             };
+            report_module_parse_errors(&mut analyzer.diagnostics, &module_path, &loaded);
             sources.push(PathBuf::from(&module_path));
-            (loaded_ast, SourceId((sources.len() - 1) as u32))
+            (loaded.ast, SourceId((sources.len() - 1) as u32))
         };
         let module_scope = analyzer.create_scope(Some(global_scope_id));
         let module_scope_id = analyzer.push_scope(module_scope);

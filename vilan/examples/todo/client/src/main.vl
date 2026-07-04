@@ -20,8 +20,9 @@ async fun main() {
 	match TodoClient::connect("/", json_codec()) {
 		Ok(let client) => {
 			mount("app", todos(client, items));
-			let syncing = client.todos.sub(|json| {
-				let synced: List<Todo> = List::from_json(json);
+			// The mirror is typed (`RemoteSource<List<Todo>>`): values arrive
+			// decoded — the wire's codec is the only (de)serialization.
+			let syncing = client.todos.sub(|synced| {
 				items.set(synced);
 			});
 		},

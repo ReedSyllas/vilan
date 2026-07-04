@@ -937,9 +937,11 @@ where
         .labelled("function")
         .boxed();
 
+    // `ret <expr>` returns a value; a bare `ret` (before `;` or `}`) returns
+    // void — the early exit of a void function.
     let return_ = just(Token::Ret)
-        .ignore_then(expression.clone())
-        .map_with(|x, e| (Node::FuncReturn(Box::new(x)), e.span()));
+        .ignore_then(expression.clone().or_not())
+        .map_with(|x, e| (Node::FuncReturn(x.map(Box::new)), e.span()));
 
     // `[expose]` — the field is observable by the service's client as a mirrored
     // `Source` (must be a `Signal` of a Wire type, checked by the analyzer).

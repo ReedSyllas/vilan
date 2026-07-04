@@ -12,8 +12,9 @@ import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{
 	HttpTransport, SplitDuplex, DuplexTransport, DuplexEnd, connect_split, bridge,
-	ReactiveServer, ReactiveClient,
+	ReactiveServer, ReactiveClient, RemoteSource,
 };
+import std::wire::Frame;
 import std::rpc_server::serve_connected;
 import std::http::Response;
 import pkg::report::{ section, round };
@@ -52,11 +53,11 @@ struct CountingDuplex {
 }
 
 impl CountingDuplex with DuplexTransport {
-	fun send(self, frame: str) {
+	fun send(self, frame: Frame) {
 		self.inner.send(frame);
 	}
 
-	fun on_frame(self, handler: |str| void) {
+	fun on_frame(self, handler: |Frame| void) {
 		self.inner.on_frame(|frame| {
 			self.inbound.write() = self.inbound.read() + 1;
 			handler(frame);
@@ -73,13 +74,14 @@ fun watch(base: str): Session {
 	let split = connect_split(base);
 	let frames: Shared<i32> = Shared::new(0);
 	let counting = CountingDuplex { inner = split, inbound = frames };
-	let reactive = ReactiveClient::new(bridge(counting));
+	let reactive = ReactiveClient::new(bridge(counting), json_codec());
 	let last_seen: Shared<i32> = Shared::new(0 - 1);
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 	match client.attach(i32::from_json(split.connection)) {
 		Ok(let channel) => {
-			let _watching = reactive.source(channel).sub(|json| {
-				last_seen.write() = i32::from_json(json);
+			let mirror: RemoteSource<i32> = reactive.source(channel);
+			let _watching = mirror.sub(|n| {
+				last_seen.write() = n;
 			});
 		},
 		Err(let error) => print("attach failed"),
@@ -94,7 +96,7 @@ fun run(finished: || void) {
 		48232,
 		board.dispatcher().into_protocol(json_codec()),
 		|id, end| {
-			sessions.write().push((id, ReactiveServer::new(end)));
+			sessions.write().push((id, ReactiveServer::new(end, json_codec())));
 		},
 		|id| {},
 		|request| Response::builder().code(404).body("benchmark").build(),

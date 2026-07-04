@@ -304,3 +304,35 @@ fn standalone_library_check_flags_a_contract_violation() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_parse_error_inside_a_package_module_fails_the_build_loudly() {
+    // Package modules (std, libraries, `pkg::` siblings) load through the
+    // error-recovering parser: a syntax error used to be silently swallowed —
+    // the recovered `Node::Error` compiled to *nothing*, so the module built
+    // with the broken statements simply gone. It must fail, naming the file
+    // and position.
+    let dir = temp_project("module-parse-error");
+    write(dir.as_path(), "vilan.toml", "[package]\nname = \"app\"\n");
+    write(
+        dir.as_path(),
+        "src/main.vl",
+        "import pkg::util::util;\nfun main() { let _ = util(); }\n",
+    );
+    write(
+        dir.as_path(),
+        "src/util.vl",
+        "fun util(): i32 { 1 }\nfun broken( {\n",
+    );
+    let build = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(
+        !build.status.success(),
+        "a module with a parse error must not build"
+    );
+    let output = combined(&build);
+    assert!(
+        output.contains("parse error in") && output.contains("util.vl"),
+        "the diagnostic should name the broken module: {output}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

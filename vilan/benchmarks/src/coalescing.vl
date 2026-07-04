@@ -11,7 +11,7 @@ import std::result::Result::{ self, Ok, Err };
 import std::reactive::{ batch, Signal };
 import std::rpc::{
 	duplex_pair, local_rpc, Dispatcher, RpcError, RpcOutcome, call, arg, reply, decode_failed,
-	ReactiveServer, ReactiveClient,
+	ReactiveServer, ReactiveClient, RemoteSource,
 };
 import pkg::report::section;
 
@@ -31,10 +31,11 @@ fun run() {
 	});
 
 	let counter: Signal<i32> = Signal::new(0);
-	let server = ReactiveServer::new(server_end);
+	let server = ReactiveServer::new(server_end, json_codec());
 	let channel = server.expose(counter);
 	let deliveries: Shared<i32> = Shared::new(0);
-	let watching = ReactiveClient::new(client_end).source(channel).sub(|json| {
+	let mirror: RemoteSource<i32> = ReactiveClient::new(client_end, json_codec()).source(channel);
+	let watching = mirror.sub(|n| {
 		deliveries.write() = deliveries.read() + 1;
 	});
 

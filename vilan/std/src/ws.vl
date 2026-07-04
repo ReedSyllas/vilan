@@ -42,6 +42,10 @@ fun text_frame(text: str): Bytes {
 	encode_frame(0x1, encode_utf8(text))
 }
 
+fun binary_frame(payload: Bytes): Bytes {
+	encode_frame(0x2, payload)
+}
+
 fun pong_frame(payload: Bytes): Bytes {
 	encode_frame(0xA, payload)
 }

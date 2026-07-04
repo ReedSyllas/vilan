@@ -2549,7 +2549,7 @@ fn service_generates_dispatcher_client_and_mirror() {
         import std::result::Result::{ self, Ok, Err };
         import std::json::{ Json, FromJson };
         import std::json::json_codec;
-        import std::rpc::{ local_rpc, duplex_pair, ReactiveServer, ReactiveClient };
+        import std::rpc::{ local_rpc, duplex_pair, ReactiveServer, ReactiveClient, RemoteSource };
 
         [service(Client)]
         struct Session {
@@ -2575,10 +2575,10 @@ fn service_generates_dispatcher_client_and_mirror() {
             let session = Session { status = Signal::new("idle"), count = Shared::new(0) };
             let transport = local_rpc(session.dispatcher().into_protocol(json_codec()));
             let (client_end, server_end) = duplex_pair();
-            let channel = ReactiveServer::new(server_end).expose(session.status);
-            let client = Client { transport, codec = json_codec(), status = ReactiveClient::new(client_end).source(channel) };
-            let watching = client.status.sub(|json| {
-                let s: str = str::from_json(json);
+            let channel = ReactiveServer::new(server_end, json_codec()).expose(session.status);
+            let mirror: RemoteSource<str> = ReactiveClient::new(client_end, json_codec()).source(channel);
+            let client = Client { transport, codec = json_codec(), status = mirror };
+            let watching = client.status.sub(|s| {
                 print(i"status = {s}");
             });
             match client.bump(5) {
@@ -3656,12 +3656,11 @@ import std::print;
         	// One call: socket + contract enforcement + attach + mirrors.
         	match Client::connect("ws://localhost:48411", json_codec()) {
         		Ok(let client) => {
-        			let counting = client.count.sub(|json| {
-        				let n: i32 = i32::from_json(json);
+        			// Typed mirrors: values arrive decoded at each field's type.
+        			let counting = client.count.sub(|n| {
         				print(i"count = {n}");
         			});
-        			let labeling = client.label.sub(|json| {
-        				let s: str = str::from_json(json);
+        			let labeling = client.label.sub(|s| {
         				if s != "" {
         					print(i"label = {s}");
         				}
@@ -3688,5 +3687,72 @@ import std::print;
 
         "#,
         "count = 0\ncount = 7\nlabel = sum 7\nadd -> 7\ndrift: {\"Contract\":\"the server reports a different service surface\"}\n",
+    );
+}
+
+// --- Bare `ret` (return void) -------------------------------------------------
+
+// `ret` with no value is a void early-return: the guard exits before the print,
+// and the non-guarded call falls through to it.
+#[test]
+fn bare_ret_returns_void_early() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun guard(flag: bool) {
+        	if flag {
+        		ret;
+        	}
+        	print("passed");
+        }
+
+        fun main() {
+        	guard(true);
+        	guard(false);
+        }
+        "#,
+        "passed\n",
+    );
+}
+
+// A `ret` value must match the declared return type. It currently is not
+// checked at all — `ret "nope"` in an `i32` function compiles clean (the
+// solver never constrains a FunctionReturn against the enclosing signature).
+#[test]
+#[ignore]
+fn ret_value_is_checked_against_the_declared_return_type() {
+    assert_fails(
+        r#"
+        fun bad(): i32 {
+        	ret "nope";
+        	1
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+    );
+}
+
+// The void case of the same gap: a bare `ret` inside a function that declares
+// a value return type should be rejected, not compile to `return;`.
+#[test]
+#[ignore]
+fn bare_ret_in_a_value_returning_function_is_rejected() {
+    assert_fails(
+        r#"
+        fun bad(flag: bool): i32 {
+        	if flag {
+        		ret;
+        	}
+        	1
+        }
+
+        fun main() {
+        	let _ = bad(true);
+        }
+        "#,
     );
 }

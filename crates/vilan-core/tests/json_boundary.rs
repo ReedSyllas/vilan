@@ -44,19 +44,22 @@ fn json_usage_stays_within_the_sanctioned_sites() {
     // (relative path, allowed non-comment lines). `std/src/json.vl` is the
     // codec's own module and unrestricted; everything else is enumerated.
     let allowed: BTreeMap<&str, usize> = BTreeMap::from([
-        // std: the reactive protocol's JSON mirrors/envelopes (+ the socket
-        // multiplex's id parse) and the server mounts' id/header reads.
-        ("std/src/rpc.vl", 7),
-        ("std/src/process/rpc_server.vl", 2),
-        // examples/benchmarks: mirror decodes (retired by reactive-on-codec),
-        // connection-id parses (the recorded small fix), error rendering, and
-        // the todo server's JSON-at-rest persistence.
+        // std, post reactive-on-codec: ONLY the multiplex id parses remain —
+        // `route_socket_frame`'s (rpc.vl) and the `/send` + text-RPC-turn
+        // parses (rpc_server.vl). All of them retire when `str -> i32` parsing
+        // lands in std::number (the recorded small fix).
+        ("std/src/rpc.vl", 1),
+        ("std/src/process/rpc_server.vl", 3),
+        // examples/benchmarks: connection-id parses (same small fix), error
+        // rendering (`error.to_json()` — retired by a Debug derive on
+        // RpcError), and the todo server's JSON-at-rest persistence. The
+        // mirror decodes are GONE — mirrors are typed now.
         ("examples/todo/server/src/main.vl", 2),
-        ("examples/todo/client/src/main.vl", 2),
+        ("examples/todo/client/src/main.vl", 1),
         ("examples/todo/client/src/todos.vl", 1),
-        ("examples/rpc/src/main.vl", 7),
+        ("examples/rpc/src/main.vl", 5),
         ("benchmarks/src/throughput.vl", 1),
-        ("benchmarks/src/realtime.vl", 2),
+        ("benchmarks/src/realtime.vl", 1),
     ]);
     let mut files = Vec::new();
     for root in ["std/src", "examples", "benchmarks"] {

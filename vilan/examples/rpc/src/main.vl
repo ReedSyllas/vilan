@@ -251,19 +251,19 @@ fun reactive_demo() {
 	print("--- reactive: a remote Source<i32> ---");
 	let (client_end, server_end) = duplex_pair();
 
-	// Server: a counter, exposed directly — the runtime erases its `i32` to JSON (the
-	// generic `expose<T: Json, S: Source<T>>` monomorphizes now, so the app hands over a
-	// plain `Signal<i32>`). `channel` is the handle that, in a real system, would cross to
-	// the client in an RPC reply; in-process we hand it over.
+	// Server: a counter, exposed directly — the runtime erases its `i32` *inside* (the
+	// generic `expose<T: Wire, S: Source<T>>` stores a typed starter per channel, and each
+	// value single-passes into an `Update` envelope over the codec). `channel` is the
+	// handle that, in a real system, would cross to the client in an RPC reply;
+	// in-process we hand it over.
 	let counter: Signal<i32> = Signal::new(0);
-	let server = ReactiveServer::new(server_end);
+	let server = ReactiveServer::new(server_end, json_codec());
 	let channel = server.expose(counter);
 
-	// Client: a remote `Source<str>`; `sub` opens the channel and observes it. Each JSON
-	// update is decoded at the concrete site — where `T` is known and monomorphizes.
-	let remote = ReactiveClient::new(client_end).source(channel);
-	let subscription = remote.sub(|json| {
-		let n: i32 = i32::from_json(json);
+	// Client: a typed remote handle — the annotated `let` binds `source<T>`, and `sub`
+	// opens the channel and observes decoded values (no per-site JSON decoding).
+	let remote: RemoteSource<i32> = ReactiveClient::new(client_end, json_codec()).source(channel);
+	let subscription = remote.sub(|n| {
 		print(i"count = {n}");
 	});
 
@@ -312,20 +312,20 @@ fun session_demo() {
 	let session = Session { status = Signal::new("offline"), user_id = Shared::new(None) };
 	let rpc_transport = local_rpc(session.dispatcher().into_protocol(json_codec()));
 	let (client_end, server_end) = duplex_pair();
-	let status_channel = ReactiveServer::new(server_end).expose(session.status);
+	let status_channel = ReactiveServer::new(server_end, json_codec()).expose(session.status);
 
-	// Client: what `Client::connect` will assemble — the RPC transport plus a mirror for
-	// each exposed field.
+	// Client: what `Client::connect` assembles — the RPC transport plus a typed mirror
+	// for each exposed field (the annotated `let` binds the mirror's type).
+	let status_mirror: RemoteSource<str> = ReactiveClient::new(client_end, json_codec()).source(status_channel);
 	let client = Client {
 		transport = rpc_transport,
 		codec = json_codec(),
-		status = ReactiveClient::new(client_end).source(status_channel),
+		status = status_mirror,
 	};
 
 	// Observe the mirrored session state: "offline" now, "online" once login lands —
 	// delivered in the same wire turn as login's reply.
-	let watching = client.status.sub(|json| {
-		let s: str = str::from_json(json);
+	let watching = client.status.sub(|s| {
 		print(i"status = {s}");
 	});
 

@@ -70,14 +70,44 @@ FREE calls (bound statics like `T::rebuild(reader)` monomorphize correctly —
 the last piece the trait shape needed) and bound-static dispatch gained the
 same inherent-shadowing protection as methods.
 
-## 5. Reactive protocol on codecs — pairs with #1's framing, not standalone
+## 5. Reactive protocol on codecs — ✅ DONE (2026-07-03: the ladder's last rung)
 
-`expose`/`Update` move off JSON-strings onto the codec: binary realtime (half
-the bytes, per the payload benchmarks). Requires a binary-capable duplex (WS —
-SSE is text-only forever, so `DuplexTransport` must accommodate a text-only
-transport gracefully), client-side WS binary events (`binaryType`, typed
-`data` access), and the reactive mirrors becoming frame-typed. Touches the
-same duplex framing #1 touches — bundle to reshape that seam once.
+`expose`/`Update` moved off JSON-strings onto the codec — and further than
+planned: the mirrors came out **typed end to end**, not frame-typed.
+`DuplexTransport` carries `Frame` (SSE stays text-only: a binary send through
+`SplitDuplex` panics loudly at the first Subscribe; WS carries both kinds via
+tag bytes — `0x64` duplex, `0x72`+LE-id RPC — which also removed
+`SocketTransport`'s binary panic: **binary RPC rides the socket**, pinned by a
+real-network test). The runtime lost its JSON mirror signals entirely:
+`expose<T: Wire>` stores a per-channel *starter* that subs the typed source on
+the first Subscribe and single-passes each value into an `Update` envelope
+(nothing retained for unwatched channels — strictly better than the old
+always-on mirrors); `source<T: Wire>` returns `RemoteSource<T>`
+(`Signal<Option<T>>` cache replacing the `""` sentinel; malformed updates
+dropped, sticky-checked per frame). The generated client emits
+`RemoteSource<Element>` from each `[expose]`d field's `Signal<Element>` type
+(the element is now part of the contract surface/hash) and binds `source<T>`
+through annotated lets — app code subscribes to *values*:
+`client.todos.sub(|list| …)`. The vestigial `Protocol` trait and the
+`ReactiveFrame` derive type are gone; `ReactiveServer/Client::new` take the
+codec; `register_session` threads `RpcProtocol`'s, so `serve_service` kept its
+signature.
+
+En route, THREE compiler findings (the probe-first rule paying out again):
+struct-literal fields do NOT direct a generic call's type parameter (two calls
+cross-unify — hence the annotated-let generation); bare `ret;` was not legal
+grammar yet `rpc_server.vl` shipped one — which exposed that **package-module
+parse errors were silently swallowed** (`load_package_module` discarded
+recovery errors: the broken statement compiled to *nothing*). Both fixed at
+the root: `ret`'s expression is optional (a void early-return, pinned), and
+module lex/parse errors now fail the build naming file+line (workspace test).
+The ret-value-vs-return-type check turned out not to exist at all — pinned as
+two `#[ignore]`s.
+
+Boundary counts after the slice: `std/src/rpc.vl` **7 → 1** (the multiplex id
+parse), every client-side mirror decode gone (todo client, rpc example,
+realtime benchmark). What remains in the table is exactly the "small fix" and
+"cosmetic" rows below.
 
 ## Final fixes — the leftover-JSON audit (2026-07-02)
 
@@ -85,17 +115,15 @@ Audited every `to_json`/`from_json` use in std and the example/benchmark
 packages (enforced by `crates/vilan-core/tests/json_boundary.rs` — per-file
 counts; a change there must be deliberate and re-sanctioned). Findings:
 
-- **Sanctioned, by design**: `std::json` itself; the reactive protocol
-  (`expose`'s JSON mirrors, `ReactiveFrame` envelopes, `RemoteSource`'s JSON
-  strings — the recorded #5 item retires these); the WS handshake's header
-  read (`JsonValue` as the documented dynamic-object accessor).
-- **Downstream of #5**: every client-side mirror decode
-  (`List::from_json(json)` in the todo client, `i32::from_json(json)` in the
-  rpc example/benchmarks) — absorbed when the reactive protocol goes typed.
+- **Sanctioned, by design**: `std::json` itself; the WS handshake's header
+  read (`JsonValue` as the documented dynamic-object accessor). ~~The reactive
+  protocol's JSON mirrors/envelopes~~ — retired by #5 (typed mirrors, codec
+  envelopes); ~~every client-side mirror decode~~ — gone with them.
 - **Small fix — number parsing masquerading as decoding**: connection ids are
-  parsed with `i32::from_json("3")` in four places (todo client, realtime
-  benchmark, `rpc_server`'s `/send` route, the socket multiplex id). Add a
-  proper `str -> i32` parse to `std::number` and migrate; `from_json` works
+  parsed with `i32::from_json("3")` in the multiplex framing (todo client's
+  connect is generated now; remaining: realtime benchmark, `rpc_server`'s
+  `/send` route + text-RPC-turn id, the socket multiplex id in `rpc.vl`). Add
+  a proper `str -> i32` parse to `std::number` and migrate; `from_json` works
   but says the wrong thing.
 - **Cosmetic**: `error.to_json()` as the human rendering of `RpcError` in
   prints — consider `[derive(Debug)]` on `RpcError` and printing `debug()`.

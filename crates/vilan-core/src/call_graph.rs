@@ -322,7 +322,8 @@ impl<'a, 'src> Collector<'a, 'src> {
                 }
             }
             Expr::Field(subject_id, _, _) => self.walk(*subject_id),
-            Expr::FunctionReturn(value_id) => self.walk(*value_id),
+            Expr::FunctionReturn(Some(value_id)) => self.walk(*value_id),
+            Expr::FunctionReturn(None) => {}
             Expr::Binary(_, lhs, rhs) => {
                 self.walk(*lhs);
                 self.walk(*rhs);

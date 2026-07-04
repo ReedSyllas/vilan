@@ -1038,8 +1038,11 @@ impl<'src> Printer<'src> {
                 self.print_block(body);
             }
             Node::FuncReturn(value) => {
-                self.out.push_str("ret ");
-                self.print_expr(value);
+                self.out.push_str("ret");
+                if let Some(value) = value {
+                    self.out.push(' ');
+                    self.print_expr(value);
+                }
             }
             Node::Jump(target) => {
                 self.out.push_str("jump ");

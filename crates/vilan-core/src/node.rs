@@ -227,7 +227,8 @@ pub enum Node<'src> {
         Spanned<(NodeList<'src>, Box<Spanned<Self>>)>,
     ),
     Func(Func<'src>),
-    FuncReturn(Box<Spanned<Self>>),
+    // `ret <expr>` / bare `ret` (an early return of void).
+    FuncReturn(Option<Box<Spanned<Self>>>),
     If(NodeIfBranch<'src>),
     // `subject is pattern` — a pattern test that yields a `bool` and binds the
     // pattern's captures into the surrounding scope.
