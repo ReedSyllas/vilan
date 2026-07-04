@@ -3017,12 +3017,13 @@ fn bytes_buffers_round_trip() {
 }
 
 #[test]
-#[ignore = "generic trait methods silently no-op through a generic bound (found by the wire-visitor probe)"]
 fn generic_trait_method_dispatches_through_a_bound() {
-    // A trait method with its OWN generic parameters compiles and dispatches
-    // correctly on a concrete receiver, but through `T: Describable` the call
-    // silently does nothing — a miscompile, not an error. The wire visitor
-    // pivoted to closure records because of this (transport-rpc.md §6.1).
+    // FIXED: a trait method with its OWN generic parameters (describe<S: Sink>)
+    // used to no-op silently through `T: Describable` — the OnConstraint
+    // emission re-targeted the concrete impl's method without the call's
+    // own-generic bindings (whose ids belong to the TRAIT member), so the
+    // instance emitted with S unbound. The bindings now cross the re-dispatch
+    // as ordered values, zipped onto the target's own generics.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -3251,12 +3252,11 @@ fn hand_written_wire_impls_round_trip_through_json() {
 }
 
 #[test]
-#[ignore = "a qualified-generic static call mis-binds the impl binder for INNER trait statics"]
 fn qualified_generic_static_resolves_inner_trait_statics() {
-    // `List<i32>::rebuild(d)` (the qualified-generic spelling) emits the inner
-    // `T::rebuild` as an EMPTY function — T never binds — while the
-    // annotation-directed `let x: List<i32> = List::rebuild(d)` works. The
-    // Wire derive emits the annotated form because of this.
+    // FIXED: `List<i32>::rebuild(d)` (the qualified-generic spelling) used to
+    // emit the inner `T::rebuild` as an EMPTY function — the accessor resolution
+    // discarded the subject's type args entirely. A qualified subject now seeds
+    // the matched impl's binder bindings into ITS call's substitution.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -3351,13 +3351,12 @@ fn derived_wire_visitor_matches_to_json_and_round_trips() {
 }
 
 #[test]
-#[ignore = "derived qualified-generic statics mis-unify two differently-typed Option fields (pre-existing; same root as the qualified-static gap)"]
 fn derived_struct_with_two_differently_typed_options() {
-    // Pre-existing (reproduces with [derive(Json)] alone, no codec involved):
-    // the derive emits `Option<str>::from_json_value(..)` and
-    // `Option<i32>::from_json_value(..)` in one generated function, and the
-    // two instantiations unify — use sites then fail with "Expected
-    // Option<i32>, but got Option<str>". A plain struct (no derive) is fine.
+    // FIXED (same root as the qualified-static gap): with the subject's type
+    // args discarded, `Option<str>::from_json_value(..)` and
+    // `Option<i32>::from_json_value(..)` in one generated function fought over
+    // one shared binder — use sites failed with "Expected Option<i32>, but got
+    // Option<str>". Per-call subject bindings keep the two instantiations apart.
     assert_compiles_and_runs(
         r#"
         import std::print;

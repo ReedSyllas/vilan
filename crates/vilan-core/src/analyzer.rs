@@ -854,6 +854,19 @@ pub struct Analyzer<'src> {
     // `match` sits between the call and the signature.
     expected_types: HashMap<Id, TypeId>,
     prepped_static_accessors: Vec<(Id, TypeId, &'src str)>,
+    // A qualified-generic static subject's impl-binder bindings
+    // (`Boxy<i32>::make` -> {impl's T -> i32}), keyed by the accessor expr id.
+    // `resolve_call_subject` seeds a call's substitution from its subject's
+    // entry, so the args written in the PATH reach that call's monomorphization
+    // — without it they were silently discarded (the empty-inner-function /
+    // cross-call-collision class).
+    static_subject_bindings: HashMap<Id, SubstitutionContext>,
+    // A method call's OWN-generic bindings as ordered VALUES (`describe<S>`
+    // called with a Collector -> [Collector]), keyed by call id. The
+    // OnConstraint emission paths zip these onto the CONCRETE target method's
+    // own generics positionally — the analyzer binds the TRAIT method's ids,
+    // which differ from each impl's, so a map can't cross that boundary.
+    own_generic_call_bindings: HashMap<Id, Vec<TypeId>>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
     // Deferred named type references: (target type id, name, scope, span, the
     // walked generic argument type ids). The arguments parameterize the resolved
@@ -1003,6 +1016,8 @@ impl<'src> Analyzer<'src> {
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
+            static_subject_bindings: HashMap::new(),
+            own_generic_call_bindings: HashMap::new(),
             prepped_trait_impls: Vec::new(),
             prepped_type_locals: Vec::new(),
             prepped_type_static_accessors: Vec::new(),
@@ -7272,6 +7287,15 @@ impl<'src> Analyzer<'src> {
                         return Resolution::Failed;
                     }
                     let mut substitution_context = HashMap::new();
+                    // A qualified-generic subject (`Boxy<i32>::make(..)`) seeds
+                    // THIS call's bindings with the args written in the path, so
+                    // the impl's binders monomorphize per call site instead of
+                    // being discarded (or fought over across call sites).
+                    if let Some(bindings) = self.static_subject_bindings.get(&subject_id) {
+                        for (constraint_id, type_id) in bindings.clone() {
+                            substitution_context.insert(constraint_id, type_id);
+                        }
+                    }
                     for (index, generic_argument_id) in generic_argument_ids.iter().enumerate() {
                         if let Some(generic_constraint) =
                             generic_parameter_constraint_ids.get(index)
@@ -7640,6 +7664,21 @@ impl<'src> Analyzer<'src> {
                         })
                     {
                         return Resolution::Deferred;
+                    }
+                }
+                // Keep the own-generic bindings as ordered values too — the
+                // OnConstraint emission re-targets a concrete impl's method,
+                // whose own-generic IDS differ from this (possibly trait)
+                // member's, so only positional values survive the re-dispatch.
+                if let Some((_, own_generics)) = self.method_signature(member_id) {
+                    if !own_generics.is_empty() {
+                        let values: Vec<TypeId> = own_generics
+                            .iter()
+                            .filter_map(|generic| substitution.get(generic).copied())
+                            .collect();
+                        if values.len() == own_generics.len() {
+                            self.own_generic_call_bindings.insert(id, values);
+                        }
                     }
                 }
                 if !substitution.is_empty() {
@@ -8741,7 +8780,7 @@ impl<'src> Analyzer<'src> {
                     // bound (`T::from_json`), not on the concrete type (§3.2) —
                     // access *on the trait itself* stays allowed.
                     let subject_is_trait = matches!(subject_type, Type::Trait(_, _));
-                    let member_id = variant_id.or_else(|| {
+                    let member_id = variant_id.map(|variant| (variant, None)).or_else(|| {
                         self.implementations
                             .iter()
                             .filter(|x| {
@@ -8755,15 +8794,40 @@ impl<'src> Analyzer<'src> {
                                 if !subject_is_trait && self.member_is_trait_only(x, member_name) {
                                     return None;
                                 }
-                                x.declarations.get(member_name)
+                                x.declarations
+                                    .get(member_name)
+                                    .map(|declaration| (*declaration, Some(x.subject)))
                             })
-                            .copied()
                     });
                     match member_id {
-                        Some(member_id) => {
+                        Some((member_id, impl_subject)) => {
                             let rc = self.reference_count.entry(member_id).or_insert(0);
                             *rc += 1;
                             self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                            // A subject written WITH generic args (`Boxy<i32>::make`,
+                            // `Option<str>::rebuild`) binds the matched impl's
+                            // binders for the call this accessor subjects —
+                            // reconciled impl-first so the bindings key on the
+                            // impl's generics.
+                            let has_concrete_args = matches!(
+                                &subject_type,
+                                Type::Struct(_, args) | Type::Enum(_, args) if !args.is_empty()
+                            );
+                            if has_concrete_args {
+                                if let Some(impl_subject_id) = impl_subject {
+                                    let impl_subject_type = impl_subject_id.get_type(self);
+                                    if let Some((_, bindings)) = self.reconcile_type(
+                                        &impl_subject_type,
+                                        &subject_type,
+                                        &HashMap::new(),
+                                    ) {
+                                        if !bindings.is_empty() {
+                                            self.static_subject_bindings
+                                                .insert(id, bindings.into_iter().collect());
+                                        }
+                                    }
+                                }
+                            }
                         }
                         None => {
                             let subject_str =
@@ -9718,6 +9782,7 @@ pub struct Program<'src> {
     // `for e in &mut list` loop bindings → whether the element view is `&mut`.
     pub for_each_views: HashMap<Id, bool>,
     pub binary_op_dispatch: HashMap<Id, Id>,
+    pub own_generic_call_bindings: HashMap<Id, Vec<TypeId>>,
     pub bitwise_u32: HashSet<Id>,
     pub bitwise_generic_lhs: HashMap<Id, TypeId>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
@@ -10415,15 +10480,6 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
 /// each field (name, then the value's own describe) to the serializer, and
 /// `rebuild` pulls them back in declaration order — the field's source type
 /// text carries the static dispatch, exactly like the derived `from_json`.
-/// A type's head name (`List<i32>` -> `List`): rebuilds are emitted
-/// annotation-directed (`let x: List<i32> = List::rebuild(..)`) because the
-/// qualified-generic static spelling (`List<i32>::rebuild(..)`) mis-binds the
-/// impl binder for the INNER `T::rebuild` (pinned #[ignore]) — the annotated
-/// form is the hand-proven shape.
-fn type_head(type_text: &str) -> &str {
-    type_text.split('<').next().unwrap_or(type_text)
-}
-
 fn struct_wire_visitor_impls(struct_name: &str, fields: &[(&str, String)]) -> String {
     let mut describe = format!("\t\t(serializer.begin_struct)({});\n", fields.len());
     for (field, _) in fields {
@@ -10435,8 +10491,7 @@ fn struct_wire_visitor_impls(struct_name: &str, fields: &[(&str, String)]) -> St
     for (field, field_type) in fields {
         rebuild.push_str(&format!("\t\t(deserializer.field)(\"{field}\");\n"));
         rebuild.push_str(&format!(
-            "\t\tlet {field}: {field_type} = {}::rebuild(deserializer);\n",
-            type_head(field_type)
+            "\t\tlet {field} = {field_type}::rebuild(deserializer);\n"
         ));
     }
     rebuild.push_str("\t\t(deserializer.end_struct)();\n");
@@ -10495,8 +10550,7 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
         let mut body = format!("\t\t\t\t(deserializer.begin_variant)(\"{name}\", {arity});\n");
         for (index, payload_type) in payload_types.iter().enumerate() {
             body.push_str(&format!(
-                "\t\t\t\tlet p{index}: {payload_type} = {}::rebuild(deserializer);\n",
-                type_head(payload_type)
+                "\t\t\t\tlet p{index} = {payload_type}::rebuild(deserializer);\n"
             ));
         }
         body.push_str("\t\t\t\t(deserializer.end_variant)();\n");
@@ -10516,8 +10570,7 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
     let mut fallback_body = String::new();
     for (index, payload_type) in first_payloads.iter().enumerate() {
         fallback_body.push_str(&format!(
-            "\t\t\t\tlet f{index}: {payload_type} = {}::rebuild(deserializer);\n",
-            type_head(payload_type)
+            "\t\t\t\tlet f{index} = {payload_type}::rebuild(deserializer);\n"
         ));
     }
     let fallback = if first_payloads.is_empty() {
@@ -12049,6 +12102,7 @@ pub fn analyze<'src>(
         for_each_next: analyzer.for_each_next,
         for_each_views: analyzer.for_each_views,
         binary_op_dispatch: analyzer.binary_op_dispatch,
+        own_generic_call_bindings: analyzer.own_generic_call_bindings,
         bitwise_u32: analyzer.bitwise_u32,
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,

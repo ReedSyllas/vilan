@@ -805,7 +805,14 @@ impl<'src> Transformer<'src> {
                     .copied()
                 {
                     if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
-                        if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
+                        let own_values = self
+                            .program
+                            .own_generic_call_bindings
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_default();
+                        if let Some(dispatch) =
+                            self.resolve_dispatch_with(concrete_type_id, member_name, &own_values)
                         {
                             return Some(self.emit_dispatch(dispatch, args));
                         }
@@ -821,7 +828,14 @@ impl<'src> Transformer<'src> {
                     self.program.generic_dispatch.get(id).copied()
                 {
                     if let Some(&concrete_type_id) = self.current_substitution.get(&constraint_id) {
-                        if let Some(dispatch) = self.resolve_dispatch(concrete_type_id, member_name)
+                        let own_values = self
+                            .program
+                            .own_generic_call_bindings
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_default();
+                        if let Some(dispatch) =
+                            self.resolve_dispatch_with(concrete_type_id, member_name, &own_values)
                         {
                             return Some(self.emit_dispatch(dispatch, args));
                         }
@@ -2186,6 +2200,19 @@ impl<'src> Transformer<'src> {
     /// generic dispatch resolving to an extern/intrinsic without this would mint
     /// a dangling name for a function that is never emitted.
     fn resolve_dispatch(&mut self, type_id: TypeId, member: &str) -> Option<Dispatch<'src>> {
+        self.resolve_dispatch_with(type_id, member, &[])
+    }
+
+    /// `resolve_dispatch`, additionally binding the target method's OWN generics
+    /// from `own_generic_values` (the call's bindings in declaration order —
+    /// recorded against the trait member the analyzer saw, whose ids differ from
+    /// each concrete impl's, so only positional values cross the re-dispatch).
+    fn resolve_dispatch_with(
+        &mut self,
+        type_id: TypeId,
+        member: &str,
+        own_generic_values: &[TypeId],
+    ) -> Option<Dispatch<'src>> {
         let type_id = self.resolve_type_id(type_id);
         if let Some((member_id, impl_subject)) = self.resolve_member_on_type(type_id, member) {
             if let Some(intrinsic) = self.program.intrinsics.get(&member_id).copied() {
@@ -2207,6 +2234,20 @@ impl<'src> Transformer<'src> {
             // this is the plain generic emission as before.
             let mut substitution = HashMap::new();
             self.bind_generics(impl_subject, type_id, &mut substitution);
+            // The method's own generics (`describe<S: Sink>`) bind from the
+            // call's ordered values; without this the instance emitted with
+            // them unbound — the silent no-op through a bound.
+            if !own_generic_values.is_empty() {
+                if let Some(function) = self.program.functions.get(&member_id) {
+                    for (constraint_id, value) in function
+                        .generic_parameter_constraint_ids
+                        .iter()
+                        .zip(own_generic_values.iter())
+                    {
+                        substitution.insert(*constraint_id, *value);
+                    }
+                }
+            }
             let name = if substitution.is_empty() {
                 self.ensure_function_emitted(member_id);
                 self.ng.name_for(member_id)
