@@ -1,9 +1,9 @@
 # `!` and `?` — early return and lifted chains (backlog B11)
 
-Status: **proposal** (2026-07-04, not implemented). The two-operator design and the four
-refinements below are **agreed**; the mechanism sections marked *(recommendation)* are the
-implementation shape proposed for review. Ships in two slices: `!` first (the ergonomics
-workhorse), `?.` second.
+Status: **proposal, design fully agreed** (2026-07-04, not implemented). The two-operator
+design, the four refinements in §0, and the §8 resolutions (opt-in `Lift`; the
+`Try`/`Lift`/`Verdict` names; `Try` as a real trait from day one) are all settled. Ships
+in two slices: `!` first (the ergonomics workhorse), `?.` second.
 
 ## 0. The split, and the settled decisions
 
@@ -68,9 +68,12 @@ and stub code as much as hand-written code.
 4. Bad: **return from the nearest enclosing callable** (the B10 rule — the same boundary
    `ret` uses) with the bad half rewrapped in the callable's return type.
 
-### The `Try` seam *(recommendation)*
+### The `Try` seam *(agreed — a real trait from day one)*
 
-"Bad" is programmed by implementing the operator trait:
+"Bad" is programmed by implementing the operator trait. The trait, `Verdict`, and the two
+std impls are **real vilan code in std** from the first slice — not compiler-known
+shortcuts (§8.3); the transformer's inline fast path (§4) is an *optimization over* those
+impls, pinned semantically identical to the trait dispatch:
 
 ```vilan
 enum Verdict<T, B> {
@@ -85,8 +88,24 @@ trait Try<T, B> {
 	fun from_bad(bad: B): Self;
 }
 
-impl Option<type T> with Try<T, void-ish> { .. }   // Bad = the absence itself
-impl Result<type T, type E> with Try<T, E> { .. }  // Bad = the error
+// Option's residual is the absence itself — a dedicated std unit type, so the
+// impl is expressible without a void type parameter.
+struct Absent {}
+
+impl Option<type T> with Try<T, Absent> {
+	fun verdict(self): Verdict<T, Absent> {
+		match self {
+			Some(let value) => Verdict::Good(value),
+			None => Verdict::Bad(Absent {}),
+		}
+	}
+
+	fun from_bad(bad: Absent): Option<T> {
+		None
+	}
+}
+
+impl Result<type T, type E> with Try<T, E> { .. }  // Bad = the error; from_bad = Err(e)
 ```
 
 - **v1 compatibility rule:** the nearest callable's declared return type must be the
@@ -144,9 +163,9 @@ This is the flattening every mainstream `?.` has (settled, §0.2): `a?.get(1)` o
 - Mixing is natural and ordered postfix-left-to-right: `a?.parse()!` lifts, then
   asserts-or-returns on the lifted result.
 
-### The `Lift` seam *(recommendation)*
+### The `Lift` seam *(agreed — opt-in)*
 
-Opt-in, so `?.` doesn't silently work on everything that happens to have a `map`:
+Opt-in (§8.1), so `?.` doesn't silently work on everything that happens to have a `map`:
 
 ```vilan
 trait Lift {}                      // the marker: this type supports `?.`
@@ -162,7 +181,7 @@ shapes; `Signal` (derived signals: `signal?.field` — its `and_then` is exactly
 own decision because the reading of `?.` silently changes domain (reactive/async) with the
 receiver.
 
-## 4. Lowering *(recommendation)* — operators, not rewrites
+## 4. Lowering *(agreed)* — operators, not rewrites
 
 Per §0.4, neither operator is a source-text expansion. The house pattern is the binary
 operators (`Add`/`PartialEq`: trait-declared, analyzer-recorded in `binary_op_dispatch`,
@@ -213,11 +232,13 @@ transformer-emitted):
   pin); `a?.b = x` rejected; `?.` + `!` composition; corpus byte-identical throughout
   (nothing uses the operators yet).
 
-## 8. Open questions
+## 8. Resolved (2026-07-04)
 
-1. `Lift` as an opt-in **marker trait** vs pure duck-typing on `map`/`and_then` — marker
-   recommended above (silent lifting over any mappable type reads as a footgun).
-2. `Verdict`/`Try`/`Lift` naming.
-3. Whether slice 1 (`!`) should land with `Try` as a *real trait* from day one, or with the
-   std pair compiler-known and the trait added when the first non-std type wants it (the
-   derive machinery took the second path and it aged well).
+1. **`Lift` is an opt-in marker trait** — silent lifting over any mappable type reads as
+   a footgun.
+2. **The names stand:** `Try`, `Lift`, `Verdict` (and `Absent` for Option's residual).
+3. **`Try` is a real trait from day one** — the trait, `Verdict`, `Absent`, and the
+   `Option`/`Result` impls ship as std source in slice 1; the compiler's inline lowering
+   is an optimization over those impls, not a substitute for them (pinned equivalent: a
+   user-`Try` type and `Option` must behave identically through `!` modulo the v1
+   same-type restriction).
