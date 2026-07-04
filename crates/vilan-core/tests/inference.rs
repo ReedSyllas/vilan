@@ -70,6 +70,62 @@ fn assert_fails(source: &str) {
     );
 }
 
+/// The analyzer's diagnostics as `(message, span range)` pairs — the E7 span
+/// harness's raw material (`compile` keeps only the messages).
+fn failure_diagnostics(source: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let leaked: &'static str = Box::leak(source.into_boxed_str());
+            let (_program, errors) = analyze_source(
+                leaked,
+                &std_spec(),
+                Path::new("."),
+                Path::new("test.vl"),
+                Some(Platform::default()),
+                &Workspace::default(),
+            );
+            errors
+                .into_iter()
+                .map(|error| (error.msg, error.span.into_range()))
+                .collect()
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// Asserts compilation fails with a diagnostic whose message contains
+/// `message_part` and whose span covers exactly the first occurrence of
+/// `spanning` in the source — spans pin like messages (backlog E7). The
+/// distinct `spanning` snippet locates the *pertinent* expression, so a
+/// diagnostic that regresses to an enclosing aggregate span fails here.
+#[track_caller]
+fn assert_fails_spanning(source: &str, spanning: &str, message_part: &str) {
+    let expected_start = source
+        .find(spanning)
+        .expect("the `spanning` snippet must occur in the source");
+    let expected = expected_start..expected_start + spanning.len();
+    let diagnostics = failure_diagnostics(source);
+    let matching: Vec<_> = diagnostics
+        .iter()
+        .filter(|(message, _)| message.contains(message_part))
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "no diagnostic contains {message_part:?}; got: {diagnostics:#?}"
+    );
+    assert!(
+        matching.iter().any(|(_, range)| *range == expected),
+        "no {message_part:?} diagnostic spans {expected:?} ({spanning:?}); spans: {:#?}",
+        matching
+            .iter()
+            .map(|(message, range)| (message.as_str(), range.clone(), &source[range.clone()]))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// The analyzer's non-fatal warning messages (e.g. unused `[must_use]` results).
 fn warnings(source: &str) -> Vec<String> {
     let source = source.to_string();
@@ -4050,5 +4106,111 @@ fn a_trait_typed_self_returns_through_a_trait_typed_signature() {
 
         fun main() {}
         "#,
+    );
+}
+
+// --- Diagnostic span precision (backlog E7) ------------------------------------
+// Each pins that the error's span covers exactly the PERTINENT expression, not
+// an enclosing aggregate — a regression back to the coarse span fails the
+// exact-range assertion.
+
+// A match-leg mismatch points at the offending leg's body, not the whole match.
+#[test]
+fn match_leg_mismatch_spans_the_offending_leg() {
+    assert_fails_spanning(
+        r#"
+        fun pick(flag: bool): i32 {
+        	match flag {
+        		true => 1,
+        		false => "oops",
+        	}
+        }
+
+        fun main() {
+        	let _ = pick(true);
+        }
+        "#,
+        "\"oops\"",
+        "match legs have mismatched types",
+    );
+}
+
+// A struct-initializer field mismatch points at that field's value, not the
+// whole `{ .. }` block.
+#[test]
+fn struct_field_mismatch_spans_the_field_value() {
+    assert_fails_spanning(
+        r#"
+        struct Point {
+        	x: i32,
+        	y: i32,
+        }
+
+        fun main() {
+        	let _ = Point { x = 1, y = "two" };
+        }
+        "#,
+        "\"two\"",
+        "Expected i32, but got str",
+    );
+}
+
+// An unknown struct name anchors at the initializer (which includes the name),
+// not the field block alone.
+#[test]
+fn unknown_struct_spans_the_initializer() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+        	let _ = Pointt { x = 1 };
+        }
+        "#,
+        "Pointt { x = 1 }",
+        "unknown struct",
+    );
+}
+
+// A missing import segment points at that segment, not the whole statement.
+#[test]
+fn import_segment_error_spans_the_segment() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Optionn;
+
+        fun main() {}
+        "#,
+        "Optionn",
+        "cannot find 'Optionn' in the imported path",
+    );
+}
+
+// An unknown import ROOT points at the root segment.
+#[test]
+fn import_root_error_spans_the_root() {
+    assert_fails_spanning(
+        r#"
+        import nowhere::thing;
+
+        fun main() {}
+        "#,
+        "nowhere",
+        "cannot find module 'nowhere' to import",
+    );
+}
+
+// A missing `use` segment points at that segment.
+#[test]
+fn use_segment_error_spans_the_segment() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Option;
+
+        fun main() {
+        	use Option::Somme;
+        	let _ = 1;
+        }
+        "#,
+        "Somme",
+        "cannot find 'Somme' in the `use` path",
     );
 }

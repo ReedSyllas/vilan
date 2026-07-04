@@ -7078,7 +7078,7 @@ impl<'src> Analyzer<'src> {
             None => {
                 if report {
                     self.diagnostics.push(Error {
-                        span,
+                        span: root_span,
                         msg: format!("cannot find module '{}' to import", root),
                     });
                 }
@@ -7113,7 +7113,7 @@ impl<'src> Analyzer<'src> {
                 None => {
                     if report {
                         self.diagnostics.push(Error {
-                            span,
+                            span: part_span,
                             msg: format!("cannot find '{}' in the imported path", part),
                         });
                     }
@@ -8354,8 +8354,15 @@ impl<'src> Analyzer<'src> {
                     None => {
                         let expected = self.pretty_print_type(&current, &HashMap::new());
                         let got = self.pretty_print_type(&body_type, &HashMap::new());
+                        // Anchor at the OFFENDING leg's body, not the whole
+                        // match (E7 — the pertinent expression).
+                        let leg_span = self
+                            .span_map
+                            .get(body_id)
+                            .map(|span| **span)
+                            .unwrap_or(prepped.span);
                         self.diagnostics.push(Error {
-                            span: prepped.span,
+                            span: leg_span,
                             msg: format!(
                                 "match legs have mismatched types: expected {}, but got {} instead.",
                                 expected, got
@@ -8400,8 +8407,13 @@ impl<'src> Analyzer<'src> {
             match self.try_get_expr_id_by_name(constraint.struct_name, constraint.scope_id) {
                 Some(expr_id) => expr_id,
                 None => {
+                    let span = self
+                        .span_map
+                        .get(&constraint.initializer_id)
+                        .map(|span| **span)
+                        .unwrap_or(constraint.fields_span);
                     self.diagnostics.push(Error {
-                        span: constraint.fields_span.clone(),
+                        span,
                         msg: format!("unknown struct: {}", constraint.struct_name),
                     });
                     return Resolution::Failed;
@@ -8410,8 +8422,13 @@ impl<'src> Analyzer<'src> {
         let struct_ = match self.structs.get(&struct_id) {
             Some(struct_) => struct_,
             None => {
+                let span = self
+                    .span_map
+                    .get(&constraint.initializer_id)
+                    .map(|span| **span)
+                    .unwrap_or(constraint.fields_span);
                 self.diagnostics.push(Error {
-                    span: constraint.fields_span.clone(),
+                    span,
                     msg: format!("cannot initialize a non-struct: {}", constraint.struct_name),
                 });
                 return Resolution::Failed;
@@ -8473,10 +8490,11 @@ impl<'src> Analyzer<'src> {
                 }
                 initializer_fields.insert(struct_field_index, *field_value);
             } else {
-                // Type mismatch: emit a diagnostic but still record the type for
-                // downstream consumers.
+                // Type mismatch: emit a diagnostic (anchored at THIS field's
+                // value, not the whole `{ .. }` block — E7) but still record
+                // the type for downstream consumers.
                 self.diagnostics.push(Error {
-                    span: constraint.fields_span.clone(),
+                    span: *field_value_span,
                     msg: format!(
                         "Expected {}, but got {} instead.",
                         self.pretty_print_type(&struct_field_type, &substitution_context),
@@ -8702,7 +8720,7 @@ impl<'src> Analyzer<'src> {
         // `use Namespace::{ a, b }` binds items out of a namespace — a module
         // or an enum (whose namespace holds its variants) — into the scope the
         // statement appears in.
-        for (path, name, scope_id, span, leaf_span, source_id) in
+        for (path, name, scope_id, _span, leaf_span, source_id) in
             std::mem::take(&mut self.prepped_uses)
         {
             let use_diagnostics_before = self.diagnostics.len();
@@ -8717,7 +8735,7 @@ impl<'src> Analyzer<'src> {
                 Some(entity) => entity,
                 None => {
                     self.diagnostics.push(Error {
-                        span,
+                        span: root_span,
                         msg: format!("cannot find '{}' in this scope", root),
                     });
                     self.attribute_new_diagnostics(use_diagnostics_before, source_id);
@@ -8738,7 +8756,7 @@ impl<'src> Analyzer<'src> {
                 };
                 let Some(namespace_scope_id) = namespace_scope_id else {
                     self.diagnostics.push(Error {
-                        span,
+                        span: segment_span,
                         msg: "`use` requires a namespace (a module or an enum)".to_string(),
                     });
                     resolved = false;
@@ -8753,7 +8771,7 @@ impl<'src> Analyzer<'src> {
                     Some(entity) => entity,
                     None => {
                         self.diagnostics.push(Error {
-                            span,
+                            span: segment_span,
                             msg: format!("cannot find '{}' in the `use` path", segment),
                         });
                         resolved = false;

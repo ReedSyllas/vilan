@@ -138,23 +138,16 @@ have gaps.
      publish their view of it; the merged per-URI union is not computed (harmless while both
      views agree, which re-analyze-all keeps true).
 
-7. **Diagnostic span precision** (M; the natural sequel to E1 — errors now land in the right
-   *file*, this lands them on the right *expression*) — several diagnostics anchor at whatever
-   coarse span the reporting site had in hand rather than the narrowest span that identifies the
-   problem. Verified examples: a match-leg type mismatch underlines the **entire `match`
-   expression** instead of the offending arm (`match legs have mismatched types` — and the same
-   applies when the match is a function's tail); `use`-path resolution errors use the whole
-   statement's `span` although the failing segment's `leaf_span`/`segment_span` is already in
-   hand; struct-initializer checks report at `fields_span` (the whole `{ … }` block) for a
-   single bad field. Counter-example proving the standard: call-argument mismatches already
-   point at exactly the bad argument. The work: audit the `diagnostics.push` sites (~150),
-   re-anchor the coarse ones to the pertinent sub-expression (the mismatched arm's span, the
-   failing path segment, the offending field's value span), prioritized by user visibility
-   (match unification, return/tail on compound tails, struct fields, `use`/import paths).
-   *Testing:* `assert_fails` ignores spans today — add a span-asserting variant to the
-   inference harness (e.g. a marker convention locating the expected span in the source) so
-   span regressions pin like message regressions; the LSP tests already assert offsets and
-   can pin the editor-visible half.
+7. **Diagnostic span precision — the long-tail audit** (S–M per batch; the first pass shipped
+   2026-07-04) — the harness and the top user-visible classes landed: `assert_fails_spanning`
+   (exact-range span pins in the inference harness), and re-anchors for match-leg mismatches
+   (→ the offending leg's body), struct-initializer field mismatches (→ that field's value)
+   and unknown-struct (→ the initializer incl. its name), import root/segment errors (→ the
+   segment), and `use` root/segment errors (→ the segment) — six span pins. Remaining: the
+   long tail of the ~150 `diagnostics.push` sites hasn't been audited — when a coarse span
+   shows up in use, re-anchor it and pin with `assert_fails_spanning`. The standard: point at
+   the narrowest expression that identifies the problem (call-argument mismatches are the
+   model).
 
 ---
 
