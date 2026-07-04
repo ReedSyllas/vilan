@@ -459,9 +459,18 @@ Built-ins:
     carries the duplex/reactive traffic as TEXT frames (opcode 0x1) — the reactive
     protocol is JSON-over-text either way; binary frames are wired when the reactive
     protocol goes codec.
-  - **Follow-up, not v1**: `impl Transport` by correlating a reply frame with its request,
-    so the RPC and reactive protocols **multiplex over one socket** (today RPC rides
-    HTTP POST beside the socket, exactly as beside SSE).
+  - **Multiplexing (settled 2026-07-02, second slice)**: the socket carries BOTH
+    protocols via channel prefixes at the transport seam — `d:<frame>` for
+    duplex/reactive traffic, `r:<id>:<frame>` for RPC — so the §4.1 envelope is
+    untouched (the correlation id is transport framing, not wire format). The client's
+    `SocketDuplex` gains a `transport()` view implementing `Transport`: `call` registers
+    the id in a pending map, sends `r:`, and resolves the promise when the correlated
+    reply lands; the server's upgrade path routes `r:` frames through the mounted
+    protocol (a wire turn, reply written back with the same id) and `d:` frames to the
+    app's `DuplexEnd`. The `__conn` announcement stays unprefixed (it precedes routing).
+    v1 multiplexes TEXT frames (the JSON codec); a binary request over the socket
+    transport is a wiring error (panics with direction) — WS binary frames land with
+    the reactive-on-codec slice, which needs the same event-kind plumbing on both ends.
 - **Asymmetric duplex** (`SplitDuplex`) — **✅ shipped (2026-07-02)** — a `DuplexTransport`
   *implementation* composing two directed channels internally: Server-Sent Events for
   server→client (`GET {base}/events`, read via fetch streaming + `TextDecoder` — works in the

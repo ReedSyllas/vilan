@@ -629,3 +629,135 @@ fun run_clients() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rpc_and_realtime_multiplex_over_one_socket() {
+    // §5's multiplex: RPC (attach, verify, interleaved adds from two clients —
+    // exercising the correlation ids) and the reactive updates ALL ride each
+    // client's one WebSocket; no HTTP requests after the upgrade.
+    let dir = temp_project("multiplex");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n",
+    );
+    write(
+        &dir,
+        "src/main.vl",
+        r#"import std::print;
+import std::shared::Shared;
+import std::process::exit;
+import std::time::sleep;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::json::{ Json, FromJson, json_codec };
+import std::reactive::Signal;
+import std::rpc::{
+	connect_socket, bridge, SocketTransport,
+	ReactiveServer, ReactiveClient, DuplexEnd,
+};
+import std::rpc_server::serve_connected;
+import std::http::Response;
+
+let sessions: Shared<List<(i32, ReactiveServer)>> = Shared::new([]);
+
+[service(Client)]
+struct Board {
+	count: Signal<i32>,
+}
+
+impl Board {
+	[rpc]
+	fun attach(self, connection: i32): i32 {
+		mut channel = 0 - 1;
+		for entry in sessions.read() {
+			let (id, reactive) = entry;
+			if id == connection {
+				channel = reactive.expose(self.count);
+			}
+		}
+		channel
+	}
+
+	[rpc]
+	fun add(self, by: i32): i32 {
+		self.count.set(self.count.get() + by);
+		self.count.get()
+	}
+}
+
+fun main() {
+	let board = Board { count = Signal::new(0) };
+	serve_connected(
+		9293,
+		board.dispatcher().into_protocol(json_codec()),
+		|id, end| {
+			sessions.write().push((id, ReactiveServer::new(end)));
+		},
+		|id| {},
+		|request| Response::builder().code(404).body("nope").build(),
+		|| {
+			run_clients();
+		},
+	);
+}
+
+// EVERYTHING rides the one socket: RPC via the transport() view, updates via
+// the duplex — no HTTP requests at all after the upgrade.
+fun watch(name: str): Client<SocketTransport> {
+	let socket = connect_socket("ws://localhost:9293");
+	let client = Client { transport = socket.transport(), codec = json_codec() };
+	let reactive = ReactiveClient::new(bridge(socket));
+	match client.attach(i32::from_json(socket.connection)) {
+		Ok(let channel) => {
+			let watching = reactive.source(channel).sub(|json| {
+				let n: i32 = i32::from_json(json);
+				print(i"{name} sees {n}");
+			});
+		},
+		Err(let error) => print(i"{name} attach err {error.to_json()}"),
+	}
+	client
+}
+
+fun run_clients() {
+	let alice = watch("alice");
+	let bob = watch("bob");
+	sleep(300);
+	match alice.verify() {
+		Ok(let same) => print(i"verify over socket = {same}"),
+		Err(let error) => print(i"verify err {error.to_json()}"),
+	}
+	match alice.add(7) {
+		Ok(let n) => print(i"alice add -> {n}"),
+		Err(let error) => print(i"add err {error.to_json()}"),
+	}
+	// Interleaved calls exercise the correlation ids.
+	match bob.add(1) {
+		Ok(let n) => print(i"bob add -> {n}"),
+		Err(let error) => print(i"add err {error.to_json()}"),
+	}
+	sleep(300);
+	exit(0);
+}
+"#,
+    );
+    let stdout = vilan_run_with_timeout(&dir, Duration::from_secs(60));
+    for expected in [
+        "alice sees 0",
+        "bob sees 0",
+        "verify over socket = true",
+        "alice add -> 7",
+        "alice sees 7",
+        "bob sees 7",
+        "bob add -> 8",
+        "alice sees 8",
+        "bob sees 8",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in multiplex output:\n{stdout}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

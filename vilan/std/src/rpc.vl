@@ -268,8 +268,17 @@ impl WebSocket {
 [extern(new, "Promise")]
 external fun handshake_promise(executor: |(|| void)| void): Promise<i32>;
 
-// The true duplex transport (§5): one WebSocket, text frames both ways. The
-// server side is `serve_connected`'s upgrade path; open one with
+// A pending RPC call multiplexed on the socket: its correlation id and the
+// resolver its reply completes.
+struct PendingCall {
+	request: i32,
+	complete: |str| void,
+}
+
+// The true duplex transport (§5): one WebSocket carrying BOTH protocols via
+// channel prefixes — `d:<frame>` for the duplex/reactive traffic this
+// transport exposes, `r:<id>:<frame>` for RPC through the `transport()` view.
+// The server side is `serve_connected`'s upgrade path; open one with
 // `connect_socket(url)` — the drop-in swap for `connect_split`, same
 // `__conn:<id>` handshake, same `.connection` for RPC correlation.
 struct SocketDuplex {
@@ -280,11 +289,13 @@ struct SocketDuplex {
 	inbound: Shared<Option<|str| void>>,
 	// Frames that arrived before `on_frame` was set — queued, then flushed.
 	early: Shared<List<str>>,
+	pending: Shared<List<PendingCall>>,
+	next_request: Shared<i32>,
 }
 
 impl SocketDuplex with DuplexTransport {
 	fun send(self, frame: str) {
-		self.socket.transmit(frame);
+		self.socket.transmit("d:" + frame);
 	}
 
 	fun on_frame(self, handler: |str| void) {
@@ -296,6 +307,81 @@ impl SocketDuplex with DuplexTransport {
 	}
 }
 
+impl SocketDuplex {
+	// The RPC half of the multiplex: a `Transport` over this same socket, so
+	// calls ride the open connection instead of HTTP requests beside it.
+	fun transport(self): SocketTransport {
+		SocketTransport { duplex = self }
+	}
+
+	// A correlated reply arrived: complete and forget its pending call.
+	fun settle(self, request: i32, reply: str) {
+		mut kept: List<PendingCall> = [];
+		for call in self.pending.read() {
+			if call.request == request {
+				(call.complete)(reply);
+			} else {
+				kept.push(call);
+			}
+		}
+		self.pending.write() = kept;
+	}
+}
+
+// `reply_promise`'s resolver carries the reply frame.
+[extern(new, "Promise")]
+external fun reply_promise(executor: |(|str| void)| void): Promise<str>;
+
+// One socket, `impl Transport`: each call sends `r:<id>:<frame>` and resolves
+// when the reply with the same id lands. Text frames only (the JSON codec) —
+// a binary frame over the socket is a wiring error until the reactive-on-codec
+// slice brings WS binary events (proposal §5).
+struct SocketTransport {
+	duplex: SocketDuplex,
+}
+
+impl SocketTransport with Transport {
+	fun call(self, request: Frame): Promise<Frame> {
+		async {
+			match request {
+				Frame::Text(let body) => {
+					let id = self.duplex.next_request.read();
+					self.duplex.next_request.write() = id + 1;
+					let reply = await reply_promise(|complete: |str| void| {
+						self.duplex.pending.write().push(PendingCall { request = id, complete });
+						self.duplex.socket.transmit(i"r:{id}:{body}");
+					});
+					Frame::Text(reply)
+				},
+				Frame::Binary(let bytes) => {
+					panic("the socket transport multiplexes text frames; binary RPC over WS lands with the reactive-on-codec slice");
+					Frame::Text("")   // unreachable — the panic throws
+				},
+			}
+		}
+	}
+}
+
+// Route one inbound socket frame by its channel prefix. `r:<id>:<frame>`
+// settles the pending call; `d:<frame>` goes to the duplex handler (or the
+// early queue); anything else is ignored (forward compatibility).
+fun route_socket_frame(
+	frame: str,
+	pending_settle: |i32, str| void,
+	dispatch: |str| void,
+) {
+	if frame.starts_with("r:") {
+		let rest = frame.substring(2, frame.len());
+		let parts = rest.split(":");
+		let id_text = parts[0];
+		let request = i32::from_json(id_text);
+		let reply = rest.substring(id_text.len() + 1, rest.len());
+		pending_settle(request, reply);
+	} else if frame.starts_with("d:") {
+		dispatch(frame.substring(2, frame.len()));
+	}
+}
+
 // Open a WebSocket connection to `url` (e.g. `ws://localhost:4000`): resolves
 // once the server's `__conn:<id>` announcement lands (which also proves the
 // socket is open — sends are safe after this returns).
@@ -303,7 +389,16 @@ fun connect_socket(url: str): SocketDuplex {
 	let socket = new_web_socket(url);
 	let inbound: Shared<Option<|str| void>> = Shared::new(None);
 	let early: Shared<List<str>> = Shared::new([]);
+	let pending: Shared<List<PendingCall>> = Shared::new([]);
 	let connection: Shared<str> = Shared::new("");
+	let duplex = SocketDuplex {
+		socket,
+		connection = "",
+		inbound,
+		early,
+		pending,
+		next_request = Shared::new(0),
+	};
 	let _ = await handshake_promise(|resolve: || void| {
 		socket.set_on_message(|message| {
 			let frame = message.data();
@@ -311,10 +406,16 @@ fun connect_socket(url: str): SocketDuplex {
 				connection.write() = frame.substring(7, frame.len());
 				resolve();
 			} else {
-				match inbound.read() {
-					Some(let handler) => handler(frame),
-					None => early.write().push(frame),
-				}
+				route_socket_frame(
+					frame,
+					|request, reply| duplex.settle(request, reply),
+					|payload| {
+						match inbound.read() {
+							Some(let handler) => handler(payload),
+							None => early.write().push(payload),
+						}
+					},
+				);
 			}
 		});
 	});
@@ -323,6 +424,8 @@ fun connect_socket(url: str): SocketDuplex {
 		connection = connection.read(),
 		inbound,
 		early,
+		pending,
+		next_request = duplex.next_request,
 	}
 }
 

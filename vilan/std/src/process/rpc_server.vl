@@ -180,18 +180,22 @@ fun serve_connected(
 	// same app code. Clients pick the transport (`connect_socket` here,
 	// `connect_split` for SSE).
 	node_server.on_upgrade("upgrade", |request, socket, head| {
-		accept_socket(request, socket, head, on_connect, on_disconnect);
+		accept_socket(request, socket, head, protocol, on_connect, on_disconnect);
 	});
 	node_server.listen(port, on_ready);
 }
 
 // Perform the RFC 6455 handshake and wire the socket into the connection
-// registry. Client→server text frames are wire turns; pings are answered;
-// close (or a protocol violation) tears the session down like an SSE close.
+// registry. Client→server text frames route by channel prefix (§5's
+// multiplex): `r:<id>:<frame>` is an RPC turn answered on the same socket
+// with the same id, `d:<frame>` is a duplex/reactive wire turn. Pings are
+// answered; close (or a protocol violation) tears the session down like an
+// SSE close.
 fun accept_socket(
 	request: NodeRequest,
 	socket: NodeSocket,
 	head: Bytes,
+	protocol: RpcProtocol,
 	on_connect: |i32, DuplexEnd| void,
 	on_disconnect: |i32| void,
 ) {
@@ -209,7 +213,7 @@ fun accept_socket(
 	let id = fresh_connection();
 	let (app_end, wire_end) = duplex_pair();
 	wire_end.on_frame(|frame| {
-		socket.write_bytes(text_frame(frame));
+		socket.write_bytes(text_frame("d:" + frame));
 	});
 	connections.write().push((id, wire_end));
 	let closed: Shared<bool> = Shared::new(false);
@@ -225,10 +229,28 @@ fun accept_socket(
 		for event in parser.feed(chunk) {
 			match event {
 				WsEvent::Text(let frame) => {
-					// the wire turn: the frame's signal writes coalesce
-					batch(|| {
-						wire_end.send(frame);
-					});
+					if frame.starts_with("r:") {
+						// An RPC turn: answer on this socket with the same id.
+						let rest = frame.substring(2, frame.len());
+						let parts = rest.split(":");
+						let id_text = parts[0];
+						let payload = rest.substring(id_text.len() + 1, rest.len());
+						let reply = batch(|| protocol.respond(Frame::Text(payload)));
+						match reply {
+							Frame::Text(let answer) => {
+								socket.write_bytes(text_frame(i"r:{id_text}:{answer}"));
+							},
+							// A binary reply can't ride the text multiplex —
+							// unreachable when both sides are wired to one
+							// codec (the client side panics first).
+							Frame::Binary(let bytes) => {},
+						}
+					} else if frame.starts_with("d:") {
+						// the wire turn: the frame's signal writes coalesce
+						batch(|| {
+							wire_end.send(frame.substring(2, frame.len()));
+						});
+					}
 				},
 				WsEvent::Ping(let payload) => socket.write_bytes(pong_frame(payload)),
 				WsEvent::Closed => {
