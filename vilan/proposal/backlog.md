@@ -114,27 +114,6 @@ have gaps.
 
 ## E. LSP & tooling
 
-1. **Diagnostics: source attribution + cross-file invalidation + a real test suite** (M–L) —
-   fixes two observed bugs and the gap that makes them invisible.
-   - *Root cause:* `Error { span, msg }` carries a bare span with **no `SourceId`**, even though
-     the analyzer has the `source_map`/`SourceId` machinery. `analyze_and_publish` analyzes one
-     document and maps **all** `program.diagnostics` through the *open doc's* line index,
-     publishing to that one URI.
-   - *Bug — missing diagnostics:* an error originating in an imported file is mapped through the
-     wrong line index (out of range → vanishes) and never surfaced on the file that has it.
-   - *Bug — stale diagnostics on import change:* editing file A re-analyzes only A; an open file B
-     that imports A is never re-analyzed, so B's diagnostics never clear/update.
-   - *Fix:* put `SourceId` on `Error`; group diagnostics per file; on any change re-analyze every
-     open doc (or the dependents) and publish an explicit (possibly empty) list **per file** so
-     stale ones clear. Also publish `Program.warnings` (`[must_use]` is collected but never
-     surfaced in the editor).
-   - *Testing (the durable part):* extract the diagnostic pipeline out of the async `Backend` into
-     a sync, testable `Workspace` + a fake `Client` that records `publish_diagnostics`. Test the
-     **lifecycle**: error→clean clears; close clears; editing an imported file republishes
-     dependents; an imported-file diagnostic is attributed to *its* URI at the right span. The
-     invariant that kills "stale forever": *published diagnostics == a fresh from-scratch analysis*
-     for every file.
-
 2. **LSP semantic highlighting** (M; roadmap #10) — semantic tokens, precision over TextMate.
 
 3. **Fix per-analysis `Box::leak` + incremental analysis** (L; roadmap #12, caching Tier 2/3) —
@@ -146,6 +125,18 @@ have gaps.
 
 5. **Migrate the codegen-snapshot corpus into `vilan test`** (S) — `vilan/test/` is a dev-time
    `.js` snapshot check, separate from the behavior runner; unify.
+
+6. **Diagnostics remainder** (M; what E1 left open when it shipped 2026-07-04) —
+   - **Buffer overlay for unsaved dependencies:** module loading is disk-backed
+     (`load_package_module`), so a dependent's re-analysis sees an edited-but-unsaved import's
+     *disk* content until save (`did_save` closes the loop today). A buffer overlay needs a core
+     seam for the loader to consult open-document contents.
+   - **Async lifecycle harness:** the publish bookkeeping (explicit empties, `published_extra`
+     diffing, close-clears-extras) is exercised only structurally; the fake-`Client` +
+     edit-sequence property test (*published == fresh analysis, always*) remains to build.
+   - **Shared-dependency last-writer-wins:** two open docs importing the same broken module each
+     publish their view of it; the merged per-URI union is not computed (harmless while both
+     views agree, which re-analyze-all keeps true).
 
 ---
 

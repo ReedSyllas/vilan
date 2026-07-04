@@ -800,3 +800,125 @@ fn derive_in_a_dependency_library_resolves() {
         "a derived type from a dependency library should round-trip, got: {errors:#?}"
     );
 }
+
+// --- Diagnostic source attribution (backlog E1) --------------------------------
+
+/// As [`analyze_package_raw`], but returns `(message, source-file name)` pairs —
+/// the attribution the LSP publishes by.
+fn analyze_package_attributed(
+    files: &[(&str, &str)],
+    entry: &str,
+    platform: Platform,
+) -> Vec<(String, String)> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("vilan_attr_{}_{unique}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (relative, contents) in files {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+    }
+    let entry_path = dir.join(entry);
+    let source = std::fs::read_to_string(&entry_path).unwrap();
+    let leaked: &'static str = Box::leak(source.into_boxed_str());
+    let (program, _errors) = analyze_source(
+        leaked,
+        &std_spec(),
+        &dir,
+        &entry_path,
+        Some(platform),
+        &Workspace::default(),
+    );
+    let program = program.expect("analysis should produce a program");
+    let attributed = program
+        .diagnostics
+        .iter()
+        .zip(program.diagnostic_sources.iter())
+        .map(|(error, source)| {
+            let name = program
+                .source_path(*source)
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<none>".to_string());
+            (error.msg.clone(), name)
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    attributed
+}
+
+// A type error INSIDE an imported module is attributed to that module's file,
+// not the entry — the root cause of the LSP's vanishing-diagnostics bug (the
+// error was mapped through the entry's line index and disappeared).
+#[test]
+fn a_type_error_in_an_imported_module_is_attributed_to_that_module() {
+    let attributed = analyze_package_attributed(
+        &[
+            (
+                "main.vl",
+                "import std::print;\nimport pkg::broken::answer;\nfun main() { print(answer()); }\n",
+            ),
+            ("broken.vl", "fun answer(): i32 {\n\t\"not a number\"\n}\n"),
+        ],
+        "main.vl",
+        Platform::default(),
+    );
+    let mismatch = attributed
+        .iter()
+        .find(|(msg, _)| msg.contains("Expected i32"))
+        .expect("the return mismatch should be reported");
+    assert_eq!(
+        mismatch.1, "broken.vl",
+        "the error belongs to the module that contains it: {attributed:?}"
+    );
+}
+
+// An unresolved name inside a module attributes there; an unresolved name in
+// the entry attributes to the entry — side by side in one program.
+#[test]
+fn name_errors_attribute_to_their_own_files() {
+    let attributed = analyze_package_attributed(
+        &[
+            (
+                "main.vl",
+                "import pkg::helper::greet;\nfun main() {\n\tgreet();\n\tmissing_in_entry();\n}\n",
+            ),
+            ("helper.vl", "fun greet() {\n\tmissing_in_helper();\n}\n"),
+        ],
+        "main.vl",
+        Platform::default(),
+    );
+    let helper_error = attributed
+        .iter()
+        .find(|(msg, _)| msg.contains("missing_in_helper"))
+        .expect("the helper's name error should be reported");
+    assert_eq!(helper_error.1, "helper.vl", "{attributed:?}");
+    let entry_error = attributed
+        .iter()
+        .find(|(msg, _)| msg.contains("missing_in_entry"))
+        .expect("the entry's name error should be reported");
+    assert_eq!(entry_error.1, "main.vl", "{attributed:?}");
+}
+
+// A module that fails to PARSE attributes its (spanless) parse diagnostics to
+// its own file, so the editor can surface them there.
+#[test]
+fn module_parse_errors_attribute_to_the_broken_module() {
+    let attributed = analyze_package_attributed(
+        &[
+            (
+                "main.vl",
+                "import pkg::util::util;\nfun main() { let _ = util(); }\n",
+            ),
+            ("util.vl", "fun util(): i32 { 1 }\nfun broken( {\n"),
+        ],
+        "main.vl",
+        Platform::default(),
+    );
+    let parse_error = attributed
+        .iter()
+        .find(|(msg, _)| msg.contains("parse error in"))
+        .expect("the module parse error should be reported");
+    assert_eq!(parse_error.1, "util.vl", "{attributed:?}");
+}

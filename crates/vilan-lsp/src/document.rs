@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use vilan_core::analyzer::{Expr, Implementation, SourceId};
+use vilan_core::analyzer::{DERIVED_SOURCE, Expr, Implementation, SourceId};
 use vilan_core::id::Id;
 use vilan_core::manifest::EntrySection;
 use vilan_core::type_::Type;
@@ -207,12 +207,32 @@ pub struct Document {
     pub line_index: LineIndex,
     pub program: Option<Program<'static>>,
     pub diagnostics: Vec<Error>,
+    /// The source file each diagnostic belongs to, parallel to `diagnostics`
+    /// (`SourceId(0)` = this document; imported modules publish to their own
+    /// files — backlog E1).
+    pub diagnostic_sources: Vec<SourceId>,
+    /// Non-fatal diagnostics (`[must_use]` drops) — published at Warning severity.
+    pub warnings: Vec<Error>,
+    /// The buffer text as of the last edit — kept so a dependent re-analysis
+    /// (another open file changed) can re-run this document without the editor
+    /// resending its content.
+    pub text: String,
     /// A hash of the source text this document was analyzed from, so an edit that
     /// leaves the buffer unchanged can skip re-analysis.
     pub text_hash: u64,
     /// `(start, end, id)` for every entry-file entity with a real span, used to
     /// find the innermost entity under a cursor.
     entity_spans: Vec<(usize, usize, Id)>,
+}
+
+/// One diagnostic as the language server publishes it: the file it belongs to
+/// (`None` = the analyzed document itself), its span *in that file's text*, the
+/// message, and the severity. LSP-type-free so the grouping is unit-testable.
+pub struct PublishedDiagnostic {
+    pub path: Option<PathBuf>,
+    pub span: Span,
+    pub message: String,
+    pub warning: bool,
 }
 
 /// The span of an entity, flattened from the `&Span` stored in `span_map`.
@@ -259,13 +279,94 @@ impl Document {
             }
         }
 
+        // `diagnostics` = the entry's own lex/parse errors, then the program's
+        // (see `analyze_source`) — so the source list is an entry-attributed
+        // prefix followed by the program's per-diagnostic attribution.
+        let program_diagnostics = program
+            .as_ref()
+            .map(|program| program.diagnostics.len())
+            .unwrap_or(0);
+        let mut diagnostic_sources =
+            vec![SourceId(0); diagnostics.len().saturating_sub(program_diagnostics)];
+        if let Some(program) = &program {
+            diagnostic_sources.extend(program.diagnostic_sources.iter().copied());
+        }
+        let warnings = program
+            .as_ref()
+            .map(|program| program.warnings.clone())
+            .unwrap_or_default();
+
         Document {
             line_index,
             program,
             diagnostics,
+            diagnostic_sources,
+            warnings,
+            text: text.to_string(),
             text_hash,
             entity_spans,
         }
+    }
+
+    /// The document's diagnostics grouped for publishing: errors attributed to
+    /// the file they occurred in (`None` = this document), plus this document's
+    /// warnings. Diagnostics from generated (derive) code carry template spans
+    /// that map to no file — they attach to the entry at offset 0, labeled.
+    pub fn published_diagnostics(&self) -> Vec<PublishedDiagnostic> {
+        let mut published = Vec::new();
+        for (index, error) in self.diagnostics.iter().enumerate() {
+            let source = self
+                .diagnostic_sources
+                .get(index)
+                .copied()
+                .unwrap_or(SourceId(0));
+            if source == SourceId(0) {
+                published.push(PublishedDiagnostic {
+                    path: None,
+                    span: error.span,
+                    message: error.msg.clone(),
+                    warning: false,
+                });
+            } else if source == DERIVED_SOURCE {
+                published.push(PublishedDiagnostic {
+                    path: None,
+                    span: Span::from(0..0),
+                    message: format!("(in generated code) {}", error.msg),
+                    warning: false,
+                });
+            } else {
+                let path = self
+                    .program
+                    .as_ref()
+                    .and_then(|program| program.source_path(source))
+                    .map(Path::to_path_buf);
+                match path {
+                    Some(path) => published.push(PublishedDiagnostic {
+                        path: Some(path),
+                        span: error.span,
+                        message: error.msg.clone(),
+                        warning: false,
+                    }),
+                    // An unknown source (shouldn't happen): keep the error
+                    // visible on the entry rather than dropping it.
+                    None => published.push(PublishedDiagnostic {
+                        path: None,
+                        span: Span::from(0..0),
+                        message: error.msg.clone(),
+                        warning: false,
+                    }),
+                }
+            }
+        }
+        for warning in &self.warnings {
+            published.push(PublishedDiagnostic {
+                path: None,
+                span: warning.span,
+                message: warning.msg.clone(),
+                warning: true,
+            });
+        }
+        published
     }
 
     /// Updates the document's text (its line index) without re-analyzing — applied
@@ -275,6 +376,7 @@ impl Document {
     /// text so the pending re-analysis still fires.
     pub fn set_text(&mut self, text: &str) {
         self.line_index = LineIndex::new(text);
+        self.text = text.to_string();
     }
 
     /// The innermost entry-file entity whose span contains `offset`.
@@ -1054,6 +1156,148 @@ mod tests {
         std::env::var_os("VILAN_STD")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"))
+    }
+
+    /// A throwaway on-disk package: `files` written under a fresh temp dir,
+    /// the first file analyzed as the open document. Returns the temp dir (for
+    /// later edits + cleanup) and the analyzed document.
+    fn analyze_workspace(files: &[(&str, &str)]) -> (PathBuf, Document) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("vilan_lsp_{}_{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (relative, contents) in files {
+            std::fs::write(dir.join(relative), contents).unwrap();
+        }
+        let entry = dir.join(files[0].0);
+        let text = std::fs::read_to_string(&entry).unwrap();
+        let document = Document::analyze(&text, &std_root(), &entry);
+        (dir, document)
+    }
+
+    // An error INSIDE an imported module publishes to that module's path, with
+    // a span that is correct in THAT file's text — the vanishing-diagnostics
+    // bug (it used to map through the entry's line index and disappear).
+    #[test]
+    fn imported_file_error_groups_to_its_path_with_its_own_span() {
+        let module = "fun answer(): i32 {\n\t\"not a number\"\n}\n";
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import std::print;\nimport pkg::broken::answer;\nfun main() { print(answer()); }\n",
+            ),
+            ("broken.vl", module),
+        ]);
+        let published = document.published_diagnostics();
+        let item = published
+            .iter()
+            .find(|item| item.message.contains("Expected i32"))
+            .expect("the module's type error should be published");
+        let path = item.path.as_ref().expect("attributed to a file");
+        assert!(path.ends_with("broken.vl"), "{path:?}");
+        // The span must be an offset into broken.vl's own text — at the string
+        // literal the error is about.
+        let expected = module.find("\"not a number\"").unwrap();
+        assert_eq!(
+            item.span.into_range().start,
+            expected,
+            "span should locate the literal in the MODULE's text"
+        );
+        assert!(!item.warning);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Entry-file errors stay on the entry (path = None), even alongside module
+    // errors in the same analysis.
+    #[test]
+    fn entry_errors_group_to_the_entry() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import pkg::helper::greet;\nfun main() {\n\tgreet();\n\tmissing_in_entry();\n}\n",
+            ),
+            ("helper.vl", "fun greet() {\n\tmissing_in_helper();\n}\n"),
+        ]);
+        let published = document.published_diagnostics();
+        let entry_error = published
+            .iter()
+            .find(|item| item.message.contains("missing_in_entry"))
+            .expect("the entry's error should be published");
+        assert!(entry_error.path.is_none(), "entry errors carry no path");
+        let helper_error = published
+            .iter()
+            .find(|item| item.message.contains("missing_in_helper"))
+            .expect("the helper's error should be published");
+        assert!(
+            helper_error
+                .path
+                .as_ref()
+                .is_some_and(|path| path.ends_with("helper.vl")),
+            "{:?}",
+            helper_error.path
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The staleness half: fixing the imported file on disk and re-analyzing the
+    // SAME entry clears the module's diagnostics — what `reanalyze_dependents`
+    // relies on (a dependent's re-analysis reads the dependency fresh).
+    #[test]
+    fn reanalysis_after_fixing_the_import_clears_its_diagnostics() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import std::print;\nimport pkg::broken::answer;\nfun main() { print(answer()); }\n",
+            ),
+            ("broken.vl", "fun answer(): i32 {\n\t\"not a number\"\n}\n"),
+        ]);
+        assert!(
+            document
+                .published_diagnostics()
+                .iter()
+                .any(|item| item.message.contains("Expected i32")),
+            "the broken dependency should report first"
+        );
+        // Fix the module on disk; re-analyze the unchanged entry.
+        std::fs::write(dir.join("broken.vl"), "fun answer(): i32 {\n\t42\n}\n").unwrap();
+        let entry = dir.join("main.vl");
+        let text = std::fs::read_to_string(&entry).unwrap();
+        let reanalyzed = Document::analyze(&text, &std_root(), &entry);
+        assert!(
+            reanalyzed.published_diagnostics().is_empty(),
+            "fixed dependency should publish clean: {:?}",
+            reanalyzed
+                .published_diagnostics()
+                .iter()
+                .map(|item| &item.message)
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `[must_use]` drops surface as warnings on the entry.
+    #[test]
+    fn must_use_drops_publish_as_warnings() {
+        let (dir, document) = analyze_workspace(&[(
+            "main.vl",
+            "[must_use]\nfun important(): i32 { 7 }\nfun main() {\n\timportant();\n}\n",
+        )]);
+        let published = document.published_diagnostics();
+        let warning = published
+            .iter()
+            .find(|item| item.warning)
+            .expect("the dropped result should warn");
+        assert!(warning.path.is_none());
+        assert!(
+            warning.message.contains("must_use")
+                || warning.message.contains("result")
+                || warning.message.contains("unused"),
+            "{}",
+            warning.message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The completion labels offered at the cursor marked `|` in `src`.

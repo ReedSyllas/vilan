@@ -564,6 +564,31 @@ enum Constraint<'src> {
 }
 
 impl Constraint<'_> {
+    /// The expression this constraint is anchored at — used to attribute any
+    /// diagnostics its resolution pushes to the anchor's source file (E1).
+    fn anchor(&self) -> Id {
+        match self {
+            Constraint::Subscript { id, .. } => *id,
+            Constraint::Is(prepped) => prepped.id,
+            Constraint::Comprehension { id, .. } => *id,
+            Constraint::FieldAccessor(constraint) => constraint.id,
+            Constraint::StructInitializer(constraint) => constraint.initializer_id,
+            Constraint::Match(prepped) => prepped.id,
+            Constraint::Variable(constraint) => constraint.variable_id,
+            Constraint::Destructure(constraint) => constraint.id,
+            Constraint::MethodCall { id, .. } => *id,
+            Constraint::SlotUnification { argument_id, .. } => *argument_id,
+            Constraint::MethodArgCheck {
+                argument_ids,
+                member_id,
+                ..
+            } => argument_ids.first().copied().unwrap_or(*member_id),
+            Constraint::ForEachItem { item_id, .. } => *item_id,
+            Constraint::CallSubject(constraint) => constraint.call_id,
+            Constraint::ReturnType { body_id, .. } => *body_id,
+        }
+    }
+
     /// The position this kind resolved at in the original `build()` fixpoint. The
     /// queue is processed in ascending priority, so a migrated section runs where
     /// it always did relative to the not-yet-migrated ones.
@@ -712,6 +737,17 @@ pub struct Analyzer<'src> {
     // The file currently being walked, so type references (which aren't entities)
     // can be tagged with their source for the language server.
     current_source_id: SourceId,
+    // Diagnostic source attribution (backlog E1): `(index, source)` marks — a
+    // diagnostic at index `i` belongs to the source of the last mark with
+    // `index <= i` (default: the entry, `SourceId(0)`). Marks are dropped at
+    // walk boundaries (`set_current_source`) and around attributed pushes
+    // (`attribute_new_diagnostics`), so the LSP can publish each error to the
+    // file it actually occurred in.
+    diagnostic_source_marks: Vec<(usize, SourceId)>,
+    // The entity-id range each file's walk produced — a field (not a local of
+    // `analyze`) so constraint resolution can attribute its diagnostics via
+    // `source_of_id`. Moved into `Program.source_ranges` at the end.
+    source_ranges: Vec<SourceRange>,
     // Each named type reference in a type position (`Option`, `i32`, a trait
     // bound, ...): its file, name span, the definition it resolves to (when one
     // exists), and its type id (rendered to a hover label after `build`, once
@@ -991,6 +1027,8 @@ impl<'src> Analyzer<'src> {
             expr_id_to_type_id_map: HashMap::new(),
             member_name_spans: HashMap::new(),
             current_source_id: SourceId(0),
+            diagnostic_source_marks: Vec::new(),
+            source_ranges: Vec::new(),
             type_references: Vec::new(),
             external_functions: IndexMap::new(),
             constraints: Vec::new(),
@@ -7100,6 +7138,40 @@ impl<'src> Analyzer<'src> {
     /// in priority order, capturing each deferral's wait set. Constraints that
     /// defer move to `self.deferred`; tasks spawned mid-pass land in
     /// `self.constraints` for the next pass. Returns whether anything resolved.
+    /// Sets the file the analyzer is currently walking AND drops a diagnostic
+    /// attribution mark: errors pushed from here on belong to `source` until
+    /// the next mark (backlog E1).
+    fn set_current_source(&mut self, source: SourceId) {
+        self.current_source_id = source;
+        match self.diagnostic_source_marks.last() {
+            Some((_, last)) if *last == source => {}
+            _ => self
+                .diagnostic_source_marks
+                .push((self.diagnostics.len(), source)),
+        }
+    }
+
+    /// Attributes the diagnostics pushed since `from` to `source`, restoring the
+    /// current source afterwards — the wrap for a bounded region (a module parse
+    /// report, one import resolution, one constraint) whose errors belong to a
+    /// file other than the one being walked.
+    fn attribute_new_diagnostics(&mut self, from: usize, source: SourceId) {
+        if self.diagnostics.len() > from && source != self.current_source_id {
+            self.diagnostic_source_marks.push((from, source));
+            self.diagnostic_source_marks
+                .push((self.diagnostics.len(), self.current_source_id));
+        }
+    }
+
+    /// The source file an entity was walked from (`Program::source_of`, but
+    /// usable during `build()`). `None` for synthetic entities.
+    fn source_of_id(&self, id: Id) -> Option<SourceId> {
+        self.source_ranges
+            .iter()
+            .find(|range| id.0 >= range.start && id.0 < range.end)
+            .map(|range| range.source)
+    }
+
     fn resolve_constraints(&mut self) -> bool {
         let mut progress = false;
         // Re-sort each pass so any task a prior pass spawned (e.g. a slot
@@ -7110,7 +7182,15 @@ impl<'src> Analyzer<'src> {
         queue.sort_by_key(|constraint| constraint.priority());
         for constraint in queue {
             self.current_waiting_on = Some(Vec::new());
+            let diagnostics_before = self.diagnostics.len();
             let resolution = self.try_resolve(&constraint);
+            // Attribute anything this constraint reported to its anchor's file
+            // (a type error inside an imported module must publish there, E1).
+            if self.diagnostics.len() > diagnostics_before
+                && let Some(source) = self.source_of_id(constraint.anchor())
+            {
+                self.attribute_new_diagnostics(diagnostics_before, source);
+            }
             let waiting_on = self.current_waiting_on.take().unwrap_or_default();
             match resolution {
                 Resolution::Resolved | Resolution::Failed => progress = true,
@@ -8602,14 +8682,20 @@ impl<'src> Analyzer<'src> {
         loop {
             let before = remaining.len();
             remaining.retain(|(path, name, scope_id, span, leaf_span, source_id)| {
-                !self.resolve_import(path, name, *scope_id, *span, false, *leaf_span, *source_id)
+                let diagnostics_before = self.diagnostics.len();
+                let resolved = self
+                    .resolve_import(path, name, *scope_id, *span, false, *leaf_span, *source_id);
+                self.attribute_new_diagnostics(diagnostics_before, *source_id);
+                !resolved
             });
             if remaining.len() == before || remaining.is_empty() {
                 break;
             }
         }
         for (path, name, scope_id, span, leaf_span, source_id) in remaining {
+            let diagnostics_before = self.diagnostics.len();
             self.resolve_import(&path, name, scope_id, span, true, leaf_span, source_id);
+            self.attribute_new_diagnostics(diagnostics_before, source_id);
         }
 
         // --- Resolve `use` statements ---
@@ -8619,6 +8705,9 @@ impl<'src> Analyzer<'src> {
         for (path, name, scope_id, span, leaf_span, source_id) in
             std::mem::take(&mut self.prepped_uses)
         {
+            let use_diagnostics_before = self.diagnostics.len();
+            // (Attributed at every exit below — a `use` error belongs to the
+            // file the statement is in, E1.)
             let mut segments = path
                 .iter()
                 .copied()
@@ -8631,6 +8720,7 @@ impl<'src> Analyzer<'src> {
                         span,
                         msg: format!("cannot find '{}' in this scope", root),
                     });
+                    self.attribute_new_diagnostics(use_diagnostics_before, source_id);
                     continue;
                 }
             };
@@ -8676,6 +8766,7 @@ impl<'src> Analyzer<'src> {
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, current);
             }
+            self.attribute_new_diagnostics(use_diagnostics_before, source_id);
         }
 
         for (id, name) in self.prepped_locals.clone() {
@@ -8687,10 +8778,14 @@ impl<'src> Analyzer<'src> {
                     self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
                 }
                 None => {
+                    let diagnostics_before = self.diagnostics.len();
                     self.diagnostics.push(Error {
                         span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!("cannot find '{}' in this scope", name),
                     });
+                    if let Some(source) = self.source_of_id(id) {
+                        self.attribute_new_diagnostics(diagnostics_before, source);
+                    }
                     self.expr_id_to_expr_map.insert(id, Expr::Error);
                 }
             }
@@ -9912,6 +10007,9 @@ pub struct Program<'src> {
     pub platform: Platform,
     pub closures: IndexMap<Id, Closure>,
     pub diagnostics: Vec<Error>,
+    /// The source file each diagnostic (by index) belongs to — `SourceId(0)` is
+    /// the entry; imported modules publish to their own files (backlog E1).
+    pub diagnostic_sources: Vec<SourceId>,
     /// Non-fatal diagnostics (unused `[must_use]` results) — rendered as warnings.
     pub warnings: Vec<Error>,
     pub enums: IndexMap<Id, Enum<'src>>,
@@ -11325,7 +11423,6 @@ pub fn analyze<'src>(
     // `sources[0]` is the entry file; std modules are appended as they load.
     // `source_ranges` records the entity-id span each file's walk produced.
     let mut sources: Vec<PathBuf> = vec![entry_path.to_path_buf()];
-    let mut source_ranges: Vec<SourceRange> = Vec::new();
     let mut analyzer = Analyzer::new();
     let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
@@ -11388,7 +11485,10 @@ pub fn analyze<'src>(
     let lib_path = std_module_path(&std.base_root, "lib.vl");
     let lib_loaded = load_package_module(&lib_path);
     if let Some(loaded) = &lib_loaded {
+        let diagnostics_before = analyzer.diagnostics.len();
         report_module_parse_errors(&mut analyzer.diagnostics, &lib_path, loaded);
+        // The lib is registered as the next source below.
+        analyzer.attribute_new_diagnostics(diagnostics_before, SourceId(sources.len() as u32));
     }
     let lib_ast = lib_loaded.map(|loaded| loaded.ast);
     sources.push(PathBuf::from(&lib_path));
@@ -11597,7 +11697,9 @@ pub fn analyze<'src>(
                 });
                 continue;
             };
+            let diagnostics_before = analyzer.diagnostics.len();
             report_module_parse_errors(&mut analyzer.diagnostics, &lib_path, &lib_loaded);
+            analyzer.attribute_new_diagnostics(diagnostics_before, SourceId(sources.len() as u32));
             let lib_ast = lib_loaded.ast;
             sources.push(PathBuf::from(&lib_path));
             let lib_source_id = SourceId((sources.len() - 1) as u32);
@@ -11717,7 +11819,9 @@ pub fn analyze<'src>(
             let Some(loaded) = load_package_module(&module_path) else {
                 continue;
             };
+            let diagnostics_before = analyzer.diagnostics.len();
             report_module_parse_errors(&mut analyzer.diagnostics, &module_path, &loaded);
+            analyzer.attribute_new_diagnostics(diagnostics_before, SourceId(sources.len() as u32));
             sources.push(PathBuf::from(&module_path));
             (loaded.ast, SourceId((sources.len() - 1) as u32))
         };
@@ -11736,7 +11840,7 @@ pub fn analyze<'src>(
         // segment naming it can go-to-definition. A one-id range maps it to its
         // source; the span is the file start.
         analyzer.span_map.insert(module_id, &EMPTY_SPAN);
-        source_ranges.push(SourceRange {
+        analyzer.source_ranges.push(SourceRange {
             start: module_id.0,
             end: module_id.0 + 1,
             source: module_source_id,
@@ -11858,10 +11962,10 @@ pub fn analyze<'src>(
         loaded.push((name, ast, module_derived, module_scope_id, module_source_id));
     }
     for (_name, ast, derived, module_scope_id, source_id) in &loaded {
-        analyzer.current_source_id = *source_id;
+        analyzer.set_current_source(*source_id);
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
-        source_ranges.push(SourceRange {
+        analyzer.source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
             source: *source_id,
@@ -11872,7 +11976,7 @@ pub fn analyze<'src>(
         if let Some(derived) = derived {
             let derived_start = analyzer.entity_id;
             analyzer.walk_expr_nodes(derived, *module_scope_id);
-            source_ranges.push(SourceRange {
+            analyzer.source_ranges.push(SourceRange {
                 start: derived_start,
                 end: analyzer.entity_id,
                 source: DERIVED_SOURCE,
@@ -11880,10 +11984,10 @@ pub fn analyze<'src>(
         }
     }
     if let Some(lib_ast) = lib_ast {
-        analyzer.current_source_id = lib_source_id;
+        analyzer.set_current_source(lib_source_id);
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, std_scope_id);
-        source_ranges.push(SourceRange {
+        analyzer.source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
             source: lib_source_id,
@@ -11892,10 +11996,10 @@ pub fn analyze<'src>(
     // Walk each dependency's `lib.vl` into its own namespace (its public surface),
     // mirroring the `std` lib walk above.
     for (source_id, namespace_scope_id, lib_ast, derived) in &dependency_lib_walks {
-        analyzer.current_source_id = *source_id;
+        analyzer.set_current_source(*source_id);
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, *namespace_scope_id);
-        source_ranges.push(SourceRange {
+        analyzer.source_ranges.push(SourceRange {
             start,
             end: analyzer.entity_id,
             source: *source_id,
@@ -11905,7 +12009,7 @@ pub fn analyze<'src>(
         if let Some(derived) = derived {
             let derived_start = analyzer.entity_id;
             analyzer.walk_expr_nodes(derived, *namespace_scope_id);
-            source_ranges.push(SourceRange {
+            analyzer.source_ranges.push(SourceRange {
                 start: derived_start,
                 end: analyzer.entity_id,
                 source: DERIVED_SOURCE,
@@ -12050,10 +12154,10 @@ pub fn analyze<'src>(
     // module it was already walked (as its module) in the loop above, so skip
     // this to avoid analyzing it twice.
     if !entry_is_module {
-        analyzer.current_source_id = SourceId(0);
+        analyzer.set_current_source(SourceId(0));
         let entry_walk_start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
-        source_ranges.push(SourceRange {
+        analyzer.source_ranges.push(SourceRange {
             start: entry_walk_start,
             end: analyzer.entity_id,
             source: SourceId(0),
@@ -12065,13 +12169,16 @@ pub fn analyze<'src>(
         if let Some(derived) = derived {
             let derived_start = analyzer.entity_id;
             analyzer.walk_expr_nodes(derived, global_scope_id);
-            source_ranges.push(SourceRange {
+            analyzer.source_ranges.push(SourceRange {
                 start: derived_start,
                 end: analyzer.entity_id,
                 source: DERIVED_SOURCE,
             });
         }
     }
+    // Constraint resolution and the post-passes attribute their diagnostics per
+    // anchor; anything unattributed defaults to the entry file.
+    analyzer.set_current_source(SourceId(0));
     analyzer.build();
     // Infer the `borrows` effect before any check reads it (readonly-mutation
     // and the scalar-view lowering both consult `Function.borrows`).
@@ -12398,6 +12505,22 @@ pub fn analyze<'src>(
         })
         .collect::<Vec<_>>();
 
+    // Resolve the diagnostic attribution marks before `diagnostics` moves into
+    // the Program: a diagnostic's source is the last mark at or before its index
+    // (default: the entry).
+    let diagnostic_sources: Vec<SourceId> = {
+        let marks = &analyzer.diagnostic_source_marks;
+        (0..analyzer.diagnostics.len())
+            .map(|index| {
+                marks
+                    .iter()
+                    .rev()
+                    .find(|(start, _)| *start <= index)
+                    .map(|(_, source)| *source)
+                    .unwrap_or(SourceId(0))
+            })
+            .collect()
+    };
     Program {
         platform,
         closures: analyzer.closures,
@@ -12439,7 +12562,8 @@ pub fn analyze<'src>(
         variables: analyzer.variables,
         parameters: analyzer.parameters,
         sources,
-        source_ranges,
+        source_ranges: std::mem::take(&mut analyzer.source_ranges),
+        diagnostic_sources,
         member_name_spans: analyzer.member_name_spans,
         struct_initializer_to_def: analyzer.struct_initializer_to_def,
         type_references,

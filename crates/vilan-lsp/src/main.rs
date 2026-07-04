@@ -84,6 +84,10 @@ struct Backend {
     /// The latest edit generation per document, so a debounced analysis can tell
     /// whether a newer edit (or a close) has superseded it before it runs.
     pending: Arc<DashMap<Url, u64>>,
+    /// Per analyzed document, the OTHER files its last publish sent diagnostics
+    /// to — so the next publish can clear the ones that no longer apply (an
+    /// explicit empty list; otherwise they'd be stale forever — backlog E1).
+    published_extra: Arc<DashMap<Url, Vec<Url>>>,
     /// `std` files don't change during a session, so cache their line indices
     /// rather than re-reading the file on every cross-file definition/reference.
     line_indices: Arc<DashMap<PathBuf, Arc<LineIndex>>>,
@@ -109,11 +113,12 @@ fn discover_std_dir(start: &Path) -> PathBuf {
 }
 
 /// Analyze `text` as the document at `uri`, store the result, and publish its
-/// diagnostics. The analysis is CPU-bound, so it runs on a blocking thread to
-/// keep the async runtime responsive.
+/// diagnostics (grouped per file — backlog E1). The analysis is CPU-bound, so
+/// it runs on a blocking thread to keep the async runtime responsive.
 async fn analyze_and_publish(
     documents: &DashMap<Url, Document>,
     client: &Client,
+    published_extra: &DashMap<Url, Vec<Url>>,
     uri: Url,
     text: String,
 ) {
@@ -127,24 +132,121 @@ async fn analyze_and_publish(
         Ok(document) => document,
         Err(_) => return,
     };
-    let diagnostics = build_diagnostics(&document);
     documents.insert(uri.clone(), document);
-    client.publish_diagnostics(uri, diagnostics, None).await;
+    publish_document(documents, client, published_extra, &uri).await;
 }
 
-/// Render a document's analyzer diagnostics as LSP diagnostics.
-fn build_diagnostics(document: &Document) -> Vec<Diagnostic> {
-    document
-        .diagnostics
+/// Publish the stored document's diagnostics: the entry's own to `uri`, and
+/// each imported file's to *that file's* URI (spans converted through a fresh
+/// read of that file — the analysis read it from disk too, so they agree).
+/// Files published to last time but clean now get an explicit empty list, so
+/// nothing goes stale.
+async fn publish_document(
+    documents: &DashMap<Url, Document>,
+    client: &Client,
+    published_extra: &DashMap<Url, Vec<Url>>,
+    uri: &Url,
+) {
+    // Compute every group before the first await (the map guard must not be
+    // held across one).
+    let mut entry_group: Vec<Diagnostic> = Vec::new();
+    let mut extra_groups: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
+    {
+        let Some(document) = documents.get(uri) else {
+            return;
+        };
+        let mut extra_indices: HashMap<PathBuf, Option<Arc<LineIndex>>> = HashMap::new();
+        for item in document.published_diagnostics() {
+            let severity = if item.warning {
+                DiagnosticSeverity::WARNING
+            } else {
+                DiagnosticSeverity::ERROR
+            };
+            let diagnostic = |range| Diagnostic {
+                range,
+                severity: Some(severity),
+                source: Some("vilan".to_string()),
+                message: item.message.clone(),
+                ..Default::default()
+            };
+            match &item.path {
+                None => entry_group.push(diagnostic(document.line_index.range(&item.span))),
+                Some(path) => {
+                    // A fresh (uncached) read: module files change across saves,
+                    // so a session-cached index would misplace ranges.
+                    let index = extra_indices
+                        .entry(path.clone())
+                        .or_insert_with(|| {
+                            std::fs::read_to_string(path)
+                                .ok()
+                                .map(|text| Arc::new(LineIndex::new(&text)))
+                        })
+                        .clone();
+                    match (index, Url::from_file_path(path)) {
+                        (Some(index), Ok(target)) => {
+                            let converted = diagnostic(index.range(&item.span));
+                            match extra_groups
+                                .iter_mut()
+                                .find(|(existing, _)| *existing == target)
+                            {
+                                Some((_, group)) => group.push(converted),
+                                None => extra_groups.push((target, vec![converted])),
+                            }
+                        }
+                        // Unreadable file: keep the error visible on the entry.
+                        _ => entry_group.push(Diagnostic {
+                            range: Range::default(),
+                            severity: Some(severity),
+                            source: Some("vilan".to_string()),
+                            message: format!("(in {}) {}", path.display(), item.message),
+                            ..Default::default()
+                        }),
+                    }
+                }
+            }
+        }
+    }
+    // Clear the files last published to that have no group this time.
+    let previous = published_extra
+        .get(uri)
+        .map(|entry| entry.value().clone())
+        .unwrap_or_default();
+    let current: Vec<Url> = extra_groups
         .iter()
-        .map(|error| Diagnostic {
-            range: document.line_index.range(&error.span),
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("vilan".to_string()),
-            message: error.msg.clone(),
-            ..Default::default()
-        })
-        .collect()
+        .map(|(target, _)| target.clone())
+        .collect();
+    for stale in previous {
+        if !current.contains(&stale) {
+            client.publish_diagnostics(stale, Vec::new(), None).await;
+        }
+    }
+    published_extra.insert(uri.clone(), current);
+    client
+        .publish_diagnostics(uri.clone(), entry_group, None)
+        .await;
+    for (target, group) in extra_groups {
+        client.publish_diagnostics(target, group, None).await;
+    }
+}
+
+/// Re-analyze every OTHER open document: an edit (or save) of one file changes
+/// what its dependents see, so their diagnostics must be recomputed — the
+/// stale-diagnostics half of backlog E1. Their buffers didn't change, so this
+/// bypasses the unchanged-text short-circuit deliberately.
+async fn reanalyze_dependents(
+    documents: &DashMap<Url, Document>,
+    client: &Client,
+    published_extra: &DashMap<Url, Vec<Url>>,
+    changed: &Url,
+) {
+    let others: Vec<(Url, String)> = documents
+        .iter()
+        .filter(|entry| entry.key() != changed)
+        .map(|entry| (entry.key().clone(), entry.value().text.clone()))
+        .collect();
+    for (uri, text) in others {
+        analyze_and_publish(documents, client, published_extra, uri, text).await;
+    }
 }
 
 impl Backend {
@@ -159,6 +261,7 @@ impl Backend {
         };
         let documents = Arc::clone(&self.documents);
         let pending = Arc::clone(&self.pending);
+        let published_extra = Arc::clone(&self.published_extra);
         let client = self.client.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
@@ -170,7 +273,10 @@ impl Backend {
             if documents.get(&uri).map(|document| document.text_hash) == Some(hash_text(&text)) {
                 return;
             }
-            analyze_and_publish(&documents, &client, uri, text).await;
+            analyze_and_publish(&documents, &client, &published_extra, uri.clone(), text).await;
+            // The edit may change what other open files see (they import this
+            // one, or a file it re-exports) — bring their diagnostics up to date.
+            reanalyze_dependents(&documents, &client, &published_extra, &uri).await;
         });
     }
 
@@ -218,8 +324,13 @@ impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -261,11 +372,8 @@ impl LanguageServer for Backend {
         let path = uri.to_file_path().unwrap_or_default();
         let std_dir = discover_std_dir(&path);
         let document = Document::analyze(&params.text_document.text, &std_dir, &path);
-        let diagnostics = build_diagnostics(&document);
         self.documents.insert(uri.clone(), document);
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+        publish_document(&self.documents, &self.client, &self.published_extra, &uri).await;
     }
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
@@ -281,13 +389,42 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.documents.remove(&params.text_document.uri);
-        // Drop the edit generation so any in-flight debounced analysis bails.
-        self.pending.remove(&params.text_document.uri);
-        self.client
-            .publish_diagnostics(params.text_document.uri, Vec::new(), None)
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        // A save changes what OTHER documents' analyses read from disk (module
+        // loading is disk-backed), so re-analyze every open document.
+        let saved = params.text_document.uri;
+        if let Some((uri, text)) = self
+            .documents
+            .get(&saved)
+            .map(|document| (saved.clone(), document.text.clone()))
+        {
+            analyze_and_publish(
+                &self.documents,
+                &self.client,
+                &self.published_extra,
+                uri,
+                text,
+            )
             .await;
+        }
+        reanalyze_dependents(&self.documents, &self.client, &self.published_extra, &saved).await;
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
+        self.documents.remove(&uri);
+        // Drop the edit generation so any in-flight debounced analysis bails.
+        self.pending.remove(&uri);
+        // Clear this document's diagnostics AND the ones it published onto
+        // other files.
+        if let Some((_, extras)) = self.published_extra.remove(&uri) {
+            for extra in extras {
+                self.client
+                    .publish_diagnostics(extra, Vec::new(), None)
+                    .await;
+            }
+        }
+        self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -424,6 +561,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         documents: Arc::new(DashMap::new()),
+        published_extra: Arc::new(DashMap::new()),
         pending: Arc::new(DashMap::new()),
         line_indices: Arc::new(DashMap::new()),
     });
