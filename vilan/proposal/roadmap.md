@@ -46,11 +46,13 @@ A compact chronicle — details live in the named proposals and the git history.
 
 ## Remaining, ranked
 
-9. **Macro engine** (L; `compiler-bindings.md` is the nearest sketch) — **the frontier.**
-   User-written macros / compiler bindings: custom derives, struct reflection,
-   numeric-type generation. Built-in derives and `[service]` generation already ship as
-   special-cased subsets; the prize is the general expansion phase that subsumes them.
-   Unblocks #15 and backlog G1's consumers.
+9. **Macro engine** (L; **proposal written: `macro-engine.md`**, awaiting review) — **the
+   frontier.** User-land vilan running inside the compiler: `macro` items over a
+   `std::meta` reflection surface, stage-0 isolated compilation, `[attr]`/`[derive(X)]` +
+   `@name(..)` invocations, an interpreted-with-fuel execution model (recommended over a
+   node host — §5), and per-invocation text-level caching made sound by enforced
+   determinism (§6). Subsumes the built-in derives + `[service]` generation behind a
+   byte-identical goldens gate. Unblocks #15 and backlog G1's consumers.
 
 10. **LSP semantic highlighting** (M) — semantic tokens, precision over the TextMate
     grammar. (Backlog §E carries the rest of the LSP list, including the higher-value

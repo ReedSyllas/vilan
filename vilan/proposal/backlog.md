@@ -204,9 +204,10 @@ have gaps.
 
 ## G. Macros
 
-1. **General macro engine** (L; roadmap #9) — built-in derives and `[service]` generation shipped
-   as special-cased subsets; the prize is user-written macros / compiler bindings (numeric-type
-   generation, custom derives, struct reflection) via a real macro-expansion phase.
+1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`**, awaiting review —
+   §5 execution model and §6 caching are the decision points) — built-in derives and `[service]`
+   generation shipped as special-cased subsets; the proposal subsumes them via stage-0 `macro`
+   items over `std::meta`, interpreted with fuel, per-invocation text caching.
 
 ---
 
