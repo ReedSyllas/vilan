@@ -75,7 +75,7 @@ have gaps.
 
 ---
 
-## C. Memory model — Phase 6+ tail (deferred; see `memory-mangement-impl-plan.md`)
+## C. Memory model — Phase 6+ tail (deferred; see `memory-management-impl-plan.md`)
 
 1. **`Weak<T>`** (M) — non-owning handle for breaking `Shared` cycles.
 

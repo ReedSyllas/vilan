@@ -1,7 +1,7 @@
 # Memory Management (Revision 1)
 
 > **Status: implemented through Phase 6 essentials** (see
-> [`memory-mangement-impl-plan.md`](memory-mangement-impl-plan.md)): value semantics,
+> [`memory-management-impl-plan.md`](memory-management-impl-plan.md)): value semantics,
 > second-class views, inferred `borrows`, view-returning `Option<&T>`, `for e in &mut`,
 > `Arena`/`Handle`, `Shared<T>`. The Phase 6+ tail (`Weak<T>`, dynamic rule 4,
 > no-view-across-`await`, deterministic destruction) is deferred — backlog §C.

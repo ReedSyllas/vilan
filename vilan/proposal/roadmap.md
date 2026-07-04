@@ -21,7 +21,7 @@ A compact chronicle — details live in the named proposals and the git history.
   the `vilan test` runner.
 - **Memory model:** Phases 1–5 (value semantics, second-class views, inferred `borrows`,
   view-returning `Option<&T>`, `for e in &mut`) plus Phase 6 essentials (`Arena`/`Handle`,
-  `Shared<T>`) — `memory-mangement-rev-1.md` / `-impl-plan.md`. Transparent references
+  `Shared<T>`) — `memory-management-rev-1.md` / `-impl-plan.md`. Transparent references
   (`transparent-references.md`). The Phase 6+ tail is deferred → backlog §C.
 - **Reactive:** ownership & disposal (`reactive-ownership.md`), batching + the wire turn
   (`reactive-batching.md`), variadic generics / `combine` (`variadic-generics.md`).
