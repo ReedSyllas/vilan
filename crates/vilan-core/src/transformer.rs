@@ -1,5 +1,5 @@
 use crate::analyzer::{
-    Expr, ExprIfBranch, ExprPattern, Function, GenericDispatch, Intrinsic, Program,
+    Expr, ExprIfBranch, ExprPattern, Function, GenericDispatch, Intrinsic, Program, TryDispatch,
 };
 use crate::error::Error;
 use crate::id::Id;
@@ -1032,6 +1032,95 @@ impl<'src> Transformer<'src> {
                     .and_then(|value| self.walk_entity(value, block))
                     .unwrap_or(js::Node::Void),
             )),
+            // `expr!` (proposal/try-and-lift.md §4): evaluate the receiver once,
+            // branch on the bad tag, return the bad half, yield the good half.
+            Expr::TryAssert(receiver_id) => {
+                let receiver = self
+                    .walk_entity(*receiver_id, block)
+                    .unwrap_or(js::Node::Void);
+                let name = self.ng.next_name();
+                block.push(js::Node::ConstVariable(js::Variable {
+                    name: name.clone(),
+                    value: Box::new(receiver),
+                }));
+                let tag_is_bad = |subject: js::Node<'src>| {
+                    js::Node::Binary(
+                        BinaryOp::Eq,
+                        Box::new(js::Node::PropertyIndex(
+                            Box::new(subject),
+                            Box::new(js::Node::Number("0".to_string(), None)),
+                        )),
+                        Box::new(js::Node::Number("1".to_string(), None)),
+                    )
+                };
+                match self.program.try_dispatch.get(&id).cloned() {
+                    // Option/Result: the bad VALUE (`None`, `Err(e)`) is the
+                    // receiver itself — return it as-is (byte-identical at any
+                    // success type).
+                    Some(TryDispatch::Std) | None => {
+                        block.push(js::Node::If(js::IfBranch::If(
+                            Box::new(tag_is_bad(js::Node::Local(name.clone()))),
+                            vec![js::Node::Return(Box::new(js::Node::Local(name.clone())))],
+                            None,
+                        )));
+                        js::Node::PropertyIndex(
+                            Box::new(js::Node::Local(name)),
+                            Box::new(js::Node::Number("1".to_string(), None)),
+                        )
+                    }
+                    // A user `Try` impl: `verdict(receiver)`, branch on the
+                    // Verdict tag (Good = 0, Bad = 1), return `from_bad(bad)`.
+                    Some(TryDispatch::Trait {
+                        verdict_id,
+                        from_bad_id,
+                        impl_subject,
+                        receiver_type_id,
+                    }) => {
+                        let verdict = self.dispatch_to_member(
+                            verdict_id,
+                            impl_subject,
+                            receiver_type_id,
+                            &[],
+                        );
+                        let from_bad = self.dispatch_to_member(
+                            from_bad_id,
+                            impl_subject,
+                            receiver_type_id,
+                            &[],
+                        );
+                        let (Dispatch::Call(verdict_name, _), Dispatch::Call(from_bad_name, _)) =
+                            (verdict, from_bad)
+                        else {
+                            // A Try impl's members are ordinary vilan methods —
+                            // an intrinsic/extern here is unreachable.
+                            return Some(js::Node::Void);
+                        };
+                        let verdict_value = self.ng.next_name();
+                        block.push(js::Node::ConstVariable(js::Variable {
+                            name: verdict_value.clone(),
+                            value: Box::new(js::Node::Call(
+                                Box::new(js::Node::Local(verdict_name)),
+                                vec![js::Node::Local(name)],
+                            )),
+                        }));
+                        block.push(js::Node::If(js::IfBranch::If(
+                            Box::new(tag_is_bad(js::Node::Local(verdict_value.clone()))),
+                            vec![js::Node::Return(Box::new(js::Node::Call(
+                                Box::new(js::Node::Local(from_bad_name)),
+                                vec![js::Node::PropertyIndex(
+                                    Box::new(js::Node::Local(verdict_value.clone())),
+                                    Box::new(js::Node::Number("1".to_string(), None)),
+                                )],
+                            )))],
+                            None,
+                        )));
+                        js::Node::PropertyIndex(
+                            Box::new(js::Node::Local(verdict_value)),
+                            Box::new(js::Node::Number("1".to_string(), None)),
+                        )
+                    }
+                }
+            }
             Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.walk_entity(*lhs, block).unwrap_or(js::Node::Void);
                 let rhs = self.walk_entity(*rhs, block).unwrap_or(js::Node::Void);

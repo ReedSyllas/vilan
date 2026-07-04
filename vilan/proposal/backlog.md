@@ -78,7 +78,8 @@ have gaps.
     Signal/Promise recorded candidates). Both are operators (the `Add` dispatch model,
     inline fast path for std), not source rewrites. Deferred: expression lifting
     (`a? + 10`), applicatives, error conversion, closure `!` (the RPC-handler follow-up).
-    Ships `!` first.
+    **Slice 1 (`!`) shipped 2026-07-04** — remaining here: slice 2 (`?.`) and the
+    deferred list.
 
 ---
 

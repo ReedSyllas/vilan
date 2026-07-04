@@ -4214,3 +4214,360 @@ fn use_segment_error_spans_the_segment() {
         "cannot find 'Somme' in the `use` path",
     );
 }
+
+// --- `expr!` — assert-or-return (proposal/try-and-lift.md, slice 1) -------------
+
+// The happy and early paths, on both std types, with the early return proven
+// by an unreached side effect.
+#[test]
+fn bang_unwraps_good_and_returns_bad() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+
+        fun lookup(key: str): Option<i32> {
+        	if key == "hit" {
+        		Some(21)
+        	} else {
+        		None
+        	}
+        }
+
+        fun doubled(key: str): Option<i32> {
+        	let value = lookup(key)!;
+        	print("unwrapped");
+        	Some(value * 2)
+        }
+
+        fun to_number(text: str): Result<i32, str> {
+        	match text.parse_i32() {
+        		Some(let value) => Ok(value),
+        		None => Err(i"not a number: {text}"),
+        	}
+        }
+
+        fun sum(a: str, b: str): Result<i32, str> {
+        	let left = to_number(a)!;
+        	let right = to_number(b)!;
+        	Ok(left + right)
+        }
+
+        fun main() {
+        	match doubled("hit") {
+        		Some(let v) => print(i"some {format(v)}"),
+        		None => print("none"),
+        	}
+        	match doubled("miss") {
+        		Some(let v) => print(i"some {format(v)}"),
+        		None => print("none"),
+        	}
+        	match sum("2", "40") {
+        		Ok(let v) => print(i"ok {format(v)}"),
+        		Err(let e) => print(i"err {e}"),
+        	}
+        	match sum("2", "forty") {
+        		Ok(let v) => print(i"ok {format(v)}"),
+        		Err(let e) => print(i"err {e}"),
+        	}
+        }
+        "#,
+        "unwrapped\nsome 42\nnone\nok 42\nerr not a number: forty\n",
+    );
+}
+
+// A user `Try` type behaves exactly like the std pair — the §8.3 equivalence
+// pin: real trait dispatch through `verdict`/`from_bad`.
+#[test]
+fn a_user_try_type_behaves_like_the_std_pair() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::operators::{ Try, Verdict };
+
+        enum Lint {
+        	Clean(i32),
+        	Dirty(str),
+        }
+
+        impl Lint with Try<i32, str> {
+        	fun verdict(self): Verdict<i32, str> {
+        		match self {
+        			Lint::Clean(let score) => Verdict::Good(score),
+        			Lint::Dirty(let complaint) => Verdict::Bad(complaint),
+        		}
+        	}
+
+        	fun from_bad(bad: str): Lint {
+        		Lint::Dirty(bad)
+        	}
+        }
+
+        fun check(source: str): Lint {
+        	if source == "tidy" {
+        		Lint::Clean(95)
+        	} else {
+        		Lint::Dirty(i"messy: {source}")
+        	}
+        }
+
+        fun grade(source: str): Lint {
+        	let score = check(source)!;
+        	print("scored");
+        	Lint::Clean(score + 5)
+        }
+
+        fun main() {
+        	match grade("tidy") {
+        		Lint::Clean(let score) => print(i"clean {format(score)}"),
+        		Lint::Dirty(let complaint) => print(complaint),
+        	}
+        	match grade("sloppy") {
+        		Lint::Clean(let score) => print(i"clean {format(score)}"),
+        		Lint::Dirty(let complaint) => print(complaint),
+        	}
+        }
+        "#,
+        "scored\nclean 100\nmessy: sloppy\n",
+    );
+}
+
+// `!` works in async functions (the declared return type is the frame).
+#[test]
+fn bang_works_in_async_functions() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::result::Result::{ self, Ok, Err };
+
+        async fun fetch_number(flag: bool): Result<i32, str> {
+        	if flag {
+        		Ok(7)
+        	} else {
+        		Err("offline")
+        	}
+        }
+
+        async fun doubled(flag: bool): Result<i32, str> {
+        	let value = (await fetch_number(flag))!;
+        	Ok(value * 2)
+        }
+
+        async fun main() {
+        	match await doubled(true) {
+        		Ok(let v) => print(i"ok {format(v)}"),
+        		Err(let e) => print(e),
+        	}
+        	match await doubled(false) {
+        		Ok(let v) => print(i"ok {format(v)}"),
+        		Err(let e) => print(e),
+        	}
+        }
+        "#,
+        "ok 14\noffline\n",
+    );
+}
+
+// `!` binds tighter than comparison, and `a!=b` stays a comparison (the lex
+// rule: `!=` wins; the postfix form needs the space).
+#[test]
+fn bang_spacing_against_not_equals() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+
+        fun pick(): Option<i32> {
+        	Some(3)
+        }
+
+        fun compare(): Option<bool> {
+        	let a = 3;
+        	let b = 4;
+        	// `a!=b` is not-equals on plain values...
+        	if a!=b {
+        		print("a != b");
+        	}
+        	// ...while `pick()! == a` unwraps then compares.
+        	Some(pick()! == a)
+        }
+
+        fun main() {
+        	match compare() {
+        		Some(let equal) => print(if equal { "equal" } else { "not equal" }),
+        		None => print("none"),
+        	}
+        }
+        "#,
+        "a != b\nequal\n",
+    );
+}
+
+// The error cases, each pinned at the pertinent span (E7 harness).
+#[test]
+fn bang_on_option_requires_an_option_function() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+
+        fun lookup(): Option<i32> {
+        	Some(1)
+        }
+
+        fun bad(): Result<i32, str> {
+        	let value = lookup()!;
+        	Ok(value)
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+        "lookup()!",
+        "must return `Option`",
+    );
+}
+
+#[test]
+fn bang_result_error_types_must_match() {
+    assert_fails_spanning(
+        r#"
+        import std::result::Result::{ self, Ok, Err };
+
+        fun inner(): Result<i32, str> {
+        	Ok(1)
+        }
+
+        fun bad(): Result<i32, i32> {
+        	let value = inner()!;
+        	Ok(value)
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+        "inner()!",
+        "error types must match",
+    );
+}
+
+#[test]
+fn bang_in_a_bare_void_function_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Option::{ self, Some, None };
+
+        fun lookup(): Option<i32> {
+        	Some(1)
+        }
+
+        fun bad() {
+        	let _ = lookup()!;
+        }
+
+        fun main() {
+        	bad();
+        }
+        "#,
+        "lookup()!",
+        "requires the nearest enclosing function",
+    );
+}
+
+#[test]
+fn bang_in_a_closure_is_rejected_v1() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Option::{ self, Some, None };
+
+        fun lookup(): Option<i32> {
+        	Some(1)
+        }
+
+        fun outer(): Option<i32> {
+        	let helper = |x: i32| {
+        		let value = lookup()!;
+        		value + x
+        	};
+        	Some(helper(1))
+        }
+
+        fun main() {
+        	let _ = outer();
+        }
+        "#,
+        "lookup()!",
+        "closures and `async` blocks are not yet supported",
+    );
+}
+
+#[test]
+fn bang_on_a_non_try_type_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Option::{ self, Some, None };
+
+        fun bad(): Option<i32> {
+        	let n = 5;
+        	let value = n!;
+        	Some(value)
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+        "n!",
+        "needs a value implementing `Try`",
+    );
+}
+
+// A user `Try` type's enclosing return must equal the receiver exactly (v1).
+#[test]
+fn user_try_requires_the_exact_return_type() {
+    assert_fails_spanning(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        import std::operators::{ Try, Verdict };
+
+        enum Lint {
+        	Clean(i32),
+        	Dirty(str),
+        }
+
+        impl Lint with Try<i32, str> {
+        	fun verdict(self): Verdict<i32, str> {
+        		match self {
+        			Lint::Clean(let score) => Verdict::Good(score),
+        			Lint::Dirty(let complaint) => Verdict::Bad(complaint),
+        		}
+        	}
+
+        	fun from_bad(bad: str): Lint {
+        		Lint::Dirty(bad)
+        	}
+        }
+
+        fun check(): Lint {
+        	Lint::Clean(1)
+        }
+
+        fun bad(): Option<i32> {
+        	let score = check()!;
+        	Some(score)
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+        "check()!",
+        "must match exactly",
+    );
+}

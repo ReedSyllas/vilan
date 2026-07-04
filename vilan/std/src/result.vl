@@ -2,6 +2,7 @@ import pkg::io::panic;
 import pkg::option::Option::{ self, Some, None };
 import pkg::compare::PartialEq;
 import pkg::default::Default;
+import pkg::operators::{ Try, Verdict };
 
 enum Result<T, E> {
 	Ok(T),
@@ -9,6 +10,22 @@ enum Result<T, E> {
 }
 
 use Result::{ Ok, Err };
+
+// `!` on a `Result`: `Ok` is good; `Err` is bad, its residual the error itself,
+// returned as-is (v1: the enclosing function's error type must match —
+// proposal/try-and-lift.md).
+impl Result<type T, type E> with Try<T, E> {
+	fun verdict(self): Verdict<T, E> {
+		match self {
+			Ok(let value) => Verdict::Good(value),
+			Err(let error) => Verdict::Bad(error),
+		}
+	}
+
+	fun from_bad(bad: E): Result<T, E> {
+		Err(bad)
+	}
+}
 
 impl Result<type T, type E> {
 	fun is_ok(self): bool {

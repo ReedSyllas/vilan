@@ -1,5 +1,6 @@
 import pkg::compare::PartialEq;
 import pkg::default::Default;
+import pkg::operators::{ Try, Verdict };
 import pkg::io::panic;
 import pkg::result::Result::{ self, Ok, Err };
 
@@ -9,6 +10,22 @@ enum Option<T> {
 }
 
 use Option::{ Some, None };
+
+// `!` on an `Option`: `Some` is good; `None` is bad, its residual `void` (the
+// unit — the absence carries no information), rebuilt as `None` at the
+// enclosing function's element type (proposal/try-and-lift.md).
+impl Option<type T> with Try<T, void> {
+	fun verdict(self): Verdict<T, void> {
+		match self {
+			Some(let value) => Verdict::Good(value),
+			None => Verdict::Bad({}),
+		}
+	}
+
+	fun from_bad(bad: void): Option<T> {
+		None
+	}
+}
 
 impl Option<type T> {
 	fun is_some(self): bool {

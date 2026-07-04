@@ -946,6 +946,10 @@ impl<'src> Printer<'src> {
                 self.out.push(*operator);
                 self.print_operand(operand, 6);
             }
+            Node::TryAssert(subject) => {
+                self.print_operand(subject, 100);
+                self.out.push('!');
+            }
             Node::Reference(mutable, operand) => {
                 self.out.push('&');
                 if *mutable {

@@ -1,0 +1,88 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::operators::{ Try, Verdict };
+
+// `expr!` (try-and-lift §2): unwrap the good half, or return the bad half from
+// the nearest enclosing function.
+
+fun lookup(key: str): Option<i32> {
+	if key == "hit" {
+		Some(21)
+	} else {
+		None
+	}
+}
+
+fun doubled(key: str): Option<i32> {
+	let value = lookup(key)!;
+	Some(value * 2)
+}
+
+fun to_number(text: str): Result<i32, str> {
+	match text.parse_i32() {
+		Some(let value) => Ok(value),
+		None => Err(text),
+	}
+}
+
+fun sum(a: str, b: str): Result<i32, str> {
+	// two bangs in one function; the second's early return carries the error
+	let left = to_number(a)!;
+	let right = to_number(b)!;
+	Ok(left + right)
+}
+
+// A user Try type dispatches through its real impl (verdict / from_bad).
+enum Gate {
+	Open(i32),
+	Shut(str),
+}
+
+impl Gate with Try<i32, str> {
+	fun verdict(self): Verdict<i32, str> {
+		match self {
+			Gate::Open(let lane) => Verdict::Good(lane),
+			Gate::Shut(let why) => Verdict::Bad(why),
+		}
+	}
+
+	fun from_bad(bad: str): Gate {
+		Gate::Shut(bad)
+	}
+}
+
+fun pass(gate: Gate): Gate {
+	let lane = gate!;
+	Gate::Open(lane + 1)
+}
+
+fun main() {
+	print(doubled("hit").unwrap_or(0 - 1)); // 42
+	print(doubled("miss").unwrap_or(0 - 1)); // -1
+	match sum("40", "2") {
+		Ok(let v) => print(v), // 42
+		Err(let e) => print(e),
+	}
+	match sum("40", "two") {
+		Ok(let v) => print(v),
+		Err(let e) => print(e), // two
+	}
+	match pass(Gate::Open(6)) {
+		Gate::Open(let lane) => print(lane), // 7
+		Gate::Shut(let why) => print(why),
+	}
+	match pass(Gate::Shut("closed")) {
+		Gate::Open(let lane) => print(lane),
+		Gate::Shut(let why) => print(why), // closed
+	}
+	// `!` binds tighter than comparison; `a!=b` stays not-equals.
+	let a = 1;
+	let b = 2;
+	print(a != b); // true
+	print(is_twenty_one().unwrap_or(false)); // true
+}
+
+fun is_twenty_one(): Option<bool> {
+	Some(lookup("hit")! == 21) // unwrap-then-compare — needs the space
+}

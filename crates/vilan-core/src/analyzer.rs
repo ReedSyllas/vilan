@@ -96,6 +96,9 @@ pub enum Expr<'src> {
     ForEach(Id, Option<Id>, (Vec<Id>, Id)),
     Function(Id),
     FunctionReturn(Option<Id>),
+    // `expr!` (proposal/try-and-lift.md): the receiver's good half, or an early
+    // return of the bad half. Typed by `Constraint::TryAssert`.
+    TryAssert(Id),
     Generic(TypeId),
     If(ExprIfBranch),
     Impl(Id),
@@ -561,6 +564,14 @@ enum Constraint<'src> {
     /// where `R = Option<User>`) leaves `T` unbound and lowers to the abstract
     /// trait method. Mirrors `Variable`.
     ReturnType { body_id: Id, return_type_id: TypeId },
+    /// `expr!` — resolves the receiver's `Try` dispatch (std `Option`/`Result`
+    /// fast path or a user `Try` impl), types the expression as the good half,
+    /// and checks the enclosing function's return type can carry the bad half.
+    TryAssert {
+        id: Id,
+        receiver_id: Id,
+        return_type_id: TypeId,
+    },
 }
 
 impl Constraint<'_> {
@@ -586,6 +597,7 @@ impl Constraint<'_> {
             Constraint::ForEachItem { item_id, .. } => *item_id,
             Constraint::CallSubject(constraint) => constraint.call_id,
             Constraint::ReturnType { body_id, .. } => *body_id,
+            Constraint::TryAssert { id, .. } => *id,
         }
     }
 
@@ -612,6 +624,7 @@ impl Constraint<'_> {
             // call is inferred against the return type first, so the return-type
             // binding is recorded the same way an annotated `let` records it.
             Constraint::ReturnType { .. } => 10,
+            Constraint::TryAssert { .. } => 10,
             Constraint::CallSubject(_) => 11,
         }
     }
@@ -946,6 +959,13 @@ pub struct Analyzer<'src> {
     // The `std` `panic` intrinsic, if loaded. A call to it never returns, so it
     // types as `any` (unifying with any expected type) and lowers to a `throw`.
     panic_fn_id: Option<Id>,
+    // `!`'s std fast-path identities and the `Try` trait, resolved by name from
+    // their std modules after loading (like `panic_fn_id`).
+    option_enum_id: Option<Id>,
+    result_enum_id: Option<Id>,
+    try_trait_id: Option<Id>,
+    // Per `expr!` site: how the transformer lowers it (proposal/try-and-lift.md §4).
+    try_dispatch: HashMap<Id, TryDispatch>,
     // The `std::promise` `Promise<T>` struct, if loaded. `async e` types as
     // `Promise<type of e>`, and `await p` unwraps a `Promise<T>` to `T`.
     promise_struct_id: Option<Id>,
@@ -1088,6 +1108,10 @@ impl<'src> Analyzer<'src> {
             walking_trait_body: false,
             trait_body_scopes: HashSet::new(),
             panic_fn_id: None,
+            option_enum_id: None,
+            result_enum_id: None,
+            try_trait_id: None,
+            try_dispatch: HashMap::new(),
             promise_struct_id: None,
         }
     }
@@ -4245,6 +4269,31 @@ impl<'src> Analyzer<'src> {
                 }
                 Some(Expr::FunctionReturn(value_id))
             }
+            Node::TryAssert(receiver) => {
+                let receiver_id = self.walk_expr_node(receiver, scope_id);
+                // `!` returns the bad half from the nearest enclosing callable,
+                // so that callable must declare a compatible return type. A
+                // closure/`async` block (inferred return) or an undeclared-void
+                // function has nothing to check against — a clean error (v1;
+                // proposal/try-and-lift.md §2).
+                match self.return_type_stack.last().copied().flatten() {
+                    Some(return_type_id) => {
+                        self.constraints.push(Constraint::TryAssert {
+                            id,
+                            receiver_id,
+                            return_type_id,
+                        });
+                    }
+                    None => {
+                        self.diagnostics.push(Error {
+                            span: node.1,
+                            msg: "`!` requires the nearest enclosing function to declare an `Option`/`Result`-compatible return type (closures and `async` blocks are not yet supported)"
+                                .to_string(),
+                        });
+                    }
+                }
+                Some(Expr::TryAssert(receiver_id))
+            }
             Node::Binary(op, lhs, rhs) => {
                 let lhs_id = self.walk_expr_node(lhs, scope_id);
                 let rhs_id = self.walk_expr_node(rhs, scope_id);
@@ -5897,6 +5946,16 @@ impl<'src> Analyzer<'src> {
             }
             // `!x` (logical not) is a boolean.
             Expr::Unary('!', _) => self.bool_type(),
+            // `expr!` — typed by `Constraint::TryAssert` (which lands in
+            // `resolved_types`, consulted above); until then it is unresolved,
+            // so dependents (a `let` grounding on it) defer and wake instead of
+            // committing to a bogus type.
+            Expr::TryAssert(_) => {
+                if let Some(waiting) = self.current_waiting_on.as_mut() {
+                    waiting.push(expr_id);
+                }
+                Type::Unresolved
+            }
             Expr::Unary(_, operand_id) => {
                 self.infer_type_inner(*operand_id, &constraint, substitution_context, exprs_seen)
             }
@@ -7276,6 +7335,11 @@ impl<'src> Analyzer<'src> {
                 body_id,
                 return_type_id,
             } => self.resolve_return_type(*body_id, *return_type_id),
+            Constraint::TryAssert {
+                id,
+                receiver_id,
+                return_type_id,
+            } => self.resolve_try_assert(*id, *receiver_id, *return_type_id),
         }
     }
 
@@ -8223,6 +8287,207 @@ impl<'src> Analyzer<'src> {
                 msg: format!("Expected {}, but got {} instead.", expected, got),
             });
         }
+        Resolution::Resolved
+    }
+
+    /// `expr!` (proposal/try-and-lift.md §2): type the expression as the
+    /// receiver's GOOD half, record the lowering dispatch, and check the
+    /// enclosing function's declared return type can carry the BAD half —
+    /// `Option` inside an `Option` function (any element), `Result` inside a
+    /// `Result` function with the same error type, or (user `Try` types, v1)
+    /// exactly the receiver's type.
+    fn resolve_try_assert(
+        &mut self,
+        id: Id,
+        receiver_id: Id,
+        return_type_id: TypeId,
+    ) -> Resolution {
+        if !self.expr_id_to_expr_map.contains_key(&receiver_id) {
+            return Resolution::Deferred;
+        }
+        let receiver_type = self.infer_type(receiver_id, &Type::Unknown, &HashMap::new());
+        if matches!(receiver_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        let return_type = return_type_id.get_type(self);
+        let span = **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN);
+        let receiver_enum = match &receiver_type {
+            Type::Enum(enum_id, arguments) => Some((*enum_id, arguments.clone())),
+            _ => None,
+        };
+        // --- The std pair: Option / Result, by identity. ---
+        if let Some((enum_id, arguments)) = &receiver_enum
+            && Some(*enum_id) == self.option_enum_id
+        {
+            let good = arguments
+                .first()
+                .map(|type_id| type_id.get_type(self))
+                .unwrap_or(Type::Unknown);
+            match &return_type {
+                Type::Enum(return_enum, _) if Some(*return_enum) == self.option_enum_id => {}
+                other => {
+                    let rendered = self.pretty_print_type(other, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "`!` on an `Option` returns `None` early, so the enclosing function must return `Option` — it returns {rendered}"
+                        ),
+                    });
+                }
+            }
+            self.try_dispatch.insert(id, TryDispatch::Std);
+            let good_id = good.get_type_id(self);
+            self.resolved_types.insert(id, good_id);
+            return Resolution::Resolved;
+        }
+        if let Some((enum_id, arguments)) = &receiver_enum
+            && Some(*enum_id) == self.result_enum_id
+        {
+            let good = arguments
+                .first()
+                .map(|type_id| type_id.get_type(self))
+                .unwrap_or(Type::Unknown);
+            let bad = arguments.get(1).map(|type_id| type_id.get_type(self));
+            match &return_type {
+                Type::Enum(return_enum, return_arguments)
+                    if Some(*return_enum) == self.result_enum_id =>
+                {
+                    // The error types must agree — `Err(e)` is returned as-is.
+                    let return_bad = return_arguments
+                        .get(1)
+                        .map(|type_id| type_id.get_type(self));
+                    if let (Some(bad), Some(return_bad)) = (bad, return_bad)
+                        && self
+                            .reconcile_type(&bad, &return_bad, &HashMap::new())
+                            .is_none()
+                    {
+                        let receiver_rendered = self.pretty_print_type(&bad, &HashMap::new());
+                        let return_rendered = self.pretty_print_type(&return_bad, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!(
+                                "`!` returns this `Result`'s error as-is, so the error types must match: the value's is {receiver_rendered}, the function returns {return_rendered} (error conversion is not supported yet)"
+                            ),
+                        });
+                    }
+                }
+                other => {
+                    let rendered = self.pretty_print_type(other, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "`!` on a `Result` returns the error early, so the enclosing function must return `Result` — it returns {rendered}"
+                        ),
+                    });
+                }
+            }
+            self.try_dispatch.insert(id, TryDispatch::Std);
+            let good_id = good.get_type_id(self);
+            self.resolved_types.insert(id, good_id);
+            return Resolution::Resolved;
+        }
+        // --- A user `Try` impl: recover Try<T, B> through the impl's trait args. ---
+        let receiver_type_id = receiver_type.clone().get_type_id(self);
+        // Snapshot the Try impls' subjects first (reconcile needs `&mut self`).
+        let candidates: Vec<(usize, TypeId)> = match self.try_trait_id {
+            Some(try_id) => self
+                .implementations
+                .iter()
+                .enumerate()
+                .filter(|(_, implementation)| implementation.trait_ids.contains(&try_id))
+                .map(|(index, implementation)| (index, implementation.subject))
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut try_impl = None;
+        for (index, subject) in candidates {
+            let subject_type = subject.get_type(self);
+            if self
+                .reconcile_type(&receiver_type, &subject_type, &HashMap::new())
+                .is_some()
+            {
+                try_impl = Some(index);
+                break;
+            }
+        }
+        let Some(impl_index) = try_impl else {
+            let rendered = self.pretty_print_type(&receiver_type, &HashMap::new());
+            self.diagnostics.push(Error {
+                span,
+                msg: format!(
+                    "`!` needs a value implementing `Try` (an `Option`, a `Result`, or a type with an `impl .. with Try<..>`) — this is {rendered}"
+                ),
+            });
+            return Resolution::Failed;
+        };
+        let implementation = &self.implementations[impl_index];
+        let impl_subject = implementation.subject;
+        let verdict_id = implementation.declarations.get("verdict").copied();
+        let from_bad_id = implementation.declarations.get("from_bad").copied();
+        let trait_arguments = self
+            .try_trait_id
+            .and_then(|try_id| {
+                implementation
+                    .trait_args
+                    .iter()
+                    .find(|(trait_id, _)| *trait_id == try_id)
+                    .map(|(_, arguments)| arguments.clone())
+            })
+            .unwrap_or_default();
+        let (Some(verdict_id), Some(from_bad_id)) = (verdict_id, from_bad_id) else {
+            self.diagnostics.push(Error {
+                span,
+                msg: "the `Try` impl is missing `verdict`/`from_bad`".to_string(),
+            });
+            return Resolution::Failed;
+        };
+        // Bind the impl's generics from the receiver, then substitute into the
+        // trait's `[T, B]` to get the concrete good half.
+        let bindings = self
+            .reconcile_type(
+                &receiver_type,
+                &impl_subject.get_type(self),
+                &HashMap::new(),
+            )
+            .map(|(_, bindings)| bindings)
+            .unwrap_or_default();
+        let substitution: SubstitutionContext = bindings.into_iter().collect();
+        let good = trait_arguments
+            .first()
+            .map(|type_id| {
+                let raw = type_id.get_type(self);
+                self.substitute_type(&raw, &substitution)
+            })
+            .unwrap_or(Type::Unknown);
+        // v1: the enclosing return type must be exactly the receiver's type
+        // (`from_bad` returns Self — no higher-kinded re-instantiation).
+        if self
+            .reconcile_type(&receiver_type, &return_type, &HashMap::new())
+            .is_none()
+            || self
+                .reconcile_type(&return_type, &receiver_type, &HashMap::new())
+                .is_none()
+        {
+            let receiver_rendered = self.pretty_print_type(&receiver_type, &HashMap::new());
+            let return_rendered = self.pretty_print_type(&return_type, &HashMap::new());
+            self.diagnostics.push(Error {
+                span,
+                msg: format!(
+                    "`!` on a `Try` type returns `from_bad(..)`, which rebuilds {receiver_rendered} — the enclosing function returns {return_rendered} (for user `Try` types the two must match exactly, v1)"
+                ),
+            });
+        }
+        self.try_dispatch.insert(
+            id,
+            TryDispatch::Trait {
+                verdict_id,
+                from_bad_id,
+                impl_subject,
+                receiver_type_id,
+            },
+        );
+        let good_id = good.get_type_id(self);
+        self.resolved_types.insert(id, good_id);
         Resolution::Resolved
     }
 
@@ -10007,6 +10272,26 @@ pub struct SourceId(pub u32);
 /// skip them instead of pointing into the user's text at a bogus offset.
 pub const DERIVED_SOURCE: SourceId = SourceId(u32::MAX);
 
+/// How one `expr!` site lowers (proposal/try-and-lift.md §4): the std pair gets
+/// the inline tag-branch fast path; any other `Try` type dispatches to its
+/// impl's `verdict`/`from_bad` (the members recorded here), with the receiver's
+/// concrete type for monomorphization.
+#[derive(Debug, Clone)]
+pub enum TryDispatch {
+    /// `Option`/`Result`: bad is tag 1, and the bad VALUE (`None` / `Err(e)`)
+    /// is byte-identical at any success type — the lowering returns it as-is.
+    Std,
+    /// A user `Try` impl: call `verdict(receiver)`, branch on the `Verdict`
+    /// tag, return `from_bad(bad)` (v1: the enclosing return type equals the
+    /// receiver type, checked at resolution).
+    Trait {
+        verdict_id: Id,
+        from_bad_id: Id,
+        impl_subject: TypeId,
+        receiver_type_id: TypeId,
+    },
+}
+
 /// The half-open entity-id range `[start, end)` produced while walking one
 /// source file. Since entity ids are minted monotonically and each file is
 /// walked by a single top-level pass, these ranges map an entity back to the
@@ -10044,6 +10329,9 @@ pub struct Program<'src> {
     pub binary_op_dispatch: HashMap<Id, Id>,
     pub own_generic_call_bindings: HashMap<Id, Vec<TypeId>>,
     pub bound_dispatch_traits: HashMap<Id, Id>,
+    /// Per `expr!` site: how the transformer lowers it (std fast path or a
+    /// user `Try` impl's members) — proposal/try-and-lift.md §4.
+    pub try_dispatch: HashMap<Id, TryDispatch>,
     pub bitwise_u32: HashSet<Id>,
     pub bitwise_generic_lhs: HashMap<Id, TypeId>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
@@ -12041,6 +12329,27 @@ pub fn analyze<'src>(
             .get(io_scope_id)
             .and_then(|scope| scope.name_to_id_map.get("panic").copied());
     }
+    // Remember the std `Option`/`Result` enums and the `Try` trait: `expr!`
+    // dispatches the std pair by identity and user types through `Try`
+    // (proposal/try-and-lift.md).
+    analyzer.option_enum_id = module_scopes.get("option").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("Option").copied())
+    });
+    analyzer.result_enum_id = module_scopes.get("result").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("Result").copied())
+    });
+    analyzer.try_trait_id = module_scopes.get("operators").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("Try").copied())
+    });
 
     // Bind source-defined primitive structs into the literal registry (so number
     // and string literals infer the right type) and the global scope (so bare
@@ -12557,6 +12866,7 @@ pub fn analyze<'src>(
         binary_op_dispatch: analyzer.binary_op_dispatch,
         own_generic_call_bindings: analyzer.own_generic_call_bindings,
         bound_dispatch_traits: analyzer.bound_dispatch_traits,
+        try_dispatch: analyzer.try_dispatch,
         bitwise_u32: analyzer.bitwise_u32,
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,

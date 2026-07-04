@@ -1,9 +1,20 @@
 # `!` and `?` — early return and lifted chains (backlog B11)
 
-Status: **proposal, design fully agreed** (2026-07-04, not implemented). The two-operator
-design, the four refinements in §0, and the §8 resolutions (opt-in `Lift`; the
-`Try`/`Lift`/`Verdict` names; `Try` as a real trait from day one) are all settled. Ships
-in two slices: `!` first (the ergonomics workhorse), `?.` second.
+Status: **slice 1 (`!`) shipped 2026-07-04**; slice 2 (`?.`) designed below, not built.
+The two-operator design, the four refinements in §0, and the §8 resolutions (opt-in
+`Lift`; the `Try`/`Lift`/`Verdict` names; `Try` as a real trait from day one) are all
+settled. Slice 1 landed as specified: postfix `!` in the member chain; `Verdict`/`Try`
++ the `Option<T> → Try<T, void>` / `Result<T, E> → Try<T, E>` impls as real std source
+(`operators.vl`/`option.vl`/`result.vl`); `Constraint::TryAssert` types the good half,
+checks the enclosing function (std pair by identity — Option-in-Option any element,
+Result-in-Result same error; user `Try` types exact-match), and records the dispatch;
+the transformer lowers std receivers to the inline tag branch (bad `Option`/`Result`
+values return AS-IS — byte-identical at any success type) and user types through their
+impl's emitted `verdict`/`from_bad`. Ten pins + a corpus test (`try-assert.vl`) cover
+§7's `!` rows; the `assert_fails_spanning` harness pins every error at the `expr!` span.
+One solver lesson en route: a new expression kind MUST have an `infer_type` arm
+reporting `Unresolved` pre-resolution — without it, a `let` grounding on `expr!`
+committed to void before the constraint ran.
 
 ## 0. The split, and the settled decisions
 
@@ -19,10 +30,12 @@ container*. Vilan splits them:
 
 Settled up front (from review):
 
-1. **`!=` always lexes as not-equals.** Postfix `!` followed by `=` requires the space:
-   `a! = b` assigns an unwrapped value; `a!=b` is a comparison. `a! == b` needs its space
-   too (`a!==y` is a lex error — `!=` then `=`). The formatter always emits the space; the
-   parser's error for the `!==`-soup case should hint at it.
+1. **`!=` always lexes as not-equals.** Postfix `!` followed by an `=`-starting operator
+   requires the space: `a! == b` compares an unwrapped value; `a!==b` is a lex error
+   (`!=` then `=`). The formatter always emits the space; the parser's error for the
+   soup case should hint at it. (`expr!` is a *value*, not a place — an assignment
+   target `a! = b` is rejected in v1; place-ness of unwrapped results is a view-model
+   question deferred with the rest.)
 2. **`?` flattens.** When the chain's continuation produces the receiver's own container
    type, the result is one level, not nested (`a?.get(1)` on `a: Option<List<T>>` is
    `Option<T>`, not `Option<Option<T>>`). Semantically `map` + `flatten`, i.e. `and_then`.
@@ -88,11 +101,11 @@ trait Try<T, B> {
 	fun from_bad(bad: B): Self;
 }
 
-// Option's residual is the absence itself — `void`, the canonical nothing.
-// `void` instantiates generics like any type (probed: `Result<void, str>` /
-// `Option<void>` construct, match, and run); the only wrinkle is that vilan
-// has no void LITERAL, so producing the residual uses a void expression (an
-// empty block / a void call — settle the spelling with slice 1's probes).
+// Option's residual is the absence itself — `void`, which in vilan IS the
+// unit type (an empty tuple; a prettier alias for `()`). It instantiates
+// generics like any type (probed: `Result<void, str>` / `Option<void>`
+// construct, match, and run); the unit expression is the empty block `{}`
+// (probed — `()` is not an expression today).
 impl Option<type T> with Try<T, void> {
 	fun verdict(self): Verdict<T, void> {
 		match self {

@@ -229,6 +229,10 @@ pub enum Node<'src> {
     Func(Func<'src>),
     // `ret <expr>` / bare `ret` (an early return of void).
     FuncReturn(Option<Box<Spanned<Self>>>),
+    // `expr!` — assert-or-return (proposal/try-and-lift.md): the good half of a
+    // `Try` value, or an early return of the bad half from the nearest
+    // enclosing function.
+    TryAssert(Box<Spanned<Self>>),
     If(NodeIfBranch<'src>),
     // `subject is pattern` — a pattern test that yields a `bool` and binds the
     // pattern's captures into the surrounding scope.

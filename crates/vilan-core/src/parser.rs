@@ -1486,10 +1486,12 @@ where
         )
         .boxed();
 
-    // A postfix suffix: `.member` or `[index]`, folded left onto the subject.
+    // A postfix suffix: `.member`, `[index]`, or `!` (assert-or-return),
+    // folded left onto the subject.
     enum Postfix<'src> {
         Member(Spanned<Node<'src>>),
         Index(Spanned<Node<'src>>),
+        TryAssert,
     }
     let member_accessor = call
         .clone()
@@ -1511,6 +1513,9 @@ where
                     .clone()
                     .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
                     .map(Postfix::Index),
+                // `expr!` — assert-or-return. `!=` lexes as one token, so this
+                // arm never consumes the `!` of a comparison.
+                just(Token::Op("!")).map(|_| Postfix::TryAssert),
             ))
             .repeated(),
             |subject, postfix, e| match postfix {
@@ -1521,6 +1526,7 @@ where
                 Postfix::Index(index) => {
                     (Node::Index(Box::new(subject), Box::new(index)), e.span())
                 }
+                Postfix::TryAssert => (Node::TryAssert(Box::new(subject)), e.span()),
             },
         )
         .boxed();
