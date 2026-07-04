@@ -21,7 +21,7 @@ import pkg::promise::Promise;
 import pkg::shared::Shared;
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
-import pkg::json::{ FromJson, JsonValue };
+import pkg::json::JsonValue;
 import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
 import pkg::wire::{ Wire, Serializer, Deserializer, Codec, Frame };
 import pkg::bytes::{ Bytes, ByteBuffer, bytes_of_buffer, new_text_decoder };
@@ -143,7 +143,7 @@ fun bridge<Tx: DuplexTransport>(wire: Tx): DuplexEnd {
 struct SplitDuplex {
 	// The connection id the server announced — apps use it to correlate this
 	// duplex connection with RPC calls (e.g. an `attach(connection)` method).
-	connection: str,
+	connection: i32,
 	send_url: str,
 	inbound: Shared<Option<|Frame| void>>,
 	// Frames that arrived before `on_frame` was set (e.g. pushed by the server
@@ -248,10 +248,22 @@ fun connect_split(base_url: str): SplitDuplex {
 		}
 	};
 	SplitDuplex {
-		connection = connection.read(),
+		connection = parse_announced(connection.read()),
 		send_url = i"{base_url}/send?c={connection.read()}",
 		inbound,
 		early,
+	}
+}
+
+// The `__conn:<id>` announcement's id, parsed once at connect time. A
+// non-numeric announcement is a broken server — refuse loudly.
+fun parse_announced(text: str): i32 {
+	match text.parse_i32() {
+		Some(let id) => id,
+		None => {
+			panic("malformed connection announcement: " + text);
+			0 - 1 // unreachable — the panic throws
+		},
 	}
 }
 
@@ -342,7 +354,7 @@ struct SocketDuplex {
 	socket: WebSocket,
 	// The connection id the server announced — correlates this duplex with
 	// RPC calls (e.g. an `attach(connection)` method), like `SplitDuplex`.
-	connection: str,
+	connection: i32,
 	inbound: Shared<Option<|Frame| void>>,
 	// Frames that arrived before `on_frame` was set — queued, then flushed.
 	early: Shared<List<Frame>>,
@@ -427,9 +439,11 @@ fun route_socket_frame(
 		let rest = frame.substring(2, frame.len());
 		let parts = rest.split(":");
 		let id_text = parts[0];
-		let request = i32::from_json(id_text);
 		let reply = rest.substring(id_text.len() + 1, rest.len());
-		pending_settle(request, Frame::Text(reply));
+		match id_text.parse_i32() {
+			Some(let request) => pending_settle(request, Frame::Text(reply)),
+			None => {},
+		}
 	} else if frame.starts_with("d:") {
 		dispatch(Frame::Text(frame.substring(2, frame.len())));
 	}
@@ -469,7 +483,7 @@ fun connect_socket(url: str): SocketDuplex {
 	let connection: Shared<str> = Shared::new("");
 	let duplex = SocketDuplex {
 		socket,
-		connection = "",
+		connection = 0 - 1, // placeholder until the announcement lands
 		inbound,
 		early,
 		pending,
@@ -499,7 +513,7 @@ fun connect_socket(url: str): SocketDuplex {
 	});
 	SocketDuplex {
 		socket,
-		connection = connection.read(),
+		connection = parse_announced(connection.read()),
 		inbound,
 		early,
 		pending,
@@ -529,7 +543,7 @@ enum RpcOutcome {
 
 // An infrastructure-level failure — distinct from an application error, which is part of
 // a procedure's own return type (e.g. `Option<User>` for "might not exist").
-[derive(Wire)]
+[derive(Wire, Debug)]
 enum RpcError {
 	Transport(str),
 	Decode(str),

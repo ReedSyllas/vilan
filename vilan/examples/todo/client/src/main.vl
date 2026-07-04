@@ -6,7 +6,7 @@
 
 import std::print;
 import std::reactive::Signal;
-import std::json::{ Json, FromJson, json_codec };
+import std::json::json_codec;
 import std::result::Result::{ Ok, Err };
 import std::ui::mount;
 import common::{ Todo, TodoClient };
@@ -26,6 +26,6 @@ async fun main() {
 				items.set(synced);
 			});
 		},
-		Err(let error) => print(i"connect failed: {error.to_json()}"),
+		Err(let error) => print(i"connect failed: {error.debug()}"),
 	}
 }

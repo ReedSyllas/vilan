@@ -167,7 +167,9 @@ fun serve_connected(
 			on_connect(id, app_end);
 		} else if path.starts_with("/send") {
 			let content = read_request_body(node_request);
-			let target = i32::from_json(connection_id_of(path));
+			// A garbled id parses to -1, which matches no connection — the
+			// frame is dropped, same as an unknown id.
+			let target = connection_id_of(path).parse_i32().unwrap_or(0 - 1);
 			for entry in connections.read() {
 				let (id, wire) = entry;
 				if id == target {
@@ -274,7 +276,8 @@ fun accept_socket(
 								socket.write_bytes(text_frame(i"r:{id_text}:{answer}"));
 							},
 							Frame::Binary(let bytes) => {
-								socket.write_bytes(binary_frame(tag_rpc_bytes(i32::from_json(id_text), bytes)));
+								let id = id_text.parse_i32().unwrap_or(0 - 1);
+								socket.write_bytes(binary_frame(tag_rpc_bytes(id, bytes)));
 							},
 						}
 					} else if frame.starts_with("d:") {

@@ -78,9 +78,18 @@ impl bool with Json {
 // to vilan scalars.
 external struct JsonValue;
 
-// `JSON.parse(text)` — parse a document into a `JsonValue`.
+// `JSON.parse(text)` — parse a document into a `JsonValue`. TRUSTING: malformed
+// text is a host exception. The validating decode paths (`decode_json`, the
+// codec's reader) go through `try_parse_json` instead.
 [extern("JSON.parse")]
 external fun parse_json_value(text: str): JsonValue;
+
+// `JSON.parse`, guarded (an intrinsic): `None` for malformed text instead of a
+// host exception — a wire frame is attacker-supplied input, so the codec must
+// refuse it as a decode error, never a crash.
+impl str {
+	external fun try_parse_json(self): Option<JsonValue>;
+}
 
 impl JsonValue {
 	// `self[name]` — the value at a named object field (an intrinsic: there is no
@@ -545,11 +554,26 @@ fun encode_json<T: Wire>(value: T): str {
 // (Malformed JSON *syntax* still throws at `parse_json_value` — the guarded
 // parse is Q10/`?` territory.)
 fun decode_json<T: Wire>(text: str): Result<T, str> {
-	let reader = JsonReader::new(parse_json_value(text));
+	let reader = opened_reader(text);
 	let value: T = T::rebuild(reader);
 	match reader.error.read() {
 		None => Ok(value),
 		Some(let reason) => Err(reason),
+	}
+}
+
+// A reader over `text` — pre-poisoned when the text is not JSON at all: the
+// codec contract is a sticky decode error, NEVER a crash (a wire frame is
+// untrusted input; a throwing parse here would let one malformed request kill
+// a server).
+fun opened_reader(text: str): JsonReader {
+	match text.try_parse_json() {
+		Some(let root) => JsonReader::new(root),
+		None => {
+			let reader = JsonReader::new(parse_json_value("null"));
+			reader.report("malformed JSON");
+			reader
+		},
 	}
 }
 
@@ -565,8 +589,8 @@ fun json_codec(): Codec {
 			// Liberal in what it accepts: a binary frame is read as UTF-8 JSON
 			// (server mounts read request bodies as bytes without sniffing).
 			match frame {
-				Frame::Text(let text) => JsonReader::new(parse_json_value(text)).deserializer(),
-				Frame::Binary(let bytes) => JsonReader::new(parse_json_value(decode_utf8(bytes))).deserializer(),
+				Frame::Text(let text) => opened_reader(text).deserializer(),
+				Frame::Binary(let bytes) => opened_reader(decode_utf8(bytes)).deserializer(),
 			}
 		},
 	}

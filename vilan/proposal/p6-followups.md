@@ -109,27 +109,43 @@ parse), every client-side mirror decode gone (todo client, rpc example,
 realtime benchmark). What remains in the table is exactly the "small fix" and
 "cosmetic" rows below.
 
-## Final fixes — the leftover-JSON audit (2026-07-02)
+## Final fixes — the leftover-JSON audit — ✅ ALL LANDED (2026-07-03)
 
 Audited every `to_json`/`from_json` use in std and the example/benchmark
 packages (enforced by `crates/vilan-core/tests/json_boundary.rs` — per-file
-counts; a change there must be deliberate and re-sanctioned). Findings:
+counts; a change there must be deliberate and re-sanctioned). End state: the
+table holds exactly TWO lines — the WS handshake's header read (`JsonValue`
+as the documented dynamic-object accessor) and the throughput benchmark's
+deliberate `to_json` (it *measures* the derive path). How each row closed:
 
-- **Sanctioned, by design**: `std::json` itself; the WS handshake's header
-  read (`JsonValue` as the documented dynamic-object accessor). ~~The reactive
-  protocol's JSON mirrors/envelopes~~ — retired by #5 (typed mirrors, codec
-  envelopes); ~~every client-side mirror decode~~ — gone with them.
-- **Small fix — number parsing masquerading as decoding**: connection ids are
-  parsed with `i32::from_json("3")` in the multiplex framing (todo client's
-  connect is generated now; remaining: realtime benchmark, `rpc_server`'s
-  `/send` route + text-RPC-turn id, the socket multiplex id in `rpc.vl`). Add
-  a proper `str -> i32` parse to `std::number` and migrate; `from_json` works
-  but says the wrong thing.
-- **Cosmetic**: `error.to_json()` as the human rendering of `RpcError` in
-  prints — consider `[derive(Debug)]` on `RpcError` and printing `debug()`.
-- **Optional showcase**: the todo server persists with `list.to_json()` /
-  `List::from_json` directly; routing it through `encode(json_codec(), …)`
-  would demonstrate persistence riding the same codec seam as the wire.
+- **Id parses → `str.parse_i32`**: `str.parse_i32()` already existed as an
+  intrinsic but was parseInt-LIBERAL (`"1.5"` → `Some(1)`, `"12x"` →
+  `Some(12)`) and completely unpinned — both parse helpers are now STRICT
+  (whole trimmed text, i32 range-checked; corpus `parse-i32.vl` pins 12
+  cases) and the root fix landed: **`.connection` is an `i32`**, parsed once
+  at the handshake (`parse_announced` — a malformed announcement panics as a
+  broken-server error), so the generated `connect`, the benchmark, and every
+  test site just pass it through. `route_socket_frame` drops frames with
+  unparseable ids; `rpc_server`'s two ids default to `-1` (matches nothing).
+- **Error prints → `[derive(Wire, Debug)]`** on `RpcError` — prints render
+  `Remote("unknown method: …")` via `.debug()`; the enum Debug derive
+  handles payload variants (probed).
+- **Persistence → the codec**: the todo server writes/reads `todos.json`
+  through `encode`/`decode(json_codec(), …)` — and the decode being
+  *validating* surfaced the real bug below.
+
+**Severity find en route**: the JSON codec's reader called `JSON.parse`
+unguarded — `decode(json_codec(), Frame::Text("garbage"))` THREW instead of
+`Err`, which meant **one malformed `/rpc` body killed the whole server
+process** (contradicting wire.vl's documented pre-poisoned-reader contract).
+Fixed at the root with a guarded `str.try_parse_json(): Option<JsonValue>`
+intrinsic; `decode_json` + the codec reader pre-poison on `None`
+(`"malformed JSON"`, sticky). Pinned at both seams
+(`malformed_json_frames_fail_sticky_instead_of_crashing`: decode → `Err`,
+protocol → `Failure(Decode)`) and verified live (corrupt `todos.json` boots
+empty; a garbage POST gets a Failure envelope and the server keeps serving).
+Per-type `from_json` stays trusting — backlog I3 (validating `from_json`)
+is unchanged.
 
 ## Further out (own proposals)
 

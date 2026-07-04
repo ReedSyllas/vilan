@@ -1,0 +1,17 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+fun main() {
+	print("42".parse_i32().unwrap_or(0 - 1)); // 42
+	print("-7".parse_i32().unwrap_or(0)); // -7
+	print("+9".parse_i32().unwrap_or(0)); // 9
+	print(" 42 ".parse_i32().unwrap_or(0 - 1)); // 42 (whitespace-tolerant)
+	print("".parse_i32().is_some()); // false
+	print("abc".parse_i32().is_some()); // false
+	print("1.5".parse_i32().is_some()); // false — strict: no truncation
+	print("12x".parse_i32().is_some()); // false — strict: no trailing garbage
+	print("2147483647".parse_i32().unwrap_or(0)); // 2147483647
+	print("2147483648".parse_i32().is_some()); // false — out of i32 range
+	print("-2147483648".parse_i32().unwrap_or(0)); // -2147483648
+	print("-2147483649".parse_i32().is_some()); // false
+}

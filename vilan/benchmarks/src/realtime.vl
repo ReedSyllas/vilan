@@ -77,7 +77,7 @@ fun watch(base: str): Session {
 	let reactive = ReactiveClient::new(bridge(counting), json_codec());
 	let last_seen: Shared<i32> = Shared::new(0 - 1);
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
-	match client.attach(i32::from_json(split.connection)) {
+	match client.attach(split.connection) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let _watching = mirror.sub(|n| {

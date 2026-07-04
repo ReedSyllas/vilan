@@ -5,12 +5,16 @@
 // to every subscribed tab.
 //
 // Persistence is just another subscription: the same `Signal` the wire fans out
-// from also writes `todos.json` — one code path for every observer of the list.
+// from also writes `todos.json` — one code path for every observer of the list —
+// and it rides the same codec seam as the wire (`encode`/`decode` over
+// `json_codec()`): the file is one JSON frame at rest.
 
 import std::print;
 import std::reactive::Signal;
 import std::shared::Shared;
-import std::json::{ Json, FromJson, json_codec };
+import std::json::json_codec;
+import std::wire::{ encode, decode, Frame };
+import std::result::Result::{ self, Ok, Err };
 import std::fs::{ exists, read_file_to_str, write_file };
 import std::http::Response;
 import std::rpc_server::serve_service;
@@ -35,7 +39,10 @@ async fun main() {
 	// fire-and-forget; rapid changes could land out of order — fine for a demo,
 	// a real app would serialize its writes.)
 	let saving = store.todos.sub(|list| {
-		write_file(storage, list.to_json());
+		match encode(json_codec(), list) {
+			Frame::Text(let text) => write_file(storage, text),
+			Frame::Binary(let _bytes) => {},
+		}
 	});
 
 	serve_service(
@@ -57,10 +64,15 @@ async fun main() {
 	);
 }
 
-// The stored list, or empty on a first run.
+// The stored list — empty on a first run, and empty (not a crash) if the file
+// is corrupt: the codec's decode is validating.
 fun load(): List<Todo> {
 	if exists(storage) {
-		List::from_json(read_file_to_str(storage))
+		let stored: Result<List<Todo>, str> = decode(json_codec(), Frame::Text(read_file_to_str(storage)));
+		match stored {
+			Ok(let list) => list,
+			Err(let _reason) => [],
+		}
 	} else {
 		[]
 	}

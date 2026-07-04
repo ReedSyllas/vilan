@@ -3756,3 +3756,46 @@ fn bare_ret_in_a_value_returning_function_is_rejected() {
         "#,
     );
 }
+
+// --- Malformed frames are decode errors, never crashes -------------------------
+
+// The JSON codec's reader must arrive PRE-POISONED on text that is not JSON at
+// all (wire frames are untrusted input): `decode` returns `Err`, and an RPC
+// protocol answers a garbage request with `Failure(Decode)` — it used to throw
+// out of `JSON.parse`, letting one malformed request kill a server process.
+#[test]
+fn malformed_json_frames_fail_sticky_instead_of_crashing() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ json_codec, decode_json };
+        import std::wire::{ decode, Frame };
+        import std::rpc::{ Dispatcher, reply, RpcOutcome, RpcError };
+
+        fun main() {
+        	// The decode seam: garbage text and a garbage binary frame both Err.
+        	let direct: Result<i32, str> = decode_json("garbage{{{");
+        	match direct {
+        		Ok(let value) => print("direct: unexpected Ok"),
+        		Err(let reason) => print(i"direct: {reason}"),
+        	}
+        	let framed: Result<i32, str> = decode(json_codec(), Frame::Text("also not json"));
+        	match framed {
+        		Ok(let value) => print("framed: unexpected Ok"),
+        		Err(let reason) => print(i"framed: {reason}"),
+        	}
+        	// The RPC seam: a protocol ANSWERS a garbage request (Failure
+        	// envelope), it does not throw.
+        	let protocol = Dispatcher::new().on("ping", |request| reply(1)).into_protocol(json_codec());
+        	let answer = protocol.respond(Frame::Text("garbage{{{"));
+        	match answer {
+        		Frame::Text(let envelope) => print(i"rpc answers: {envelope}"),
+        		Frame::Binary(let bytes) => print("rpc: unexpected binary"),
+        	}
+        }
+        "#,
+        "direct: malformed JSON\nframed: malformed JSON\nrpc answers: {\"Failure\":{\"Decode\":\"malformed JSON\"}}\n",
+    );
+}

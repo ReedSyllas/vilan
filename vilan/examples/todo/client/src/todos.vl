@@ -11,7 +11,6 @@ import std::print;
 import std::ui::{ view, View };
 import std::reactive::{ Signal, combine };
 import std::display::format;
-import std::json::Json;
 import std::result::Result::{ self, Ok, Err };
 import std::rpc::{ SocketTransport, RpcError };
 import common::{ Todo, TodoClient };
@@ -107,6 +106,6 @@ fun checkbox(client: TodoClient<SocketTransport>, todo: Todo): View {
 fun report<T>(outcome: Result<T, RpcError>) {
 	match outcome {
 		Ok(let value) => {},
-		Err(let error) => print(i"rpc error: {error.to_json()}"),
+		Err(let error) => print(i"rpc error: {error.debug()}"),
 	}
 }

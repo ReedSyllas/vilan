@@ -13,7 +13,7 @@ vilan run vilan/examples/rpc
 ```
 ok: found ada (@ada)
 ok: no such user
-raw error: {"Remote":"unknown method: delete_everything"}
+raw error: Remote("unknown method: delete_everything")
 --- reactive: a remote Source<i32> ---
 count = 0
 count = 1

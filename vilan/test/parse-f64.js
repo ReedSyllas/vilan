@@ -1,6 +1,7 @@
 function __parse_f64(text) {
-	const value = Number.parseFloat(text);
-	return Number.isNaN(value) ? [ 1 ] : [ 0, value ];
+	const trimmed = text.trim();
+	const value = Number(trimmed);
+	return trimmed === "" || Number.isNaN(value) ? [ 1 ] : [ 0, value ];
 }
 function $a(self, fallback) {
 	const $b = self;

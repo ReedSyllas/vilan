@@ -223,8 +223,14 @@ impl bool {
 // result is an `Option`, which the core `str` module must not depend on. An
 // `impl` block does not need to share a module with the type it extends.
 impl str {
+	// STRICT: the whole (whitespace-trimmed) text must be a decimal integer in
+	// i32 range — `"1.5"`, `"12x"`, `""`, and out-of-range values are `None`,
+	// never a truncation.
 	external fun parse_i32(self): Option<i32>;
 
+	// STRICT on shape (`"3.14x"` is `None`, unlike a liberal parseFloat), but
+	// any full numeric text the host accepts — including `"1e3"` and
+	// `"Infinity"` — parses.
 	external fun parse_f64(self): Option<f64>;
 }
 

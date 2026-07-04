@@ -9711,6 +9711,9 @@ pub enum Intrinsic {
     ParseI32,
     // `str.parse_f64(): Option<f64>` -> a runtime helper returning the enum form.
     ParseF64,
+    // `str.try_parse_json(): Option<JsonValue>` -> a guarded `JSON.parse` helper
+    // (`None` on malformed text — what the validating decode path rides).
+    TryParseJson,
     // `random::range_i32`/`range_u32` -> an integer range helper over `Math.random`.
     RandomInt,
     // `random::range_f64` -> a float range helper over `Math.random`.
@@ -10521,7 +10524,7 @@ fn service_impl_source(
          \t\t\t\tret Result::Err(error);\n\
          \t\t\t}},\n\
          \t\t}}\n\
-         \t\tlet connection = i32::from_json(socket.connection);\n\
+         \t\tlet connection = socket.connection;\n\
          \t\tlet attached: Result<List<i32>, RpcError> = call(transport, codec, \"__attach\", [|serializer: Serializer| connection.describe(serializer)]);\n\
          \t\tmatch attached {{\n\
          \t\t\tResult::Ok(let channels) => {{\n\
@@ -10870,12 +10873,6 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
         prelude.push_str("import std::wire::{ Codec, Serializer };\n");
         prelude.push_str("import std::result::Result;\n");
         prelude.push_str("import std::option::Option;\n");
-        // `connect` parses the socket's connection id with `i32::from_json`;
-        // the Json/Wire prelude line already imports FromJson when a derive is
-        // present — only add it otherwise (a duplicate import would collide).
-        if !traits.contains("Json") && !traits.contains("Wire") {
-            prelude.push_str("import std::json::FromJson;\n");
-        }
     }
     let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
     let tokens = crate::lexer::lexer().parse(source).into_output()?;
@@ -12079,6 +12076,7 @@ pub fn analyze<'src>(
                     ("substring", Intrinsic::StrSubstring),
                     ("parse_i32", Intrinsic::ParseI32),
                     ("parse_f64", Intrinsic::ParseF64),
+                    ("try_parse_json", Intrinsic::TryParseJson),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

@@ -65,16 +65,30 @@ fn helper_source(name: &str) -> &'static str {
              \treturn __vilan_stdin_index < __vilan_stdin.length ? __vilan_stdin[__vilan_stdin_index++] : \"\";\n\
              }"
         }
+        // STRICT parses: the whole (trimmed) text must be the number — trailing
+        // garbage, a fractional part on an integer, or an out-of-range value is
+        // `None`, not a truncation (`parseInt`'s liberality said the wrong thing).
         "__parse_i32" => {
             "function __parse_i32(text) {\n\
-             \tconst value = Number.parseInt(text, 10);\n\
-             \treturn Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
+             \tconst trimmed = text.trim();\n\
+             \tconst value = Number(trimmed);\n\
+             \treturn /^[+-]?[0-9]+$/.test(trimmed) && value >= -2147483648 && value <= 2147483647 ? [ 0, value ] : [ 1 ];\n\
              }"
         }
         "__parse_f64" => {
             "function __parse_f64(text) {\n\
-             \tconst value = Number.parseFloat(text);\n\
-             \treturn Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
+             \tconst trimmed = text.trim();\n\
+             \tconst value = Number(trimmed);\n\
+             \treturn trimmed === \"\" || Number.isNaN(value) ? [ 1 ] : [ 0, value ];\n\
+             }"
+        }
+        "__try_parse_json" => {
+            "function __try_parse_json(text) {\n\
+             \ttry {\n\
+             \t\treturn [ 0, JSON.parse(text) ];\n\
+             \t} catch (error) {\n\
+             \t\treturn [ 1 ];\n\
+             \t}\n\
              }"
         }
         "__random_int" => {
@@ -1923,6 +1937,13 @@ impl<'src> Transformer<'src> {
                 self.used_helpers.insert("__parse_i32");
                 js::Node::Call(
                     Box::new(js::Node::Local("__parse_i32".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
+                )
+            }
+            Intrinsic::TryParseJson => {
+                self.used_helpers.insert("__try_parse_json");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__try_parse_json".to_string())),
                     vec![args.next().unwrap_or(js::Node::Void)],
                 )
             }

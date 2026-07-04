@@ -14,7 +14,6 @@
 //     vilan run vilan/examples/rpc
 
 import std::print;
-import std::json::{ Json, FromJson };
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
 import std::shared::Shared;
@@ -294,7 +293,7 @@ fun reactive_demo() {
 	let added: Result<i32, RpcError> = call(rpc_transport, json_codec(), "add", [|s: Serializer| amount.describe(s)]);
 	match added {
 		Ok(let n) => print(i"rpc add -> {n}"),
-		Err(let error) => print(i"rpc error: {error.to_json()}"),
+		Err(let error) => print(i"rpc error: {error.debug()}"),
 	}
 
 	subscription.dispose();   // stop observing; the server's forward is a no-op with no client
@@ -340,7 +339,7 @@ fun session_demo() {
 fun show_login(result: Result<bool, RpcError>) {
 	match result {
 		Ok(let ok) => print(i"login -> {ok}"),
-		Err(let error) => print(i"login rpc error: {error.to_json()}"),
+		Err(let error) => print(i"login rpc error: {error.debug()}"),
 	}
 }
 
@@ -348,7 +347,7 @@ fun show_whoami(result: Result<Option<WireUser>, RpcError>) {
 	match result {
 		Ok(Some(let user)) => print(i"whoami -> {user.username} ({user.handle})"),
 		Ok(None) => print("whoami -> not logged in"),
-		Err(let error) => print(i"whoami rpc error: {error.to_json()}"),
+		Err(let error) => print(i"whoami rpc error: {error.debug()}"),
 	}
 }
 
@@ -356,7 +355,7 @@ fun show(result: Result<Option<WireUser>, RpcError>) {
 	match result {
 		Ok(Some(let user)) => print(i"ok: found {user.username} ({user.handle})"),
 		Ok(None) => print("ok: no such user"),
-		Err(let error) => print(i"rpc error: {error.to_json()}"),
+		Err(let error) => print(i"rpc error: {error.debug()}"),
 	}
 }
 
@@ -366,6 +365,6 @@ fun show_raw(transport: LocalTransport) {
 	let bogus: Result<i32, RpcError> = call(transport, json_codec(), "delete_everything", []);
 	match bogus {
 		Ok(let value) => print(i"raw ok: {value}"),
-		Err(let error) => print(i"raw error: {error.to_json()}"),
+		Err(let error) => print(i"raw error: {error.debug()}"),
 	}
 }

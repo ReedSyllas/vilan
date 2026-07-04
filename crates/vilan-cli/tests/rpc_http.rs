@@ -291,7 +291,7 @@ fun watch(name: str, base: str): Client<HttpTransport> {
 	let split = connect_split(base);
 	let reactive = ReactiveClient::new(bridge(split), json_codec());
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
-	match client.attach(i32::from_json(split.connection)) {
+	match client.attach(split.connection) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let _ = mirror.sub(|n| {
@@ -435,7 +435,7 @@ fun main() {{
 	let split = connect_split(base);
 	let reactive = ReactiveClient::new(bridge(split), json_codec());
 	let transport = HttpTransport {{ url = i"{{base}}/rpc" }};
-	let connection = i32::from_json(split.connection);
+	let connection = split.connection;
 	let attached: Result<i32, RpcError> = call(transport, json_codec(), "attach", [|s: Serializer| connection.describe(s)]);
 	match attached {{
 		Ok(let channel) => {{
@@ -587,7 +587,7 @@ fun watch(name: str, base: str): Client<HttpTransport> {
 	let socket = connect_socket("ws://localhost:9291");
 	let reactive = ReactiveClient::new(bridge(socket), json_codec());
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
-	match client.attach(i32::from_json(socket.connection)) {
+	match client.attach(socket.connection) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let watching = mirror.sub(|n| {
@@ -708,7 +708,7 @@ fun watch(name: str): Client<SocketTransport> {
 	let socket = connect_socket("ws://localhost:9293");
 	let client = Client { transport = socket.transport(), codec = json_codec() };
 	let reactive = ReactiveClient::new(bridge(socket), json_codec());
-	match client.attach(i32::from_json(socket.connection)) {
+	match client.attach(socket.connection) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let watching = mirror.sub(|n| {
@@ -843,7 +843,7 @@ fun watch(name: str): Client<SocketTransport> {
 	let socket = connect_socket("ws://localhost:9294");
 	let client = Client { transport = socket.transport(), codec = binary_codec() };
 	let reactive = ReactiveClient::new(bridge(socket), binary_codec());
-	match client.attach(i32::from_json(socket.connection)) {
+	match client.attach(socket.connection) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let watching = mirror.sub(|n| {
