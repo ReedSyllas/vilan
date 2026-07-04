@@ -70,9 +70,15 @@ have gaps.
     x }` passes where `|i32| i32` is expected; `|x| { ret 5; }` types as a void closure).
     Pinned `#[ignore]`d (`ret_participates_in_closure_return_inference`).
 
-11. **`?`/try** (M–L; transport-rpc Q10) — terse error propagation. Unblocks `arg → Result`
-    handler ergonomics and guarded parsing (I3); wants its own proposal (interaction with `Result`
-    combinators, `async`, and the reply envelope).
+11. **`!` and `?.` — early return + lifted chains** (M–L; transport-rpc Q10; **proposal
+    written: `try-and-lift.md`**, design agreed 2026-07-04) — `expr!` asserts-or-returns
+    (Rust-`?` semantics, programmable "bad" via a `Try` seam; `!=` always lexes as
+    not-equals, space disambiguates), `a?.b.c` lifts member chains with flattening
+    (map-or-`and_then` by continuation type, opt-in `Lift` marker; Option/Result v1,
+    Signal/Promise recorded candidates). Both are operators (the `Add` dispatch model,
+    inline fast path for std), not source rewrites. Deferred: expression lifting
+    (`a? + 10`), applicatives, error conversion, closure `!` (the RPC-handler follow-up).
+    Ships `!` first.
 
 ---
 
