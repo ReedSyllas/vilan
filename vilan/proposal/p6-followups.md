@@ -74,6 +74,30 @@ transport gracefully), client-side WS binary events (`binaryType`, typed
 `data` access), and the reactive mirrors becoming frame-typed. Touches the
 same duplex framing #1 touches — bundle to reshape that seam once.
 
+## Final fixes — the leftover-JSON audit (2026-07-02)
+
+Audited every `to_json`/`from_json` use in std and the example/benchmark
+packages (enforced by `crates/vilan-core/tests/json_boundary.rs` — per-file
+counts; a change there must be deliberate and re-sanctioned). Findings:
+
+- **Sanctioned, by design**: `std::json` itself; the reactive protocol
+  (`expose`'s JSON mirrors, `ReactiveFrame` envelopes, `RemoteSource`'s JSON
+  strings — the recorded #5 item retires these); the WS handshake's header
+  read (`JsonValue` as the documented dynamic-object accessor).
+- **Downstream of #5**: every client-side mirror decode
+  (`List::from_json(json)` in the todo client, `i32::from_json(json)` in the
+  rpc example/benchmarks) — absorbed when the reactive protocol goes typed.
+- **Small fix — number parsing masquerading as decoding**: connection ids are
+  parsed with `i32::from_json("3")` in four places (todo client, realtime
+  benchmark, `rpc_server`'s `/send` route, the socket multiplex id). Add a
+  proper `str -> i32` parse to `std::number` and migrate; `from_json` works
+  but says the wrong thing.
+- **Cosmetic**: `error.to_json()` as the human rendering of `RpcError` in
+  prints — consider `[derive(Debug)]` on `RpcError` and printing `debug()`.
+- **Optional showcase**: the todo server persists with `list.to_json()` /
+  `List::from_json` directly; routing it through `encode(json_codec(), …)`
+  would demonstrate persistence riding the same codec seam as the wire.
+
 ## Further out (own proposals)
 
 The macro engine (roadmap #9 — would eventually subsume the derive/service
