@@ -867,6 +867,12 @@ pub struct Analyzer<'src> {
     // own generics positionally — the analyzer binds the TRAIT method's ids,
     // which differ from each impl's, so a map can't cross that boundary.
     own_generic_call_bindings: HashMap<Id, Vec<TypeId>>,
+    // The trait a bound call resolved through (`value.tag()` where `T: Marker`
+    // found `tag` in `Marker`), keyed by call id. The OnConstraint emission
+    // dispatches on THAT trait's surface — override, else default — so an
+    // inherent method sharing the name can't shadow the trait member the
+    // analyzer typed against.
+    bound_dispatch_traits: HashMap<Id, Id>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
     // Deferred named type references: (target type id, name, scope, span, the
     // walked generic argument type ids). The arguments parameterize the resolved
@@ -1018,6 +1024,7 @@ impl<'src> Analyzer<'src> {
             prepped_static_accessors: Vec::new(),
             static_subject_bindings: HashMap::new(),
             own_generic_call_bindings: HashMap::new(),
+            bound_dispatch_traits: HashMap::new(),
             prepped_trait_impls: Vec::new(),
             prepped_type_locals: Vec::new(),
             prepped_type_static_accessors: Vec::new(),
@@ -7152,6 +7159,13 @@ impl<'src> Analyzer<'src> {
         if matches!(subject_type, Type::Unresolved) {
             return Resolution::Deferred;
         }
+        // An unannotated closure parameter as the CALL SUBJECT (`|done| { done(); }`)
+        // defers until bidirectional inference lands its type — the same rule the
+        // method-receiver and argument paths already apply (Bug C′'s family);
+        // without it the call fails as "not a function" before the type exists.
+        if matches!(subject_type, Type::Unknown) && self.is_unknown_closure_parameter(subject_id) {
+            return Resolution::Deferred;
+        }
 
         // Calling a closure-typed value, e.g. `(self.fn)()`: type-check the
         // arguments against the closure's parameter types.
@@ -7574,6 +7588,7 @@ impl<'src> Analyzer<'src> {
                 } else {
                     // Search every bound trait (`T: A + B`) for the method.
                     let mut member = None;
+                    let mut member_trait = None;
                     for (trait_id, trait_arguments) in &bound_traits {
                         let Some(found_member) =
                             self.method_member_in_trait(*trait_id, member_name)
@@ -7581,6 +7596,7 @@ impl<'src> Analyzer<'src> {
                             continue;
                         };
                         member = Some(found_member);
+                        member_trait = Some(*trait_id);
                         // A parameterized bound (`F: Feed<T>`) substitutes the trait's
                         // parameters with the bound's arguments, so a method parameter
                         // typed in the trait's terms (`each(observer: |T| ..)`) is typed
@@ -7612,6 +7628,9 @@ impl<'src> Analyzer<'src> {
                             id,
                             GenericDispatch::OnConstraint(*constraint_id, member_name),
                         );
+                        if let Some(trait_id) = member_trait {
+                            self.bound_dispatch_traits.insert(id, trait_id);
+                        }
                     }
                     found(member)
                 }
@@ -9783,6 +9802,7 @@ pub struct Program<'src> {
     pub for_each_views: HashMap<Id, bool>,
     pub binary_op_dispatch: HashMap<Id, Id>,
     pub own_generic_call_bindings: HashMap<Id, Vec<TypeId>>,
+    pub bound_dispatch_traits: HashMap<Id, Id>,
     pub bitwise_u32: HashSet<Id>,
     pub bitwise_generic_lhs: HashMap<Id, TypeId>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
@@ -12103,6 +12123,7 @@ pub fn analyze<'src>(
         for_each_views: analyzer.for_each_views,
         binary_op_dispatch: analyzer.binary_op_dispatch,
         own_generic_call_bindings: analyzer.own_generic_call_bindings,
+        bound_dispatch_traits: analyzer.bound_dispatch_traits,
         bitwise_u32: analyzer.bitwise_u32,
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,

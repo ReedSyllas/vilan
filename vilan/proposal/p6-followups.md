@@ -7,7 +7,7 @@ known silent miscompiles. This file ranks what remains, with enough context to
 re-prioritize later. Agreed order: **1 → 2 → 3**, then 4+5 bundled behind a
 benchmark-justified design pass.
 
-## 1. RPC-over-WebSocket multiplexing — IN PROGRESS
+## 1. RPC-over-WebSocket multiplexing — ✅ DONE (2026-07-02, 2d82cc7: 2.5× HTTP)
 
 Today a WS client still makes RPC calls over HTTP POST *beside* the socket
 (exactly as beside SSE). Benchmarks: ~1.2 ms per awaited localhost HTTP call,
@@ -23,7 +23,7 @@ framing. v1 is text frames (JSON codec); binary-over-WS is bundled with #5
 (same event-kind plumbing on both ends). `connect_socket`'s duplex gains a
 `transport()` view implementing `Transport` with a pending-call map.
 
-## 2. The two remaining pins with real bite
+## 2. The two remaining pins with real bite — ✅ DONE (2026-07-02)
 
 - **`bound_dispatch_prefers_the_trait_method_on_a_name_collision`** — an
   inherent method and a trait default sharing a name: a bound call picks the
@@ -35,9 +35,13 @@ framing. v1 is text frames (JSON codec); binary-over-WS is bundled with #5
   (the `sleep` and `connect_socket` promise executors). Same deferral family
   as the fixed Bug C′.
 
-The quieter two: **trait-argument binders** (`impl X with Trait<type S:
-Bound>`) are a missing *feature* with a clean error — notable as the
-alternative route to the trait-shaped visitor (#4); and the **impl-binder
+Both fixed: the resolved trait is recorded per bound call and emission
+dispatches on that trait's surface (override, else default — an inherent name
+collision can't shadow it); and a free call whose subject is an unannotated
+closure parameter now defers like the method paths always did. The pin ledger
+is down to two, neither a bug: **trait-argument binders** (`impl X with
+Trait<type S: Bound>`) are a missing *feature* with a clean error — notable as
+the alternative route to the trait-shaped visitor (#4); and the **impl-binder
 declaration-order** pin has a trivial workaround (reorder declarations).
 
 ## 3. `Client::connect` — small, closes a promised loop

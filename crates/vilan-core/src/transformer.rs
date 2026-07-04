@@ -811,9 +811,13 @@ impl<'src> Transformer<'src> {
                             .get(id)
                             .cloned()
                             .unwrap_or_default();
-                        if let Some(dispatch) =
-                            self.resolve_dispatch_with(concrete_type_id, member_name, &own_values)
-                        {
+                        let preferred = self.program.bound_dispatch_traits.get(id).copied();
+                        if let Some(dispatch) = self.resolve_dispatch_with(
+                            concrete_type_id,
+                            member_name,
+                            &own_values,
+                            preferred,
+                        ) {
                             return Some(self.emit_dispatch(dispatch, args));
                         }
                     }
@@ -834,9 +838,13 @@ impl<'src> Transformer<'src> {
                             .get(id)
                             .cloned()
                             .unwrap_or_default();
-                        if let Some(dispatch) =
-                            self.resolve_dispatch_with(concrete_type_id, member_name, &own_values)
-                        {
+                        let preferred = self.program.bound_dispatch_traits.get(id).copied();
+                        if let Some(dispatch) = self.resolve_dispatch_with(
+                            concrete_type_id,
+                            member_name,
+                            &own_values,
+                            preferred,
+                        ) {
                             return Some(self.emit_dispatch(dispatch, args));
                         }
                     }
@@ -2200,62 +2208,54 @@ impl<'src> Transformer<'src> {
     /// generic dispatch resolving to an extern/intrinsic without this would mint
     /// a dangling name for a function that is never emitted.
     fn resolve_dispatch(&mut self, type_id: TypeId, member: &str) -> Option<Dispatch<'src>> {
-        self.resolve_dispatch_with(type_id, member, &[])
+        self.resolve_dispatch_with(type_id, member, &[], None)
     }
 
     /// `resolve_dispatch`, additionally binding the target method's OWN generics
     /// from `own_generic_values` (the call's bindings in declaration order —
     /// recorded against the trait member the analyzer saw, whose ids differ from
-    /// each concrete impl's, so only positional values cross the re-dispatch).
+    /// each concrete impl's, so only positional values cross the re-dispatch),
+    /// and — when the analyzer resolved the call through a trait — dispatching on
+    /// THAT trait's surface (`preferred_trait`): its impl's override, else its
+    /// default, never an inherent method that happens to share the name.
     fn resolve_dispatch_with(
         &mut self,
         type_id: TypeId,
         member: &str,
         own_generic_values: &[TypeId],
+        preferred_trait: Option<Id>,
     ) -> Option<Dispatch<'src>> {
         let type_id = self.resolve_type_id(type_id);
-        if let Some((member_id, impl_subject)) = self.resolve_member_on_type(type_id, member) {
-            if let Some(intrinsic) = self.program.intrinsics.get(&member_id).copied() {
-                return Some(Dispatch::Intrinsic(intrinsic));
-            }
-            if let Some(binding) = self
-                .program
-                .external_functions
-                .get(&member_id)
-                .and_then(|external| external.extern_binding.clone())
+        if let Some(trait_id) = preferred_trait {
+            // Resolve strictly within the trait: the impl's override first...
+            if let Some((member_id, impl_subject)) =
+                self.resolve_member_on_trait_impl(type_id, trait_id, member)
             {
-                return Some(Dispatch::Extern(member_id, binding));
+                return Some(self.dispatch_to_member(
+                    member_id,
+                    impl_subject,
+                    type_id,
+                    own_generic_values,
+                ));
             }
-            // Bind the impl's generics from the concrete receiver type and emit a
-            // monomorphized instance, so a method whose body uses the impl's type
-            // parameter — `T::from_json_value` inside `List<T>::from_json_value` —
-            // resolves it concretely even when reached as a *nested* dispatch (the
-            // `List<List<i32>>` round-trip). With no bindings (a non-generic impl)
-            // this is the plain generic emission as before.
-            let mut substitution = HashMap::new();
-            self.bind_generics(impl_subject, type_id, &mut substitution);
-            // The method's own generics (`describe<S: Sink>`) bind from the
-            // call's ordered values; without this the instance emitted with
-            // them unbound — the silent no-op through a bound.
-            if !own_generic_values.is_empty() {
-                if let Some(function) = self.program.functions.get(&member_id) {
-                    for (constraint_id, value) in function
-                        .generic_parameter_constraint_ids
-                        .iter()
-                        .zip(own_generic_values.iter())
-                    {
-                        substitution.insert(*constraint_id, *value);
-                    }
-                }
+            // ...else the trait's own default, specialized for this type.
+            if let Some(default_id) = self.trait_default_member(trait_id, member) {
+                let is_async = self.program.async_functions.contains(&default_id);
+                return Some(Dispatch::Call(
+                    self.emit_default_instance(default_id, type_id),
+                    is_async,
+                ));
             }
-            let name = if substitution.is_empty() {
-                self.ensure_function_emitted(member_id);
-                self.ng.name_for(member_id)
-            } else {
-                self.emit_instance(member_id, &substitution)
-            };
-            let is_async = self.program.async_functions.contains(&member_id);
-            return Some(Dispatch::Call(name, is_async));
+            // The preference didn't materialize (shouldn't happen for a call the
+            // analyzer resolved) — fall through to the general lookup.
+        }
+        if let Some((member_id, impl_subject)) = self.resolve_member_on_type(type_id, member) {
+            return Some(self.dispatch_to_member(
+                member_id,
+                impl_subject,
+                type_id,
+                own_generic_values,
+            ));
         }
         let default_id = self.resolve_inherited_default(type_id, member)?;
         let is_async = self.program.async_functions.contains(&default_id);
@@ -2263,6 +2263,84 @@ impl<'src> Transformer<'src> {
             self.emit_default_instance(default_id, type_id),
             is_async,
         ))
+    }
+
+    /// Lowers a resolved member to its dispatch: an intrinsic, an extern, or an
+    /// emitted (possibly monomorphized) instance. Binds the impl's generics from
+    /// the concrete receiver type — so a method whose body uses the impl's type
+    /// parameter (`T::from_json_value` inside `List<T>::from_json_value`)
+    /// resolves it concretely even when reached as a *nested* dispatch — plus
+    /// the method's OWN generics from the call's ordered values (without which
+    /// the instance emitted with them unbound — the silent no-op through a
+    /// bound).
+    fn dispatch_to_member(
+        &mut self,
+        member_id: Id,
+        impl_subject: TypeId,
+        type_id: TypeId,
+        own_generic_values: &[TypeId],
+    ) -> Dispatch<'src> {
+        if let Some(intrinsic) = self.program.intrinsics.get(&member_id).copied() {
+            return Dispatch::Intrinsic(intrinsic);
+        }
+        if let Some(binding) = self
+            .program
+            .external_functions
+            .get(&member_id)
+            .and_then(|external| external.extern_binding.clone())
+        {
+            return Dispatch::Extern(member_id, binding);
+        }
+        let mut substitution = HashMap::new();
+        self.bind_generics(impl_subject, type_id, &mut substitution);
+        if !own_generic_values.is_empty() {
+            if let Some(function) = self.program.functions.get(&member_id) {
+                for (constraint_id, value) in function
+                    .generic_parameter_constraint_ids
+                    .iter()
+                    .zip(own_generic_values.iter())
+                {
+                    substitution.insert(*constraint_id, *value);
+                }
+            }
+        }
+        let name = if substitution.is_empty() {
+            self.ensure_function_emitted(member_id);
+            self.ng.name_for(member_id)
+        } else {
+            self.emit_instance(member_id, &substitution)
+        };
+        let is_async = self.program.async_functions.contains(&member_id);
+        Dispatch::Call(name, is_async)
+    }
+
+    /// A member provided by `type_id`'s impl OF `trait_id` specifically — the
+    /// trait-scoped counterpart of `resolve_member_on_type`, immune to inherent
+    /// name collisions.
+    fn resolve_member_on_trait_impl(
+        &self,
+        type_id: TypeId,
+        trait_id: Id,
+        member: &str,
+    ) -> Option<(Id, TypeId)> {
+        let type_ = self.program.type_id_to_type_map.get(&type_id)?;
+        self.program
+            .implementations
+            .iter()
+            .filter(|implementation| {
+                implementation.trait_ids.contains(&trait_id)
+                    && self
+                        .program
+                        .type_id_to_type_map
+                        .get(&implementation.subject)
+                        .is_some_and(|subject| nominal_matches(subject, type_))
+            })
+            .find_map(|implementation| {
+                implementation
+                    .declarations
+                    .get(member)
+                    .map(|member_id| (*member_id, implementation.subject))
+            })
     }
 
     /// Lowers a resolved [`Dispatch`] to its call node with `args` (the receiver

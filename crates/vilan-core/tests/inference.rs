@@ -2512,13 +2512,12 @@ fn trait_only_does_not_shadow_an_inherent_method() {
 }
 
 #[test]
-#[ignore = "pre-existing dispatch shadowing (independent of [trait_only], reproduces \
-            without it): a bound call's monomorphized dispatch resolves the concrete \
-            type's *inherent* same-name method instead of the trait's inherited default \
-            — `via_bound(Pt {..})` prints `own` instead of `trait-default`. The analyzer \
-            resolves the bound path correctly; the transformer's name-based dispatch \
-            lookup does not distinguish the inherent method from the trait member."]
 fn bound_dispatch_prefers_the_trait_method_on_a_name_collision() {
+    // FIXED: the analyzer resolved `value.tag()` through the `Marker` bound,
+    // but the transformer's name-based re-dispatch found the concrete type's
+    // INHERENT `tag` first. The resolved trait is now recorded per call
+    // (bound_dispatch_traits) and emission dispatches on that trait's surface
+    // — override, else default — so an inherent name collision can't shadow it.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -2741,13 +2740,11 @@ fn a_parenthesized_type_is_grouping_not_a_tuple() {
 }
 
 #[test]
-#[ignore = "pre-existing deferral gap (independent of the `(T)` transparency fix — bug C′ \
-            covered unknown-closure-parameter *arguments* and method *receivers*): a free \
-            call whose SUBJECT is an unannotated closure parameter (`|done| { done(); }`) \
-            resolves before the parameter's type lands and fails with `cannot call a \
-            non-function value` instead of deferring. Annotating the parameter \
-            (`|done: || void|`) works."]
 fn calling_an_unannotated_closure_parameter_defers() {
+    // FIXED: a free call whose SUBJECT is an unannotated closure parameter
+    // (`|done| { done(); }`) now defers until bidirectional inference lands
+    // the parameter's type — the same rule the method-receiver and argument
+    // paths already had (Bug C′'s family).
     assert_compiles_and_runs(
         r#"
         import std::print;
