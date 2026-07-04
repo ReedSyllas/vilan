@@ -4027,11 +4027,10 @@ fn async_function_rets_check_against_the_declared_type() {
 }
 
 // `ret` returns from the NEAREST callable: a closure (or `async` block) is its
-// own boundary with an INFERRED return type, so `ret` inside one is not checked
-// against the enclosing function (v1 — proposal/ret-checking.md rule 4), and at
-// runtime it exits the closure, not the function.
+// own boundary — at runtime `ret` exits the closure, not the function, and an
+// agreeing early-exit ret checks cleanly against the body's tail type.
 #[test]
-fn ret_inside_a_closure_exits_the_closure_and_is_unchecked_v1() {
+fn ret_inside_a_closure_exits_the_closure() {
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -4056,12 +4055,10 @@ fn ret_inside_a_closure_exits_the_closure_and_is_unchecked_v1() {
     );
 }
 
-// The recorded follow-up (proposal/ret-checking.md): a closure's `ret` should
-// PARTICIPATE in the closure's return-type inference — `|x| { ret "s"; x }`
-// passed where `|i32| i32` is expected should be rejected. Today the closure's
-// type comes from its tail alone, so the mismatched `ret` slips through.
+// A closure's `ret` PARTICIPATES in its return typing: a ret disagreeing with
+// the body's tail type is rejected (the collected-rets constraint —
+// proposal/ret-checking.md rule 4's follow-up, now shipped).
 #[test]
-#[ignore]
 fn ret_participates_in_closure_return_inference() {
     assert_fails(
         r#"
@@ -4834,14 +4831,11 @@ fn lift_is_not_an_assignment_target() {
     );
 }
 
-// The recorded try-and-lift deferral surfaced by adoption: a RETURN-position
-// generic should bind THROUGH `!` (the let's annotation directing the
-// receiver's type parameter). Today the receiver is inferred undirected, so
-// `T` never reaches the call's monomorphization — `T::from_json` emits the
-// abstract method (a silent miscompile shape; the workaround is a typed
-// intermediate: `let r: Result<T, E> = call(..); let v = r!;`).
+// A RETURN-position generic binds THROUGH `!`: the let's annotation directs
+// the receiver's type parameter (`resolve_try_assert` re-infers the receiver
+// as `Container<expected, ..>` once the container is known, riding the same
+// reconcile-and-record channel as an annotated let).
 #[test]
-#[ignore]
 fn bang_directs_return_position_generics_into_its_receiver() {
     assert_compiles_and_runs(
         r#"
@@ -4867,5 +4861,94 @@ fn bang_directs_return_position_generics_into_its_receiver() {
         }
         "#,
         "42\n",
+    );
+}
+
+// The bare-`ret` half of closure participation: fine in a void-tailed closure,
+// rejected in a value-yielding one...
+#[test]
+fn bare_ret_in_a_value_yielding_closure_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        fun apply(f: |i32| i32): i32 {
+        	f(10)
+        }
+
+        fun main() {
+        	let _ = apply(|x| {
+        		if x > 5 {
+        			ret;
+        		}
+        		x + 1
+        	});
+        }
+        "#,
+        "ret",
+        "a bare `ret` exits a closure whose body yields",
+    );
+}
+
+// ...and the mirror: a value-`ret` in a closure whose body ends without one.
+#[test]
+fn value_ret_in_a_void_closure_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        import std::print;
+
+        fun main() {
+        	let helper = |x: i32| {
+        		if x > 5 {
+        			ret 99;
+        		}
+        		print("small");
+        	};
+        	helper(1);
+        }
+        "#,
+        "ret 99",
+        "make the ret'd value the body's tail",
+    );
+}
+
+// A bare-ret early exit in a void closure stays legal (the guard pattern).
+#[test]
+fn bare_ret_in_a_void_closure_is_allowed() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+        	let helper = |x: i32| {
+        		if x > 5 {
+        			ret;
+        		}
+        		print("small");
+        	};
+        	helper(10);
+        	helper(1);
+        }
+        "#,
+        "small\n",
+    );
+}
+
+// `async` blocks get the same participation: an agreeing ret passes, and the
+// existing early-return semantics hold.
+#[test]
+fn async_block_rets_check_against_the_tail() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+        	let flag = true;
+        	let pending = async {
+        		if flag {
+        			ret "mismatched";
+        		}
+        		2
+        	};
+        }
+        "#,
+        "ret \"mismatched\"",
+        "but the closure's body yields",
     );
 }

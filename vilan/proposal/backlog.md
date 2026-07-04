@@ -64,12 +64,6 @@ have gaps.
 9. **Impl-binder declaration order** (S; pin ledger) — the second `#[ignore]` pin; declaration
    order affects binder resolution. Trivial workaround (reorder declarations); fix for hygiene.
 
-10. **`ret` participates in closure return inference** (M; the recorded remainder of the
-    shipped return-position checking, `ret-checking.md` rule 4) — a closure's `ret` neither
-    checks against nor contributes to the closure's inferred return type (`|x| { ret "s";
-    x }` passes where `|i32| i32` is expected; `|x| { ret 5; }` types as a void closure).
-    Pinned `#[ignore]`d (`ret_participates_in_closure_return_inference`).
-
 11. **`!` and `?.` — early return + lifted chains** (M–L; transport-rpc Q10; **proposal
     written: `try-and-lift.md`**, design agreed 2026-07-04) — `expr!` asserts-or-returns
     (Rust-`?` semantics, programmable "bad" via a `Try` seam; `!=` always lexes as

@@ -586,6 +586,13 @@ enum Constraint<'src> {
         binder_id: Id,
         continuation_id: Id,
     },
+    /// A closure's collected `ret`s, checked against its inferred tail type
+    /// (proposal/ret-checking.md rule 4's follow-up).
+    ClosureReturns {
+        closure_id: Id,
+        tail_id: Id,
+        rets: Vec<(Span, Option<Id>)>,
+    },
 }
 
 impl Constraint<'_> {
@@ -613,6 +620,7 @@ impl Constraint<'_> {
             Constraint::ReturnType { body_id, .. } => *body_id,
             Constraint::TryAssert { id, .. } => *id,
             Constraint::Lift { id, .. } => *id,
+            Constraint::ClosureReturns { closure_id, .. } => *closure_id,
         }
     }
 
@@ -641,6 +649,7 @@ impl Constraint<'_> {
             Constraint::ReturnType { .. } => 10,
             Constraint::TryAssert { .. } => 10,
             Constraint::Lift { .. } => 10,
+            Constraint::ClosureReturns { .. } => 10,
             Constraint::CallSubject(_) => 11,
         }
     }
@@ -746,12 +755,13 @@ pub struct Analyzer<'src> {
     /// `[expose]`d fields awaiting the `Signal`-of-Wire check
     /// (`check_expose_fields`), collected at the struct walk.
     expose_fields_to_check: Vec<ExposeFieldCheck<'src>>,
-    // The innermost enclosing callable's DECLARED return type, or `None` when
-    // there is nothing to check `ret` against (an undeclared-void function, or
-    // a closure/`async` block, whose return type is inferred): `ret` returns
-    // from the nearest callable, so each body walk pushes its frame
-    // (proposal/ret-checking.md).
-    return_type_stack: Vec<Option<TypeId>>,
+    // The innermost enclosing callable's return frame: `ret` returns from the
+    // nearest callable, so each body walk pushes one (proposal/ret-checking.md).
+    // Functions check rets against the declared type; undeclared-void
+    // functions check nothing (the consistency-with-tail rule); closures and
+    // `async` blocks COLLECT their rets, checked against the inferred tail
+    // type once it resolves (rule 4's follow-up).
+    return_type_stack: Vec<ReturnFrame>,
     /// Non-fatal diagnostics (e.g. an unused `[must_use]` result). Rendered as
     /// warnings; they do not block codegen.
     warnings: Vec<Error>,
@@ -4171,7 +4181,10 @@ impl<'src> Analyzer<'src> {
                     // The body's `ret`s check against this function's declared
                     // return type; an undeclared (void) return checks nothing —
                     // consistent with the tail (proposal/ret-checking.md).
-                    self.return_type_stack.push(return_type_id);
+                    self.return_type_stack.push(match return_type_id {
+                        Some(declared) => ReturnFrame::Function(declared),
+                        None => ReturnFrame::VoidFunction,
+                    });
                     let (ids, expr_id) = match &function.body {
                         Some(body) => {
                             // Parameter destructures run first, before the body.
@@ -4276,21 +4289,29 @@ impl<'src> Analyzer<'src> {
                 // checks (and binds return-position generics) against the
                 // innermost callable's DECLARED return type. A bare `ret` is
                 // `ret <void>` — a synthesized void value spanned at the `ret`,
-                // legal exactly when the declared type is void
-                // (proposal/ret-checking.md).
-                if let Some(Some(return_type_id)) = self.return_type_stack.last().copied() {
-                    let checked_id = value_id.unwrap_or_else(|| {
-                        let void_id = self.new_entity_id();
-                        self.expr_id_to_expr_map.insert(void_id, Expr::Void);
-                        self.expr_id_to_scope_id_map.insert(void_id, scope_id);
-                        self.span_map.insert(void_id, &node.1);
-                        void_id
-                    });
-                    self.expected_types.insert(checked_id, return_type_id);
-                    self.constraints.push(Constraint::ReturnType {
-                        body_id: checked_id,
-                        return_type_id,
-                    });
+                // legal exactly when the declared type is void. In a closure,
+                // rets collect on the frame and check against the inferred
+                // tail type instead (proposal/ret-checking.md).
+                match self.return_type_stack.last_mut() {
+                    Some(ReturnFrame::Function(declared)) => {
+                        let return_type_id = *declared;
+                        let checked_id = value_id.unwrap_or_else(|| {
+                            let void_id = self.new_entity_id();
+                            self.expr_id_to_expr_map.insert(void_id, Expr::Void);
+                            self.expr_id_to_scope_id_map.insert(void_id, scope_id);
+                            self.span_map.insert(void_id, &node.1);
+                            void_id
+                        });
+                        self.expected_types.insert(checked_id, return_type_id);
+                        self.constraints.push(Constraint::ReturnType {
+                            body_id: checked_id,
+                            return_type_id,
+                        });
+                    }
+                    Some(ReturnFrame::Closure { rets }) => {
+                        rets.push((node.1, value_id));
+                    }
+                    Some(ReturnFrame::VoidFunction) | None => {}
                 }
                 Some(Expr::FunctionReturn(value_id))
             }
@@ -4328,15 +4349,16 @@ impl<'src> Analyzer<'src> {
                 // closure/`async` block (inferred return) or an undeclared-void
                 // function has nothing to check against — a clean error (v1;
                 // proposal/try-and-lift.md §2).
-                match self.return_type_stack.last().copied().flatten() {
-                    Some(return_type_id) => {
+                match self.return_type_stack.last() {
+                    Some(ReturnFrame::Function(declared)) => {
+                        let return_type_id = *declared;
                         self.constraints.push(Constraint::TryAssert {
                             id,
                             receiver_id,
                             return_type_id,
                         });
                     }
-                    None => {
+                    _ => {
                         self.diagnostics.push(Error {
                             span: node.1,
                             msg: "`!` requires the nearest enclosing function to declare an `Option`/`Result`-compatible return type (closures and `async` blocks are not yet supported)"
@@ -4382,6 +4404,15 @@ impl<'src> Analyzer<'src> {
                     .as_ref()
                     .map(|x| self.walk_type_node(x, scope_id))
                     .unwrap_or(Type::Unknown.get_type_id(self));
+                // An annotated let EXPECTS its value at the annotation — the
+                // same seed the function tail gets from its declared return
+                // type, so expectation-readers (`match` leg propagation, `!`'s
+                // receiver direction) see it.
+                if type_.is_some()
+                    && let Some(value_id) = initial
+                {
+                    self.expected_types.entry(value_id).or_insert(type_id);
+                }
                 self.variables.insert(
                     id,
                     Variable {
@@ -4872,11 +4903,21 @@ impl<'src> Analyzer<'src> {
                         )
                     })
                     .collect::<Vec<_>>();
-                // A closure is a `ret` boundary with an INFERRED return type —
-                // nothing declared to check against (proposal/ret-checking.md).
-                self.return_type_stack.push(None);
+                // A closure is a `ret` boundary with an INFERRED return type:
+                // its rets collect here and check against the tail once it
+                // resolves (proposal/ret-checking.md rule 4's follow-up).
+                self.return_type_stack
+                    .push(ReturnFrame::Closure { rets: Vec::new() });
                 let expr_id = self.walk_expr_node(&closure.return_value, body_scope_id);
-                self.return_type_stack.pop();
+                if let Some(ReturnFrame::Closure { rets }) = self.return_type_stack.pop()
+                    && !rets.is_empty()
+                {
+                    self.constraints.push(Constraint::ClosureReturns {
+                        closure_id: id,
+                        tail_id: expr_id,
+                        rets,
+                    });
+                }
                 self.closures.insert(
                     id,
                     Closure {
@@ -4897,9 +4938,18 @@ impl<'src> Analyzer<'src> {
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
                 // Like a closure: a `ret` boundary with an inferred return type.
-                self.return_type_stack.push(None);
+                self.return_type_stack
+                    .push(ReturnFrame::Closure { rets: Vec::new() });
                 let return_id = self.walk_expr_node(body, body_scope_id);
-                self.return_type_stack.pop();
+                if let Some(ReturnFrame::Closure { rets }) = self.return_type_stack.pop()
+                    && !rets.is_empty()
+                {
+                    self.constraints.push(Constraint::ClosureReturns {
+                        closure_id,
+                        tail_id: return_id,
+                        rets,
+                    });
+                }
                 self.closures.insert(
                     closure_id,
                     Closure {
@@ -7416,6 +7466,11 @@ impl<'src> Analyzer<'src> {
                 binder_id,
                 continuation_id,
             } => self.resolve_lift(*id, *subject_id, *binder_id, *continuation_id),
+            Constraint::ClosureReturns {
+                closure_id,
+                tail_id,
+                rets,
+            } => self.resolve_closure_returns(*closure_id, *tail_id, rets),
         }
     }
 
@@ -8478,6 +8533,70 @@ impl<'src> Analyzer<'src> {
         Resolution::Resolved
     }
 
+    /// A closure's `ret`s participate in its return typing: each value-`ret`
+    /// must reconcile with the inferred tail type (with the tail as the
+    /// directed expectation, so return-position generics bind); a bare `ret`
+    /// requires a void tail; and a value-`ret` in a void-tailed closure is
+    /// rejected with guidance (proposal/ret-checking.md rule 4's follow-up).
+    fn resolve_closure_returns(
+        &mut self,
+        _closure_id: Id,
+        tail_id: Id,
+        rets: &[(Span, Option<Id>)],
+    ) -> Resolution {
+        let tail_type = self.infer_type(tail_id, &Type::Unknown, &HashMap::new());
+        // `Unknown` means the closure's parameters haven't been typed yet (the
+        // call site reconciles them later) — defer; the run-all backstop
+        // retries once they land. A closure that never types (unbound, never
+        // called) leaves the constraint deferred, matching how loosely such a
+        // closure types everywhere else.
+        if matches!(tail_type, Type::Unresolved | Type::Unknown) {
+            return Resolution::Deferred;
+        }
+        let tail_is_void = matches!(tail_type, Type::Void);
+        for (span, value_id) in rets {
+            match value_id {
+                None => {
+                    if !tail_is_void {
+                        let tail_rendered = self.pretty_print_type(&tail_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: *span,
+                            msg: format!(
+                                "a bare `ret` exits a closure whose body yields {tail_rendered} — return a value"
+                            ),
+                        });
+                    }
+                }
+                Some(value_id) => {
+                    let value_type = self.infer_type(*value_id, &tail_type, &HashMap::new());
+                    if matches!(value_type, Type::Unresolved) {
+                        return Resolution::Deferred;
+                    }
+                    if tail_is_void && !matches!(value_type, Type::Void) {
+                        self.diagnostics.push(Error {
+                            span: *span,
+                            msg: "the closure's body ends without a value, but this `ret` returns one — make the ret'd value the body's tail"
+                                .to_string(),
+                        });
+                    } else if self
+                        .reconcile_type(&value_type, &tail_type, &HashMap::new())
+                        .is_none()
+                    {
+                        let value_rendered = self.pretty_print_type(&value_type, &HashMap::new());
+                        let tail_rendered = self.pretty_print_type(&tail_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: *span,
+                            msg: format!(
+                                "this `ret` returns {value_rendered}, but the closure's body yields {tail_rendered}"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Resolution::Resolved
+    }
+
     /// `expr!` (proposal/try-and-lift.md §2): type the expression as the
     /// receiver's GOOD half, record the lowering dispatch, and check the
     /// enclosing function's declared return type can carry the BAD half —
@@ -8499,6 +8618,34 @@ impl<'src> Analyzer<'src> {
         }
         let return_type = return_type_id.get_type(self);
         let span = **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN);
+        // When the `!` expression itself has an expectation (an annotated let,
+        // a `ret`, the tail), re-infer the receiver DIRECTED as
+        // `Container<expected, ...>` — the call arm's reconcile-and-record
+        // block then binds return-position generics for monomorphization,
+        // exactly as the two-step `let r: Result<T, E> = call(..); r!` form
+        // does. Undirected, `T` would never reach the receiver's emission
+        // (the pinned silent-miscompile shape).
+        let receiver_type = match (&receiver_type, self.expected_types.get(&id).copied()) {
+            (Type::Enum(enum_id, arguments), Some(expected_good_id)) => {
+                let mut needs_direction = Vec::new();
+                if let Some(good) = arguments.first() {
+                    self.collect_generics(&good.get_type(self), 0, &mut needs_direction);
+                }
+                if arguments.is_empty() || !needs_direction.is_empty() {
+                    let mut directed_arguments = arguments.clone();
+                    if directed_arguments.is_empty() {
+                        directed_arguments.push(expected_good_id);
+                    } else {
+                        directed_arguments[0] = expected_good_id;
+                    }
+                    let directed = Type::Enum(*enum_id, directed_arguments);
+                    self.infer_type(receiver_id, &directed, &HashMap::new())
+                } else {
+                    receiver_type
+                }
+            }
+            _ => receiver_type,
+        };
         let receiver_enum = match &receiver_type {
             Type::Enum(enum_id, arguments) => Some((*enum_id, arguments.clone())),
             _ => None,
@@ -10464,6 +10611,18 @@ pub const DERIVED_SOURCE: SourceId = SourceId(u32::MAX);
 /// the inline tag-branch fast path; any other `Try` type dispatches to its
 /// impl's `verdict`/`from_bad` (the members recorded here), with the receiver's
 /// concrete type for monomorphization.
+/// The innermost callable a `ret`/`!` returns from (proposal/ret-checking.md).
+#[derive(Debug)]
+enum ReturnFrame {
+    /// A function with a declared return type — rets check against it.
+    Function(TypeId),
+    /// A function with no declared return type: void, rets unchecked.
+    VoidFunction,
+    /// A closure or `async` block: rets collect here (span + optional value)
+    /// and check against the inferred tail type.
+    Closure { rets: Vec<(Span, Option<Id>)> },
+}
+
 /// How one `?.` site lowers: the std pair inline — short-circuit the bad tag,
 /// run the continuation on the element, wrap (`map`) or pass through
 /// (`flatten`).

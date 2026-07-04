@@ -27,11 +27,15 @@ and argument checking; return position had none.
    the tail (existing behavior: `fun f() { 5 }` compiles, the value is discarded) nor any
    `ret v`. Consistency with the tail is the rule; a void function's return values are
    discarded, not diagnosed.
-4. **In closures and `async` blocks (v1: unchecked):** their return types are *inferred*,
-   not declared, so there is nothing declared to check against. A `ret` inside one is
-   skipped by this check (the boundary pushes an unchecked frame). The follow-up — `ret`
-   *participating* in closure return inference (today `|x| { ret 5; }` has a void tail
-   and types as a void closure) — is its own slice, pinned `#[ignore]`d.
+4. **In closures and `async` blocks (shipped as the follow-up):** their return types are
+   *inferred*, so a closure's `ret`s collect on its frame and check against the inferred
+   tail type once it resolves (`Constraint::ClosureReturns`): a value-`ret` must reconcile
+   with the tail (inferred WITH the tail as expectation, so return-position generics
+   bind); a bare `ret` requires a void tail; a value-`ret` in a void-tailed closure is
+   rejected with guidance ("make the ret'd value the body's tail" — the conservative rule
+   that avoids the diverging-tail swamp). A closure that never types (unbound, never
+   called) leaves the check deferred, matching how loosely such a closure types
+   everywhere else.
 
 ## Mechanism
 

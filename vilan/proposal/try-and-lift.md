@@ -238,13 +238,10 @@ transformer-emitted):
 
 ## 6. Deferred (recorded, not drifted into)
 
-- **Return-position generics through `!`** (surfaced by adoption): `let n: i32 =
-  decode_as("42")!` infers the receiver undirected, so `T` never reaches the call's
-  monomorphization — a silent-miscompile shape, pinned `#[ignore]`d
-  (`bang_directs_return_position_generics_into_its_receiver`). Workaround (used by the
-  generated `connect`/`verify`): a typed intermediate, then `!`. The fix wants the
-  solver's expected-type propagation story (it must learn the container before it can
-  direct the element).
+- ~~Return-position generics through `!`~~ — **fixed** (stabilization pass): annotated
+  lets seed their expectation onto the value, and `resolve_try_assert` re-infers the
+  receiver as `Container<expected, ..>` once the container is known — the binding rides
+  the same reconcile-and-record channel as the two-step form. Pin un-ignored.
 
 - Expression-level lifting (`a? + 10`) and the applicative form (`a? + b?`) — §0.3.
 - Error conversion across types (`Option` in a `Result` fn; `From`-style `E1 → E2`).
