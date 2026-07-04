@@ -1,6 +1,19 @@
 # `!` and `?` — early return and lifted chains (backlog B11)
 
-Status: **slice 1 (`!`) shipped 2026-07-04**; slice 2 (`?.`) designed below, not built.
+Status: **BOTH SLICES SHIPPED 2026-07-04** — `!` and `?.` are live (`void` also became
+the unit expression en route). Slice 2 landed as specified: `?` lexes as an operator,
+`?.member` joins the postfix chain, and the parser groups each `?.`'s continuation (the
+member plus every following plain postfix up to the next `?.`/`!`/chain end — escaping a
+group is parenthesization, as in TS) over a `LiftBinder` hole; `Constraint::Lift` grounds
+the binder as the subject's element (waking the continuation's deferred constraints),
+picks map-vs-flatten from the continuation's type (same-container = flatten; `Result`
+flatten checks the error types), and records the lowering; the transformer emits the
+match-shaped inline form — bad tag short-circuits AS-IS, the element aliases into the
+continuation (no closure), map rewraps via the container's good variant. A lifted chain
+is rejected as an assignment target. The `Lift` marker + Option/Result impls ship in std;
+user `Lift` lowering (closure-argument emission) is the recorded follow-up with a clean
+error. LSP: completion after `a?.` offers the ELEMENT's members. Ten `?.` pins + corpus
+`lift-chain.vl` cover §7's rows.
 The two-operator design, the four refinements in §0, and the §8 resolutions (opt-in
 `Lift`; the `Try`/`Lift`/`Verdict` names; `Try` as a real trait from day one) are all
 settled. Slice 1 landed as specified: postfix `!` in the member chain; `Verdict`/`Try`

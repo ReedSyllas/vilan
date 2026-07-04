@@ -1490,16 +1490,50 @@ where
         )
         .boxed();
 
-    // A postfix suffix: `.member`, `[index]`, or `!` (assert-or-return),
-    // folded left onto the subject.
+    // A postfix suffix: `.member`, `[index]`, `!` (assert-or-return), or
+    // `?.member` (a lifted chain link). Collected, then grouped: the segment
+    // from one `?.` to the next `?.`/`!`/chain end forms that link's
+    // continuation (proposal/try-and-lift.md §3), built over `LiftBinder`.
     enum Postfix<'src> {
         Member(Spanned<Node<'src>>),
         Index(Spanned<Node<'src>>),
         TryAssert,
+        LiftMember(Spanned<Node<'src>>),
+    }
+    // Apply one plain postfix to a subject, spanning from the chain's start.
+    fn apply_postfix<'src>(
+        subject: Spanned<Node<'src>>,
+        postfix: Postfix<'src>,
+        end: usize,
+    ) -> Spanned<Node<'src>> {
+        let span = (subject.1.start..end).into();
+        match postfix {
+            Postfix::Member(member) => (
+                Node::MemberAccessor(Box::new(subject), Box::new(member)),
+                span,
+            ),
+            Postfix::Index(index) => (Node::Index(Box::new(subject), Box::new(index)), span),
+            Postfix::TryAssert => (Node::TryAssert(Box::new(subject)), span),
+            // Grouping happens in the outer loop; a stray lift link here is
+            // unreachable.
+            Postfix::LiftMember(member) => (
+                Node::Lift(
+                    Box::new(subject),
+                    Box::new((
+                        Node::MemberAccessor(
+                            Box::new((Node::LiftBinder, member.1)),
+                            Box::new(member),
+                        ),
+                        span,
+                    )),
+                ),
+                span,
+            ),
+        }
     }
     let member_accessor = call
         .clone()
-        .foldl_with(
+        .then(
             choice((
                 // A trailing `.` with no member yet (`p.`, mid-edit) recovers to an
                 // `Error` member rather than failing the whole statement — so the
@@ -1508,7 +1542,7 @@ where
                 // path, so valid programs parse identically.
                 just(Token::Ctrl('.'))
                     .map_with(|_, e| e.span())
-                    .then(call.or_not())
+                    .then(call.clone().or_not())
                     .map(|(dot_span, member)| {
                         Postfix::Member(member.unwrap_or((Node::Error, dot_span)))
                     }),
@@ -1520,19 +1554,56 @@ where
                 // `expr!` — assert-or-return. `!=` lexes as one token, so this
                 // arm never consumes the `!` of a comparison.
                 just(Token::Op("!")).map(|_| Postfix::TryAssert),
+                // `?.member` — a lifted link (with the same mid-edit recovery
+                // as `.member`, for completion after `a?.`).
+                just(Token::Op("?"))
+                    .ignore_then(just(Token::Ctrl('.')))
+                    .map_with(|_, e| e.span())
+                    .then(call.or_not())
+                    .map(|(dot_span, member)| {
+                        Postfix::LiftMember(member.unwrap_or((Node::Error, dot_span)))
+                    }),
             ))
-            .repeated(),
-            |subject, postfix, e| match postfix {
-                Postfix::Member(member) => (
-                    Node::MemberAccessor(Box::new(subject), Box::new(member)),
-                    e.span(),
-                ),
-                Postfix::Index(index) => {
-                    (Node::Index(Box::new(subject), Box::new(index)), e.span())
-                }
-                Postfix::TryAssert => (Node::TryAssert(Box::new(subject)), e.span()),
-            },
+            .map_with(|postfix, e| (postfix, e.span()))
+            .repeated()
+            .collect::<Vec<_>>(),
         )
+        .map(|(base, postfixes)| {
+            let mut current = base;
+            let mut items = postfixes.into_iter().peekable();
+            while let Some((postfix, postfix_span)) = items.next() {
+                match postfix {
+                    Postfix::LiftMember(member) => {
+                        // The continuation: this member, then every following
+                        // plain postfix up to the next `?.` or `!` (which apply
+                        // to the LIFTED result, not inside it).
+                        let member_span = member.1;
+                        let mut continuation: Spanned<Node> = (
+                            Node::MemberAccessor(
+                                Box::new((Node::LiftBinder, member_span)),
+                                Box::new(member),
+                            ),
+                            member_span,
+                        );
+                        let mut lift_end = postfix_span.end;
+                        while matches!(
+                            items.peek(),
+                            Some((Postfix::Member(_) | Postfix::Index(_), _))
+                        ) {
+                            let (step, step_span) = items.next().unwrap();
+                            lift_end = step_span.end;
+                            continuation = apply_postfix(continuation, step, lift_end);
+                        }
+                        let span = (current.1.start..lift_end).into();
+                        current = (Node::Lift(Box::new(current), Box::new(continuation)), span);
+                    }
+                    step => {
+                        current = apply_postfix(current, step, postfix_span.end);
+                    }
+                }
+            }
+            current
+        })
         .boxed();
 
     // Unary prefix operators, binding tighter than the binary ops: `!` (logical

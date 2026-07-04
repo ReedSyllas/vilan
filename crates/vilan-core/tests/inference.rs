@@ -4610,3 +4610,226 @@ fn void_is_the_unit_expression() {
         "7\nsome unit\nconfirmed\n",
     );
 }
+
+// --- `a?.b` — lifted member chains (proposal/try-and-lift.md, slice 2) ----------
+
+// Map and flatten, typed and run: a plain-valued continuation wraps back into
+// the container; a container-valued one flattens (single Option, not nested).
+// The None subject short-circuits — proven by an unreached side effect.
+#[test]
+fn lift_maps_flattens_and_short_circuits() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::option::Option::{ self, Some, None };
+
+        struct Profile {
+        	name: str,
+        }
+
+        impl Profile {
+        	fun loud_name(self): str {
+        		print("computed");
+        		self.name
+        	}
+
+        	fun nickname(self): Option<str> {
+        		if self.name == "ada" {
+        			Some("the countess")
+        		} else {
+        			None
+        		}
+        	}
+        }
+
+        fun user(key: str): Option<Profile> {
+        	if key == "hit" {
+        		Some(Profile { name = "ada" })
+        	} else {
+        		None
+        	}
+        }
+
+        fun main() {
+        	// map — the annotation pins the type: Option<str>, not nested.
+        	let mapped: Option<str> = user("hit")?.loud_name();
+        	print(mapped.unwrap_or("?"));
+        	// short-circuit: the continuation must not run.
+        	let skipped: Option<str> = user("miss")?.loud_name();
+        	print(skipped.unwrap_or("?"));
+        	// flatten — the annotation pins Option<str> (not Option<Option<str>>).
+        	let flat: Option<str> = user("hit")?.nickname();
+        	print(flat.unwrap_or("?"));
+        	let flat_none: Option<str> = user("miss")?.nickname();
+        	print(flat_none.unwrap_or("?"));
+        	// multi-link with args, escaped by parens.
+        	print(format((user("hit")?.nickname()?.len()).unwrap_or(0 - 1)));
+        }
+        "#,
+        "computed\nada\n?\nthe countess\n?\n12\n",
+    );
+}
+
+// Result lifts: map wraps Ok, flatten passes the chain's own Result through,
+// and Err short-circuits as-is.
+#[test]
+fn lift_works_on_results() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+
+        fun to_number(text: str): Result<i32, str> {
+        	match text.parse_i32() {
+        		Some(let value) => Ok(value),
+        		None => Err(i"bad: {text}"),
+        	}
+        }
+
+        fun halve(value: i32): Result<i32, str> {
+        	if value == value / 2 * 2 {
+        		Ok(value / 2)
+        	} else {
+        		Err("odd")
+        	}
+        }
+
+        fun show(value: Result<i32, str>) {
+        	match value {
+        		Ok(let v) => print(i"ok {format(v)}"),
+        		Err(let e) => print(e),
+        	}
+        }
+
+        fun main() {
+        	let mapped: Result<i32, str> = to_number("21")?.max(0);
+        	show(mapped);
+        	let flat: Result<i32, str> = to_number("42")?.abs()?.max(0);
+        	show(flat);
+        	show(to_number("nope")?.max(0));
+        }
+        "#,
+        "ok 21\nok 42\nbad: nope\n",
+    );
+}
+
+// `?.` composes with `!`: the bang applies to the LIFTED result (it closes the
+// group), not inside the continuation.
+#[test]
+fn lift_composes_with_bang() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+
+        struct Wrap {
+        	label: str,
+        }
+
+        fun boxed(key: str): Option<Wrap> {
+        	if key == "hit" {
+        		Some(Wrap { label = "inside" })
+        	} else {
+        		None
+        	}
+        }
+
+        fun read(key: str): Option<str> {
+        	let label = boxed(key)?.label!;
+        	Some(label)
+        }
+
+        fun main() {
+        	match read("hit") {
+        		Some(let v) => print(v),
+        		None => print("none"),
+        	}
+        	match read("miss") {
+        		Some(let v) => print(v),
+        		None => print("none"),
+        	}
+        }
+        "#,
+        "inside\nnone\n",
+    );
+}
+
+// `?.` on a non-Lift subject is rejected at the chain's span.
+#[test]
+fn lift_on_a_non_lift_type_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+        	let n = 5;
+        	let _ = n?.max(1);
+        }
+        "#,
+        "n?.max(1)",
+        "`?.` lifts an `Option` or `Result`",
+    );
+}
+
+// A flattened Result chain must keep the same error type.
+#[test]
+fn lift_flatten_requires_matching_result_errors() {
+    assert_fails_spanning(
+        r#"
+        import std::result::Result::{ self, Ok, Err };
+
+        fun start(): Result<i32, str> {
+        	Ok(1)
+        }
+
+        struct Helper {}
+
+        impl i32 {
+        	fun widen(self): Result<i32, i32> {
+        		Ok(self)
+        	}
+        }
+
+        fun main() {
+        	let _ = start()?.widen();
+        }
+        "#,
+        "start()?.widen()",
+        "error types must match",
+    );
+}
+
+// A bare `?` (no following member) does not parse.
+#[test]
+fn bare_question_mark_is_rejected() {
+    assert_fails(
+        r#"
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+        	let a = Some(1);
+        	let _ = a?;
+        }
+        "#,
+    );
+}
+
+// A lifted chain is not an assignment target.
+#[test]
+fn lift_is_not_an_assignment_target() {
+    assert_fails(
+        r#"
+        import std::option::Option::{ self, Some, None };
+
+        struct Point {
+        	x: i32,
+        }
+
+        fun main() {
+        	let p = Some(Point { x = 1 });
+        	p?.x = 5;
+        }
+        "#,
+    );
+}

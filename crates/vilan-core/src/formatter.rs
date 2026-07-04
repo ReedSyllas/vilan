@@ -950,6 +950,15 @@ impl<'src> Printer<'src> {
                 self.print_operand(subject, 100);
                 self.out.push('!');
             }
+            Node::Lift(subject, continuation) => {
+                // `a?.b.c`: the subject, `?`, then the continuation — whose
+                // innermost `LiftBinder` prints nothing, so its leading
+                // `.member` renders right after the `?`.
+                self.print_operand(subject, 100);
+                self.out.push('?');
+                self.print_expr(continuation);
+            }
+            Node::LiftBinder => {}
             Node::Reference(mutable, operand) => {
                 self.out.push('&');
                 if *mutable {

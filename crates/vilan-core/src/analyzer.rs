@@ -99,6 +99,12 @@ pub enum Expr<'src> {
     // `expr!` (proposal/try-and-lift.md): the receiver's good half, or an early
     // return of the bad half. Typed by `Constraint::TryAssert`.
     TryAssert(Id),
+    // `a?.b.c` (proposal/try-and-lift.md §3): subject, the continuation's
+    // binder entity, and the continuation. Typed by `Constraint::Lift`.
+    Lift(Id, Id, Id),
+    // The lifted element inside a `Lift` continuation — typed when the Lift
+    // constraint resolves the subject's element.
+    LiftBinder,
     Generic(TypeId),
     If(ExprIfBranch),
     Impl(Id),
@@ -572,6 +578,14 @@ enum Constraint<'src> {
         receiver_id: Id,
         return_type_id: TypeId,
     },
+    /// `a?.b` — types the binder as the subject's element, the whole expression
+    /// as map-or-flatten of the continuation's type, and records the lowering.
+    Lift {
+        id: Id,
+        subject_id: Id,
+        binder_id: Id,
+        continuation_id: Id,
+    },
 }
 
 impl Constraint<'_> {
@@ -598,6 +612,7 @@ impl Constraint<'_> {
             Constraint::CallSubject(constraint) => constraint.call_id,
             Constraint::ReturnType { body_id, .. } => *body_id,
             Constraint::TryAssert { id, .. } => *id,
+            Constraint::Lift { id, .. } => *id,
         }
     }
 
@@ -625,6 +640,7 @@ impl Constraint<'_> {
             // binding is recorded the same way an annotated `let` records it.
             Constraint::ReturnType { .. } => 10,
             Constraint::TryAssert { .. } => 10,
+            Constraint::Lift { .. } => 10,
             Constraint::CallSubject(_) => 11,
         }
     }
@@ -964,8 +980,14 @@ pub struct Analyzer<'src> {
     option_enum_id: Option<Id>,
     result_enum_id: Option<Id>,
     try_trait_id: Option<Id>,
+    lift_trait_id: Option<Id>,
+    // The enclosing `Lift` continuations' binder entities, innermost last —
+    // what a walked `LiftBinder` node resolves to.
+    lift_binder_stack: Vec<Id>,
     // Per `expr!` site: how the transformer lowers it (proposal/try-and-lift.md §4).
     try_dispatch: HashMap<Id, TryDispatch>,
+    // Per `?.` site: the lowering (std pair inline; flatten or map).
+    lift_dispatch: HashMap<Id, LiftDispatch>,
     // The `std::promise` `Promise<T>` struct, if loaded. `async e` types as
     // `Promise<type of e>`, and `await p` unwraps a `Promise<T>` to `T`.
     promise_struct_id: Option<Id>,
@@ -1111,7 +1133,10 @@ impl<'src> Analyzer<'src> {
             option_enum_id: None,
             result_enum_id: None,
             try_trait_id: None,
+            lift_trait_id: None,
+            lift_binder_stack: Vec::new(),
             try_dispatch: HashMap::new(),
+            lift_dispatch: HashMap::new(),
             promise_struct_id: None,
         }
     }
@@ -4269,6 +4294,33 @@ impl<'src> Analyzer<'src> {
                 }
                 Some(Expr::FunctionReturn(value_id))
             }
+            Node::Lift(subject, continuation) => {
+                let subject_id = self.walk_expr_node(subject, scope_id);
+                // The binder: the continuation's hole, typed by the constraint
+                // as the subject's element.
+                let binder_id = self.new_entity_id();
+                self.expr_id_to_expr_map.insert(binder_id, Expr::LiftBinder);
+                self.expr_id_to_scope_id_map.insert(binder_id, scope_id);
+                self.span_map.insert(binder_id, &node.1);
+                self.lift_binder_stack.push(binder_id);
+                let continuation_id = self.walk_expr_node(continuation, scope_id);
+                self.lift_binder_stack.pop();
+                self.constraints.push(Constraint::Lift {
+                    id,
+                    subject_id,
+                    binder_id,
+                    continuation_id,
+                });
+                Some(Expr::Lift(subject_id, binder_id, continuation_id))
+            }
+            Node::LiftBinder => {
+                // Resolve to the innermost enclosing Lift's binder entity, like
+                // a reference to a local.
+                match self.lift_binder_stack.last().copied() {
+                    Some(binder_id) => Some(Expr::Local(binder_id)),
+                    None => Some(Expr::Error),
+                }
+            }
             Node::TryAssert(receiver) => {
                 let receiver_id = self.walk_expr_node(receiver, scope_id);
                 // `!` returns the bad half from the nearest enclosing callable,
@@ -4404,6 +4456,15 @@ impl<'src> Analyzer<'src> {
                 // place (`MemberAccessor`). Walking it yields an `Expr::Local`
                 // or, once resolved, an `Expr::Field`; the transformer renders
                 // either as the left side of a JS assignment.
+                //
+                // A lifted chain is a VALUE, not a place — `p?.x = 5` would
+                // assign into a lowering temp (proposal/try-and-lift.md §3).
+                if lift_target_of(target) {
+                    self.diagnostics.push(Error {
+                        span: target.1,
+                        msg: "a lifted chain (`?.`) is not an assignment target".to_string(),
+                    });
+                }
                 let target_id = self.walk_expr_node(target, scope_id);
                 // A compound assignment like `x += v` desugars to `x = x + v`;
                 // the left operand re-reads the same place.
@@ -5956,6 +6017,15 @@ impl<'src> Analyzer<'src> {
                 }
                 Type::Unresolved
             }
+            // `a?.b` and its binder: typed by `Constraint::Lift` (landing in
+            // `resolved_types`, consulted above); unresolved until then so
+            // dependents defer and wake.
+            Expr::Lift(..) | Expr::LiftBinder => {
+                if let Some(waiting) = self.current_waiting_on.as_mut() {
+                    waiting.push(expr_id);
+                }
+                Type::Unresolved
+            }
             Expr::Unary(_, operand_id) => {
                 self.infer_type_inner(*operand_id, &constraint, substitution_context, exprs_seen)
             }
@@ -7340,6 +7410,12 @@ impl<'src> Analyzer<'src> {
                 receiver_id,
                 return_type_id,
             } => self.resolve_try_assert(*id, *receiver_id, *return_type_id),
+            Constraint::Lift {
+                id,
+                subject_id,
+                binder_id,
+                continuation_id,
+            } => self.resolve_lift(*id, *subject_id, *binder_id, *continuation_id),
         }
     }
 
@@ -8287,6 +8363,118 @@ impl<'src> Analyzer<'src> {
                 msg: format!("Expected {}, but got {} instead.", expected, got),
             });
         }
+        Resolution::Resolved
+    }
+
+    /// `a?.b.c` (proposal/try-and-lift.md §3): once the subject resolves, the
+    /// binder becomes the subject's element (waking the continuation's deferred
+    /// constraints); once the continuation resolves, the whole expression types
+    /// as map (`M<U>`) or — when the continuation yields the subject's own
+    /// container — flatten (`U` itself, error types matching for `Result`).
+    fn resolve_lift(
+        &mut self,
+        id: Id,
+        subject_id: Id,
+        binder_id: Id,
+        continuation_id: Id,
+    ) -> Resolution {
+        if !self.expr_id_to_expr_map.contains_key(&subject_id) {
+            return Resolution::Deferred;
+        }
+        let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+        if matches!(subject_type, Type::Unresolved) {
+            return Resolution::Deferred;
+        }
+        let span = **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN);
+        // v1 lowers the std pair; the `Lift` marker is the opt-in seam, and any
+        // other implementor is recognized but its lowering is the recorded
+        // follow-up (user containers need closure-argument emission).
+        let (family_id, arguments) = match &subject_type {
+            Type::Enum(enum_id, arguments)
+                if Some(*enum_id) == self.option_enum_id
+                    || Some(*enum_id) == self.result_enum_id =>
+            {
+                (*enum_id, arguments.clone())
+            }
+            other => {
+                let rendered = self.pretty_print_type(other, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span,
+                    msg: format!(
+                        "`?.` lifts an `Option` or `Result` (user `Lift` types are not supported yet) — this is {rendered}"
+                    ),
+                });
+                return Resolution::Failed;
+            }
+        };
+        let element = arguments
+            .first()
+            .map(|type_id| type_id.get_type(self))
+            .unwrap_or(Type::Unknown);
+        // Ground the binder first: the continuation's constraints deferred on
+        // it and wake once it lands.
+        let element_id = element.get_type_id(self);
+        if self.resolved_types.get(&binder_id) != Some(&element_id) {
+            self.resolved_types.insert(binder_id, element_id);
+        }
+        let continuation_type = self.infer_type(continuation_id, &Type::Unknown, &HashMap::new());
+        if matches!(continuation_type, Type::Unresolved) {
+            // The continuation resolves after the wake; retry then.
+            return Resolution::Deferred;
+        }
+        let flatten = matches!(&continuation_type, Type::Enum(enum_id, _) if *enum_id == family_id);
+        let result = if flatten {
+            // Flatten: the continuation's container IS the result. For Result,
+            // the error types must agree (the short-circuited Err passes
+            // through unchanged).
+            if Some(family_id) == self.result_enum_id
+                && let (Type::Enum(_, continuation_arguments), Some(subject_error)) =
+                    (&continuation_type, arguments.get(1))
+                && let Some(continuation_error) = continuation_arguments.get(1)
+            {
+                let subject_error_type = subject_error.get_type(self);
+                let continuation_error_type = continuation_error.get_type(self);
+                if self
+                    .reconcile_type(
+                        &subject_error_type,
+                        &continuation_error_type,
+                        &HashMap::new(),
+                    )
+                    .is_none()
+                {
+                    let subject_rendered =
+                        self.pretty_print_type(&subject_error_type, &HashMap::new());
+                    let continuation_rendered =
+                        self.pretty_print_type(&continuation_error_type, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "`?.` flattens into the chain's own `Result`, so the error types must match: the subject's is {subject_rendered}, the chain yields {continuation_rendered}"
+                        ),
+                    });
+                }
+            }
+            continuation_type
+        } else {
+            // Map: wrap the continuation's type back in the subject's container.
+            let continuation_type_id = continuation_type.get_type_id(self);
+            let mut result_arguments = arguments.clone();
+            if result_arguments.is_empty() {
+                result_arguments.push(continuation_type_id);
+            } else {
+                result_arguments[0] = continuation_type_id;
+            }
+            Type::Enum(family_id, result_arguments)
+        };
+        self.lift_dispatch.insert(
+            id,
+            LiftDispatch::Std {
+                flatten,
+                enum_id: family_id,
+            },
+        );
+        let result_id = result.get_type_id(self);
+        self.resolved_types.insert(id, result_id);
         Resolution::Resolved
     }
 
@@ -10276,6 +10464,19 @@ pub const DERIVED_SOURCE: SourceId = SourceId(u32::MAX);
 /// the inline tag-branch fast path; any other `Try` type dispatches to its
 /// impl's `verdict`/`from_bad` (the members recorded here), with the receiver's
 /// concrete type for monomorphization.
+/// How one `?.` site lowers: the std pair inline — short-circuit the bad tag,
+/// run the continuation on the element, wrap (`map`) or pass through
+/// (`flatten`).
+#[derive(Debug, Clone)]
+pub enum LiftDispatch {
+    Std {
+        flatten: bool,
+        /// The subject's enum (`Option`/`Result`) — the map wrap rebuilds its
+        /// good variant (index 0) around the continuation's value.
+        enum_id: Id,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum TryDispatch {
     /// `Option`/`Result`: bad is tag 1, and the bad VALUE (`None` / `Err(e)`)
@@ -10332,6 +10533,8 @@ pub struct Program<'src> {
     /// Per `expr!` site: how the transformer lowers it (std fast path or a
     /// user `Try` impl's members) — proposal/try-and-lift.md §4.
     pub try_dispatch: HashMap<Id, TryDispatch>,
+    /// Per `?.` site: the lowering (proposal/try-and-lift.md §3–4).
+    pub lift_dispatch: HashMap<Id, LiftDispatch>,
     pub bitwise_u32: HashSet<Id>,
     pub bitwise_generic_lhs: HashMap<Id, TypeId>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
@@ -10560,6 +10763,16 @@ fn report_module_parse_errors(diagnostics: &mut Vec<Error>, path: &str, loaded: 
 /// with a field body are handled; each supported trait name emits its impl,
 /// built from the struct's field names. Unknown trait names are skipped (the
 /// missing-impl error surfaces naturally at the use site).
+/// Whether an assignment target contains a lifted chain (`?.`) at its root —
+/// walking through the member/index places that legally wrap an lvalue.
+fn lift_target_of(node: &Spanned<Node<'_>>) -> bool {
+    match &node.0 {
+        Node::Lift(..) => true,
+        Node::MemberAccessor(subject, _) | Node::Index(subject, _) => lift_target_of(subject),
+        _ => false,
+    }
+}
+
 /// Renders a (field) type node back to source for use in generated code — a
 /// name (`i32`/`Point`) or a generic application (`List<i32>`). Other forms fall
 /// back to `_`, which surfaces a clear error at the generated use site.
@@ -12350,6 +12563,12 @@ pub fn analyze<'src>(
             .get(scope_id)
             .and_then(|scope| scope.name_to_id_map.get("Try").copied())
     });
+    analyzer.lift_trait_id = module_scopes.get("operators").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("Lift").copied())
+    });
 
     // Bind source-defined primitive structs into the literal registry (so number
     // and string literals infer the right type) and the global scope (so bare
@@ -12867,6 +13086,7 @@ pub fn analyze<'src>(
         own_generic_call_bindings: analyzer.own_generic_call_bindings,
         bound_dispatch_traits: analyzer.bound_dispatch_traits,
         try_dispatch: analyzer.try_dispatch,
+        lift_dispatch: analyzer.lift_dispatch,
         bitwise_u32: analyzer.bitwise_u32,
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,

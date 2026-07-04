@@ -846,6 +846,11 @@ impl Document {
             start -= 1;
         }
         if start >= 1 && bytes[start - 1] == b'.' {
+            // `a?.` completes on the LIFTED element (`Option<Profile>` offers
+            // Profile's members — proposal/try-and-lift.md §5).
+            if start >= 2 && bytes[start - 2] == b'?' {
+                return self.lifted_member_completions(program, start - 2);
+            }
             return self.member_completions(program, start - 1);
         }
         if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
@@ -860,6 +865,11 @@ impl Document {
         let Some(type_id) = self.receiver_nominal_id(program, dot_offset) else {
             return Vec::new();
         };
+        self.nominal_member_completions(program, type_id)
+    }
+
+    /// The fields + methods of one nominal type — the member-completion list.
+    fn nominal_member_completions(&self, program: &Program, type_id: Id) -> Vec<Completion> {
         let mut items = Vec::new();
         if let Some(structure) = program.structs.get(&type_id) {
             for field in &structure.fields {
@@ -871,6 +881,61 @@ impl Document {
         }
         self.push_methods(program, type_id, true, &mut items);
         items
+    }
+
+    /// Members of the ELEMENT under a lifted chain (`a?.` on an
+    /// `Option<Profile>` offers Profile's members): the receiver ends just
+    /// before the `?` at `question_offset`; its container's first type
+    /// argument is the element.
+    fn lifted_member_completions(
+        &self,
+        program: &Program,
+        question_offset: usize,
+    ) -> Vec<Completion> {
+        // A bare name (`p?.`): the binding's declared container type.
+        if let Some(name) = identifier_ending_at(self.line_index.text(), question_offset) {
+            let binding = self
+                .binding_in_scope(program, name, question_offset)
+                .or_else(|| self.same_file_variable(program, name, question_offset));
+            let element = binding
+                .and_then(|id| {
+                    program
+                        .variables
+                        .get(&id)
+                        .map(|variable| variable.type_id)
+                        .or_else(|| {
+                            program
+                                .parameters
+                                .get(&id)
+                                .map(|parameter| parameter.type_id)
+                        })
+                })
+                .and_then(|type_id| match program.type_id_to_type_map.get(&type_id) {
+                    Some(Type::Enum(_, arguments)) | Some(Type::Struct(_, arguments)) => {
+                        arguments.first().copied()
+                    }
+                    _ => None,
+                })
+                .and_then(
+                    |element_id| match program.type_id_to_type_map.get(&element_id) {
+                        Some(Type::Struct(id, _)) | Some(Type::Enum(id, _)) => Some(*id),
+                        _ => None,
+                    },
+                );
+            if let Some(element) = element {
+                return self.nominal_member_completions(program, element);
+            }
+        }
+        // A complex receiver (`find(x)?.`): its rendered type's first generic
+        // argument names the element.
+        question_offset
+            .checked_sub(1)
+            .and_then(|offset| self.entity_at(offset))
+            .and_then(|receiver| self.hover_label(program, receiver))
+            .and_then(|label| first_generic_argument(&label).map(str::to_string))
+            .and_then(|element| self.nominal_id_by_name(program, base_type_name(&element)))
+            .map(|type_id| self.nominal_member_completions(program, type_id))
+            .unwrap_or_default()
     }
 
     /// The nominal struct/enum id of the receiver value ending just before the `.`
@@ -1125,6 +1190,24 @@ fn is_identifier_byte(byte: u8) -> bool {
 /// The nominal name in a rendered type label: `struct Point` -> `Point`,
 /// `enum Option<i32>` -> `Option` (drops the `struct`/`enum`/`trait` prefix the
 /// type renderer adds, plus any type arguments and surrounding whitespace).
+/// The first generic argument of a rendered type label — `Option<Profile>` →
+/// `Profile`, `Result<User, str>` → `User` (nesting respected).
+fn first_generic_argument(label: &str) -> Option<&str> {
+    let open = label.find('<')?;
+    let inner = &label[open + 1..];
+    let mut depth = 0usize;
+    for (index, character) in inner.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' if depth == 0 => return Some(inner[..index].trim()),
+            '>' => depth -= 1,
+            ',' if depth == 0 => return Some(inner[..index].trim()),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn base_type_name(label: &str) -> &str {
     let label = label.trim();
     let label = ["struct ", "enum ", "trait "]
@@ -1312,6 +1395,26 @@ mod tests {
             .into_iter()
             .map(|completion| completion.label)
             .collect()
+    }
+
+    #[test]
+    fn lifted_member_completion_offers_the_element() {
+        let labels = completions_at_cursor(
+            "import std::option::Option::{ self, Some, None };\n\
+             struct Profile { name: str, age: i32 }\n\
+             impl Profile { fun greeting(self): str { self.name } }\n\
+             fun find(): Option<Profile> { None }\n\
+             fun main() {\n\tlet p: Option<Profile> = find();\n\tp?.|\n}\n",
+        );
+        assert!(labels.contains(&"name".to_string()), "fields: {labels:?}");
+        assert!(
+            labels.contains(&"greeting".to_string()),
+            "methods: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"unwrap_or".to_string()),
+            "the ELEMENT's members, not Option's: {labels:?}"
+        );
     }
 
     #[test]

@@ -233,6 +233,13 @@ pub enum Node<'src> {
     // `Try` value, or an early return of the bad half from the nearest
     // enclosing function.
     TryAssert(Box<Spanned<Self>>),
+    // `a?.b.c` — a lifted member chain (proposal/try-and-lift.md §3): the
+    // subject, and the continuation built over `LiftBinder` (the segment from
+    // this `?` to the next `?`/`!`/chain end). Maps, or flattens when the
+    // continuation yields the subject's own container.
+    Lift(Box<Spanned<Self>>, Box<Spanned<Self>>),
+    // The continuation's hole: the lifted element inside a `Lift` chain.
+    LiftBinder,
     If(NodeIfBranch<'src>),
     // `subject is pattern` — a pattern test that yields a `bool` and binds the
     // pattern's captures into the surrounding scope.

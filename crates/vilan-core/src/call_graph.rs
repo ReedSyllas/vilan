@@ -325,6 +325,11 @@ impl<'a, 'src> Collector<'a, 'src> {
             Expr::FunctionReturn(Some(value_id)) => self.walk(*value_id),
             Expr::FunctionReturn(None) => {}
             Expr::TryAssert(receiver_id) => self.walk(*receiver_id),
+            Expr::Lift(subject_id, _, continuation_id) => {
+                self.walk(*subject_id);
+                self.walk(*continuation_id);
+            }
+            Expr::LiftBinder => {}
             Expr::Binary(_, lhs, rhs) => {
                 self.walk(*lhs);
                 self.walk(*rhs);

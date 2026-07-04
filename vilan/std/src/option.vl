@@ -1,6 +1,6 @@
 import pkg::compare::PartialEq;
 import pkg::default::Default;
-import pkg::operators::{ Try, Verdict };
+import pkg::operators::{ Lift, Try, Verdict };
 import pkg::io::panic;
 import pkg::result::Result::{ self, Ok, Err };
 
@@ -26,6 +26,10 @@ impl Option<type T> with Try<T, void> {
 		None
 	}
 }
+
+// `?.` on an `Option` maps `Some` (or flattens an `Option`-yielding chain);
+// `None` short-circuits.
+impl Option<type T> with Lift {}
 
 impl Option<type T> {
 	fun is_some(self): bool {

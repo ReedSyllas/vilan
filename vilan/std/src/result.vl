@@ -2,7 +2,7 @@ import pkg::io::panic;
 import pkg::option::Option::{ self, Some, None };
 import pkg::compare::PartialEq;
 import pkg::default::Default;
-import pkg::operators::{ Try, Verdict };
+import pkg::operators::{ Lift, Try, Verdict };
 
 enum Result<T, E> {
 	Ok(T),
@@ -26,6 +26,10 @@ impl Result<type T, type E> with Try<T, E> {
 		Err(bad)
 	}
 }
+
+// `?.` on a `Result` maps `Ok` (or flattens a `Result`-yielding chain, same
+// error type); `Err` short-circuits.
+impl Result<type T, type E> with Lift {}
 
 impl Result<type T, type E> {
 	fun is_ok(self): bool {

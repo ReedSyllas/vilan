@@ -78,8 +78,10 @@ have gaps.
     Signal/Promise recorded candidates). Both are operators (the `Add` dispatch model,
     inline fast path for std), not source rewrites. Deferred: expression lifting
     (`a? + 10`), applicatives, error conversion, closure `!` (the RPC-handler follow-up).
-    **Slice 1 (`!`) shipped 2026-07-04** — remaining here: slice 2 (`?.`) and the
-    deferred list.
+    **Both slices shipped 2026-07-04.** Remaining here (the recorded deferrals):
+    user-`Lift` lowering (closure-argument emission; the marker + clean error exist),
+    closure `!` (the RPC-handler follow-up), error conversion, expression lifting
+    (`a? + 10`), applicatives, and `Signal`/`Promise` `Lift` opt-ins.
 
 ---
 

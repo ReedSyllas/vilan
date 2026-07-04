@@ -1,5 +1,6 @@
 use crate::analyzer::{
-    Expr, ExprIfBranch, ExprPattern, Function, GenericDispatch, Intrinsic, Program, TryDispatch,
+    Expr, ExprIfBranch, ExprPattern, Function, GenericDispatch, Intrinsic, LiftDispatch, Program,
+    TryDispatch,
 };
 use crate::error::Error;
 use crate::id::Id;
@@ -1032,6 +1033,68 @@ impl<'src> Transformer<'src> {
                     .and_then(|value| self.walk_entity(value, block))
                     .unwrap_or(js::Node::Void),
             )),
+            // `a?.b.c` (proposal/try-and-lift.md §3–4): evaluate the subject
+            // once; a bad tag short-circuits AS-IS; otherwise the continuation
+            // runs with the binder aliased to the element, and the result is
+            // wrapped back (map) or passed through (flatten).
+            Expr::Lift(subject_id, binder_id, continuation_id) => {
+                let subject = self
+                    .walk_entity(*subject_id, block)
+                    .unwrap_or(js::Node::Void);
+                let subject_name = self.ng.next_name();
+                block.push(js::Node::ConstVariable(js::Variable {
+                    name: subject_name.clone(),
+                    value: Box::new(subject),
+                }));
+                let result_name = self.ng.next_name();
+                block.push(js::Node::LetVariable(js::Variable {
+                    name: result_name.clone(),
+                    value: Box::new(js::Node::Null),
+                }));
+                let bad_body = vec![js::Node::Assignment(
+                    Box::new(js::Node::Local(result_name.clone())),
+                    Box::new(js::Node::Local(subject_name.clone())),
+                )];
+                self.is_bindings.insert(
+                    *binder_id,
+                    js::Node::PropertyIndex(
+                        Box::new(js::Node::Local(subject_name.clone())),
+                        Box::new(js::Node::Number("1".to_string(), None)),
+                    ),
+                );
+                let mut good_body = Vec::new();
+                let value = self
+                    .walk_entity(*continuation_id, &mut good_body)
+                    .unwrap_or(js::Node::Void);
+                self.is_bindings.remove(binder_id);
+                let wrapped = match self.program.lift_dispatch.get(&id) {
+                    Some(LiftDispatch::Std { flatten: true, .. }) | None => value,
+                    Some(LiftDispatch::Std {
+                        flatten: false,
+                        enum_id,
+                    }) => self.variant_value(*enum_id, 0, vec![value]),
+                };
+                good_body.push(js::Node::Assignment(
+                    Box::new(js::Node::Local(result_name.clone())),
+                    Box::new(wrapped),
+                ));
+                block.push(js::Node::If(js::IfBranch::If(
+                    Box::new(js::Node::Binary(
+                        BinaryOp::Eq,
+                        Box::new(js::Node::PropertyIndex(
+                            Box::new(js::Node::Local(subject_name)),
+                            Box::new(js::Node::Number("0".to_string(), None)),
+                        )),
+                        Box::new(js::Node::Number("1".to_string(), None)),
+                    )),
+                    bad_body,
+                    Some(Box::new(js::IfBranch::Else(good_body))),
+                )));
+                js::Node::Local(result_name)
+            }
+            // Only reachable through the `Local` alias inside a continuation;
+            // standalone it has no value.
+            Expr::LiftBinder => js::Node::Void,
             // `expr!` (proposal/try-and-lift.md §4): evaluate the receiver once,
             // branch on the bad tag, return the bad half, yield the good half.
             Expr::TryAssert(receiver_id) => {

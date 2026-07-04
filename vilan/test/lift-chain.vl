@@ -1,0 +1,63 @@
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+
+// `a?.b.c` (try-and-lift §3): the continuation applies INSIDE the container —
+// map when it yields a plain value, flatten when it yields the container.
+
+struct Book {
+	title: str,
+	sequel: str,
+}
+
+impl Book {
+	fun shelf(self): Option<str> {
+		if self.title == "dune" {
+			Some("sci-fi")
+		} else {
+			None
+		}
+	}
+}
+
+fun find(key: str): Option<Book> {
+	if key == "hit" {
+		Some(Book { title = "dune", sequel = "messiah" })
+	} else {
+		None
+	}
+}
+
+fun to_number(text: str): Result<i32, str> {
+	match text.parse_i32() {
+		Some(let value) => Ok(value),
+		None => Err(text),
+	}
+}
+
+fun main() {
+	// map: field, then method-with-args in one group
+	print((find("hit")?.title).unwrap_or("?")); // dune
+	print((find("hit")?.sequel.len()).unwrap_or(0 - 1)); // 7
+	print((find("miss")?.title).unwrap_or("?")); // ?
+	// flatten: Option-yielding continuation stays single
+	print((find("hit")?.shelf()).unwrap_or("?")); // sci-fi
+	print((find("miss")?.shelf()).unwrap_or("?")); // ?
+	// Result: map + Err pass-through
+	match to_number("40")?.max(2) {
+		Ok(let v) => print(v), // 40
+		Err(let e) => print(e),
+	}
+	match to_number("nope")?.max(2) {
+		Ok(let v) => print(v),
+		Err(let e) => print(e), // nope
+	}
+	// composed with `!` inside an Option fn
+	print(headline("hit").unwrap_or("?")); // DUNE-ish: title upper
+	print(headline("miss").unwrap_or("?")); // ?
+}
+
+fun headline(key: str): Option<str> {
+	let title = find(key)?.title!;
+	Some(title.to_uppercase())
+}

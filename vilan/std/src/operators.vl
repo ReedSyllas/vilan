@@ -20,6 +20,14 @@ trait Try<T, B> {
 	fun from_bad(bad: B): Self;
 }
 
+// === `?.` — lifted member chains (proposal/try-and-lift.md §3) ==============
+
+// The opt-in marker for `?.`: a lifted chain applies its continuation INSIDE
+// the container (`a?.b.c` on an `Option` maps — or, when the continuation
+// yields the container's own type, flattens). `Option` and `Result` opt in in
+// their own modules; the compiler lowers the std pair inline.
+trait Lift {}
+
 trait Add<B = Self> {
 	fun add(self, b: B): Self {
 		panic("not implemented yet")
