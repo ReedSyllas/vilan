@@ -3716,11 +3716,10 @@ fn bare_ret_returns_void_early() {
     );
 }
 
-// A `ret` value must match the declared return type. It currently is not
-// checked at all — `ret "nope"` in an `i32` function compiles clean (the
-// solver never constrains a FunctionReturn against the enclosing signature).
+// A `ret` value must match the declared return type (proposal/ret-checking.md:
+// `ret` joins the tail's `ReturnType` constraint, which now verifies via
+// `reconcile_type` instead of only directing inference).
 #[test]
-#[ignore]
 fn ret_value_is_checked_against_the_declared_return_type() {
     assert_fails(
         r#"
@@ -3736,10 +3735,9 @@ fn ret_value_is_checked_against_the_declared_return_type() {
     );
 }
 
-// The void case of the same gap: a bare `ret` inside a function that declares
-// a value return type should be rejected, not compile to `return;`.
+// The void case: a bare `ret` is `ret <void>` — legal exactly when the
+// declared return type is void, rejected in a value-returning function.
 #[test]
-#[ignore]
 fn bare_ret_in_a_value_returning_function_is_rejected() {
     assert_fails(
         r#"
@@ -3797,5 +3795,260 @@ fn malformed_json_frames_fail_sticky_instead_of_crashing() {
         }
         "#,
         "direct: malformed JSON\nframed: malformed JSON\nrpc answers: {\"Failure\":{\"Decode\":\"malformed JSON\"}}\n",
+    );
+}
+
+// The wider half of the same gap (proposal/ret-checking.md): the TAIL was not
+// checked either — `Constraint::ReturnType` directed inference but never
+// verified. `fun f(): i32 { "nope" }` used to compile clean.
+#[test]
+fn function_tail_is_checked_against_the_declared_return_type() {
+    assert_fails(
+        r#"
+        fun bad(): i32 {
+        	"nope"
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+    );
+}
+
+// A void CALL is not a value: caught in tail position...
+#[test]
+fn a_void_call_tail_is_not_a_value_return() {
+    assert_fails(
+        r#"
+        import std::print;
+
+        fun bad(): i32 {
+        	print("side effect")
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+    );
+}
+
+// ...and in `ret` position.
+#[test]
+fn a_void_call_ret_is_not_a_value_return() {
+    assert_fails(
+        r#"
+        import std::print;
+
+        fun bad(): i32 {
+        	ret print("side effect");
+        	1
+        }
+
+        fun main() {
+        	let _ = bad();
+        }
+        "#,
+    );
+}
+
+// One bad `ret` among good ones is flagged — the check is per return site,
+// not per function.
+#[test]
+fn one_bad_ret_among_good_ones_is_flagged() {
+    assert_fails(
+        r#"
+        fun bad(a: bool, b: bool): i32 {
+        	if a {
+        		ret 1;
+        	}
+        	if b {
+        		ret "two";
+        	}
+        	3
+        }
+
+        fun main() {
+        	let _ = bad(true, false);
+        }
+        "#,
+    );
+}
+
+// In a function with NO declared return type, `ret <value>` is unchecked and
+// the value is discarded — the same rule as the (unchecked) tail of a void
+// function. Consistency with the tail is the deliberate semantic
+// (proposal/ret-checking.md rule 3).
+#[test]
+fn ret_with_a_value_in_an_undeclared_void_function_is_allowed() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun loud(flag: bool) {
+        	if flag {
+        		ret print("early");
+        	}
+        	print("late");
+        }
+
+        fun main() {
+        	loud(true);
+        	loud(false);
+        }
+        "#,
+        "early\nlate\n",
+    );
+}
+
+// A generic return type checks `ret` by unification, exactly like the tail.
+#[test]
+fn generic_return_rets_bind_like_the_tail() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+
+        fun pick<T>(flag: bool, a: T, b: T): T {
+        	if flag {
+        		ret a;
+        	}
+        	b
+        }
+
+        fun main() {
+        	print(format(pick(true, 1, 2)));
+        	print(pick(false, "x", "y"));
+        }
+        "#,
+        "1\ny\n",
+    );
+}
+
+// `ret` is a first-class return position: a return-position generic call binds
+// its type parameters from the declared type through `ret`, like the tail.
+#[test]
+fn ret_directs_return_position_generics() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+
+        fun fresh(flag: bool): List<i32> {
+        	if flag {
+        		ret List::new();
+        	}
+        	[7]
+        }
+
+        fun main() {
+        	print(format(fresh(true).len()));
+        	print(format(fresh(false).len()));
+        }
+        "#,
+        "0\n1\n",
+    );
+}
+
+// An `async` function's `ret` checks against its declared return type.
+#[test]
+fn async_function_rets_check_against_the_declared_type() {
+    assert_fails(
+        r#"
+        async fun bad(flag: bool): i32 {
+        	if flag {
+        		ret "nope";
+        	}
+        	1
+        }
+
+        async fun main() {
+        	let _ = await bad(true);
+        }
+        "#,
+    );
+}
+
+// `ret` returns from the NEAREST callable: a closure (or `async` block) is its
+// own boundary with an INFERRED return type, so `ret` inside one is not checked
+// against the enclosing function (v1 — proposal/ret-checking.md rule 4), and at
+// runtime it exits the closure, not the function.
+#[test]
+fn ret_inside_a_closure_exits_the_closure_and_is_unchecked_v1() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+
+        fun apply(f: |i32| i32): i32 {
+        	f(10)
+        }
+
+        fun main() {
+        	let result = apply(|x| {
+        		if x > 5 {
+        			ret 99;
+        		}
+        		x + 1
+        	});
+        	print(format(result));
+        	print("after");
+        }
+        "#,
+        "99\nafter\n",
+    );
+}
+
+// The recorded follow-up (proposal/ret-checking.md): a closure's `ret` should
+// PARTICIPATE in the closure's return-type inference — `|x| { ret "s"; x }`
+// passed where `|i32| i32` is expected should be rejected. Today the closure's
+// type comes from its tail alone, so the mismatched `ret` slips through.
+#[test]
+#[ignore]
+fn ret_participates_in_closure_return_inference() {
+    assert_fails(
+        r#"
+        fun apply(f: |i32| i32): i32 {
+        	f(10)
+        }
+
+        fun main() {
+        	let _ = apply(|x| {
+        		if x > 5 {
+        			ret "mismatched";
+        		}
+        		x + 1
+        	});
+        }
+        "#,
+    );
+}
+
+// A trait-typed `self` returns through a trait-typed signature (the
+// `impl Iterator<type T> with Iterable<T> { fun iter(self): Iterator<T> { self } }`
+// shape) — pins the `(Trait, Trait)` reconcile arm the return check surfaced.
+#[test]
+fn a_trait_typed_self_returns_through_a_trait_typed_signature() {
+    assert_compiles(
+        r#"
+        import std::option::Option::{ self, Some, None };
+
+        trait Walk<T> {
+        	fun step(self): Option<T>;
+        }
+
+        trait AsWalk<T> {
+        	fun as_walk(self): Walk<T>;
+        }
+
+        impl Walk<type T> with AsWalk<T> {
+        	fun as_walk(self): Walk<T> {
+        		self
+        	}
+        }
+
+        fun main() {}
+        "#,
     );
 }

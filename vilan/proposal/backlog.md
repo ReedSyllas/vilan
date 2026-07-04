@@ -64,10 +64,11 @@ have gaps.
 9. **Impl-binder declaration order** (S; pin ledger) — the second `#[ignore]` pin; declaration
    order affects binder resolution. Trivial workaround (reorder declarations); fix for hygiene.
 
-10. **`ret` return-type checking is missing entirely** (S–M) — `ret "nope"` in an `i32` function
-    compiles clean, and a bare `ret` in a value-returning function compiles to a `return;` — the
-    solver never constrains a `FunctionReturn` against the enclosing signature. Two `#[ignore]`
-    pins in `inference.rs` (`ret_value_is_checked_…`, `bare_ret_in_a_value_returning_…`).
+10. **`ret` participates in closure return inference** (M; the recorded remainder of the
+    shipped return-position checking, `ret-checking.md` rule 4) — a closure's `ret` neither
+    checks against nor contributes to the closure's inferred return type (`|x| { ret "s";
+    x }` passes where `|i32| i32` is expected; `|x| { ret 5; }` types as a void closure).
+    Pinned `#[ignore]`d (`ret_participates_in_closure_return_inference`).
 
 11. **`?`/try** (M–L; transport-rpc Q10) — terse error propagation. Unblocks `arg → Result`
     handler ergonomics and guarded parsing (I3); wants its own proposal (interaction with `Result`

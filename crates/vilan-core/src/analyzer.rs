@@ -692,6 +692,12 @@ pub struct Analyzer<'src> {
     /// `[expose]`d fields awaiting the `Signal`-of-Wire check
     /// (`check_expose_fields`), collected at the struct walk.
     expose_fields_to_check: Vec<ExposeFieldCheck<'src>>,
+    // The innermost enclosing callable's DECLARED return type, or `None` when
+    // there is nothing to check `ret` against (an undeclared-void function, or
+    // a closure/`async` block, whose return type is inferred): `ret` returns
+    // from the nearest callable, so each body walk pushes its frame
+    // (proposal/ret-checking.md).
+    return_type_stack: Vec<Option<TypeId>>,
     /// Non-fatal diagnostics (e.g. an unused `[must_use]` result). Rendered as
     /// warnings; they do not block codegen.
     warnings: Vec<Error>,
@@ -976,6 +982,7 @@ impl<'src> Analyzer<'src> {
             wire_types_to_check: Vec::new(),
             rpc_signatures_to_check: Vec::new(),
             expose_fields_to_check: Vec::new(),
+            return_type_stack: Vec::new(),
             warnings: Vec::new(),
             entity_id: 0,
             enums: IndexMap::new(),
@@ -4074,6 +4081,10 @@ impl<'src> Analyzer<'src> {
                     self.expr_id_to_type_id_map.insert(id, function_type_id);
                     Some(Expr::ExternalFunction(id))
                 } else {
+                    // The body's `ret`s check against this function's declared
+                    // return type; an undeclared (void) return checks nothing —
+                    // consistent with the tail (proposal/ret-checking.md).
+                    self.return_type_stack.push(return_type_id);
                     let (ids, expr_id) = match &function.body {
                         Some(body) => {
                             // Parameter destructures run first, before the body.
@@ -4102,6 +4113,7 @@ impl<'src> Analyzer<'src> {
                             (Vec::new(), void_id)
                         }
                     };
+                    self.return_type_stack.pop();
                     // Infer the body's tail against the declared return type (the
                     // way a `let v: R = ..` annotation drives its value), so a
                     // return-position generic call binds its type parameters from
@@ -4170,10 +4182,30 @@ impl<'src> Analyzer<'src> {
                 Some(Expr::Call(id))
             }
             Node::FuncReturn(value) => {
-                let id = value
+                let value_id = value
                     .as_ref()
                     .map(|value| self.walk_expr_node(value, scope_id));
-                Some(Expr::FunctionReturn(id))
+                // `ret` is a return position exactly like the tail: its value
+                // checks (and binds return-position generics) against the
+                // innermost callable's DECLARED return type. A bare `ret` is
+                // `ret <void>` — a synthesized void value spanned at the `ret`,
+                // legal exactly when the declared type is void
+                // (proposal/ret-checking.md).
+                if let Some(Some(return_type_id)) = self.return_type_stack.last().copied() {
+                    let checked_id = value_id.unwrap_or_else(|| {
+                        let void_id = self.new_entity_id();
+                        self.expr_id_to_expr_map.insert(void_id, Expr::Void);
+                        self.expr_id_to_scope_id_map.insert(void_id, scope_id);
+                        self.span_map.insert(void_id, &node.1);
+                        void_id
+                    });
+                    self.expected_types.insert(checked_id, return_type_id);
+                    self.constraints.push(Constraint::ReturnType {
+                        body_id: checked_id,
+                        return_type_id,
+                    });
+                }
+                Some(Expr::FunctionReturn(value_id))
             }
             Node::Binary(op, lhs, rhs) => {
                 let lhs_id = self.walk_expr_node(lhs, scope_id);
@@ -4692,7 +4724,11 @@ impl<'src> Analyzer<'src> {
                         )
                     })
                     .collect::<Vec<_>>();
+                // A closure is a `ret` boundary with an INFERRED return type —
+                // nothing declared to check against (proposal/ret-checking.md).
+                self.return_type_stack.push(None);
                 let expr_id = self.walk_expr_node(&closure.return_value, body_scope_id);
+                self.return_type_stack.pop();
                 self.closures.insert(
                     id,
                     Closure {
@@ -4712,7 +4748,10 @@ impl<'src> Analyzer<'src> {
                 let closure_id = self.new_entity_id();
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
+                // Like a closure: a `ret` boundary with an inferred return type.
+                self.return_type_stack.push(None);
                 let return_id = self.walk_expr_node(body, body_scope_id);
+                self.return_type_stack.pop();
                 self.closures.insert(
                     closure_id,
                     Closure {
@@ -6599,6 +6638,48 @@ impl<'src> Analyzer<'src> {
                     self.reconcile_argument_types(l_arguments, r_arguments, substitution_context)?;
                 (Type::Struct(*l_id, arguments), bindings)
             }
+            // Two abstract mapped types (e.g. a parameter typed `(U in T:
+            // List<U>)` returned through an identically-written mapped return):
+            // the same syntax walks as distinct binder ids, so reconcile
+            // STRUCTURALLY — sources and templates recurse (a template's
+            // `Generic(U_left)` binds against `Generic(U_right)` like any
+            // generic), and the binders' alpha-renaming bindings are dropped
+            // from the result. Concrete tuples against a mapped type take the
+            // inversion arms above instead.
+            (
+                Type::Mapped(l_binder, l_source, l_template),
+                Type::Mapped(r_binder, r_source, r_template),
+            ) => {
+                let l_source_type = l_source.get_type(self);
+                let r_source_type = r_source.get_type(self);
+                let (source, mut bindings) =
+                    self.reconcile_type(&l_source_type, &r_source_type, substitution_context)?;
+                let l_template_type = l_template.get_type(self);
+                let r_template_type = r_template.get_type(self);
+                let (template, template_bindings) =
+                    self.reconcile_type(&l_template_type, &r_template_type, substitution_context)?;
+                bindings.extend(
+                    template_bindings
+                        .into_iter()
+                        .filter(|(id, _)| id != l_binder && id != r_binder),
+                );
+                (
+                    Type::Mapped(
+                        *l_binder,
+                        source.get_type_id(self),
+                        template.get_type_id(self),
+                    ),
+                    bindings,
+                )
+            }
+            // The same trait on both sides (e.g. `self` typed `Iterator<T>` in an
+            // `impl Iterator<type T>` block, returned where `Iterator<T>` is
+            // declared): reconcile like the nominal arms above.
+            (Type::Trait(l_id, l_arguments), Type::Trait(r_id, r_arguments)) if l_id == r_id => {
+                let (arguments, bindings) =
+                    self.reconcile_argument_types(l_arguments, r_arguments, substitution_context)?;
+                (Type::Trait(*l_id, arguments), bindings)
+            }
             (
                 Type::Closure(l_parameter_ids, l_return_id),
                 Type::Closure(r_parameter_ids, r_return_id),
@@ -8042,9 +8123,25 @@ impl<'src> Analyzer<'src> {
             return Resolution::Deferred;
         }
         let return_type = return_type_id.get_type(self);
-        let body_type = self.infer_type(body_id, &return_type, &HashMap::new());
+        let substitution_context = HashMap::new();
+        let body_type = self.infer_type(body_id, &return_type, &substitution_context);
         if matches!(body_type, Type::Unresolved) {
             return Resolution::Deferred;
+        }
+        // The checking half (proposal/ret-checking.md): the value must reconcile
+        // with the declared type — the same unification the let-annotation check
+        // uses, so a generic return binds rather than mismatching. Without this,
+        // return position directed inference but never verified it.
+        if self
+            .reconcile_type(&body_type, &return_type, &substitution_context)
+            .is_none()
+        {
+            let expected = self.pretty_print_type(&return_type, &substitution_context);
+            let got = self.pretty_print_type(&body_type, &substitution_context);
+            self.diagnostics.push(Error {
+                span: **self.span_map.get(&body_id).unwrap_or(&&EMPTY_SPAN),
+                msg: format!("Expected {}, but got {} instead.", expected, got),
+            });
         }
         Resolution::Resolved
     }
