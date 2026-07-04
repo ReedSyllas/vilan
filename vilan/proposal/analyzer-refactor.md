@@ -103,6 +103,16 @@ Each lists the bug classes it shrinks, scope (S/M/L), risk, and dependencies.
 > they make these bug *classes* structurally hard to reintroduce and simplify the
 > inference paths, rather than fixing a specific open bug. The one open bug, (c),
 > lives in the transformer's monomorphization, which none of these items address.
+>
+> **Update (2026-07-03): this program is essentially complete.** Items 1–5 are
+> resolved (1 investigated-and-rejected; 2 subsumed by the unified queue —
+> [`constraint-queue-plan.md`](constraint-queue-plan.md), v1+v2 shipped; 5 with
+> the item-4/5 solver pass), bug (c) and the whole A/B/C + B1 cluster are fixed
+> with per-case pins ([`type-solver.md`](type-solver.md): "B1 genuinely fully
+> closed"), and later solver passes extended the same channels (own-generic
+> ordered values, bound-dispatch trait recording — see transport-rpc.md's
+> follow-ups). Only **item 6** (type interning) remains open, as a perf/hygiene
+> stabilization with no bug attached.
 
 ### 1. Inference result memoization — investigated, **NOT worth it** · medium risk
 Original idea: cache `infer_type_inner(expr_id, substitution)` keyed by

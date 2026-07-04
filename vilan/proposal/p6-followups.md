@@ -7,6 +7,10 @@ known silent miscompiles. This file ranks what remains, with enough context to
 re-prioritize later. Agreed order: **1 → 2 → 3**, then 4+5 bundled behind a
 benchmark-justified design pass.
 
+> **Status (2026-07-03): the ladder is COMPLETE — all five items ✅, and the "Final
+> fixes" audit below is fully landed.** What remains beyond this file is proposal-sized
+> (see "Further out").
+
 ## 1. RPC-over-WebSocket multiplexing — ✅ DONE (2026-07-02, 2d82cc7: 2.5× HTTP)
 
 Today a WS client still makes RPC calls over HTTP POST *beside* the socket

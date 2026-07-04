@@ -510,6 +510,14 @@ shape it can provide — first-class, no registry.
 
 ## 6. Codec — the format (data ⇆ bytes)
 
+> **Status (2026-07-03): IMPLEMENTED — the whole arc.** The correction below is kept as the
+> record of the honest inventory that triggered the codec slice; everything it lists as
+> missing has since landed: prerequisites (bits-and-bytes.md), the §6.1 visitor (records,
+> then the trait shape — follow-up #4), both codecs (§6.2), the single-pass envelope
+> re-plumb (double-encoding ~15% → ~0.2%), validating decode incl. `RpcError::Decode` and
+> the guarded `try_parse_json` (a malformed frame is a sticky decode error, never a crash),
+> and the reactive protocol on codecs (§8's amendment — typed mirrors, binary over WS).
+>
 > **Status (record corrected 2026-07-02): designed, NOT implemented.** Earlier revisions
 > marked the `Codec` trait shipped (Q2, phase 1); it never was — no `Codec`, no
 > `JsonCodec` exists anywhere. What shipped hardwires JSON at every seam:
@@ -898,8 +906,9 @@ The pieces this needs, all in the reactive phase:
 A `[library]` package, `std::rpc` (or a standalone `rpc` library), providing the stable
 core: the `Transport` and `DuplexTransport` shapes + built-in transports, `RpcError`, the
 envelope types, and the reactive runtime with its capability table (all shipped; the
-server-side mounts live in the process-layer `std::rpc_server`). The `Codec` trait +
-`JsonCodec` join it once §6's prerequisites land — they are not there yet (§6 status). The `[derive(Wire)]` derive, the
+server-side mounts live in the process-layer `std::rpc_server`). The codec seam shipped
+too — `Codec`/`Frame` live in `std::wire`, with `json_codec()` (`std::json`) and
+`binary_codec()` (`std::binary`) as the two implementations (§6.2). The `[derive(Wire)]` derive, the
 `[service]`/`[rpc]` generation (dispatcher + stub), and the `[trait_only]`/`[doc(hidden)]`
 attributes are **compiler** features, not library code (§10). The application's own domain types, their
 Wire twins, the `to_wire` projections, and the `[service]` contract live in the app —
@@ -1036,12 +1045,10 @@ The agreed build order within phases 2–3 (2026-07-02): the `[rpc]`/`[expose]` 
 the `[trait_only]`/`[doc(hidden)]` hygiene attributes (§3.2), then `[service(Client)]`
 generation, then the real transports (phase 4), then phase 6's apps + benchmarks.
 
-The **codec** is the next slice (agreed 2026-07-02, after the phase-6 todo app): JSON is
-currently *hardwired*, not a default behind a seam — see §6's status block for the honest
-inventory and the agreed order (hex + bitwise operators → `Bytes` → the `Serializer`
-visitor retarget of `[derive(Wire)]` + validating decode → the `Codec` trait with
-`JsonCodec` and a binary codec). The phase-6 benchmarks bracket it: measure the JSON
-double-encoding before, the binary win after. Phases 0–2 are the usable core (typed
+The **codec** slice is complete (see §6's status block): the agreed order ran
+prerequisites → visitor → both codecs → the single-pass re-plumb, and the benchmarks
+bracketed it as planned (JSON double-encoding ≈15% measured before; binary halves
+payloads; the trait-shaped visitor added +18%/+14% on the direct paths). Phases 0–2 are the usable core (typed
 request/response with the Wire boundary); 3 makes the calls seamless (generated stubs);
 4–5 are the reactive/streaming reach. Each is independently valuable and testable.
 

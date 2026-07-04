@@ -1,5 +1,9 @@
 # Bits and bytes — the binary floor (backlog I2, codec prerequisites 1–2)
 
+> **Status: implemented** (2026-07-02 — commits 24e53f3 the §0 paren miscompile, 295f420
+> hex literals + bitwise/shift, 894d80d `std::bytes`). The binary codec and the RFC 6455
+> WebSocket codec (`std::ws`) both ride it. `[T; n]` generally stays on the backlog (I2).
+
 The language floor under the binary codec (transport-rpc.md §6) and the WebSocket
 frame codec: hex literals, bitwise/shift operators, and a `Bytes` type. Agreed
 2026-07-02 as the first prerequisites of the codec slice.

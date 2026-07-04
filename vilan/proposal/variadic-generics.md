@@ -1,5 +1,10 @@
 # Variadic generics via mapped tuples over flat storage
 
+> **Status: implemented** — see [`variadic-generics-plan.md`](variadic-generics-plan.md)
+> (shipped, commits bc360e9…3d00f5c): `combine` works end to end and is load-bearing in the
+> reactive UI and the todo example. `keyof`/spread-params/elision remain deferred (the
+> plan's own deferred section).
+
 > Supersedes the parameter-pack exploration (previous commit). The driving
 > example is unchanged — `std::reactive::combine`, the product combinator the
 > reactive UI needs (`reactive-ui/todos.vl` imports it; `README.md` flags it as

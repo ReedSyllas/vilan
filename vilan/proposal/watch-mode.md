@@ -1,5 +1,8 @@
 # `--watch` mode (roadmap P5)
 
+> **Status: implemented** (2026-07-02): `build`/`check`/`test`/`run --watch` re-run on `.vl`
+> change, dependency-free polling, `run --watch` restarts the process — as settled below.
+
 `vilan build`/`check`/`test`/`run`, with `--watch`, re-run the command whenever a
 source file changes — the standard edit→save→rebuild loop. Small, independent DX win
 (roadmap P5, sized S); no language semantics, so this note just settles the design

@@ -1,6 +1,14 @@
 # Reactive batching — deferred notification & the `batch` turn
 
-**Status:** **proposal** (2026-07-01, not implemented). A batching layer for `std::reactive`:
+**Status:** **implemented as designed** (2026-07-02, the P6 transport slice). Everything below
+landed byte-for-byte in `std/src/reactive.vl` — the `Scheduler` (pending/depth/draining),
+dedup-on-enqueue, the budget-bounded re-entrancy-guarded `flush`, `batch`, eager lone-`set`,
+and the resolved questions including *dispose scrubs the pending queue*. The wire turn is
+load-bearing across `std::rpc`/`std::rpc_server` (every inbound frame runs in a `batch`), and
+the coalescing claims are CI-pinned as exact counts (`vilan/benchmarks` + its CLI test: 100
+batched sets → 1 update frame; an RPC handler's 3 writes → 1 frame beside the reply). Still
+future, as noted below: the ambient microtask flush and async turns/actions (§Future). The
+document stands as the design record. A batching layer for `std::reactive`:
 `Signal::set` keeps committing its value immediately but **defers subscriber notification** to a
 flush boundary, and a new `batch(body)` groups a set of writes so their observers fire **once**,
 glitch-free. The motivating consumer is the transport/RPC turn (`proposal/transport-rpc.md`): the

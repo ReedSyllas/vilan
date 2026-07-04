@@ -297,7 +297,9 @@ dependencies. Unordered within a section.
 1. **Struct keys for `Map`/`Set`** (M; roadmap #3) — M2 gives value `==`, but JS Map/Set key objects
    by *reference*, so by-value aggregate keys need key-serialization or a custom table.
 2. **A proper array type (`[u8]` / `Bytes`, and `[T; n]` generally)** (M; RPC binary codec;
-   **NEXT UP — codec prerequisite, agreed 2026-07-02**) — a binary `Codec` produces *bytes*,
+   **PARTIALLY SHIPPED 2026-07-02** — hex literals, bitwise/shift, and `std::bytes` over
+   `Uint8Array` landed with the codec slice (bits-and-bytes.md); what REMAINS here is
+   `[T; n]` as a general fixed-length array type) — a binary `Codec` produces *bytes*,
    and Vilan has no byte/array type today: `List<u8>` is the stand-in (heap-boxed,
    length-mutable — workable but not ideal). A fixed-length / contiguous array type — `[u8]`
    (and a `Bytes` view over one) as the immediate want, `[T; n]` as the general feature — is
@@ -307,9 +309,11 @@ dependencies. Unordered within a section.
    also what the WebSocket frame codec is gated on. The codec slice takes `Bytes` (a view
    over the host `Uint8Array`) + hex/bitwise first; `[T; n]` generally stays here.
 3. **Validating `from_json` — decode errors instead of `undefined`** (M; codec hardening,
-   `transport-rpc.md` Q6; **folded into the codec slice's prerequisites, agreed 2026-07-02**:
-   the `Deserializer` returns `Result`, finally constructing the never-yet-used
-   `RpcError::Decode` — transport-rpc.md §6 status) — `from_json` doesn't validate: a
+   `transport-rpc.md` Q6; **the CODEC seam is done** — the wire path validates end to end:
+   sticky deserializer errors, `RpcError::Decode` constructed and pinned, and malformed
+   JSON is a decode error rather than a thrown `JSON.parse` (the guarded `try_parse_json`
+   intrinsic). What REMAINS here is the per-type `to_json`/`from_json` convenience surface,
+   which stays trusting) — `from_json` doesn't validate: a
    missing/mistyped field decodes to `undefined` and flows onward as garbage — the *silent*
    failure mode, worse than a crash. It surfaces under RPC version skew (a changed Wire
    shape), but hurts on **any** malformed input. Wanted: decode reports an error (a `Result`,

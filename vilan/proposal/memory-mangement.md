@@ -1,5 +1,8 @@
 # Memory Management
 
+> **Status: superseded** by [`memory-mangement-rev-1.md`](memory-mangement-rev-1.md)
+> (the four-rules design that shipped). Kept as the original exploration.
+
 ```vilan
 mut a = 10;
 a = 20;

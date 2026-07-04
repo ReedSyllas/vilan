@@ -4,14 +4,15 @@ A ranked backlog, most-important first, to be tackled roughly in order. Ranked b
 *unblocks real programs* > *cheap correctness* > *daily DX* > *strategic reach* >
 *perf / advanced / cleanup*. Effort is S/M/L. Dependencies are noted inline.
 
-Status note (updated): **Tiers 1 and 2 are complete, and most of Tier 3's stdlib/derives.**
-The memory model is done through Phase 5 — value semantics, second-class views, inferred
-`borrows`, `(base,key)` views, subscript/index + element-iteration views, view-returning
-`Option<&T>` (direct/conditional/aggregate — the `Arena::get` shape), `for e in &mut
-container`, plus Phase 6 essentials `Arena`/`Handle` and `Shared<T>`. The **frontier is now
-the two big strategic items: the browser backend (#8) and the general macro engine (#9)** —
-derives already shipped as a special-cased subset of #9. Remaining Phase 6+ memory tail
-(`Weak<T>`, dynamic rule-4, no-view-across-`await`, deterministic destruction) is deferred.
+Status note (updated 2026-07-03): **Tiers 1–3, the project/platform model (P1–P3, L1/L2,
+platform-model.md, deno/bun), P5 `--watch`, the browser backend (#8), variadic generics
+(`combine`), and all of P6 transport/RPC — including its follow-ups ladder and final
+fixes (p6-followups.md) — are complete.** The memory model is done through Phase 5 plus
+Phase 6 essentials (`Arena`/`Handle`, `Shared<T>`); the Phase 6+ tail (`Weak<T>`, dynamic
+rule-4, no-view-across-`await`, deterministic destruction) is deferred. The **frontier is
+now the macro engine (#9)** — derives and `[service]` generation already ship as
+special-cased subsets of it — with the WASM/native backends (backlog F3/F4) and `?`/try
+(Q10) as the other strategic candidates.
 
 **Recently shipped (since this note):** transparent references (the view model — assign *through* a
 view with no `*`, `*` is value-only; R1/R5/R6/R7/R8), `Shared::write` as a real view, reactive

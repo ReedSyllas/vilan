@@ -1,5 +1,11 @@
 # Memory Management (Revision 1)
 
+> **Status: implemented through Phase 6 essentials** (see
+> [`memory-mangement-impl-plan.md`](memory-mangement-impl-plan.md)): value semantics,
+> second-class views, inferred `borrows`, view-returning `Option<&T>`, `for e in &mut`,
+> `Arena`/`Handle`, `Shared<T>`. The Phase 6+ tail (`Weak<T>`, dynamic rule 4,
+> no-view-across-`await`, deterministic destruction) is deferred — backlog §C.
+
 Goals, unchanged: deterministic, GC-free memory that a developer can *read off
 the source*, that unlocks in-place optimization even on the JS backend, and that
 ports to WebAssembly / small Rust modules later **without exposing lifetimes**.

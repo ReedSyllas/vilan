@@ -1,5 +1,9 @@
 # Memory Management — Implementation Plan
 
+> **Status: Phases 1–5 complete + Phase 6 essentials** (`Arena`/`Handle`, `Shared<T>`).
+> The remaining Phase 6+ tail (`Weak<T>`, dynamic rule 4, no-view-across-`await`,
+> deterministic destruction) is deferred and tracked in backlog §C.
+
 Companion to `memory-mangement-rev-1.md` (the design). This is the build
 sequence plus the resolved Phase 0 decisions.
 

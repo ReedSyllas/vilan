@@ -1,6 +1,10 @@
 # Build model: backends, platforms, and layers
 
-Status: **plan, awaiting review** (open questions in §11). **Supersedes library-packages
+Status: **implemented** (2026-06-23, the platform-model stabilizing slice; see [[roadmap]]
+"recently shipped"): `Target` split into `Backend`+`Platform`, library layers declare
+`PlatformPattern` sets, std's `src/node` moved to `src/process` under `[library.layer]`, CLI
+`--platform`/`--backend`. Proven by the follow-on `deno`+`bun` runtimes (the std `process`
+layer serves node/deno/bun unchanged) and the §4.2 completeness check (`vilan check`). **Supersedes library-packages
 L3** and **refines L1/L2**. A merge of two designs: the *layer model* (layers declare
 the platforms they serve, with version first-class, and the cross-platform contract is
 intrinsic to resolution) and the *axis model* (`Target` splits into an emitter

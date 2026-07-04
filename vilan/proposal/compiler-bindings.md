@@ -1,5 +1,9 @@
 # Compiler Bindings
 
+> **Status: idea sketch, unscheduled.** Not designed to the project's proposal bar and
+> not on the roadmap; the macro engine (roadmap #9) covers the nearest concrete need
+> (user-extensible codegen) and would reframe this if taken.
+
 An api for hooking with the compiler in user projects to extend the core functionality and interoperability of the compiler.
 
 ## Compiler bindings API

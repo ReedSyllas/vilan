@@ -1,5 +1,10 @@
 # Type solver — capability characterization (backlog B1)
 
+> **Status: analysis complete, B1 closed** (see the closing section: every row of the
+> bug table has a passing pinned test). Kept as the capability map of what the solver
+> decides and how; later channels (own-generic ordered values, `bound_dispatch_traits`,
+> free-call deferral) are recorded in transport-rpc.md's follow-ups and p6-followups.md.
+
 B1 asks: stand back from the constraint machinery, characterize what the solver
 *can and cannot* decide, find the cases it gets wrong, and **merge the special cases
 into general code** rather than whack-a-mole each one. This is the synthesis. The
