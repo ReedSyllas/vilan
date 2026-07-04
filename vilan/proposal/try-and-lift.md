@@ -238,6 +238,14 @@ transformer-emitted):
 
 ## 6. Deferred (recorded, not drifted into)
 
+- **Return-position generics through `!`** (surfaced by adoption): `let n: i32 =
+  decode_as("42")!` infers the receiver undirected, so `T` never reaches the call's
+  monomorphization — a silent-miscompile shape, pinned `#[ignore]`d
+  (`bang_directs_return_position_generics_into_its_receiver`). Workaround (used by the
+  generated `connect`/`verify`): a typed intermediate, then `!`. The fix wants the
+  solver's expected-type propagation story (it must learn the container before it can
+  direct the element).
+
 - Expression-level lifting (`a? + 10`) and the applicative form (`a? + b?`) — §0.3.
 - Error conversion across types (`Option` in a `Result` fn; `From`-style `E1 → E2`).
 - `!` inside closures/async blocks (first follow-up; wants contextually-known closure

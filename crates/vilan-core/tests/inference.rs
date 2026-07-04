@@ -4833,3 +4833,39 @@ fn lift_is_not_an_assignment_target() {
         "#,
     );
 }
+
+// The recorded try-and-lift deferral surfaced by adoption: a RETURN-position
+// generic should bind THROUGH `!` (the let's annotation directing the
+// receiver's type parameter). Today the receiver is inferred undirected, so
+// `T` never reaches the call's monomorphization — `T::from_json` emits the
+// abstract method (a silent miscompile shape; the workaround is a typed
+// intermediate: `let r: Result<T, E> = call(..); let v = r!;`).
+#[test]
+#[ignore]
+fn bang_directs_return_position_generics_into_its_receiver() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::FromJson;
+
+        fun decode_as<T: FromJson>(text: str): Result<T, str> {
+        	Ok(T::from_json(text))
+        }
+
+        fun run(): Result<i32, str> {
+        	let n: i32 = decode_as("42")!;
+        	Ok(n)
+        }
+
+        fun main() {
+        	match run() {
+        		Ok(let v) => print(format(v)),
+        		Err(let e) => print(e),
+        	}
+        }
+        "#,
+        "42\n",
+    );
+}

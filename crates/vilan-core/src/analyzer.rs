@@ -11189,12 +11189,12 @@ fn service_impl_source(
     // Contract verification (Q6 v2): fetch the server's hash over the wire and
     // compare — `Ok(true)` is a matching contract, `Ok(false)` a drifted one.
     out.push_str(
+        // The typed intermediate directs `call`'s T; `!` propagates the error
+        // (a return-position generic does not bind THROUGH `!` — the recorded
+        // try-and-lift deferral).
         "\tfun verify(self): Result<bool, RpcError> {\n\
          \t\tlet remote: Result<str, RpcError> = call(self.transport, self.codec, \"__contract\", []);\n\
-         \t\tmatch remote {\n\
-         \t\t\tResult::Ok(let hash) => Result::Ok(hash == self.contract_hash()),\n\
-         \t\t\tResult::Err(let error) => Result::Err(error),\n\
-         \t\t}\n\
+         \t\tResult::Ok(remote! == self.contract_hash())\n\
          \t}\n",
     );
     out.push_str(&format!(
@@ -11222,35 +11222,27 @@ fn service_impl_source(
         .map(|(field_name, _)| format!(",\n\t\t\t\t\t{field_name} = mirror_{field_name}"))
         .collect::<Vec<_>>()
         .join("");
+    // The mirror lets sit one level shallower now (no match arm around them).
+    let mirror_lets = mirror_lets.replace("\t\t\t\tlet mirror_", "\t\tlet mirror_");
+    let mirror_fields = mirror_fields.replace("\n\t\t\t\t\t", "\n\t\t\t");
     out.push_str(&format!(
         "impl {client_name}<SocketTransport> {{\n\
          \tfun connect(url: str, codec: Codec): Result<{client_name}<SocketTransport>, RpcError> {{\n\
          \t\tlet socket = connect_socket(url);\n\
          \t\tlet transport = socket.transport();\n\
          \t\tlet remote: Result<str, RpcError> = call(transport, codec, \"__contract\", []);\n\
-         \t\tmatch remote {{\n\
-         \t\t\tResult::Ok(let hash) => {{\n\
-         \t\t\t\tif hash != \"{hash}\" {{\n\
-         \t\t\t\t\tret Result::Err(RpcError::Contract(\"the server reports a different service surface\"));\n\
-         \t\t\t\t}}\n\
-         \t\t\t}},\n\
-         \t\t\tResult::Err(let error) => {{\n\
-         \t\t\t\tret Result::Err(error);\n\
-         \t\t\t}},\n\
+         \t\tif remote! != \"{hash}\" {{\n\
+         \t\t\tret Result::Err(RpcError::Contract(\"the server reports a different service surface\"));\n\
          \t\t}}\n\
          \t\tlet connection = socket.connection;\n\
          \t\tlet attached: Result<List<i32>, RpcError> = call(transport, codec, \"__attach\", [|serializer: Serializer| connection.describe(serializer)]);\n\
-         \t\tmatch attached {{\n\
-         \t\t\tResult::Ok(let channels) => {{\n\
-         \t\t\t\tlet reactive = ReactiveClient::new(bridge(socket), codec);\n\
+         \t\tlet channels = attached!;\n\
+         \t\tlet reactive = ReactiveClient::new(bridge(socket), codec);\n\
 {mirror_lets}\
-         \t\t\t\tResult::Ok({client_name} {{\n\
-         \t\t\t\t\ttransport = transport,\n\
-         \t\t\t\t\tcodec = codec{mirror_fields},\n\
-         \t\t\t\t}})\n\
-         \t\t\t}},\n\
-         \t\t\tResult::Err(let error) => Result::Err(error),\n\
-         \t\t}}\n\
+         \t\tResult::Ok({client_name} {{\n\
+         \t\t\ttransport = transport,\n\
+         \t\t\tcodec = codec{mirror_fields},\n\
+         \t\t}})\n\
          \t}}\n\
          }}\n"
     ));

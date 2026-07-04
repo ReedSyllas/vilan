@@ -121,12 +121,9 @@ fun accounts_dispatcher(): Dispatcher {
 			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
 			None => {
 				// `reply(lookup_user(id))` would NOT compile — `User` has no codec.
-				// The projection to the wire shape is mandatory: the safety guarantee.
-				let wire_user = match lookup_user(id) {
-					Some(let user) => Some(user.to_wire()),
-					None => None,
-				};
-				reply(wire_user)
+				// The projection to the wire shape is mandatory (the safety
+				// guarantee); `?.` applies it inside the Option.
+				reply(lookup_user(id)?.to_wire())
 			},
 		}
 	})
@@ -201,13 +198,10 @@ impl Session {
 	// `[rpc(auth)]` attribute. Unauthenticated is an application-level `None`.
 	[rpc]
 	fun whoami(self): Option<WireUser> {
-		match self.user_id.read() {
-			Some(let id) => match lookup_user(id) {
-				Some(let user) => Some(user.to_wire()),
-				None => None,
-			},
-			None => None,
-		}
+		// `!` returns the `None` early (nobody logged in); `?.` projects inside
+		// the Option — the operator form of what used to be two nested matches.
+		let id = self.user_id.read()!;
+		lookup_user(id)?.to_wire()
 	}
 }
 
