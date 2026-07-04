@@ -811,7 +811,18 @@ impl<'src> Transformer<'src> {
                             .get(id)
                             .cloned()
                             .unwrap_or_default();
-                        let preferred = self.program.bound_dispatch_traits.get(id).copied();
+                        // A static's trait was recorded against the ACCESSOR
+                        // (the call id wasn't known at resolution).
+                        let preferred = self
+                            .program
+                            .bound_dispatch_traits
+                            .get(id)
+                            .or_else(|| {
+                                self.program
+                                    .bound_dispatch_traits
+                                    .get(&function_call.subject_id)
+                            })
+                            .copied();
                         if let Some(dispatch) = self.resolve_dispatch_with(
                             concrete_type_id,
                             member_name,

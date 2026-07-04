@@ -11,7 +11,7 @@ import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::shared::Shared;
 import pkg::bytes::decode_utf8;
-import pkg::wire::{ Wire, Serializer, Deserializer, Codec, Frame };
+import pkg::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer, Codec, Frame };
 
 // --- Serialization (`to_json`) ------------------------------------------------
 
@@ -231,57 +231,110 @@ impl JsonWriter {
 		self.out.read()
 	}
 
-	// The closure record a `Wire` value describes itself to.
+	// The closure record a `Codec` hands out — thin delegates to the trait
+	// methods below (the codec-as-a-value erasure; direct `encode_json` skips it).
 	fun serializer(self): Serializer {
 		Serializer {
-			begin_struct = |fields| self.open("{"),
-			field = |name| {
-				if self.pending_comma.read() {
-					self.out.write() = self.out.read() + ",";
-				}
-				self.out.write() = self.out.read() + name.to_json() + ":";
-				self.pending_comma.write() = false;
-			},
-			end_struct = || self.close("}"),
-			begin_list = |length| self.open("["),
-			end_list = || self.close("]"),
-			begin_variant = |name, arity| {
-				self.variant_arities.write().push(arity);
-				if arity == 0 {
-					// A payload-less variant is its bare name: `"Ready"`.
-					self.value(name.to_json());
-				} else {
-					self.open("{");
-					self.out.write() = self.out.read() + name.to_json() + ":";
-					self.pending_comma.write() = false;
-					if arity > 1 {
-						// Several payloads ride in an array: `{"Pair":[1,2]}`.
-						self.out.write() = self.out.read() + "[";
-					}
-				}
-			},
-			end_variant = || {
-				let arity = match self.variant_arities.write().pop() {
-					Some(let opened) => opened,
-					None => 0,
-				};
-				if arity > 1 {
-					self.out.write() = self.out.read() + "]";
-				}
-				if arity > 0 {
-					self.close("}");
-				}
-			},
-			null_value = || self.value("null"),
-			// JSON has no Some marker — a present Option is its bare value
-			// (which keeps the format's Some(None) ≡ None collapse).
-			some_value = || {},
-			str_value = |value| self.value(value.to_json()),
-			i32_value = |value| self.value(i"{value}"),
-			u32_value = |value| self.value(i"{value}"),
-			f64_value = |value| self.value(i"{value}"),
-			bool_value = |value| self.value(i"{value}"),
+			begin_struct = |fields| self.begin_struct(fields),
+			field = |name| self.field(name),
+			end_struct = || self.end_struct(),
+			begin_list = |length| self.begin_list(length),
+			end_list = || self.end_list(),
+			begin_variant = |name, arity| self.begin_variant(name, arity),
+			end_variant = || self.end_variant(),
+			null_value = || self.null_value(),
+			some_value = || self.some_value(),
+			str_value = |value| self.str_value(value),
+			i32_value = |value| self.i32_value(value),
+			u32_value = |value| self.u32_value(value),
+			f64_value = |value| self.f64_value(value),
+			bool_value = |value| self.bool_value(value),
 		}
+	}
+}
+
+// The visitor's write half, natively — `describe` monomorphizes straight onto
+// these methods on the direct path.
+impl JsonWriter with Serialize {
+	fun begin_struct(self, fields: i32) {
+		self.open("{");
+	}
+
+	fun field(self, name: str) {
+		if self.pending_comma.read() {
+			self.out.write() = self.out.read() + ",";
+		}
+		self.out.write() = self.out.read() + name.to_json() + ":";
+		self.pending_comma.write() = false;
+	}
+
+	fun end_struct(self) {
+		self.close("}");
+	}
+
+	fun begin_list(self, length: i32) {
+		self.open("[");
+	}
+
+	fun end_list(self) {
+		self.close("]");
+	}
+
+	fun begin_variant(self, name: str, arity: i32) {
+		self.variant_arities.write().push(arity);
+		if arity == 0 {
+			// A payload-less variant is its bare name: `"Ready"`.
+			self.value(name.to_json());
+		} else {
+			self.open("{");
+			self.out.write() = self.out.read() + name.to_json() + ":";
+			self.pending_comma.write() = false;
+			if arity > 1 {
+				// Several payloads ride in an array: `{"Pair":[1,2]}`.
+				self.out.write() = self.out.read() + "[";
+			}
+		}
+	}
+
+	fun end_variant(self) {
+		let arity = match self.variant_arities.write().pop() {
+			Some(let opened) => opened,
+			None => 0,
+		};
+		if arity > 1 {
+			self.out.write() = self.out.read() + "]";
+		}
+		if arity > 0 {
+			self.close("}");
+		}
+	}
+
+	fun null_value(self) {
+		self.value("null");
+	}
+
+	// JSON has no Some marker — a present Option is its bare value (which
+	// keeps the format's Some(None) ≡ None collapse).
+	fun some_value(self) {}
+
+	fun str_value(self, value: str) {
+		self.value(value.to_json());
+	}
+
+	fun i32_value(self, value: i32) {
+		self.value(i"{value}");
+	}
+
+	fun u32_value(self, value: u32) {
+		self.value(i"{value}");
+	}
+
+	fun f64_value(self, value: f64) {
+		self.value(i"{value}");
+	}
+
+	fun bool_value(self, value: bool) {
+		self.value(i"{value}");
 	}
 }
 
@@ -345,100 +398,145 @@ impl JsonReader {
 		}
 	}
 
-	// The closure record a `Wire` value rebuilds itself from.
+	// The closure record a `Codec` hands out — thin delegates to the trait
+	// methods below (direct `decode_json` skips it).
 	fun deserializer(self): Deserializer {
 		Deserializer {
-			begin_struct = || {},
-			field = |name| {
-				let subject = self.top();
-				if self.ok() {
-					if has_json_field(subject, name) {
-						self.stack.write().push(subject.field(name));
-					} else {
-						self.report(i"missing field '{name}'");
-					}
-				}
-			},
-			end_struct = || {
-				let _ = self.take();
-			},
-			begin_list = || {
-				let subject = self.take();
-				if self.ok() {
-					let elements = subject.elements();
+			begin_struct = || self.begin_struct(),
+			field = |name| self.field(name),
+			end_struct = || self.end_struct(),
+			begin_list = || self.begin_list(),
+			end_list = || self.end_list(),
+			variant_tag = || self.variant_tag(),
+			begin_variant = |name, arity| self.begin_variant(name, arity),
+			end_variant = || self.end_variant(),
+			is_null = || self.is_null(),
+			null_value = || self.null_value(),
+			str_value = || self.str_value(),
+			i32_value = || self.i32_value(),
+			u32_value = || self.u32_value(),
+			f64_value = || self.f64_value(),
+			bool_value = || self.bool_value(),
+			fail = |reason| self.fail(reason),
+			failed = || self.failed(),
+		}
+	}
+}
+
+// The visitor's read half, natively.
+impl JsonReader with Deserialize {
+	fun begin_struct(self) {}
+
+	fun field(self, name: str) {
+		let subject = self.top();
+		if self.ok() {
+			if has_json_field(subject, name) {
+				self.stack.write().push(subject.field(name));
+			} else {
+				self.report(i"missing field '{name}'");
+			}
+		}
+	}
+
+	fun end_struct(self) {
+		let _ = self.take();
+	}
+
+	fun begin_list(self): i32 {
+		let subject = self.take();
+		if self.ok() {
+			let elements = subject.elements();
+			mut index = elements.len() - 1;
+			for index >= 0 {
+				self.stack.write().push(elements[index]);
+				index -= 1;
+			}
+			elements.len()
+		} else {
+			0
+		}
+	}
+
+	fun end_list(self) {}
+
+	fun variant_tag(self): str {
+		if self.ok() {
+			self.top().tag()
+		} else {
+			""
+		}
+	}
+
+	fun begin_variant(self, name: str, arity: i32) {
+		let subject = self.take();
+		if self.ok() && arity > 0 {
+			if has_json_field(subject, name) {
+				let payload = subject.field(name);
+				if arity == 1 {
+					self.stack.write().push(payload);
+				} else {
+					let elements = payload.elements();
 					mut index = elements.len() - 1;
 					for index >= 0 {
 						self.stack.write().push(elements[index]);
 						index -= 1;
 					}
-					elements.len()
-				} else {
-					0
 				}
-			},
-			end_list = || {},
-			variant_tag = || {
-				if self.ok() {
-					self.top().tag()
-				} else {
-					""
-				}
-			},
-			begin_variant = |name, arity| {
-				let subject = self.take();
-				if self.ok() && arity > 0 {
-					if has_json_field(subject, name) {
-						let payload = subject.field(name);
-						if arity == 1 {
-							self.stack.write().push(payload);
-						} else {
-							let elements = payload.elements();
-							mut index = elements.len() - 1;
-							for index >= 0 {
-								self.stack.write().push(elements[index]);
-								index -= 1;
-							}
-						}
-					} else {
-						self.report(i"missing payload for variant '{name}'");
-					}
-				}
-			},
-			end_variant = || {},
-			is_null = || self.ok() && self.top().is_null(),
-			null_value = || {
-				let _ = self.take();
-			},
-			str_value = || {
-				let value = self.take();
-				if self.ok() { str::from_json_value(value) } else { "" }
-			},
-			i32_value = || {
-				let value = self.take();
-				if self.ok() { i32::from_json_value(value) } else { 0 }
-			},
-			u32_value = || {
-				let value = self.take();
-				if self.ok() { u32::from_json_value(value) } else { 0 }
-			},
-			f64_value = || {
-				let value = self.take();
-				if self.ok() { f64::from_json_value(value) } else { 0.0 }
-			},
-			bool_value = || {
-				let value = self.take();
-				if self.ok() { bool::from_json_value(value) } else { false }
-			},
-			fail = |reason| self.report(reason),
-			failed = || self.error.read(),
+			} else {
+				self.report(i"missing payload for variant '{name}'");
+			}
 		}
+	}
+
+	fun end_variant(self) {}
+
+	fun is_null(self): bool {
+		self.ok() && self.top().is_null()
+	}
+
+	fun null_value(self) {
+		let _ = self.take();
+	}
+
+	fun str_value(self): str {
+		let value = self.take();
+		if self.ok() { str::from_json_value(value) } else { "" }
+	}
+
+	fun i32_value(self): i32 {
+		let value = self.take();
+		if self.ok() { i32::from_json_value(value) } else { 0 }
+	}
+
+	fun u32_value(self): u32 {
+		let value = self.take();
+		if self.ok() { u32::from_json_value(value) } else { 0 }
+	}
+
+	fun f64_value(self): f64 {
+		let value = self.take();
+		if self.ok() { f64::from_json_value(value) } else { 0.0 }
+	}
+
+	fun bool_value(self): bool {
+		let value = self.take();
+		if self.ok() { bool::from_json_value(value) } else { false }
+	}
+
+	fun fail(self, reason: str) {
+		self.report(reason);
+	}
+
+	fun failed(self): Option<str> {
+		self.error.read()
 	}
 }
 
-// Encode a `Wire` value as JSON text.
+// Encode a `Wire` value as JSON text — the direct path: `describe`
+// monomorphizes straight onto `JsonWriter`, no record in between.
 fun encode_json<T: Wire>(value: T): str {
 	let writer = JsonWriter::new();
-	value.describe(writer.serializer());
+	value.describe(writer);
 	writer.result()
 }
 
@@ -448,7 +546,7 @@ fun encode_json<T: Wire>(value: T): str {
 // parse is Q10/`?` territory.)
 fun decode_json<T: Wire>(text: str): Result<T, str> {
 	let reader = JsonReader::new(parse_json_value(text));
-	let value = T::rebuild(reader.deserializer());
+	let value: T = T::rebuild(reader);
 	match reader.error.read() {
 		None => Ok(value),
 		Some(let reason) => Err(reason),

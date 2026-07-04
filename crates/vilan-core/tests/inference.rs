@@ -3109,7 +3109,7 @@ fn hand_written_wire_impls_round_trip_through_json() {
         import std::print;
         import std::option::Option::{ self, Some, None };
         import std::result::Result::{ self, Ok, Err };
-        import std::wire::{ Wire, Serializer, Deserializer };
+        import std::wire::{ Wire, Serialize, Deserialize };
         import std::json::{ encode_json, decode_json };
 
         enum Status {
@@ -3119,49 +3119,49 @@ fn hand_written_wire_impls_round_trip_through_json() {
         }
 
         impl Status with Wire {
-            fun describe(self, serializer: Serializer) {
+            fun describe<S: Serialize>(self, serializer: S) {
                 match self {
                     Status::Offline => {
-                        (serializer.begin_variant)("Offline", 0);
-                        (serializer.end_variant)();
+                        serializer.begin_variant("Offline", 0);
+                        serializer.end_variant();
                     },
                     Status::Away(let reason) => {
-                        (serializer.begin_variant)("Away", 1);
+                        serializer.begin_variant("Away", 1);
                         reason.describe(serializer);
-                        (serializer.end_variant)();
+                        serializer.end_variant();
                     },
                     Status::Busy(let task, let minutes) => {
-                        (serializer.begin_variant)("Busy", 2);
+                        serializer.begin_variant("Busy", 2);
                         task.describe(serializer);
                         minutes.describe(serializer);
-                        (serializer.end_variant)();
+                        serializer.end_variant();
                     },
                 }
             }
 
-            fun rebuild(deserializer: Deserializer): Status {
-                let tag = (deserializer.variant_tag)();
+            fun rebuild<D: Deserialize>(deserializer: D): Status {
+                let tag = deserializer.variant_tag();
                 match tag {
                     "Offline" => {
-                        (deserializer.begin_variant)("Offline", 0);
-                        (deserializer.end_variant)();
+                        deserializer.begin_variant("Offline", 0);
+                        deserializer.end_variant();
                         Status::Offline
                     },
                     "Away" => {
-                        (deserializer.begin_variant)("Away", 1);
+                        deserializer.begin_variant("Away", 1);
                         let reason = str::rebuild(deserializer);
-                        (deserializer.end_variant)();
+                        deserializer.end_variant();
                         Status::Away(reason)
                     },
                     "Busy" => {
-                        (deserializer.begin_variant)("Busy", 2);
+                        deserializer.begin_variant("Busy", 2);
                         let task = str::rebuild(deserializer);
                         let minutes = i32::rebuild(deserializer);
-                        (deserializer.end_variant)();
+                        deserializer.end_variant();
                         Status::Busy(task, minutes)
                     },
                     _ => {
-                        (deserializer.fail)(i"unknown variant '{tag}'");
+                        deserializer.fail(i"unknown variant '{tag}'");
                         Status::Offline
                     },
                 }
@@ -3177,34 +3177,34 @@ fn hand_written_wire_impls_round_trip_through_json() {
         }
 
         impl Profile with Wire {
-            fun describe(self, serializer: Serializer) {
-                (serializer.begin_struct)(5);
-                (serializer.field)("id");
+            fun describe<S: Serialize>(self, serializer: S) {
+                serializer.begin_struct(5);
+                serializer.field("id");
                 self.id.describe(serializer);
-                (serializer.field)("name");
+                serializer.field("name");
                 self.name.describe(serializer);
-                (serializer.field)("scores");
+                serializer.field("scores");
                 self.scores.describe(serializer);
-                (serializer.field)("nickname");
+                serializer.field("nickname");
                 self.nickname.describe(serializer);
-                (serializer.field)("status");
+                serializer.field("status");
                 self.status.describe(serializer);
-                (serializer.end_struct)();
+                serializer.end_struct();
             }
 
-            fun rebuild(deserializer: Deserializer): Profile {
-                (deserializer.begin_struct)();
-                (deserializer.field)("id");
+            fun rebuild<D: Deserialize>(deserializer: D): Profile {
+                deserializer.begin_struct();
+                deserializer.field("id");
                 let id = i32::rebuild(deserializer);
-                (deserializer.field)("name");
+                deserializer.field("name");
                 let name = str::rebuild(deserializer);
-                (deserializer.field)("scores");
+                deserializer.field("scores");
                 let scores: List<i32> = List::rebuild(deserializer);
-                (deserializer.field)("nickname");
+                deserializer.field("nickname");
                 let nickname: Option<str> = Option::rebuild(deserializer);
-                (deserializer.field)("status");
+                deserializer.field("status");
                 let status = Status::rebuild(deserializer);
-                (deserializer.end_struct)();
+                deserializer.end_struct();
                 Profile { id = id, name = name, scores = scores, nickname = nickname, status = status }
             }
         }

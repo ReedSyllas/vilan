@@ -7372,6 +7372,20 @@ impl<'src> Analyzer<'src> {
                         argument_ids,
                         arguments_span,
                     );
+                    // Keep the callee's own-generic bindings as ordered values
+                    // too — a bound static (`T::rebuild(source)`) re-targets a
+                    // concrete impl's method at emission, whose generic IDS
+                    // differ from this (trait) signature's; only positional
+                    // values cross that boundary (mirrors the method path).
+                    if !generic_parameter_constraint_ids.is_empty() {
+                        let values: Vec<TypeId> = generic_parameter_constraint_ids
+                            .iter()
+                            .filter_map(|generic| substitution_context.get(generic).copied())
+                            .collect();
+                        if values.len() == generic_parameter_constraint_ids.len() {
+                            self.own_generic_call_bindings.insert(call_id, values);
+                        }
+                    }
                     // Record generic bindings inferred from the arguments so the
                     // transformer can monomorphize the call (e.g. `range(0, 9)`
                     // binds `T = i32`, `Box::new(5)` binds the impl's `T`). Key off
@@ -8916,15 +8930,24 @@ impl<'src> Analyzer<'src> {
                         );
                         // Search every bound trait (`T: A + B`) for the member.
                         let member_id = bound_trait_ids.iter().find_map(|trait_id| {
-                            self.traits
-                                .get(trait_id)
-                                .and_then(|trait_| trait_.declarations.get(member_name).copied())
+                            self.traits.get(trait_id).and_then(|trait_| {
+                                trait_
+                                    .declarations
+                                    .get(member_name)
+                                    .copied()
+                                    .map(|member| (member, *trait_id))
+                            })
                         });
                         match member_id {
-                            Some(member_id) => {
+                            Some((member_id, matched_trait)) => {
                                 let rc = self.reference_count.entry(member_id).or_insert(0);
                                 *rc += 1;
                                 self.expr_id_to_expr_map.insert(id, Expr::Local(member_id));
+                                // Emission dispatches on THIS trait's surface —
+                                // an inherent static sharing the name can't
+                                // shadow it (keyed by the accessor: the call id
+                                // isn't known here).
+                                self.bound_dispatch_traits.insert(id, matched_trait);
                             }
                             None => {
                                 let bounds = bound_trait_ids
@@ -10566,20 +10589,20 @@ fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
 /// `rebuild` pulls them back in declaration order — the field's source type
 /// text carries the static dispatch, exactly like the derived `from_json`.
 fn struct_wire_visitor_impls(struct_name: &str, fields: &[(&str, String)]) -> String {
-    let mut describe = format!("\t\t(serializer.begin_struct)({});\n", fields.len());
+    let mut describe = format!("\t\tserializer.begin_struct({});\n", fields.len());
     for (field, _) in fields {
-        describe.push_str(&format!("\t\t(serializer.field)(\"{field}\");\n"));
+        describe.push_str(&format!("\t\tserializer.field(\"{field}\");\n"));
         describe.push_str(&format!("\t\tself.{field}.describe(serializer);\n"));
     }
-    describe.push_str("\t\t(serializer.end_struct)();");
-    let mut rebuild = String::from("\t\t(deserializer.begin_struct)();\n");
+    describe.push_str("\t\tserializer.end_struct();");
+    let mut rebuild = String::from("\t\tdeserializer.begin_struct();\n");
     for (field, field_type) in fields {
-        rebuild.push_str(&format!("\t\t(deserializer.field)(\"{field}\");\n"));
+        rebuild.push_str(&format!("\t\tdeserializer.field(\"{field}\");\n"));
         rebuild.push_str(&format!(
             "\t\tlet {field} = {field_type}::rebuild(deserializer);\n"
         ));
     }
-    rebuild.push_str("\t\t(deserializer.end_struct)();\n");
+    rebuild.push_str("\t\tdeserializer.end_struct();\n");
     let initializers = fields
         .iter()
         .map(|(field, _)| format!("{field} = {field}"))
@@ -10588,8 +10611,8 @@ fn struct_wire_visitor_impls(struct_name: &str, fields: &[(&str, String)]) -> St
     rebuild.push_str(&format!("\t\t{struct_name} {{ {initializers} }}"));
     format!(
         "impl {struct_name} with Wire {{\n\
-         \tfun describe(self, serializer: Serializer) {{\n{describe}\n\t}}\n\
-         \tfun rebuild(deserializer: Deserializer): {struct_name} {{\n{rebuild}\n\t}}\n\
+         \tfun describe<S: Serialize>(self, serializer: S) {{\n{describe}\n\t}}\n\
+         \tfun rebuild<D: Deserialize>(deserializer: D): {struct_name} {{\n{rebuild}\n\t}}\n\
          }}\n"
     )
 }
@@ -10610,8 +10633,8 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
         if arity == 0 {
             describe_arms.push_str(&format!(
                 "\t\t\t{enum_name}::{name} => {{\n\
-                 \t\t\t\t(serializer.begin_variant)(\"{name}\", 0);\n\
-                 \t\t\t\t(serializer.end_variant)();\n\
+                 \t\t\t\tserializer.begin_variant(\"{name}\", 0);\n\
+                 \t\t\t\tserializer.end_variant();\n\
                  \t\t\t}},\n"
             ));
         } else {
@@ -10619,11 +10642,11 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
                 .map(|i| format!("let p{i}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut body = format!("\t\t\t\t(serializer.begin_variant)(\"{name}\", {arity});\n");
+            let mut body = format!("\t\t\t\tserializer.begin_variant(\"{name}\", {arity});\n");
             for index in 0..arity {
                 body.push_str(&format!("\t\t\t\tp{index}.describe(serializer);\n"));
             }
-            body.push_str("\t\t\t\t(serializer.end_variant)();\n");
+            body.push_str("\t\t\t\tserializer.end_variant();\n");
             describe_arms.push_str(&format!(
                 "\t\t\t{enum_name}::{name}({binds}) => {{\n{body}\t\t\t}},\n"
             ));
@@ -10632,13 +10655,13 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
     let mut rebuild_arms = String::new();
     for (name, payload_types) in variants {
         let arity = payload_types.len();
-        let mut body = format!("\t\t\t\t(deserializer.begin_variant)(\"{name}\", {arity});\n");
+        let mut body = format!("\t\t\t\tdeserializer.begin_variant(\"{name}\", {arity});\n");
         for (index, payload_type) in payload_types.iter().enumerate() {
             body.push_str(&format!(
                 "\t\t\t\tlet p{index} = {payload_type}::rebuild(deserializer);\n"
             ));
         }
-        body.push_str("\t\t\t\t(deserializer.end_variant)();\n");
+        body.push_str("\t\t\t\tdeserializer.end_variant();\n");
         let construct = if arity == 0 {
             format!("{enum_name}::{name}")
         } else {
@@ -10669,17 +10692,17 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
     };
     rebuild_arms.push_str(&format!(
         "\t\t\t_ => {{\n\
-         \t\t\t\t(deserializer.fail)(i\"unknown variant '{{tag}}'\");\n{fallback_body}\
+         \t\t\t\tdeserializer.fail(i\"unknown variant '{{tag}}'\");\n{fallback_body}\
          \t\t\t\t{fallback}\n\
          \t\t\t}},\n"
     ));
     format!(
         "impl {enum_name} with Wire {{\n\
-         \tfun describe(self, serializer: Serializer) {{\n\
+         \tfun describe<S: Serialize>(self, serializer: S) {{\n\
          \t\tmatch self {{\n{describe_arms}\t\t}}\n\
          \t}}\n\
-         \tfun rebuild(deserializer: Deserializer): {enum_name} {{\n\
-         \t\tlet tag = (deserializer.variant_tag)();\n\
+         \tfun rebuild<D: Deserialize>(deserializer: D): {enum_name} {{\n\
+         \t\tlet tag = deserializer.variant_tag();\n\
          \t\tmatch tag {{\n{rebuild_arms}\t\t}}\n\
          \t}}\n\
          }}\n"
@@ -10735,7 +10758,9 @@ fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
         prelude.push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
     }
     if traits.contains("Wire") {
-        prelude.push_str("import std::wire::{ Wire, Serializer, Deserializer };\n");
+        prelude.push_str(
+            "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n",
+        );
     }
     if enum_derives_json {
         prelude.push_str("import std::io::panic;\n");

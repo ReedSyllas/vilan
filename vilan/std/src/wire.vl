@@ -5,23 +5,66 @@
 // scalar/`List`/`Option` impls here are the leaves the derived code bottoms
 // out in.
 //
-// The serializer/deserializer are CLOSURE RECORDS, not traits — the house
-// trait-object stand-in (`Dispatcher`/`DuplexEnd` precedent). The trait-shaped
-// zero-cost design is blocked on two pinned compiler gaps (generic trait
-// methods no-op through bounds; impls can't bind a trait argument) and becomes
-// a drop-in upgrade when either closes.
+// The visitor surface is a pair of TRAITS (`Serialize`/`Deserialize`), so
+// `describe`/`rebuild` monomorphize to direct calls against each codec's
+// writer/reader. The closure RECORDS below remain as the codec-as-a-VALUE
+// erasure only (`Codec` must hand back one concrete type) — they implement
+// the traits by delegating to their fields, so the RPC seam rides them
+// unchanged while direct entry points (`encode_json`, `encode_binary`) skip
+// them entirely.
 
 import pkg::bytes::Bytes;
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 
+// The write half of the visitor: what a codec's writer implements. See
+// `Serializer` (the record) for the call-by-call protocol notes.
+trait Serialize {
+	fun begin_struct(self, fields: i32);
+	fun field(self, name: str);
+	fun end_struct(self);
+	fun begin_list(self, length: i32);
+	fun end_list(self);
+	fun begin_variant(self, name: str, arity: i32);
+	fun end_variant(self);
+	fun null_value(self);
+	fun some_value(self);
+	fun str_value(self, value: str);
+	fun i32_value(self, value: i32);
+	fun u32_value(self, value: u32);
+	fun f64_value(self, value: f64);
+	fun bool_value(self, value: bool);
+}
+
+// The read half: pull-based, sticky-erroring (see `Deserializer`).
+trait Deserialize {
+	fun begin_struct(self);
+	fun field(self, name: str);
+	fun end_struct(self);
+	fun begin_list(self): i32;
+	fun end_list(self);
+	fun variant_tag(self): str;
+	fun begin_variant(self, name: str, arity: i32);
+	fun end_variant(self);
+	fun is_null(self): bool;
+	fun null_value(self);
+	fun str_value(self): str;
+	fun i32_value(self): i32;
+	fun u32_value(self): u32;
+	fun f64_value(self): f64;
+	fun bool_value(self): bool;
+	fun fail(self, reason: str);
+	fun failed(self): Option<str>;
+}
+
 // The self-description contract. `describe` narrates the value's structure to
 // the serializer; `rebuild` pulls the same structure back out of a
-// deserializer. The two must mirror each other exactly — the derive guarantees
-// it; hand-written impls promise it.
+// deserializer — both generic over the codec's own writer/reader, so the
+// calls monomorphize with no indirection. The two must mirror each other
+// exactly: the derive guarantees it; hand-written impls promise it.
 trait Wire {
-	fun describe(self, serializer: Serializer);
-	fun rebuild(deserializer: Deserializer): Wire;
+	fun describe<S: Serialize>(self, serializer: S);
+	fun rebuild<D: Deserialize>(deserializer: D): Wire;
 }
 
 // The write side. Aggregates narrate as: a struct is `begin_struct(n)`, then
@@ -80,77 +123,209 @@ struct Deserializer {
 	failed: || Option<str>,
 }
 
+// The records implement the visitor traits by delegating to their fields, so
+// a `Codec`-supplied record IS a `Serialize`/`Deserialize` and rides the same
+// generic `describe`/`rebuild` as a direct writer (one extra call per
+// operation — the price of the erasure, paid only on the codec path).
+impl Serializer with Serialize {
+	fun begin_struct(self, fields: i32) {
+		(self.begin_struct)(fields);
+	}
+
+	fun field(self, name: str) {
+		(self.field)(name);
+	}
+
+	fun end_struct(self) {
+		(self.end_struct)();
+	}
+
+	fun begin_list(self, length: i32) {
+		(self.begin_list)(length);
+	}
+
+	fun end_list(self) {
+		(self.end_list)();
+	}
+
+	fun begin_variant(self, name: str, arity: i32) {
+		(self.begin_variant)(name, arity);
+	}
+
+	fun end_variant(self) {
+		(self.end_variant)();
+	}
+
+	fun null_value(self) {
+		(self.null_value)();
+	}
+
+	fun some_value(self) {
+		(self.some_value)();
+	}
+
+	fun str_value(self, value: str) {
+		(self.str_value)(value);
+	}
+
+	fun i32_value(self, value: i32) {
+		(self.i32_value)(value);
+	}
+
+	fun u32_value(self, value: u32) {
+		(self.u32_value)(value);
+	}
+
+	fun f64_value(self, value: f64) {
+		(self.f64_value)(value);
+	}
+
+	fun bool_value(self, value: bool) {
+		(self.bool_value)(value);
+	}
+}
+
+impl Deserializer with Deserialize {
+	fun begin_struct(self) {
+		(self.begin_struct)();
+	}
+
+	fun field(self, name: str) {
+		(self.field)(name);
+	}
+
+	fun end_struct(self) {
+		(self.end_struct)();
+	}
+
+	fun begin_list(self): i32 {
+		(self.begin_list)()
+	}
+
+	fun end_list(self) {
+		(self.end_list)();
+	}
+
+	fun variant_tag(self): str {
+		(self.variant_tag)()
+	}
+
+	fun begin_variant(self, name: str, arity: i32) {
+		(self.begin_variant)(name, arity);
+	}
+
+	fun end_variant(self) {
+		(self.end_variant)();
+	}
+
+	fun is_null(self): bool {
+		(self.is_null)()
+	}
+
+	fun null_value(self) {
+		(self.null_value)();
+	}
+
+	fun str_value(self): str {
+		(self.str_value)()
+	}
+
+	fun i32_value(self): i32 {
+		(self.i32_value)()
+	}
+
+	fun u32_value(self): u32 {
+		(self.u32_value)()
+	}
+
+	fun f64_value(self): f64 {
+		(self.f64_value)()
+	}
+
+	fun bool_value(self): bool {
+		(self.bool_value)()
+	}
+
+	fun fail(self, reason: str) {
+		(self.fail)(reason);
+	}
+
+	fun failed(self): Option<str> {
+		(self.failed)()
+	}
+}
+
 // --- The leaves -------------------------------------------------------------
 
 impl str with Wire {
-	fun describe(self, serializer: Serializer) {
-		(serializer.str_value)(self);
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.str_value(self);
 	}
 
-	fun rebuild(deserializer: Deserializer): str {
-		(deserializer.str_value)()
+	fun rebuild<D: Deserialize>(deserializer: D): str {
+		deserializer.str_value()
 	}
 }
 
 impl i32 with Wire {
-	fun describe(self, serializer: Serializer) {
-		(serializer.i32_value)(self);
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.i32_value(self);
 	}
 
-	fun rebuild(deserializer: Deserializer): i32 {
-		(deserializer.i32_value)()
+	fun rebuild<D: Deserialize>(deserializer: D): i32 {
+		deserializer.i32_value()
 	}
 }
 
 impl u32 with Wire {
-	fun describe(self, serializer: Serializer) {
-		(serializer.u32_value)(self);
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.u32_value(self);
 	}
 
-	fun rebuild(deserializer: Deserializer): u32 {
-		(deserializer.u32_value)()
+	fun rebuild<D: Deserialize>(deserializer: D): u32 {
+		deserializer.u32_value()
 	}
 }
 
 impl f64 with Wire {
-	fun describe(self, serializer: Serializer) {
-		(serializer.f64_value)(self);
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.f64_value(self);
 	}
 
-	fun rebuild(deserializer: Deserializer): f64 {
-		(deserializer.f64_value)()
+	fun rebuild<D: Deserialize>(deserializer: D): f64 {
+		deserializer.f64_value()
 	}
 }
 
 impl bool with Wire {
-	fun describe(self, serializer: Serializer) {
-		(serializer.bool_value)(self);
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.bool_value(self);
 	}
 
-	fun rebuild(deserializer: Deserializer): bool {
-		(deserializer.bool_value)()
+	fun rebuild<D: Deserialize>(deserializer: D): bool {
+		deserializer.bool_value()
 	}
 }
 
 // A list narrates element by element; rebuild trusts `begin_list`'s count.
 impl List<type T: Wire> with Wire {
-	fun describe(self, serializer: Serializer) {
-		(serializer.begin_list)(self.len());
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.begin_list(self.len());
 		for element in self {
 			element.describe(serializer);
 		}
-		(serializer.end_list)();
+		serializer.end_list();
 	}
 
-	fun rebuild(deserializer: Deserializer): List<T> {
-		let length = (deserializer.begin_list)();
+	fun rebuild<D: Deserialize>(deserializer: D): List<T> {
+		let length = deserializer.begin_list();
 		mut result: List<T> = [];
 		mut index = 0;
 		for index < length {
 			result.push(T::rebuild(deserializer));
 			index += 1;
 		}
-		(deserializer.end_list)();
+		deserializer.end_list();
 		result
 	}
 }
@@ -158,19 +333,19 @@ impl List<type T: Wire> with Wire {
 // An absent option is a null; a present one announces itself (`some_value` —
 // a no-op in JSON, a marker byte in binary) and describes its value.
 impl Option<type T: Wire> with Wire {
-	fun describe(self, serializer: Serializer) {
+	fun describe<S: Serialize>(self, serializer: S) {
 		match self {
 			Some(let value) => {
-				(serializer.some_value)();
+				serializer.some_value();
 				value.describe(serializer);
 			},
-			None => (serializer.null_value)(),
+			None => serializer.null_value(),
 		}
 	}
 
-	fun rebuild(deserializer: Deserializer): Option<T> {
-		if (deserializer.is_null)() {
-			(deserializer.null_value)();
+	fun rebuild<D: Deserialize>(deserializer: D): Option<T> {
+		if deserializer.is_null() {
+			deserializer.null_value();
 			None
 		} else {
 			Some(T::rebuild(deserializer))

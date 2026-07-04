@@ -592,6 +592,22 @@ The format-independence mechanism: a Wire value *describes itself* to a `Seriali
 the bytes. Proven hand-written first (a struct + enum with hand impls against
 `JsonSerializer`), then generated.
 
+> **UPGRADED to the trait shape (2026-07-02, follow-up #4)** — the compiler gaps that
+> forced the record pivot are fixed (generic trait methods through bounds, incl. statics
+> — the own-generic ordered-values channel covers method AND free calls). The design:
+> traits `Serialize`/`Deserialize` carry the visitor surface; `Wire` is
+> `describe<S: Serialize>` / `rebuild<D: Deserialize>` and monomorphizes to direct calls;
+> the codecs' writers/readers implement the traits natively. The closure RECORDS remain —
+> **as the codec-as-a-value erasure only**: `Serializer`/`Deserializer` keep their names
+> and fields and now `impl` the traits by delegation, so `Codec { writer, reader }`, the
+> RPC seam, and `|s: Serializer|` argument closures are untouched. Direct entry points
+> (`encode_json`/`decode_json`, `encode_binary`/`decode_binary`) pass the writer/reader
+> straight through — zero records, the measured fast path. A struct field and a
+> same-named trait method coexist (probed), which is what lets the records implement
+> their own vocabulary.
+>
+> The original pivot note, for the record:
+>
 > **v1 shape (settled by probe, 2026-07-02): the serializer/deserializer are CLOSURE
 > RECORDS, not traits.** The trait design below hit two compiler gaps: a trait method
 > with its own generics (`fun describe<S: Serializer>`) **silently no-ops when

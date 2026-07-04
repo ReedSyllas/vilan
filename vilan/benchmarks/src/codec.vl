@@ -1,0 +1,73 @@
+// Codec throughput: encode/decode of a realistic value, in-process — the
+// number that decides how much the serializer call mechanism (closure records
+// vs monomorphized traits, §6.1) matters. Uses the payload module's sample.
+
+import std::print;
+import std::option::Option::{ Some, None };
+import std::result::Result::{ self, Ok, Err };
+import std::time::now;
+import std::json::{ Json, json_codec, encode_json, decode_json };
+import std::binary::{ binary_codec, encode_binary, decode_binary };
+import std::wire::{ Wire, Frame, Codec, encode, decode };
+import pkg::payload::{ BenchTodo, sample_list };
+import pkg::report::{ section, rate, round };
+
+fun run() {
+	section("codec throughput (encode+decode round-trips, 25-todo list)");
+	let rounds = 2000;
+	let todos = sample_list(25);
+	let json = json_codec();
+	let json_elapsed = drive(json, todos, rounds);
+	print(i"json: {rounds} round-trips in {round(json_elapsed)} ms -> {rate(rounds, json_elapsed)}/sec");
+	let binary = binary_codec();
+	let binary_elapsed = drive(binary, todos, rounds);
+	print(i"binary: {rounds} round-trips in {round(binary_elapsed)} ms -> {rate(rounds, binary_elapsed)}/sec");
+	// The DIRECT paths (§6.1 trait shape): describe/rebuild monomorphize
+	// straight onto the writer/reader — no closure record between them.
+	let direct_json_elapsed = drive_direct_json(todos, rounds);
+	print(i"json direct: {rounds} round-trips in {round(direct_json_elapsed)} ms -> {rate(rounds, direct_json_elapsed)}/sec");
+	let direct_binary_elapsed = drive_direct_binary(todos, rounds);
+	print(i"binary direct: {rounds} round-trips in {round(direct_binary_elapsed)} ms -> {rate(rounds, direct_binary_elapsed)}/sec");
+}
+
+fun drive_direct_json(todos: List<BenchTodo>, rounds: i32): f64 {
+	let started = now();
+	mut index = 0;
+	for index < rounds {
+		let decoded: Result<List<BenchTodo>, str> = decode_json(encode_json(todos));
+		match decoded {
+			Ok(let value) => {},
+			Err(let reason) => print(i"direct json failed: {reason}"),
+		}
+		index += 1;
+	}
+	now() - started
+}
+
+fun drive_direct_binary(todos: List<BenchTodo>, rounds: i32): f64 {
+	let started = now();
+	mut index = 0;
+	for index < rounds {
+		let decoded: Result<List<BenchTodo>, str> = decode_binary(encode_binary(todos));
+		match decoded {
+			Ok(let value) => {},
+			Err(let reason) => print(i"direct binary failed: {reason}"),
+		}
+		index += 1;
+	}
+	now() - started
+}
+
+fun drive(codec: Codec, todos: List<BenchTodo>, rounds: i32): f64 {
+	let started = now();
+	mut index = 0;
+	for index < rounds {
+		let decoded: Result<List<BenchTodo>, str> = decode(codec, encode(codec, todos));
+		match decoded {
+			Ok(let value) => {},
+			Err(let reason) => print(i"round-trip failed: {reason}"),
+		}
+		index += 1;
+	}
+	now() - started
+}

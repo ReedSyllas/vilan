@@ -53,17 +53,22 @@ contract hash (refusing cleanly on drift — Q6's actual *enforcement*), run the
 attach handshake, and wire the `RemoteSource` mirrors. Mostly generation work
 over machinery that now exists; the todo app's wiring collapses to two lines.
 
-## 4. Trait-shaped Wire visitor — unblocked, wait for a number
+## 4. Trait-shaped Wire visitor — ✅ DONE (2026-07-02: direct paths +18%/+14%)
 
 The generic-trait-method miscompile that forced §6.1's closure-record pivot is
 fixed, so `describe<S: Serializer>` monomorphizing to zero cost is expressible.
-Hold because: (a) the win is unmeasured — codec work is nanoseconds against the
-~1.2 ms network tax; it only matters for hot local encode loops; (b) a real
-design wrinkle: the runtime's codec-as-a-VALUE (chosen at wiring time)
-fundamentally needs erasure — a `Codec` record cannot return a trait-typed
-serializer without trait objects. Traits likely become an *additional*
-zero-cost path for direct `encode_json<T>`-style calls while the RPC seam
-keeps the records. Needs its own §6.1 amendment when taken.
+Shipped exactly as predicted: traits `Serialize`/`Deserialize` carry the
+visitor; the writers/readers implement them natively; the closure records
+remain ONLY as the codec-as-a-value erasure (they now `impl` the traits by
+delegation — a struct field and a same-named trait method coexist, probed), so
+the RPC seam and `Codec` didn't change at all. Direct entry points
+(`encode_json`/`decode_json`, new `encode_binary`/`decode_binary`) skip the
+records: measured +18% json / +14% binary on the 25-todo round-trip
+(51.3k/29.9k per sec vs the 42.5k/25.6k baseline), with the codec path
+unregressed. En route, the own-generic ordered-values channel was extended to
+FREE calls (bound statics like `T::rebuild(reader)` monomorphize correctly —
+the last piece the trait shape needed) and bound-static dispatch gained the
+same inherent-shadowing protection as methods.
 
 ## 5. Reactive protocol on codecs — pairs with #1's framing, not standalone
 

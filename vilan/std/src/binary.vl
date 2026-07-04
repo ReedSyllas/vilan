@@ -9,7 +9,8 @@
 import pkg::bytes::{ Bytes, data_view, encode_utf8, decode_utf8 };
 import pkg::option::Option::{ self, Some, None };
 import pkg::shared::Shared;
-import pkg::wire::{ Serializer, Deserializer, Codec, Frame };
+import pkg::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer, Codec, Frame };
+import pkg::result::Result::{ self, Ok, Err };
 
 // --- The write side ----------------------------------------------------------
 
@@ -89,26 +90,75 @@ impl BinaryWriter {
 		self.buffer.read().slice(0, self.used.read())
 	}
 
-	// The closure record a `Wire` value describes itself to. Structure calls
-	// that the schema already carries (struct shape, list/variant ends) write
-	// nothing.
+	// The closure record a `Codec` hands out — thin delegates to the trait
+	// methods below (direct `encode_binary` skips it).
 	fun serializer(self): Serializer {
 		Serializer {
-			begin_struct = |fields| {},
-			field = |name| {},
-			end_struct = || {},
-			begin_list = |length| self.write_i32(length),
-			end_list = || {},
-			begin_variant = |name, arity| self.write_str(name),
-			end_variant = || {},
-			null_value = || self.write_byte(0),
-			some_value = || self.write_byte(1),
-			str_value = |value| self.write_str(value),
-			i32_value = |value| self.write_i32(value),
-			u32_value = |value| self.write_u32(value),
-			f64_value = |value| self.write_f64(value),
-			bool_value = |value| self.write_byte(if value { 1 } else { 0 }),
+			begin_struct = |fields| self.begin_struct(fields),
+			field = |name| self.field(name),
+			end_struct = || self.end_struct(),
+			begin_list = |length| self.begin_list(length),
+			end_list = || self.end_list(),
+			begin_variant = |name, arity| self.begin_variant(name, arity),
+			end_variant = || self.end_variant(),
+			null_value = || self.null_value(),
+			some_value = || self.some_value(),
+			str_value = |value| self.str_value(value),
+			i32_value = |value| self.i32_value(value),
+			u32_value = |value| self.u32_value(value),
+			f64_value = |value| self.f64_value(value),
+			bool_value = |value| self.bool_value(value),
 		}
+	}
+}
+
+// The visitor's write half, natively. Structure calls the schema already
+// carries (struct shape, list/variant ends) write nothing.
+impl BinaryWriter with Serialize {
+	fun begin_struct(self, fields: i32) {}
+
+	fun field(self, name: str) {}
+
+	fun end_struct(self) {}
+
+	fun begin_list(self, length: i32) {
+		self.write_i32(length);
+	}
+
+	fun end_list(self) {}
+
+	fun begin_variant(self, name: str, arity: i32) {
+		self.write_str(name);
+	}
+
+	fun end_variant(self) {}
+
+	fun null_value(self) {
+		self.write_byte(0);
+	}
+
+	fun some_value(self) {
+		self.write_byte(1);
+	}
+
+	fun str_value(self, value: str) {
+		self.write_str(value);
+	}
+
+	fun i32_value(self, value: i32) {
+		self.write_i32(value);
+	}
+
+	fun u32_value(self, value: u32) {
+		self.write_u32(value);
+	}
+
+	fun f64_value(self, value: f64) {
+		self.write_f64(value);
+	}
+
+	fun bool_value(self, value: bool) {
+		self.write_byte(if value { 1 } else { 0 });
 	}
 }
 
@@ -222,45 +272,117 @@ impl BinaryReader {
 		decode_utf8(piece)
 	}
 
-	// The closure record a `Wire` value rebuilds itself from. `variant_tag`
-	// consumes the tag (so `begin_variant` is a no-op — the mirror of the
-	// write side, where `begin_variant` writes it); `is_null` peeks the Option
-	// marker and consumes it only for `Some`, leaving `None`'s `0x00` for
-	// `null_value`.
+	// The closure record a `Codec` hands out — thin delegates to the trait
+	// methods below (direct `decode_binary` skips it).
 	fun deserializer(self): Deserializer {
 		Deserializer {
-			begin_struct = || {},
-			field = |name| {},
-			end_struct = || {},
-			begin_list = || self.read_length(),
-			end_list = || {},
-			variant_tag = || self.read_str(),
-			begin_variant = |name, arity| {},
-			end_variant = || {},
-			is_null = || {
-				if !self.expect(1) {
-					ret false;
-				}
-				if self.bytes.get(self.cursor.read()) == 0 {
-					true
-				} else {
-					// A present Option: consume the `0x01` marker; the value
-					// follows.
-					self.cursor.write() = self.cursor.read() + 1;
-					false
-				}
-			},
-			null_value = || {
-				let _ = self.read_byte();
-			},
-			str_value = || self.read_str(),
-			i32_value = || self.read_i32(),
-			u32_value = || self.read_u32(),
-			f64_value = || self.read_f64(),
-			bool_value = || self.read_byte() != 0,
-			fail = |reason| self.report(reason),
-			failed = || self.error.read(),
+			begin_struct = || self.begin_struct(),
+			field = |name| self.field(name),
+			end_struct = || self.end_struct(),
+			begin_list = || self.begin_list(),
+			end_list = || self.end_list(),
+			variant_tag = || self.variant_tag(),
+			begin_variant = |name, arity| self.begin_variant(name, arity),
+			end_variant = || self.end_variant(),
+			is_null = || self.is_null(),
+			null_value = || self.null_value(),
+			str_value = || self.str_value(),
+			i32_value = || self.i32_value(),
+			u32_value = || self.u32_value(),
+			f64_value = || self.f64_value(),
+			bool_value = || self.bool_value(),
+			fail = |reason| self.fail(reason),
+			failed = || self.failed(),
 		}
+	}
+}
+
+// The visitor's read half, natively. `variant_tag` consumes the tag (so
+// `begin_variant` is a no-op — the mirror of the write side, where
+// `begin_variant` writes it); `is_null` peeks the Option marker and consumes
+// it only for `Some`, leaving `None`'s `0x00` for `null_value`.
+impl BinaryReader with Deserialize {
+	fun begin_struct(self) {}
+
+	fun field(self, name: str) {}
+
+	fun end_struct(self) {}
+
+	fun begin_list(self): i32 {
+		self.read_length()
+	}
+
+	fun end_list(self) {}
+
+	fun variant_tag(self): str {
+		self.read_str()
+	}
+
+	fun begin_variant(self, name: str, arity: i32) {}
+
+	fun end_variant(self) {}
+
+	fun is_null(self): bool {
+		if !self.expect(1) {
+			ret false;
+		}
+		if self.bytes.get(self.cursor.read()) == 0 {
+			true
+		} else {
+			// A present Option: consume the `0x01` marker; the value follows.
+			self.cursor.write() = self.cursor.read() + 1;
+			false
+		}
+	}
+
+	fun null_value(self) {
+		let _ = self.read_byte();
+	}
+
+	fun str_value(self): str {
+		self.read_str()
+	}
+
+	fun i32_value(self): i32 {
+		self.read_i32()
+	}
+
+	fun u32_value(self): u32 {
+		self.read_u32()
+	}
+
+	fun f64_value(self): f64 {
+		self.read_f64()
+	}
+
+	fun bool_value(self): bool {
+		self.read_byte() != 0
+	}
+
+	fun fail(self, reason: str) {
+		self.report(reason);
+	}
+
+	fun failed(self): Option<str> {
+		self.error.read()
+	}
+}
+
+// Encode a `Wire` value as compact bytes — the direct path (no record).
+fun encode_binary<T: Wire>(value: T): Bytes {
+	let writer = BinaryWriter::new();
+	value.describe(writer);
+	writer.finish()
+}
+
+// Decode compact bytes as a `Wire` value; `Err(reason)` names the first
+// structural failure (truncation, an over-declared length, unknown variant).
+fun decode_binary<T: Wire>(bytes: Bytes): Result<T, str> {
+	let reader = BinaryReader::new(bytes);
+	let value: T = T::rebuild(reader);
+	match reader.error.read() {
+		None => Ok(value),
+		Some(let reason) => Err(reason),
 	}
 }
 
