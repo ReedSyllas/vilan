@@ -19,7 +19,8 @@ decisions this document exists to settle; recommendations are marked.
   1. **Custom attributes** — `[my_attr(..)]` on an item transforms or augments it
      (custom derives are the flagship: `[derive(Builder)]`, `[derive(Display)]`).
   2. **Repetitious code generation** — item- and expression-position invocations that
-     stamp out families of code (`@numeric_types(i8, i16, i64)`, `@lut(256, |i| ..)`).
+     stamp out families of code (`macro numeric_types(i8, i16, i64)`,
+     `macro lut(256, |i| ..)`).
 - **Isolation**: macros live in their own scope — their code cannot touch runtime
   bindings, runtime code cannot call macros, and macro execution cannot observe
   anything but its declared inputs (no I/O, no ambient state — §4).
@@ -45,7 +46,7 @@ decisions this document exists to settle; recommendations are marked.
 
 ```vilan
 // In a library — an ordinary module marked as compile-time code (§3).
-macro derive_display(item: Item): Source {
+macro fun derive_display(item: Item): Source {
 	let target = item.as_struct()!;
 	mut arms: List<str> = [];
 	for field in target.fields {
@@ -61,28 +62,37 @@ macro derive_display(item: Item): Source {
 struct Point { x: i32, y: i32 }
 ```
 
-**Repetitious generation** (invocation use). The `@` sigil — freed when attributes moved
-to `[..]` — marks item- and expression-position invocations:
+**Repetitious generation** (invocation use). The `macro` keyword prefixes every
+compile-time construct — definitions, invocations, and (future) blocks — the same way
+`async`/`await` mark vilan's other evaluation-mode shifts:
 
 ```vilan
-@numeric_family(i8, i16, i64)          // item position: expands to N struct+impl sets
+macro numeric_family(i8, i16, i64)     // item position: expands to N struct+impl sets
 
 fun area(): i32 {
-	@unroll(4, |i| accumulate(i))       // expression position: 4 inlined calls
+	macro unroll(4, |i| accumulate(i))  // expression position: 4 inlined calls
 }
 ```
 
 Item macros receive their arguments as syntax and return items; expression macros
 return an expression. Attributes receive *the item they annotate* plus their arguments.
+One keyword makes the compile-time boundary greppable: `macro` finds every place code
+runs at expansion time.
 
 ## 3. The model: staged compilation, syntax in → source out
 
-A macro is a `macro` item — a function-shaped definition whose parameter and return
-types come from the compiler's reflection vocabulary (`std::meta`):
+A macro is a `macro fun` — the `macro` modifier on an ordinary function definition
+(reusing the whole `fun` grammar: parameters, generics, helpers), whose parameter and
+return types come from the compiler's reflection vocabulary (`std::meta`):
 
 ```vilan
-macro name(item: Item, arguments: Arguments): Source { .. }
+macro fun name(item: Item, arguments: Arguments): Source { .. }
 ```
+
+After `macro`, the parser decides on one token: `fun` → a definition, `{` → a
+compile-time block (Phase 4), an identifier → an invocation. `macro` becomes a
+reserved word. Other `macro <item>` forms (`macro struct`, …) are reserved errors in
+v1 ("only functions can be macros").
 
 - **`std::meta`** (new, the compiler-interaction surface): `Item` (an enum over
   `StructItem`/`EnumItem`/`FunctionItem`/…), `Field { name: str, type_: TypeExpr }`,
@@ -94,7 +104,7 @@ macro name(item: Item, arguments: Arguments): Source { .. }
   text is what makes caching sound (§6). Quasi-quotation sugar can come later without
   changing the model; `i"…"` interpolation already carries the pattern well.
 - **Staging.** Macro definitions form **stage 0**: the loader partitions each package's
-  modules into macro modules (those declaring `macro` items — they may also hold plain
+  modules into macro modules (those declaring `macro fun`s — they may also hold plain
   helper functions) and program modules. Stage 0 compiles first, against the **macro
   prelude** only (§4); stage 1 (the program) then expands invocations and compiles.
   A macro module importing a program module is an error (the stage boundary); a program
@@ -109,10 +119,10 @@ macro name(item: Item, arguments: Arguments): Source { .. }
 
 The user requirement, made mechanical:
 
-- **A separate namespace.** `macro` items are not values: they cannot be assigned,
+- **A separate namespace.** `macro fun`s are not values: they cannot be assigned,
   passed, or called by runtime code (`name(..)` finds no function; the error suggests
-  `@name`). Runtime items are invisible to macro bodies (stage 0 compiles before stage
-  1 exists).
+  `macro name(..)`). Runtime items are invisible to macro bodies (stage 0 compiles
+  before stage 1 exists).
 - **The macro prelude** is the *pure* std subset: `List`, `str`, `Option`, `Result`,
   `Map`/`Set`, `format`/`display`, `std::meta` — and nothing platform-flavored. No
   `fs`, no `http`/`fetch`, no `time`, no `random`, no `process`, no `[extern]` in macro
@@ -251,7 +261,7 @@ load (stage-0 macro modules compile first, interpreted thereafter)
 ```
 
 Expression-position invocations expand during the same pass (they are syntax → syntax;
-the walk never sees `@`). The corpus stays byte-identical through the engine's landing
+the walk never sees a `macro` invocation). The corpus stays byte-identical through the engine's landing
 because nothing uses it until a program opts in — the same additive discipline as
 variadic generics.
 
@@ -272,21 +282,30 @@ behavior (skip; the missing-impl error surfaces at the use site).
 - **Phase 0 — `std::meta` + the interpreter core** (the long pole): the reflection
   structs, the prelude-subset interpreter with fuel, its compiled-vs-interpreted
   equivalence suite.
-- **Phase 1 — attributes**: `macro` items, stage-0 loading, `[name(args)]` +
+- **Phase 1 — attributes**: `macro fun` items, stage-0 loading, `[name(args)]` +
   `[derive(Name)]` dispatch, expansion fixpoint, the per-invocation text cache,
   `meta::fresh`, error surfacing. Exit: `derive_display` (§2) works end to end from a
   user library.
-- **Phase 2 — invocations**: `@name(args)` in item and expression position, expression
-  splice + placeholder-gensym stamping. Exit: `@numeric_family` and an `@unroll`.
+- **Phase 2 — invocations**: `macro name(args)` in item and expression position,
+  expression splice + placeholder-gensym stamping. Exit: `macro numeric_family(..)`
+  and a `macro unroll(..)`.
 - **Phase 3 — migration** (§10), one derive per commit, goldens as referee.
-- **Phase 4 (recorded, unscheduled)** — semantic queries (post-inference expansion
-  stage), quasi-quotation, the compiled macro host, on-disk caching.
+- **Phase 4 (recorded, unscheduled)** — **`macro { .. }` blocks** (an anonymous,
+  immediately-expanded macro: the body runs at expansion time in the macro prelude; in
+  item position its emissions splice in place — comptime-style families without naming
+  a macro; in expression position it yields a spliced `Source` — compile-time constant
+  folding), semantic queries (post-inference expansion stage), quasi-quotation, the
+  compiled macro host, on-disk caching.
 
 ## 12. Open questions for review
 
-1. **The `@` sigil** for invocations (attributes stay `[..]`): confirm, or prefer a
-   keyword form (`expand name(..)`)? `@` is lexically free and visually distinct from
-   the postfix operators; the old attribute `@` was retired two eras ago.
+1. ~~The `@` sigil~~ — **resolved (review): the `macro` keyword prefixes everything**
+   (definitions `macro fun`, invocations `macro name(..)`, future blocks
+   `macro { .. }`; attributes stay `[..]`). Rationale: vilan marks evaluation-mode
+   shifts with keywords (`async`/`await`), not sigils — invocations read as
+   `await`-family; the compile-time boundary becomes greppable by one word; no
+   retired sigil returns; and the block form falls out of the grammar. Cost: `macro`
+   is reserved. Parse decision is one token after `macro` (§3).
 2. **Fuel defaults** (1M steps/expansion, depth 16) and whether they are per-package
    configurable in `vilan.toml [macros]`.
 3. **Should macro modules be *marked*** (a `[macro]` module attribute / `macro/`
