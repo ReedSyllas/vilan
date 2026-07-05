@@ -1,11 +1,10 @@
 # The macro engine (roadmap #9)
 
-Status: **proposal for review** (2026-07-04, not implemented). The strategic frontier:
-user-land vilan code that runs *inside the compiler* and generates vilan code. Subsumes
-the built-in derives and `[service]` generation — today's hand-rolled, Rust-side
-special cases — and unlocks the uses they cannot serve (numeric-type families, custom
-derives, embedded-DSL checking). §5 (execution model) and §6 (caching) are the two
-decisions this document exists to settle; recommendations are marked.
+Status: **proposal, design settled in review** (2026-07-04, not implemented; every §12
+question resolved). The strategic frontier: user-land vilan code that runs *inside the
+compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
+generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
+cannot serve (numeric-type families, custom derives, embedded-DSL checking).
 
 ## 1. Goals and non-goals
 
@@ -45,8 +44,12 @@ decisions this document exists to settle; recommendations are marked.
 `analyzer.rs`; as a macro it is vilan in userland:
 
 ```vilan
-// In a library — an ordinary module marked as compile-time code (§3).
+// In any module — a macro fun's body is hermetic (§3): it sees only what it
+// imports, and it imports only from `macro_std`.
 macro fun derive_display(item: Item): Source {
+	import macro_std::source;
+	import macro_std::display::format;
+
 	let target = item.as_struct()!;
 	mut arms: List<str> = [];
 	for field in target.fields {
@@ -103,51 +106,45 @@ v1 ("only functions can be macros").
   in-house shape: every derive and the service generator emit source strings today, and
   text is what makes caching sound (§6). Quasi-quotation sugar can come later without
   changing the model; `i"…"` interpolation already carries the pattern well.
-- **Staging.** Macro definitions form **stage 0**: the loader partitions each package's
-  modules into macro modules (those declaring `macro fun`s — they may also hold plain
-  helper functions) and program modules. Stage 0 compiles first, against the **macro
-  prelude** only (§4); stage 1 (the program) then expands invocations and compiles.
-  A macro module importing a program module is an error (the stage boundary); a program
-  module importing a macro module gets its *macros* only. Macros generating macro
-  definitions are rejected in v1 (one stage-0, no fixpoint of stages).
+- **The macro world is HERMETIC, per function** (settled in review — one rule solving
+  the prelude gate and the helper ambiguity at once): a `macro fun`'s body sees
+  **nothing** of its surrounding module — not its imports, not its functions, not its
+  module-level `let`s. What a macro body can reference is exactly: its own parameters
+  and locals, **other `macro fun`s** (its helpers — inside the macro world, calling one
+  is an ordinary call; the `macro name(..)` syntax is for *splice sites* in program
+  code), the language intrinsics (literals, `List`/`str` built-ins), and whatever it
+  imports **inside its own scope** — and macro-scope imports resolve against exactly
+  one package: **`macro_std`**.
+- **`macro_std`** is the macro world's std — a separate, toolchain-shipped package,
+  *not* a filtered view of `std`: `macro_std::meta` (the reflection types),
+  `macro_std::source`, and re-exports of the pure core (`option`, `result`, `list`,
+  `map`, `display`, …) so macros keep the ordinary vocabulary. There is nothing to
+  subset or police: if it isn't in `macro_std`, a macro can't name it. No `fs`, no
+  clock, no `[extern]` — the package simply doesn't contain them. Function-scoped
+  `import` is new grammar, legal **only inside `macro fun` bodies** in v1 (generalizing
+  it to all functions is an independent future question).
+- **Two orthogonal systems, cleanly split:** macro *names* distribute through the
+  ordinary module system (a module exports its `macro fun`s; `import pkg::x::my_macro`
+  brings the macro into scope for `[derive(..)]`/`macro my_macro(..)` sites), while
+  macro *bodies* live in the hermetic world. A macro can therefore sit in the same
+  file as the runtime code it serves — there are no "macro modules", no marker, and
+  no module partitioning; the `macro fun` head is the entire boundary, at exactly the
+  granularity the boundary is real.
+- **Staging falls out per-function**: the macro world (`macro fun`s + `macro_std`)
+  is closed under its own references, so it compiles first by construction — no
+  module-graph cut. Macros generating `macro fun`s are rejected in v1 (no fixpoint of
+  worlds).
 - **Expansion is a pre-analysis pass**, exactly where `expand_derives` sits today:
   after parse, before the walk — iterated to a fixpoint over *item* expansions (a
   macro's output may carry attribute invocations), with a depth cap (default 16) whose
   overflow is a clean "macro expansion did not settle" error naming the chain.
 
-### Why the unit of staging is the MODULE (not the item)
-
-The split itself is functional, not an implementation convenience — three of the
-design's load-bearing properties are properties of a *compilation unit*, and vilan's
-compilation unit is the module:
-
-1. **The prelude gate is an import rule, and imports are per-module.** Isolation says
-   macro code sees only the pure prelude — but an `import` binds into the *module's*
-   scope; vilan has no per-item import visibility. A mixed module would need two
-   simultaneous legality rules for one import list ("`std::fs` is fine for the runtime
-   half, illegal for the macro half"), i.e. item-level import tracking that doesn't
-   exist. Module granularity makes the gate enforceable with the shipped machinery
-   (the platform-layer gating already validates per module-set).
-2. **The stage boundary is a dependency-graph cut, and the loader's nodes are
-   modules.** Stage 0 must compile before stage 1 exists. A mixed module would
-   straddle the cut: its macro half must load in stage 0 while its runtime half may
-   import stage-1 modules — resolvable only with per-item dependency staging, a far
-   finer analysis than the loader performs.
-3. **Helpers need an unambiguous world.** A macro's helper `fun`s run in the
-   interpreter and must be pure; a runtime `fun` compiles to JS with full std. In a
-   mixed module the same helper could be reachable from both worlds — Zig-style
-   dual-use (`comptime`-callable functions), which is a coherent but much heavier
-   model: bi-modal checking per function and an interpreter that must cover
-   everything macro-reachable. The module split makes it binary: in a macro module →
-   interpreted, pure; elsewhere → compiled, full.
-
-The *granularity* is also where implementation economy and readability point the same
-way: module-content hashing is what the caches already do (§6), and the reader knows
-from the file which world they are editing.
-
-**The recorded cost:** logic needed by BOTH worlds exists twice (or the macro *emits*
-it — generated code freely calls runtime libraries; the macro itself cannot). This is
-the deliberate trade against dual-use functions, revisitable if it bites in practice.
+**The recorded cost of hermeticity:** logic needed by BOTH worlds exists twice (or the
+macro *emits* it — generated code freely calls runtime libraries; the macro body
+cannot). Shared constants between a macro and the runtime code beside it are likewise
+duplicated. This is the deliberate trade against Zig-style dual-use functions
+(bi-modal checking per function, an interpreter covering everything macro-reachable);
+revisitable if it bites in practice.
 
 ## 4. Isolation — the macro's own scope
 
@@ -155,14 +152,12 @@ The user requirement, made mechanical:
 
 - **A separate namespace.** `macro fun`s are not values: they cannot be assigned,
   passed, or called by runtime code (`name(..)` finds no function; the error suggests
-  `macro name(..)`). Runtime items are invisible to macro bodies (stage 0 compiles
-  before stage 1 exists).
-- **The macro prelude** is the *pure* std subset: `List`, `str`, `Option`, `Result`,
-  `Map`/`Set`, `format`/`display`, `std::meta` — and nothing platform-flavored. No
-  `fs`, no `http`/`fetch`, no `time`, no `random`, no `process`, no `[extern]` in macro
-  modules at all. This is enforced at stage-0 load (the platform-layer machinery
-  already gates module sets per target; the macro stage is one more, maximally
-  restrictive, "platform").
+  `macro name(..)`). Symmetrically, runtime items are invisible to macro bodies — the
+  hermetic rule (§3): a macro body resolves names against its locals, other
+  `macro fun`s, intrinsics, and its own `macro_std` imports, nothing else.
+- **`macro_std` is the entire reachable library surface** (§3): isolation needs no
+  enforcement pass, because the sandbox is the package boundary itself — `fs`, the
+  clock, `random`, `process`, and `[extern]` aren't restricted, they are *absent*.
 - **Consequence: determinism by construction.** A macro's output is a pure function of
   (its own source, its inputs). No clock, no randomness, no filesystem, no environment.
   This is not just safety hygiene — it is what makes caching (§6) *correct* rather than
@@ -200,7 +195,7 @@ The compiler is Rust; macros are vilan. Three ways to run them:
    `std::meta` contract* — the macro's source doesn't change, only the engine. Decide
    that from measurements, not in advance.
 
-The interpreter's scope is the macro prelude subset only (no async, no views/arenas —
+The interpreter's scope is `macro_std` plus the intrinsics (no async, no views/arenas —
 value semantics over plain data), which keeps it small and testable: its conformance
 suite is "every prelude corpus program the subset admits produces the same output
 interpreted as compiled" — an executable equivalence gate.
@@ -230,10 +225,12 @@ distinct gensyms (§7), so even intra-run memoization must key the gensym seed.
 **The design — cache text, never trees:**
 
 1. **The unit of caching is the expansion's SOURCE TEXT** — id-free, span-free,
-   analysis-independent. Key: `hash(macro definition source) × hash(invocation input
-   source) × engine version`. Both hashes are cheap and already have in-house
-   precedent: `load_package_module`'s content-addressed parse cache. Determinism (§4)
-   is what makes this *sound*: same key ⇒ same text, always.
+   analysis-independent. Key: `hash(the macro's REACHABLE definition set — its own
+   source plus the macro funs it transitively calls) × hash(invocation input source) ×
+   engine/macro_std version`. The reachable set is well-defined because the macro
+   world is closed (§3); the hashes are cheap and have in-house precedent
+   (`load_package_module`'s content-addressed parse cache). Determinism (§4) is what
+   makes this *sound*: same key ⇒ same text, always.
 2. **The parse of cached text rides the existing parse cache** (content-addressed, so
    a hit costs a hash lookup), and the walk re-runs per analysis — exactly how std
    modules already work per keystroke. Fresh ids/spans every run; no remapping problem.
@@ -266,8 +263,8 @@ as incremental analysis; if roadmap #12 ever lands stable ids, revisit).
 - **`meta::fresh(prefix: str): str`** is the gensym: names that cannot collide with
   user code or other expansions (reserved `__m` namespace, per-site stamped — §6.4).
   v1 hygiene = "use `fresh` for anything you bind"; full auto-renaming is future work.
-- A macro's *helpers* (plain functions in its stage-0 module) are invisible to stage 1
-  — generated code cannot call them; anything the output needs must be emitted or be
+- A macro's *helpers* (other `macro fun`s) are invisible to the program world —
+  generated code cannot call them; anything the output needs must be emitted or be
   ordinary library code the *program* imports.
 
 ## 8. Errors, spans, and the LSP
@@ -282,14 +279,16 @@ as incremental analysis; if roadmap #12 ever lands stable ids, revisit).
   generated code anchor at the invocation with the "(in generated code)" label — all
   shipped behavior (E1), inherited unchanged.
 - The LSP re-expands per analysis through the §6 cache; a macro edit invalidates by
-  definition-hash, so editing a macro module live-updates its expansions on the next
-  debounce.
+  definition-set hash, so editing a `macro fun` live-updates its expansions on the
+  next debounce. Inside a macro body, completion/hover resolve against the hermetic
+  scope (`macro_std` + macro funs) — the same platform-gating shape the LSP already
+  applies per target.
 
 ## 9. Pipeline integration
 
 ```
-load (stage-0 macro modules compile first, interpreted thereafter)
-  → parse (program)
+load + parse
+  → macro world compiles (macro funs + macro_std; closed, so no ordering analysis)
   → EXPAND (fixpoint over item invocations, depth ≤ 16, per-invocation cache)
   → walk → build → contexts → async → transform     (unchanged)
 ```
@@ -313,13 +312,13 @@ behavior (skip; the missing-impl error surfaces at the use site).
 
 ## 11. Phased plan
 
-- **Phase 0 — `std::meta` + the interpreter core** (the long pole): the reflection
-  structs, the prelude-subset interpreter with fuel, its compiled-vs-interpreted
-  equivalence suite.
-- **Phase 1 — attributes**: `macro fun` items, stage-0 loading, `[name(args)]` +
-  `[derive(Name)]` dispatch, expansion fixpoint, the per-invocation text cache,
-  `meta::fresh`, error surfacing. Exit: `derive_display` (§2) works end to end from a
-  user library.
+- **Phase 0 — `macro_std` + the interpreter core** (the long pole): the `macro_std`
+  package (meta types, `source`, the pure-core re-exports), the interpreter with fuel,
+  its compiled-vs-interpreted equivalence suite.
+- **Phase 1 — attributes**: `macro fun` items with function-scoped `macro_std`
+  imports, the hermetic name resolution, `[name(args)]` + `[derive(Name)]` dispatch,
+  expansion fixpoint, the per-invocation text cache, `meta::fresh`, error surfacing.
+  Exit: `derive_display` (§2) works end to end from a user library.
 - **Phase 2 — invocations**: `macro name(args)` in item and expression position,
   expression splice + placeholder-gensym stamping. Exit: `macro numeric_family(..)`
   and a `macro unroll(..)`.
@@ -342,10 +341,9 @@ behavior (skip; the missing-impl error surfaces at the use site).
    is reserved. Parse decision is one token after `macro` (§3).
 2. ~~Fuel defaults~~ — **resolved (review):** 1M steps/expansion, depth 16, per-package
    configurable in `vilan.toml [macros]`.
-3. **Should macro modules be *marked*** (a `[macro]` module attribute / `macro/`
-   directory convention) or inferred from containing `macro fun`s? The staging
-   rationale (§3) sharpens the case for **marked**: the import-legality rules apply to
-   the WHOLE module, so the reader (and the LSP's platform gating) should know the
-   module's world before reading any item — and under inference, adding or removing
-   one `macro fun` silently flips the module's stage and its imports' legality.
+3. ~~Marked vs inferred macro modules~~ — **resolved (review): the question dissolved.**
+   There are no macro modules: the macro world is hermetic PER FUNCTION (§3) — a
+   `macro fun` sees nothing of its surrounding module and imports only from
+   `macro_std`, inside its own scope. The `macro fun` head is the marker, at exactly
+   the granularity the boundary is real; macros live beside the code they serve.
 4. ~~Expression macros in v1 or Phase 2?~~ — **resolved (review): Phase 2 as written.**
