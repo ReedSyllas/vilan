@@ -115,6 +115,40 @@ v1 ("only functions can be macros").
   macro's output may carry attribute invocations), with a depth cap (default 16) whose
   overflow is a clean "macro expansion did not settle" error naming the chain.
 
+### Why the unit of staging is the MODULE (not the item)
+
+The split itself is functional, not an implementation convenience — three of the
+design's load-bearing properties are properties of a *compilation unit*, and vilan's
+compilation unit is the module:
+
+1. **The prelude gate is an import rule, and imports are per-module.** Isolation says
+   macro code sees only the pure prelude — but an `import` binds into the *module's*
+   scope; vilan has no per-item import visibility. A mixed module would need two
+   simultaneous legality rules for one import list ("`std::fs` is fine for the runtime
+   half, illegal for the macro half"), i.e. item-level import tracking that doesn't
+   exist. Module granularity makes the gate enforceable with the shipped machinery
+   (the platform-layer gating already validates per module-set).
+2. **The stage boundary is a dependency-graph cut, and the loader's nodes are
+   modules.** Stage 0 must compile before stage 1 exists. A mixed module would
+   straddle the cut: its macro half must load in stage 0 while its runtime half may
+   import stage-1 modules — resolvable only with per-item dependency staging, a far
+   finer analysis than the loader performs.
+3. **Helpers need an unambiguous world.** A macro's helper `fun`s run in the
+   interpreter and must be pure; a runtime `fun` compiles to JS with full std. In a
+   mixed module the same helper could be reachable from both worlds — Zig-style
+   dual-use (`comptime`-callable functions), which is a coherent but much heavier
+   model: bi-modal checking per function and an interpreter that must cover
+   everything macro-reachable. The module split makes it binary: in a macro module →
+   interpreted, pure; elsewhere → compiled, full.
+
+The *granularity* is also where implementation economy and readability point the same
+way: module-content hashing is what the caches already do (§6), and the reader knows
+from the file which world they are editing.
+
+**The recorded cost:** logic needed by BOTH worlds exists twice (or the macro *emits*
+it — generated code freely calls runtime libraries; the macro itself cannot). This is
+the deliberate trade against dual-use functions, revisitable if it bites in practice.
+
 ## 4. Isolation — the macro's own scope
 
 The user requirement, made mechanical:
@@ -306,11 +340,12 @@ behavior (skip; the missing-impl error surfaces at the use site).
    `await`-family; the compile-time boundary becomes greppable by one word; no
    retired sigil returns; and the block form falls out of the grammar. Cost: `macro`
    is reserved. Parse decision is one token after `macro` (§3).
-2. **Fuel defaults** (1M steps/expansion, depth 16) and whether they are per-package
+2. ~~Fuel defaults~~ — **resolved (review):** 1M steps/expansion, depth 16, per-package
    configurable in `vilan.toml [macros]`.
 3. **Should macro modules be *marked*** (a `[macro]` module attribute / `macro/`
-   directory convention) or inferred from containing `macro` items? Marked is
-   recommended: the stage boundary is load-bearing and should be visible at a glance.
-4. **Expression macros in v1 or Phase 2 as written?** Attributes alone cover the derive
-   prize; expressions add the splice/gensym machinery. The phasing above defers them
-   one phase without blocking the migration.
+   directory convention) or inferred from containing `macro fun`s? The staging
+   rationale (§3) sharpens the case for **marked**: the import-legality rules apply to
+   the WHOLE module, so the reader (and the LSP's platform gating) should know the
+   module's world before reading any item — and under inference, adding or removing
+   one `macro fun` silently flips the module's stage and its imports' legality.
+4. ~~Expression macros in v1 or Phase 2?~~ — **resolved (review): Phase 2 as written.**
