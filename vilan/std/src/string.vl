@@ -1,3 +1,5 @@
+import pkg::operators::Add;
+
 external struct str;
 
 impl str {
@@ -28,5 +30,14 @@ impl str {
 
 	fun is_empty(self): bool {
 		self.len() == 0
+	}
+}
+
+// `+` on strings is native concatenation; this impl admits `str` to generic
+// `T: Add` code. (`operators` pulls only `io` — string.vl stays off the
+// `option` chain, the constraint recorded in option.vl's `parse_i32` note.)
+impl str with Add {
+	fun add(self, b: str): str {
+		self + b
 	}
 }

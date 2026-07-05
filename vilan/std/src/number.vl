@@ -1,4 +1,6 @@
 import pkg::default::Default;
+import pkg::compare::PartialEq;
+import pkg::operators::{ Add, Sub, Mul, Div, Shl, Shr, BitAnd, BitOr, BitXor };
 
 external struct u32;
 
@@ -80,5 +82,225 @@ external struct BigInt;
 impl BigInt with Default {
 	fun default(): BigInt {
 		0n
+	}
+}
+
+// --- Trait impls for the numeric primitives -----------------------------------
+//
+// Equality and the operator traits, so generic `T: PartialEq` / `T: Add` / ...
+// code (and conditional impls over it) accepts the numeric primitives. Every
+// body is the native operator: `+`/`==`/`&` on primitives always lower to
+// native JS, so nothing recurses — a body runs only when reached through an
+// explicit method call or a generic bound's dispatch; written `a + b` stays
+// native and never touches these.
+
+impl i32 with PartialEq {
+	fun eq(self, b: i32): bool {
+		self == b
+	}
+}
+
+impl u32 with PartialEq {
+	fun eq(self, b: u32): bool {
+		self == b
+	}
+}
+
+impl f64 with PartialEq {
+	fun eq(self, b: f64): bool {
+		self == b
+	}
+}
+
+impl BigInt with PartialEq {
+	fun eq(self, b: BigInt): bool {
+		self == b
+	}
+}
+
+impl i32 with Add {
+	fun add(self, b: i32): i32 {
+		self + b
+	}
+}
+
+impl i32 with Sub {
+	fun sub(self, b: i32): i32 {
+		self - b
+	}
+}
+
+impl i32 with Mul {
+	fun mul(self, b: i32): i32 {
+		self * b
+	}
+}
+
+impl i32 with Div {
+	fun div(self, b: i32): i32 {
+		self / b
+	}
+}
+
+impl u32 with Add {
+	fun add(self, b: u32): u32 {
+		self + b
+	}
+}
+
+impl u32 with Sub {
+	fun sub(self, b: u32): u32 {
+		self - b
+	}
+}
+
+impl u32 with Mul {
+	fun mul(self, b: u32): u32 {
+		self * b
+	}
+}
+
+impl u32 with Div {
+	fun div(self, b: u32): u32 {
+		self / b
+	}
+}
+
+impl f64 with Add {
+	fun add(self, b: f64): f64 {
+		self + b
+	}
+}
+
+impl f64 with Sub {
+	fun sub(self, b: f64): f64 {
+		self - b
+	}
+}
+
+impl f64 with Mul {
+	fun mul(self, b: f64): f64 {
+		self * b
+	}
+}
+
+impl f64 with Div {
+	fun div(self, b: f64): f64 {
+		self / b
+	}
+}
+
+impl BigInt with Add {
+	fun add(self, b: BigInt): BigInt {
+		self + b
+	}
+}
+
+impl BigInt with Sub {
+	fun sub(self, b: BigInt): BigInt {
+		self - b
+	}
+}
+
+impl BigInt with Mul {
+	fun mul(self, b: BigInt): BigInt {
+		self * b
+	}
+}
+
+impl BigInt with Div {
+	fun div(self, b: BigInt): BigInt {
+		self / b
+	}
+}
+
+// The bitwise/shift traits, for the two types the operators are defined on
+// (the hex/bitwise slice): `i32` and `u32`. `f64` has no bitwise story and
+// `BigInt`'s is unverified — deliberately omitted.
+
+impl i32 with Shl {
+	fun shl(self, b: i32): i32 {
+		self << b
+	}
+}
+
+impl i32 with Shr {
+	fun shr(self, b: i32): i32 {
+		self >> b
+	}
+}
+
+impl i32 with BitAnd {
+	fun bit_and(self, b: i32): i32 {
+		self & b
+	}
+}
+
+impl i32 with BitOr {
+	fun bit_or(self, b: i32): i32 {
+		self | b
+	}
+}
+
+impl i32 with BitXor {
+	fun bit_xor(self, b: i32): i32 {
+		self ^ b
+	}
+}
+
+impl u32 with Shl {
+	fun shl(self, b: u32): u32 {
+		self << b
+	}
+}
+
+impl u32 with Shr {
+	fun shr(self, b: u32): u32 {
+		self >> b
+	}
+}
+
+impl u32 with BitAnd {
+	fun bit_and(self, b: u32): u32 {
+		self & b
+	}
+}
+
+impl u32 with BitOr {
+	fun bit_or(self, b: u32): u32 {
+		self | b
+	}
+}
+
+impl u32 with BitXor {
+	fun bit_xor(self, b: u32): u32 {
+		self ^ b
+	}
+}
+
+// --- Parity --------------------------------------------------------------------
+//
+// Concrete on the integer types: a generic form over `BitAnd` needs a way to
+// conjure `one`/`zero` AT the generic type (a `One`/`Zero` seam vilan doesn't
+// have), and parity on `f64` is undefined off the integers — so two honest
+// one-liners per type beat a new numeric-tower trait.
+
+impl i32 {
+	fun is_even(self): bool {
+		(self & 1) == 0
+	}
+
+	fun is_odd(self): bool {
+		(self & 1) == 1
+	}
+}
+
+impl u32 {
+	fun is_even(self): bool {
+		(self & 1u32) == 0u32
+	}
+
+	fun is_odd(self): bool {
+		(self & 1u32) == 1u32
 	}
 }

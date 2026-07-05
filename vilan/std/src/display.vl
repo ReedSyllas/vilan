@@ -36,3 +36,15 @@ impl bool with Display {
 		i"{self}"
 	}
 }
+
+impl u32 with Display {
+	fun to_string(self): str {
+		i"{self}"
+	}
+}
+
+impl BigInt with Display {
+	fun to_string(self): str {
+		i"{self}"
+	}
+}

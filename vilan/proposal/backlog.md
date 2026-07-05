@@ -77,6 +77,14 @@ have gaps.
     closure `!` (the RPC-handler follow-up), error conversion, expression lifting
     (`a? + 10`), applicatives, and `Signal`/`Promise` `Lift` opt-ins.
 
+12. **Missing-impl bound dispatch emits the abstract method** (M; found via `format(7u32)`
+    before u32 had a `Display` impl) — a generic bound's dispatch at a type LACKING the
+    impl silently monomorphizes to the trait's abstract method and returns `undefined` —
+    the silent-miscompile class. The conformance side exists (an `impl .. with` missing
+    members errors); the MONOMORPHIZATION side doesn't: instantiating a bound at a type
+    with no impl should be a spanned compile error at the call site. (The u32/BigInt
+    `Display` holes are fixed; the general check remains.)
+
 ---
 
 ## C. Memory model — Phase 6+ tail (deferred; see `memory-management-impl-plan.md`)

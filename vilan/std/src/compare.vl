@@ -76,34 +76,15 @@ fun minmax<T: Ord>(a: T, b: T): (T, T) {
 	}
 }
 
-// Primitive equality. These satisfy `PartialEq` so generic `T: PartialEq` code —
-// and conditional impls like `Option<T>` / `Result<T, E>` — works for primitive
-// types. `==` on a primitive always lowers to native JS, so these bodies don't
-// recurse; they're reached only via an explicit `.eq()`.
-impl i32 with PartialEq {
-	fun eq(self, b: i32): bool {
-		self == b
-	}
-}
-
-impl u32 with PartialEq {
-	fun eq(self, b: u32): bool {
-		self == b
-	}
-}
-
-impl f64 with PartialEq {
-	fun eq(self, b: f64): bool {
-		self == b
-	}
-}
-
-impl BigInt with PartialEq {
-	fun eq(self, b: BigInt): bool {
-		self == b
-	}
-}
-
+// Primitive equality for `str` and `bool`. These satisfy `PartialEq` so generic
+// `T: PartialEq` code — and conditional impls like `Option<T>` / `Result<T, E>`
+// — works for primitive types; `==` on a primitive always lowers to native JS,
+// so the bodies don't recurse (reached only via an explicit `.eq()` / generic
+// dispatch). They live HERE, not with their types, because `string.vl` and
+// `boolean.vl` are deliberately dependency-free core modules (see boolean.vl's
+// header and option.vl's note on `parse_i32`) and this module pulls the
+// `option` chain through `PartialOrd`. The numeric impls live in `number.vl`,
+// which already carries imports.
 impl str with PartialEq {
 	fun eq(self, b: str): bool {
 		self == b

@@ -5029,3 +5029,53 @@ fn a_mappable_type_without_the_lift_marker_is_rejected() {
         "opting in with `impl .. with Lift`",
     );
 }
+
+// The primitive operator/equality impls: generic `T: Add`/`T: BitAnd` code
+// dispatches to the numeric primitives (and `str` for Add), and the bodies
+// lower to the native operators — including u32's `>>> 0` correction.
+#[test]
+fn primitive_operator_impls_dispatch_generically() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+        import std::operators::{ Add, BitAnd };
+
+        fun sum<T: Add>(a: T, b: T): T {
+        	a.add(b)
+        }
+
+        fun low_bit<T: BitAnd>(value: T, one: T): T {
+        	value.bit_and(one)
+        }
+
+        fun main() {
+        	print(format(sum(40, 2)));
+        	print(sum("con", "cat"));
+        	print(format(sum(1.5, 2.25)));
+        	print(sum(20n, 22n));
+        	print(format(low_bit(7, 1)));
+        	print(format(low_bit(8u32, 1u32)));
+        }
+        "#,
+        "42\nconcat\n3.75\n42n\n1\n0\n",
+    );
+}
+
+// `format` covers every displayable primitive — u32 and BigInt were silently
+// missing (the bound dispatch emitted the abstract to_string → undefined).
+#[test]
+fn format_covers_u32_and_bigint() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::format;
+
+        fun main() {
+        	print(format(7u32));
+        	print(format(42n));
+        }
+        "#,
+        "7\n42\n",
+    );
+}

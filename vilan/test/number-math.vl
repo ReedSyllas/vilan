@@ -1,6 +1,7 @@
 import std::print;
 
 fun main() {
+	parity();
 	// i32 math: the `Math.*` wrappers plus the existing `diff`.
 	let n: i32 = -5;
 	print(n.abs()); // 5
@@ -19,4 +20,14 @@ fun main() {
 	print(y.round()); // 4
 	print(y.min(2f)); // 2
 	print(y.max(10f)); // 10
+}
+
+fun parity() {
+	// is_even / is_odd on the integer types
+	print(6.is_even()); // true
+	print(6.is_odd()); // false
+	print(7.is_odd()); // true
+	print((0 - 3).is_even()); // false
+	print(8u32.is_even()); // true
+	print(9u32.is_odd()); // true
 }
