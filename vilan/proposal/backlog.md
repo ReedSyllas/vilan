@@ -206,12 +206,15 @@ have gaps.
 
 ## G. Macros
 
-1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`, design settled in
-   review 2026-07-05** — every §12 question resolved) — built-in derives and `[service]`
-   generation shipped as special-cased subsets; the proposal subsumes them via `macro fun`
-   items over `macro_std::meta`, hermetic per-function isolation (bodies see only `macro_std`
-   via scoped imports, H2), a fueled interpreter, and per-invocation text caching. Next:
-   Phase 0 (`macro_std` + the interpreter core).
+1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`, design settled;
+   Phase 0 SHIPPED 2026-07-06**) — built-in derives and `[service]` generation shipped as
+   special-cased subsets; the proposal subsumes them via `macro fun` items over
+   `macro_std::meta`, hermetic per-function isolation (bodies see only `macro_std` via
+   scoped imports, H2), a fueled interpreter, and per-invocation text caching. Phase 0
+   in-tree: the interpreter over the transformer's `js::Node` AST (`transform_to_ast`),
+   the 70/70 equivalence gate + failure-mode pins, and the `macro_std` package. Next:
+   Phase 1 — `macro fun` items, hermetic resolution, `[attr]`/`[derive(X)]` dispatch,
+   the expansion fixpoint + text cache.
 
 ---
 

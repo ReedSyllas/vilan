@@ -1,0 +1,21 @@
+// `macro_std` — the macro world's std (proposal/macro-engine.md §3, §4).
+// A `macro fun`'s body is hermetic: it sees nothing of its surrounding module
+// and imports ONLY from this package, so this package's surface IS the
+// expansion sandbox — `fs`, the clock, `random`, and `[extern]` aren't
+// restricted here, they are absent.
+//
+// Phase 0 ships the compiler-interaction surface (`meta`, `source`). The
+// pure-core vocabulary (`Option`, `Result`, `List` methods, `format`, …)
+// reaches macro bodies as re-exports of `std`'s pure modules — HOW those
+// resolve is the hermetic resolver's job (Phase 1): macro-scope imports
+// resolve against this package's universe instead of the program's.
+
+// The reflection surface: `import macro_std::meta::{ Item, TypeExpr, .. }`.
+export import pkg::meta;
+
+use meta::Source;
+
+// Builds generated source. The one constructor every macro ends in.
+export fun source(text: str): Source {
+	Source { text = text }
+}

@@ -16,6 +16,30 @@ pub fn transform<'src>(program: &Program<'src>, options: &BuildOptions) -> Resul
     Transformer::new(program, options).transform_entry()
 }
 
+/// The transformed program one step before formatting: the whole JS AST plus
+/// the text prelude it needs. `transform` formats this into the final source;
+/// the macro engine's interpreter (`interpreter.rs`, macro-engine.md §5)
+/// evaluates `nodes` directly — the two consumers share every lowering
+/// decision down to this tree.
+pub struct JsProgram<'src> {
+    /// Host import lines (`import { a } from "m";`) from `[extern]` bindings.
+    /// Non-empty means the program reaches host capabilities — the interpreter
+    /// rejects it ("not available at expansion time").
+    pub imports: Vec<String>,
+    /// The names of the `__` runtime helpers the program uses (`__clone`, …),
+    /// in emission order. The formatter prepends their JS sources; the
+    /// interpreter implements them natively by name.
+    pub helpers: Vec<&'static str>,
+    pub nodes: Vec<js::Node<'src>>,
+}
+
+pub fn transform_to_ast<'src>(
+    program: &'src Program<'src>,
+    options: &BuildOptions,
+) -> Result<JsProgram<'src>, Error> {
+    Transformer::new(program, options).transform_entry_ast()
+}
+
 /// Interprets a string literal's backslash escapes into the characters they
 /// denote (`\n` -> newline, `\t`, `\r`, `\"`, `\\`, `\0`), so the value is the
 /// real text — the JS formatter then re-escapes it for output. Borrows the slice
@@ -323,7 +347,32 @@ impl<'src> Transformer<'src> {
         }
     }
 
-    fn transform_entry(mut self) -> Result<String, Error> {
+    fn transform_entry(self) -> Result<String, Error> {
+        let formatter = self.formatter.clone();
+        let line_break = formatter.line_break;
+        let program = self.transform_entry_ast()?;
+        let body = formatter.file(&program.nodes);
+        let imports = program.imports.join("\n");
+        let helpers = program
+            .helpers
+            .iter()
+            .map(|name| helper_source(name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prelude = [imports, helpers]
+            .into_iter()
+            .filter(|section| !section.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = if prelude.is_empty() {
+            body
+        } else {
+            format!("{}\n{}", prelude, body)
+        };
+        Ok(format!("{}{}", output, line_break))
+    }
+
+    fn transform_entry_ast(mut self) -> Result<JsProgram<'src>, Error> {
         let global_scope = self
             .program
             .scopes
@@ -413,25 +462,14 @@ impl<'src> Transformer<'src> {
                 let names = symbols.iter().cloned().collect::<Vec<_>>().join(", ");
                 format!("import {{ {} }} from \"{}\";", names, module)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
         // Value-semantics copies (`own` arguments, aggregate bindings) lower to
         // the `__clone` helper rather than `structuredClone`, which can't copy
         // the closures a struct may hold.
         if !self.program.clone_sites.is_empty() {
             self.used_helpers.insert("__clone");
         }
-        let helpers = self
-            .used_helpers
-            .iter()
-            .map(|name| helper_source(name))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let prelude = [imports, helpers]
-            .into_iter()
-            .filter(|section| !section.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let helpers = self.used_helpers.into_iter().collect::<Vec<_>>();
 
         let mut nodes = t_functions
             .chain(t_instances)
@@ -442,13 +480,11 @@ impl<'src> Transformer<'src> {
         // (readable: both sibling `value`s stay `value`; release: reuse short
         // names per function).
         rename_for_scopes(&self.ng, self.program, &mut nodes);
-        let body = self.formatter.file(&nodes);
-        let output = if prelude.is_empty() {
-            body
-        } else {
-            format!("{}\n{}", prelude, body)
-        };
-        Ok(format!("{}{}", output, self.formatter.line_break))
+        Ok(JsProgram {
+            imports,
+            helpers,
+            nodes,
+        })
     }
 
     fn find_global_variables(&self, globals: &Vec<Id>) -> Vec<Id> {
@@ -2977,6 +3013,7 @@ impl<'src> Transformer<'src> {
     }
 }
 
+#[derive(Clone)]
 struct Formatter {
     line_break: &'static str,
     indentation: &'static str,

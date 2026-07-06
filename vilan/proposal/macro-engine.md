@@ -1,7 +1,8 @@
 # The macro engine (roadmap #9)
 
-Status: **proposal, design settled in review** (2026-07-04, not implemented; every §12
-question resolved). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phase 0 SHIPPED 2026-07-06** (every §12 question resolved;
+the fueled interpreter + `macro_std` are in-tree with the equivalence gate green —
+see §11). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -209,6 +210,40 @@ value semantics over plain data), which keeps it small and testable: its conform
 suite is "every prelude corpus program the subset admits produces the same output
 interpreted as compiled" — an executable equivalence gate.
 
+### What the interpreter executes: the transformer's own JS AST (Phase 0 decision)
+
+The "eval over the existing typed AST" above sharpened during implementation into
+something strictly better: the interpreter evaluates **`js::Node` — the transformer's
+output AST** — not the analyzed vilan IR. The macro world compiles through the
+ordinary full pipeline (analyze → contexts → transform); the interpreter picks up
+where the JS *formatter* otherwise would.
+
+1. **One lowering, not two.** Generic dispatch, monomorphization, value-semantics
+   copies, and match compilation live in the transformer — the exact subsystems the
+   solver-stabilization arc hardened. A vilan-IR interpreter would be a second
+   implementation of the hardest logic in the compiler, diverging precisely where
+   bugs are subtlest. Over `js::Node`, the interpreter cannot disagree with codegen
+   about what a program *means*.
+2. **Equivalence by construction.** Compiled and interpreted paths share everything
+   down to the last AST; the residual claim is only "this evaluator matches a JS
+   engine on the emitted subset", which the conformance suite tests *directly* —
+   run node, run the interpreter, diff the output.
+3. **Future features are free.** Whatever the transformer learns to emit, macros can
+   run — no interpreter work per language feature.
+4. **The emitted subset is tiny and closed.** ~25 node kinds; values are
+   undefined/null/bool/number/BigInt/string/array/`Set`/`Map`/closure plus the one
+   `{ v }` cell `Shared` uses — no general objects (structs are positional arrays),
+   no classes, no prototypes, no `this`. The dynamic semantics to match are JS's
+   arithmetic, `===`, string `+`, UTF-16 string indexing, and insertion-ordered
+   `Set`/`Map`.
+5. **Runtime helpers are native.** The `__` helpers the backend injects as source
+   text are implemented in Rust, mirroring their JS sources one-to-one; the impure
+   ones (`__scan`/`__env`/`__args`/`__random_*`) and `[extern]` host imports are
+   clean "not available at expansion time" errors — the sandbox stays a *missing
+   capability*, not a check.
+6. **Fuel** decrements per node evaluated; a call-depth cap bounds recursion. Both
+   exhaust into clean errors naming the macro.
+
 ## 6. Caching — both sides of the problem, addressed
 
 Macros run on every analysis, and the LSP analyzes on every debounced keystroke. Naive
@@ -321,9 +356,18 @@ behavior (skip; the missing-impl error surfaces at the use site).
 
 ## 11. Phased plan
 
-- **Phase 0 — `macro_std` + the interpreter core** (the long pole): the `macro_std`
-  package (meta types, `source`, the pure-core re-exports), the interpreter with fuel,
-  its compiled-vs-interpreted equivalence suite.
+- **Phase 0 — `macro_std` + the interpreter core** — **SHIPPED 2026-07-06.** The
+  interpreter (`crates/vilan-core/src/interpreter.rs`) evaluates the transformer's
+  `js::Node` AST (the §5 decision) behind `transform_to_ast` with fuel + a call-depth
+  cap; the equivalence gate (`tests/interpreter.rs`) runs EVERY admitted corpus
+  program both ways — node vs interpreter — and compares (stdout, exit code) exactly:
+  70/70 equivalent, 3 exclusions (async ×2, host env ×1), ~4s. Failure modes pinned:
+  fuel exhaustion, depth cap, impure capability (`Unsupported`, "not available at
+  expansion time"), panic (`Thrown`). `vilan/macro_std` ships `meta` (Item/StructItem/
+  EnumItem/FunctionItem/Field/TypeExpr.render/Variant/Arguments/Source) + `source()`,
+  pinned end-to-end via a consumer app (`crates/vilan-cli/tests/macro_std.rs`).
+  Recorded v1 bounds (each a loud error, never silent): BigInt beyond i128, async,
+  the unimplemented host-method tail.
 - **Phase 1 — attributes**: `macro fun` items with scoped `macro_std` imports
   (the general block-scoped-imports feature shipped 2026-07-05, backlog H2 — only the
   `macro_std` resolution restriction remains), the hermetic name resolution,

@@ -1,0 +1,107 @@
+import std::option::Option;
+
+// The compiler-interaction surface (proposal/macro-engine.md §3): the types a
+// `macro fun` receives and returns. These are ordinary vilan values — the
+// compiler constructs them from its AST at expansion time and consumes the
+// returned `Source` back. Shapes are v1: syntactic, not semantic (a `TypeExpr`
+// is a *written* type, renderable back to text; nothing here is resolved).
+
+// Generated vilan source text, the output of every macro. Built with
+// `macro_std::source(..)`; the compiler parses it in place of the invocation.
+export struct Source {
+	text: str,
+}
+
+// A written type: its head name and its written arguments, renderable back to
+// source text (`List<i32>` is `TypeExpr { name = "List", arguments = [i32] }`).
+export struct TypeExpr {
+	name: str,
+	arguments: List<TypeExpr>,
+}
+
+impl TypeExpr {
+	fun render(self): str {
+		if self.arguments.len() == 0 {
+			self.name
+		} else {
+			mut rendered = i"{self.name}<";
+			mut first = true;
+			for argument in &self.arguments {
+				if first {
+					first = false;
+				} else {
+					rendered = rendered + ", ";
+				}
+				rendered = rendered + argument.render();
+			}
+			rendered + ">"
+		}
+	}
+}
+
+// One struct field: its name and its written type.
+export struct Field {
+	name: str,
+	type_: TypeExpr,
+}
+
+export struct StructItem {
+	name: str,
+	fields: List<Field>,
+}
+
+// One enum variant: its name and its payload types (empty for a bare variant).
+export struct Variant {
+	name: str,
+	payload: List<TypeExpr>,
+}
+
+export struct EnumItem {
+	name: str,
+	variants: List<Variant>,
+}
+
+export struct FunctionItem {
+	name: str,
+	parameters: List<Field>,
+	return_type: TypeExpr,
+}
+
+// The item a macro attribute annotates — what `[derive(X)]`-style macros
+// receive. The `as_struct`/`as_enum` accessors give the common shapes back as
+// options, so a struct-only macro can `item.as_struct()!`.
+export enum Item {
+	Struct(StructItem),
+	Enum(EnumItem),
+	Function(FunctionItem),
+}
+
+impl Item {
+	fun as_struct(self): Option<StructItem> {
+		match self {
+			Item::Struct(let item) => Option::Some(item),
+			_ => Option::None,
+		}
+	}
+
+	fun as_enum(self): Option<EnumItem> {
+		match self {
+			Item::Enum(let item) => Option::Some(item),
+			_ => Option::None,
+		}
+	}
+
+	fun as_function(self): Option<FunctionItem> {
+		match self {
+			Item::Function(let item) => Option::Some(item),
+			_ => Option::None,
+		}
+	}
+}
+
+// An invocation's arguments, as written: `macro unroll(4, |i| body)` delivers
+// the raw argument texts. v1 is deliberately syntactic — richer accessors
+// (numbers, identifiers) come with the expression-macro phase.
+export struct Arguments {
+	values: List<str>,
+}

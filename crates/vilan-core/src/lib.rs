@@ -9,6 +9,7 @@ pub mod context;
 pub mod error;
 pub mod formatter;
 pub mod id;
+pub mod interpreter;
 pub mod lexer;
 pub mod manifest;
 pub mod node;
@@ -30,7 +31,7 @@ pub use options::{BuildOptions, Preset};
 pub use parser::parser;
 pub use span::{Span, Spanned};
 pub use target::{Backend, Platform, PlatformPattern};
-pub use transformer::transform;
+pub use transformer::{JsProgram, transform, transform_to_ast};
 
 use std::path::Path;
 
