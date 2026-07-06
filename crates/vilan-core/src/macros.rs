@@ -42,7 +42,7 @@ const MAX_DEPTH: u32 = 16;
 pub(crate) struct World {
     key: u64,
     program: JsProgram<'static>,
-    entries: HashMap<String, (String, MacroShape)>,
+    entries: HashMap<String, (String, Option<MacroShape>)>,
 }
 
 #[derive(Default)]
@@ -64,7 +64,11 @@ pub(crate) enum MacroShape {
 pub(crate) struct MacroDef {
     world: Arc<World>,
     entry: String,
-    shape: MacroShape,
+    /// `None` = a HELPER (§3: helpers are macro funs) — compiled into the
+    /// world and callable from other macros, but not dispatchable from
+    /// program code (its signature is not a macro shape, or it doesn't
+    /// return `Source`).
+    shape: Option<MacroShape>,
 }
 
 /// The `macro_std` package, resolved from its toolchain location beside `std`
@@ -200,6 +204,14 @@ fn check_hermetic_imports(node: &Spanned<Node>, diagnostics: &mut Vec<Error>, he
 /// The dispatch shape a macro's written signature declares, by its parameter
 /// TYPE names (`Item` / `Arguments`). `None` for anything else.
 fn macro_shape(function: &Func) -> Option<MacroShape> {
+    // A dispatchable macro returns `Source`; anything else is a helper.
+    let returns_source = matches!(
+        function.return_type.as_deref().map(|spanned| &spanned.0),
+        Some(Node::Accessor("Source"))
+    );
+    if !returns_source {
+        return None;
+    }
     let type_name = |index: usize| -> Option<&str> {
         let (_, type_, _, _) = function.parameters.0.get(index)?;
         match type_.as_deref().map(|spanned| &spanned.0) {
@@ -308,19 +320,10 @@ fn compile_world(
             .copied();
         match id {
             Some(id) if program.functions.contains_key(&id) => {
-                let Some(shape) = macro_shape(function) else {
-                    errors.push(Error {
-                        span: *span,
-                        msg: format!(
-                            "the macro `{name}` has an unsupported signature — a macro takes \
-                             `(item: Item)`, `(item: Item, arguments: Arguments)`, \
-                             `(arguments: Arguments)`, or `()`"
-                        ),
-                    });
-                    continue;
-                };
+                // A non-macro signature (or a non-`Source` return) is a HELPER:
+                // compiled and callable inside the world, never dispatched.
                 roots.push(id);
-                root_names.push((name.to_string(), shape));
+                root_names.push((name.to_string(), macro_shape(function)));
             }
             _ => errors.push(Error {
                 span: *span,
@@ -494,11 +497,21 @@ impl Expander<'_, '_> {
             return;
         };
         let call_arguments = match def.shape {
-            MacroShape::Item => vec![construct_item(item, text)],
-            MacroShape::ItemArguments => {
+            None => {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "`{name}` is a macro HELPER (its signature is not a macro shape or it \
+                         doesn't return `Source`) — only other macros can call it"
+                    ),
+                });
+                return;
+            }
+            Some(MacroShape::Item) => vec![construct_item(item, text)],
+            Some(MacroShape::ItemArguments) => {
                 vec![construct_item(item, text), construct_arguments(arguments)]
             }
-            MacroShape::Arguments | MacroShape::Unit => {
+            Some(MacroShape::Arguments) | Some(MacroShape::Unit) => {
                 self.diagnostics.push(Error {
                     span: site,
                     msg: format!(
@@ -544,9 +557,22 @@ impl Expander<'_, '_> {
             return;
         };
         let call_arguments = match def.shape {
-            MacroShape::Arguments => vec![construct_arguments(arguments)],
-            MacroShape::Unit => Vec::new(),
-            MacroShape::Item | MacroShape::ItemArguments => {
+            None => {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "`{name}` is a macro HELPER (its signature is not a macro shape or it \
+                         doesn't return `Source`) — only other macros can call it"
+                    ),
+                });
+                if let Some(site_key) = expression_site {
+                    self.output.failed_sites.push(site_key);
+                }
+                return;
+            }
+            Some(MacroShape::Arguments) => vec![construct_arguments(arguments)],
+            Some(MacroShape::Unit) => Vec::new(),
+            Some(MacroShape::Item) | Some(MacroShape::ItemArguments) => {
                 self.diagnostics.push(Error {
                     span: site,
                     msg: format!(

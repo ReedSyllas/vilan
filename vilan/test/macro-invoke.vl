@@ -32,14 +32,13 @@ macro fun unroll(arguments: Arguments): Source {
 	import macro_std::meta::{ Arguments, Source };
 	import macro_std::option::Option::{ self, Some, None };
 
-	let count = match arguments.values.get(0) {
-		Some(let text) => match text.parse_i32() {
-			Some(let n) => n,
-			None => 0,
-		},
+	// The typed accessors (construction API step 1): no string parsing on
+	// your own arguments.
+	let count = match arguments.as_i32(0) {
+		Some(let n) => n,
 		None => 0,
 	};
-	let callback = match arguments.values.get(1) {
+	let callback = match arguments.get(1) {
 		Some(let text) => text,
 		None => "",
 	};

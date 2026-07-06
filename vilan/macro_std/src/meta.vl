@@ -1,4 +1,4 @@
-import std::option::Option;
+import std::option::Option::{ self, Some, None };
 
 // The compiler-interaction surface (proposal/macro-engine.md §3): the types a
 // `macro fun` receives and returns. These are ordinary vilan values — the
@@ -100,8 +100,66 @@ impl Item {
 }
 
 // An invocation's arguments, as written: `macro unroll(4, |i| body)` delivers
-// the raw argument texts. v1 is deliberately syntactic — richer accessors
-// (numbers, identifiers) come with the expression-macro phase.
+// the raw argument texts, with typed accessors over the syntactic capture
+// (macro-engine.md §3, the construction API step 1) — full `Expr` reflection
+// is the recorded follow-up.
 export struct Arguments {
 	values: List<str>,
+}
+
+impl Arguments {
+	fun len(self): i32 {
+		self.values.len()
+	}
+
+	// The argument's raw source text.
+	fun get(self, index: i32): Option<str> {
+		self.values.get(index)
+	}
+
+	// The argument as an integer literal.
+	fun as_i32(self, index: i32): Option<i32> {
+		match self.values.get(index) {
+			Some(let text) => text.parse_i32(),
+			None => None,
+		}
+	}
+
+	// The argument as a string literal's contents (the quotes stripped;
+	// escapes left as written).
+	fun as_str_literal(self, index: i32): Option<str> {
+		match self.values.get(index) {
+			Some(let text) => {
+				if text.len() >= 2 && text.starts_with("\"") && text.ends_with("\"") {
+					Some(text.substring(1, text.len() - 1))
+				} else {
+					None
+				}
+			},
+			None => None,
+		}
+	}
+
+	// The argument as a bare identifier: non-empty, no digit first, none of
+	// the common expression punctuation. (Syntactic v1 — `Expr` reflection
+	// replaces this.)
+	fun as_identifier(self, index: i32): Option<str> {
+		match self.values.get(index) {
+			Some(let text) => {
+				if text.len() == 0 {
+					ret None;
+				}
+				if "0123456789".contains(text.substring(0, 1)) {
+					ret None;
+				}
+				if text.contains(" ") || text.contains("\"") || text.contains("(")
+					|| text.contains(".") || text.contains("+") || text.contains("-")
+					|| text.contains("|") || text.contains(":") {
+					ret None;
+				}
+				Some(text)
+			},
+			None => None,
+		}
+	}
 }
