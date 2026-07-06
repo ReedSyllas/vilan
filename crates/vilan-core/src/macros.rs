@@ -101,6 +101,7 @@ pub(crate) fn register_file(
     text: &str,
     file: &Path,
     std: &PackageSpec,
+    builtins: Option<&MacroRegistry>,
     diagnostics: &mut Vec<Error>,
 ) {
     let definitions = macro_funs(nodes);
@@ -147,6 +148,20 @@ pub(crate) fn register_file(
                 msg: format!("a macro named `{name}` is already defined"),
             });
             continue;
+        }
+        // Built-in derive names are reserved: a user macro shadowing
+        // `PartialEq` would fire twice (the builtin channel AND the user
+        // registry). The builtins file itself registers with `builtins: None`.
+        if let Some(builtins) = builtins {
+            if builtins.by_name.contains_key(&name) {
+                diagnostics.push(Error {
+                    span: function.name.1,
+                    msg: format!(
+                        "`{name}` is a built-in derive — a user macro cannot take its name"
+                    ),
+                });
+                continue;
+            }
         }
         let Some((entry, shape)) = world.entries.get(&name).cloned() else {
             continue; // the world compile reported why
@@ -351,6 +366,7 @@ pub(crate) struct ExpansionOutput {
 
 struct Expander<'r, 'd> {
     registry: &'r MacroRegistry,
+    std: &'r PackageSpec,
     diagnostics: &'d mut Vec<Error>,
     /// The per-splice-site counter that stamps `__m<N>` gensym placeholders
     /// unique (§7): deterministic — sites are visited in file/node order.
@@ -365,6 +381,7 @@ struct Expander<'r, 'd> {
 /// generated code are chased to the depth cap.
 pub(crate) fn expand_source(
     registry: &MacroRegistry,
+    std: &PackageSpec,
     nodes: &NodeList,
     text: &str,
     diagnostics: &mut Vec<Error>,
@@ -373,6 +390,7 @@ pub(crate) fn expand_source(
 ) -> ExpansionOutput {
     let mut expander = Expander {
         registry,
+        std,
         diagnostics,
         site_counter,
         output: ExpansionOutput::default(),
@@ -586,44 +604,17 @@ impl Expander<'_, '_> {
         // The RAW output is cached by (world, macro, item source, argument
         // sources) — §6; sound because the interpreter is deterministic.
         // Gensym stamping is per SITE, so it applies after the cache.
-        static EXPANSIONS: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
-        let key = {
-            let mut hasher = DefaultHasher::new();
-            def.world.key.hash(&mut hasher);
-            name.hash(&mut hasher);
-            item_text.hash(&mut hasher);
-            arguments.hash(&mut hasher);
-            hasher.finish()
-        };
-        let expansions = EXPANSIONS.get_or_init(|| Mutex::new(HashMap::new()));
-        let cached = expansions.lock().unwrap().get(&key).copied();
-        let raw: &'static str = match cached {
-            Some(raw) => raw,
-            None => {
-                let source = match interpreter::run_entry(
-                    &def.world.program,
-                    &def.entry,
-                    &call_arguments,
-                    Limits::default(),
-                ) {
-                    Ok(source) => source,
-                    Err(failure) => {
-                        self.diagnostics.push(Error {
-                            span: site,
-                            msg: format!(
-                                "macro `{name}` failed at expansion time: {}",
-                                failure.message
-                            ),
-                        });
-                        if let Some(site_key) = expression_site {
-                            self.output.failed_sites.push(site_key);
-                        }
-                        return;
-                    }
-                };
-                let leaked: &'static str = Box::leak(source.into_boxed_str());
-                expansions.lock().unwrap().insert(key, leaked);
-                leaked
+        let raw: &'static str = match cached_run(def, name, item_text, arguments, &call_arguments) {
+            Ok(raw) => raw,
+            Err(message) => {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!("macro `{name}` failed at expansion time: {message}"),
+                });
+                if let Some(site_key) = expression_site {
+                    self.output.failed_sites.push(site_key);
+                }
+                return;
             }
         };
 
@@ -699,12 +690,128 @@ impl Expander<'_, '_> {
             }
             self.output.items.push(parsed);
             // The generated code may carry built-in derives and further uses.
-            if let Some(derived) = crate::analyzer::expand_derives(parsed) {
+            if let Some(derived) =
+                crate::analyzer::expand_derives(parsed, parsed_text, self.std, self.diagnostics)
+            {
                 self.output.items.push(derived);
             }
             self.expand_list(parsed, parsed_text, depth + 1);
         }
     }
+}
+
+/// Runs one macro through the process-global expansion cache: key = (world,
+/// macro, item source, argument sources) — §6, sound because the interpreter
+/// is deterministic by construction.
+fn cached_run(
+    def: &MacroDef,
+    name: &str,
+    item_text: &str,
+    arguments: &[&str],
+    call_arguments: &[js::Node<'static>],
+) -> Result<&'static str, String> {
+    static EXPANSIONS: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
+    let key = {
+        let mut hasher = DefaultHasher::new();
+        def.world.key.hash(&mut hasher);
+        name.hash(&mut hasher);
+        item_text.hash(&mut hasher);
+        arguments.hash(&mut hasher);
+        hasher.finish()
+    };
+    let expansions = EXPANSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(raw) = expansions.lock().unwrap().get(&key).copied() {
+        return Ok(raw);
+    }
+    let source = interpreter::run_entry(
+        &def.world.program,
+        &def.entry,
+        call_arguments,
+        Limits::default(),
+    )
+    .map_err(|failure| failure.message)?;
+    let leaked: &'static str = Box::leak(source.into_boxed_str());
+    expansions.lock().unwrap().insert(key, leaked);
+    Ok(leaked)
+}
+
+/// The toolchain's BUILT-IN derive macros (`<std package dir>/derives.vl` —
+/// deliberately outside the layer roots, so it can never load as a module):
+/// compiled once per std path and consulted by `expand_derives` before the
+/// Rust generators. This is Phase 3's migration seam (§10): a derive moves to
+/// user-land vilan by gaining a `macro fun` here whose output is byte-
+/// identical to the Rust generator it replaces; the corpus goldens referee.
+pub(crate) fn builtin_derives(std: &PackageSpec) -> &'static (MacroRegistry, Vec<Error>) {
+    static BUILTINS: OnceLock<
+        Mutex<HashMap<std::path::PathBuf, &'static (MacroRegistry, Vec<Error>)>>,
+    > = OnceLock::new();
+    let by_root = BUILTINS.get_or_init(|| Mutex::new(HashMap::new()));
+    let root = std.base_root.clone();
+    if let Some(cached) = by_root.lock().unwrap().get(&root) {
+        return cached;
+    }
+    // Compiling derives.vl's macro world runs a nested `analyze`, whose own
+    // `expand_derives` re-enters here. Seed an EMPTY registry first so the
+    // nested lookup terminates — inside the macro world the Rust generators
+    // (byte-identical by the migration contract) serve any std derive.
+    let placeholder: &'static (MacroRegistry, Vec<Error>) =
+        Box::leak(Box::new((MacroRegistry::default(), Vec::new())));
+    by_root.lock().unwrap().insert(root.clone(), placeholder);
+    let mut registry = MacroRegistry::default();
+    let mut diagnostics = Vec::new();
+    let path = std
+        .base_root
+        .parent()
+        .map(|parent| parent.join("derives.vl"));
+    if let Some(path) = path.filter(|path| path.is_file()) {
+        match crate::analyzer::load_package_module(&path.to_string_lossy()) {
+            Some(loaded) => {
+                for error in loaded.parse_errors {
+                    diagnostics.push(Error {
+                        span: (0..0).into(),
+                        msg: format!("in the built-in derives ({}): {error}", path.display()),
+                    });
+                }
+                register_file(
+                    &mut registry,
+                    &loaded.ast.0,
+                    loaded.text,
+                    &path,
+                    std,
+                    None,
+                    &mut diagnostics,
+                );
+            }
+            None => diagnostics.push(Error {
+                span: (0..0).into(),
+                msg: format!(
+                    "the built-in derives file is unreadable: {}",
+                    path.display()
+                ),
+            }),
+        }
+    }
+    let leaked: &'static (MacroRegistry, Vec<Error>) = Box::leak(Box::new((registry, diagnostics)));
+    by_root.lock().unwrap().insert(root, leaked);
+    leaked
+}
+
+/// Runs a built-in derive against an item, returning the generated source
+/// text (uncached failures are the caller's diagnostics; output rides the
+/// same expansion cache as user macros).
+pub(crate) fn run_builtin_derive(
+    def: &MacroDef,
+    name: &str,
+    item: &Spanned<Node>,
+    text: &str,
+) -> Result<&'static str, String> {
+    let call_arguments = vec![construct_item(item, text)];
+    cached_run(def, name, slice(text, item.1), &[], &call_arguments)
+}
+
+/// Looks up a built-in derive by name.
+pub(crate) fn builtin_derive<'r>(builtins: &'r MacroRegistry, name: &str) -> Option<&'r MacroDef> {
+    builtins.by_name.get(name)
 }
 
 /// Replaces whole-identifier `__m<digits>` gensym placeholders (`meta::fresh`'s

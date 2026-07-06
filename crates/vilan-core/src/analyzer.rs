@@ -11045,7 +11045,7 @@ pub(crate) struct LoadedModule {
     pub(crate) parse_errors: &'static [String],
 }
 
-fn load_package_module(path: &str) -> Option<LoadedModule> {
+pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     use chumsky::prelude::*;
     use std::collections::HashMap;
     use std::collections::hash_map::DefaultHasher;
@@ -11899,7 +11899,12 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
 /// Synthesizes and parses the trait impls for every `[derive(..)]` item at the top
 /// level of `nodes`, returning the appended node list (leaked so it lives for the
 /// whole compilation, like a loaded module), or `None` when there are no derives.
-pub(crate) fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
+pub(crate) fn expand_derives(
+    nodes: &NodeList<'_>,
+    text: &str,
+    std: &PackageSpec,
+    diagnostics: &mut Vec<Error>,
+) -> Option<&'static NodeList<'static>> {
     use chumsky::prelude::*;
     let mut source = String::new();
     let mut traits: HashSet<&str> = HashSet::new();
@@ -11908,6 +11913,11 @@ pub(crate) fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'
     // calls `panic` on an unknown tag.
     let mut enum_derives_json = false;
     let mut any_service = false;
+    // The migration seam (macro-engine.md §10): a derive that has moved to
+    // user-land vilan (`<std dir>/derives.vl`) generates through the expansion
+    // interpreter; the rest keep their Rust generators. Same text, same walk
+    // position — the corpus goldens referee byte-identity.
+    let (builtins, _builtin_errors) = crate::macros::builtin_derives(std);
     for (node, _span) in nodes {
         match node {
             Node::Derive(derives, item) => {
@@ -11917,7 +11927,22 @@ pub(crate) fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'
                 {
                     enum_derives_json = true;
                 }
-                source.push_str(&derive_impl_source(derives, item));
+                for derive in derives.iter() {
+                    match crate::macros::builtin_derive(builtins, derive) {
+                        Some(def) => {
+                            match crate::macros::run_builtin_derive(def, derive, item, text) {
+                                Ok(generated) => source.push_str(generated),
+                                Err(message) => diagnostics.push(Error {
+                                    span: item.1,
+                                    msg: format!(
+                                        "the built-in derive `{derive}` failed: {message}"
+                                    ),
+                                }),
+                            }
+                        }
+                        None => source.push_str(&derive_impl_source(&[derive], item)),
+                    }
+                }
             }
             // `[service(Client)]` — generate the dispatcher + client sibling +
             // contract hash from the struct's same-module `[rpc]` impl methods
@@ -12441,7 +12466,7 @@ pub fn analyze<'src>(
     // `PartialEq` in `std::compare`) that must be pulled into the reachable set
     // alongside the user's own imports, and they're walked into the entry scope
     // later. Computed once and reused.
-    let derived = expand_derives(&nodes.0);
+    let derived = expand_derives(&nodes.0, entry_source, std, &mut analyzer.diagnostics);
 
     let mut to_load: Vec<(Origin, &str)> = lib_ast
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
@@ -12613,7 +12638,8 @@ pub fn analyze<'src>(
             // A dependency's public surface can derive too — expand its `lib.vl`'s
             // `[derive(..)]`, seeding the std modules the impls reference, and carry
             // them to walk into the dependency's namespace below.
-            let lib_derived = expand_derives(&lib_ast.0);
+            let lib_derived =
+                expand_derives(&lib_ast.0, lib_loaded.text, std, &mut analyzer.diagnostics);
             if let Some(generated) = lib_derived {
                 to_load.extend(
                     collect_module_refs(generated, "std")
@@ -12884,7 +12910,7 @@ pub fn analyze<'src>(
             let module_derived = if is_entry_module {
                 derived
             } else {
-                let generated = expand_derives(&ast.0);
+                let generated = expand_derives(&ast.0, module_text, std, &mut analyzer.diagnostics);
                 if let Some(generated) = generated {
                     to_load.extend(
                         collect_module_refs(generated, "std")
@@ -12908,6 +12934,11 @@ pub fn analyze<'src>(
         // --- Macro expansion epilogue (runs once loads settle) ---
         let registry = macro_registry.get_or_insert_with(|| {
             let mut registry = crate::macros::MacroRegistry::default();
+            // The toolchain's built-in derive macros: their compile errors (a
+            // broken derives.vl) surface in every analysis, loudly; their
+            // names are reserved against user macros.
+            let (builtins, builtin_errors) = crate::macros::builtin_derives(std);
+            analyzer.diagnostics.extend(builtin_errors.iter().cloned());
             let before = analyzer.diagnostics.len();
             crate::macros::register_file(
                 &mut registry,
@@ -12915,6 +12946,7 @@ pub fn analyze<'src>(
                 entry_source,
                 entry_path,
                 std,
+                Some(builtins),
                 &mut analyzer.diagnostics,
             );
             analyzer.attribute_new_diagnostics(before, SourceId(0));
@@ -12927,6 +12959,7 @@ pub fn analyze<'src>(
                     module_text,
                     &file,
                     std,
+                    Some(builtins),
                     &mut analyzer.diagnostics,
                 );
                 analyzer.attribute_new_diagnostics(before, *module_source_id);
@@ -12940,6 +12973,7 @@ pub fn analyze<'src>(
                     lib_text,
                     &file,
                     std,
+                    Some(builtins),
                     &mut analyzer.diagnostics,
                 );
                 analyzer.attribute_new_diagnostics(before, *lib_source_id);
@@ -12980,6 +13014,7 @@ pub fn analyze<'src>(
                 let before = analyzer.diagnostics.len();
                 let output = crate::macros::expand_source(
                     registry,
+                    std,
                     &nodes.0,
                     entry_source,
                     &mut analyzer.diagnostics,
@@ -13005,6 +13040,7 @@ pub fn analyze<'src>(
                 let before = analyzer.diagnostics.len();
                 let output = crate::macros::expand_source(
                     registry,
+                    std,
                     &ast.0,
                     module_text,
                     &mut analyzer.diagnostics,
