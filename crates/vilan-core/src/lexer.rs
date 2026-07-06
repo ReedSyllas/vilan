@@ -69,6 +69,7 @@ pub fn lexer<'src>()
         "is" => Token::Is,
         "jump" => Token::Jump,
         "let" => Token::Let,
+        "macro" => Token::Macro,
         "match" => Token::Match,
         "mod" => Token::Mod,
         "mut" => Token::Mut,

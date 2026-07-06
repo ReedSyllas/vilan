@@ -83,3 +83,74 @@ main();
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Phase 1's exit criterion (macro-engine.md §11): a macro DEFINED IN A LIBRARY
+// drives generation in the app that depends on it.
+#[test]
+fn a_library_macro_expands_in_the_consuming_app() {
+    let macro_std = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/macro_std");
+    let _ = macro_std.canonicalize().expect("macro_std path");
+    let dir = temp_project("library_macro");
+    write(
+        &dir,
+        "vilan.toml",
+        "[project]\npackages = [\"macros\", \"app\"]\n",
+    );
+    write(&dir, "macros/vilan.toml", "[library]\nname = \"macros\"\n");
+    write(
+        &dir,
+        "macros/src/lib.vl",
+        r#"macro fun derive_tag(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source, StructItem };
+	import macro_std::option::Option::{ self, Some, None };
+
+	let target = match item.as_struct() {
+		Some(let found) => found,
+		None => StructItem { name = "?", fields = [] },
+	};
+	source("impl " + target.name + " {\nfun tag(self): str {\n\"" + target.name + "\"\n}\n}\n")
+}
+"#,
+    );
+    write(
+        &dir,
+        "app/vilan.toml",
+        "[package]\nname = \"app\"\ntarget = \"node\"\n\n[package.dependencies]\nmacros = { path = \"../macros\" }\n",
+    );
+    write(
+        &dir,
+        "app/src/main.vl",
+        r#"import std::print;
+import macros;
+
+[derive_tag]
+struct Widget {
+	size: i32,
+}
+
+fun main() {
+	print(Widget { size = 1 }.tag());
+}
+
+main();
+"#,
+    );
+    let output = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new("node")
+        .arg(dir.join("dist/app.js"))
+        .output()
+        .expect("run node");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "Widget\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -40,6 +40,74 @@ pub fn transform_to_ast<'src>(
     Transformer::new(program, options).transform_entry_ast()
 }
 
+/// Transforms a program rooted at the given FUNCTIONS instead of `main` — the
+/// macro world's shape (macro-engine.md §3): macro funs are entry points the
+/// expansion interpreter calls directly, so emission is seeded from them (plus
+/// module-level globals) and no `main` is required. Returns the program AST and
+/// each root's emitted function name. Skips the cosmetic scope-renaming pass —
+/// the interpreter doesn't read the output, and stable names keep the root map
+/// trivially correct.
+pub fn transform_functions<'src>(
+    program: &'src Program<'src>,
+    options: &BuildOptions,
+    roots: &[Id],
+) -> Result<(JsProgram<'src>, HashMap<Id, String>), Error> {
+    let mut transformer = Transformer::new(program, options);
+
+    let global_scope = program.scopes.get(&program.global_scope_id).unwrap();
+    let mut global_variables = transformer.find_global_variables(
+        &global_scope
+            .name_to_id_map
+            .iter()
+            .map(|(_, x)| *x)
+            .collect(),
+    );
+    global_variables.extend(transformer.module_level_variables());
+    let mut seen = std::collections::HashSet::new();
+    global_variables.retain(|id| seen.insert(*id));
+    let t_global_variables = transformer.walk_list(&global_variables);
+
+    let mut names = HashMap::new();
+    for root in roots {
+        transformer.ensure_function_emitted(*root);
+        names.insert(*root, transformer.ng.name_for(*root));
+    }
+
+    let mut t_functions = transformer
+        .required_functions
+        .into_iter()
+        .collect::<Vec<_>>();
+    t_functions.sort_by(|a, b| (a.0.0).cmp(&b.0.0));
+    let t_functions = t_functions.into_iter().map(|x| x.1);
+    let t_instances = transformer.monomorphized.into_iter();
+
+    let imports = transformer
+        .used_imports
+        .iter()
+        .map(|(module, symbols)| {
+            let names = symbols.iter().cloned().collect::<Vec<_>>().join(", ");
+            format!("import {{ {} }} from \"{}\";", names, module)
+        })
+        .collect::<Vec<_>>();
+    if !program.clone_sites.is_empty() {
+        transformer.used_helpers.insert("__clone");
+    }
+    let helpers = transformer.used_helpers.into_iter().collect::<Vec<_>>();
+
+    let nodes = t_functions
+        .chain(t_instances)
+        .chain(t_global_variables)
+        .collect::<Vec<_>>();
+    Ok((
+        JsProgram {
+            imports,
+            helpers,
+            nodes,
+        },
+        names,
+    ))
+}
+
 /// Interprets a string literal's backslash escapes into the characters they
 /// denote (`\n` -> newline, `\t`, `\r`, `\"`, `\\`, `\0`), so the value is the
 /// real text — the JS formatter then re-escapes it for output. Borrows the slice

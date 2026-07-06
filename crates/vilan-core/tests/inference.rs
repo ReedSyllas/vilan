@@ -5350,3 +5350,368 @@ fn a_body_import_of_a_missing_module_errors_cleanly() {
         "cannot find 'nonexistent' in the imported path",
     );
 }
+
+// --- The macro engine, Phase 1 (macro-engine.md §3-§4) ---
+// `macro fun` definitions compile hermetically per file and run in the
+// expansion interpreter; `[name(args)]` and `[derive(Name)]` splice their
+// returned Source before analysis.
+
+// The whole pipeline: hermetic world compile, attribute dispatch, reflection,
+// interpreter run, splice, and dispatch INTO the generated impl.
+#[test]
+fn a_macro_attribute_expands_and_the_generated_impl_dispatches() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::display::{ Display, format };
+
+        macro fun derive_display(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source, StructItem };
+            import macro_std::option::Option::{ self, Some, None };
+
+            let target = match item.as_struct() {
+                Some(let found) => found,
+                None => StructItem { name = "?", fields = [] },
+            };
+            mut arms = "";
+            mut first = true;
+            for field in target.fields {
+                if first {
+                    first = false;
+                } else {
+                    arms = arms + " + \", \" + ";
+                }
+                arms = arms + "\"" + field.name + "=\" + format(self." + field.name + ")";
+            }
+            source(
+                "impl " + target.name + " with Display {\n"
+                    + "fun to_string(self): str {\n"
+                    + "import std::display::format;\n"
+                    + arms + "\n}\n}\n",
+            )
+        }
+
+        [derive_display]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            print(format(Point { x = 1, y = 2 }));
+        }
+
+        main();
+        "#,
+        "x=1, y=2\n",
+    );
+}
+
+// `[derive(Name)]` dispatches to a registered macro named `Name`; built-in
+// derive names keep their Rust generators.
+#[test]
+fn a_derive_name_dispatches_to_a_registered_macro() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun Tagged(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source, StructItem };
+            import macro_std::option::Option::{ self, Some, None };
+
+            let target = match item.as_struct() {
+                Some(let found) => found,
+                None => StructItem { name = "?", fields = [] },
+            };
+            source("impl " + target.name + " {\nfun tag(self): str {\n\"" + target.name + "\"\n}\n}\n")
+        }
+
+        [derive(Tagged)]
+        struct Widget {
+            size: i32,
+        }
+
+        fun main() {
+            print(Widget { size = 3 }.tag());
+        }
+
+        main();
+        "#,
+        "Widget\n",
+    );
+}
+
+// A two-parameter macro receives the invocation's argument SOURCE TEXTS.
+#[test]
+fn a_macro_receives_its_arguments_as_source_text() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun labelled(item: Item, arguments: Arguments): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source, Arguments, StructItem };
+            import macro_std::option::Option::{ self, Some, None };
+
+            let target = match item.as_struct() {
+                Some(let found) => found,
+                None => StructItem { name = "?", fields = [] },
+            };
+            mut body = "";
+            mut first = true;
+            for value in arguments.values {
+                if first {
+                    first = false;
+                    // A string argument arrives with its quotes — a ready
+                    // expression to splice.
+                    body = value;
+                } else {
+                    body = body + " + format(" + value + ")";
+                }
+            }
+            source(
+                "impl " + target.name + " {\nfun label(self): str {\n"
+                    + "import std::display::format;\n" + body + "\n}\n}\n",
+            )
+        }
+
+        [labelled("alpha-", 42)]
+        struct Thing {
+            n: i32,
+        }
+
+        fun main() {
+            print(Thing { n = 1 }.label());
+        }
+
+        main();
+        "#,
+        "alpha-42\n",
+    );
+}
+
+// A macro's output can itself carry a built-in derive — the expansion fixpoint.
+#[test]
+fn a_macros_output_can_carry_a_builtin_derive() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun make_pair(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            import macro_std::meta::{ Item, Source };
+
+            source("[derive(PartialEq)]\nstruct Pair {\na: i32,\nb: i32,\n}\n")
+        }
+
+        [make_pair]
+        struct Seed {
+            unused: i32,
+        }
+
+        fun main() {
+            let left = Pair { a = 1, b = 2 };
+            let same = Pair { a = 1, b = 2 };
+            let different = Pair { a = 9, b = 2 };
+            print(left == same);
+            print(left == different);
+        }
+
+        main();
+        "#,
+        "true\nfalse\n",
+    );
+}
+
+#[test]
+fn an_unknown_macro_attribute_errors_cleanly() {
+    assert_fails_spanning(
+        r#"
+        [no_such_macro]
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "no_such_macro",
+        "no macro named `no_such_macro` is in scope",
+    );
+}
+
+// Hermeticity (§4): a macro body may import only from `macro_std`.
+#[test]
+fn a_macro_body_importing_std_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        macro fun bad(item: Item): Source {
+            import std::io;
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "import std::io",
+        "a macro body may import only from `macro_std`",
+    );
+}
+
+// A panic inside a macro surfaces as a spanned failure at the invocation.
+#[test]
+fn a_macro_panic_surfaces_at_the_invocation() {
+    assert_fails_spanning(
+        r#"
+        [explode]
+        struct Point {
+            x: i32,
+        }
+
+        macro fun explode(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            import macro_std::panic;
+            panic("unsupported item shape");
+            source("")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "explode",
+        "failed at expansion time",
+    );
+}
+
+#[test]
+fn a_macro_generating_invalid_vilan_errors_at_the_site() {
+    assert_fails_spanning(
+        r#"
+        [broken]
+        struct Point {
+            x: i32,
+        }
+
+        macro fun broken(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("fun {")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "broken",
+        "generated invalid vilan",
+    );
+}
+
+#[test]
+fn a_macro_generating_a_macro_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        [sneaky]
+        struct Point {
+            x: i32,
+        }
+
+        macro fun sneaky(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("macro fun nested(item: Item): Source {\nimport macro_std::source;\nsource(\"\")\n}\n")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "sneaky",
+        "macros cannot define macros",
+    );
+}
+
+#[test]
+fn duplicate_macro_names_error() {
+    assert_fails(
+        r#"
+        macro fun twice(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("")
+        }
+
+        macro fun twice(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+    );
+}
+
+// The fuel budget bounds a runaway macro (§5): the failure names the macro at
+// its invocation instead of hanging the compiler.
+#[test]
+fn an_infinite_macro_is_stopped_by_fuel() {
+    assert_fails_spanning(
+        r#"
+        [forever]
+        struct Point {
+            x: i32,
+        }
+
+        macro fun forever(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            mut n = 0;
+            for {
+                n = n + 1;
+            }
+            source("")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "forever",
+        "failed at expansion time",
+    );
+}
+
+#[test]
+fn a_macro_fun_inside_a_body_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            macro fun inner(item: Item): Source {
+                import macro_std::source;
+                import macro_std::meta::{ Item, Source };
+                source("")
+            }
+        }
+
+        main();
+        "#,
+        "macro fun inner(item: Item): Source {
+                import macro_std::source;
+                import macro_std::meta::{ Item, Source };
+                source(\"\")
+            }",
+        "must be a top-level item",
+    );
+}

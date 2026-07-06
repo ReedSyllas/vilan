@@ -258,6 +258,16 @@ pub enum Node<'src> {
     Import(ImportBranch<'src>),
     // `export <item>` — re-export an import or expose a local declaration.
     Export(Box<Spanned<Self>>),
+    // `macro fun name(..) { .. }` — a macro definition (macro-engine.md §3).
+    // Its body is HERMETIC: never walked in the program world, compiled in the
+    // per-file macro world instead (its imports resolve against `macro_std`
+    // only), and executed by the expansion interpreter.
+    MacroFun(Func<'src>),
+    // `[name(args)] <item>` — a user macro attribute on a struct/enum/function:
+    // the macro's name (with its span), the argument SPANS (their source text
+    // is what `Arguments` carries — arguments are syntax), and the annotated
+    // item. Expanded before analysis; the item itself is walked normally.
+    MacroAttribute(&'src str, Span, Vec<Span>, Box<Spanned<Self>>),
     // `[derive(A, B)] <struct|enum>` — the derive trait names and the item they
     // annotate. Transparent to analysis (the inner item is walked normally); a
     // pre-analysis pass generates the trait impls from the item's fields.
@@ -510,7 +520,7 @@ impl<'src> Node<'src> {
                 visit(iterable);
                 visit_body(&body.0, visit);
             }
-            Node::Func(function) => {
+            Node::Func(function) | Node::MacroFun(function) => {
                 visit_generic_parameters(&function.generic_parameters, visit);
                 visit_parameters(&function.parameters, visit);
                 if let Some(return_type) = function.return_type.as_deref() {
@@ -520,6 +530,7 @@ impl<'src> Node<'src> {
                     visit_body(&body.0, visit);
                 }
             }
+            Node::MacroAttribute(_, _, _, item) => visit(item),
             Node::FuncReturn(value) => {
                 if let Some(value) = value.as_deref() {
                     visit(value);

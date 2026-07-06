@@ -1,0 +1,59 @@
+import std::print;
+import std::display::{ Display, format };
+
+// The macro engine, Phase 1 (macro-engine.md §2): a user-land derive. The
+// macro compiles hermetically against macro_std, runs in the expansion
+// interpreter, and its returned source is spliced before analysis — the
+// generated impl carries its own block-scoped import (H2).
+
+macro fun derive_display(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source, StructItem };
+	import macro_std::option::Option::{ self, Some, None };
+
+	// (`None => panic(..)` would be the natural guard, but panic in a match
+	// arm types as `any` today — the never-type gap recorded in B10's
+	// exclusions — so a dummy fallback keeps the arm typed.)
+	let target = match item.as_struct() {
+		Some(let found) => found,
+		None => StructItem { name = "?", fields = [] },
+	};
+	mut arms = "";
+	mut first = true;
+	for field in target.fields {
+		if first {
+			first = false;
+		} else {
+			arms = arms + " + \", \" + ";
+		}
+		arms = arms + "\"" + field.name + "=\" + format(self." + field.name + ")";
+	}
+	source(
+		"impl " + target.name + " with Display {\n"
+			+ "\tfun to_string(self): str {\n"
+			+ "\t\timport std::display::format;\n"
+			+ "\t\t" + arms + "\n"
+			+ "\t}\n"
+			+ "}\n",
+	)
+}
+
+[derive_display]
+struct Point {
+	x: i32,
+	y: i32,
+}
+
+// The `[derive(Name)]` form dispatches to the macro named `Name`.
+[derive(derive_display)]
+struct Size {
+	width: i32,
+	height: i32,
+}
+
+fun main() {
+	print(format(Point { x = 1, y = 2 }));
+	print(format(Size { width = 3, height = 4 }));
+}
+
+main();

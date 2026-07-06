@@ -1,8 +1,9 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phase 0 SHIPPED 2026-07-06** (every §12 question resolved;
-the fueled interpreter + `macro_std` are in-tree with the equivalence gate green —
-see §11). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phases 0–1 SHIPPED 2026-07-06** (every §12 question
+resolved; the fueled interpreter, `macro_std`, `macro fun` items, and
+`[attr]`/`[derive(X)]` expansion are in-tree — see §11 for what each phase
+delivered and Phase 1's recorded v1 bounds). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -368,12 +369,37 @@ behavior (skip; the missing-impl error surfaces at the use site).
   pinned end-to-end via a consumer app (`crates/vilan-cli/tests/macro_std.rs`).
   Recorded v1 bounds (each a loud error, never silent): BigInt beyond i128, async,
   the unimplemented host-method tail.
-- **Phase 1 — attributes**: `macro fun` items with scoped `macro_std` imports
-  (the general block-scoped-imports feature shipped 2026-07-05, backlog H2 — only the
-  `macro_std` resolution restriction remains), the hermetic name resolution,
-  `[name(args)]` + `[derive(Name)]` dispatch,
-  expansion fixpoint, the per-invocation text cache, `meta::fresh`, error surfacing.
-  Exit: `derive_display` (§2) works end to end from a user library.
+- **Phase 1 — attributes** — **SHIPPED 2026-07-06.** `macro fun` items parse
+  (`macro` is reserved; only `fun` may follow in v1) and never walk in the program
+  world; each file's macros compile in a per-file hermetic world — the file with
+  everything outside the definitions BLANKED to whitespace (spans stay true), the
+  `macro` keyword erased, analyzed against a workspace whose only dependency is
+  `macro_std` (body imports checked to root there; H2's block-scoped imports carry
+  the signatures too, since a `fun`'s scope is flat). `transform_functions` emits the
+  world rooted at the macro funs (no `main`); `run_entry` executes one against the
+  reflected `Item` (+ `Arguments` for two-parameter macros: the argument SOURCE
+  TEXTS) and returns the `Source` text, which parses loudly and splices — the
+  generated code walks into the invoking module's scope and may carry its own
+  block-scoped imports (no synthesized prelude), with `[derive(..)]`s in output
+  expanded and further attributes chased to depth 16. `[derive(Name)]` dispatches to
+  the macro NAMED `Name`; built-ins keep their generators; unknown attributes error.
+  Worlds cache by blanked-content hash, expansions by (world, macro, item text,
+  argument texts) — both process-global. `macro_std` now re-exports the pure core
+  (`option`/`result`/`display`/`debug`/`compare`/`operators`/`map`/`set` + `panic`,
+  the error channel: a throw = a spanned "failed at expansion time" at the site).
+  Exit criterion met: a library-defined macro drives generation in its consuming app
+  (CLI-pinned), plus the §2 corpus program (`macro-derive.vl`) and 12 inference pins
+  (dispatch both forms, arguments, output-derives fixpoint, hermetic violation,
+  unknown name, duplicate names, panic/fuel/invalid-output/macro-generating-macro,
+  body-position rejection).
+  **Recorded v1 bounds:** macro names are a flat global namespace (module-scoped
+  distribution = follow-up); attributes expand at file top level and `mod` bodies
+  (attribute USE inside a dependency's own files is deferred — definitions there
+  work); fuel is the 1M default (the `vilan.toml [macros]` knob is pending);
+  `meta::fresh` waits for its first consumer. **Findings:** i-strings have no brace
+  escape, so brace-heavy generation uses concatenation (ergonomic follow-up, backlog
+  H3); `panic` in a match arm types as `any` (B10's recorded never-type exclusion),
+  so macro guards use typed fallbacks.
 - **Phase 2 — invocations**: `macro name(args)` in item and expression position,
   expression splice + placeholder-gensym stamping. Exit: `macro numeric_family(..)`
   and a `macro unroll(..)`.

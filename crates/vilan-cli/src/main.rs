@@ -1069,7 +1069,7 @@ fn compile_to_js(
                 write_debug(file, "parse.out", &format!("{root:#?}"));
             }
 
-            let mut program = analyze(&root, &std, pkg_root, file, platform, workspace);
+            let mut program = analyze(&root, &src, &std, pkg_root, file, platform, workspace);
 
             // Thread `std::context::Context` values as hidden parameters (a no-op
             // unless the program creates a context).

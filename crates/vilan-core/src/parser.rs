@@ -1272,9 +1272,61 @@ where
         .map_with(|(client_name, item), e| (Node::Service(client_name, Box::new(item)), e.span()))
         .boxed();
 
+    // `macro fun name(..) { .. }` — a macro definition (macro-engine.md §3).
+    // The parser decides on the token after `macro`: only `fun` is legal in v1
+    // (invocations are Phase 2; blocks Phase 4).
+    let macro_fun = just(Token::Macro)
+        .ignore_then(
+            function
+                .clone()
+                .labelled("macro definition (`macro fun …`)"),
+        )
+        .map_with(|(node, _), e| match node {
+            Node::Func(function) => (Node::MacroFun(function), e.span()),
+            other => (other, e.span()),
+        })
+        .boxed();
+
+    // `[name(args)] <struct|enum|fun>` — a user macro attribute. The known
+    // built-in markers keep their own parsers (earlier in the choice or fused
+    // into `function`), so their names are excluded here; argument spans are
+    // captured for `Arguments` (arguments are SYNTAX — their source text).
+    let macro_attribute_name = select! {
+        Token::Ident(name) if !matches!(
+            name,
+            "derive" | "service" | "extern" | "must_use" | "rpc" | "trait_only" | "doc"
+                | "expose"
+        ) => name
+    };
+    let macro_attributed_item = just(Token::Ctrl('['))
+        .ignore_then(macro_attribute_name.map_with(|name, e| (name, e.span())))
+        .then(
+            expression
+                .clone()
+                .map_with(|_, e| e.span())
+                .separated_by(just(Token::Ctrl(',')))
+                .allow_trailing()
+                .collect::<Vec<Span>>()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                .or_not()
+                .map(|arguments| arguments.unwrap_or_default()),
+        )
+        .then_ignore(just(Token::Ctrl(']')))
+        .then(choice((struct_.clone(), enum_.clone(), function.clone())))
+        .map_with(|(((name, name_span), arguments), item), e| {
+            (
+                Node::MacroAttribute(name, name_span, arguments, Box::new(item)),
+                e.span(),
+            )
+        })
+        .labelled("macro attribute")
+        .boxed();
+
     statement.define(choice((
         derived_item,
         service_item,
+        macro_attributed_item,
+        macro_fun,
         export_,
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_.then_ignore(not_block_end.clone()),

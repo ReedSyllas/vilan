@@ -98,18 +98,7 @@ pub struct RunOutput {
 /// executes its statements in order. This is the equivalence suite's entry;
 /// macro expansion (Phase 1) drives the same evaluator per `macro fun` call.
 pub fn run_program<'a>(program: &'a JsProgram<'a>, limits: Limits) -> Result<RunOutput, Failure> {
-    if !program.imports.is_empty() {
-        return Err(Failure::unsupported("host bindings ([extern])"));
-    }
-    for helper in &program.helpers {
-        // The impure helpers are absent by design; everything else is native.
-        if matches!(
-            *helper,
-            "__scan" | "__env" | "__args" | "__random_int" | "__random_float"
-        ) {
-            return Err(Failure::unsupported(format!("`{helper}`")));
-        }
-    }
+    check_capabilities(program)?;
     let mut interpreter = Interpreter {
         fuel: limits.fuel,
         depth_left: limits.call_depth,
@@ -135,6 +124,71 @@ pub fn run_program<'a>(program: &'a JsProgram<'a>, limits: Limits) -> Result<Run
         }
         Err(failure) => Err(failure),
     }
+}
+
+/// A program needing host capabilities cannot run at expansion time.
+fn check_capabilities(program: &JsProgram) -> Result<(), Failure> {
+    if !program.imports.is_empty() {
+        return Err(Failure::unsupported("host bindings ([extern])"));
+    }
+    for helper in &program.helpers {
+        // The impure helpers are absent by design; everything else is native.
+        if matches!(
+            *helper,
+            "__scan" | "__env" | "__args" | "__random_int" | "__random_float"
+        ) {
+            return Err(Failure::unsupported(format!("`{helper}`")));
+        }
+    }
+    Ok(())
+}
+
+/// Runs one function of a transformed program — the macro-expansion entry
+/// (macro-engine.md §3). Executes the program's top level first (hoisting its
+/// functions, initializing module-level globals), then calls `entry` with the
+/// given argument expressions, expecting a `macro_std` `Source` back (a
+/// one-field struct, compiled to `[text]`); returns its text.
+pub fn run_entry<'a>(
+    program: &'a JsProgram<'a>,
+    entry: &str,
+    arguments: &'a [js::Node<'a>],
+    limits: Limits,
+) -> Result<String, Failure> {
+    check_capabilities(program)?;
+    let mut interpreter = Interpreter {
+        fuel: limits.fuel,
+        depth_left: limits.call_depth,
+        stdout: String::new(),
+        exited: None,
+    };
+    let globals = Scope::root();
+    match interpreter.exec_body(&program.nodes, &globals)? {
+        Flow::Normal => {}
+        _ => return Err(Failure::internal("control flow escaped the top level")),
+    }
+    let Some(callee) = lookup(&globals, entry) else {
+        return Err(Failure::internal(format!(
+            "the macro entry `{entry}` was not emitted"
+        )));
+    };
+    let mut values = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        values.push(interpreter.eval(argument, &globals)?);
+    }
+    let result = interpreter.call_value(&callee, values)?;
+    // A `Source` is `struct Source { text: str }` — the one-field positional
+    // array `[text]`.
+    if let Value::Array(slots) = &result {
+        let slots = slots.borrow();
+        if let Some(Value::Str(text)) = slots.first() {
+            return Ok(text.to_string());
+        }
+    }
+    Err(Failure {
+        kind: FailureKind::Thrown,
+        message: "the macro did not return a `Source` (build one with `macro_std::source(..)`)"
+            .to_string(),
+    })
 }
 
 // --- Values ---

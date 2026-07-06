@@ -11,6 +11,7 @@ pub mod formatter;
 pub mod id;
 pub mod interpreter;
 pub mod lexer;
+pub(crate) mod macros;
 pub mod manifest;
 pub mod node;
 pub mod options;
@@ -156,7 +157,7 @@ pub fn analyze_source(
     // `std::dom`).
     let platform = platform.unwrap_or_else(|| infer_platform(&root.0, std));
     let analyzed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut program = analyze(root, std, pkg_root, entry_path, platform, workspace);
+        let mut program = analyze(root, source, std, pkg_root, entry_path, platform, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
         program

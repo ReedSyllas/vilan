@@ -4054,6 +4054,25 @@ impl<'src> Analyzer<'src> {
             }
             // Re-export visibility is not tracked yet; walking the inner
             // statement is enough to bind it into the current scope.
+            // A macro definition: HERMETIC — the body is never walked in the
+            // program world (it compiles in the per-file macro world instead,
+            // macro-engine.md §3). Expansion consumed it before this walk.
+            Node::MacroFun(function) => {
+                if !self.module_scope_ids.contains(&scope_id) {
+                    self.diagnostics.push(Error {
+                        span: node.1,
+                        msg: "a `macro fun` must be a top-level item".to_string(),
+                    });
+                }
+                let _ = function;
+                Some(Expr::Void)
+            }
+            // A macro attribute: expansion already ran (pre-walk) and appended
+            // the generated items; the annotated item itself walks normally.
+            Node::MacroAttribute(_, _, _, inner) => {
+                self.walk_expr_node(inner, scope_id);
+                Some(Expr::Void)
+            }
             Node::Export(inner) => {
                 // Exports shape a module's public surface, so they only mean
                 // something at a module's top level. A block-scoped `import`
@@ -10978,9 +10997,10 @@ impl<'src> Program<'src> {
 /// unparsed statements simply gone (a miscompile that hides until the dropped
 /// path runs).
 #[derive(Clone, Copy)]
-struct LoadedModule {
-    ast: &'static crate::span::Spanned<NodeList<'static>>,
-    parse_errors: &'static [String],
+pub(crate) struct LoadedModule {
+    pub(crate) ast: &'static crate::span::Spanned<NodeList<'static>>,
+    pub(crate) text: &'static str,
+    pub(crate) parse_errors: &'static [String],
 }
 
 fn load_package_module(path: &str) -> Option<LoadedModule> {
@@ -11057,6 +11077,7 @@ fn load_package_module(path: &str) -> Option<LoadedModule> {
     };
     let loaded = LoadedModule {
         ast: root,
+        text: source,
         parse_errors: Box::leak(errors.into_boxed_slice()),
     };
     cache.lock().unwrap().insert(key, loaded);
@@ -11836,7 +11857,7 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
 /// Synthesizes and parses the trait impls for every `[derive(..)]` item at the top
 /// level of `nodes`, returning the appended node list (leaked so it lives for the
 /// whole compilation, like a loaded module), or `None` when there are no derives.
-fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
+pub(crate) fn expand_derives(nodes: &NodeList<'_>) -> Option<&'static NodeList<'static>> {
     use chumsky::prelude::*;
     let mut source = String::new();
     let mut traits: HashSet<&str> = HashSet::new();
@@ -12251,6 +12272,7 @@ struct LoadedPackage {
 
 pub fn analyze<'src>(
     nodes: &'src Spanned<NodeList<'src>>,
+    entry_source: &'src str,
     std: &PackageSpec,
     pkg_root: &Path,
     entry_path: &Path,
@@ -12338,9 +12360,11 @@ pub fn analyze<'src>(
     let mut loaded: Vec<(
         &str,
         &Spanned<NodeList>,
+        &str,
         Option<&'static NodeList<'static>>,
         Id,
         SourceId,
+        Origin,
     )> = Vec::new();
     // A module's package: `Std` modules resolve under the `std` library's layered
     // roots and are addressable as both `std::name` and `pkg::name`; `Pkg` modules —
@@ -12442,6 +12466,7 @@ pub fn analyze<'src>(
         Id,
         &Spanned<NodeList>,
         Option<&'static NodeList<'static>>,
+        &'static str,
     )> = Vec::new();
     if has_dependencies {
         // Package 0 is the entry; its namespace is the existing `pkg`. The entry
@@ -12554,7 +12579,13 @@ pub fn analyze<'src>(
                         .map(|(module, _)| (Origin::Std, module)),
                 );
             }
-            dependency_lib_walks.push((lib_source_id, namespace_scope_id, lib_ast, lib_derived));
+            dependency_lib_walks.push((
+                lib_source_id,
+                namespace_scope_id,
+                lib_ast,
+                lib_derived,
+                lib_loaded.text,
+            ));
             // A library's own imports are its internals (not the building package's
             // code), so they load for typing without a cross-platform gate. But the
             // base `lib.vl` is the *public surface*, which must be the same for every
@@ -12608,197 +12639,341 @@ pub fn analyze<'src>(
     // Dedup is per-package, not by bare name: two packages may each define a
     // module of the same name, and both must load into their own namespace.
     let mut loaded_keys: HashSet<(Origin, &str)> = HashSet::new();
-    while let Some((origin, name)) = to_load.pop() {
-        if !loaded_keys.insert((origin, name)) {
-            continue;
-        }
-        // The roots to search for this module. `std`/`pkg` are single-root; a
-        // dependency library is layered — its overlay for the build target, then its
-        // base, then other overlays (so a cross-target module still loads for typing).
-        let search_roots: Vec<&Path> = match origin {
-            Origin::Std => std.search_roots(platform),
-            Origin::Pkg => vec![pkg_root],
-            Origin::Dep(index) => workspace.packages[index].search_roots(platform),
-        };
-        // A platform-gated std module (e.g. `std::http` in a browser build) is *not*
-        // skipped here: it loads so its signatures bind and the rest of the file
-        // types cleanly. The cross-target diagnostic is reported once, at the user's
-        // `import`, where the load is seeded (P3/L1).
-        let (resolved_path, ambiguous) = resolve_module_in_roots(&search_roots, name);
-        let Some(module_path) = resolved_path else {
-            // Not a module file here (a non-module name, or a missing import the
-            // resolver below will report) — skip, as the previous loader did.
-            continue;
-        };
-        if ambiguous {
-            analyzer.diagnostics.push(Error {
-                span: EMPTY_SPAN,
-                msg: format!(
-                    "module `{name}` is ambiguous: both `{name}.vl` and `{name}/lib.vl` \
-                     exist — keep only one"
-                ),
-            });
-        }
-        let is_entry_module = match (
-            std::fs::canonicalize(&module_path),
-            std::fs::canonicalize(entry_path),
-        ) {
-            (Ok(module_canonical), Ok(entry_canonical)) => module_canonical == entry_canonical,
-            _ => false,
-        };
-        // Use the entry's (buffer) AST for its own module; load the rest from
-        // disk. The entry module keeps SourceId 0 so editor features resolve to
-        // the open document.
-        let (ast, module_source_id): (&Spanned<NodeList>, SourceId) = if is_entry_module {
-            entry_is_module = true;
-            (nodes, SourceId(0))
-        } else {
-            let Some(loaded) = load_package_module(&module_path) else {
+    // Macro expansion state (macro-engine.md Phase 1): the registry is built
+    // once every load settles (macro definitions must be reachable WITHOUT
+    // expansion); each file's attributes then expand exactly once, and the
+    // generated code's imports re-enter the load loop.
+    let mut macro_registry: Option<crate::macros::MacroRegistry> = None;
+    let mut expanded_sources: HashSet<SourceId> = HashSet::new();
+    let mut generated_by_source: HashMap<SourceId, Vec<&'static NodeList<'static>>> =
+        HashMap::new();
+    loop {
+        while let Some((origin, name)) = to_load.pop() {
+            if !loaded_keys.insert((origin, name)) {
+                continue;
+            }
+            // The roots to search for this module. `std`/`pkg` are single-root; a
+            // dependency library is layered — its overlay for the build target, then its
+            // base, then other overlays (so a cross-target module still loads for typing).
+            let search_roots: Vec<&Path> = match origin {
+                Origin::Std => std.search_roots(platform),
+                Origin::Pkg => vec![pkg_root],
+                Origin::Dep(index) => workspace.packages[index].search_roots(platform),
+            };
+            // A platform-gated std module (e.g. `std::http` in a browser build) is *not*
+            // skipped here: it loads so its signatures bind and the rest of the file
+            // types cleanly. The cross-target diagnostic is reported once, at the user's
+            // `import`, where the load is seeded (P3/L1).
+            let (resolved_path, ambiguous) = resolve_module_in_roots(&search_roots, name);
+            let Some(module_path) = resolved_path else {
+                // Not a module file here (a non-module name, or a missing import the
+                // resolver below will report) — skip, as the previous loader did.
                 continue;
             };
-            let diagnostics_before = analyzer.diagnostics.len();
-            report_module_parse_errors(&mut analyzer.diagnostics, &module_path, &loaded);
-            analyzer.attribute_new_diagnostics(diagnostics_before, SourceId(sources.len() as u32));
-            sources.push(PathBuf::from(&module_path));
-            (loaded.ast, SourceId((sources.len() - 1) as u32))
-        };
-        let module_scope = analyzer.create_scope(Some(global_scope_id));
-        let module_scope_id = analyzer.push_scope(module_scope);
-        let module_id = analyzer.new_entity_id();
-        analyzer.modules.insert(
-            module_id,
-            Module {
-                id: module_id,
-                name,
-                body: (Vec::new(), module_scope_id),
-            },
-        );
-        // Give the module entity a location (its file, at the top) so a path
-        // segment naming it can go-to-definition. A one-id range maps it to its
-        // source; the span is the file start.
-        analyzer.span_map.insert(module_id, &EMPTY_SPAN);
-        analyzer.source_ranges.push(SourceRange {
-            start: module_id.0,
-            end: module_id.0 + 1,
-            source: module_source_id,
-        });
-        analyzer
-            .expr_id_to_expr_map
-            .insert(module_id, Expr::Module(module_id));
-        // Register the module under its package's namespace: `std`/entry modules
-        // in `pkg` (and `std` modules also under `std` for external `std::name`
-        // access); a dependency's modules only in that dependency's namespace, so
-        // they neither collide with nor shadow another package's modules.
-        let namespace_scope_id = match origin {
-            Origin::Std | Origin::Pkg => pkg_scope_id,
-            Origin::Dep(index) => analyzer.packages[1 + index].namespace_scope_id,
-        };
-        analyzer
-            .mut_scope_for_scope_id(namespace_scope_id)
-            .name_to_id_map
-            .insert(name, module_id);
-        if origin == Origin::Std {
+            if ambiguous {
+                analyzer.diagnostics.push(Error {
+                    span: EMPTY_SPAN,
+                    msg: format!(
+                        "module `{name}` is ambiguous: both `{name}.vl` and `{name}/lib.vl` \
+                     exist — keep only one"
+                    ),
+                });
+            }
+            let is_entry_module = match (
+                std::fs::canonicalize(&module_path),
+                std::fs::canonicalize(entry_path),
+            ) {
+                (Ok(module_canonical), Ok(entry_canonical)) => module_canonical == entry_canonical,
+                _ => false,
+            };
+            // Use the entry's (buffer) AST for its own module; load the rest from
+            // disk. The entry module keeps SourceId 0 so editor features resolve to
+            // the open document.
+            let (ast, module_text, module_source_id): (&Spanned<NodeList>, &str, SourceId) =
+                if is_entry_module {
+                    entry_is_module = true;
+                    (nodes, entry_source, SourceId(0))
+                } else {
+                    let Some(loaded) = load_package_module(&module_path) else {
+                        continue;
+                    };
+                    let diagnostics_before = analyzer.diagnostics.len();
+                    report_module_parse_errors(&mut analyzer.diagnostics, &module_path, &loaded);
+                    analyzer.attribute_new_diagnostics(
+                        diagnostics_before,
+                        SourceId(sources.len() as u32),
+                    );
+                    sources.push(PathBuf::from(&module_path));
+                    (
+                        loaded.ast,
+                        loaded.text,
+                        SourceId((sources.len() - 1) as u32),
+                    )
+                };
+            let module_scope = analyzer.create_scope(Some(global_scope_id));
+            let module_scope_id = analyzer.push_scope(module_scope);
+            let module_id = analyzer.new_entity_id();
+            analyzer.modules.insert(
+                module_id,
+                Module {
+                    id: module_id,
+                    name,
+                    body: (Vec::new(), module_scope_id),
+                },
+            );
+            // Give the module entity a location (its file, at the top) so a path
+            // segment naming it can go-to-definition. A one-id range maps it to its
+            // source; the span is the file start.
+            analyzer.span_map.insert(module_id, &EMPTY_SPAN);
+            analyzer.source_ranges.push(SourceRange {
+                start: module_id.0,
+                end: module_id.0 + 1,
+                source: module_source_id,
+            });
             analyzer
-                .mut_scope_for_scope_id(std_scope_id)
+                .expr_id_to_expr_map
+                .insert(module_id, Expr::Module(module_id));
+            // Register the module under its package's namespace: `std`/entry modules
+            // in `pkg` (and `std` modules also under `std` for external `std::name`
+            // access); a dependency's modules only in that dependency's namespace, so
+            // they neither collide with nor shadow another package's modules.
+            let namespace_scope_id = match origin {
+                Origin::Std | Origin::Pkg => pkg_scope_id,
+                Origin::Dep(index) => analyzer.packages[1 + index].namespace_scope_id,
+            };
+            analyzer
+                .mut_scope_for_scope_id(namespace_scope_id)
                 .name_to_id_map
                 .insert(name, module_id);
-        }
-        // `module_scopes` indexes std/entry modules by name for the primitive and
-        // `panic` lookups below; a dependency's modules must not enter it (a `dep`
-        // module named `string`/`number`/... would shadow the real primitive).
-        if !matches!(origin, Origin::Dep(_)) {
-            module_scopes.insert(name, module_scope_id);
-        }
-        // Record which package this module's source belongs to, so its imports
-        // resolve `pkg::`/`<dep>::` relative to that package (only when the program
-        // has dependencies; otherwise the legacy global resolution applies).
-        match origin {
-            Origin::Dep(index) => {
+            if origin == Origin::Std {
                 analyzer
-                    .package_of_source
-                    .insert(module_source_id, 1 + index);
+                    .mut_scope_for_scope_id(std_scope_id)
+                    .name_to_id_map
+                    .insert(name, module_id);
             }
-            Origin::Pkg if has_dependencies => {
-                analyzer.package_of_source.insert(module_source_id, 0);
+            // `module_scopes` indexes std/entry modules by name for the primitive and
+            // `panic` lookups below; a dependency's modules must not enter it (a `dep`
+            // module named `string`/`number`/... would shadow the real primitive).
+            if !matches!(origin, Origin::Dep(_)) {
+                module_scopes.insert(name, module_scope_id);
             }
-            _ => {}
-        }
-        // A module's `pkg::` siblings inherit its package; a user/dependency
-        // module's `std::` imports are std, and its `<dep>::` references seed that
-        // dependency. (Std modules reference each other via `pkg::` only, so
-        // collecting their `std::` imports would be a no-op — skip it to keep the
-        // std load byte-for-byte unchanged.)
-        to_load.extend(
-            collect_module_refs(&ast.0, "pkg")
-                .into_iter()
-                .map(|(sibling, _)| (origin, sibling)),
-        );
-        // Seed the module's `std::` and `<dep>::` references. Only the *building*
-        // package's own code (`Pkg`) is cross-target-gated — a dependency's modules
-        // (`Dep`) are its internals, loaded for typing without a gate (the
-        // dependency's compatibility was checked at the user's import). Std modules
-        // reference each other only via `pkg::`, so they seed nothing here.
-        match origin {
-            Origin::Std => {}
-            Origin::Pkg => {
-                let std_refs = collect_module_refs(&ast.0, "std");
-                gate_library_imports(&std_refs, std, "std", platform, &mut analyzer.diagnostics);
-                to_load.extend(
-                    std_refs
-                        .into_iter()
-                        .map(|(module, _)| (Origin::Std, module)),
-                );
-                for (name, index) in &workspace.entry_dependencies {
-                    let refs = collect_module_refs(&ast.0, name);
+            // Record which package this module's source belongs to, so its imports
+            // resolve `pkg::`/`<dep>::` relative to that package (only when the program
+            // has dependencies; otherwise the legacy global resolution applies).
+            match origin {
+                Origin::Dep(index) => {
+                    analyzer
+                        .package_of_source
+                        .insert(module_source_id, 1 + index);
+                }
+                Origin::Pkg if has_dependencies => {
+                    analyzer.package_of_source.insert(module_source_id, 0);
+                }
+                _ => {}
+            }
+            // A module's `pkg::` siblings inherit its package; a user/dependency
+            // module's `std::` imports are std, and its `<dep>::` references seed that
+            // dependency. (Std modules reference each other via `pkg::` only, so
+            // collecting their `std::` imports would be a no-op — skip it to keep the
+            // std load byte-for-byte unchanged.)
+            to_load.extend(
+                collect_module_refs(&ast.0, "pkg")
+                    .into_iter()
+                    .map(|(sibling, _)| (origin, sibling)),
+            );
+            // Seed the module's `std::` and `<dep>::` references. Only the *building*
+            // package's own code (`Pkg`) is cross-target-gated — a dependency's modules
+            // (`Dep`) are its internals, loaded for typing without a gate (the
+            // dependency's compatibility was checked at the user's import). Std modules
+            // reference each other only via `pkg::`, so they seed nothing here.
+            match origin {
+                Origin::Std => {}
+                Origin::Pkg => {
+                    let std_refs = collect_module_refs(&ast.0, "std");
                     gate_library_imports(
-                        &refs,
-                        &workspace.packages[*index],
-                        name,
+                        &std_refs,
+                        std,
+                        "std",
                         platform,
                         &mut analyzer.diagnostics,
                     );
                     to_load.extend(
-                        refs.into_iter()
-                            .map(|(module, _)| (Origin::Dep(*index), module)),
+                        std_refs
+                            .into_iter()
+                            .map(|(module, _)| (Origin::Std, module)),
                     );
+                    for (name, index) in &workspace.entry_dependencies {
+                        let refs = collect_module_refs(&ast.0, name);
+                        gate_library_imports(
+                            &refs,
+                            &workspace.packages[*index],
+                            name,
+                            platform,
+                            &mut analyzer.diagnostics,
+                        );
+                        to_load.extend(
+                            refs.into_iter()
+                                .map(|(module, _)| (Origin::Dep(*index), module)),
+                        );
+                    }
+                }
+                Origin::Dep(index) => {
+                    to_load.extend(
+                        collect_module_refs(&ast.0, "std")
+                            .into_iter()
+                            .map(|(module, _)| (Origin::Std, module)),
+                    );
+                    for (name, dependency_index) in &workspace.packages[index].dependencies {
+                        to_load.extend(
+                            collect_module_refs(&ast.0, name)
+                                .into_iter()
+                                .map(|(module, _)| (Origin::Dep(*dependency_index), module)),
+                        );
+                    }
                 }
             }
-            Origin::Dep(index) => {
-                to_load.extend(
-                    collect_module_refs(&ast.0, "std")
-                        .into_iter()
-                        .map(|(module, _)| (Origin::Std, module)),
-                );
-                for (name, dependency_index) in &workspace.packages[index].dependencies {
+            // Expand this module's own `[derive(..)]` — the synthesized impls reference
+            // std modules (e.g. `std::json`), so seed those into the load set, and carry
+            // the impls to walk into this module's scope below (where its types and the
+            // imported traits resolve). The entry module reuses the `derived` already
+            // computed and seeded for it; every other module expands here.
+            let module_derived = if is_entry_module {
+                derived
+            } else {
+                let generated = expand_derives(&ast.0);
+                if let Some(generated) = generated {
                     to_load.extend(
-                        collect_module_refs(&ast.0, name)
+                        collect_module_refs(generated, "std")
                             .into_iter()
-                            .map(|(module, _)| (Origin::Dep(*dependency_index), module)),
+                            .map(|(module, _)| (Origin::Std, module)),
                     );
                 }
+                generated
+            };
+            loaded.push((
+                name,
+                ast,
+                module_text,
+                module_derived,
+                module_scope_id,
+                module_source_id,
+                origin,
+            ));
+        }
+
+        // --- Macro expansion epilogue (runs once loads settle) ---
+        let registry = macro_registry.get_or_insert_with(|| {
+            let mut registry = crate::macros::MacroRegistry::default();
+            let before = analyzer.diagnostics.len();
+            crate::macros::register_file(
+                &mut registry,
+                &nodes.0,
+                entry_source,
+                entry_path,
+                std,
+                &mut analyzer.diagnostics,
+            );
+            analyzer.attribute_new_diagnostics(before, SourceId(0));
+            for (_, ast, module_text, _, _, module_source_id, _) in &loaded {
+                let before = analyzer.diagnostics.len();
+                let file = sources[module_source_id.0 as usize].clone();
+                crate::macros::register_file(
+                    &mut registry,
+                    &ast.0,
+                    module_text,
+                    &file,
+                    std,
+                    &mut analyzer.diagnostics,
+                );
+                analyzer.attribute_new_diagnostics(before, *module_source_id);
+            }
+            for (lib_source_id, _, lib_ast, _, lib_text) in &dependency_lib_walks {
+                let before = analyzer.diagnostics.len();
+                let file = sources[lib_source_id.0 as usize].clone();
+                crate::macros::register_file(
+                    &mut registry,
+                    &lib_ast.0,
+                    lib_text,
+                    &file,
+                    std,
+                    &mut analyzer.diagnostics,
+                );
+                analyzer.attribute_new_diagnostics(before, *lib_source_id);
+            }
+            registry
+        });
+        {
+            // Expand each not-yet-expanded file; generated code's module references
+            // seed further loads (its `import`s are ordinary — H2 block-scoped
+            // imports let a macro emit code that carries its own dependencies).
+            // This runs even with an empty registry: an unknown `[attribute]` must
+            // error rather than silently skip.
+            let seed_generated_refs =
+                |generated: &[&'static NodeList<'static>],
+                 origin: Origin,
+                 to_load: &mut Vec<(Origin, &str)>| {
+                    for list in generated {
+                        to_load.extend(
+                            collect_module_refs(list, "std")
+                                .into_iter()
+                                .map(|(module, _)| (Origin::Std, module)),
+                        );
+                        to_load.extend(
+                            collect_module_refs(list, "pkg")
+                                .into_iter()
+                                .map(|(module, _)| (origin, module)),
+                        );
+                        for (dep_name, index) in &workspace.entry_dependencies {
+                            to_load.extend(
+                                collect_module_refs(list, dep_name)
+                                    .into_iter()
+                                    .map(|(module, _)| (Origin::Dep(*index), module)),
+                            );
+                        }
+                    }
+                };
+            if !entry_is_module && expanded_sources.insert(SourceId(0)) {
+                let before = analyzer.diagnostics.len();
+                let generated = crate::macros::expand_source(
+                    registry,
+                    &nodes.0,
+                    entry_source,
+                    &mut analyzer.diagnostics,
+                    0,
+                );
+                analyzer.attribute_new_diagnostics(before, SourceId(0));
+                seed_generated_refs(&generated, entry_pkg_origin, &mut to_load);
+                generated_by_source
+                    .entry(SourceId(0))
+                    .or_default()
+                    .extend(generated);
+            }
+            for (_, ast, module_text, _, _, module_source_id, origin) in &loaded {
+                if !expanded_sources.insert(*module_source_id) {
+                    continue;
+                }
+                let before = analyzer.diagnostics.len();
+                let generated = crate::macros::expand_source(
+                    registry,
+                    &ast.0,
+                    module_text,
+                    &mut analyzer.diagnostics,
+                    0,
+                );
+                analyzer.attribute_new_diagnostics(before, *module_source_id);
+                seed_generated_refs(&generated, *origin, &mut to_load);
+                generated_by_source
+                    .entry(*module_source_id)
+                    .or_default()
+                    .extend(generated);
             }
         }
-        // Expand this module's own `[derive(..)]` — the synthesized impls reference
-        // std modules (e.g. `std::json`), so seed those into the load set, and carry
-        // the impls to walk into this module's scope below (where its types and the
-        // imported traits resolve). The entry module reuses the `derived` already
-        // computed and seeded for it; every other module expands here.
-        let module_derived = if is_entry_module {
-            derived
-        } else {
-            let generated = expand_derives(&ast.0);
-            if let Some(generated) = generated {
-                to_load.extend(
-                    collect_module_refs(generated, "std")
-                        .into_iter()
-                        .map(|(module, _)| (Origin::Std, module)),
-                );
-            }
-            generated
-        };
-        loaded.push((name, ast, module_derived, module_scope_id, module_source_id));
+        if to_load.is_empty() {
+            break;
+        }
     }
-    for (_name, ast, derived, module_scope_id, source_id) in &loaded {
+
+    for (_name, ast, _text, derived, module_scope_id, source_id, _origin) in &loaded {
         analyzer.set_current_source(*source_id);
         analyzer.module_scope_ids.insert(*module_scope_id);
         let start = analyzer.entity_id;
@@ -12820,6 +12995,18 @@ pub fn analyze<'src>(
                 source: DERIVED_SOURCE,
             });
         }
+        // Macro-generated items likewise walk into the module's own scope; their
+        // spans point into leaked generated text, so they too record under
+        // `DERIVED_SOURCE` (editor features skip them).
+        for generated in generated_by_source.get(source_id).into_iter().flatten() {
+            let generated_start = analyzer.entity_id;
+            analyzer.walk_expr_nodes(generated, *module_scope_id);
+            analyzer.source_ranges.push(SourceRange {
+                start: generated_start,
+                end: analyzer.entity_id,
+                source: DERIVED_SOURCE,
+            });
+        }
     }
     if let Some(lib_ast) = lib_ast {
         analyzer.set_current_source(lib_source_id);
@@ -12834,7 +13021,7 @@ pub fn analyze<'src>(
     }
     // Walk each dependency's `lib.vl` into its own namespace (its public surface),
     // mirroring the `std` lib walk above.
-    for (source_id, namespace_scope_id, lib_ast, derived) in &dependency_lib_walks {
+    for (source_id, namespace_scope_id, lib_ast, derived, _lib_text) in &dependency_lib_walks {
         analyzer.set_current_source(*source_id);
         analyzer.module_scope_ids.insert(*namespace_scope_id);
         let start = analyzer.entity_id;
@@ -13039,6 +13226,15 @@ pub fn analyze<'src>(
             analyzer.walk_expr_nodes(derived, global_scope_id);
             analyzer.source_ranges.push(SourceRange {
                 start: derived_start,
+                end: analyzer.entity_id,
+                source: DERIVED_SOURCE,
+            });
+        }
+        for generated in generated_by_source.get(&SourceId(0)).into_iter().flatten() {
+            let generated_start = analyzer.entity_id;
+            analyzer.walk_expr_nodes(generated, global_scope_id);
+            analyzer.source_ranges.push(SourceRange {
+                start: generated_start,
                 end: analyzer.entity_id,
                 source: DERIVED_SOURCE,
             });

@@ -206,15 +206,17 @@ have gaps.
 
 ## G. Macros
 
-1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`, design settled;
-   Phase 0 SHIPPED 2026-07-06**) — built-in derives and `[service]` generation shipped as
-   special-cased subsets; the proposal subsumes them via `macro fun` items over
-   `macro_std::meta`, hermetic per-function isolation (bodies see only `macro_std` via
-   scoped imports, H2), a fueled interpreter, and per-invocation text caching. Phase 0
-   in-tree: the interpreter over the transformer's `js::Node` AST (`transform_to_ast`),
-   the 70/70 equivalence gate + failure-mode pins, and the `macro_std` package. Next:
-   Phase 1 — `macro fun` items, hermetic resolution, `[attr]`/`[derive(X)]` dispatch,
-   the expansion fixpoint + text cache.
+1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`; Phases 0–1
+   SHIPPED 2026-07-06**) — Phase 0: the interpreter over the transformer's `js::Node` AST
+   (`transform_to_ast`), the 70/70 equivalence gate, `macro_std`. Phase 1: `macro fun`
+   items, per-file hermetic worlds (blanked-file compile against a macro_std-only
+   workspace), `[name(args)]`/`[derive(Name)]` dispatch through `run_entry`, output
+   splicing with depth-16 fixpoint, world + expansion caches; library-defined macros work
+   (the exit criterion). **Remaining (Phase 2+):** `macro name(..)` invocations (item +
+   expression position, placeholder gensyms/`meta::fresh`), migration of the built-in
+   derives behind the byte-identical gate, `vilan.toml [macros]` fuel knob, module-scoped
+   macro names (v1 is a flat namespace), attribute use inside dependency files, `macro
+   { .. }` blocks (Phase 4).
 
 ---
 
@@ -237,6 +239,13 @@ have gaps.
    depth, which also carries the P3 cross-target gates, the L1 lib-surface check, the §4.2
    contract check, and the LSP platform sniffer for free. Pins: 12 in `inference.rs`, corpus
    `scoped-import.vl`, workspace body-import + §4.2-at-depth CLI tests.
+
+---
+
+3. **Brace escapes (or raw strings) in interpolated strings** (S; found writing macros) —
+   `i"..."` has no `{{` escape, so generating brace-heavy vilan (impl bodies) falls back to
+   string concatenation. Either `{{`/`}}` escapes in i-strings or a raw-string form would
+   make `source(i"impl {name} {{ .. }}")` read like the §2 proposal example.
 
 ---
 

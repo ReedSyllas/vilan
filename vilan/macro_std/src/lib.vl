@@ -13,6 +13,21 @@
 // The reflection surface: `import macro_std::meta::{ Item, TypeExpr, .. }`.
 export import pkg::meta;
 
+// The pure core, re-exported (macro-engine.md §3): the ordinary vocabulary a
+// macro keeps — `import macro_std::option::Option::{ self, Some, None };` and
+// friends. Nothing platform-flavored is here, and nothing else is reachable.
+export import std::option;
+export import std::result;
+export import std::display;
+export import std::debug;
+export import std::compare;
+export import std::operators;
+export import std::map;
+export import std::set;
+// `panic` throws — the macro's error channel: a throw surfaces as a spanned
+// "failed at expansion time" diagnostic at the invocation.
+export import std::io::panic;
+
 use meta::Source;
 
 // Builds generated source. The one constructor every macro ends in.
