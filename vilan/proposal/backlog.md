@@ -237,8 +237,10 @@ have gaps.
    largest generators), then `[service]`; the derive-name registration mechanism (builtins
    settle as fn-name = trait name; decoupling deferred to the first user derive needing
    it); `vilan.toml [macros]` fuel knob; module-scoped macro names (v1 flat); attribute
-   use inside dependency files; ambient meta vocabulary in macro scope; `macro { .. }`
-   blocks (Phase 4).
+   use inside dependency files; ambient meta vocabulary in macro scope; the
+   **construction API** (macro-engine §3 recorded direction, user request 2026-07-06:
+   `Arguments` typed accessors first, then macro_std output builders, tree interchange
+   only if measured); `macro { .. }` blocks (Phase 4).
 
 ---
 

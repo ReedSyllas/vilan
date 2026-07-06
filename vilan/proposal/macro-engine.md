@@ -130,7 +130,39 @@ v1 ("only functions can be macros").
 - **Output is source text** (`source(str)` builds a `Source`). This is the proven
   in-house shape: every derive and the service generator emit source strings today, and
   text is what makes caching sound (§6). Quasi-quotation sugar can come later without
-  changing the model; `i"…"` interpolation already carries the pattern well.
+  changing the model; `i"…"` interpolation already carries the pattern well. The
+  recorded evolution beyond text is a formal construction API — see below.
+
+### From text to a construction API (recorded direction, 2026-07-06)
+
+Text output is the right v1 (§5/§6), but the first real macros surfaced its costs:
+brace/quote escaping makes templates noisy; ill-formed output is a runtime-of-expansion
+failure ("generated invalid vilan") where an API could make it unrepresentable; and
+macro ARGUMENTS arrive as raw source text — the shipped `unroll` macro parses its own
+integer argument out of a string. The evolution, in adoption order:
+
+1. **Input accessors (first — small, immediate DX).** `Arguments` gains typed views
+   over the existing syntactic capture: `as_i32(index)`, `as_str_literal(index)`,
+   `as_identifier(index)`, arity — no more `parse_i32` on your own arguments. Later,
+   full `meta::Expr` reflection for arguments (kind + children + rendered text), so
+   `unroll(4, |i| ..)` receives a real integer and a real closure expression.
+2. **Output builders (macro_std sugar — no compiler change).** `ImplBuilder`,
+   `FunBuilder`, match-arm combinators…: ordinary vilan in `macro_std` that RENDERS TO
+   TEXT internally. The parser stays the single grammar authority (the §5 lesson — no
+   dual lowering), `Source` and the §6 text cache are untouched, and `source(str)`
+   remains the escape hatch for shapes the builders don't cover yet. This captures the
+   DX win: no escapes, structured composition, the common shapes (an impl of N
+   methods, a match over an enum's variants) as combinators.
+3. **Tree interchange (last — compiler-visible, decide from measurements).** A
+   `Source` variant carrying reflected AST values the compiler converts directly to
+   nodes, skipping lex+parse of the output. Wins: the perf tail and
+   correct-by-construction output. Costs to solve first: a value→node converter held
+   to the same exhaustiveness discipline as `for_each_child` (a second entry into node
+   construction must not silently lag the grammar); spans for constructed nodes
+   (synthetic-source attribution, like the derive channel's); and caching — §6 stays
+   sound by caching the tree's CANONICAL RENDERING. Since parsing small generated text
+   is cheap, step 2 may capture most of the value; step 3 is taken only if
+   measurements say the parse matters.
 - **The macro world is HERMETIC, per function** (settled in review — one rule solving
   the prelude gate and the helper ambiguity at once): a `macro fun`'s body sees
   **nothing** of its surrounding module — not its imports, not its functions, not its
@@ -365,12 +397,32 @@ variadic generics.
 The prize is deleting Rust: `derive_impl_source` (~500 lines) and `service_impl_source`
 (~250 lines) become vilan macros in std. The gate is absolute: each built-in migrates
 only when its macro produces **byte-identical generated source** for the whole corpus +
-examples (the goldens are the referee), and the native path is deleted in the same
-commit or not at all. Order: `Debug` (smallest) → `Default` → `PartialEq` → `Json` →
-`Wire` → `[service]` (last; it is the stress test — cross-module, contract hashing,
-mirror lets). `derive(..)` dispatch: built-in names resolve to std macros once
-migrated; unknown names resolve to user macros in scope; a miss keeps today's
-behavior (skip; the missing-impl error surfaces at the use site).
+examples (the goldens are the referee). `derive(..)` dispatch: built-in names resolve
+to std macros once migrated; unknown names resolve to user macros in scope; a miss
+keeps today's behavior (skip; the missing-impl error surfaces at the use site).
+
+**How the std macros are used: they aren't imported — they're AMBIENT.** The built-in
+derives are part of the language's standing vocabulary, exactly like the primitive
+types: `[derive(PartialEq)]` works in any file with zero imports, before and after
+migration identically (that's the migration contract). `derives.vl` living outside
+std's layer roots is the mechanism, not an accident — it is not a module, so it can
+never collide with the module system; the compiler registers its macros into every
+program. USER macros are the opposite: distributed through the module system, imported
+like any item. When module-scoped macro names replace the v1 flat namespace, the
+builtins stay prelude-ambient — the same split vilan already has between ambient
+primitives and imported std items.
+
+**Amendment (2026-07-06), on "the native path is deleted in the same commit":** the
+Rust generators for migrated derives are NOT dead code and stay. Two consumers remain:
+(1) test fixtures with custom `std` trees have no `derives.vl`, and (2) compiling
+`derives.vl`'s own macro world re-enters the builtin lookup — the recursion guard
+serves it an empty registry, so any derive used by std modules inside that world takes
+the Rust path. Both produce byte-identical output by the gate, so the fallback is a
+second copy of a FROZEN contract, not a second live implementation; it shrinks to
+deletion only if fixtures gain a derives.vl and the world bootstraps differently.
+Actual migration order (2026-07-06): `PartialEq` → `Default` → `Debug`, with
+`Json`/`Wire` → `[service]` remaining (the stress test — cross-module, contract
+hashing, mirror lets).
 
 ## 11. Phased plan
 
@@ -452,6 +504,9 @@ behavior (skip; the missing-impl error surfaces at the use site).
   `proc_macro_derive`-style registration stays deferred until a user derive
   needs the decoupling. `Json`/`Wire` (the visitor impls, enum tag fallbacks,
   panic arms — the largest generators) are the next slice.
+- **Phase 5 (recorded, unscheduled)** — **the construction API** (§3's recorded
+  direction): input accessors on `Arguments`, then `macro_std` output builders
+  rendering to text, then — only if measured — tree interchange.
 - **Phase 4 (recorded, unscheduled)** — **`macro { .. }` blocks** (an anonymous,
   immediately-expanded macro: the body runs at expansion time in the macro prelude; in
   item position its emissions splice in place — comptime-style families without naming
