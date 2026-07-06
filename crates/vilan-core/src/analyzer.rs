@@ -877,6 +877,15 @@ pub struct Analyzer<'src> {
     binding_annotation_view: HashMap<Id, bool>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
+    // Macro invocations (macro-engine.md §2), keyed by the invocation NODE's
+    // address (stable: all walked ASTs are leaked or outlive the analysis).
+    // Item-position invocations walk to nothing (their output was appended to
+    // the module); expression-position ones walk their spliced replacement.
+    macro_item_invocations: HashSet<usize>,
+    macro_expression_expansions: HashMap<usize, &'static Spanned<Node<'static>>>,
+    // Expression sites whose expansion failed — already diagnosed; they walk
+    // to an error entity without a second (misleading) message.
+    macro_failed_sites: HashSet<usize>,
     // Scopes that are a module's top level: the entry file's global scope, each
     // loaded file's namespace scope, and every `mod { .. }` body. `export` is
     // legal exactly in these (a block-scoped `import` is not exportable, H2).
@@ -1110,6 +1119,9 @@ impl<'src> Analyzer<'src> {
             binding_annotation_view: HashMap::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
+            macro_item_invocations: HashSet::new(),
+            macro_expression_expansions: HashMap::new(),
+            macro_failed_sites: HashSet::new(),
             module_scope_ids: HashSet::new(),
             prepped_locals: Vec::new(),
             untyped_comprehension_binders: HashSet::new(),
@@ -4072,6 +4084,36 @@ impl<'src> Analyzer<'src> {
             Node::MacroAttribute(_, _, _, inner) => {
                 self.walk_expr_node(inner, scope_id);
                 Some(Expr::Void)
+            }
+            // A macro invocation: item-position ones already appended their
+            // output (nothing to walk); expression-position ones walk their
+            // spliced replacement, aliased through an empty block so this
+            // node's entity IS the replacement's value.
+            Node::MacroInvocation(name, _, _) => {
+                let key = node as *const Spanned<Node> as usize;
+                if self.macro_item_invocations.contains(&key) {
+                    Some(Expr::Void)
+                } else if self.macro_failed_sites.contains(&key) {
+                    // The expansion failure is already a diagnostic.
+                    Some(Expr::Error)
+                } else if let Some(replacement) =
+                    self.macro_expression_expansions.get(&key).copied()
+                {
+                    let child_id = self.walk_expr_node(replacement, scope_id);
+                    Some(Expr::Block((Vec::new(), child_id)))
+                } else {
+                    // Reached only where expansion never runs — a macro body
+                    // (the world walks the definition's original text).
+                    self.diagnostics.push(Error {
+                        span: node.1,
+                        msg: format!(
+                            "the invocation `macro {name}(..)` was not expanded — splice \
+                             syntax belongs in program code; inside the macro world, call \
+                             `{name}(..)` as a plain function"
+                        ),
+                    });
+                    Some(Expr::Error)
+                }
             }
             Node::Export(inner) => {
                 // Exports shape a module's public surface, so they only mean
@@ -12645,6 +12687,8 @@ pub fn analyze<'src>(
     // generated code's imports re-enter the load loop.
     let mut macro_registry: Option<crate::macros::MacroRegistry> = None;
     let mut expanded_sources: HashSet<SourceId> = HashSet::new();
+    // Splice sites are stamped with a per-analysis counter (gensym hygiene, §7).
+    let mut macro_site_counter: u32 = 0;
     let mut generated_by_source: HashMap<SourceId, Vec<&'static NodeList<'static>>> =
         HashMap::new();
     loop {
@@ -12934,38 +12978,50 @@ pub fn analyze<'src>(
                 };
             if !entry_is_module && expanded_sources.insert(SourceId(0)) {
                 let before = analyzer.diagnostics.len();
-                let generated = crate::macros::expand_source(
+                let output = crate::macros::expand_source(
                     registry,
                     &nodes.0,
                     entry_source,
                     &mut analyzer.diagnostics,
+                    &mut macro_site_counter,
                     0,
                 );
                 analyzer.attribute_new_diagnostics(before, SourceId(0));
-                seed_generated_refs(&generated, entry_pkg_origin, &mut to_load);
+                seed_generated_refs(&output.items, entry_pkg_origin, &mut to_load);
                 generated_by_source
                     .entry(SourceId(0))
                     .or_default()
-                    .extend(generated);
+                    .extend(output.items);
+                analyzer.macro_item_invocations.extend(output.item_sites);
+                analyzer.macro_failed_sites.extend(output.failed_sites);
+                analyzer
+                    .macro_expression_expansions
+                    .extend(output.expressions);
             }
             for (_, ast, module_text, _, _, module_source_id, origin) in &loaded {
                 if !expanded_sources.insert(*module_source_id) {
                     continue;
                 }
                 let before = analyzer.diagnostics.len();
-                let generated = crate::macros::expand_source(
+                let output = crate::macros::expand_source(
                     registry,
                     &ast.0,
                     module_text,
                     &mut analyzer.diagnostics,
+                    &mut macro_site_counter,
                     0,
                 );
                 analyzer.attribute_new_diagnostics(before, *module_source_id);
-                seed_generated_refs(&generated, *origin, &mut to_load);
+                seed_generated_refs(&output.items, *origin, &mut to_load);
                 generated_by_source
                     .entry(*module_source_id)
                     .or_default()
-                    .extend(generated);
+                    .extend(output.items);
+                analyzer.macro_item_invocations.extend(output.item_sites);
+                analyzer.macro_failed_sites.extend(output.failed_sites);
+                analyzer
+                    .macro_expression_expansions
+                    .extend(output.expressions);
             }
         }
         if to_load.is_empty() {

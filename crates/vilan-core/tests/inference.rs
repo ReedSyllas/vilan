@@ -5715,3 +5715,219 @@ fn a_macro_fun_inside_a_body_is_rejected() {
         "must be a top-level item",
     );
 }
+
+// --- The macro engine, Phase 2: `macro name(args)` invocations ---
+
+#[test]
+fn an_item_invocation_stamps_out_declarations() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun constants(arguments: Arguments): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Arguments, Source };
+
+            mut body = "";
+            mut index = 0;
+            for name in arguments.values {
+                body = body + i"fun {name}(): i32 \{ {index} \}\n";
+                index = index + 1;
+            }
+            source(body)
+        }
+
+        macro constants(zero, one, two);
+
+        fun main() {
+            print(two());
+            print(zero());
+        }
+
+        main();
+        "#,
+        "2\n0\n",
+    );
+}
+
+#[test]
+fn an_expression_invocation_splices_in_place() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun double_of(arguments: Arguments): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Arguments, Source };
+            import macro_std::option::Option::{ self, Some, None };
+
+            let text = match arguments.values.get(0) {
+                Some(let value) => value,
+                None => "0",
+            };
+            source(i"(({text}) * 2)")
+        }
+
+        fun main() {
+            print(macro double_of(21));
+            print(1 + macro double_of(3 + 4));
+        }
+
+        main();
+        "#,
+        "42\n15\n",
+    );
+}
+
+// A zero-parameter macro is invocable with empty parens.
+#[test]
+fn a_unit_macro_invokes_with_no_arguments() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun answer(): Source {
+            import macro_std::source;
+            import macro_std::meta::Source;
+
+            source("42")
+        }
+
+        fun main() {
+            print(macro answer());
+        }
+
+        main();
+        "#,
+        "42\n",
+    );
+}
+
+// Gensym hygiene (§7): `fresh()` placeholders stamp unique per splice site, so
+// one macro's output cannot capture a binder another site introduced.
+#[test]
+fn gensyms_do_not_capture_across_splice_sites() {
+    assert_fails(
+        r#"
+        macro fun binds(arguments: Arguments): Source {
+            import macro_std::source;
+            import macro_std::fresh;
+            import macro_std::meta::{ Arguments, Source };
+
+            let binder = fresh();
+            source(i"\{ let {binder} = 1; {binder} + macro leaks() \}")
+        }
+
+        macro fun leaks(): Source {
+            import macro_std::source;
+            import macro_std::fresh;
+            import macro_std::meta::Source;
+
+            // Emits a REFERENCE to its own fresh placeholder without binding
+            // it: if stamping were per-program instead of per-site, this would
+            // silently capture `binds`'s binder.
+            source(i"{fresh()}")
+        }
+
+        fun main() {
+            let x = macro binds();
+        }
+
+        main();
+        "#,
+    );
+}
+
+// Shape mismatches are clean errors in both directions.
+#[test]
+fn an_attribute_shaped_macro_cannot_be_invoked() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let x = macro takes_item();
+        }
+
+        macro fun takes_item(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("")
+        }
+
+        main();
+        "#,
+        "takes_item",
+        "attribute-shaped",
+    );
+}
+
+#[test]
+fn an_invocation_shaped_macro_cannot_be_an_attribute() {
+    assert_fails_spanning(
+        r#"
+        [takes_arguments]
+        struct Point {
+            x: i32,
+        }
+
+        macro fun takes_arguments(arguments: Arguments): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Arguments, Source };
+            source("")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "takes_arguments",
+        "invocation-shaped",
+    );
+}
+
+// An expression splice must be exactly one expression.
+#[test]
+fn an_expression_macro_must_generate_one_expression() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let x = macro two_statements();
+        }
+
+        macro fun two_statements(): Source {
+            import macro_std::source;
+            import macro_std::meta::Source;
+            source("1; 2;")
+        }
+
+        main();
+        "#,
+        "two_statements",
+        "generated invalid vilan",
+    );
+}
+
+// A closure bound to a local and called directly doesn't type its unannotated
+// parameter (backlog B13) — the call-site reconciliation channel covers method
+// calls and deferred call subjects, but a direct call on a closure-typed local
+// never feeds the parameter back. Surfaced writing `macro unroll(..)` callbacks.
+#[test]
+#[ignore]
+fn a_direct_call_types_an_unannotated_closure_parameter() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun accumulate(i: i32): i32 {
+            i * 10
+        }
+
+        fun main() {
+            let f = |i| accumulate(i);
+            print(f(3));
+        }
+
+        main();
+        "#,
+        "30\n",
+    );
+}

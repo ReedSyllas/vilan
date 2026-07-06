@@ -42,7 +42,7 @@ const MAX_DEPTH: u32 = 16;
 pub(crate) struct World {
     key: u64,
     program: JsProgram<'static>,
-    entries: HashMap<String, (String, usize)>,
+    entries: HashMap<String, (String, MacroShape)>,
 }
 
 #[derive(Default)]
@@ -50,10 +50,21 @@ pub(crate) struct MacroRegistry {
     by_name: HashMap<String, MacroDef>,
 }
 
+/// What a macro's signature says it consumes — which dispatch forms fit.
+/// Attributes need `(Item)` / `(Item, Arguments)`; invocations need
+/// `(Arguments)` / `()`.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum MacroShape {
+    Item,
+    ItemArguments,
+    Arguments,
+    Unit,
+}
+
 pub(crate) struct MacroDef {
     world: Arc<World>,
     entry: String,
-    parameters: usize,
+    shape: MacroShape,
 }
 
 /// The `macro_std` package, resolved from its toolchain location beside `std`
@@ -137,7 +148,7 @@ pub(crate) fn register_file(
             });
             continue;
         }
-        let Some((entry, parameters)) = world.entries.get(&name).cloned() else {
+        let Some((entry, shape)) = world.entries.get(&name).cloned() else {
             continue; // the world compile reported why
         };
         registry.by_name.insert(
@@ -145,7 +156,7 @@ pub(crate) fn register_file(
             MacroDef {
                 world: world.clone(),
                 entry,
-                parameters,
+                shape,
             },
         );
     }
@@ -169,6 +180,31 @@ fn check_hermetic_imports(node: &Spanned<Node>, diagnostics: &mut Vec<Error>, he
     }
     node.0
         .for_each_child(&mut |child| check_hermetic_imports(child, diagnostics, hermetic));
+}
+
+/// The dispatch shape a macro's written signature declares, by its parameter
+/// TYPE names (`Item` / `Arguments`). `None` for anything else.
+fn macro_shape(function: &Func) -> Option<MacroShape> {
+    let type_name = |index: usize| -> Option<&str> {
+        let (_, type_, _, _) = function.parameters.0.get(index)?;
+        match type_.as_deref().map(|spanned| &spanned.0) {
+            Some(Node::Accessor(name)) => Some(*name),
+            _ => None,
+        }
+    };
+    match function.parameters.0.len() {
+        0 => Some(MacroShape::Unit),
+        1 => match type_name(0)? {
+            "Item" => Some(MacroShape::Item),
+            "Arguments" => Some(MacroShape::Arguments),
+            _ => None,
+        },
+        2 => match (type_name(0)?, type_name(1)?) {
+            ("Item", "Arguments") => Some(MacroShape::ItemArguments),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The macro world's source: every byte outside the macro definitions becomes
@@ -257,8 +293,19 @@ fn compile_world(
             .copied();
         match id {
             Some(id) if program.functions.contains_key(&id) => {
+                let Some(shape) = macro_shape(function) else {
+                    errors.push(Error {
+                        span: *span,
+                        msg: format!(
+                            "the macro `{name}` has an unsupported signature — a macro takes \
+                             `(item: Item)`, `(item: Item, arguments: Arguments)`, \
+                             `(arguments: Arguments)`, or `()`"
+                        ),
+                    });
+                    continue;
+                };
                 roots.push(id);
-                root_names.push((name.to_string(), function.parameters.0.len()));
+                root_names.push((name.to_string(), shape));
             }
             _ => errors.push(Error {
                 span: *span,
@@ -274,12 +321,7 @@ fn compile_world(
     let entries = roots
         .iter()
         .zip(root_names)
-        .map(|(id, (name, parameters))| {
-            (
-                name,
-                (emitted.get(id).cloned().unwrap_or_default(), parameters),
-            )
-        })
+        .map(|(id, (name, shape))| (name, (emitted.get(id).cloned().unwrap_or_default(), shape)))
         .collect();
     let world = Arc::new(World {
         key,
@@ -292,199 +334,447 @@ fn compile_world(
 
 // --- Expansion ---
 
-/// Expands every macro attribute in `nodes` (a file's top level, or a
-/// generated list when recursing): each hit runs its macro in the interpreter
-/// and parses the returned `Source` text. Returns the generated node lists to
-/// be walked after the originating file's items — including nested expansions
-/// and the built-in derives the generated code carries.
+/// One file's expansion results, ready for `analyze` to fold in.
+#[derive(Default)]
+pub(crate) struct ExpansionOutput {
+    /// Generated ITEM lists — walked after the originating file's items.
+    pub(crate) items: Vec<&'static NodeList<'static>>,
+    /// Expression splices: invocation node address → the replacement
+    /// expression the walk substitutes.
+    pub(crate) expressions: Vec<(usize, &'static Spanned<Node<'static>>)>,
+    /// Item-position invocation node addresses (they walk to nothing).
+    pub(crate) item_sites: Vec<usize>,
+    /// Expression sites whose expansion FAILED — the failure is already a
+    /// diagnostic; the walk substitutes an error entity without piling on.
+    pub(crate) failed_sites: Vec<usize>,
+}
+
+struct Expander<'r, 'd> {
+    registry: &'r MacroRegistry,
+    diagnostics: &'d mut Vec<Error>,
+    /// The per-splice-site counter that stamps `__m<N>` gensym placeholders
+    /// unique (§7): deterministic — sites are visited in file/node order.
+    site_counter: &'d mut u32,
+    output: ExpansionOutput,
+}
+
+/// Expands every macro use in `nodes` (a file's top level, or a generated list
+/// when recursing): attributes and item-position invocations append generated
+/// items; expression-position invocations (found at ANY depth, except inside
+/// macro definitions) record their spliced replacement. Nested uses in
+/// generated code are chased to the depth cap.
 pub(crate) fn expand_source(
     registry: &MacroRegistry,
     nodes: &NodeList,
     text: &str,
     diagnostics: &mut Vec<Error>,
+    site_counter: &mut u32,
     depth: u32,
-) -> Vec<&'static NodeList<'static>> {
-    let mut generated = Vec::new();
-    for node in nodes {
-        expand_node(registry, node, text, diagnostics, depth, &mut generated);
-    }
-    generated
+) -> ExpansionOutput {
+    let mut expander = Expander {
+        registry,
+        diagnostics,
+        site_counter,
+        output: ExpansionOutput::default(),
+    };
+    expander.expand_list(nodes, text, depth);
+    expander.output
 }
 
-fn expand_node(
-    registry: &MacroRegistry,
-    node: &Spanned<Node>,
-    text: &str,
-    diagnostics: &mut Vec<Error>,
-    depth: u32,
-    generated: &mut Vec<&'static NodeList<'static>>,
-) {
-    match &node.0 {
-        Node::Export(inner) => expand_node(registry, inner, text, diagnostics, depth, generated),
-        // `mod` bodies are item position too.
-        Node::Module(_, body) => {
-            for child in &body.0 {
-                expand_node(registry, child, text, diagnostics, depth, generated);
-            }
+impl Expander<'_, '_> {
+    fn expand_list(&mut self, nodes: &NodeList, text: &str, depth: u32) {
+        for node in nodes {
+            self.expand_item_position(node, text, depth);
         }
-        Node::MacroAttribute(name, name_span, argument_spans, item) => {
-            let Some(def) = registry.by_name.get(*name) else {
-                diagnostics.push(Error {
-                    span: *name_span,
-                    msg: format!("no macro named `{name}` is in scope"),
-                });
-                return;
-            };
-            let arguments: Vec<&str> = argument_spans
-                .iter()
-                .map(|span| slice(text, *span))
-                .collect();
-            run_expansion(
-                registry,
-                def,
-                name,
-                *name_span,
-                item,
-                &arguments,
-                text,
-                diagnostics,
-                depth,
-                generated,
-            );
-        }
-        // `[derive(Name)]` with a registered name dispatches like an attribute
-        // with no arguments; built-in names keep their Rust generators, and
-        // unknown names keep today's behavior (skip — the missing-impl error
-        // surfaces at the use site).
-        Node::Derive(names, item) => {
-            for name in names {
-                if let Some(def) = registry.by_name.get(*name) {
-                    run_expansion(
-                        registry,
-                        def,
-                        name,
-                        node.1,
-                        item,
-                        &[],
-                        text,
-                        diagnostics,
-                        depth,
-                        generated,
-                    );
+    }
+
+    /// A node in ITEM position: attributes, item invocations, derives — and a
+    /// sweep of everything else for expression-position invocations.
+    fn expand_item_position(&mut self, node: &Spanned<Node>, text: &str, depth: u32) {
+        match &node.0 {
+            Node::Export(inner) => self.expand_item_position(inner, text, depth),
+            // `mod` bodies are item position too.
+            Node::Module(_, body) => {
+                for child in &body.0 {
+                    self.expand_item_position(child, text, depth);
                 }
             }
-        }
-        _ => {}
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_expansion(
-    registry: &MacroRegistry,
-    def: &MacroDef,
-    name: &str,
-    site: Span,
-    item: &Spanned<Node>,
-    arguments: &[&str],
-    text: &str,
-    diagnostics: &mut Vec<Error>,
-    depth: u32,
-    generated: &mut Vec<&'static NodeList<'static>>,
-) {
-    if depth >= MAX_DEPTH {
-        diagnostics.push(Error {
-            span: site,
-            msg: format!(
-                "macro expansion did not settle after {MAX_DEPTH} rounds — the chain ends at \
-                 `{name}`"
-            ),
-        });
-        return;
-    }
-
-    // The cache key: the world (definition set), the macro, and the invocation
-    // input AS SOURCE — the item's text and the argument texts (§6). The cached
-    // value is the parsed output with its (leaked) text, so re-analyses skip
-    // the interpreter AND the parse.
-    static EXPANSIONS: OnceLock<Mutex<HashMap<u64, (&'static NodeList<'static>, &'static str)>>> =
-        OnceLock::new();
-    let item_text = slice(text, item.1);
-    let key = {
-        let mut hasher = DefaultHasher::new();
-        def.world.key.hash(&mut hasher);
-        name.hash(&mut hasher);
-        item_text.hash(&mut hasher);
-        arguments.hash(&mut hasher);
-        hasher.finish()
-    };
-    let expansions = EXPANSIONS.get_or_init(|| Mutex::new(HashMap::new()));
-    let cached = expansions.lock().unwrap().get(&key).copied();
-    let (parsed, parsed_source) = match cached {
-        Some(cached) => cached,
-        None => {
-            let mut call_arguments = vec![construct_item(item, text)];
-            if def.parameters >= 2 {
-                call_arguments.push(construct_arguments(arguments));
+            // A macro definition: its body is the macro world's, never
+            // expanded (splice syntax is program-code-only).
+            Node::MacroFun(_) => {}
+            Node::MacroAttribute(name, name_span, argument_spans, item) => {
+                let arguments: Vec<&str> = argument_spans
+                    .iter()
+                    .map(|span| slice(text, *span))
+                    .collect();
+                self.run_attribute(name, *name_span, item, &arguments, text, depth);
+                // The annotated item may contain expression invocations.
+                self.sweep_expressions(item, text, depth);
             }
-            let source = match interpreter::run_entry(
-                &def.world.program,
-                &def.entry,
-                &call_arguments,
-                Limits::default(),
-            ) {
-                Ok(source) => source,
-                Err(failure) => {
-                    diagnostics.push(Error {
+            // `[derive(Name)]` with a registered name dispatches like an
+            // attribute with no arguments; built-in names keep their Rust
+            // generators; unknown names keep today's behavior.
+            Node::Derive(names, item) => {
+                for name in names.iter() {
+                    if self.registry.by_name.contains_key(*name) {
+                        self.run_attribute(name, node.1, item, &[], text, depth);
+                    }
+                }
+                self.sweep_expressions(item, text, depth);
+            }
+            // An ITEM invocation: the output parses as items and appends.
+            Node::MacroInvocation(name, name_span, argument_spans) => {
+                let arguments: Vec<&str> = argument_spans
+                    .iter()
+                    .map(|span| slice(text, *span))
+                    .collect();
+                self.output
+                    .item_sites
+                    .push(node as *const Spanned<Node> as usize);
+                self.run_invocation(name, *name_span, &arguments, depth, None);
+            }
+            // Everything else: hunt expression-position invocations inside.
+            _ => self.sweep_expressions(node, text, depth),
+        }
+    }
+
+    /// Finds `macro name(..)` in EXPRESSION position anywhere under `node`
+    /// (macro definitions excluded — their bodies belong to the world).
+    fn sweep_expressions(&mut self, node: &Spanned<Node>, text: &str, depth: u32) {
+        match &node.0 {
+            Node::MacroFun(_) => {}
+            Node::MacroInvocation(name, name_span, argument_spans) => {
+                let arguments: Vec<&str> = argument_spans
+                    .iter()
+                    .map(|span| slice(text, *span))
+                    .collect();
+                let site = node as *const Spanned<Node> as usize;
+                self.run_invocation(name, *name_span, &arguments, depth, Some(site));
+            }
+            _ => {
+                node.0
+                    .for_each_child(&mut |child| self.sweep_expressions(child, text, depth));
+            }
+        }
+    }
+
+    /// Attribute/derive dispatch: the macro must be Item-shaped.
+    fn run_attribute(
+        &mut self,
+        name: &str,
+        site: Span,
+        item: &Spanned<Node>,
+        arguments: &[&str],
+        text: &str,
+        depth: u32,
+    ) {
+        let Some(def) = self.registry.by_name.get(name) else {
+            self.diagnostics.push(Error {
+                span: site,
+                msg: format!("no macro named `{name}` is in scope"),
+            });
+            return;
+        };
+        let call_arguments = match def.shape {
+            MacroShape::Item => vec![construct_item(item, text)],
+            MacroShape::ItemArguments => {
+                vec![construct_item(item, text), construct_arguments(arguments)]
+            }
+            MacroShape::Arguments | MacroShape::Unit => {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "macro `{name}` is invocation-shaped (it takes no `Item`) — call it \
+                         as `macro {name}(..)`, not as an attribute"
+                    ),
+                });
+                return;
+            }
+        };
+        let item_text = slice(text, item.1);
+        self.expand_call(
+            def,
+            name,
+            site,
+            item_text,
+            arguments,
+            call_arguments,
+            depth,
+            None,
+        );
+    }
+
+    /// Invocation dispatch: the macro must be Arguments-shaped (or take
+    /// nothing). `expression_site` is the invocation node's address when in
+    /// expression position; `None` in item position.
+    fn run_invocation(
+        &mut self,
+        name: &str,
+        site: Span,
+        arguments: &[&str],
+        depth: u32,
+        expression_site: Option<usize>,
+    ) {
+        let Some(def) = self.registry.by_name.get(name) else {
+            self.diagnostics.push(Error {
+                span: site,
+                msg: format!("no macro named `{name}` is in scope"),
+            });
+            if let Some(site_key) = expression_site {
+                self.output.failed_sites.push(site_key);
+            }
+            return;
+        };
+        let call_arguments = match def.shape {
+            MacroShape::Arguments => vec![construct_arguments(arguments)],
+            MacroShape::Unit => Vec::new(),
+            MacroShape::Item | MacroShape::ItemArguments => {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "macro `{name}` is attribute-shaped (it takes an `Item`) — use it \
+                         as `[{name}]` on an item, not as an invocation"
+                    ),
+                });
+                if let Some(site_key) = expression_site {
+                    self.output.failed_sites.push(site_key);
+                }
+                return;
+            }
+        };
+        self.expand_call(
+            def,
+            name,
+            site,
+            "",
+            arguments,
+            call_arguments,
+            depth,
+            expression_site,
+        );
+    }
+
+    /// Runs one macro call: the raw-text expansion cache, per-site gensym
+    /// stamping, parsing (as items, or as one expression for an expression
+    /// site), and the nested-expansion recursion.
+    #[allow(clippy::too_many_arguments)]
+    fn expand_call(
+        &mut self,
+        def: &MacroDef,
+        name: &str,
+        site: Span,
+        item_text: &str,
+        arguments: &[&str],
+        call_arguments: Vec<js::Node<'static>>,
+        depth: u32,
+        expression_site: Option<usize>,
+    ) {
+        if depth >= MAX_DEPTH {
+            self.diagnostics.push(Error {
+                span: site,
+                msg: format!(
+                    "macro expansion did not settle after {MAX_DEPTH} rounds — the chain ends \
+                     at `{name}`"
+                ),
+            });
+            if let Some(site_key) = expression_site {
+                self.output.failed_sites.push(site_key);
+            }
+            return;
+        }
+
+        // The RAW output is cached by (world, macro, item source, argument
+        // sources) — §6; sound because the interpreter is deterministic.
+        // Gensym stamping is per SITE, so it applies after the cache.
+        static EXPANSIONS: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
+        let key = {
+            let mut hasher = DefaultHasher::new();
+            def.world.key.hash(&mut hasher);
+            name.hash(&mut hasher);
+            item_text.hash(&mut hasher);
+            arguments.hash(&mut hasher);
+            hasher.finish()
+        };
+        let expansions = EXPANSIONS.get_or_init(|| Mutex::new(HashMap::new()));
+        let cached = expansions.lock().unwrap().get(&key).copied();
+        let raw: &'static str = match cached {
+            Some(raw) => raw,
+            None => {
+                let source = match interpreter::run_entry(
+                    &def.world.program,
+                    &def.entry,
+                    &call_arguments,
+                    Limits::default(),
+                ) {
+                    Ok(source) => source,
+                    Err(failure) => {
+                        self.diagnostics.push(Error {
+                            span: site,
+                            msg: format!(
+                                "macro `{name}` failed at expansion time: {}",
+                                failure.message
+                            ),
+                        });
+                        if let Some(site_key) = expression_site {
+                            self.output.failed_sites.push(site_key);
+                        }
+                        return;
+                    }
+                };
+                let leaked: &'static str = Box::leak(source.into_boxed_str());
+                expansions.lock().unwrap().insert(key, leaked);
+                leaked
+            }
+        };
+
+        // Stamp `__m<N>` placeholders unique per splice site (§7). Outputs
+        // without placeholders (the common case) parse through the
+        // content-addressed cache; stamped text is site-unique, so it parses
+        // fresh.
+        *self.site_counter += 1;
+        let stamped = stamp_gensyms(raw, *self.site_counter);
+
+        if let Some(site_key) = expression_site {
+            // Expression position: the output must be ONE expression. It is
+            // parsed as the statement `(<output>);` — the grouping makes any
+            // expression a well-formed statement without changing it.
+            let wrapped = format!("({});", stamped.as_deref().unwrap_or(raw));
+            let (parsed, parsed_text) = match parse_generated(&wrapped) {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    self.diagnostics.push(Error {
                         span: site,
                         msg: format!(
-                            "macro `{name}` failed at expansion time: {}",
-                            failure.message
+                            "macro `{name}` generated invalid vilan ({message}) — the \
+                             output was: {}",
+                            preview(&wrapped)
+                        ),
+                    });
+                    self.output.failed_sites.push(site_key);
+                    return;
+                }
+            };
+            let [only] = parsed.as_slice() else {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "macro `{name}` must generate a single expression here (it is \
+                         spliced in expression position)"
+                    ),
+                });
+                self.output.failed_sites.push(site_key);
+                return;
+            };
+            self.output.expressions.push((site_key, only));
+            // The spliced expression may itself contain invocations.
+            self.sweep_expressions(only, parsed_text, depth + 1);
+        } else {
+            let parse_result = match &stamped {
+                None => parse_cached(raw),
+                Some(stamped) => parse_generated(stamped),
+            };
+            let (parsed, parsed_text) = match parse_result {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    self.diagnostics.push(Error {
+                        span: site,
+                        msg: format!(
+                            "macro `{name}` generated invalid vilan ({message}) — the \
+                             output was: {}",
+                            preview(stamped.as_deref().unwrap_or(raw))
                         ),
                     });
                     return;
                 }
             };
-            let (parsed, parsed_source) = match parse_generated(&source) {
-                Ok(parsed) => parsed,
-                Err(message) => {
-                    diagnostics.push(Error {
-                        span: site,
-                        msg: format!("macro `{name}` generated invalid vilan ({message})"),
-                    });
-                    return;
-                }
-            };
             if !macro_funs(parsed).is_empty() {
-                diagnostics.push(Error {
+                self.diagnostics.push(Error {
                     span: site,
                     msg: format!(
-                        "macro `{name}` generated a `macro fun` — macros cannot define macros \
-                         (macro-engine.md §3)"
+                        "macro `{name}` generated a `macro fun` — macros cannot define \
+                         macros (macro-engine.md §3)"
                     ),
                 });
                 return;
             }
-            expansions
-                .lock()
-                .unwrap()
-                .insert(key, (parsed, parsed_source));
-            (parsed, parsed_source)
+            self.output.items.push(parsed);
+            // The generated code may carry built-in derives and further uses.
+            if let Some(derived) = crate::analyzer::expand_derives(parsed) {
+                self.output.items.push(derived);
+            }
+            self.expand_list(parsed, parsed_text, depth + 1);
         }
-    };
-    generated.push(parsed);
-    // The generated code may carry built-in derives and further macro
-    // attributes: expand both, one level deeper.
-    if let Some(derived) = crate::analyzer::expand_derives(parsed) {
-        generated.push(derived);
     }
-    let nested = expand_source(registry, parsed, parsed_source, diagnostics, depth + 1);
-    generated.extend(nested);
+}
+
+/// Replaces whole-identifier `__m<digits>` gensym placeholders (`meta::fresh`'s
+/// outputs, §7) with per-site unique names. `None` when the text has none.
+fn stamp_gensyms(text: &str, site: u32) -> Option<String> {
+    if !text.contains("__m") {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut index = 0;
+    let mut stamped = false;
+    while index < bytes.len() {
+        let rest = &text[index..];
+        let is_boundary =
+            index == 0 || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_');
+        if is_boundary && rest.starts_with("__m") {
+            let digits_len = rest[3..]
+                .bytes()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            let next = index + 3 + digits_len;
+            let ends_cleanly = next >= bytes.len()
+                || !(bytes[next].is_ascii_alphanumeric() || bytes[next] == b'_');
+            if digits_len > 0 && ends_cleanly {
+                out.push_str("__s");
+                out.push_str(&site.to_string());
+                out.push_str(&rest[1..3 + digits_len]); // "_m<digits>"
+                index = next;
+                stamped = true;
+                continue;
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    stamped.then_some(out)
+}
+
+/// A one-line, length-capped rendering of generated text for error messages.
+fn preview(text: &str) -> String {
+    let flat = text.replace('\n', " ");
+    let flat = flat.trim();
+    if flat.len() > 120 {
+        format!("`{}…`", &flat[..120])
+    } else {
+        format!("`{flat}`")
+    }
 }
 
 fn slice<'a>(text: &'a str, span: Span) -> &'a str {
     let range = span.into_range();
     text.get(range.start.min(text.len())..range.end.min(text.len()))
         .unwrap_or("")
+}
+
+/// The content-addressed parse cache for UNSTAMPED macro output — re-analyses
+/// skip both the interpreter and the parse.
+fn parse_cached(text: &'static str) -> Result<(&'static NodeList<'static>, &'static str), String> {
+    static PARSES: OnceLock<Mutex<HashMap<u64, (&'static NodeList<'static>, &'static str)>>> =
+        OnceLock::new();
+    let key = content_key(text);
+    let parses = PARSES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = parses.lock().unwrap().get(&key).copied() {
+        return Ok(cached);
+    }
+    let parsed = parse_generated(text)?;
+    parses.lock().unwrap().insert(key, parsed);
+    Ok(parsed)
 }
 
 /// Lexes + parses a macro's returned source. Unlike the trusted derive
@@ -514,7 +804,7 @@ fn parse_generated(source: &str) -> Result<(&'static NodeList<'static>, &'static
     match root {
         Some((root, _file_span)) => {
             let leaked: &'static crate::span::Spanned<NodeList<'static>> =
-                &*Box::leak(Box::new(root));
+                Box::leak(Box::new(root));
             Ok((&leaked.0, source))
         }
         None => Err("empty output".to_string()),

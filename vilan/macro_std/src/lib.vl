@@ -34,3 +34,16 @@ use meta::Source;
 export fun source(text: str): Source {
 	Source { text = text }
 }
+
+// Gensym placeholders (macro-engine.md §7): each call yields the next
+// `__m<N>` placeholder name. The compiler stamps every placeholder unique per
+// splice site, so distinct expansions can never capture each other's
+// bindings. Deterministic by construction: the counter restarts each run, so
+// identical input yields identical output (the §6 cache stays sound).
+mut __fresh_counter = 0;
+
+export fun fresh(): str {
+	let ordinal = __fresh_counter;
+	__fresh_counter = __fresh_counter + 1;
+	i"__m{ordinal}"
+}

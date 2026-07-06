@@ -1,9 +1,10 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phases 0–1 SHIPPED 2026-07-06** (every §12 question
-resolved; the fueled interpreter, `macro_std`, `macro fun` items, and
-`[attr]`/`[derive(X)]` expansion are in-tree — see §11 for what each phase
-delivered and Phase 1's recorded v1 bounds). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phases 0–2 SHIPPED 2026-07-06** (every §12 question
+resolved; the fueled interpreter, `macro_std`, `macro fun` items,
+`[attr]`/`[derive(X)]` expansion, and `macro name(..)` invocations with gensym
+stamping are in-tree — see §11 for what each phase delivered and the recorded
+v1 bounds). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -415,9 +416,26 @@ behavior (skip; the missing-impl error surfaces at the use site).
   braces as `\{`/`\}` (and span lines), so generation reads like §2's example;
   `panic` in a match arm types as `any` (B10's recorded never-type exclusion), so
   macro guards use typed fallbacks.
-- **Phase 2 — invocations**: `macro name(args)` in item and expression position,
-  expression splice + placeholder-gensym stamping. Exit: `macro numeric_family(..)`
-  and a `macro unroll(..)`.
+- **Phase 2 — invocations** — **SHIPPED 2026-07-06.** `macro name(args)` parses in
+  item position (a module's top level / `mod` bodies: output parses as items and
+  appends) and expression position (anywhere else, found at any depth: output parses
+  as ONE expression via the `(<output>);` wrap and splices in place — the walk
+  aliases the invocation to its replacement, keyed by node address). Dispatch is
+  SHAPE-checked from the macro's written signature: attributes need `(Item)` /
+  `(Item, Arguments)`, invocations need `(Arguments)` / `()` — mismatches are
+  spanned errors in both directions. `macro_std::fresh()` yields `__m<N>`
+  placeholders; the compiler stamps every placeholder unique per splice site
+  (`__s<site>_m<N>`, whole-identifier match), so one site's binders cannot capture
+  another's — pinned by a test where a macro REFERENCES a placeholder another site
+  bound (clean "cannot find" instead of silent capture). The raw output text is
+  what §6's cache stores (stamping is per-site, applied after the cache); unstamped
+  output parses through a content-addressed parse cache. Failed expression sites
+  walk to an error entity without a second diagnostic; "generated invalid vilan"
+  errors carry a preview of the offending output. Exit criterion met: a
+  `constants(..)` item family and `unroll(n, callback)` (corpus `macro-invoke.vl`),
+  plus 7 inference pins. **Finding:** an unannotated closure bound to a local and
+  called directly doesn't type its parameter (pre-existing; pinned as backlog B13) —
+  spliced callbacks annotate their parameter until it's fixed.
 - **Phase 3 — migration** (§10), one derive per commit, goldens as referee.
 - **Phase 4 (recorded, unscheduled)** — **`macro { .. }` blocks** (an anonymous,
   immediately-expanded macro: the body runs at expansion time in the macro prelude; in

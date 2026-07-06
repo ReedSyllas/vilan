@@ -305,9 +305,30 @@ where
         .boxed();
 
     // 'Atoms' are expressions that contain no ambiguity
+    // `macro name(args)` — an invocation (macro-engine.md §2): item position at
+    // a module's top level, expression position anywhere else. Arguments are
+    // captured as SPANS — their source text is what the macro receives.
+    let macro_invocation = just(Token::Macro)
+        .ignore_then(identifier.map_with(|name, e| (name, e.span())))
+        .then(
+            expression
+                .clone()
+                .map_with(|_, e| e.span())
+                .separated_by(just(Token::Ctrl(',')))
+                .allow_trailing()
+                .collect::<Vec<Span>>()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+        )
+        .map_with(|((name, name_span), arguments), e| {
+            (Node::MacroInvocation(name, name_span, arguments), e.span())
+        })
+        .labelled("macro invocation")
+        .boxed();
+
     let atom = choice((
         literal,
         tuple_comprehension,
+        macro_invocation.clone(),
         local,
         local_type.clone(),
         list,
@@ -1273,8 +1294,8 @@ where
         .boxed();
 
     // `macro fun name(..) { .. }` — a macro definition (macro-engine.md §3).
-    // The parser decides on the token after `macro`: only `fun` is legal in v1
-    // (invocations are Phase 2; blocks Phase 4).
+    // The parser decides on the token after `macro`: `fun` is a definition, an
+    // identifier is an invocation (blocks are Phase 4).
     let macro_fun = just(Token::Macro)
         .ignore_then(
             function
@@ -1327,6 +1348,9 @@ where
         service_item,
         macro_attributed_item,
         macro_fun,
+        macro_invocation
+            .clone()
+            .then_ignore(just(Token::Ctrl(';')).or_not()),
         export_,
         expression.clone().then_ignore(just(Token::Ctrl(';'))),
         if_.then_ignore(not_block_end.clone()),

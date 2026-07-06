@@ -268,6 +268,12 @@ pub enum Node<'src> {
     // is what `Arguments` carries — arguments are syntax), and the annotated
     // item. Expanded before analysis; the item itself is walked normally.
     MacroAttribute(&'src str, Span, Vec<Span>, Box<Spanned<Self>>),
+    // `macro name(args)` — a macro invocation (macro-engine.md §2). At a
+    // module's top level it is an ITEM invocation (the returned Source parses
+    // as items, appended to the module); anywhere else it is an EXPRESSION
+    // invocation (the returned Source parses as an expression and splices in
+    // place). The name (with its span) and the argument SPANS.
+    MacroInvocation(&'src str, Span, Vec<Span>),
     // `[derive(A, B)] <struct|enum>` — the derive trait names and the item they
     // annotate. Transparent to analysis (the inner item is walked normally); a
     // pre-analysis pass generates the trait impls from the item's fields.
@@ -434,6 +440,7 @@ impl<'src> Node<'src> {
             | Node::Import(_)
             | Node::Jump(_)
             | Node::LiftBinder
+            | Node::MacroInvocation(..)
             | Node::Null
             | Node::Number(..)
             | Node::String(_)

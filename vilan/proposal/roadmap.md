@@ -50,12 +50,12 @@ A compact chronicle — details live in the named proposals and the git history.
 
 ## Remaining, ranked
 
-9. **Macro engine** (L; **proposal: `macro-engine.md`; Phases 0–1 SHIPPED
-   2026-07-06** — the fueled `js::Node` interpreter + `macro_std` with the 70/70
-   equivalence gate, then `macro fun` items, per-file hermetic worlds, and
-   `[attr]`/`[derive(X)]` expansion with both caches; a library-defined
-   `derive_display` runs end to end. Next = Phase 2, `macro name(..)` invocations) —
-   **the frontier.** User-land vilan running inside the compiler:
+9. **Macro engine** (L; **proposal: `macro-engine.md`; Phases 0–2 SHIPPED
+   2026-07-06** — the fueled `js::Node` interpreter + `macro_std` (70/70 equivalence
+   gate); `macro fun` items, per-file hermetic worlds, `[attr]`/`[derive(X)]`
+   expansion; `macro name(..)` invocations in item + expression position with
+   per-site gensym stamping. Next = Phase 3: migrate the built-in derives behind
+   the byte-identical goldens gate) — **the frontier.** User-land vilan running inside the compiler:
    `macro fun` items over the `macro_std::meta` reflection surface, hermetic
    per-function isolation (bodies see only `macro_std`, via the general block-scoped
    imports — backlog H2, a prerequisite), `[attr]`/`[derive(X)]` + `macro name(..)`

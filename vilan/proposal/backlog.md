@@ -79,6 +79,13 @@ have gaps.
     with no impl should be a spanned compile error at the call site. (The u32/BigInt
     `Display` holes are fixed; the general check remains.)
 
+13. **A direct call on a closure-typed local doesn't type its unannotated parameter** (M;
+    pinned `#[ignore]`d; surfaced writing macro `unroll` callbacks 2026-07-06) — `let f = |i|
+    accumulate(i); f(3)` never feeds `i` from the call site (zero-param and annotated forms
+    work; closures passed to methods work via reconciliation). The C′-family stabilization
+    covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
+    channel. Workaround: annotate (`|i: i32| ..`).
+
 ---
 
 ## C. Memory model — Phase 6+ tail (deferred; see `memory-management-impl-plan.md`)
@@ -220,11 +227,15 @@ have gaps.
    items, per-file hermetic worlds (blanked-file compile against a macro_std-only
    workspace), `[name(args)]`/`[derive(Name)]` dispatch through `run_entry`, output
    splicing with depth-16 fixpoint, world + expansion caches; library-defined macros work
-   (the exit criterion). **Remaining (Phase 2+):** `macro name(..)` invocations (item +
-   expression position, placeholder gensyms/`meta::fresh`), migration of the built-in
-   derives behind the byte-identical gate, `vilan.toml [macros]` fuel knob, module-scoped
-   macro names (v1 is a flat namespace), attribute use inside dependency files, `macro
-   { .. }` blocks (Phase 4).
+   (the exit criterion). Phase 2 (also 2026-07-06):
+   `macro name(..)` invocations — item + expression position, shape-checked dispatch from
+   the signature, `fresh()` gensyms stamped per splice site (capture pinned as a clean
+   error), output previews in errors. **Remaining (Phase 3+):** migration of the built-in
+   derives behind the byte-identical gate (incl. the derive-name registration question),
+   `vilan.toml [macros]` fuel knob, module-scoped macro names (v1 is a flat namespace),
+   attribute use inside dependency files, ambient meta vocabulary in macro scope (today
+   every macro imports `macro_std::meta::{..}` explicitly), `macro { .. }` blocks
+   (Phase 4).
 
 ---
 

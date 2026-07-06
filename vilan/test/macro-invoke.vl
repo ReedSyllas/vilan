@@ -1,0 +1,67 @@
+import std::print;
+
+// The macro engine, Phase 2 (macro-engine.md §2): `macro name(args)`
+// invocations. Item position stamps out declarations; expression position
+// splices an expression in place, with `fresh()` gensym placeholders stamped
+// unique per site (§7). (The unroll callbacks annotate their parameter — an
+// unannotated closure bound to a local and called directly is a known
+// inference gap, pinned as backlog B13.)
+
+// Item-position invocation: stamp out a family of constant functions.
+macro fun constants(arguments: Arguments): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Arguments, Source };
+
+	mut body = "";
+	mut index = 0;
+	for name in arguments.values {
+		body = body + i"fun {name}(): i32 \{ {index} \}\n";
+		index = index + 1;
+	}
+	source(body)
+}
+
+macro constants(zero, one, two);
+
+// Expression-position invocation with a gensym: bind the closure argument
+// once, apply it N times.
+macro fun unroll(arguments: Arguments): Source {
+	import macro_std::source;
+	import macro_std::fresh;
+	import macro_std::panic;
+	import macro_std::meta::{ Arguments, Source };
+	import macro_std::option::Option::{ self, Some, None };
+
+	let count = match arguments.values.get(0) {
+		Some(let text) => match text.parse_i32() {
+			Some(let n) => n,
+			None => 0,
+		},
+		None => 0,
+	};
+	let callback = match arguments.values.get(1) {
+		Some(let text) => text,
+		None => "",
+	};
+	let binder = fresh();
+	mut sum = "0";
+	mut i = 0;
+	for i < count {
+		sum = sum + i" + {binder}({i})";
+		i = i + 1;
+	}
+	source(i"\{ let {binder} = ({callback}); {sum} \}")
+}
+
+fun accumulate(i: i32): i32 {
+	i * 10
+}
+
+fun main() {
+	print(two());
+	print(one());
+	print(macro unroll(4, |i: i32| accumulate(i)));
+	print(macro unroll(3, |i: i32| i + 100));
+}
+
+main();
