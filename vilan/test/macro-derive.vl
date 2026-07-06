@@ -4,7 +4,8 @@ import std::display::{ Display, format };
 // The macro engine, Phase 1 (macro-engine.md §2): a user-land derive. The
 // macro compiles hermetically against macro_std, runs in the expansion
 // interpreter, and its returned source is spliced before analysis — the
-// generated impl carries its own block-scoped import (H2).
+// generated impl carries its own block-scoped import (H2). Literal braces in
+// the generated text are `\{`/`\}` i-string escapes.
 
 macro fun derive_display(item: Item): Source {
 	import macro_std::source;
@@ -26,16 +27,15 @@ macro fun derive_display(item: Item): Source {
 		} else {
 			arms = arms + " + \", \" + ";
 		}
-		arms = arms + "\"" + field.name + "=\" + format(self." + field.name + ")";
+		arms = arms + i"\"{field.name}=\" + format(self.{field.name})";
 	}
-	source(
-		"impl " + target.name + " with Display {\n"
-			+ "\tfun to_string(self): str {\n"
-			+ "\t\timport std::display::format;\n"
-			+ "\t\t" + arms + "\n"
-			+ "\t}\n"
-			+ "}\n",
-	)
+	source(i"impl {target.name} with Display \{
+	fun to_string(self): str \{
+		import std::display::format;
+		{arms}
+	\}
+\}
+")
 }
 
 [derive_display]

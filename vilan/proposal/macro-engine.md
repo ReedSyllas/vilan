@@ -57,9 +57,9 @@ macro fun derive_display(item: Item): Source {
 	for field in target.fields {
 		arms.push(i"\"{field.name}=\" + format(self.{field.name})");
 	}
-	source(i"impl {target.name} with Display {{
-		fun to_string(self): str {{ {arms.join(" + \", \" + ")} }}
-	}}")
+	source(i"impl {target.name} with Display \{
+		fun to_string(self): str \{ {arms.join(" + \", \" + ")} \}
+	\}")
 }
 ```
 ```vilan
@@ -396,10 +396,10 @@ behavior (skip; the missing-impl error surfaces at the use site).
   distribution = follow-up); attributes expand at file top level and `mod` bodies
   (attribute USE inside a dependency's own files is deferred — definitions there
   work); fuel is the 1M default (the `vilan.toml [macros]` knob is pending);
-  `meta::fresh` waits for its first consumer. **Findings:** i-strings have no brace
-  escape, so brace-heavy generation uses concatenation (ergonomic follow-up, backlog
-  H3); `panic` in a match arm types as `any` (B10's recorded never-type exclusion),
-  so macro guards use typed fallbacks.
+  `meta::fresh` waits for its first consumer. **Findings:** i-strings escape literal
+  braces as `\{`/`\}` (and span lines), so generation reads like §2's example;
+  `panic` in a match arm types as `any` (B10's recorded never-type exclusion), so
+  macro guards use typed fallbacks.
 - **Phase 2 — invocations**: `macro name(args)` in item and expression position,
   expression splice + placeholder-gensym stamping. Exit: `macro numeric_family(..)`
   and a `macro unroll(..)`.

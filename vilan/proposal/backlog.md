@@ -242,11 +242,6 @@ have gaps.
 
 ---
 
-3. **Brace escapes (or raw strings) in interpolated strings** (S; found writing macros) —
-   `i"..."` has no `{{` escape, so generating brace-heavy vilan (impl bodies) falls back to
-   string concatenation. Either `{{`/`}}` escapes in i-strings or a raw-string form would
-   make `source(i"impl {name} {{ .. }}")` read like the §2 proposal example.
-
 ---
 
 ## I. Collections
