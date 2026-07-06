@@ -156,6 +156,14 @@ have gaps.
 
 ---
 
+8. **LSP + editor support for the macro engine** (M; after the macro phases settle) — the
+   TextMate grammar doesn't know the `macro` keyword or generic `[name(args)]` attributes;
+   semantic tokens should classify macro names distinctly; completion should offer registered
+   macro names at attribute sites; hover on `[name]` should show the macro's signature;
+   go-to-definition on an attribute should jump to its `macro fun` (the registry knows the
+   defining file); and diagnostics inside macro bodies already carry true spans (the blanked
+   world) — verify the editor experience end to end once Phase 2/3 land.
+
 ## F. Backend & platform
 
 2. **Numeric types `u8`…`i64`/`f32`** (S; roadmap #15) — low value on a JS target (collapse to
@@ -241,6 +249,17 @@ have gaps.
    `scoped-import.vl`, workspace body-import + §4.2-at-depth CLI tests.
 
 ---
+
+4. **Triple-quoted strings `\"\"\"text\"\"\"`** (S–M; user request 2026-07-06; H3 is retired —
+   a retracted finding) — a multi-line string form that auto-trims each line's indentation up
+   to the column of the opening `\"\"\"` (Java-text-block / Swift-multiline style), so embedded
+   code blocks nest naturally under their vilan surroundings. Design points to settle at
+   implementation: whether the newline after the opening `\"\"\"` is dropped; the interpolated
+   variant `i\"\"\"..\"\"\"` (the macro-authoring payoff — `source(i\"\"\"impl {name} { .. }\"\"\")`
+   with NO brace escapes, since plain braces could be literal in the triple form and only
+   `{expr}` holes interpolate... which needs its own escape story); how little escaping the
+   body needs (the raw-ish appeal is pasting code verbatim). Complements, not replaces, the
+   `\{`/`\}` escapes in ordinary i-strings.
 
 ---
 
