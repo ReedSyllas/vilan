@@ -233,8 +233,10 @@ have gaps.
    error), output previews in errors. Phase 3 UNDERWAY (2026-07-06): the
    builtin-derive channel (`std/derives.vl`, names reserved, Rust fallback for
    unmigrated/fixture stds) with `PartialEq`/`Default`/`Debug` migrated byte-identically.
-   **Remaining:** `Json`/`Wire` migration (the visitor impls + enum tag fallbacks — the
-   largest generators), then `[service]`; the derive-name registration mechanism (builtins
+   Derives COMPLETE (2026-07-06):
+   all five migrated (`Json`+`Wire` together — one Rust contract — via str-returning
+   helper macro funs); `Arguments` typed accessors shipped (construction API step 1).
+   **Remaining:** `[service]` migration (the stress test); the derive-name registration mechanism (builtins
    settle as fn-name = trait name; decoupling deferred to the first user derive needing
    it); `vilan.toml [macros]` fuel knob; module-scoped macro names (v1 flat); attribute
    use inside dependency files; ambient meta vocabulary in macro scope; the

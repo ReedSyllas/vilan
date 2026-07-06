@@ -1,11 +1,11 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phases 0–2 SHIPPED, Phase 3 UNDERWAY 2026-07-06**
-(every §12 question resolved; the fueled interpreter, `macro_std`, `macro fun`
-items, `[attr]`/`[derive(X)]` expansion, `macro name(..)` invocations with
-gensym stamping, and the builtin-derive migration channel are in-tree —
-`PartialEq`/`Default`/`Debug` are user-land vilan now, goldens byte-identical;
-`Json`/`Wire` remain Rust — see §11). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phases 0–2 SHIPPED, Phase 3 derives COMPLETE
+2026-07-06** (every §12 question resolved; ALL FIVE built-in derives —
+`PartialEq`/`Default`/`Debug`/`Json`/`Wire` — are user-land vilan, gated
+byte-identical against their Rust generators; `[service]` is the remaining
+generator. Helper macro funs and the first construction-API step
+(`Arguments` typed accessors) shipped alongside — see §11). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -490,8 +490,13 @@ hashing, mirror lets).
   called directly doesn't type its parameter (pre-existing; pinned as backlog B13) —
   spliced callbacks annotate their parameter until it's fixed.
 - **Phase 3 — migration** (§10), one derive per commit, goldens as referee —
-  **UNDERWAY (2026-07-06): `PartialEq`, `Default`, `Debug` migrated; `Json`/`Wire`
-  remain.** The seam: `expand_derives` consults the toolchain's built-in derive
+  **DERIVES COMPLETE (2026-07-06): all five migrated — `PartialEq`, `Default`,
+  `Debug`, then `Json`+`Wire` together (one contract: the Rust `"Json" | "Wire"`
+  arm), sharing their JSON impls through str-returning HELPER macro funs (§3's
+  helpers, first real use — a non-macro-shaped or non-`Source`-returning
+  `macro fun` compiles into the world, callable by other macros, never
+  dispatched). Wire's gate was manufactured: the todo example builds
+  byte-identical bundles macro-vs-Rust. `[service]` remains.** The seam: `expand_derives` consults the toolchain's built-in derive
   macros (`<std dir>/derives.vl` — outside the layer roots, never importable, its
   names reserved against user macros) per derive name, falling back to the Rust
   generators for anything not yet migrated (and for std fixtures without the
