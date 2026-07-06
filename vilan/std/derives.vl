@@ -91,3 +91,58 @@ macro fun Default(item: Item): Source {
 	// generator.
 	source("")
 }
+
+macro fun Debug(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source };
+	import macro_std::option::Option::{ self, Some, None };
+
+	if item.as_struct() is Some(let target) {
+		// `"T { " + "a = " + self.a.debug() + ", " + … + " }"`; a
+		// field-less struct is just its name.
+		mut body = "";
+		if target.fields.len() == 0 {
+			body = i"\"{target.name}\"";
+		} else {
+			mut parts = "";
+			mut first = true;
+			for field in target.fields {
+				if first {
+					first = false;
+				} else {
+					parts = parts + " + \", \" + ";
+				}
+				parts = parts + i"\"{field.name} = \" + self.{field.name}.debug()";
+			}
+			body = i"\"{target.name} \{ \" + {parts} + \" \}\"";
+		}
+		ret source(i"impl {target.name} with Debug \{\n\tfun debug(self): str \{\n\t\t{body}\n\t\}\n\}\n");
+	}
+	if item.as_enum() is Some(let target) {
+		// `match self { E::V(let p0,..) => "V(" + p0.debug() + ", " + .. +
+		// ")", E::W => "W" }`.
+		mut arms = "";
+		for variant in target.variants {
+			let arity = variant.payload.len();
+			if arity == 0 {
+				arms = arms + i"\t\t\t{target.name}::{variant.name} => \"{variant.name}\",\n";
+			} else {
+				mut binds = "";
+				mut parts = "";
+				mut index = 0;
+				for index < arity {
+					if index > 0 {
+						binds = binds + ", ";
+						parts = parts + " + \", \" + ";
+					}
+					binds = binds + i"let p{index}";
+					parts = parts + i"p{index}.debug()";
+					index = index + 1;
+				}
+				arms = arms + i"\t\t\t{target.name}::{variant.name}({binds}) => \"{variant.name}(\" + {parts} + \")\",\n";
+			}
+		}
+		ret source(i"impl {target.name} with Debug \{\n\tfun debug(self): str \{\n\t\tmatch self \{\n{arms}\t\t\}\n\t\}\n\}\n");
+	}
+	source("")
+}
