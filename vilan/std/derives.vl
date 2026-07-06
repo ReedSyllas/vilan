@@ -67,3 +67,27 @@ macro fun PartialEq(item: Item): Source {
 	// never meaningful.)
 	source("")
 }
+
+macro fun Default(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source };
+	import macro_std::option::Option::{ self, Some, None };
+
+	if item.as_struct() is Some(let target) {
+		// `{ a = i32::default(), b = Point::default() }`.
+		mut initializers = "";
+		mut first = true;
+		for field in target.fields {
+			if first {
+				first = false;
+			} else {
+				initializers = initializers + ", ";
+			}
+			initializers = initializers + i"{field.name} = {field.type_.render()}::default()";
+		}
+		ret source(i"impl {target.name} with Default \{\n\tfun default(): {target.name} \{\n\t\t{target.name} \{ {initializers} \}\n\t\}\n\}\n");
+	}
+	// An enum has no unambiguous default variant — nothing, like the Rust
+	// generator.
+	source("")
+}
