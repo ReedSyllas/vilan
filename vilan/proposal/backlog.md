@@ -64,18 +64,12 @@ have gaps.
 9. **Impl-binder declaration order** (S; pin ledger) — the second `#[ignore]` pin; declaration
    order affects binder resolution. Trivial workaround (reorder declarations); fix for hygiene.
 
-11. **`!` and `?.` — early return + lifted chains** (M–L; transport-rpc Q10; **proposal
-    written: `try-and-lift.md`**, design agreed 2026-07-04) — `expr!` asserts-or-returns
-    (Rust-`?` semantics, programmable "bad" via a `Try` seam; `!=` always lexes as
-    not-equals, space disambiguates), `a?.b.c` lifts member chains with flattening
-    (map-or-`and_then` by continuation type, opt-in `Lift` marker; Option/Result v1,
-    Signal/Promise recorded candidates). Both are operators (the `Add` dispatch model,
-    inline fast path for std), not source rewrites. Deferred: expression lifting
-    (`a? + 10`), applicatives, error conversion, closure `!` (the RPC-handler follow-up).
-    **Both slices shipped 2026-07-04.** Remaining here (the recorded deferrals):
-    user-`Lift` lowering (closure-argument emission; the marker + clean error exist),
-    closure `!` (the RPC-handler follow-up), error conversion, expression lifting
-    (`a? + 10`), applicatives, and `Signal`/`Promise` `Lift` opt-ins.
+11. **`!` / `?.` deferred tail** (M; `try-and-lift.md`) — the operators shipped 2026-07-04
+    (both slices + the stabilization arc: bang-directed return-position generics, closure-`ret`
+    participation, user-`Lift` lowering). Remaining here are the recorded deferrals only:
+    closure `!` (the RPC-handler follow-up; needs the `arg → Result` linkage design), error
+    conversion at the `!` boundary, expression lifting (`a? + 10`), applicatives, and
+    `Signal`/`Promise` `Lift` opt-ins.
 
 12. **Missing-impl bound dispatch emits the abstract method** (M; found via `format(7u32)`
     before u32 had a `Display` impl) — a generic bound's dispatch at a type LACKING the
@@ -212,18 +206,32 @@ have gaps.
 
 ## G. Macros
 
-1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`**, awaiting review —
-   §5 execution model and §6 caching are the decision points) — built-in derives and `[service]`
-   generation shipped as special-cased subsets; the proposal subsumes them via stage-0 `macro`
-   items over `std::meta`, interpreted with fuel, per-invocation text caching.
+1. **General macro engine** (L; roadmap #9; **proposal: `macro-engine.md`, design settled in
+   review 2026-07-05** — every §12 question resolved) — built-in derives and `[service]`
+   generation shipped as special-cased subsets; the proposal subsumes them via `macro fun`
+   items over `macro_std::meta`, hermetic per-function isolation (bodies see only `macro_std`
+   via scoped imports, H2), a fueled interpreter, and per-invocation text caching. Next:
+   Phase 0 (`macro_std` + the interpreter core).
 
 ---
 
-## H. Parser gaps
+## H. Parser & grammar
 
 1. **Struct literal as an operator operand** (S) — `Point { .. } == x` fails (bind to a variable
    first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
    degrades to a clean parse error, documented at the parser site.
+
+2. **Block-scoped imports** (M; settled in review 2026-07-05, macro-engine §3; **prerequisite
+   consumed by G1 Phase 1**) — `import ..;` legal in statement position in any block, binding
+   from the statement to block end (like a `let`), shadowing outer bindings; duplicate name in
+   one scope errors as at module level; scoped imports are not re-exportable. Rationale: less
+   module-namespace bloat (a one-function dependency stays in that function). Safe because vilan
+   imports are pure compile-time name bindings — no load-order/side-effect hazards (the
+   Python/JS import-timing concerns don't exist) and zero codegen effect. Touchpoints: the
+   loader's module-ref collection recurses into bodies (pre-analysis, mechanical); the §4.2
+   platform-contract check gathers imports at all depths under the same rule; the analyzer
+   binds into the current scope instead of module scope; LSP completion/hover ride the existing
+   scope machinery. Macro bodies consume this with resolution restricted to `macro_std`.
 
 ---
 

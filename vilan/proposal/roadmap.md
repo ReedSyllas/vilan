@@ -11,7 +11,7 @@ the per-feature design records live in the sibling proposal documents.
 
 ---
 
-## Done (through 2026-07-03)
+## Done (through 2026-07-04)
 
 A compact chronicle — details live in the named proposals and the git history.
 
@@ -41,18 +41,24 @@ A compact chronicle — details live in the named proposals and the git history.
 - **Solver stabilization:** the generic-dispatch bug cluster closed with per-case pins
   (`analyzer-refactor.md`, `constraint-queue-plan.md`, `type-solver.md`). Residual small
   gaps are indexed in backlog §B/§H.
+- **Try/Lift operators (B11)** — `expr!` assert-or-return and `?.` lifted chains over real
+  `Try`/`Verdict`/`Lift` traits (`try-and-lift.md`), adopted across std/examples/generation;
+  plus the surrounding stabilization arc: return-position checking (B10,
+  `ret-checking.md`), diagnostics source attribution (E1), span precision (E7).
 
 ---
 
 ## Remaining, ranked
 
-9. **Macro engine** (L; **proposal written: `macro-engine.md`**, awaiting review) — **the
-   frontier.** User-land vilan running inside the compiler: `macro` items over a
-   `std::meta` reflection surface, stage-0 isolated compilation, `[attr]`/`[derive(X)]` +
-   `@name(..)` invocations, an interpreted-with-fuel execution model (recommended over a
-   node host — §5), and per-invocation text-level caching made sound by enforced
-   determinism (§6). Subsumes the built-in derives + `[service]` generation behind a
-   byte-identical goldens gate. Unblocks #15 and backlog G1's consumers.
+9. **Macro engine** (L; **proposal: `macro-engine.md`, design settled in review
+   2026-07-05**) — **the frontier.** User-land vilan running inside the compiler:
+   `macro fun` items over the `macro_std::meta` reflection surface, hermetic
+   per-function isolation (bodies see only `macro_std`, via the general block-scoped
+   imports — backlog H2, a prerequisite), `[attr]`/`[derive(X)]` + `macro name(..)`
+   invocations, a fueled interpreter (§5), and per-invocation text-level caching made
+   sound by enforced determinism (§6). Subsumes the built-in derives + `[service]`
+   generation behind a byte-identical goldens gate. Unblocks #15 and backlog G1's
+   consumers. Build order: Phase 0 = `macro_std` + the interpreter core.
 
 10. **LSP semantic highlighting** (M) — semantic tokens, precision over the TextMate
     grammar. (Backlog §E carries the rest of the LSP list, including the higher-value
@@ -70,7 +76,5 @@ A compact chronicle — details live in the named proposals and the git history.
     F3/F4, where distinct integer widths are real).
 
 **Strategic candidates, not yet ranked/committed** (each wants its own proposal before
-building): the **WASM backend** (backlog F3), the **native backend** (backlog F4),
-**`?`/try** (backlog B11 / transport-rpc Q10 — unblocks `arg → Result` ergonomics and
-guarded parsing), the **language specification** (backlog D1), and the **memory Phase 6+
-tail** (backlog §C).
+building): the **WASM backend** (backlog F3), the **native backend** (backlog F4), the
+**language specification** (backlog D1), and the **memory Phase 6+ tail** (backlog §C).

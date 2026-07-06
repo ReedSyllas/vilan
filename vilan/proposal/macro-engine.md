@@ -82,6 +82,12 @@ return an expression. Attributes receive *the item they annotate* plus their arg
 One keyword makes the compile-time boundary greppable: `macro` finds every place code
 runs at expansion time.
 
+The prefix marks **boundary crossings only** (settled in review): a `macro name(..)`
+splice site sits in *program* code, so it needs the keyword. Inside the macro world a
+`macro fun` calling another `macro fun` is an ordinary call — no prefix, no ambiguity
+(runtime functions are invisible there, §3), and composing macros is just calling
+functions and concatenating their `Source`.
+
 ## 3. The model: staged compilation, syntax in → source out
 
 A macro is a `macro fun` — the `macro` modifier on an ordinary function definition
@@ -120,9 +126,12 @@ v1 ("only functions can be macros").
   `macro_std::source`, and re-exports of the pure core (`option`, `result`, `list`,
   `map`, `display`, …) so macros keep the ordinary vocabulary. There is nothing to
   subset or police: if it isn't in `macro_std`, a macro can't name it. No `fs`, no
-  clock, no `[extern]` — the package simply doesn't contain them. Function-scoped
-  `import` is new grammar, legal **only inside `macro fun` bodies** in v1 (generalizing
-  it to all functions is an independent future question).
+  clock, no `[extern]` — the package simply doesn't contain them. Scoped `import` is
+  **not macro-special grammar**: it is the general block-scoped-imports feature
+  (settled in review; backlog H2 — imports legal in any block, binding like a `let`),
+  which macro bodies consume with one restriction: their imports resolve against the
+  `macro_std` universe instead of the package universe. Same grammar everywhere; the
+  hermetic rule is purely a resolution restriction.
 - **Two orthogonal systems, cleanly split:** macro *names* distribute through the
   ordinary module system (a module exports its `macro fun`s; `import pkg::x::my_macro`
   brings the macro into scope for `[derive(..)]`/`macro my_macro(..)` sites), while
@@ -315,8 +324,9 @@ behavior (skip; the missing-impl error surfaces at the use site).
 - **Phase 0 — `macro_std` + the interpreter core** (the long pole): the `macro_std`
   package (meta types, `source`, the pure-core re-exports), the interpreter with fuel,
   its compiled-vs-interpreted equivalence suite.
-- **Phase 1 — attributes**: `macro fun` items with function-scoped `macro_std`
-  imports, the hermetic name resolution, `[name(args)]` + `[derive(Name)]` dispatch,
+- **Phase 1 — attributes**: `macro fun` items with scoped `macro_std` imports
+  (consumes the general block-scoped-imports feature, backlog H2 — build it first or
+  alongside), the hermetic name resolution, `[name(args)]` + `[derive(Name)]` dispatch,
   expansion fixpoint, the per-invocation text cache, `meta::fresh`, error surfacing.
   Exit: `derive_display` (§2) works end to end from a user library.
 - **Phase 2 — invocations**: `macro name(args)` in item and expression position,
@@ -338,7 +348,9 @@ behavior (skip; the missing-impl error surfaces at the use site).
    shifts with keywords (`async`/`await`), not sigils — invocations read as
    `await`-family; the compile-time boundary becomes greppable by one word; no
    retired sigil returns; and the block form falls out of the grammar. Cost: `macro`
-   is reserved. Parse decision is one token after `macro` (§3).
+   is reserved. Parse decision is one token after `macro` (§3). Refinement (review):
+   the prefix is required only in *program* code — inside the macro world, macro funs
+   call each other plainly (§2).
 2. ~~Fuel defaults~~ — **resolved (review):** 1M steps/expansion, depth 16, per-package
    configurable in `vilan.toml [macros]`.
 3. ~~Marked vs inferred macro modules~~ — **resolved (review): the question dissolved.**
