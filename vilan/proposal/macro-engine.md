@@ -84,6 +84,21 @@ return an expression. Attributes receive *the item they annotate* plus their arg
 One keyword makes the compile-time boundary greppable: `macro` finds every place code
 runs at expansion time.
 
+**The two attribute forms are both permanent, for different jobs.** `[name(args)]`
+is the general attribute: one macro, on any item, with arguments. `[derive(A, B, C)]`
+is the batching form for the "add impls" pattern: a LIST, mixing built-in derives and
+user macros in one site (`[derive(PartialEq, Json, Display)]` — the first two Rust
+generators until Phase 3 migrates them, the third user-land), taking no arguments.
+It is also the migration seam: built-ins become macros behind this same syntax with
+byte-identical output. In v1 both forms are purely ADDITIVE (the annotated item
+always compiles unchanged; the macro's output is appended) — the forms diverge when
+item *transformation* lands: an attribute may then rewrite its item, a derive never
+will. Naming convention: a derive-style macro is named after the trait it implements
+(`macro fun Display(..)` → `[derive(Display)]`); an attribute-style macro gets a
+verb-ish name (`[route("/api")]`). Whether a derive's registered name should be
+decoupled from its function name (a `proc_macro_derive`-style registration) is a
+Phase 3 question — it becomes concrete when the built-ins migrate.
+
 The prefix marks **boundary crossings only** (settled in review): a `macro name(..)`
 splice site sits in *program* code, so it needs the keyword. Inside the macro world a
 `macro fun` calling another `macro fun` is an ordinary call — no prefix, no ambiguity
