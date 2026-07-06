@@ -69,7 +69,21 @@ fn infer_platform(root: &NodeList, std: &PackageSpec) -> Platform {
         }
     }
     let imports_browser_layer = |branch: &ImportBranch| matches!(branch, ImportBranch::Path("std", _, Some(child)) if std_child_in_browser(child, &in_browser_layer));
-    let references_browser = root.iter().any(|(node, _)| match node {
+    // Imports are block-scoped statements (backlog H2), so scan at every depth —
+    // a browser import inside a function body flags the file too.
+    fn any_node(nodes: &NodeList, matches: &mut dyn FnMut(&Node) -> bool) -> bool {
+        fn walk(node: &Spanned<Node>, matches: &mut dyn FnMut(&Node) -> bool) -> bool {
+            if matches(&node.0) {
+                return true;
+            }
+            let mut found = false;
+            node.0
+                .for_each_child(&mut |child| found = found || walk(child, matches));
+            found
+        }
+        nodes.iter().any(|node| walk(node, matches))
+    }
+    let references_browser = any_node(root, &mut |node| match node {
         Node::Import(branch) | Node::Use(branch) => imports_browser_layer(branch),
         _ => false,
     });

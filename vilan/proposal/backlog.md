@@ -221,17 +221,19 @@ have gaps.
    first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
    degrades to a clean parse error, documented at the parser site.
 
-2. **Block-scoped imports** (M; settled in review 2026-07-05, macro-engine §3; **prerequisite
-   consumed by G1 Phase 1**) — `import ..;` legal in statement position in any block, binding
-   from the statement to block end (like a `let`), shadowing outer bindings; duplicate name in
-   one scope errors as at module level; scoped imports are not re-exportable. Rationale: less
-   module-namespace bloat (a one-function dependency stays in that function). Safe because vilan
-   imports are pure compile-time name bindings — no load-order/side-effect hazards (the
-   Python/JS import-timing concerns don't exist) and zero codegen effect. Touchpoints: the
-   loader's module-ref collection recurses into bodies (pre-analysis, mechanical); the §4.2
-   platform-contract check gathers imports at all depths under the same rule; the analyzer
-   binds into the current scope instead of module scope; LSP completion/hover ride the existing
-   scope machinery. Macro bodies consume this with resolution restricted to `macro_std`.
+2. ~~Block-scoped imports~~ — **shipped 2026-07-05** (kept as the design record; macro-engine
+   §3 consumes it for `macro_std` resolution). `import`/`use` are statements, legal in any
+   block (function/closure/if/match-arm bodies, bare blocks, impl bodies — an impl-scope
+   import serves its methods); a binding is visible throughout its enclosing block and a later
+   same-name binding shadows by overwrite — both **exactly `let`'s semantics** (vilan scopes
+   are flat per block; use-before-`let` already compiled, and imports have no TDZ hazard since
+   they compile to nothing). Not re-exportable: `export` in a body is a spanned error. The
+   compiler previously PANICKED on a body import (no `Expr` for the statement id → transformer
+   `unwrap`; now `Expr::Void`), and the loader only scanned top-level nodes — `Node::for_each_child`
+   (the new exhaustive structural visitor, no catch-all) drives `collect_module_refs` at every
+   depth, which also carries the P3 cross-target gates, the L1 lib-surface check, the §4.2
+   contract check, and the LSP platform sniffer for free. Pins: 12 in `inference.rs`, corpus
+   `scoped-import.vl`, workspace body-import + §4.2-at-depth CLI tests.
 
 ---
 

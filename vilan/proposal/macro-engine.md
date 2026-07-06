@@ -128,8 +128,8 @@ v1 ("only functions can be macros").
   subset or police: if it isn't in `macro_std`, a macro can't name it. No `fs`, no
   clock, no `[extern]` — the package simply doesn't contain them. Scoped `import` is
   **not macro-special grammar**: it is the general block-scoped-imports feature
-  (settled in review; backlog H2 — imports legal in any block, binding like a `let`),
-  which macro bodies consume with one restriction: their imports resolve against the
+  (**shipped 2026-07-05**; backlog H2 — imports legal in any block, binding like a
+  `let`), which macro bodies consume with one restriction: their imports resolve against the
   `macro_std` universe instead of the package universe. Same grammar everywhere; the
   hermetic rule is purely a resolution restriction.
 - **Two orthogonal systems, cleanly split:** macro *names* distribute through the
@@ -325,8 +325,9 @@ behavior (skip; the missing-impl error surfaces at the use site).
   package (meta types, `source`, the pure-core re-exports), the interpreter with fuel,
   its compiled-vs-interpreted equivalence suite.
 - **Phase 1 — attributes**: `macro fun` items with scoped `macro_std` imports
-  (consumes the general block-scoped-imports feature, backlog H2 — build it first or
-  alongside), the hermetic name resolution, `[name(args)]` + `[derive(Name)]` dispatch,
+  (the general block-scoped-imports feature shipped 2026-07-05, backlog H2 — only the
+  `macro_std` resolution restriction remains), the hermetic name resolution,
+  `[name(args)]` + `[derive(Name)]` dispatch,
   expansion fixpoint, the per-invocation text cache, `meta::fresh`, error surfacing.
   Exit: `derive_display` (§2) works end to end from a user library.
 - **Phase 2 — invocations**: `macro name(args)` in item and expression position,

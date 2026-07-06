@@ -1,0 +1,62 @@
+import std::print;
+
+// Block-scoped imports (backlog H2): `import`/`use` are statements, legal in
+// any block. A binding is visible throughout its enclosing block (like a
+// `let`), shadows outer scopes, and compiles to nothing.
+
+mod alpha {
+	export fun tag(): str {
+		"alpha"
+	}
+}
+
+mod beta {
+	export fun tag(): str {
+		"beta"
+	}
+}
+
+use alpha::tag;
+
+// `std::io` is referenced only inside bodies below: the loader must find the
+// reference at depth to load the module at all.
+fun from_body() {
+	import std::io;
+	io::print("io from a body import");
+}
+
+fun shadowing() {
+	print(tag());
+	{
+		use beta::tag;
+		print(tag());
+	}
+	print(tag());
+}
+
+fun branches(pick: bool) {
+	if pick {
+		import std::io;
+		io::print("then-arm import");
+	}
+	match pick {
+		true => {
+			import std::io;
+			io::print("match-arm import");
+		}
+		_ => {}
+	}
+}
+
+fun main() {
+	from_body();
+	shadowing();
+	branches(true);
+	let closure = || {
+		import std::io;
+		io::print("closure import");
+	};
+	closure();
+}
+
+main();

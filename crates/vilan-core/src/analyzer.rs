@@ -877,6 +877,10 @@ pub struct Analyzer<'src> {
     binding_annotation_view: HashMap<Id, bool>,
     prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
+    // Scopes that are a module's top level: the entry file's global scope, each
+    // loaded file's namespace scope, and every `mod { .. }` body. `export` is
+    // legal exactly in these (a block-scoped `import` is not exportable, H2).
+    module_scope_ids: HashSet<Id>,
     prepped_locals: Vec<(Id, &'src str)>,
     // Comprehension binders whose element type isn't set yet — a method call on
     // one defers (like an unknown closure parameter) rather than erroring.
@@ -1106,6 +1110,7 @@ impl<'src> Analyzer<'src> {
             binding_annotation_view: HashMap::new(),
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
+            module_scope_ids: HashSet::new(),
             prepped_locals: Vec::new(),
             untyped_comprehension_binders: HashSet::new(),
             prepped_for_each: Vec::new(),
@@ -3910,6 +3915,12 @@ impl<'src> Analyzer<'src> {
                     .push((id, subject_type_id, member_name));
                 None
             }
+            // `import`/`use` bind into the scope they appear in — module scope
+            // at a file's top level, a block/impl scope anywhere else (imports
+            // are block-scoped statements, backlog H2; visibility is
+            // block-granular, like a `let`). They compile to nothing: the
+            // `Expr::Void` keeps a statement-position import a well-formed
+            // no-op through typing and emission.
             Node::Import(root_branch) => {
                 let mut entries = Vec::new();
                 flatten_namespace_branch(root_branch, Vec::new(), &mut entries);
@@ -3923,7 +3934,7 @@ impl<'src> Analyzer<'src> {
                         self.current_source_id,
                     ));
                 }
-                None
+                Some(Expr::Void)
             }
             Node::Use(root_branch) => {
                 let mut entries = Vec::new();
@@ -3938,7 +3949,7 @@ impl<'src> Analyzer<'src> {
                         self.current_source_id,
                     ));
                 }
-                None
+                Some(Expr::Void)
             }
             Node::List(items) => {
                 let ids = self.walk_expr_nodes(items, scope_id);
@@ -4044,8 +4055,19 @@ impl<'src> Analyzer<'src> {
             // Re-export visibility is not tracked yet; walking the inner
             // statement is enough to bind it into the current scope.
             Node::Export(inner) => {
+                // Exports shape a module's public surface, so they only mean
+                // something at a module's top level. A block-scoped `import`
+                // (H2) is deliberately not exportable — and any other `export`
+                // in a body has nothing to attach to.
+                if !self.module_scope_ids.contains(&scope_id) {
+                    self.diagnostics.push(Error {
+                        span: node.1,
+                        msg: "`export` is a module-level item and cannot appear inside a body"
+                            .to_string(),
+                    });
+                }
                 self.walk_expr_node(inner, scope_id);
-                None
+                Some(Expr::Void)
             }
             // `[derive(..)]` is transparent: walk the wrapped item; the synthesized
             // trait impls are appended separately (see `derive_impl_source`).
@@ -4992,6 +5014,7 @@ impl<'src> Analyzer<'src> {
                 scope.name_to_id_map.insert(name, id);
                 let body_scope = self.create_scope(Some(scope_id));
                 let body_scope_id = self.push_scope(body_scope);
+                self.module_scope_ids.insert(body_scope_id);
                 let body = self.walk_expr_nodes(&body.0, body_scope_id);
                 self.modules.insert(
                     id,
@@ -11923,18 +11946,15 @@ fn resolve_module_file(root: &Path, name: &str) -> (Option<String>, bool) {
 /// std module's own siblings, `std` when scanning the entry program for the std
 /// submodules it addresses by path (e.g. `import std::option::Option`), or a
 /// dependency's import name.
+/// Collects every `import`/`use` reference under `root` (`pkg`, `std`, or a
+/// dependency name) at ANY nesting depth — imports are block-scoped statements
+/// (backlog H2), so a module referenced only inside a function body must still
+/// seed the loader's reachable set and pass the platform gates. The traversal
+/// is depth-first in source order, so files with only top-level imports (with
+/// or without `export` wrapping) collect in exactly the order they always did.
 fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<(&'a str, Span)> {
-    let mut modules = Vec::new();
-    for (node, _span) in nodes {
-        let branch = match node {
-            Node::Import(branch) | Node::Use(branch) => Some(branch),
-            Node::Export(inner) => match &inner.0 {
-                Node::Import(branch) | Node::Use(branch) => Some(branch),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(branch) = branch {
+    fn walk<'a>(node: &'a Spanned<Node<'a>>, root: &str, modules: &mut Vec<(&'a str, Span)>) {
+        if let Node::Import(branch) | Node::Use(branch) = &node.0 {
             let mut entries = Vec::new();
             flatten_namespace_branch(branch, Vec::new(), &mut entries);
             for (path, leaf, leaf_span) in entries {
@@ -11950,6 +11970,12 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<(&'a str,
                 }
             }
         }
+        node.0
+            .for_each_child(&mut |child| walk(child, root, modules));
+    }
+    let mut modules = Vec::new();
+    for node in nodes {
+        walk(node, root, &mut modules);
     }
     modules
 }
@@ -12774,6 +12800,7 @@ pub fn analyze<'src>(
     }
     for (_name, ast, derived, module_scope_id, source_id) in &loaded {
         analyzer.set_current_source(*source_id);
+        analyzer.module_scope_ids.insert(*module_scope_id);
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&ast.0, *module_scope_id);
         analyzer.source_ranges.push(SourceRange {
@@ -12796,6 +12823,7 @@ pub fn analyze<'src>(
     }
     if let Some(lib_ast) = lib_ast {
         analyzer.set_current_source(lib_source_id);
+        analyzer.module_scope_ids.insert(std_scope_id);
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, std_scope_id);
         analyzer.source_ranges.push(SourceRange {
@@ -12808,6 +12836,7 @@ pub fn analyze<'src>(
     // mirroring the `std` lib walk above.
     for (source_id, namespace_scope_id, lib_ast, derived) in &dependency_lib_walks {
         analyzer.set_current_source(*source_id);
+        analyzer.module_scope_ids.insert(*namespace_scope_id);
         let start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&lib_ast.0, *namespace_scope_id);
         analyzer.source_ranges.push(SourceRange {
@@ -12993,6 +13022,7 @@ pub fn analyze<'src>(
     // this to avoid analyzing it twice.
     if !entry_is_module {
         analyzer.set_current_source(SourceId(0));
+        analyzer.module_scope_ids.insert(global_scope_id);
         let entry_walk_start = analyzer.entity_id;
         analyzer.walk_expr_nodes(&nodes.0, global_scope_id);
         analyzer.source_ranges.push(SourceRange {

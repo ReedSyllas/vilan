@@ -332,6 +332,295 @@ pub enum Node<'src> {
     Void,
 }
 
+impl<'src> Node<'src> {
+    /// Visits every direct child node. Whole-tree scans that must see nodes at
+    /// any nesting depth (`collect_module_refs` finding a block-scoped `import`
+    /// inside a closure, the platform sniffer) recurse with this. The match is
+    /// deliberately exhaustive with no catch-all: adding a `Node` variant must
+    /// extend it or compilation fails here — a container variant silently
+    /// missing from the scan is exactly the bug this prevents.
+    pub fn for_each_child<'a>(&'a self, visit: &mut dyn FnMut(&'a Spanned<Node<'src>>)) {
+        fn visit_generic_parameters<'a, 'src>(
+            parameters: &'a Option<GenericParameters<'src>>,
+            visit: &mut dyn FnMut(&'a Spanned<Node<'src>>),
+        ) {
+            for parameter in parameters.iter().flat_map(|parameters| &parameters.0) {
+                for bound in &parameter.bounds {
+                    visit(bound);
+                }
+                if let Some(element) = parameter
+                    .tuple_bound
+                    .as_ref()
+                    .and_then(|bound| bound.element.as_deref())
+                {
+                    visit(element);
+                }
+                if let Some(default) = parameter.default.as_deref() {
+                    visit(default);
+                }
+            }
+        }
+        fn visit_pattern<'a, 'src>(
+            pattern: &'a Pattern<'src>,
+            visit: &mut dyn FnMut(&'a Spanned<Node<'src>>),
+        ) {
+            match pattern {
+                Pattern::Wildcard | Pattern::Binding(..) | Pattern::Variant(_, None) => {}
+                Pattern::Variant(_, Some(payload)) => {
+                    for (sub, _) in payload {
+                        visit_pattern(sub, visit);
+                    }
+                }
+                Pattern::Tuple(elements) => {
+                    for (sub, _) in elements {
+                        visit_pattern(sub, visit);
+                    }
+                }
+                Pattern::Literal(literal) => visit(literal),
+            }
+        }
+        fn visit_parameters<'a, 'src>(
+            parameters: &'a Spanned<Vec<Parameter<'src>>>,
+            visit: &mut dyn FnMut(&'a Spanned<Node<'src>>),
+        ) {
+            for (pattern, type_, _, _) in &parameters.0 {
+                visit_pattern(pattern, visit);
+                if let Some(type_) = type_.as_deref() {
+                    visit(type_);
+                }
+            }
+        }
+        // A `(statements, tail)` body — blocks, loop bodies, function bodies.
+        fn visit_body<'a, 'src>(
+            body: &'a (NodeList<'src>, Box<Spanned<Node<'src>>>),
+            visit: &mut dyn FnMut(&'a Spanned<Node<'src>>),
+        ) {
+            for statement in &body.0 {
+                visit(statement);
+            }
+            visit(&body.1);
+        }
+        fn visit_if_branch<'a, 'src>(
+            branch: &'a NodeIfBranch<'src>,
+            visit: &mut dyn FnMut(&'a Spanned<Node<'src>>),
+        ) {
+            match branch {
+                NodeIfBranch::If(if_) => {
+                    visit(&if_.condition);
+                    visit_body(&if_.then.0, visit);
+                    if let Some(else_) = &if_.else_ {
+                        visit_if_branch(&else_.0, visit);
+                    }
+                }
+                NodeIfBranch::Else(body) => visit_body(&body.0, visit),
+            }
+        }
+
+        match self {
+            // Leaves.
+            Node::Accessor(_)
+            | Node::Bool(_)
+            | Node::Error
+            | Node::Import(_)
+            | Node::Jump(_)
+            | Node::LiftBinder
+            | Node::Null
+            | Node::Number(..)
+            | Node::String(_)
+            | Node::Use(_)
+            | Node::Void => {}
+            Node::AccessorWithGenerics(_, arguments) => {
+                for argument in &arguments.0 {
+                    visit(argument);
+                }
+            }
+            Node::Async(inner)
+            | Node::Await(inner)
+            | Node::Dereference(inner)
+            | Node::Derive(_, inner)
+            | Node::Export(inner)
+            | Node::Reference(_, inner)
+            | Node::Service(_, inner)
+            | Node::StaticAccessor(inner, _)
+            | Node::TryAssert(inner)
+            | Node::Unary(_, inner) => visit(inner),
+            Node::TypeBinder(_, bounds) => {
+                for bound in bounds {
+                    visit(bound);
+                }
+            }
+            Node::Assign(target, _, value) => {
+                visit(target);
+                visit(value);
+            }
+            Node::Binary(_, left, right) => {
+                visit(left);
+                visit(right);
+            }
+            Node::Block(body) => visit_body(&body.0, visit),
+            Node::Call(subject, generic_arguments, arguments) => {
+                visit(subject);
+                for argument in generic_arguments.iter().flat_map(|arguments| &arguments.0) {
+                    visit(argument);
+                }
+                for argument in &arguments.0 {
+                    visit(argument);
+                }
+            }
+            Node::Closure(closure) => {
+                visit_parameters(&closure.parameters, visit);
+                if let Some(return_type) = closure.return_type.as_deref() {
+                    visit(return_type);
+                }
+                visit(&closure.return_value);
+            }
+            Node::ClosureType(parameters, return_type) => {
+                for (_, type_) in &parameters.0 {
+                    visit(type_);
+                }
+                if let Some(return_type) = return_type.as_deref() {
+                    visit(return_type);
+                }
+            }
+            Node::MappedType {
+                source, template, ..
+            } => {
+                visit(source);
+                visit(template);
+            }
+            Node::TupleComprehension { source, body, .. } => {
+                visit(source);
+                visit(body);
+            }
+            Node::Enum(_, generic_parameters, variants) => {
+                visit_generic_parameters(generic_parameters, visit);
+                for (_, data, _) in variants.0.iter().map(|variant| &variant.0) {
+                    for type_ in data {
+                        visit(type_);
+                    }
+                }
+            }
+            Node::For(condition, body) => {
+                if let Some(condition) = condition.as_deref() {
+                    visit(condition);
+                }
+                visit_body(&body.0, visit);
+            }
+            Node::ForIn(_, iterable, body) => {
+                visit(iterable);
+                visit_body(&body.0, visit);
+            }
+            Node::Func(function) => {
+                visit_generic_parameters(&function.generic_parameters, visit);
+                visit_parameters(&function.parameters, visit);
+                if let Some(return_type) = function.return_type.as_deref() {
+                    visit(return_type);
+                }
+                if let Some(body) = &function.body {
+                    visit_body(&body.0, visit);
+                }
+            }
+            Node::FuncReturn(value) => {
+                if let Some(value) = value.as_deref() {
+                    visit(value);
+                }
+            }
+            Node::Lift(subject, continuation) => {
+                visit(subject);
+                visit(continuation);
+            }
+            Node::If(branch) => visit_if_branch(branch, visit),
+            Node::Is(subject, pattern) => {
+                visit(subject);
+                visit_pattern(&pattern.0, visit);
+            }
+            Node::Impl(subject, traits, body) => {
+                visit(subject);
+                for trait_ in traits {
+                    visit(trait_);
+                }
+                for member in &body.0 {
+                    visit(member);
+                }
+            }
+            Node::Let(_, type_, value, _) => {
+                if let Some(type_) = type_.as_deref() {
+                    visit(type_);
+                }
+                if let Some(value) = value.as_deref() {
+                    visit(value);
+                }
+            }
+            Node::LetDestructure(pattern, type_, value, _) => {
+                visit_pattern(&pattern.0, visit);
+                if let Some(type_) = type_.as_deref() {
+                    visit(type_);
+                }
+                if let Some(value) = value.as_deref() {
+                    visit(value);
+                }
+            }
+            Node::List(items) | Node::Tuple(items) => {
+                for item in items {
+                    visit(item);
+                }
+            }
+            Node::Match(subject, legs) => {
+                visit(subject);
+                for (patterns, guard, body) in &legs.0 {
+                    for (pattern, _) in patterns {
+                        visit_pattern(pattern, visit);
+                    }
+                    if let Some(guard) = guard.as_deref() {
+                        visit(guard);
+                    }
+                    visit(body);
+                }
+            }
+            Node::MemberAccessor(subject, member) | Node::Index(subject, member) => {
+                visit(subject);
+                visit(member);
+            }
+            Node::Module(_, body) => {
+                for statement in &body.0 {
+                    visit(statement);
+                }
+            }
+            Node::Struct(_, generic_parameters, _, fields) => {
+                visit_generic_parameters(generic_parameters, visit);
+                for (_, type_, _) in fields
+                    .iter()
+                    .flat_map(|fields| &fields.0)
+                    .map(|field| &field.0)
+                {
+                    if let Some(type_) = type_ {
+                        visit(type_);
+                    }
+                }
+            }
+            Node::StructInitializer(_, generic_arguments, fields) => {
+                for argument in generic_arguments.iter().flat_map(|arguments| &arguments.0) {
+                    visit(argument);
+                }
+                for (_, value) in fields.0.iter().map(|field| &field.0) {
+                    if let Some(value) = value {
+                        visit(value);
+                    }
+                }
+            }
+            Node::Trait(_, generic_parameters, supertraits, body) => {
+                visit_generic_parameters(generic_parameters, visit);
+                for supertrait in supertraits {
+                    visit(supertrait);
+                }
+                for member in &body.0 {
+                    visit(member);
+                }
+            }
+        }
+    }
+}
+
 // One enum variant: name, the types of its optional data, and an optional
 // explicit integer discriminant (`Less = -1`).
 pub type EnumVariant<'src> = (&'src str, Vec<Spanned<Node<'src>>>, Option<i64>);

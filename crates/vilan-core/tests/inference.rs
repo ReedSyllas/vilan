@@ -5079,3 +5079,274 @@ fn format_covers_u32_and_bigint() {
         "7\n42\n",
     );
 }
+
+// --- Block-scoped imports (backlog H2) ---
+// `import`/`use` are statements, legal in any block; a binding is visible
+// throughout its enclosing block (like a `let`), shadows outer scopes, and
+// compiles to nothing. The loader finds module references at any depth.
+
+// The loader half: `std::io` is referenced ONLY inside the body, so the module
+// must still enter the reachable set (collect_module_refs recurses).
+#[test]
+fn an_import_in_a_function_body_binds_and_loads_its_module() {
+    assert_compiles_and_runs(
+        r#"
+        fun main() {
+            import std::io;
+            io::print("from the body");
+        }
+
+        main();
+        "#,
+        "from the body\n",
+    );
+}
+
+// Flat block scope, like a `let`: the binding is visible before its statement
+// (imports have no runtime effect, so there is no TDZ hazard either).
+#[test]
+fn a_body_import_binds_throughout_its_block_like_a_let() {
+    assert_compiles_and_runs(
+        r#"
+        fun main() {
+            io::print("early");
+            import std::io;
+        }
+
+        main();
+        "#,
+        "early\n",
+    );
+}
+
+// Confinement: a block's import is invisible outside the block. `outer` comes
+// first so the failing `io` is the source's first occurrence (the span pin).
+#[test]
+fn a_body_import_is_confined_to_its_function() {
+    assert_fails_spanning(
+        r#"
+        fun outer() {
+            io::print("outer");
+        }
+
+        fun inner() {
+            import std::io;
+            io::print("inner");
+        }
+
+        fun main() {
+            inner();
+            outer();
+        }
+
+        main();
+        "#,
+        "io",
+        "cannot find",
+    );
+}
+
+#[test]
+fn an_inner_block_import_is_confined_to_the_block() {
+    assert_fails_spanning(
+        r#"
+        import std::print;
+
+        fun escaped() {
+            io::print("outside");
+        }
+
+        fun main() {
+            {
+                import std::io;
+                io::print("inner");
+            }
+            print("separator");
+            escaped();
+        }
+
+        main();
+        "#,
+        "io",
+        "cannot find",
+    );
+}
+
+#[test]
+fn an_import_inside_an_if_arm_works() {
+    assert_compiles_and_runs(
+        r#"
+        fun main() {
+            if true {
+                import std::io;
+                io::print("then");
+            } else {
+                import std::io;
+                io::print("else");
+            }
+        }
+
+        main();
+        "#,
+        "then\n",
+    );
+}
+
+#[test]
+fn an_import_inside_a_match_arm_works() {
+    assert_compiles_and_runs(
+        r#"
+        fun main() {
+            match 2 {
+                2 => {
+                    import std::io;
+                    io::print("two");
+                }
+                _ => {}
+            }
+        }
+
+        main();
+        "#,
+        "two\n",
+    );
+}
+
+#[test]
+fn an_import_inside_a_closure_body_works() {
+    assert_compiles_and_runs(
+        r#"
+        fun main() {
+            let show = || {
+                import std::io;
+                io::print("from closure");
+            };
+            show();
+        }
+
+        main();
+        "#,
+        "from closure\n",
+    );
+}
+
+// A function declared in the block resolves the block's import through the
+// ordinary scope chain.
+#[test]
+fn a_nested_function_sees_its_blocks_import() {
+    assert_compiles_and_runs(
+        r#"
+        fun main() {
+            import std::io;
+            fun emit() {
+                io::print("nested");
+            }
+            emit();
+        }
+
+        main();
+        "#,
+        "nested\n",
+    );
+}
+
+// An impl body is a statement list too: an import there serves every method.
+#[test]
+fn an_import_inside_an_impl_body_serves_its_methods() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        struct Greeter {
+            name: str,
+        }
+
+        impl Greeter {
+            import std::display::format;
+
+            fun greet(self) {
+                print(format(self.name));
+            }
+        }
+
+        fun main() {
+            let greeter = Greeter { name = "vi" };
+            greeter.greet();
+        }
+
+        main();
+        "#,
+        "vi\n",
+    );
+}
+
+// Scoped `use` rides the same machinery: an inner `use` shadows the outer
+// binding for its block, and the outer one is restored after.
+#[test]
+fn a_scoped_use_shadows_and_restores() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        mod alpha {
+            export fun tag(): str {
+                "alpha"
+            }
+        }
+
+        mod beta {
+            export fun tag(): str {
+                "beta"
+            }
+        }
+
+        use alpha::tag;
+
+        fun main() {
+            print(tag());
+            {
+                use beta::tag;
+                print(tag());
+            }
+            print(tag());
+        }
+
+        main();
+        "#,
+        "alpha\nbeta\nalpha\n",
+    );
+}
+
+// A block-scoped binding is deliberately not exportable — and no other
+// `export` means anything inside a body.
+#[test]
+fn an_export_inside_a_body_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            export import std::io;
+        }
+
+        main();
+        "#,
+        "export import std::io;",
+        "`export` is a module-level item",
+    );
+}
+
+// A body import of a module that does not exist fails at the import itself,
+// not with a panic or a cascade at the use sites.
+#[test]
+fn a_body_import_of_a_missing_module_errors_cleanly() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            import std::nonexistent;
+        }
+
+        main();
+        "#,
+        "nonexistent",
+        "cannot find 'nonexistent' in the imported path",
+    );
+}

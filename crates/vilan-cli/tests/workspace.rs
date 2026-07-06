@@ -336,3 +336,85 @@ fn a_parse_error_inside_a_package_module_fails_the_build_loudly() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Block-scoped imports (backlog H2), the multi-package path: a dependency and a
+// `pkg::` sibling referenced ONLY inside function bodies must still seed the
+// loader's reachable set — `collect_module_refs` finds references at any depth.
+#[test]
+fn body_scoped_imports_load_dependencies_and_siblings() {
+    let dir = temp_project("body_imports");
+    write(
+        &dir,
+        "vilan.toml",
+        "[project]\npackages = [\"common\", \"server\"]\n",
+    );
+    write(&dir, "common/vilan.toml", "[library]\nname = \"common\"\n");
+    write(
+        &dir,
+        "common/src/lib.vl",
+        "fun greeting(): str { \"hi\" }\n",
+    );
+    write(
+        &dir,
+        "server/vilan.toml",
+        "[package]\nname = \"server\"\ntarget = \"node\"\n\n[package.dependencies]\ncommon = { path = \"../common\" }\n",
+    );
+    write(
+        &dir,
+        "server/src/main.vl",
+        "import std::print;\n\nfun main() {\n    import common::greeting;\n    import pkg::helper;\n    print(greeting());\n    print(helper::tagline());\n}\n",
+    );
+    write(
+        &dir,
+        "server/src/helper.vl",
+        "fun tagline(): str { \"from a sibling\" }\n",
+    );
+    let output = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new("node")
+        .arg(dir.join("dist/server.js"))
+        .output()
+        .expect("run node");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "hi\nfrom a sibling\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// The §4.2 completeness check sees imports at any depth (backlog H2): a base
+// module smuggling a process-only module through a FUNCTION-BODY import is the
+// same violation as a top-level one.
+#[test]
+fn standalone_library_check_flags_a_body_scoped_violation() {
+    let dir = temp_project("contract_body");
+    write(
+        dir.as_path(),
+        "vilan.toml",
+        "[library]\nname = \"lib\"\n\n[library.layer.process]\nplatform = [\"@process\"]\n",
+    );
+    write(dir.as_path(), "src/lib.vl", "");
+    write(
+        dir.as_path(),
+        "src/core.vl",
+        "fun core(): i32 {\n    import pkg::feature::feature;\n    feature()\n}\n",
+    );
+    write(
+        dir.as_path(),
+        "src/process/feature.vl",
+        "fun feature(): i32 { 1 }\n",
+    );
+    let output = vilan(&["check", dir.to_str().unwrap()]);
+    assert!(!output.status.success(), "expected a contract violation");
+    let text = combined(&output);
+    assert!(
+        text.contains("not available for") && text.contains("browser"),
+        "unexpected output: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
