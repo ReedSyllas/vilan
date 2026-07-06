@@ -54,8 +54,10 @@ A compact chronicle — details live in the named proposals and the git history.
    2026-07-06** — the fueled `js::Node` interpreter + `macro_std` (70/70 equivalence
    gate); `macro fun` items, per-file hermetic worlds, `[attr]`/`[derive(X)]`
    expansion; `macro name(..)` invocations in item + expression position with
-   per-site gensym stamping. Next = Phase 3: migrate the built-in derives behind
-   the byte-identical goldens gate) — **the frontier.** User-land vilan running inside the compiler:
+   per-site gensym stamping; Phase 3 UNDERWAY — the builtin-derive channel
+   (`std/derives.vl`) with `PartialEq`/`Default`/`Debug` migrated to user-land
+   vilan, goldens byte-identical. Next = `Json`/`Wire`, then the `[service]`
+   generator) — **the frontier.** User-land vilan running inside the compiler:
    `macro fun` items over the `macro_std::meta` reflection surface, hermetic
    per-function isolation (bodies see only `macro_std`, via the general block-scoped
    imports — backlog H2, a prerequisite), `[attr]`/`[derive(X)]` + `macro name(..)`

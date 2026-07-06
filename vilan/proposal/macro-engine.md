@@ -1,10 +1,11 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phases 0–2 SHIPPED 2026-07-06** (every §12 question
-resolved; the fueled interpreter, `macro_std`, `macro fun` items,
-`[attr]`/`[derive(X)]` expansion, and `macro name(..)` invocations with gensym
-stamping are in-tree — see §11 for what each phase delivered and the recorded
-v1 bounds). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phases 0–2 SHIPPED, Phase 3 UNDERWAY 2026-07-06**
+(every §12 question resolved; the fueled interpreter, `macro_std`, `macro fun`
+items, `[attr]`/`[derive(X)]` expansion, `macro name(..)` invocations with
+gensym stamping, and the builtin-derive migration channel are in-tree —
+`PartialEq`/`Default`/`Debug` are user-land vilan now, goldens byte-identical;
+`Json`/`Wire` remain Rust — see §11). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -436,7 +437,21 @@ behavior (skip; the missing-impl error surfaces at the use site).
   plus 7 inference pins. **Finding:** an unannotated closure bound to a local and
   called directly doesn't type its parameter (pre-existing; pinned as backlog B13) —
   spliced callbacks annotate their parameter until it's fixed.
-- **Phase 3 — migration** (§10), one derive per commit, goldens as referee.
+- **Phase 3 — migration** (§10), one derive per commit, goldens as referee —
+  **UNDERWAY (2026-07-06): `PartialEq`, `Default`, `Debug` migrated; `Json`/`Wire`
+  remain.** The seam: `expand_derives` consults the toolchain's built-in derive
+  macros (`<std dir>/derives.vl` — outside the layer roots, never importable, its
+  names reserved against user macros) per derive name, falling back to the Rust
+  generators for anything not yet migrated (and for std fixtures without the
+  file). A migrated derive generates through the expansion interpreter with the
+  same cache as user macros; identical text at the same walk position keeps every
+  golden byte-identical. Recorded: compiling derives.vl's own macro world
+  re-enters the builtin lookup — a seeded empty placeholder terminates it (the
+  world's std derives use the Rust fallback, byte-identically). The derive-name
+  question (§2) settles for builtins as fn-name = trait name; a
+  `proc_macro_derive`-style registration stays deferred until a user derive
+  needs the decoupling. `Json`/`Wire` (the visitor impls, enum tag fallbacks,
+  panic arms — the largest generators) are the next slice.
 - **Phase 4 (recorded, unscheduled)** — **`macro { .. }` blocks** (an anonymous,
   immediately-expanded macro: the body runs at expansion time in the macro prelude; in
   item position its emissions splice in place — comptime-style families without naming

@@ -230,12 +230,15 @@ have gaps.
    (the exit criterion). Phase 2 (also 2026-07-06):
    `macro name(..)` invocations — item + expression position, shape-checked dispatch from
    the signature, `fresh()` gensyms stamped per splice site (capture pinned as a clean
-   error), output previews in errors. **Remaining (Phase 3+):** migration of the built-in
-   derives behind the byte-identical gate (incl. the derive-name registration question),
-   `vilan.toml [macros]` fuel knob, module-scoped macro names (v1 is a flat namespace),
-   attribute use inside dependency files, ambient meta vocabulary in macro scope (today
-   every macro imports `macro_std::meta::{..}` explicitly), `macro { .. }` blocks
-   (Phase 4).
+   error), output previews in errors. Phase 3 UNDERWAY (2026-07-06): the
+   builtin-derive channel (`std/derives.vl`, names reserved, Rust fallback for
+   unmigrated/fixture stds) with `PartialEq`/`Default`/`Debug` migrated byte-identically.
+   **Remaining:** `Json`/`Wire` migration (the visitor impls + enum tag fallbacks — the
+   largest generators), then `[service]`; the derive-name registration mechanism (builtins
+   settle as fn-name = trait name; decoupling deferred to the first user derive needing
+   it); `vilan.toml [macros]` fuel knob; module-scoped macro names (v1 flat); attribute
+   use inside dependency files; ambient meta vocabulary in macro scope; `macro { .. }`
+   blocks (Phase 4).
 
 ---
 
