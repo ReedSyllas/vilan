@@ -258,8 +258,7 @@ impl Signal<type T> {
 	// trait; inherent until the context call graph learns trait-default
 	// dispatch edges — backlog B14.)
 	fun effect(self, observer: |T| void) {
-		let subscription = self.sub(observer);
-		let owned = get_owner().take(subscription);
+		get_owner().take(self.sub(observer));
 	}
 
 	fun map<U>(self, transform: |T| U): Signal<U> {
