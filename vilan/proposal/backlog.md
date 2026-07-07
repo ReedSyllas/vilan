@@ -190,6 +190,11 @@ have gaps.
    Remaining (recorded in the proposal §7): wrapping arithmetic + real widths on a
    non-JS backend, `f32` fround, Wire slots, parse family, numeric→`BigInt`.
 
+5. **Project-model deferrals from P1/P2** (M) — registry-dependency loading (only `path`
+   dependencies resolve today), `[project.dependencies]` inheritance, and P1's server-side
+   manifest completions. (Captured here when the shipped `project-model-p1/p2` proposals
+   were pruned — their full context lives in git history.)
+
 3. **WASM backend** (L; far future) — the second emitter on the platform model's `Backend` axis
    (`Js` is the only variant today; `platform-model.md` §7.1 reserves `Wasm`). Three parts, only
    one of which is "codegen":
