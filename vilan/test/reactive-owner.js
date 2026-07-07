@@ -38,70 +38,87 @@ function dispose(self) {
 function new2() {
 	return [ __shared_new([  ]) ];
 }
+function dispose2(self) {
+	for (const cleanup of self[0].v) {
+		cleanup();
+	}
+	self[0].v = [  ];
+}
+function get_owner($g) {
+	return $g;
+}
 function $a(value) {
 	let subscribers = [  ];
 	return [ __shared_new(value), __shared_new(subscribers) ];
 }
-function $c(self) {
+function $f(self) {
 	return self[0].v;
 }
-function $d(self, value) {
-	self[0].v = value;
-	let $e = null;
-	if (scheduler[1].v === 0) {
-		for (const subscriber of self[1].v) {
-			subscriber[1]();
-		}
-		$e = undefined;
-	} else {
-		enqueue(self[1].v);
-	}
-	return $e;
-}
-function $b(self, transform) {
-	const derived = $a(transform($c(self)));
-	self[1].v.push([ fresh_id(), () => {
-		$d(derived, transform($c(self)));
-		return;
-	} ]);
-	return derived;
-}
-function $f(self, observer) {
+function $e(self, observer) {
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
-		observer($c(self));
+		observer($f(self));
 		return;
 	} ]);
-	observer($c(self));
+	observer($f(self));
 	return [ self[1], id ];
 }
-function $g(self, item) {
+function $h(self, item) {
 	self[0].v.push(() => {
 		dispose(item);
 		return;
 	});
 	return item;
 }
-function $h(self, transform) {
-	$d(self, transform($c(self)));
+function $c(self, observer, $d) {
+	const subscription = $e(self, observer);
+	$h(get_owner($d), subscription);
 }
+function $i(self, value) {
+	self[0].v = value;
+	let $j = null;
+	if (scheduler[1].v === 0) {
+		for (const subscriber of self[1].v) {
+			subscriber[1]();
+		}
+		$j = undefined;
+	} else {
+		enqueue(self[1].v);
+	}
+	return $j;
+}
+const owner_scope = null;
 const next_subscriber_id = __shared_new(0);
 const scheduler = [ __shared_new([  ]), __shared_new(0), __shared_new(false) ];
-const owner_scope = null;
+const count = $a(1);
 const owner = new2();
-const count = $a(0);
-const doubled = $b(count, (n) => {
-	return n * 2;
-});
-$g(owner, $f(doubled, (n) => {
-	return console.log(n);
-}));
-$d(count, 1);
-$h(count, (n) => {
-	return n + 4;
-});
-console.log($c(doubled));
-$g(owner, $f(count, (n) => {
-	return console.log(n);
-}));
-$d(count, 20);
+(($b) => {
+	$c(count, (value) => {
+		return console.log("seen " + value);
+	}, $b);
+	return;
+})(owner);
+$i(count, 2);
+dispose2(owner);
+$i(count, 3);
+console.log("done");
+const outer = new2();
+const inner = new2();
+(($k) => {
+	(($l) => {
+		$c(count, (value) => {
+			return console.log("inner " + value);
+		}, $l);
+		return;
+	})(inner);
+	$c(count, (value) => {
+		return console.log("outer " + value);
+	}, $k);
+	return;
+})(outer);
+$i(count, 4);
+dispose2(inner);
+$i(count, 5);
+dispose2(outer);
+$i(count, 6);
+console.log("end");

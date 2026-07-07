@@ -123,6 +123,7 @@ function $n(self, transform) {
 }
 const next_subscriber_id = __shared_new(0);
 const scheduler = [ __shared_new([  ]), __shared_new(0), __shared_new(false) ];
+const owner_scope = null;
 const first = $a(1);
 const second = $a(10);
 const outer = $b(first);

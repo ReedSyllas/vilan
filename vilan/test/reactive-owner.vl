@@ -1,0 +1,35 @@
+// The ambient owner (proposal/ambient-owner.md, backlog A5): `owner_scope.run`
+// establishes the extent, `effect` self-registers into it — stored callbacks
+// keep firing after the extent exits and die with their owner. Extents nest;
+// the nearest wins.
+import std::print;
+import std::reactive::{ Signal, Owner, Disposable, owner_scope, get_owner };
+
+fun main() {
+	let count = Signal::new(1);
+	let owner = Owner::new();
+	owner_scope.run(owner, || {
+		count.effect(|value| print(i"seen {value}"));
+	});
+	count.set(2);
+	owner.dispose();
+	count.set(3);
+	print("done");
+
+	let outer = Owner::new();
+	let inner = Owner::new();
+	owner_scope.run(outer, || {
+		owner_scope.run(inner, || {
+			count.effect(|value| print(i"inner {value}"));
+		});
+		count.effect(|value| print(i"outer {value}"));
+	});
+	count.set(4);
+	inner.dispose();
+	count.set(5);
+	outer.dispose();
+	count.set(6);
+	print("end");
+}
+
+main();

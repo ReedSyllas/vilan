@@ -29,9 +29,20 @@ have gaps.
    follow `map`/`combine`'s unowned precedent; the rolling inner subscription is disposed
    per switch.
 
-5. **Ambient owner / `comp` ergonomic layer** (M; deferred from `reactive-ownership.md`) — sugar
-   over the explicit `Owner`/`Disposable` primitives, once an API is proven against
-   async/callbacks. The magic desugars to the shipped primitives; nothing blocks on it.
+5. **Ambient owner / `comp` ergonomic layer** (M; `proposal/ambient-owner.md`) — **v1 basics
+   SHIPPED 2026-07-07**: `owner_scope` (a `Context<Owner>`), `get_owner()`, and
+   `Signal.effect` (the scope-tied `sub` — registers into the ambient owner, nothing to
+   hold; misuse outside an extent is a COMPILE error via the context coverage fence). The
+   substrate was proven against stored callbacks AND async first (probes: capture survives
+   extent exit and `await`; interleaved extents each keep their value). Findings: a
+   `run_with_owner(owner, body)` wrapper FUNCTION is impossible by the context model's own
+   rules (`run` needs a closure literal; capture is at CREATION — a forwarded body is born
+   outside the extent), so the extent is entered as `owner_scope.run(owner, || ..)`; macro
+   sugar can restore the wrapper spelling later. The coverage check gained the DEAD-reader
+   exemption (an uncalled, un-taken, non-top-level function cannot run uncovered) — without
+   it every `std::reactive` importer failed. **Remaining:** `comp` sugar, `std::ui`
+   integration (views self-registering), `get_safe` (recorded with the `Option`-parameter
+   sketch), `effect` on the `Source` trait (blocked on B14), fence-diagnostic anchoring.
 
 6. **Ambient microtask flush + async turns/actions** (M–L; the future sections of
    `reactive-batching.md`) — auto-`flush` on the next microtask (committed, deferred), and the
@@ -83,6 +94,14 @@ have gaps.
     members errors); the MONOMORPHIZATION side doesn't: instantiating a bound at a type
     with no impl should be a spanned compile error at the call site. (The u32/BigInt
     `Display` holes are fixed; the general check remains.)
+
+14. **Context threading misses trait-default dispatch edges** (M; found by A5, pinned
+    `#[ignore]`d) — a trait DEFAULT body reading a context is flagged "reachable without
+    an enclosing `run`" even when its only call site is covered: the context call graph
+    has no edge from a dispatched call to the trait's default body. Conservative (false
+    compile error, never a miscompile). Blocks `effect` living on the `Source` trait
+    (proposal/ambient-owner.md §3); fix = default-body dispatch edges in
+    `call_graph.rs`/`context.rs`.
 
 13. **A direct call on a closure-typed local doesn't type its unannotated parameter** (M;
     pinned `#[ignore]`d; surfaced writing macro `unroll` callbacks 2026-07-06) — `let f = |i|

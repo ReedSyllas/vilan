@@ -2,6 +2,7 @@
 import pkg::shared::Shared;
 import pkg::option::Option::{ self, Some, None };
 import pkg::compare::PartialEq;
+import pkg::context::Context;
 
 // A resource that can be released. An `Owner` collects `Disposable`s and releases
 // them as a group; `Subscription`, `Owner`, and `std::ui`'s `View` are disposable.
@@ -160,6 +161,34 @@ impl Owner with Disposable {
 	}
 }
 
+// === The ambient owner (proposal/ambient-owner.md, backlog A5) ===
+//
+// A dynamically-scoped `Owner`, carried by `std::context` — compile-time
+// hidden-parameter threading, so it survives stored callbacks and `await`
+// by construction, and reading it outside any `owner_scope.run` extent is a
+// COMPILE error (the context coverage check), never a runtime absence.
+//
+// The extent is entered DIRECTLY on the context:
+//
+//     owner_scope.run(owner, || {
+//         count.effect(|value| ..);   // disposed with `owner`
+//     });
+//
+// A `run_with_owner(owner, body)` wrapper FUNCTION is impossible by the
+// context model's own rules (probed): `run` requires a closure literal at
+// its call site, and a closure captures its context AT CREATION — a body
+// passed to a wrapper is born at the caller's site, outside the extent, so
+// its reads are statically rejected. The literal therefore belongs at the
+// user's site, on the context itself. (Sugar that keeps this shape is
+// possible as a macro, which splices the literal in place — recorded in the
+// proposal.)
+let owner_scope: Context<Owner> = Context::new();
+
+// The ambient owner established by the nearest enclosing `owner_scope.run`.
+fun get_owner(): Owner {
+	owner_scope.get()
+}
+
 // The read-only view of a reactive value: read the current value and subscribe to its
 // changes. `Signal<T>` implements it (and adds `set`/`set_with`); a *remote* handle
 // implements it too (its `sub` flows over a transport), so code that only observes can't
@@ -221,6 +250,16 @@ impl Signal<type T> {
 
 	fun set_with(self, transform: |T| T) {
 		self.set(transform(self.get()));
+	}
+
+	// Subscribe and register with the ambient owner (backlog A5): the
+	// scope-tied `sub` — nothing to hold, nothing to drop by hand. Requires
+	// an enclosing `owner_scope.run`, statically. (Designed for the `Source`
+	// trait; inherent until the context call graph learns trait-default
+	// dispatch edges — backlog B14.)
+	fun effect(self, observer: |T| void) {
+		let subscription = self.sub(observer);
+		let owned = get_owner().take(subscription);
 	}
 
 	fun map<U>(self, transform: |T| U): Signal<U> {

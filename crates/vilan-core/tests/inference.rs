@@ -6634,3 +6634,151 @@ fn owner_defer_runs_cleanups_on_dispose() {
         "first\nsecond\ndone\n",
     );
 }
+
+// --- The ambient owner (proposal/ambient-owner.md, backlog A5) ---
+
+// A covered `effect` registers into the ambient owner and dies with it.
+#[test]
+fn effect_registers_into_the_ambient_owner_and_dies_with_it() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner, Disposable, owner_scope };
+
+        fun main() {
+            let count = Signal::new(1);
+            let owner = Owner::new();
+            owner_scope.run(owner, || {
+                count.effect(|value| print(value));
+            });
+            count.set(2);
+            owner.dispose();
+            count.set(3);
+            print("done");
+        }
+
+        main();
+        "#,
+        "1\n2\ndone\n",
+    );
+}
+
+// The static fence: `effect` reachable outside every `owner_scope.run` is a
+// compile error, not a runtime absence.
+#[test]
+fn effect_outside_an_owner_scope_is_a_compile_error() {
+    let diagnostics = failure_diagnostics(
+        r#"
+import std::print;
+import std::reactive::Signal;
+
+fun main() {
+    let count = Signal::new(1);
+    count.effect(|value| print(value));
+}
+main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("without an enclosing `run`")),
+        "expected the coverage fence; got: {diagnostics:#?}"
+    );
+}
+
+// The dead-reader exemption: a program that imports `std::reactive` without
+// ever using the ambient layer must compile — an uncalled reader cannot run,
+// so it cannot run uncovered.
+#[test]
+fn importing_reactive_without_the_ambient_layer_compiles() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Subscription, Disposable };
+
+        fun main() {
+            let count = Signal::new(5);
+            let seen = count.sub(|value| print(value));
+            seen.dispose();
+        }
+
+        main();
+        "#,
+        "5\n",
+    );
+}
+
+// A DEAD user helper reaching the ambient reader must not poison the
+// covered path beside it.
+#[test]
+fn a_dead_ambient_reader_does_not_poison_covered_paths() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner, Disposable, owner_scope, get_owner };
+
+        // Never called: exempt, and it must not unbind `get_owner` for the
+        // covered path below.
+        fun forgotten() {
+            let owner = get_owner();
+            owner.dispose();
+        }
+
+        fun main() {
+            let count = Signal::new(7);
+            let owner = Owner::new();
+            owner_scope.run(owner, || {
+                count.effect(|value| print(value));
+            });
+            print("alive");
+        }
+
+        main();
+        "#,
+        "7\nalive\n",
+    );
+}
+
+// KNOWN GAP (backlog B14): the context call graph has no trait-default
+// dispatch edges — a default body reading a context is flagged "reachable
+// without an enclosing run" even when its only call site is covered.
+// Conservative (a false compile error, never a miscompile). Un-ignore when
+// the edge lands.
+#[test]
+#[ignore = "backlog B14: context threading misses trait-default dispatch edges"]
+fn a_trait_default_body_reads_context_through_covered_dispatch() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        trait Probe {
+            fun name(self): str;
+
+            fun report(self) {
+                print(i"{self.name()}: {current.get()}");
+            }
+        }
+
+        struct Widget { tag: str }
+
+        impl Widget with Probe {
+            fun name(self): str {
+                self.tag
+            }
+        }
+
+        fun main() {
+            current.run(9, || {
+                Widget { tag = "w" }.report();
+            });
+        }
+
+        main();
+        "#,
+        "w: 9\n",
+    );
+}

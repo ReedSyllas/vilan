@@ -259,6 +259,43 @@ fn analyze(
     plan.news = news;
     plan.runs = runs;
 
+    // --- Entry points the call graph cannot see (for the coverage check's
+    // dead-code exemption): a function with NO caller edges is either dead —
+    // it cannot run, so it cannot run uncovered — or entered from OUTSIDE the
+    // graph, which must stay checked. Outside entries: calls made by
+    // top-level statements (the graph has no top-level node), and functions
+    // taken as values (called indirectly; the value-use error also fires).
+    let owned_call_ids: HashSet<Id> = graph
+        .nodes()
+        .iter()
+        .flat_map(|node| graph.calls_of(node.id()))
+        .map(|call| call.call_id)
+        .collect();
+    let top_level_targets: HashSet<Id> = program
+        .function_calls
+        .iter()
+        .filter(|(call_id, _)| !owned_call_ids.contains(call_id))
+        .filter_map(|(_, call)| local_target(program, call.subject_id))
+        .collect();
+    let call_subject_entities: HashSet<Id> = program
+        .function_calls
+        .values()
+        .map(|call| call.subject_id)
+        .collect();
+    let value_taken: HashSet<Id> = program
+        .entity_map
+        .iter()
+        .filter_map(|(entity_id, expr)| match expr {
+            Expr::Local(target)
+                if program.functions.contains_key(target)
+                    && !call_subject_entities.contains(entity_id) =>
+            {
+                Some(*target)
+            }
+            _ => None,
+        })
+        .collect();
+
     // --- Per-context effect inference + coverage. ---
     for &context in &plan.contexts {
         // Seed with the nodes that directly read this context.
@@ -304,7 +341,14 @@ fn analyze(
                 }
                 let covered = if is_function(id) {
                     let callers = graph.callers_of(id);
-                    !callers.is_empty() && callers.iter().all(|caller| bound.contains(&caller.id()))
+                    if callers.is_empty() {
+                        // No caller edges: dead code is exempt (it cannot
+                        // run); a top-level-called or value-taken function is
+                        // entered from outside the graph — uncovered.
+                        !top_level_targets.contains(&id) && !value_taken.contains(&id)
+                    } else {
+                        callers.iter().all(|caller| bound.contains(&caller.id()))
+                    }
                 } else {
                     // A captured closure is covered iff its defining scope is.
                     graph
