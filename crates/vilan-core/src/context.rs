@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analyzer::{Expr, Program};
-use crate::call_graph::{CallGraph, CallTarget, Node};
+use crate::call_graph::{CallGraph, CallTarget, IndirectReason, Node};
 use crate::error::Error;
 use crate::id::Id;
 
@@ -259,6 +259,82 @@ fn analyze(
     plan.news = news;
     plan.runs = runs;
 
+    // --- Dispatch edges the shared graph deliberately leaves indirect
+    // (backlog B14): a call the analyzer routed through trait dispatch — a
+    // trait method on a concrete receiver (`OnType`, which may land on the
+    // trait's DEFAULT body) or a generic-bounded member (`OnConstraint`) —
+    // has no `CallTarget::Function` edge, so the trait default's gets looked
+    // unreachable and its callers uncovered. The graph stays untouched (it is
+    // also async inference's graph; conservative edges there would
+    // over-propagate async-ness); the context analysis adds the edges
+    // LOCALLY: for each dispatch site, every candidate callee — the named
+    // member's trait default plus every implementation's override, across the
+    // traits declaring that name. Over-approximation is sound here (an extra
+    // caller edge only strengthens the coverage demand); the same sites join
+    // the threading plan, and a callee that turns out not to need the value
+    // simply ignores the extra argument.
+    let dispatch_member_name = |call_id: Id| -> Option<&str> {
+        let subject_id = program.function_calls.get(&call_id)?.subject_id;
+        for key in [call_id, subject_id] {
+            match program.generic_dispatch.get(&key) {
+                Some(crate::analyzer::GenericDispatch::OnConstraint(_, name))
+                | Some(crate::analyzer::GenericDispatch::OnType(_, name)) => return Some(name),
+                None => {}
+            }
+        }
+        None
+    };
+    let dispatch_candidates = |name: &str| -> Vec<Id> {
+        let mut candidates = Vec::new();
+        for trait_ in program.traits.values() {
+            let Some(&declaration_id) = trait_.declarations.get(name) else {
+                continue;
+            };
+            // The trait's own default body, when it has one.
+            if program
+                .functions
+                .get(&declaration_id)
+                .is_some_and(|function| function.has_body)
+            {
+                candidates.push(declaration_id);
+            }
+            // Every implementation's override of this trait's member.
+            for implementation in &program.implementations {
+                if implementation.trait_ids.contains(&trait_.id) {
+                    if let Some(&member_id) = implementation.declarations.get(name) {
+                        candidates.push(member_id);
+                    }
+                }
+            }
+        }
+        candidates
+    };
+    // (caller node, call id, candidate callees) per dispatch site.
+    let mut dispatch_sites: Vec<(Id, Id, Vec<Id>)> = Vec::new();
+    // callee -> the nodes that may reach it through dispatch.
+    let mut dispatch_callers: HashMap<Id, Vec<Id>> = HashMap::new();
+    for node in graph.nodes() {
+        for call in graph.calls_of(node.id()) {
+            if !matches!(
+                call.target,
+                CallTarget::Indirect(IndirectReason::TraitDispatch | IndirectReason::GenericMember)
+            ) {
+                continue;
+            }
+            let Some(name) = dispatch_member_name(call.call_id) else {
+                continue;
+            };
+            let candidates = dispatch_candidates(name);
+            for &candidate in &candidates {
+                dispatch_callers
+                    .entry(candidate)
+                    .or_default()
+                    .push(node.id());
+            }
+            dispatch_sites.push((node.id(), call.call_id, candidates));
+        }
+    }
+
     // --- Entry points the call graph cannot see (for the coverage check's
     // dead-code exemption): a function with NO caller edges is either dead —
     // it cannot run, so it cannot run uncovered — or entered from OUTSIDE the
@@ -306,11 +382,17 @@ fn analyze(
                 worklist.push(get.owner.id());
             }
         }
-        // Backward reachability: a caller of a needs-context node needs it too.
+        // Backward reachability: a caller of a needs-context node needs it too
+        // — through direct edges and through dispatch (B14).
         while let Some(id) = worklist.pop() {
             for caller in graph.callers_of(id) {
                 if needs.insert(caller.id()) {
                     worklist.push(caller.id());
+                }
+            }
+            for caller in dispatch_callers.get(&id).into_iter().flatten() {
+                if needs.insert(*caller) {
+                    worklist.push(*caller);
                 }
             }
         }
@@ -341,13 +423,20 @@ fn analyze(
                 }
                 let covered = if is_function(id) {
                     let callers = graph.callers_of(id);
-                    if callers.is_empty() {
+                    let through_dispatch = dispatch_callers.get(&id);
+                    let no_edges =
+                        callers.is_empty() && through_dispatch.is_none_or(|list| list.is_empty());
+                    if no_edges {
                         // No caller edges: dead code is exempt (it cannot
                         // run); a top-level-called or value-taken function is
                         // entered from outside the graph — uncovered.
                         !top_level_targets.contains(&id) && !value_taken.contains(&id)
                     } else {
                         callers.iter().all(|caller| bound.contains(&caller.id()))
+                            && through_dispatch
+                                .into_iter()
+                                .flatten()
+                                .all(|caller| bound.contains(caller))
                     }
                 } else {
                     // A captured closure is covered iff its defining scope is.
@@ -444,7 +533,9 @@ fn analyze(
         }
 
         // Thread the value into every call from a needs-context node to a
-        // needs-context function.
+        // needs-context function — direct calls, and dispatch sites whose
+        // candidate callees include a needy one (B14; a candidate that does
+        // not need the value ignores the extra trailing argument).
         for &node_id in &needs {
             let Some(&owner) = graph.nodes().iter().find(|node| node.id() == node_id) else {
                 continue;
@@ -456,6 +547,18 @@ fn analyze(
                     }
                 }
             }
+        }
+        for (caller, call_id, candidates) in &dispatch_sites {
+            if !needs.contains(caller) {
+                continue;
+            }
+            if !candidates.iter().any(|candidate| needs.contains(candidate)) {
+                continue;
+            }
+            let Some(&owner) = graph.nodes().iter().find(|node| node.id() == *caller) else {
+                continue;
+            };
+            plan.thread_calls.push((*call_id, context, owner));
         }
     }
 

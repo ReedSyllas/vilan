@@ -44,23 +44,23 @@ function dispose2(self) {
 	}
 	self[0].v = [  ];
 }
-function get_owner($g) {
-	return $g;
+function get_owner($e) {
+	return $e;
 }
 function $a(value) {
 	let subscribers = [  ];
 	return [ __shared_new(value), __shared_new(subscribers) ];
 }
-function $f(self) {
+function $g(self) {
 	return self[0].v;
 }
-function $e(self, observer) {
+function $f(self, observer) {
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
-		observer($f(self));
+		observer($g(self));
 		return;
 	} ]);
-	observer($f(self));
+	observer($g(self));
 	return [ self[1], id ];
 }
 function $h(self, item) {
@@ -71,8 +71,7 @@ function $h(self, item) {
 	return item;
 }
 function $c(self, observer, $d) {
-	const subscription = $e(self, observer);
-	$h(get_owner($d), subscription);
+	$h(get_owner($d), $f(self, observer));
 }
 function $i(self, value) {
 	self[0].v = value;

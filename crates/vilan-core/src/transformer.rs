@@ -2784,10 +2784,16 @@ impl<'src> Transformer<'src> {
             .implementations
             .iter()
             .filter(|implementation| {
+                // NOMINAL matching, like `resolve_member_on_type`: the impl
+                // subject is written in its own generic terms (`Signal<T>`),
+                // the receiver in concrete ones (`Signal<i32>`) — exact type
+                // equality only ever matched non-generic subjects, silently
+                // dropping inherited defaults on generic types (the emitted
+                // call then bound to the trait's abstract member).
                 self.program
                     .type_id_to_type_map
                     .get(&implementation.subject)
-                    == Some(&type_)
+                    .is_some_and(|subject| nominal_matches(subject, &type_))
             })
             .flat_map(|implementation| implementation.trait_ids.iter().copied())
             .find_map(|trait_id| self.trait_default_member(trait_id, member))

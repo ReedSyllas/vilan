@@ -60,23 +60,27 @@ fun run_with_owner(owner: Owner, body: || void)
 // Reaching this without one is a compile error (the §1 static fence).
 fun get_owner(): Owner
 
-impl Signal<type T> {
+trait Source<T> {
     ..
     // Subscribe and register with the ambient owner — nothing to hold.
-    fun effect(self, observer: |T| void)
+    fun effect(self, observer: |T| void)   // trait DEFAULT — every Source
 }
 ```
 
-`effect` is `self.sub(observer)` handed to `get_owner()`. It was DESIGNED as
-a defaulted `Source` trait method, but probing moved it: **the context call
-graph does not wire trait-dispatch edges to trait DEFAULT bodies** — a
-default body reading a context is flagged "reachable without an enclosing
-`run`" even when its only call site is covered (conservative, not a
-miscompile; pinned `#[ignore]`, backlog B14). Until that edge lands, `effect`
-is an inherent method on `Signal` — every real `Source` today. `run_with_owner`
-nests like `run`: the nearest extent wins; disposing an owner disposes the
-effects registered in its extent, stored callbacks and post-`await`
-registrations included (§1).
+`effect` is `self.sub(observer)` handed to `get_owner()`, and it lives on the
+`Source` trait as designed — **B14 is fixed** (2026-07-07): the context pass
+now adds trait-dispatch edges locally (the shared call graph stays untouched
+— it is also async inference's graph), so a default body's context read is
+covered when its dispatch sites are, and the hidden value threads through the
+dispatch call (a candidate callee that doesn't need it ignores the trailing
+argument). Fixing it exposed and repaired a LATENT MISCOMPILE beyond
+contexts: `resolve_inherited_default` matched impl subjects by exact type
+equality, so an inherited default on a GENERIC subject (`Signal<i32>` through
+`impl Signal<type T> with Source<T>`) never matched and the call silently
+bound to the trait's abstract member — now nominal matching, like
+`resolve_member_on_type`, with its own pin. Extents nest — the nearest wins;
+disposing an owner disposes the effects registered in its extent, stored
+callbacks and post-`await` registrations included (§1).
 
 ## 4. Recorded follow-ups
 
@@ -90,6 +94,33 @@ registrations included (§1).
   `get()` inside `std::reactive` when the uncovered path starts in user code;
   anchoring it at the uncovered root's call site is a diagnostics follow-up.
 - **`get_safe`** (§2.1), with the `Option`-parameter sketch.
-- **`effect` on the `Source` trait** — once the context call graph learns
-  trait-default dispatch edges (backlog B14), move/extend `effect` to the
-  trait so remote sources get it too.
+
+## 5. Context-typed closure parameters (recorded direction, 2026-07-07)
+
+The user-requested route back to `run_with_owner(owner, body)` as a plain
+function: a closure TYPE that carries a context requirement, so a closure can
+be *injected into* an extent instead of capturing at creation —
+
+```vilan
+fun run_with_owner(owner: Owner, body: (|| void) context owner_scope) {
+    owner_scope.run(owner, body);
+}
+```
+
+Semantics: a closure typed `(|| void) context owner_scope` defers its binding
+for that context — its reads resolve to a hidden argument supplied AT EACH
+CALL, not captured at creation. Creation sites are then free; CALL sites take
+on the coverage demand (calling such a closure is a context read: the caller
+must be covered, or itself annotated). The clause names the CONTEXT VALUE,
+not its element type — `context owner_scope`, not `context Owner` — because
+two contexts can share an element type and the binding must be unambiguous;
+naming a value in a signature clause has precedent (`borrows self`). `run`
+accepts an annotated closure VALUE for its matching context (the literal-only
+restriction lifts for exactly that case: `run` supplies the deferred
+argument). Compatibility: a context-free closure passes where an annotated
+one is expected (the extra hidden argument is unread); a closure literal in
+an annotated position defers instead of capturing; a closure that already
+captured (created inside an extent) keeps its captured value — capture wins,
+the deferred argument is unread. Multiple contexts: a comma list. This is a
+REAL slice (parser clause, a closure-type effect row, coverage + threading
+extensions) — design settled here, taken as its own slice.

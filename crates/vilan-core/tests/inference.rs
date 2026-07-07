@@ -6740,13 +6740,10 @@ fn a_dead_ambient_reader_does_not_poison_covered_paths() {
     );
 }
 
-// KNOWN GAP (backlog B14): the context call graph has no trait-default
-// dispatch edges — a default body reading a context is flagged "reachable
-// without an enclosing run" even when its only call site is covered.
-// Conservative (a false compile error, never a miscompile). Un-ignore when
-// the edge lands.
+// FIXED (backlog B14): the context pass now adds trait-dispatch edges
+// locally — a default body reading a context is covered when its dispatch
+// sites are, and the hidden value threads through the dispatch call.
 #[test]
-#[ignore = "backlog B14: context threading misses trait-default dispatch edges"]
 fn a_trait_default_body_reads_context_through_covered_dispatch() {
     assert_compiles_and_runs(
         r#"
@@ -6780,5 +6777,45 @@ fn a_trait_default_body_reads_context_through_covered_dispatch() {
         main();
         "#,
         "w: 9\n",
+    );
+}
+
+// FIXED with B14's slice: an inherited trait default called on a GENERIC
+// subject's concrete instance (`Signal<i32>` inheriting from
+// `impl Signal<type T> with Source<T>`) — `resolve_inherited_default`
+// matched impl subjects by exact type equality, so generic subjects never
+// matched and the call silently bound to the trait's ABSTRACT member (the
+// B12 silent-miscompile shape). Now nominal, like `resolve_member_on_type`.
+#[test]
+fn an_inherited_default_on_a_generic_subject_dispatches() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        trait Doubler<T> {
+            fun once(self): T;
+
+            fun twice(self): T {
+                self.once() + self.once()
+            }
+        }
+
+        struct Holder<T> {
+            value: T,
+        }
+
+        impl Holder<type T> with Doubler<T> {
+            fun once(self): T {
+                self.value
+            }
+        }
+
+        fun main() {
+            print(Holder { value = 21 }.twice());
+        }
+
+        main();
+        "#,
+        "42\n",
     );
 }

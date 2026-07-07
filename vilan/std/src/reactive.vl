@@ -198,6 +198,15 @@ trait Source<T> {
 	fun get(self): T;
 	[must_use]
 	fun sub(self, observer: |T| void): Subscription;
+
+	// Subscribe and register with the ambient owner (backlog A5): the
+	// scope-tied `sub` — nothing to hold, nothing to drop by hand. Requires
+	// an enclosing `owner_scope.run`, statically. A trait DEFAULT, so every
+	// `Source` gets it (B14 wired the dispatch edges that make a default
+	// body's context read coverable).
+	fun effect(self, observer: |T| void) {
+		get_owner().take(self.sub(observer));
+	}
 }
 
 // A reactive value: a current value plus the observers to notify when it changes.
@@ -250,15 +259,6 @@ impl Signal<type T> {
 
 	fun set_with(self, transform: |T| T) {
 		self.set(transform(self.get()));
-	}
-
-	// Subscribe and register with the ambient owner (backlog A5): the
-	// scope-tied `sub` — nothing to hold, nothing to drop by hand. Requires
-	// an enclosing `owner_scope.run`, statically. (Designed for the `Source`
-	// trait; inherent until the context call graph learns trait-default
-	// dispatch edges — backlog B14.)
-	fun effect(self, observer: |T| void) {
-		get_owner().take(self.sub(observer));
 	}
 
 	fun map<U>(self, transform: |T| U): Signal<U> {

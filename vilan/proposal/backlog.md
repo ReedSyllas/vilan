@@ -95,13 +95,22 @@ have gaps.
     with no impl should be a spanned compile error at the call site. (The u32/BigInt
     `Display` holes are fixed; the general check remains.)
 
-14. **Context threading misses trait-default dispatch edges** (M; found by A5, pinned
-    `#[ignore]`d) — a trait DEFAULT body reading a context is flagged "reachable without
-    an enclosing `run`" even when its only call site is covered: the context call graph
-    has no edge from a dispatched call to the trait's default body. Conservative (false
-    compile error, never a miscompile). Blocks `effect` living on the `Source` trait
-    (proposal/ambient-owner.md §3); fix = default-body dispatch edges in
-    `call_graph.rs`/`context.rs`.
+14. ~~**Context threading misses trait-default dispatch edges**~~ — **FIXED 2026-07-07**:
+    the context pass adds trait-dispatch edges locally (coverage, backward needs
+    propagation, and argument threading through dispatch call sites; the shared call
+    graph stays untouched — it is also async inference's). `effect` moved onto the
+    `Source` trait as designed; pin un-ignored. The fix EXPOSED a latent miscompile:
+    `resolve_inherited_default` matched impl subjects by exact type equality, so an
+    inherited default on a GENERIC subject silently bound to the trait's abstract member
+    (B12's shape) — now nominal matching, pinned
+    (`an_inherited_default_on_a_generic_subject_dispatches`).
+
+15. **Context-typed closure parameters** (M; design settled in
+    `proposal/ambient-owner.md` §5) — `body: (|| void) context owner_scope`: a closure
+    type carrying a context requirement, so closures can be INJECTED into an extent
+    (deferred call-site binding instead of capture-at-creation). Unblocks
+    `run_with_owner` as a plain function. Clause names the context VALUE (`borrows`
+    precedent); call sites take the coverage demand; `run` accepts annotated values.
 
 13. **A direct call on a closure-typed local doesn't type its unannotated parameter** (M;
     pinned `#[ignore]`d; surfaced writing macro `unroll` callbacks 2026-07-06) — `let f = |i|
