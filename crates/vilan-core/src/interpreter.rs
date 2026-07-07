@@ -1169,6 +1169,17 @@ impl Interpreter {
         let str_result = |out: String| Ok(Value::Str(Rc::from(out.as_str())));
         match method {
             "trim" => str_result(s.trim().to_string()),
+            // `str.code_at` — the UTF-16 code unit as a number (NaN out of
+            // range, like the host).
+            "charCodeAt" => {
+                let index = expect_number(&argument(0))?;
+                let unit = (index >= 0.0 && index.fract() == 0.0)
+                    .then(|| s.encode_utf16().nth(index as usize))
+                    .flatten();
+                Ok(Value::Number(
+                    unit.map(|unit| unit as f64).unwrap_or(f64::NAN),
+                ))
+            }
             "toLowerCase" => str_result(s.to_lowercase()),
             "toUpperCase" => str_result(s.to_uppercase()),
             "includes" => Ok(Value::Bool(s.contains(&*expect_str(&argument(0))?))),

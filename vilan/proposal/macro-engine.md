@@ -1,11 +1,10 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phases 0–2 SHIPPED, Phase 3 derives COMPLETE
-2026-07-06** (every §12 question resolved; ALL FIVE built-in derives —
-`PartialEq`/`Default`/`Debug`/`Json`/`Wire` — are user-land vilan, gated
-byte-identical against their Rust generators; `[service]` is the remaining
-generator. Helper macro funs and the first construction-API step
-(`Arguments` typed accessors) shipped alongside — see §11). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phases 0–3 SHIPPED 2026-07-06** (every §12 question
+resolved; ALL built-in generation is user-land vilan — the five derives AND
+`[service]`, each gated byte-identical against the Rust generator it
+replaced. Helper macro funs and the first construction-API step (`Arguments`
+typed accessors) shipped alongside — see §11). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -496,7 +495,19 @@ hashing, mirror lets).
   helpers, first real use — a non-macro-shaped or non-`Source`-returning
   `macro fun` compiles into the world, callable by other macros, never
   dispatched). Wire's gate was manufactured: the todo example builds
-  byte-identical bundles macro-vs-Rust. `[service]` remains.** The seam: `expand_derives` consults the toolchain's built-in derive
+  byte-identical bundles macro-vs-Rust. **`[service]` migrated too — the stress
+  test passed (2026-07-06): `Item` gained a `Service` variant whose `ServiceItem`
+  carries the resolved client name, the exposure-flagged fields (`Field` gained
+  `exposed`), and the same-module `[rpc]` surface GATHERED BY THE COMPILER
+  (module-wide reflection stays future — a service's subject includes its rpc
+  surface by the feature's own definition); the expansion cache keys on the
+  struct text PLUS the gathered method texts, so a sibling method edit
+  invalidates; the djb2 contract hash is computed by the macro itself in vilan
+  (`str.code_at`, a new UTF-16 code-unit intrinsic with interpreter support);
+  and the ~250-line generator — dispatcher, client sibling, mirrors,
+  `Client::connect` with contract enforcement — is `macro fun service` plus
+  helpers in `derives.vl`. Byte-gated on the todo and rpc examples
+  (macro-vs-Rust bundle diff) and the live socket suites.** The seam: `expand_derives` consults the toolchain's built-in derive
   macros (`<std dir>/derives.vl` — outside the layer roots, never importable, its
   names reserved against user macros) per derive name, falling back to the Rust
   generators for anything not yet migrated (and for std fixtures without the

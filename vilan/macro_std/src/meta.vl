@@ -39,10 +39,12 @@ impl TypeExpr {
 	}
 }
 
-// One struct field: its name and its written type.
+// One struct field: its name, its written type, and whether it is marked
+// `[expose]` (a service-surface field, transport-rpc.md §4.2).
 export struct Field {
 	name: str,
 	type_: TypeExpr,
+	exposed: bool,
 }
 
 export struct StructItem {
@@ -67,6 +69,18 @@ export struct FunctionItem {
 	return_type: TypeExpr,
 }
 
+// A `[service(Client)]` struct with its same-module `[rpc]` surface gathered
+// by the compiler: the service name, the resolved client name (given or
+// `{name}Client`), the struct's fields (exposure flags included), and the
+// `[rpc]` methods from this module's inherent impls (each with all written
+// parameters — `self` included; generators skip it by name).
+export struct ServiceItem {
+	name: str,
+	client_name: str,
+	fields: List<Field>,
+	methods: List<FunctionItem>,
+}
+
 // The item a macro attribute annotates — what `[derive(X)]`-style macros
 // receive. The `as_struct`/`as_enum` accessors give the common shapes back as
 // options, so a struct-only macro can `item.as_struct()!`.
@@ -74,6 +88,7 @@ export enum Item {
 	Struct(StructItem),
 	Enum(EnumItem),
 	Function(FunctionItem),
+	Service(ServiceItem),
 }
 
 impl Item {
@@ -94,6 +109,13 @@ impl Item {
 	fun as_function(self): Option<FunctionItem> {
 		match self {
 			Item::Function(let item) => Option::Some(item),
+			_ => Option::None,
+		}
+	}
+
+	fun as_service(self): Option<ServiceItem> {
+		match self {
+			Item::Service(let item) => Option::Some(item),
 			_ => Option::None,
 		}
 	}

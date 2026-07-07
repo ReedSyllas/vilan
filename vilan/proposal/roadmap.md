@@ -54,11 +54,13 @@ A compact chronicle — details live in the named proposals and the git history.
    2026-07-06** — the fueled `js::Node` interpreter + `macro_std` (70/70 equivalence
    gate); `macro fun` items, per-file hermetic worlds, `[attr]`/`[derive(X)]`
    expansion; `macro name(..)` invocations in item + expression position with
-   per-site gensym stamping; Phase 3 derives COMPLETE — all five built-in
-   derives are user-land vilan (`std/derives.vl`), byte-identical against their
-   Rust generators; helper macro funs + `Arguments` typed accessors shipped
-   alongside. Next = the `[service]` generator, the stress test) — **the
-   frontier.** User-land vilan running inside the compiler:
+   per-site gensym stamping; Phase 3 COMPLETE — all five derives AND the
+   `[service]` generator are user-land vilan (`std/derives.vl`), byte-identical
+   against the Rust they replaced (the service gate: todo/rpc bundles diffed
+   macro-vs-Rust + the live socket suites); helper macro funs, `Arguments`
+   typed accessors, `str.code_at` shipped alongside) — **the frontier: engine
+   complete through migration; remaining = the recorded tail (fuel knob,
+   scoped names, construction-API steps 2–3, `macro { .. }` blocks).** User-land vilan running inside the compiler:
    `macro fun` items over the `macro_std::meta` reflection surface, hermetic
    per-function isolation (bodies see only `macro_std`, via the general block-scoped
    imports — backlog H2, a prerequisite), `[attr]`/`[derive(X)]` + `macro name(..)`

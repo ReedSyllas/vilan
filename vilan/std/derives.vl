@@ -377,3 +377,201 @@ macro fun Wire(item: Item): Source {
 	}
 	source("")
 }
+
+// --- [service] (transport-rpc.md §4.2) ---
+
+// djb2 over the canonical contract surface (Q6 v2), rendered as 8 hex digits
+// — the same fingerprint on both generated sides.
+macro fun service_hash(surface: str): str {
+	mut hash = 5381u32;
+	mut index = 0;
+	let length = surface.len();
+	for index < length {
+		hash = (hash * 33u32) ^ surface.code_at(index);
+		index = index + 1;
+	}
+	mut hex = "";
+	mut nibble = 0;
+	for nibble < 8 {
+		let shift = 28u32 - (4u32 * u32_of_nibble(nibble));
+		hex = hex + nibble_char((hash >> shift) & 15u32);
+		nibble = nibble + 1;
+	}
+	hex
+}
+
+// (i32 loop counter → u32 shift operand; a dedicated conversion keeps the
+// hash all-u32. Number() is the identity on an in-range integer.)
+macro fun u32_of_nibble(value: i32): u32 {
+	if value == 0 { ret 0u32; }
+	if value == 1 { ret 1u32; }
+	if value == 2 { ret 2u32; }
+	if value == 3 { ret 3u32; }
+	if value == 4 { ret 4u32; }
+	if value == 5 { ret 5u32; }
+	if value == 6 { ret 6u32; }
+	7u32
+}
+
+macro fun nibble_char(digit: u32): str {
+	if digit == 0u32 { ret "0"; }
+	if digit == 1u32 { ret "1"; }
+	if digit == 2u32 { ret "2"; }
+	if digit == 3u32 { ret "3"; }
+	if digit == 4u32 { ret "4"; }
+	if digit == 5u32 { ret "5"; }
+	if digit == 6u32 { ret "6"; }
+	if digit == 7u32 { ret "7"; }
+	if digit == 8u32 { ret "8"; }
+	if digit == 9u32 { ret "9"; }
+	if digit == 10u32 { ret "a"; }
+	if digit == 11u32 { ret "b"; }
+	if digit == 12u32 { ret "c"; }
+	if digit == 13u32 { ret "d"; }
+	if digit == 14u32 { ret "e"; }
+	"f"
+}
+
+macro fun service(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source, ServiceItem, Field, FunctionItem, TypeExpr };
+	import macro_std::option::Option::{ self, Some, None };
+
+	let target = match item.as_service() {
+		Some(let found) => found,
+		None => ServiceItem { name = "?", client_name = "?", fields = [], methods = [] },
+	};
+	// The [expose]d fields: each `Signal<Element>` surfaces its element (a
+	// malformed field renders `_`, erroring clearly at the generated site).
+	mut exposed_names: List<str> = [];
+	mut exposed_elements: List<str> = [];
+	for field in target.fields {
+		if field.exposed {
+			exposed_names.push(field.name);
+			if field.type_.name == "Signal" && field.type_.arguments.len() == 1 {
+				match field.type_.arguments.get(0) {
+					Some(let element) => exposed_elements.push(element.render()),
+					None => exposed_elements.push("_"),
+				}
+			} else {
+				exposed_elements.push("_");
+			}
+		}
+	}
+	// The contract surface + its hash — shared verbatim by both sides.
+	mut surface = "";
+	for method in target.methods {
+		surface = surface + method.name + "(";
+		mut first = true;
+		for parameter in method.parameters {
+			if parameter.name == "self" {
+				jump continue;
+			}
+			if first {
+				first = false;
+			} else {
+				surface = surface + ",";
+			}
+			surface = surface + parameter.type_.render();
+		}
+		surface = surface + ")->" + method.return_type.render() + ";";
+	}
+	mut expose_index = 0;
+	for field_name in exposed_names {
+		let element = match exposed_elements.get(expose_index) {
+			Some(let found) => found,
+			None => "_",
+		};
+		surface = surface + "expose:" + field_name + ":" + element + ";";
+		expose_index = expose_index + 1;
+	}
+	let hash = service_hash(surface);
+
+	// --- The dispatcher: one route per [rpc] method, handlers capturing `self`.
+	mut out = i"impl {target.name} \{\n";
+	out = out + "\tfun dispatcher(self): Dispatcher {\n\t\tDispatcher::new()";
+	for method in target.methods {
+		mut parameter_lines = "";
+		mut argument_list = "";
+		mut arity = 0;
+		mut index = 0;
+		for parameter in method.parameters {
+			if parameter.name == "self" {
+				jump continue;
+			}
+			parameter_lines = parameter_lines + i"\t\t\t\tlet {parameter.name}: {parameter.type_.render()} = arg(request, {arity});\n";
+			if arity > 0 {
+				argument_list = argument_list + ", ";
+			}
+			argument_list = argument_list + parameter.name;
+			arity = arity + 1;
+		}
+		if arity == 0 {
+			out = out + i"\n\t\t\t.on(\"{method.name}\", |_| reply(self.{method.name}()))";
+		} else {
+			out = out + i"\n\t\t\t.on(\"{method.name}\", |request| \{\n{parameter_lines}\t\t\t\tmatch decode_failed(request) \{\n\t\t\t\t\tOption::Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),\n\t\t\t\t\tOption::None => reply(self.{method.name}({argument_list})),\n\t\t\t\t\}\n\t\t\t\})";
+		}
+	}
+	out = out + "\n\t\t\t.on(\"__contract\", |_| reply(self.contract_hash()))";
+	mut exposures = "";
+	mut first_exposure = true;
+	for field_name in exposed_names {
+		if first_exposure {
+			first_exposure = false;
+		} else {
+			exposures = exposures + ", ";
+		}
+		exposures = exposures + i"session.expose(self.{field_name})";
+	}
+	out = out + i"\n\t\t\t.on(\"__attach\", |request| \{\n\t\t\t\tlet connection: i32 = arg(request, 0);\n\t\t\t\tmatch decode_failed(request) \{\n\t\t\t\t\tOption::Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),\n\t\t\t\t\tOption::None => match session_of(connection) \{\n\t\t\t\t\t\tOption::Some(let session) => \{\n\t\t\t\t\t\t\tlet channels: List<i32> = [{exposures}];\n\t\t\t\t\t\t\treply(channels)\n\t\t\t\t\t\t\},\n\t\t\t\t\t\tOption::None => RpcOutcome::Failure(RpcError::Remote(\"unknown connection\")),\n\t\t\t\t\t\},\n\t\t\t\t\}\n\t\t\t\})";
+	out = out + "\n\t}\n";
+	out = out + i"\tfun contract_hash(self): str \{\n\t\t\"{hash}\"\n\t\}\n\}\n";
+	// --- The client sibling: a transport + a mirror per exposed field.
+	out = out + i"struct {target.client_name}<T: Transport> \{\n\ttransport: T,\n\tcodec: Codec,\n";
+	mut mirror_index = 0;
+	for field_name in exposed_names {
+		let element = match exposed_elements.get(mirror_index) {
+			Some(let found) => found,
+			None => "_",
+		};
+		out = out + i"\t{field_name}: RemoteSource<{element}>,\n";
+		mirror_index = mirror_index + 1;
+	}
+	out = out + "}\n";
+	out = out + i"impl {target.client_name}<type T> \{\n";
+	for method in target.methods {
+		mut parameter_list = "";
+		mut argument_list = "";
+		mut first = true;
+		for parameter in method.parameters {
+			if parameter.name == "self" {
+				jump continue;
+			}
+			parameter_list = parameter_list + i", {parameter.name}: {parameter.type_.render()}";
+			if first {
+				first = false;
+			} else {
+				argument_list = argument_list + ", ";
+			}
+			argument_list = argument_list + i"|serializer: Serializer| {parameter.name}.describe(serializer)";
+		}
+		out = out + i"\tfun {method.name}(self{parameter_list}): Result<{method.return_type.render()}, RpcError> \{\n\t\tcall(self.transport, self.codec, \"{method.name}\", [{argument_list}])\n\t\}\n";
+	}
+	out = out + "\tfun verify(self): Result<bool, RpcError> {\n\t\tlet remote: Result<str, RpcError> = call(self.transport, self.codec, \"__contract\", []);\n\t\tResult::Ok(remote! == self.contract_hash())\n\t}\n";
+	out = out + i"\tfun contract_hash(self): str \{\n\t\t\"{hash}\"\n\t\}\n\}\n";
+	// --- Client::connect (§4.2): contract enforcement, __attach, mirrors.
+	mut mirror_lets = "";
+	mut mirror_fields = "";
+	mut channel_index = 0;
+	for field_name in exposed_names {
+		let element = match exposed_elements.get(channel_index) {
+			Some(let found) => found,
+			None => "_",
+		};
+		mirror_lets = mirror_lets + i"\t\tlet mirror_{field_name}: RemoteSource<{element}> = reactive.source(channels[{channel_index}]);\n";
+		mirror_fields = mirror_fields + i",\n\t\t\t{field_name} = mirror_{field_name}";
+		channel_index = channel_index + 1;
+	}
+	out = out + i"impl {target.client_name}<SocketTransport> \{\n\tfun connect(url: str, codec: Codec): Result<{target.client_name}<SocketTransport>, RpcError> \{\n\t\tlet socket = connect_socket(url);\n\t\tlet transport = socket.transport();\n\t\tlet remote: Result<str, RpcError> = call(transport, codec, \"__contract\", []);\n\t\tif remote! != \"{hash}\" \{\n\t\t\tret Result::Err(RpcError::Contract(\"the server reports a different service surface\"));\n\t\t\}\n\t\tlet connection = socket.connection;\n\t\tlet attached: Result<List<i32>, RpcError> = call(transport, codec, \"__attach\", [|serializer: Serializer| connection.describe(serializer)]);\n\t\tlet channels = attached!;\n\t\tlet reactive = ReactiveClient::new(bridge(socket), codec);\n{mirror_lets}\t\tResult::Ok({target.client_name} \{\n\t\t\ttransport = transport,\n\t\t\tcodec = codec{mirror_fields},\n\t\t\})\n\t\}\n\}\n";
+	source(out)
+}

@@ -5931,3 +5931,22 @@ fn a_direct_call_types_an_unannotated_closure_parameter() {
         "30\n",
     );
 }
+
+// `str.code_at` — the UTF-16 code-unit accessor (added for the service
+// macro's djb2 contract hash; charCodeAt under the hood).
+#[test]
+fn code_at_reads_utf16_units() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            print("A".code_at(0));
+            print("ab".code_at(1));
+        }
+
+        main();
+        "#,
+        "65\n98\n",
+    );
+}

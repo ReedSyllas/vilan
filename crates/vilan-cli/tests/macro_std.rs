@@ -51,7 +51,7 @@ fun main() {
     let list_of_i32 = TypeExpr { name = "List", arguments = [TypeExpr { name = "i32", arguments = [] }] };
     print(list_of_i32.render());
     print(source("let x = 1;").text);
-    let item = Item::Struct(StructItem { name = "Point", fields = [Field { name = "x", type_ = TypeExpr { name = "i32", arguments = [] } }] });
+    let item = Item::Struct(StructItem { name = "Point", fields = [Field { name = "x", type_ = TypeExpr { name = "i32", arguments = [] }, exposed = false }] });
     match item.as_struct() {
         Some(let found) => print(found.name),
         None => print("not a struct"),

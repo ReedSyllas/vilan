@@ -236,7 +236,10 @@ have gaps.
    Derives COMPLETE (2026-07-06):
    all five migrated (`Json`+`Wire` together — one Rust contract — via str-returning
    helper macro funs); `Arguments` typed accessors shipped (construction API step 1).
-   **Remaining:** `[service]` migration (the stress test); the derive-name registration mechanism (builtins
+   `[service]` migrated same day (the
+   stress test passed: `Item::Service`/`ServiceItem` reflection with compiler-gathered
+   rpc surface, cache keyed on struct+methods text, in-macro djb2 via new `str.code_at`;
+   byte-gated on todo/rpc bundles). **Remaining:** the derive-name registration mechanism (builtins
    settle as fn-name = trait name; decoupling deferred to the first user derive needing
    it); `vilan.toml [macros]` fuel knob; module-scoped macro names (v1 flat); attribute
    use inside dependency files; ambient meta vocabulary in macro scope; the

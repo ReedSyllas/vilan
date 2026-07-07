@@ -998,13 +998,14 @@ fn construct_item(item: &Spanned<Node>, text: &str) -> js::Node<'static> {
                 .iter()
                 .flat_map(|fields| &fields.0)
                 .map(|(field, _)| {
-                    let (field_name, field_type, _exposed) = field;
+                    let (field_name, field_type, exposed) = field;
                     array(vec![
                         string_literal(field_name.0),
                         field_type
                             .as_ref()
                             .map(|type_| construct_type_expr(type_, text))
                             .unwrap_or_else(void_type_expr),
+                        js::Node::Bool(*exposed),
                     ])
                 })
                 .collect();
@@ -1035,44 +1036,140 @@ fn construct_item(item: &Spanned<Node>, text: &str) -> js::Node<'static> {
                 array(vec![string_literal(name.0), array(variants)]),
             ])
         }
-        Node::Func(function) => {
-            let parameters = function
-                .parameters
-                .0
-                .iter()
-                .map(|(pattern, type_, _convention, span)| {
-                    let parameter_name = match pattern {
-                        Pattern::Binding(name, _) => (*name).to_string(),
-                        _ => slice(text, *span).to_string(),
-                    };
-                    array(vec![
-                        string_literal(&parameter_name),
-                        type_
-                            .as_ref()
-                            .map(|type_| construct_type_expr(type_, text))
-                            .unwrap_or_else(void_type_expr),
-                    ])
-                })
-                .collect();
-            array(vec![
-                discriminant(2),
-                array(vec![
-                    string_literal(function.name.0),
-                    array(parameters),
-                    function
-                        .return_type
-                        .as_ref()
-                        .map(|type_| construct_type_expr(type_, text))
-                        .unwrap_or_else(void_type_expr),
-                ]),
-            ])
-        }
+        Node::Func(function) => array(vec![
+            discriminant(2),
+            construct_function_item(function, text),
+        ]),
         // The parser only puts structs/enums/functions under an attribute.
         _ => array(vec![
             discriminant(0),
             array(vec![string_literal(""), array(Vec::new())]),
         ]),
     }
+}
+
+/// A `FunctionItem` value: name, parameters (as never-exposed `Field`s, `self`
+/// included — consumers skip it by name), and the written return type
+/// (`void` when omitted).
+fn construct_function_item(function: &Func, text: &str) -> js::Node<'static> {
+    let parameters = function
+        .parameters
+        .0
+        .iter()
+        .map(|(pattern, type_, _convention, span)| {
+            let parameter_name = match pattern {
+                Pattern::Binding(name, _) => (*name).to_string(),
+                _ => slice(text, *span).to_string(),
+            };
+            array(vec![
+                string_literal(&parameter_name),
+                type_
+                    .as_ref()
+                    .map(|type_| construct_type_expr(type_, text))
+                    .unwrap_or_else(void_type_expr),
+                js::Node::Bool(false),
+            ])
+        })
+        .collect();
+    array(vec![
+        string_literal(function.name.0),
+        array(parameters),
+        function
+            .return_type
+            .as_ref()
+            .map(|type_| construct_type_expr(type_, text))
+            .unwrap_or_else(void_type_expr),
+    ])
+}
+
+/// The `Item::Service` value for a `[service(..)]` struct — the compiler
+/// gathers the same-module `[rpc]` surface (module-wide reflection stays
+/// future; a service's subject INCLUDES its rpc surface by the feature's own
+/// definition). Returns the literal plus the canonical INPUT text the
+/// expansion cache keys on: the output depends on the sibling impls, so the
+/// struct's own text alone would go stale when a method changes.
+pub(crate) fn construct_service(
+    client_name: Option<&str>,
+    item: &Spanned<Node>,
+    nodes: &NodeList,
+    text: &str,
+) -> Option<(js::Node<'static>, String)> {
+    let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
+        return None;
+    };
+    let service_name = name.0;
+    let client = client_name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{service_name}Client"));
+    let field_values = fields
+        .0
+        .iter()
+        .map(|(field, _)| {
+            let (field_name, field_type, exposed) = field;
+            array(vec![
+                string_literal(field_name.0),
+                field_type
+                    .as_ref()
+                    .map(|type_| construct_type_expr(type_, text))
+                    .unwrap_or_else(void_type_expr),
+                js::Node::Bool(*exposed),
+            ])
+        })
+        .collect();
+    let mut methods = Vec::new();
+    let mut input = String::new();
+    input.push_str(slice(text, item.1));
+    input.push('\u{0}');
+    input.push_str(&client);
+    for (node, _span) in nodes {
+        let Node::Impl(subject, impl_traits, body) = node else {
+            continue;
+        };
+        if !impl_traits.is_empty() {
+            continue;
+        }
+        let Node::Accessor(subject_name) = &subject.0 else {
+            continue;
+        };
+        if *subject_name != service_name {
+            continue;
+        }
+        for (member, member_span) in &body.0 {
+            let Node::Func(function) = member else {
+                continue;
+            };
+            if !function.rpc {
+                continue;
+            }
+            methods.push(construct_function_item(function, text));
+            input.push('\u{0}');
+            input.push_str(slice(text, *member_span));
+        }
+    }
+    let literal = array(vec![
+        discriminant(3),
+        array(vec![
+            string_literal(service_name),
+            string_literal(&client),
+            array(field_values),
+            array(methods),
+        ]),
+    ]);
+    Some((literal, input))
+}
+
+/// Runs the built-in `service` macro against a `[service(..)]` struct.
+pub(crate) fn run_builtin_service(
+    def: &MacroDef,
+    client_name: Option<&str>,
+    item: &Spanned<Node>,
+    nodes: &NodeList,
+    text: &str,
+) -> Result<&'static str, String> {
+    let Some((literal, input)) = construct_service(client_name, item, nodes, text) else {
+        return Ok(""); // a bodyless struct generates nothing, like the Rust path
+    };
+    cached_run(def, "service", &input, &[], &[literal])
 }
 
 /// `Arguments { values }` — the invocation's argument source texts.

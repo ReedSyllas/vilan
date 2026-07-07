@@ -11948,7 +11948,22 @@ pub(crate) fn expand_derives(
             // contract hash from the struct's same-module `[rpc]` impl methods
             // and `[expose]`d fields (transport-rpc.md §4.2).
             Node::Service(client_name, item) => {
-                source.push_str(&service_impl_source(*client_name, item, nodes));
+                match crate::macros::builtin_derive(builtins, "service") {
+                    Some(def) => match crate::macros::run_builtin_service(
+                        def,
+                        *client_name,
+                        item,
+                        nodes,
+                        text,
+                    ) {
+                        Ok(generated) => source.push_str(generated),
+                        Err(message) => diagnostics.push(Error {
+                            span: item.1,
+                            msg: format!("the built-in `[service]` macro failed: {message}"),
+                        }),
+                    },
+                    None => source.push_str(&service_impl_source(*client_name, item, nodes)),
+                }
                 any_service = true;
             }
             _ => {}
