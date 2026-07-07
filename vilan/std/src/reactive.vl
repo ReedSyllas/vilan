@@ -261,10 +261,7 @@ impl Signal<Signal<type U>> {
 		let inner_subscription: Shared<Option<Subscription>> = Shared::new(None);
 		// `sub` runs its observer immediately, so the first inner wires here too.
 		let outer_subscription = self.sub(|inner| {
-			match inner_subscription.read() {
-				Some(let previous) => previous.dispose(),
-				None => {},
-			}
+			inner_subscription.read()?.dispose();
 			inner_subscription.write() = Some(inner.sub(|value| {
 				derived.set(value);
 			}));

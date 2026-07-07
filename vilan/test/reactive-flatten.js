@@ -86,11 +86,10 @@ function $c(self) {
 	$k(self, (inner) => {
 		const $f = inner_subscription.v;
 		let $g = null;
-		if ($f[0] === 0) {
-			const previous = $f[1];
-			$g = dispose(previous);
+		if ($f[0] === 1) {
+			$g = $f;
 		} else {
-			$g = undefined;
+			$g = [ 0, dispose($f[1]) ];
 		}
 		$g;
 		inner_subscription.v = [ 0, $j(inner, (value) => {
