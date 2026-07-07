@@ -603,7 +603,6 @@ fun json_codec(): Codec {
 // the `Wire` TRAIT stays in `wire.vl`. Outputs carry their own imports.
 
 macro fun struct_json_impls(target: StructItem): str {
-	import macro_std::meta::StructItem;
 	import macro_std::build::{ impl_of, fun_of, init_of, quote, join };
 
 	// `"{" + "\"a\":" + self.a.to_json() + "," + … + "}"`.
@@ -642,7 +641,6 @@ macro fun struct_json_impls(target: StructItem): str {
 }
 
 macro fun struct_wire_impls(target: StructItem): str {
-	import macro_std::meta::StructItem;
 	import macro_std::build::{ impl_of, fun_of, init_of, quote };
 
 	mut describe = fun_of("describe")
@@ -673,7 +671,6 @@ macro fun struct_wire_impls(target: StructItem): str {
 }
 
 macro fun enum_json_impls(target: EnumItem): str {
-	import macro_std::meta::{ EnumItem, TypeExpr };
 	import macro_std::option::Option::{ self, Some, None };
 	import macro_std::build::{ impl_of, fun_of, match_of, quote, join };
 
@@ -749,7 +746,6 @@ macro fun enum_json_impls(target: EnumItem): str {
 }
 
 macro fun enum_wire_impls(target: EnumItem): str {
-	import macro_std::meta::{ EnumItem, TypeExpr };
 	import macro_std::option::Option::{ self, Some, None };
 	import macro_std::build::{ impl_of, fun_of, match_of, quote, join };
 
@@ -840,8 +836,6 @@ macro fun enum_wire_impls(target: EnumItem): str {
 }
 
 macro fun Json(item: Item): Source {
-	import macro_std::source;
-	import macro_std::meta::{ Item, Source };
 	import macro_std::option::Option::{ self, Some, None };
 
 	if item.as_struct() is Some(let target) {
@@ -854,8 +848,6 @@ macro fun Json(item: Item): Source {
 }
 
 macro fun Wire(item: Item): Source {
-	import macro_std::source;
-	import macro_std::meta::{ Item, Source };
 	import macro_std::option::Option::{ self, Some, None };
 
 	if item.as_struct() is Some(let target) {

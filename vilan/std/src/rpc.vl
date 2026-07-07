@@ -1116,8 +1116,6 @@ macro fun route_block(name: str, statements: List<str>): str {
 }
 
 macro fun service(item: Item): Source {
-	import macro_std::source;
-	import macro_std::meta::{ Item, Source, ServiceItem, Field, FunctionItem, TypeExpr };
 	import macro_std::option::Option::{ self, Some, None };
 	import macro_std::build::{ impl_of, fun_of, match_of, struct_of, quote, join, indent };
 

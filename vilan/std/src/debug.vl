@@ -35,8 +35,6 @@ impl bool with Debug {
 // The `Debug` derive: a prelude macro (this module is always loaded).
 
 macro fun Debug(item: Item): Source {
-	import macro_std::source;
-	import macro_std::meta::{ Item, Source };
 	import macro_std::option::Option::{ self, Some, None };
 	import macro_std::build::{ impl_of, fun_of, match_of, quote, join };
 

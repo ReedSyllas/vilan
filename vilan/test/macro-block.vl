@@ -1,0 +1,53 @@
+// `macro { .. }` blocks (macro-engine.md Phase 4): an anonymous, immediately-
+// expanded macro. In item position its emissions splice as items (comptime-
+// style families without naming a macro); in expression position it yields a
+// spliced expression (compile-time constant folding). Bodies are hermetic
+// macro-world code with the ambient meta prelude — the minimal block needs no
+// imports at all.
+import std::print;
+
+// A helper `macro fun` — a block calls it as a plain in-world function.
+macro fun labeled(name: str, value: i32): str {
+    i"fun {name}(): i32 \{ {value} \}\n"
+}
+
+// ITEM position: a family of constants, stamped out at expansion time.
+macro {
+    mut generated = "";
+    mut index = 0;
+    for index < 3 {
+        generated = generated + labeled(i"constant_{index}", index * 10);
+        index = index + 1;
+    }
+    source(generated)
+}
+
+fun main() {
+    print(constant_0() + constant_1() + constant_2());
+
+    // EXPRESSION position: the sum 1..=10, folded at compile time.
+    let folded = macro {
+        mut total = 0;
+        mut index = 1;
+        for index <= 10 {
+            total = total + index;
+            index = index + 1;
+        }
+        source(i"{total}")
+    };
+    print(folded);
+
+    // Two expression blocks using `fresh()` gensyms: each site's binders are
+    // stamped unique, so the splices cannot capture each other.
+    let first = macro {
+        let slot = fresh();
+        source(i"\{ let {slot} = 5; {slot} * 2 \}")
+    };
+    let second = macro {
+        let slot = fresh();
+        source(i"\{ let {slot} = 7; {slot} * 3 \}")
+    };
+    print(first + second);
+}
+
+main();

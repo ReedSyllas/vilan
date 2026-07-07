@@ -325,10 +325,20 @@ where
         .labelled("macro invocation")
         .boxed();
 
+    // `macro { .. }` — an anonymous, immediately-expanded macro (macro-engine.md
+    // Phase 4): the body is macro-world code (a function body), the returned
+    // `Source` splices at this position.
+    let macro_block = just(Token::Macro)
+        .ignore_then(block.clone())
+        .map_with(|body, e| (Node::MacroBlock(body), e.span()))
+        .labelled("macro block")
+        .boxed();
+
     let atom = choice((
         literal,
         tuple_comprehension,
         macro_invocation.clone(),
+        macro_block.clone(),
         local,
         local_type.clone(),
         list,
@@ -1296,7 +1306,7 @@ where
 
     // `macro fun name(..) { .. }` — a macro definition (macro-engine.md §3).
     // The parser decides on the token after `macro`: `fun` is a definition, an
-    // identifier is an invocation (blocks are Phase 4).
+    // identifier is an invocation, `{` is a block.
     let macro_fun = just(Token::Macro)
         .ignore_then(
             function
@@ -1349,6 +1359,9 @@ where
         service_item,
         macro_attributed_item,
         macro_fun,
+        macro_block
+            .clone()
+            .then_ignore(just(Token::Ctrl(';')).or_not()),
         macro_invocation
             .clone()
             .then_ignore(just(Token::Ctrl(';')).or_not()),

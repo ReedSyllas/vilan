@@ -91,6 +91,10 @@ pub(crate) enum ModuleKey {
 #[derive(Default)]
 pub(crate) struct MacroRegistry {
     by_module: HashMap<ModuleKey, HashMap<String, MacroDef>>,
+    /// `macro { .. }` blocks per file, keyed by the block NODE's address —
+    /// anonymous, so they dispatch by position, not name (macro-engine.md
+    /// Phase 4). Only the defining file's own blocks are ever in scope.
+    blocks_by_module: HashMap<ModuleKey, HashMap<usize, MacroDef>>,
 }
 
 impl MacroRegistry {
@@ -101,13 +105,19 @@ impl MacroRegistry {
 
 /// The macros in scope for ONE file: same-file definitions shadow imported
 /// ones, which shadow the std prelude — the ordinary name-resolution order.
+/// `blocks` are the file's OWN `macro { .. }` blocks, by node address.
 pub(crate) struct MacroScope<'r> {
     names: HashMap<String, &'r MacroDef>,
+    blocks: Option<&'r HashMap<usize, MacroDef>>,
 }
 
 impl<'r> MacroScope<'r> {
     fn get(&self, name: &str) -> Option<&'r MacroDef> {
         self.names.get(name).copied()
+    }
+
+    fn block(&self, address: usize) -> Option<&'r MacroDef> {
+        self.blocks.and_then(|blocks| blocks.get(&address))
     }
 }
 
@@ -188,7 +198,10 @@ pub(crate) fn scope_for<'r>(
             names.insert(name.clone(), def);
         }
     }
-    MacroScope { names }
+    MacroScope {
+        names,
+        blocks: registry.blocks_by_module.get(key),
+    }
 }
 
 /// Which package a file belongs to, for import-root resolution.
@@ -293,6 +306,48 @@ fn macro_funs<'a, 'src>(nodes: &'a NodeList<'src>) -> Vec<(&'a Func<'src>, Span)
         .collect()
 }
 
+/// A file's `macro { .. }` blocks, at ANY depth (expression position nests),
+/// with each block's node address and full span — plus the spans of ILLEGAL
+/// ones (inside a `macro fun` body or another block: those bodies are already
+/// macro-world code, where there is nothing to splice into).
+fn macro_blocks<'a, 'src>(nodes: &'a NodeList<'src>) -> (Vec<(usize, Span)>, Vec<Span>) {
+    fn walk<'a, 'src>(
+        node: &'a Spanned<Node<'src>>,
+        inside_macro: bool,
+        blocks: &mut Vec<(usize, Span)>,
+        illegal: &mut Vec<Span>,
+    ) {
+        let inside_next = match &node.0 {
+            Node::MacroFun(_) => true,
+            Node::MacroBlock(_) => {
+                if inside_macro {
+                    illegal.push(node.1);
+                } else {
+                    blocks.push((node as *const Spanned<Node> as usize, node.1));
+                }
+                true
+            }
+            _ => inside_macro,
+        };
+        node.0
+            .for_each_child(&mut |child| walk(child, inside_next, blocks, illegal));
+    }
+    let mut blocks = Vec::new();
+    let mut illegal = Vec::new();
+    for node in nodes {
+        walk(node, false, &mut blocks, &mut illegal);
+    }
+    blocks.sort_by_key(|(_, span)| span.into_range().start);
+    (blocks, illegal)
+}
+
+/// The world-side entry name of the file's `n`-th block (text order) — the
+/// same numbering `analyze_source`'s world hook stamps onto the synthetic
+/// wrapper funs.
+pub(crate) fn block_entry_name(ordinal: usize) -> String {
+    format!("__macro_block_{ordinal}")
+}
+
 /// Registers a file's `macro fun`s: checks their bodies' hermeticity, compiles
 /// the file's macro world (cached by blanked content), and binds each macro
 /// name. Diagnostics carry spans into THIS file (the caller attributes them).
@@ -307,12 +362,26 @@ pub(crate) fn register_file(
     diagnostics: &mut Vec<Error>,
 ) {
     let definitions = macro_funs(nodes);
-    if definitions.is_empty() {
+    let (blocks, illegal_blocks) = macro_blocks(nodes);
+    for span in &illegal_blocks {
+        diagnostics.push(Error {
+            span: *span,
+            msg: "a `macro { .. }` block cannot appear inside macro code — the enclosing \
+                  body already runs at expansion time"
+                .to_string(),
+        });
+    }
+    if definitions.is_empty() && blocks.is_empty() {
         return;
     }
+    let first_span = definitions
+        .first()
+        .map(|(_, span)| *span)
+        .or_else(|| blocks.first().map(|(_, span)| *span))
+        .unwrap_or_else(|| (0..0).into());
     let Some(macro_std) = resolve_macro_std(std) else {
         diagnostics.push(Error {
-            span: definitions[0].1,
+            span: first_span,
             msg: "the `macro_std` package was not found beside `std` — macros need the \
                   toolchain's `macro_std`"
                 .to_string(),
@@ -321,8 +390,9 @@ pub(crate) fn register_file(
     };
 
     // Hermeticity (§4): a macro body imports only from `macro_std`. Checked on
-    // the ORIGINAL parse so the error points at the offending import.
-    let mut hermetic = true;
+    // the ORIGINAL parse so the error points at the offending import. Block
+    // bodies are macro bodies too.
+    let mut hermetic = illegal_blocks.is_empty();
     for (function, _) in &definitions {
         if let Some(body) = &function.body {
             for statement in body.0.0.iter().chain(std::iter::once(&*body.0.1)) {
@@ -330,13 +400,17 @@ pub(crate) fn register_file(
             }
         }
     }
+    for node in nodes {
+        check_hermetic_block_imports(node, diagnostics, &mut hermetic);
+    }
     if !hermetic {
         return;
     }
 
     let _ = macro_std; // presence checked above; the world resolves it lazily
-    let blanked = Arc::new(blank_to_world(text, &definitions));
-    let module = registry.by_module.entry(key).or_default();
+    let block_spans: Vec<Span> = blocks.iter().map(|(_, span)| *span).collect();
+    let blanked = Arc::new(blank_to_world(text, &definitions, &block_spans));
+    let module = registry.by_module.entry(key.clone()).or_default();
     for (function, _) in &definitions {
         let name = function.name.0.to_string();
         if module.contains_key(&name) {
@@ -357,6 +431,47 @@ pub(crate) fn register_file(
                 world: std::cell::RefCell::new(None),
             },
         );
+    }
+    if !blocks.is_empty() {
+        let by_address = registry.blocks_by_module.entry(key).or_default();
+        for (ordinal, (address, _)) in blocks.iter().enumerate() {
+            by_address.insert(
+                *address,
+                MacroDef {
+                    name: block_entry_name(ordinal),
+                    shape: Some(MacroShape::Unit),
+                    blanked: blanked.clone(),
+                    file: file.to_path_buf(),
+                    source,
+                    world: std::cell::RefCell::new(None),
+                },
+            );
+        }
+    }
+}
+
+/// The hermetic-import check over `macro { .. }` block bodies found at any
+/// depth (the check for `macro fun` bodies runs separately, from the
+/// definitions list).
+fn check_hermetic_block_imports(
+    node: &Spanned<Node>,
+    diagnostics: &mut Vec<Error>,
+    hermetic: &mut bool,
+) {
+    match &node.0 {
+        // A macro fun's body is checked by the caller; blocks inside it are
+        // already illegal.
+        Node::MacroFun(_) => {}
+        Node::MacroBlock(body) => {
+            for statement in body.0.0.iter().chain(std::iter::once(&*body.0.1)) {
+                check_hermetic_imports(statement, diagnostics, hermetic);
+            }
+        }
+        _ => {
+            node.0.for_each_child(&mut |child| {
+                check_hermetic_block_imports(child, diagnostics, hermetic)
+            });
+        }
     }
 }
 
@@ -416,7 +531,11 @@ fn macro_shape(function: &Func) -> Option<MacroShape> {
 /// The macro world's source: every byte outside the macro definitions becomes
 /// a space (newlines kept, so spans and line numbers stay true), and each
 /// definition's leading `macro` keyword is blanked, leaving a plain `fun`.
-fn blank_to_world(text: &str, definitions: &[(&Func, Span)]) -> String {
+/// `macro { .. }` blocks stay VERBATIM (keyword included): the world's parse
+/// sees them as `MacroBlock` statements at its top level, and the world hook
+/// in `analyze_source` wraps each into a synthetic `fun __macro_block_<n>():
+/// Source` — true spans, no offset arithmetic.
+fn blank_to_world(text: &str, definitions: &[(&Func, Span)], blocks: &[Span]) -> String {
     let bytes = text.as_bytes();
     let mut blanked: Vec<u8> = bytes
         .iter()
@@ -430,6 +549,11 @@ fn blank_to_world(text: &str, definitions: &[(&Func, Span)]) -> String {
         if bytes[range.clone()].starts_with(b"macro") {
             blanked[range.start..range.start + 5].fill(b' ');
         }
+    }
+    for span in blocks {
+        let range = span.into_range();
+        let range = range.start.min(bytes.len())..range.end.min(bytes.len());
+        blanked[range.clone()].copy_from_slice(&bytes[range.clone()]);
     }
     String::from_utf8(blanked).expect("blanking preserves UTF-8 (multibyte bytes become spaces)")
 }
@@ -451,6 +575,70 @@ thread_local! {
 
 pub(crate) fn in_macro_world() -> bool {
     IN_MACRO_WORLD.with(|flag| flag.get())
+}
+
+/// The macro world's AMBIENT prelude vocabulary (macro-engine.md §3/§10): the
+/// compiler-interaction surface — the `meta` reflection types plus
+/// `source`/`fresh` — is in scope in every macro body without imports, the
+/// way the derive macros are ambient in program code. Libraries (`option`,
+/// `build`, …) stay explicit imports; the ambient set is exactly the surface
+/// a macro exists to talk to.
+const AMBIENT_META_TYPES: &[&str] = &[
+    "Item",
+    "StructItem",
+    "EnumItem",
+    "FunctionItem",
+    "ServiceItem",
+    "Field",
+    "Variant",
+    "TypeExpr",
+    "Arguments",
+    "Source",
+];
+const AMBIENT_FUNCTIONS: &[&str] = &["source", "fresh"];
+
+/// The prelude's parsed import nodes for one world, with any name the file
+/// DEFINES itself left out — a same-named `macro fun` shadows the prelude
+/// (imports overwrite hoisted function bindings, so the exclusion is how the
+/// prelude yields). Parsed fresh per world compile (worlds cache
+/// process-globally); the built text leaks, bounded like the world itself.
+pub(crate) fn world_prelude_nodes(
+    defined: &std::collections::HashSet<&str>,
+) -> Option<NodeList<'static>> {
+    use chumsky::prelude::*;
+    let survivors: Vec<&str> = AMBIENT_META_TYPES
+        .iter()
+        .copied()
+        .filter(|name| !defined.contains(name))
+        .collect();
+    let mut text = String::new();
+    if !survivors.is_empty() {
+        text.push_str("import macro_std::meta::{ ");
+        text.push_str(&survivors.join(", "));
+        text.push_str(" };\n");
+    }
+    for function in AMBIENT_FUNCTIONS {
+        if !defined.contains(function) {
+            text.push_str("import macro_std::");
+            text.push_str(function);
+            text.push_str(";\n");
+        }
+    }
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    let text: &'static str = Box::leak(text.into_boxed_str());
+    let tokens = crate::lexer().parse(text).into_output()?;
+    let root = crate::parser()
+        .parse(
+            tokens
+                .as_slice()
+                .map((text.len()..text.len()).into(), |(token, span)| {
+                    (token, span)
+                }),
+        )
+        .into_output()?;
+    Some(root.0)
 }
 
 fn compile_world(
@@ -705,13 +893,21 @@ impl Expander<'_, '_> {
                     .push(node as *const Spanned<Node> as usize);
                 self.run_invocation(name, *name_span, &arguments, depth, None);
             }
+            // An ITEM-position `macro { .. }` block: the output parses as
+            // items and appends (its body never expands here — world code).
+            Node::MacroBlock(_) => {
+                let site = node as *const Spanned<Node> as usize;
+                self.output.item_sites.push(site);
+                self.run_block(site, node.1, depth, None);
+            }
             // Everything else: hunt expression-position invocations inside.
             _ => self.sweep_expressions(node, text, depth),
         }
     }
 
-    /// Finds `macro name(..)` in EXPRESSION position anywhere under `node`
-    /// (macro definitions excluded — their bodies belong to the world).
+    /// Finds `macro name(..)` invocations and `macro { .. }` blocks in
+    /// EXPRESSION position anywhere under `node` (macro definitions and block
+    /// bodies excluded — those belong to the world).
     fn sweep_expressions(&mut self, node: &Spanned<Node>, text: &str, depth: u32) {
         match &node.0 {
             Node::MacroFun(_) => {}
@@ -723,11 +919,51 @@ impl Expander<'_, '_> {
                 let site = node as *const Spanned<Node> as usize;
                 self.run_invocation(name, *name_span, &arguments, depth, Some(site));
             }
+            Node::MacroBlock(_) => {
+                let site = node as *const Spanned<Node> as usize;
+                self.run_block(site, node.1, depth, Some(site));
+            }
             _ => {
                 node.0
                     .for_each_child(&mut |child| self.sweep_expressions(child, text, depth));
             }
         }
+    }
+
+    /// `macro { .. }` dispatch: an anonymous zero-argument macro, resolved by
+    /// the block node's ADDRESS in the defining file (blocks have no names).
+    /// A miss means the file's registration failed (generated blocks are
+    /// rejected at their generating site before this can run).
+    fn run_block(
+        &mut self,
+        address: usize,
+        site: Span,
+        depth: u32,
+        expression_site: Option<usize>,
+    ) {
+        let Some(def) = self.scope.block(address) else {
+            self.diagnostics.push(Error {
+                span: site,
+                msg: "this `macro { .. }` block was not registered — see the file's \
+                      earlier macro errors"
+                    .to_string(),
+            });
+            if let Some(site_key) = expression_site {
+                self.output.failed_sites.push(site_key);
+            }
+            return;
+        };
+        let name = def.name.clone();
+        self.expand_call(
+            def,
+            &name,
+            site,
+            "",
+            &[],
+            Vec::new(),
+            depth,
+            expression_site,
+        );
     }
 
     /// `[service(..)]` dispatch through the std `service` macro.
@@ -939,13 +1175,20 @@ impl Expander<'_, '_> {
         depth: u32,
         expression_site: Option<usize>,
     ) {
+        // Blocks are anonymous — their synthetic entry names would read as
+        // noise in diagnostics.
+        let label = if name.starts_with("__macro_block_") {
+            "the `macro { .. }` block".to_string()
+        } else {
+            format!("macro `{name}`")
+        };
         if depth >= self.limits.depth {
             let cap = self.limits.depth;
             self.diagnostics.push(Error {
                 span: site,
                 msg: format!(
                     "macro expansion did not settle after {cap} rounds — the chain ends \
-                     at `{name}`"
+                     at {label}"
                 ),
             });
             if let Some(site_key) = expression_site {
@@ -966,7 +1209,7 @@ impl Expander<'_, '_> {
                     .extend(errors.into_iter().map(|error| (def.source, error)));
                 self.diagnostics.push(Error {
                     span: site,
-                    msg: format!("macro `{name}`'s definition did not compile"),
+                    msg: format!("{label}'s definition did not compile"),
                 });
                 if let Some(site_key) = expression_site {
                     self.output.failed_sites.push(site_key);
@@ -987,7 +1230,7 @@ impl Expander<'_, '_> {
             Err(message) => {
                 self.diagnostics.push(Error {
                     span: site,
-                    msg: format!("macro `{name}` failed at expansion time: {message}"),
+                    msg: format!("{label} failed at expansion time: {message}"),
                 });
                 if let Some(site_key) = expression_site {
                     self.output.failed_sites.push(site_key);
@@ -1014,7 +1257,7 @@ impl Expander<'_, '_> {
                     self.diagnostics.push(Error {
                         span: site,
                         msg: format!(
-                            "macro `{name}` generated invalid vilan ({message}) — the \
+                            "{label} generated invalid vilan ({message}) — the \
                              output was: {}",
                             preview(&wrapped)
                         ),
@@ -1027,13 +1270,25 @@ impl Expander<'_, '_> {
                 self.diagnostics.push(Error {
                     span: site,
                     msg: format!(
-                        "macro `{name}` must generate a single expression here (it is \
+                        "{label} must generate a single expression here (it is \
                          spliced in expression position)"
                     ),
                 });
                 self.output.failed_sites.push(site_key);
                 return;
             };
+            let (generated_blocks, _) = macro_blocks(parsed);
+            if !generated_blocks.is_empty() {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "{label} generated a `macro {{ .. }}` block — macros cannot \
+                         define macros (macro-engine.md §3)"
+                    ),
+                });
+                self.output.failed_sites.push(site_key);
+                return;
+            }
             self.output.expressions.push((site_key, only));
             // The spliced expression may itself contain invocations.
             self.sweep_expressions(only, parsed_text, depth + 1);
@@ -1048,7 +1303,7 @@ impl Expander<'_, '_> {
                     self.diagnostics.push(Error {
                         span: site,
                         msg: format!(
-                            "macro `{name}` generated invalid vilan ({message}) — the \
+                            "{label} generated invalid vilan ({message}) — the \
                              output was: {}",
                             preview(stamped.as_deref().unwrap_or(raw))
                         ),
@@ -1060,8 +1315,19 @@ impl Expander<'_, '_> {
                 self.diagnostics.push(Error {
                     span: site,
                     msg: format!(
-                        "macro `{name}` generated a `macro fun` — macros cannot define \
+                        "{label} generated a `macro fun` — macros cannot define \
                          macros (macro-engine.md §3)"
+                    ),
+                });
+                return;
+            }
+            let (generated_blocks, _) = macro_blocks(parsed);
+            if !generated_blocks.is_empty() {
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!(
+                        "{label} generated a `macro {{ .. }}` block — macros cannot \
+                         define macros (macro-engine.md §3)"
                     ),
                 });
                 return;

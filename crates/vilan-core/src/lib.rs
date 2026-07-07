@@ -37,7 +37,7 @@ pub use transformer::{JsProgram, transform, transform_to_ast};
 
 use std::path::Path;
 
-use node::{ImportBranch, Node, NodeList};
+use node::{Func, ImportBranch, Node, NodeList};
 use target::PlatformPattern as Pattern;
 
 /// Infers a build platform for editor analysis (which has no `--platform`) from a
@@ -145,9 +145,67 @@ pub fn analyze_source(
         span: *error.span(),
         msg: error.to_string(),
     }));
-    let Some((root, _file_span)) = ast else {
+    let Some((mut root, _file_span)) = ast else {
         return (None, diagnostics);
     };
+
+    // A macro WORLD's entry gets the ambient meta prelude (macro-engine.md
+    // §3/§10): the reflection vocabulary binds at file scope. Names the file
+    // defines itself are excluded, so an explicit definition shadows the
+    // prelude.
+    if macros::in_macro_world() {
+        // `macro { .. }` blocks survive world blanking verbatim and parse at
+        // the world's top level; wrap each into the synthetic zero-argument
+        // `fun __macro_block_<n>(): Source` the expansion engine dispatches
+        // (macro-engine.md Phase 4). Numbering is source order — the same
+        // order registration assigned.
+        let mut block_ordinal = 0usize;
+        for node in root.0.iter_mut() {
+            if matches!(node.0, Node::MacroBlock(_)) {
+                let placeholder = std::mem::replace(&mut node.0, Node::Error);
+                let Node::MacroBlock(body) = placeholder else {
+                    unreachable!("just matched MacroBlock");
+                };
+                let name: &'static str =
+                    Box::leak(macros::block_entry_name(block_ordinal).into_boxed_str());
+                block_ordinal += 1;
+                let start = node.1.into_range().start;
+                let head: Span = (start..start).into();
+                node.0 = Node::Func(Func {
+                    name: (name, head),
+                    is_async: false,
+                    external: false,
+                    extern_binding: None,
+                    must_use: false,
+                    rpc: false,
+                    trait_only: false,
+                    doc_hidden: false,
+                    generic_parameters: None,
+                    parameters: (Vec::new(), head),
+                    return_type: Some(Box::new((Node::Accessor("Source"), head))),
+                    borrows: None,
+                    body: Some(body),
+                });
+            }
+        }
+        let mut defined = std::collections::HashSet::new();
+        for (node, _span) in root.0.iter() {
+            let function = match node {
+                Node::Func(function) => Some(function),
+                Node::Export(inner) => match &inner.0 {
+                    Node::Func(function) => Some(function),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(function) = function {
+                defined.insert(function.name.0);
+            }
+        }
+        if let Some(prelude) = macros::world_prelude_nodes(&defined) {
+            root.0.splice(0..0, prelude);
+        }
+    }
 
     let root = Box::leak(Box::new(root));
     // Use the front-end's resolved platform (e.g. from `vilan.toml`), else infer

@@ -4170,6 +4170,33 @@ impl<'src> Analyzer<'src> {
                     Some(Expr::Error)
                 }
             }
+            // A `macro { .. }` block: like an invocation, but anonymous — its
+            // body is macro-world code and never walks here; the expansion
+            // recorded what this site becomes.
+            Node::MacroBlock(_) => {
+                let key = node as *const Spanned<Node> as usize;
+                if self.macro_item_invocations.contains(&key) {
+                    Some(Expr::Void)
+                } else if self.macro_failed_sites.contains(&key) {
+                    // The expansion failure is already a diagnostic.
+                    Some(Expr::Error)
+                } else if let Some(replacement) =
+                    self.macro_expression_expansions.get(&key).copied()
+                {
+                    let child_id = self.walk_expr_node(replacement, scope_id);
+                    Some(Expr::Block((Vec::new(), child_id)))
+                } else {
+                    // Reached only where expansion never runs — a macro body.
+                    self.diagnostics.push(Error {
+                        span: node.1,
+                        msg: "this `macro { .. }` block was not expanded — a block cannot \
+                              appear inside macro code (the enclosing body already runs at \
+                              expansion time)"
+                            .to_string(),
+                    });
+                    Some(Expr::Error)
+                }
+            }
             Node::Export(inner) => {
                 // Exports shape a module's public surface, so they only mean
                 // something at a module's top level. A block-scoped `import`

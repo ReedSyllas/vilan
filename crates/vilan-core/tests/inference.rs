@@ -6039,3 +6039,279 @@ fn prelude_derives_need_no_import() {
         "true\n",
     );
 }
+
+// The macro world's AMBIENT meta prelude (macro-engine.md §3/§10): the
+// reflection vocabulary — the meta types, `source`, `fresh` — is in scope in
+// every macro body with no imports at all. Libraries (`option`, `build`)
+// stay explicit.
+#[test]
+fn the_meta_vocabulary_is_ambient_in_macro_bodies() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun tag(item: Item): Source {
+            import macro_std::option::Option::{ self, Some, None };
+
+            let name = match item.as_struct() {
+                Some(let found) => found.name,
+                None => "?",
+            };
+            source(i"fun tag_of(): str \{\n\"{name}\"\n\}\n")
+        }
+
+        [tag]
+        struct Widget {
+            size: i32,
+        }
+
+        fun main() {
+            print(tag_of());
+        }
+
+        main();
+        "#,
+        "Widget\n",
+    );
+}
+
+// `fresh()` is part of the ambient vocabulary too — a zero-import invocation
+// macro gensyms and splices.
+#[test]
+fn fresh_is_ambient_in_macro_bodies() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun doubled(arguments: Arguments): Source {
+            let slot = fresh();
+            source(i"let {slot} = 21;\nlet answer = {slot} + {slot};")
+        }
+
+        macro doubled()
+
+        fun main() {
+            print(answer);
+        }
+
+        main();
+        "#,
+        "42\n",
+    );
+}
+
+// An explicit same-name definition SHADOWS the ambient prelude — the prelude
+// binds first, ordinary resolution order.
+#[test]
+fn a_macro_fun_shadows_the_ambient_prelude() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun fresh(): str {
+            "__custom"
+        }
+
+        macro fun emit(arguments: Arguments): Source {
+            let slot = fresh();
+            source(i"fun generated(): str \{\n\"{slot}\"\n\}\n")
+        }
+
+        macro emit()
+
+        fun main() {
+            print(generated());
+        }
+
+        main();
+        "#,
+        "__custom\n",
+    );
+}
+
+// --- `macro { .. }` blocks (macro-engine.md Phase 4) ---
+
+// ITEM position: the block's emissions splice as items.
+#[test]
+fn an_item_position_macro_block_splices_items() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro {
+            source("fun answer(): i32 {\n42\n}\n")
+        }
+
+        fun main() {
+            print(answer());
+        }
+
+        main();
+        "#,
+        "42\n",
+    );
+}
+
+// EXPRESSION position: the block folds at compile time and splices one
+// expression.
+#[test]
+fn an_expression_position_macro_block_splices_an_expression() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let folded = macro {
+                mut total = 0;
+                mut index = 1;
+                for index <= 4 {
+                    total = total + index;
+                    index = index + 1;
+                }
+                source(i"{total}")
+            };
+            print(folded);
+        }
+
+        main();
+        "#,
+        "10\n",
+    );
+}
+
+// A block calls the file's `macro fun` helpers as plain in-world functions.
+#[test]
+fn a_macro_block_calls_a_same_file_helper() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun doubled(value: i32): str {
+            i"{value * 2}"
+        }
+
+        fun main() {
+            print(macro { source(doubled(21)) });
+        }
+
+        main();
+        "#,
+        "42\n",
+    );
+}
+
+// The synthetic entry declares `: Source`, so a non-Source tail is a world
+// type error at the block's true position.
+#[test]
+fn a_macro_block_must_yield_source() {
+    assert_fails_spanning(
+        r#"
+fun main() {
+    let x = macro { 42 };
+}
+
+main();
+        "#,
+        "macro { 42 }",
+        "definition did not compile",
+    );
+}
+
+// Output that doesn't parse is the ordinary invalid-vilan error, with the
+// block's own label.
+#[test]
+fn a_macro_block_with_invalid_output_errors() {
+    assert_fails_spanning(
+        r#"
+fun main() {
+    let x = macro { source("+++ nope") };
+}
+
+main();
+        "#,
+        r#"macro { source("+++ nope") }"#,
+        "generated invalid vilan",
+    );
+}
+
+// Inside a `macro fun` body there is nothing to splice into — the body
+// already runs at expansion time.
+#[test]
+fn a_macro_block_inside_a_macro_fun_is_rejected() {
+    assert_fails_spanning(
+        r#"
+macro fun bad(item: Item): Source {
+    macro { source("1") }
+}
+
+fun main() {}
+
+main();
+        "#,
+        r#"macro { source("1") }"#,
+        "cannot appear inside macro code",
+    );
+}
+
+// Same rule one level down: blocks cannot nest.
+#[test]
+fn a_macro_block_inside_a_macro_block_is_rejected() {
+    assert_fails_spanning(
+        r#"
+fun main() {
+    let x = macro { macro { source("1") } };
+}
+
+main();
+        "#,
+        r#"macro { source("1") }"#,
+        "cannot appear inside macro code",
+    );
+}
+
+// Block bodies are hermetic like every macro body: imports root at
+// `macro_std` only.
+#[test]
+fn a_macro_block_body_is_hermetic() {
+    assert_fails_spanning(
+        r#"
+fun main() {
+    let x = macro {
+        import std::io::print;
+        source("1")
+    };
+}
+
+main();
+        "#,
+        "import std::io::print",
+        "hermetic",
+    );
+}
+
+// A macro's output cannot carry a `macro { .. }` block (mirrors the
+// macro-generating-macro rejection).
+#[test]
+fn generated_code_cannot_carry_a_macro_block() {
+    let source = r#"
+macro fun emit_block(arguments: Arguments): Source {
+    source("fun answer(): i32 {\nmacro { source(\"1\") }\n}\n")
+}
+
+macro emit_block()
+
+fun main() {}
+
+main();
+        "#;
+    let diagnostics = failure_diagnostics(source);
+    // The error anchors at the GENERATING invocation's name (a file span),
+    // never into the generated text.
+    let invocation_name = source.rfind("emit_block").unwrap();
+    assert!(
+        diagnostics.iter().any(|(message, range)| {
+            message.contains("generated a `macro { .. }` block") && range.start == invocation_name
+        }),
+        "expected the generated-block rejection at the invocation; got: {diagnostics:#?}"
+    );
+}

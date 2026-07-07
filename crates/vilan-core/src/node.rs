@@ -274,6 +274,13 @@ pub enum Node<'src> {
     // invocation (the returned Source parses as an expression and splices in
     // place). The name (with its span) and the argument SPANS.
     MacroInvocation(&'src str, Span, Vec<Span>),
+    // `macro { .. }` — an anonymous, immediately-expanded macro (macro-engine.md
+    // Phase 4): the body runs at expansion time (hermetic, like a `macro fun`
+    // body) and its returned `Source` splices at this position — as items at a
+    // module's top level, as one expression anywhere else. The body shape is a
+    // function body; the world compiles it as a synthetic zero-argument
+    // `fun __macro_block_<n>(): Source`.
+    MacroBlock(Spanned<(NodeList<'src>, Box<Spanned<Self>>)>),
     // `[derive(A, B)] <struct|enum>` — the derive trait names and the item they
     // annotate. Transparent to analysis (the inner item is walked normally); a
     // pre-analysis pass generates the trait impls from the item's fields.
@@ -474,7 +481,7 @@ impl<'src> Node<'src> {
                 visit(left);
                 visit(right);
             }
-            Node::Block(body) => visit_body(&body.0, visit),
+            Node::Block(body) | Node::MacroBlock(body) => visit_body(&body.0, visit),
             Node::Call(subject, generic_arguments, arguments) => {
                 visit(subject);
                 for argument in generic_arguments.iter().flat_map(|arguments| &arguments.0) {
