@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use vilan_core::{Error, Layer, PackageSpec, Platform, PlatformPattern, Workspace, analyze_source};
+use vilan_core::{
+    Error, Layer, MacroLimits, PackageSpec, Platform, PlatformPattern, Workspace, analyze_source,
+};
 
 fn std_spec() -> PackageSpec {
     vilan_core::manifest::resolve_std(
@@ -165,6 +167,7 @@ fn analyze_workspace(entry: &str, deps: &[Dep], platform: Platform) -> Vec<Strin
     let workspace = Workspace {
         packages,
         entry_dependencies,
+        macro_limits: MacroLimits::default(),
     };
 
     let source = std::fs::read_to_string(&entry_path).unwrap();
@@ -257,6 +260,7 @@ fn dependency_pkg_self_reference_is_isolated() {
             dependencies: Vec::new(),
         }],
         entry_dependencies: vec![("common".to_string(), 0)],
+        macro_limits: MacroLimits::default(),
     };
     let entry_path = app_dir.join("main.vl");
     let source = std::fs::read_to_string(&entry_path).unwrap();
@@ -434,6 +438,7 @@ fn analyze_layered(entry: &str, platform: Platform) -> Vec<String> {
             dependencies: Vec::new(),
         }],
         entry_dependencies: vec![("plat".to_string(), 0)],
+        macro_limits: MacroLimits::default(),
     };
     let source = std::fs::read_to_string(&entry_path).unwrap();
     let leaked: &'static str = Box::leak(source.into_boxed_str());
@@ -532,6 +537,7 @@ fn base_lib_reexporting_a_layer_module_errors() {
             dependencies: Vec::new(),
         }],
         entry_dependencies: vec![("plat".to_string(), 0)],
+        macro_limits: MacroLimits::default(),
     };
     let source = std::fs::read_to_string(&entry_path).unwrap();
     let leaked: &'static str = Box::leak(source.into_boxed_str());

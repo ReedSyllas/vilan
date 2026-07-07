@@ -27,6 +27,7 @@ pub mod util;
 pub use analyzer::{Layer, PackageSpec, Program, Workspace, analyze};
 pub use error::Error;
 pub use lexer::lexer;
+pub use macros::MacroLimits;
 pub use manifest::Manifest;
 pub use options::{BuildOptions, Preset};
 pub use parser::parser;

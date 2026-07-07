@@ -38,53 +38,60 @@ macro fun Debug(item: Item): Source {
 	import macro_std::source;
 	import macro_std::meta::{ Item, Source };
 	import macro_std::option::Option::{ self, Some, None };
+	import macro_std::build::{ impl_of, fun_of, match_of, quote, join };
+
+	// Debug output glues text fragments around each `.debug()` call, so the
+	// pieces join on ` + ", " + ` — a quoted separator between quoted labels.
+	let glued_comma = " + " + quote(", ") + " + ";
 
 	if item.as_struct() is Some(let target) {
 		// `"T { " + "a = " + self.a.debug() + ", " + … + " }"`; a
 		// field-less struct is just its name.
 		mut body = "";
 		if target.fields.len() == 0 {
-			body = i"\"{target.name}\"";
+			body = quote(target.name);
 		} else {
-			mut parts = "";
-			mut first = true;
+			mut parts: List<str> = [];
 			for field in target.fields {
-				if first {
-					first = false;
-				} else {
-					parts = parts + " + \", \" + ";
-				}
-				parts = parts + i"\"{field.name} = \" + self.{field.name}.debug()";
+				parts.push(quote(i"{field.name} = ") + i" + self.{field.name}.debug()");
 			}
-			body = i"\"{target.name} \{ \" + {parts} + \" \}\"";
+			body = quote(i"{target.name} \{ ") + " + " + join(parts, glued_comma) + " + " + quote(" }");
 		}
-		ret source(i"import std::debug::Debug;\nimpl {target.name} with Debug \{\n\tfun debug(self): str \{\n\t\t{body}\n\t\}\n\}\n");
+		let printer = fun_of("debug")
+			.parameter("self")
+			.returns("str")
+			.expr(body);
+		ret source("import std::debug::Debug;\n"
+			+ impl_of(target.name).implements("Debug").method(printer).render());
 	}
 	if item.as_enum() is Some(let target) {
 		// `match self { E::V(let p0,..) => "V(" + p0.debug() + ", " + .. +
 		// ")", E::W => "W" }`.
-		mut arms = "";
+		mut arms = match_of("self");
 		for variant in target.variants {
 			let arity = variant.payload.len();
 			if arity == 0 {
-				arms = arms + i"\t\t\t{target.name}::{variant.name} => \"{variant.name}\",\n";
+				arms = arms.arm(i"{target.name}::{variant.name}", quote(variant.name));
 			} else {
-				mut binds = "";
-				mut parts = "";
+				mut binds: List<str> = [];
+				mut parts: List<str> = [];
 				mut index = 0;
 				for index < arity {
-					if index > 0 {
-						binds = binds + ", ";
-						parts = parts + " + \", \" + ";
-					}
-					binds = binds + i"let p{index}";
-					parts = parts + i"p{index}.debug()";
+					binds.push(i"let p{index}");
+					parts.push(i"p{index}.debug()");
 					index = index + 1;
 				}
-				arms = arms + i"\t\t\t{target.name}::{variant.name}({binds}) => \"{variant.name}(\" + {parts} + \")\",\n";
+				let bind_pattern = join(binds, ", ");
+				let rendering = quote(i"{variant.name}(") + " + " + join(parts, glued_comma) + " + " + quote(")");
+				arms = arms.arm(i"{target.name}::{variant.name}({bind_pattern})", rendering);
 			}
 		}
-		ret source(i"import std::debug::Debug;\nimpl {target.name} with Debug \{\n\tfun debug(self): str \{\n\t\tmatch self \{\n{arms}\t\t\}\n\t\}\n\}\n");
+		let printer = fun_of("debug")
+			.parameter("self")
+			.returns("str")
+			.expr(arms.render());
+		ret source("import std::debug::Debug;\n"
+			+ impl_of(target.name).implements("Debug").method(printer).render());
 	}
 	source("")
 }

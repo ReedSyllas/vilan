@@ -145,13 +145,18 @@ integer argument out of a string. The evolution, in adoption order:
    `as_identifier(index)`, arity — no more `parse_i32` on your own arguments. Later,
    full `meta::Expr` reflection for arguments (kind + children + rendered text), so
    `unroll(4, |i| ..)` receives a real integer and a real closure expression.
-2. **Output builders (macro_std sugar — no compiler change).** `ImplBuilder`,
-   `FunBuilder`, match-arm combinators…: ordinary vilan in `macro_std` that RENDERS TO
-   TEXT internally. The parser stays the single grammar authority (the §5 lesson — no
+2. **Output builders (macro_std sugar — no compiler change)** — **SHIPPED
+   2026-07-07** as `macro_std::build`: ordinary vilan that RENDERS TO TEXT
+   internally. The parser stays the single grammar authority (the §5 lesson — no
    dual lowering), `Source` and the §6 text cache are untouched, and `source(str)`
    remains the escape hatch for shapes the builders don't cover yet. This captures the
    DX win: no escapes, structured composition, the common shapes (an impl of N
-   methods, a match over an enum's variants) as combinators.
+   methods, a match over an enum's variants) as combinators. The shipped shape:
+   `quote`/`join`/`indent` text helpers plus `impl_of`/`fun_of`/`match_of`/
+   `struct_of`/`init_of` builders that chain by value and render depth-0 text,
+   containers re-indenting child text line-by-line — nesting works by rendering
+   the inner shape into the outer one. Every std derive and `[service]` is
+   written against them, byte-identically.
 3. **Tree interchange (last — compiler-visible, decide from measurements).** A
    `Source` variant carrying reflected AST values the compiler converts directly to
    nodes, skipping lex+parse of the output. Wins: the perf tail and
@@ -531,9 +536,19 @@ hashing, mirror lets).
   `proc_macro_derive`-style registration stays deferred until a user derive
   needs the decoupling. `Json`/`Wire` (the visitor impls, enum tag fallbacks,
   panic arms — the largest generators) are the next slice.
-- **Phase 5 (recorded, unscheduled)** — **the construction API** (§3's recorded
-  direction): input accessors on `Arguments`, then `macro_std` output builders
-  rendering to text, then — only if measured — tree interchange.
+- **Phase 5 — the construction API** (§3's recorded direction), in adoption order:
+  input accessors on `Arguments` (**SHIPPED 2026-07-06**, with the `Json`/`Wire`
+  slice); **output builders — SHIPPED 2026-07-07**: `macro_std::build` (pure
+  vilan, no compiler change) with `quote`/`join`/`indent` and
+  `impl_of`/`fun_of`/`match_of`/`struct_of`/`init_of` — chain-by-value builders
+  that render depth-0 text, containers re-indenting child text line-by-line, so
+  shapes nest by rendering (`fun_of(..).expr(match_of(..).render())`). All five
+  std derives and `[service]` are written against them (the escape/separator/
+  indentation noise is gone from the templates); proven **byte-identical** on
+  the whole corpus, the rpc example, and both todo bundles, and pinned by an
+  exact-bytes e2e test (`the_output_builders_render_and_splice`). `source(str)`
+  stays the escape hatch. Tree interchange remains recorded, taken only if
+  measurements say the parse of generated text matters.
 - **Phase 4 (recorded, unscheduled)** — **`macro { .. }` blocks** (an anonymous,
   immediately-expanded macro: the body runs at expansion time in the macro prelude; in
   item position its emissions splice in place — comptime-style families without naming

@@ -248,9 +248,12 @@ have gaps.
    it); ~~fuel knob~~ (shipped 2026-07-06 as `[macro]` — singular, the user's naming call:
    `fuel`/`depth`, entry-manifest-governed, CLI-pinned); ~~module-scoped macro names~~ (shipped, above); ~~attribute
    use inside dependency files~~ (shipped with the unified epilogue); ambient meta vocabulary in macro scope; the
-   **construction API** (macro-engine §3 recorded direction, user request 2026-07-06:
-   `Arguments` typed accessors first, then macro_std output builders, tree interchange
-   only if measured); `macro { .. }` blocks (Phase 4).
+   **construction API** (macro-engine §3 recorded direction, user request 2026-07-06):
+   ~~`Arguments` typed accessors~~ (step 1, shipped 2026-07-06), ~~macro_std output
+   builders~~ (step 2, **shipped 2026-07-07** as `macro_std::build` — `quote`/`join`/
+   `indent` + `impl_of`/`fun_of`/`match_of`/`struct_of`/`init_of`; all five derives and
+   `[service]` rewritten against them byte-identically; exact-bytes e2e pin), tree
+   interchange (step 3) only if measured; `macro { .. }` blocks (Phase 4).
 
 ---
 

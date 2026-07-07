@@ -13,6 +13,10 @@
 // The reflection surface: `import macro_std::meta::{ Item, TypeExpr, .. }`.
 export import pkg::meta;
 
+// The output builders (macro-engine.md §3, the construction API step 2):
+// `import macro_std::build::{ impl_of, fun_of, match_of, quote, join }`.
+export import pkg::build;
+
 // The pure core, re-exported (macro-engine.md §3): the ordinary vocabulary a
 // macro keeps — `import macro_std::option::Option::{ self, Some, None };` and
 // friends. Nothing platform-flavored is here, and nothing else is reachable.

@@ -1,0 +1,331 @@
+// `macro_std::build` — the construction API's output builders (macro-engine.md
+// §3, step 2). Ordinary vilan that renders to text: the parser stays the single
+// grammar authority, the expansion text cache is untouched, and `source(str)`
+// remains the escape hatch for shapes these don't cover.
+//
+// The composition rule: every builder renders depth-0 text (its first line at
+// column 0), and container builders re-indent child text line-by-line. Nesting
+// therefore works by rendering the inner shape and handing the text to the
+// outer one — `fun_of("eq").expr(match_of("self").arm(..).render())`.
+
+// A vilan string literal whose contents are `value` — the quotes and the
+// escaping handled (`\`, `"`, newline, tab). The antidote to `\\\"` noise:
+// `quote(i"\"{name}\":")` renders the JSON-fragment literal `"\"a\":"`.
+export fun quote(value: str): str {
+    let escaped = value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t");
+    "\"" + escaped + "\""
+}
+
+// `parts` glued with `separator` between elements — the antidote to the
+// `mut first = true` separator loop.
+export fun join(parts: List<str>, separator: str): str {
+    mut joined = "";
+    mut first = true;
+    for part in parts {
+        if first {
+            first = false;
+        } else {
+            joined = joined + separator;
+        }
+        joined = joined + part;
+    }
+    joined
+}
+
+// `text` with every non-empty line pushed right by `tabs` tab stops. Empty
+// lines stay empty (no trailing whitespace). Containers use this to place
+// child text at its depth.
+export fun indent(text: str, tabs: i32): str {
+    let prefix = "\t".repeat(tabs);
+    mut indented = "";
+    mut first = true;
+    for line in text.split("\n") {
+        if first {
+            first = false;
+        } else {
+            indented = indented + "\n";
+        }
+        if line != "" {
+            indented = indented + prefix + line;
+        }
+    }
+    indented
+}
+
+// --- `fun` definitions ----------------------------------------------------
+
+// A `fun` under construction. Builders chain by value: each call returns the
+// extended builder, so loops rebind (`shell = shell.line(..)`).
+export struct FunBuilder {
+    name: str,
+    generic_parameters: str,
+    parameters: List<str>,
+    return_type: str,
+    statements: List<str>,
+    trailing: str,
+}
+
+export fun fun_of(name: str): FunBuilder {
+    FunBuilder {
+        name = name,
+        generic_parameters = "",
+        parameters = [],
+        return_type = "",
+        statements = [],
+        trailing = "",
+    }
+}
+
+impl FunBuilder {
+    // The written generic parameter list, brackets included: `"<S: Serialize>"`.
+    fun generics(self, generic_parameters: str): FunBuilder {
+        FunBuilder {
+            name = self.name,
+            generic_parameters = generic_parameters,
+            parameters = self.parameters,
+            return_type = self.return_type,
+            statements = self.statements,
+            trailing = self.trailing,
+        }
+    }
+
+    // One parameter as written: `"self"`, `"other: Point"`.
+    fun parameter(self, parameter: str): FunBuilder {
+        mut parameters = self.parameters;
+        parameters.push(parameter);
+        FunBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            parameters = parameters,
+            return_type = self.return_type,
+            statements = self.statements,
+            trailing = self.trailing,
+        }
+    }
+
+    fun returns(self, return_type: str): FunBuilder {
+        FunBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            parameters = self.parameters,
+            return_type = return_type,
+            statements = self.statements,
+            trailing = self.trailing,
+        }
+    }
+
+    // One body statement (may be multi-line; re-indented at render).
+    fun line(self, statement: str): FunBuilder {
+        mut statements = self.statements;
+        statements.push(statement);
+        FunBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            parameters = self.parameters,
+            return_type = self.return_type,
+            statements = statements,
+            trailing = self.trailing,
+        }
+    }
+
+    // The trailing result expression (may be multi-line; re-indented at render).
+    fun expr(self, expression: str): FunBuilder {
+        FunBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            parameters = self.parameters,
+            return_type = self.return_type,
+            statements = self.statements,
+            trailing = expression,
+        }
+    }
+
+    fun render(self): str {
+        let parameter_list = join(self.parameters, ", ");
+        mut rendered = i"fun {self.name}{self.generic_parameters}({parameter_list})";
+        if self.return_type != "" {
+            rendered = rendered + ": " + self.return_type;
+        }
+        rendered = rendered + " {\n";
+        for statement in self.statements {
+            rendered = rendered + indent(statement, 1) + "\n";
+        }
+        if self.trailing != "" {
+            rendered = rendered + indent(self.trailing, 1) + "\n";
+        }
+        rendered + "}"
+    }
+}
+
+// --- `impl` blocks ----------------------------------------------------------
+
+export struct ImplBuilder {
+    name: str,
+    generic_parameters: str,
+    trait_name: str,
+    members: List<str>,
+}
+
+export fun impl_of(name: str): ImplBuilder {
+    ImplBuilder { name = name, generic_parameters = "", trait_name = "", members = [] }
+}
+
+impl ImplBuilder {
+    // The written generic parameter list, brackets included: `"<type T>"`.
+    fun generics(self, generic_parameters: str): ImplBuilder {
+        ImplBuilder {
+            name = self.name,
+            generic_parameters = generic_parameters,
+            trait_name = self.trait_name,
+            members = self.members,
+        }
+    }
+
+    // The `with` clause: `impl_of("Point").implements("PartialEq")`.
+    fun implements(self, trait_name: str): ImplBuilder {
+        ImplBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            trait_name = trait_name,
+            members = self.members,
+        }
+    }
+
+    fun method(self, method: FunBuilder): ImplBuilder {
+        self.member(method.render())
+    }
+
+    // Raw member text, for member shapes the builders don't cover.
+    fun member(self, text: str): ImplBuilder {
+        mut members = self.members;
+        members.push(text);
+        ImplBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            trait_name = self.trait_name,
+            members = members,
+        }
+    }
+
+    fun render(self): str {
+        mut rendered = i"impl {self.name}{self.generic_parameters}";
+        if self.trait_name != "" {
+            rendered = rendered + " with " + self.trait_name;
+        }
+        rendered = rendered + " {\n";
+        for member in self.members {
+            rendered = rendered + indent(member, 1) + "\n";
+        }
+        rendered + "}\n"
+    }
+}
+
+// --- `match` expressions ------------------------------------------------------
+
+export struct MatchBuilder {
+    subject: str,
+    arms: List<str>,
+}
+
+export fun match_of(subject: str): MatchBuilder {
+    MatchBuilder { subject = subject, arms = [] }
+}
+
+impl MatchBuilder {
+    // `pattern => value,`
+    fun arm(self, pattern: str, value: str): MatchBuilder {
+        mut arms = self.arms;
+        arms.push(i"{pattern} => {value},");
+        MatchBuilder { subject = self.subject, arms = arms }
+    }
+
+    // `pattern => { ..statements.. },`
+    fun arm_block(self, pattern: str, statements: List<str>): MatchBuilder {
+        mut body = i"{pattern} => \{\n";
+        for statement in statements {
+            body = body + indent(statement, 1) + "\n";
+        }
+        mut arms = self.arms;
+        arms.push(body + "},");
+        MatchBuilder { subject = self.subject, arms = arms }
+    }
+
+    fun render(self): str {
+        mut rendered = i"match {self.subject} \{\n";
+        for arm in self.arms {
+            rendered = rendered + indent(arm, 1) + "\n";
+        }
+        rendered + "}"
+    }
+}
+
+// --- `struct` declarations ----------------------------------------------------
+
+export struct StructBuilder {
+    name: str,
+    generic_parameters: str,
+    fields: List<str>,
+}
+
+export fun struct_of(name: str): StructBuilder {
+    StructBuilder { name = name, generic_parameters = "", fields = [] }
+}
+
+impl StructBuilder {
+    // The written generic parameter list, brackets included: `"<T: Transport>"`.
+    fun generics(self, generic_parameters: str): StructBuilder {
+        StructBuilder {
+            name = self.name,
+            generic_parameters = generic_parameters,
+            fields = self.fields,
+        }
+    }
+
+    // One field as written, no trailing comma: `"transport: T"`.
+    fun field(self, field: str): StructBuilder {
+        mut fields = self.fields;
+        fields.push(field);
+        StructBuilder {
+            name = self.name,
+            generic_parameters = self.generic_parameters,
+            fields = fields,
+        }
+    }
+
+    fun render(self): str {
+        mut rendered = i"struct {self.name}{self.generic_parameters} \{\n";
+        for field in self.fields {
+            rendered = rendered + indent(field + ",", 1) + "\n";
+        }
+        rendered + "}\n"
+    }
+}
+
+// --- struct literals ------------------------------------------------------------
+
+export struct InitBuilder {
+    name: str,
+    fields: List<str>,
+}
+
+export fun init_of(name: str): InitBuilder {
+    InitBuilder { name = name, fields = [] }
+}
+
+impl InitBuilder {
+    // One initializer: `.field("x", "0")` renders `x = 0`.
+    fun field(self, field_name: str, value: str): InitBuilder {
+        mut fields = self.fields;
+        fields.push(i"{field_name} = {value}");
+        InitBuilder { name = self.name, fields = fields }
+    }
+
+    fun render(self): str {
+        let assignments = join(self.fields, ", ");
+        i"{self.name} \{ {assignments} \}"
+    }
+}

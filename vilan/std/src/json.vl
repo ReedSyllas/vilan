@@ -604,203 +604,239 @@ fun json_codec(): Codec {
 
 macro fun struct_json_impls(target: StructItem): str {
 	import macro_std::meta::StructItem;
+	import macro_std::build::{ impl_of, fun_of, init_of, quote, join };
 
 	// `"{" + "\"a\":" + self.a.to_json() + "," + … + "}"`.
-	mut body = "\"{\"";
+	mut parts: List<str> = [];
+	parts.push(quote("{"));
 	mut first = true;
 	for field in target.fields {
 		if first {
 			first = false;
 		} else {
-			body = body + " + \",\"";
+			parts.push(quote(","));
 		}
-		body = body + i" + \"\\\"{field.name}\\\":\" + self.{field.name}.to_json()";
+		parts.push(quote(i"\"{field.name}\":"));
+		parts.push(i"self.{field.name}.to_json()");
 	}
-	body = body + " + \"}\"";
-	mut initializers = "";
-	mut first_init = true;
+	parts.push(quote("}"));
+	let to_json = fun_of("to_json")
+		.parameter("self")
+		.returns("str")
+		.expr(join(parts, " + "));
+	let from_json = fun_of("from_json")
+		.parameter("text: str")
+		.returns(target.name)
+		.expr(i"{target.name}::from_json_value(parse_json_value(text))");
+	mut literal = init_of(target.name);
 	for field in target.fields {
-		if first_init {
-			first_init = false;
-		} else {
-			initializers = initializers + ", ";
-		}
-		initializers = initializers + i"{field.name} = {field.type_.render()}::from_json_value(value.field(\"{field.name}\"))";
+		let label = quote(field.name);
+		literal = literal.field(field.name, i"{field.type_.render()}::from_json_value(value.field({label}))");
 	}
-	i"impl {target.name} with Json \{\n\tfun to_json(self): str \{\n\t\t{body}\n\t\}\n\}\nimpl {target.name} with FromJson \{\n\tfun from_json(text: str): {target.name} \{\n\t\t{target.name}::from_json_value(parse_json_value(text))\n\t\}\n\tfun from_json_value(value: JsonValue): {target.name} \{\n\t\t{target.name} \{ {initializers} \}\n\t\}\n\}\n"
+	let from_json_value = fun_of("from_json_value")
+		.parameter("value: JsonValue")
+		.returns(target.name)
+		.expr(literal.render());
+	impl_of(target.name).implements("Json").method(to_json).render()
+		+ impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
 }
 
 macro fun struct_wire_impls(target: StructItem): str {
 	import macro_std::meta::StructItem;
+	import macro_std::build::{ impl_of, fun_of, init_of, quote };
 
-	mut describe = i"\t\tserializer.begin_struct({target.fields.len()});\n";
+	mut describe = fun_of("describe")
+		.generics("<S: Serialize>")
+		.parameter("self")
+		.parameter("serializer: S")
+		.line(i"serializer.begin_struct({target.fields.len()});");
 	for field in target.fields {
-		describe = describe + i"\t\tserializer.field(\"{field.name}\");\n\t\tself.{field.name}.describe(serializer);\n";
+		let label = quote(field.name);
+		describe = describe.line(i"serializer.field({label});");
+		describe = describe.line(i"self.{field.name}.describe(serializer);");
 	}
-	describe = describe + "\t\tserializer.end_struct();";
-	mut rebuild = "\t\tdeserializer.begin_struct();\n";
+	describe = describe.line("serializer.end_struct();");
+	mut rebuild = fun_of("rebuild")
+		.generics("<D: Deserialize>")
+		.parameter("deserializer: D")
+		.returns(target.name)
+		.line("deserializer.begin_struct();");
+	mut literal = init_of(target.name);
 	for field in target.fields {
-		rebuild = rebuild + i"\t\tdeserializer.field(\"{field.name}\");\n\t\tlet {field.name} = {field.type_.render()}::rebuild(deserializer);\n";
+		let label = quote(field.name);
+		rebuild = rebuild.line(i"deserializer.field({label});");
+		rebuild = rebuild.line(i"let {field.name} = {field.type_.render()}::rebuild(deserializer);");
+		literal = literal.field(field.name, field.name);
 	}
-	rebuild = rebuild + "\t\tdeserializer.end_struct();\n";
-	mut initializers = "";
-	mut first = true;
-	for field in target.fields {
-		if first {
-			first = false;
-		} else {
-			initializers = initializers + ", ";
-		}
-		initializers = initializers + i"{field.name} = {field.name}";
-	}
-	rebuild = rebuild + i"\t\t{target.name} \{ {initializers} \}";
-	i"impl {target.name} with Wire \{\n\tfun describe<S: Serialize>(self, serializer: S) \{\n{describe}\n\t\}\n\tfun rebuild<D: Deserialize>(deserializer: D): {target.name} \{\n{rebuild}\n\t\}\n\}\n"
+	rebuild = rebuild.line("deserializer.end_struct();").expr(literal.render());
+	impl_of(target.name).implements("Wire").method(describe).method(rebuild).render()
 }
 
 macro fun enum_json_impls(target: EnumItem): str {
 	import macro_std::meta::{ EnumItem, TypeExpr };
 	import macro_std::option::Option::{ self, Some, None };
+	import macro_std::build::{ impl_of, fun_of, match_of, quote, join };
 
 	// Externally tagged: no payload -> `"V"`; one -> `{"V":<p>}`;
 	// many -> `{"V":[<p0>,<p1>]}`.
-	mut to_arms = "";
+	mut to_arms = match_of("self");
 	for variant in target.variants {
 		let arity = variant.payload.len();
 		if arity == 0 {
-			to_arms = to_arms + i"\t\t\t{target.name}::{variant.name} => \"\\\"{variant.name}\\\"\",\n";
+			to_arms = to_arms.arm(i"{target.name}::{variant.name}", quote(i"\"{variant.name}\""));
 		} else if arity == 1 {
-			to_arms = to_arms + i"\t\t\t{target.name}::{variant.name}(let p0) => \"\{\\\"{variant.name}\\\":\" + p0.to_json() + \"\}\",\n";
+			let opener = quote(i"\{\"{variant.name}\":");
+			to_arms = to_arms.arm(
+				i"{target.name}::{variant.name}(let p0)",
+				opener + " + p0.to_json() + " + quote("}"));
 		} else {
-			mut binds = "";
-			mut parts = "";
+			mut binds: List<str> = [];
+			mut parts: List<str> = [];
 			mut index = 0;
 			for index < arity {
-				if index > 0 {
-					binds = binds + ", ";
-					parts = parts + " + \",\" + ";
-				}
-				binds = binds + i"let p{index}";
-				parts = parts + i"p{index}.to_json()";
+				binds.push(i"let p{index}");
+				parts.push(i"p{index}.to_json()");
 				index = index + 1;
 			}
-			to_arms = to_arms + i"\t\t\t{target.name}::{variant.name}({binds}) => \"\{\\\"{variant.name}\\\":[\" + {parts} + \"]\}\",\n";
+			let bind_pattern = join(binds, ", ");
+			let separator = " + " + quote(",") + " + ";
+			let opener = quote(i"\{\"{variant.name}\":[");
+			to_arms = to_arms.arm(
+				i"{target.name}::{variant.name}({bind_pattern})",
+				opener + " + " + join(parts, separator) + " + " + quote("]}"));
 		}
 	}
-	mut from_arms = "";
+	mut from_arms = match_of("value.tag()");
 	for variant in target.variants {
 		let arity = variant.payload.len();
+		let tag = quote(variant.name);
 		if arity == 0 {
-			from_arms = from_arms + i"\t\t\t\"{variant.name}\" => {target.name}::{variant.name},\n";
+			from_arms = from_arms.arm(tag, i"{target.name}::{variant.name}");
 		} else if arity == 1 {
 			let payload_type = match variant.payload.get(0) {
 				Some(let type_) => type_.render(),
 				None => "_",
 			};
-			from_arms = from_arms + i"\t\t\t\"{variant.name}\" => {target.name}::{variant.name}({payload_type}::from_json_value(value.field(\"{variant.name}\"))),\n";
+			from_arms = from_arms.arm(tag, i"{target.name}::{variant.name}({payload_type}::from_json_value(value.field({tag})))");
 		} else {
-			mut elements = "";
+			mut elements: List<str> = [];
 			mut index = 0;
 			for type_ in variant.payload {
-				if index > 0 {
-					elements = elements + ", ";
-				}
-				elements = elements + i"{type_.render()}::from_json_value(value.field(\"{variant.name}\").field(\"{index}\"))";
+				let position = quote(i"{index}");
+				elements.push(i"{type_.render()}::from_json_value(value.field({tag}).field({position}))");
 				index = index + 1;
 			}
-			from_arms = from_arms + i"\t\t\t\"{variant.name}\" => {target.name}::{variant.name}({elements}),\n";
+			let element_list = join(elements, ", ");
+			from_arms = from_arms.arm(tag, i"{target.name}::{variant.name}({element_list})");
 		}
 	}
-	from_arms = from_arms + i"\t\t\t_ => panic(\"unknown variant in JSON for enum {target.name}\"),\n";
-	i"impl {target.name} with Json \{\n\tfun to_json(self): str \{\n\t\tmatch self \{\n{to_arms}\t\t\}\n\t\}\n\}\nimpl {target.name} with FromJson \{\n\tfun from_json(text: str): {target.name} \{\n\t\t{target.name}::from_json_value(parse_json_value(text))\n\t\}\n\tfun from_json_value(value: JsonValue): {target.name} \{\n\t\tmatch value.tag() \{\n{from_arms}\t\t\}\n\t\}\n\}\n"
+	let complaint = quote(i"unknown variant in JSON for enum {target.name}");
+	from_arms = from_arms.arm("_", i"panic({complaint})");
+	let to_json = fun_of("to_json")
+		.parameter("self")
+		.returns("str")
+		.expr(to_arms.render());
+	let from_json = fun_of("from_json")
+		.parameter("text: str")
+		.returns(target.name)
+		.expr(i"{target.name}::from_json_value(parse_json_value(text))");
+	let from_json_value = fun_of("from_json_value")
+		.parameter("value: JsonValue")
+		.returns(target.name)
+		.expr(from_arms.render());
+	impl_of(target.name).implements("Json").method(to_json).render()
+		+ impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
 }
 
 macro fun enum_wire_impls(target: EnumItem): str {
 	import macro_std::meta::{ EnumItem, TypeExpr };
 	import macro_std::option::Option::{ self, Some, None };
+	import macro_std::build::{ impl_of, fun_of, match_of, quote, join };
 
 	// An empty enum gets no impls (nothing to construct).
 	if target.variants.len() == 0 {
 		ret "";
 	}
-	mut describe_arms = "";
+	mut describe_arms = match_of("self");
 	for variant in target.variants {
 		let arity = variant.payload.len();
-		if arity == 0 {
-			describe_arms = describe_arms + i"\t\t\t{target.name}::{variant.name} => \{\n\t\t\t\tserializer.begin_variant(\"{variant.name}\", 0);\n\t\t\t\tserializer.end_variant();\n\t\t\t\},\n";
-		} else {
-			mut binds = "";
-			mut body = i"\t\t\t\tserializer.begin_variant(\"{variant.name}\", {arity});\n";
-			mut index = 0;
-			for index < arity {
-				if index > 0 {
-					binds = binds + ", ";
-				}
-				binds = binds + i"let p{index}";
-				body = body + i"\t\t\t\tp{index}.describe(serializer);\n";
-				index = index + 1;
-			}
-			body = body + "\t\t\t\tserializer.end_variant();\n";
-			describe_arms = describe_arms + i"\t\t\t{target.name}::{variant.name}({binds}) => \{\n{body}\t\t\t\},\n";
-		}
-	}
-	mut rebuild_arms = "";
-	for variant in target.variants {
-		let arity = variant.payload.len();
-		mut body = i"\t\t\t\tdeserializer.begin_variant(\"{variant.name}\", {arity});\n";
+		let tag = quote(variant.name);
+		mut statements: List<str> = [];
+		statements.push(i"serializer.begin_variant({tag}, {arity});");
+		mut binds: List<str> = [];
 		mut index = 0;
-		for type_ in variant.payload {
-			body = body + i"\t\t\t\tlet p{index} = {type_.render()}::rebuild(deserializer);\n";
+		for index < arity {
+			binds.push(i"let p{index}");
+			statements.push(i"p{index}.describe(serializer);");
 			index = index + 1;
 		}
-		body = body + "\t\t\t\tdeserializer.end_variant();\n";
+		statements.push("serializer.end_variant();");
+		if arity == 0 {
+			describe_arms = describe_arms.arm_block(i"{target.name}::{variant.name}", statements);
+		} else {
+			let bind_pattern = join(binds, ", ");
+			describe_arms = describe_arms.arm_block(i"{target.name}::{variant.name}({bind_pattern})", statements);
+		}
+	}
+	mut rebuild_arms = match_of("tag");
+	for variant in target.variants {
+		let arity = variant.payload.len();
+		let tag = quote(variant.name);
+		mut statements: List<str> = [];
+		statements.push(i"deserializer.begin_variant({tag}, {arity});");
+		mut arguments: List<str> = [];
+		mut index = 0;
+		for type_ in variant.payload {
+			statements.push(i"let p{index} = {type_.render()}::rebuild(deserializer);");
+			arguments.push(i"p{index}");
+			index = index + 1;
+		}
+		statements.push("deserializer.end_variant();");
 		mut construct = i"{target.name}::{variant.name}";
 		if arity > 0 {
-			mut args = "";
-			mut position = 0;
-			for position < arity {
-				if position > 0 {
-					args = args + ", ";
-				}
-				args = args + i"p{position}";
-				position = position + 1;
-			}
-			construct = construct + i"({args})";
+			let argument_list = join(arguments, ", ");
+			construct = construct + i"({argument_list})";
 		}
-		body = body + i"\t\t\t\t{construct}\n";
-		rebuild_arms = rebuild_arms + i"\t\t\t\"{variant.name}\" => \{\n{body}\t\t\t\},\n";
+		statements.push(construct);
+		rebuild_arms = rebuild_arms.arm_block(tag, statements);
 	}
 	// The unknown-tag arm reports a sticky decode failure and zero-constructs
 	// the FIRST variant through the (now poisoned) deserializer.
-	mut fallback_body = "";
-	mut fallback = "";
+	mut fallback: List<str> = [];
+	fallback.push(i"deserializer.fail(i\"unknown variant '\{tag\}'\");");
 	mut first = true;
 	for variant in target.variants {
 		if first {
 			first = false;
 			let arity = variant.payload.len();
+			mut arguments: List<str> = [];
 			mut index = 0;
 			for type_ in variant.payload {
-				fallback_body = fallback_body + i"\t\t\t\tlet f{index} = {type_.render()}::rebuild(deserializer);\n";
+				fallback.push(i"let f{index} = {type_.render()}::rebuild(deserializer);");
+				arguments.push(i"f{index}");
 				index = index + 1;
 			}
 			if arity == 0 {
-				fallback = i"{target.name}::{variant.name}";
+				fallback.push(i"{target.name}::{variant.name}");
 			} else {
-				mut args = "";
-				mut position = 0;
-				for position < arity {
-					if position > 0 {
-						args = args + ", ";
-					}
-					args = args + i"f{position}";
-					position = position + 1;
-				}
-				fallback = i"{target.name}::{variant.name}({args})";
+				let argument_list = join(arguments, ", ");
+				fallback.push(i"{target.name}::{variant.name}({argument_list})");
 			}
 		}
 	}
-	rebuild_arms = rebuild_arms + i"\t\t\t_ => \{\n\t\t\t\tdeserializer.fail(i\"unknown variant '\{tag\}'\");\n{fallback_body}\t\t\t\t{fallback}\n\t\t\t\},\n";
-	i"impl {target.name} with Wire \{\n\tfun describe<S: Serialize>(self, serializer: S) \{\n\t\tmatch self \{\n{describe_arms}\t\t\}\n\t\}\n\tfun rebuild<D: Deserialize>(deserializer: D): {target.name} \{\n\t\tlet tag = deserializer.variant_tag();\n\t\tmatch tag \{\n{rebuild_arms}\t\t\}\n\t\}\n\}\n"
+	rebuild_arms = rebuild_arms.arm_block("_", fallback);
+	let describe = fun_of("describe")
+		.generics("<S: Serialize>")
+		.parameter("self")
+		.parameter("serializer: S")
+		.expr(describe_arms.render());
+	let rebuild = fun_of("rebuild")
+		.generics("<D: Deserialize>")
+		.parameter("deserializer: D")
+		.returns(target.name)
+		.line("let tag = deserializer.variant_tag();")
+		.expr(rebuild_arms.render());
+	impl_of(target.name).implements("Wire").method(describe).method(rebuild).render()
 }
 
 macro fun Json(item: Item): Source {
