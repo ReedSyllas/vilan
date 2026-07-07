@@ -799,6 +799,9 @@ impl<'src> Transformer<'src> {
 
         Some(match entity {
             Expr::Error => unreachable!(),
+            // A macro-name marker: never a value (the analyzer rejects value
+            // uses); reached only as an inert statement — emit nothing.
+            Expr::Macro => js::Node::Void,
             Expr::TupleComprehension(binder_id, source_id, body_id) => {
                 // A flat tuple is a JS array, so the comprehension lowers to a
                 // runtime `source.map((x) => body)` — arity-independent, no

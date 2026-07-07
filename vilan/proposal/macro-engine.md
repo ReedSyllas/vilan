@@ -1,10 +1,10 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phases 0–3 SHIPPED 2026-07-06** (every §12 question
-resolved; ALL built-in generation is user-land vilan — the five derives AND
-`[service]`, each gated byte-identical against the Rust generator it
-replaced. Helper macro funs and the first construction-API step (`Arguments`
-typed accessors) shipped alongside — see §11). The strategic frontier: user-land vilan code that runs *inside the
+Status: **design settled; Phases 0–3 SHIPPED; names MODULE-SCOPED and
+`derives.vl` DISSOLVED 2026-07-06** (every §12 question resolved; all built-in
+generation is user-land vilan living in its trait's own std module; macro
+names distribute through the module system with the std prelude ambient —
+see §3/§10/§11). The strategic frontier: user-land vilan code that runs *inside the
 compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
 generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
 cannot serve (numeric-type families, custom derives, embedded-DSL checking).
@@ -400,16 +400,27 @@ examples (the goldens are the referee). `derive(..)` dispatch: built-in names re
 to std macros once migrated; unknown names resolve to user macros in scope; a miss
 keeps today's behavior (skip; the missing-impl error surfaces at the use site).
 
-**How the std macros are used: they aren't imported — they're AMBIENT.** The built-in
-derives are part of the language's standing vocabulary, exactly like the primitive
-types: `[derive(PartialEq)]` works in any file with zero imports, before and after
-migration identically (that's the migration contract). `derives.vl` living outside
-std's layer roots is the mechanism, not an accident — it is not a module, so it can
-never collide with the module system; the compiler registers its macros into every
-program. USER macros are the opposite: distributed through the module system, imported
-like any item. When module-scoped macro names replace the v1 flat namespace, the
-builtins stay prelude-ambient — the same split vilan already has between ambient
-primitives and imported std items.
+**How the std macros are used: they aren't imported — they're the PRELUDE**
+(realized 2026-07-06; the interim `derives.vl` special file is dissolved). Each
+derive macro lives in its trait's own std module — `PartialEq` in `compare.vl`,
+`Default` in `default.vl`, `Debug` in `debug.vl`, `Json` AND `Wire` (plus their
+shared text-builder helpers, which are file-scoped) in `json.vl`, `service` in
+`rpc.vl` — and **macros defined in std modules are ambient**: `[derive(PartialEq)]`
+works with zero imports because the derive-hosting modules are always loaded
+(`compare`/`default`/`debug`/`json` joined the core-load set; `rpc` is too heavy to
+always-load, so a `[service]` item anywhere seeds it). USER macros are
+module-scoped: in scope in their defining file, and elsewhere via a LEAF import
+(`import pkg::x::my_macro`, any depth per H2) — a bare module import does not
+suffice. Same-file macros shadow imports, which shadow the prelude; a user macro
+may shadow a prelude derive for its own file (the old reserved-names rule is
+subsumed by scoping). Macro NAMES also bind as first-class markers in the analyzer
+(imports/`use`/go-to-definition resolve them; using one as a value is a clean
+error), yielding to same-named ITEMS — a derive macro deliberately shares its
+trait's name in the trait's own module, and the item import keeps meaning the
+trait. Macro worlds compile LAZILY at first dispatch (registration is syntactic),
+cached process-globally by blanked content; world errors attribute to the DEFINING
+file. Generated code carries its own imports (each macro's output starts with the
+trait imports it needs — the Rust-side prelude synthesizer is gone).
 
 **Amendment (2026-07-06), on "the native path is deleted in the same commit":** the
 Rust generators for migrated derives are NOT dead code and stay. Two consumers remain:

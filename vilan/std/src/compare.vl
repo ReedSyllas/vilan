@@ -96,3 +96,68 @@ impl bool with PartialEq {
 		self == b
 	}
 }
+
+// The `PartialEq` derive (macro-engine.md §10): a prelude macro — `compare`
+// is always loaded, so `[derive(PartialEq)]` needs no import. Its output
+// carries its own trait import.
+
+macro fun PartialEq(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source };
+	import macro_std::option::Option::{ self, Some, None };
+
+	if item.as_struct() is Some(let target) {
+		// `self.a == other.a && self.b == other.b` (a field-less struct is
+		// always equal).
+		mut comparison = "";
+		mut first = true;
+		for field in target.fields {
+			if first {
+				first = false;
+			} else {
+				comparison = comparison + " && ";
+			}
+			comparison = comparison + i"self.{field.name} == other.{field.name}";
+		}
+		if comparison == "" {
+			comparison = "true";
+		}
+		ret source(i"import std::compare::PartialEq;\nimpl {target.name} with PartialEq \{\n\tfun eq(self, other: {target.name}): bool \{\n\t\t{comparison}\n\t\}\n\}\n");
+	}
+	if item.as_enum() is Some(let target) {
+		// `match (self, other) { (E::V(let s0,..), E::V(let o0,..)) => s0
+		// == o0 && .., (E::W, E::W) => true, _ => false }`.
+		mut arms = "";
+		for variant in target.variants {
+			let arity = variant.payload.len();
+			if arity == 0 {
+				arms = arms + i"\t\t\t({target.name}::{variant.name}, {target.name}::{variant.name}) => true,\n";
+			} else {
+				mut self_binds = "";
+				mut other_binds = "";
+				mut comparison = "";
+				mut index = 0;
+				for index < arity {
+					if index > 0 {
+						self_binds = self_binds + ", ";
+						other_binds = other_binds + ", ";
+						comparison = comparison + " && ";
+					}
+					self_binds = self_binds + i"let s{index}";
+					other_binds = other_binds + i"let o{index}";
+					comparison = comparison + i"s{index} == o{index}";
+					index = index + 1;
+				}
+				arms = arms + i"\t\t\t({target.name}::{variant.name}({self_binds}), {target.name}::{variant.name}({other_binds})) => {comparison},\n";
+			}
+		}
+		arms = arms + "\t\t\t_ => false,\n";
+		ret source(i"import std::compare::PartialEq;\nimpl {target.name} with PartialEq \{\n\tfun eq(self, other: {target.name}): bool \{\n\t\tmatch (self, other) \{\n{arms}\t\t\}\n\t\}\n\}\n");
+	}
+	// Anything else (a bodyless external struct): nothing, like the Rust
+	// generator. (One recorded divergence: the Rust path also skips a
+	// BODYLESS struct; the reflection cannot distinguish it from a field-less
+	// one, which derives `true`-equality — deriving on an external struct was
+	// never meaningful.)
+	source("")
+}

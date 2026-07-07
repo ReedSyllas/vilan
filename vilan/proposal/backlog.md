@@ -239,11 +239,14 @@ have gaps.
    `[service]` migrated same day (the
    stress test passed: `Item::Service`/`ServiceItem` reflection with compiler-gathered
    rpc surface, cache keyed on struct+methods text, in-macro djb2 via new `str.code_at`;
-   byte-gated on todo/rpc bundles). **Remaining:** the derive-name registration mechanism (builtins
+   byte-gated on todo/rpc bundles). Scoped names + dissolution SHIPPED
+   (2026-07-06): macro names are module-scoped (leaf imports; std prelude ambient; markers
+   in the analyzer; lazy per-file worlds), `derives.vl` dissolved into
+   compare/default/debug/json/rpc, outputs self-carry imports. **Remaining:** the derive-name registration mechanism (builtins
    settle as fn-name = trait name; decoupling deferred to the first user derive needing
    it); ~~fuel knob~~ (shipped 2026-07-06 as `[macro]` — singular, the user's naming call:
-   `fuel`/`depth`, entry-manifest-governed, CLI-pinned); module-scoped macro names (v1 flat); attribute
-   use inside dependency files; ambient meta vocabulary in macro scope; the
+   `fuel`/`depth`, entry-manifest-governed, CLI-pinned); ~~module-scoped macro names~~ (shipped, above); ~~attribute
+   use inside dependency files~~ (shipped with the unified epilogue); ambient meta vocabulary in macro scope; the
    **construction API** (macro-engine §3 recorded direction, user request 2026-07-06:
    `Arguments` typed accessors first, then macro_std output builders, tree interchange
    only if measured); `macro { .. }` blocks (Phase 4).

@@ -22,10 +22,12 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::analyzer::SourceId;
 use crate::error::Error;
+use crate::id::Id;
 use crate::interpreter::{self, Limits};
 use crate::node::{Func, ImportBranch, Node, NodeList, Pattern};
 use crate::options::BuildOptions;
@@ -62,7 +64,8 @@ impl Default for MacroLimits {
 pub(crate) struct World {
     key: u64,
     program: JsProgram<'static>,
-    entries: HashMap<String, (String, Option<MacroShape>)>,
+    /// macro name → its emitted function name.
+    entries: HashMap<String, String>,
 }
 
 /// A module's identity for macro scoping: which package, which module. Macro
@@ -213,13 +216,56 @@ pub(crate) enum MacroShape {
 }
 
 pub(crate) struct MacroDef {
-    world: Arc<World>,
-    entry: String,
+    /// The macro's declared name (the world's entry lookup key).
+    name: String,
     /// `None` = a HELPER (§3: helpers are macro funs) — compiled into the
     /// world and callable from other macros, but not dispatchable from
     /// program code (its signature is not a macro shape, or it doesn't
-    /// return `Source`).
+    /// return `Source`). Computed syntactically at registration.
     shape: Option<MacroShape>,
+    /// The file's blanked world source (shared by the file's macros) and its
+    /// location — the world compiles LAZILY on first dispatch (registration
+    /// stays syntactic, so a program pays only for the macros it uses), cached
+    /// process-globally by blanked content.
+    blanked: Arc<String>,
+    file: PathBuf,
+    /// The defining file's source in THIS analysis — world-compile errors
+    /// attribute here (their spans point into the defining file).
+    source: SourceId,
+    world: std::cell::RefCell<Option<Arc<World>>>,
+}
+
+impl MacroDef {
+    /// The compiled world and this macro's emitted entry name; compiles on
+    /// first use. `Err` = the world's diagnostics (spans in `self.file`).
+    #[allow(clippy::wrong_self_convention)]
+    fn world(&self, std: &PackageSpec) -> Result<(Arc<World>, String), Vec<Error>> {
+        let existing = self.world.borrow().clone();
+        let world = match existing {
+            Some(world) => world,
+            None => {
+                let Some(macro_std) = resolve_macro_std(std) else {
+                    return Err(vec![Error {
+                        span: (0..0).into(),
+                        msg: "the `macro_std` package was not found beside `std`".to_string(),
+                    }]);
+                };
+                let world = compile_world((*self.blanked).clone(), &self.file, std, &macro_std)?;
+                *self.world.borrow_mut() = Some(world.clone());
+                world
+            }
+        };
+        let Some(entry) = world.entries.get(&self.name).cloned() else {
+            return Err(vec![Error {
+                span: (0..0).into(),
+                msg: format!(
+                    "the macro `{}` did not compile to a callable function",
+                    self.name
+                ),
+            }]);
+        };
+        Ok((world, entry))
+    }
 }
 
 /// The `macro_std` package, resolved from its toolchain location beside `std`
@@ -256,6 +302,7 @@ pub(crate) fn register_file(
     nodes: &NodeList,
     text: &str,
     file: &Path,
+    source: SourceId,
     std: &PackageSpec,
     diagnostics: &mut Vec<Error>,
 ) {
@@ -287,14 +334,8 @@ pub(crate) fn register_file(
         return;
     }
 
-    let blanked = blank_to_world(text, &definitions);
-    let world = match compile_world(blanked, file, std, &macro_std, &definitions) {
-        Ok(world) => world,
-        Err(errors) => {
-            diagnostics.extend(errors);
-            return;
-        }
-    };
+    let _ = macro_std; // presence checked above; the world resolves it lazily
+    let blanked = Arc::new(blank_to_world(text, &definitions));
     let module = registry.by_module.entry(key).or_default();
     for (function, _) in &definitions {
         let name = function.name.0.to_string();
@@ -305,15 +346,15 @@ pub(crate) fn register_file(
             });
             continue;
         }
-        let Some((entry, shape)) = world.entries.get(&name).cloned() else {
-            continue; // the world compile reported why
-        };
         module.insert(
-            name,
+            name.clone(),
             MacroDef {
-                world: world.clone(),
-                entry,
-                shape,
+                name,
+                shape: macro_shape(function),
+                blanked: blanked.clone(),
+                file: file.to_path_buf(),
+                source,
+                world: std::cell::RefCell::new(None),
             },
         );
     }
@@ -399,12 +440,24 @@ fn content_key(text: &str) -> u64 {
     hasher.finish()
 }
 
+thread_local! {
+    /// Set while a macro WORLD is being analyzed. A world's own analysis must
+    /// not register macros (std's prelude modules contain `macro fun`s —
+    /// registering them would recursively compile their worlds, unboundedly);
+    /// expansion still runs there, with an empty scope, so std's own derives
+    /// generate through the byte-identical Rust fallback.
+    static IN_MACRO_WORLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn in_macro_world() -> bool {
+    IN_MACRO_WORLD.with(|flag| flag.get())
+}
+
 fn compile_world(
     blanked: String,
     file: &Path,
     std: &PackageSpec,
     macro_std: &PackageSpec,
-    definitions: &[(&Func, Span)],
 ) -> Result<Arc<World>, Vec<Error>> {
     static WORLDS: OnceLock<Mutex<HashMap<u64, Arc<World>>>> = OnceLock::new();
     let key = content_key(&blanked);
@@ -419,14 +472,25 @@ fn compile_world(
         entry_dependencies: vec![("macro_std".to_string(), 0)],
         macro_limits: MacroLimits::default(),
     };
+    let previously_in_world = IN_MACRO_WORLD.with(|flag| flag.replace(true));
     let (program, errors) = analyze_source(
         leaked,
         std,
-        file.parent().unwrap_or(Path::new(".")),
+        // A macro world is not a package: the package root is the FILE itself
+        // (never matches a std layer root — that detection would flip the
+        // world into compiling-std mode and skip the dependency registration
+        // `macro_std` resolves through; stray `pkg::` imports root at a
+        // non-directory, and the hermetic check bans them anyway). The ENTRY
+        // path is synthetic: a std-hosted macro file is ALSO an always-loaded
+        // std module, and a real path would alias that module to the blanked
+        // entry (`is_entry_module`), walking the macros into a module scope
+        // instead of the world's global one.
         file,
+        &file.with_extension("vl.macro-world"),
         Some(Platform::default()),
         &workspace,
     );
+    IN_MACRO_WORLD.with(|flag| flag.set(previously_in_world));
     if !errors.is_empty() {
         return Err(errors
             .into_iter()
@@ -438,7 +502,7 @@ fn compile_world(
     }
     let Some(program) = program else {
         return Err(vec![Error {
-            span: definitions[0].1,
+            span: (0..0).into(),
             msg: "the macro world failed to compile".to_string(),
         }]);
     };
@@ -447,38 +511,29 @@ fn compile_world(
     // the same shape as the parse cache's leaks.
     let program: &'static crate::Program<'static> = Box::leak(Box::new(program));
 
+    // The world's roots are the blanked entry's top-level functions — exactly
+    // the file's macro funs (and their helper macro funs).
     let mut roots = Vec::new();
     let mut root_names = Vec::new();
-    let mut errors = Vec::new();
-    for (function, span) in definitions {
-        let name = function.name.0;
-        let id = program
-            .scopes
-            .get(&program.global_scope_id)
-            .and_then(|scope| scope.name_to_id_map.get(name))
-            .copied();
-        match id {
-            Some(id) if program.functions.contains_key(&id) => {
-                // A non-macro signature (or a non-`Source` return) is a HELPER:
-                // compiled and callable inside the world, never dispatched.
-                roots.push(id);
-                root_names.push((name.to_string(), macro_shape(function)));
-            }
-            _ => errors.push(Error {
-                span: *span,
-                msg: format!("the macro `{name}` did not compile to a callable function"),
-            }),
+    if let Some(global) = program.scopes.get(&program.global_scope_id) {
+        let mut named: Vec<(&str, Id)> = global
+            .name_to_id_map
+            .iter()
+            .map(|(name, id)| (*name, *id))
+            .filter(|(_, id)| program.functions.contains_key(id))
+            .collect();
+        named.sort_by_key(|(_, id)| id.0);
+        for (name, id) in named {
+            roots.push(id);
+            root_names.push(name.to_string());
         }
-    }
-    if !errors.is_empty() {
-        return Err(errors);
     }
     let (js_program, emitted) = transform_functions(program, &BuildOptions::default(), &roots)
         .map_err(|error| vec![error])?;
     let entries = roots
         .iter()
         .zip(root_names)
-        .map(|(id, (name, shape))| (name, (emitted.get(id).cloned().unwrap_or_default(), shape)))
+        .map(|(id, name)| (name, emitted.get(id).cloned().unwrap_or_default()))
         .collect();
     let world = Arc::new(World {
         key,
@@ -504,10 +559,14 @@ pub(crate) struct ExpansionOutput {
     /// Expression sites whose expansion FAILED — the failure is already a
     /// diagnostic; the walk substitutes an error entity without piling on.
     pub(crate) failed_sites: Vec<usize>,
+    /// Diagnostics whose spans point into a macro's DEFINING file (lazy world
+    /// compiles fail at first use) — attributed per source by the caller.
+    pub(crate) world_errors: Vec<(SourceId, Error)>,
 }
 
 struct Expander<'r, 'd> {
     scope: &'r MacroScope<'r>,
+    std: &'r PackageSpec,
     limits: MacroLimits,
     /// Rust-generated fallback text (derive/service names with no macro in
     /// scope — fixture stds without the std macros). Flushed as ONE list,
@@ -531,6 +590,7 @@ struct Expander<'r, 'd> {
 /// generated code are chased to the depth cap.
 pub(crate) fn expand_source(
     scope: &MacroScope,
+    std: &PackageSpec,
     limits: MacroLimits,
     nodes: &NodeList,
     text: &str,
@@ -540,6 +600,7 @@ pub(crate) fn expand_source(
 ) -> ExpansionOutput {
     let mut expander = Expander {
         scope,
+        std,
         limits,
         rust_source: String::new(),
         rust_traits: std::collections::HashSet::new(),
@@ -896,8 +957,26 @@ impl Expander<'_, '_> {
         // The RAW output is cached by (world, macro, item source, argument
         // sources) — §6; sound because the interpreter is deterministic.
         // Gensym stamping is per SITE, so it applies after the cache.
+        // Lazy world compile — errors carry the DEFINING file's spans.
+        let (world, entry) = match def.world(self.std) {
+            Ok(resolved) => resolved,
+            Err(errors) => {
+                self.output
+                    .world_errors
+                    .extend(errors.into_iter().map(|error| (def.source, error)));
+                self.diagnostics.push(Error {
+                    span: site,
+                    msg: format!("macro `{name}`'s definition did not compile"),
+                });
+                if let Some(site_key) = expression_site {
+                    self.output.failed_sites.push(site_key);
+                }
+                return;
+            }
+        };
         let raw: &'static str = match cached_run(
-            def,
+            &world,
+            &entry,
             name,
             item_text,
             arguments,
@@ -999,7 +1078,8 @@ impl Expander<'_, '_> {
 /// macro, item source, argument sources) — §6, sound because the interpreter
 /// is deterministic by construction.
 fn cached_run(
-    def: &MacroDef,
+    world: &World,
+    entry: &str,
     name: &str,
     item_text: &str,
     arguments: &[&str],
@@ -1009,7 +1089,7 @@ fn cached_run(
     static EXPANSIONS: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
     let key = {
         let mut hasher = DefaultHasher::new();
-        def.world.key.hash(&mut hasher);
+        world.key.hash(&mut hasher);
         name.hash(&mut hasher);
         item_text.hash(&mut hasher);
         arguments.hash(&mut hasher);
@@ -1020,8 +1100,8 @@ fn cached_run(
         return Ok(raw);
     }
     let source = interpreter::run_entry(
-        &def.world.program,
-        &def.entry,
+        &world.program,
+        entry,
         call_arguments,
         Limits {
             fuel,

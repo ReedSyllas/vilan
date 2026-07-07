@@ -55,10 +55,12 @@ A compact chronicle — details live in the named proposals and the git history.
    gate); `macro fun` items, per-file hermetic worlds, `[attr]`/`[derive(X)]`
    expansion; `macro name(..)` invocations in item + expression position with
    per-site gensym stamping; Phase 3 COMPLETE — all five derives AND the
-   `[service]` generator are user-land vilan (`std/derives.vl`), byte-identical
-   against the Rust they replaced (the service gate: todo/rpc bundles diffed
-   macro-vs-Rust + the live socket suites); helper macro funs, `Arguments`
-   typed accessors, `str.code_at` shipped alongside) — **the frontier: engine
+   `[service]` generator are user-land vilan, byte-identical against the Rust
+   they replaced; macro names are MODULE-SCOPED (leaf imports; std prelude
+   ambient) and `derives.vl` is DISSOLVED into the trait modules
+   (compare/default/debug/json/rpc) with lazy per-file worlds and self-carried
+   output imports; helper macro funs, `Arguments` typed accessors,
+   `str.code_at` shipped alongside) — **the frontier: engine
    complete through migration; remaining = the recorded tail (fuel knob,
    scoped names, construction-API steps 2–3, `macro { .. }` blocks).** User-land vilan running inside the compiler:
    `macro fun` items over the `macro_std::meta` reflection surface, hermetic

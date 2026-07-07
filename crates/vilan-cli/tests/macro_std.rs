@@ -118,11 +118,43 @@ fn a_library_macro_expands_in_the_consuming_app() {
         "app/vilan.toml",
         "[package]\nname = \"app\"\ntarget = \"node\"\n\n[package.dependencies]\nmacros = { path = \"../macros\" }\n",
     );
+    // A bare MODULE import does not bring the macro into scope (names are
+    // module-scoped now): the build fails, naming the missing macro.
     write(
         &dir,
         "app/src/main.vl",
         r#"import std::print;
 import macros;
+
+[derive_tag]
+struct Widget {
+	size: i32,
+}
+
+fun main() {
+	print(Widget { size = 1 }.tag());
+}
+
+main();
+"#,
+    );
+    let output = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(!output.status.success(), "a module import must not suffice");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("no macro named `derive_tag` is in scope"),
+        "unexpected output: {text}"
+    );
+    // The LEAF import brings it into scope.
+    write(
+        &dir,
+        "app/src/main.vl",
+        r#"import std::print;
+import macros::derive_tag;
 
 [derive_tag]
 struct Widget {

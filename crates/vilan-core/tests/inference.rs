@@ -5950,3 +5950,92 @@ fn code_at_reads_utf16_units() {
         "65\n98\n",
     );
 }
+
+// --- Scoped macro names (macro-engine.md §3 — the flat namespace is gone) ---
+
+// A macro in another module needs a leaf import; unimported = a clean error.
+#[test]
+fn an_unimported_macro_from_another_module_is_not_in_scope() {
+    assert_fails_spanning(
+        r#"
+        [tag]
+        struct Point {
+            x: i32,
+        }
+
+        mod helpers {
+            macro fun tag(item: Item): Source {
+                import macro_std::source;
+                import macro_std::meta::{ Item, Source };
+                source("")
+            }
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "tag",
+        "no macro named `tag` is in scope",
+    );
+}
+
+// A user macro may now SHADOW a prelude derive for its own file — the
+// reserved-name rule died with the flat namespace.
+#[test]
+fn a_user_macro_shadows_a_prelude_derive_in_its_file() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun PartialEq(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source, StructItem };
+            import macro_std::option::Option::{ self, Some, None };
+
+            let target = match item.as_struct() {
+                Some(let found) => found,
+                None => StructItem { name = "?", fields = [] },
+            };
+            source(i"impl {target.name} \{\nfun shadowed(self): str \{\n\"local\"\n\}\n\}\n")
+        }
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            print(Point { x = 1 }.shadowed());
+        }
+
+        main();
+        "#,
+        "local\n",
+    );
+}
+
+// The prelude: `[derive(PartialEq)]` still needs no import — the derive
+// macros live in always-loaded std modules now, not in a special file.
+#[test]
+fn prelude_derives_need_no_import() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            let a = Point { x = 1 };
+            let b = Point { x = 1 };
+            print(a == b);
+        }
+
+        main();
+        "#,
+        "true\n",
+    );
+}

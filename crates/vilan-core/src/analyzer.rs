@@ -135,6 +135,10 @@ pub enum Expr<'src> {
     Dereference(Id),
     Variable(Id),
     Void,
+    // A `macro fun`'s NAME, bound in its module's scope so imports/`use`
+    // resolve it and go-to-definition lands on the definition. Not a value:
+    // referencing it outside `[name]` / `macro name(..)` is a clean error.
+    Macro,
 }
 
 #[derive(Clone, Debug)]
@@ -4076,7 +4080,22 @@ impl<'src> Analyzer<'src> {
                         msg: "a `macro fun` must be a top-level item".to_string(),
                     });
                 }
-                let _ = function;
+                // Bind the macro's NAME so imports/`use`/re-exports resolve it
+                // (the expansion layer resolves scope separately, from syntax).
+                // Items WIN name collisions — macros are a separate namespace
+                // (§4), and a derive macro deliberately shares its trait's
+                // name in the trait's own module: the item import must keep
+                // meaning the trait. `or_insert` here + plain inserts in the
+                // item arms give items precedence in either declaration order.
+                let marker = self.new_entity_id();
+                self.expr_id_to_expr_map.insert(marker, Expr::Macro);
+                self.span_map.insert(marker, &function.name.1);
+                self.expr_id_to_scope_id_map.insert(marker, scope_id);
+                let scope = self.mut_scope_for_scope_id(scope_id);
+                scope
+                    .name_to_id_map
+                    .entry(function.name.0)
+                    .or_insert(marker);
                 Some(Expr::Void)
             }
             // A macro attribute: expansion already ran (pre-walk) and appended
@@ -9605,6 +9624,22 @@ impl<'src> Analyzer<'src> {
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             match self.try_get_expr_id_by_name(name, scope_id) {
+                Some(subject_id)
+                    if matches!(self.expr_id_to_expr_map.get(&subject_id), Some(Expr::Macro)) =>
+                {
+                    let diagnostics_before = self.diagnostics.len();
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "`{name}` is a macro, not a value — use it as `[{name}]` on an \
+                             item or invoke it with `macro {name}(..)`"
+                        ),
+                    });
+                    if let Some(source) = self.source_of_id(id) {
+                        self.attribute_new_diagnostics(diagnostics_before, source);
+                    }
+                    self.expr_id_to_expr_map.insert(id, Expr::Error);
+                }
                 Some(subject_id) => {
                     let rc = self.reference_count.entry(subject_id).or_insert(0);
                     *rc += 1;
@@ -11925,6 +11960,21 @@ fn resolve_module_file(root: &Path, name: &str) -> (Option<String>, bool) {
 /// std module's own siblings, `std` when scanning the entry program for the std
 /// submodules it addresses by path (e.g. `import std::option::Option`), or a
 /// dependency's import name.
+/// Whether an AST carries a `[service(..)]` item at any depth — the trigger
+/// for loading the std `service` macro's host module into the prelude.
+fn contains_service(nodes: &NodeList) -> bool {
+    fn walk(node: &Spanned<Node>) -> bool {
+        if matches!(node.0, Node::Service(..)) {
+            return true;
+        }
+        let mut found = false;
+        node.0
+            .for_each_child(&mut |child| found = found || walk(child));
+        found
+    }
+    nodes.iter().any(walk)
+}
+
 /// Collects every `import`/`use` reference under `root` (`pkg`, `std`, or a
 /// dependency name) at ANY nesting depth — imports are block-scoped statements
 /// (backlog H2), so a module referenced only inside a function body must still
@@ -12363,6 +12413,9 @@ pub fn analyze<'src>(
     // std import (e.g. `std::http` in a browser build) is reported here — once, at
     // its import — but still loaded, so the rest of the file types cleanly (P3).
     // (Skipped when compiling std itself, whose internal imports aren't user code.)
+    if contains_service(&nodes.0) {
+        to_load.push((Origin::Std, "rpc"));
+    }
     let entry_std_refs = collect_module_refs(&nodes.0, "std");
     if !compiling_std {
         gate_library_imports(
@@ -12388,7 +12441,12 @@ pub fn analyze<'src>(
     );
     // `bool`, `List`, and `null` are core primitives, so their (dependency-free)
     // modules are always loaded even when not imported.
-    for core in ["boolean", "list", "null", "promise"] {
+    // `compare`/`default`/`debug`/`json` host the prelude derive MACROS
+    // (macro-engine.md §10 — the ambient derive vocabulary), so they must be
+    // loaded before the registry builds, derives or not.
+    for core in [
+        "boolean", "list", "null", "promise", "compare", "default", "debug", "json",
+    ] {
         to_load.push((Origin::Std, core));
     }
 
@@ -12710,6 +12768,11 @@ pub fn analyze<'src>(
                     .into_iter()
                     .map(|(sibling, _)| (origin, sibling)),
             );
+            // A `[service]` item means the std `service` macro (hosted in
+            // `std::rpc`, too heavy to always-load) must be in the prelude.
+            if contains_service(&ast.0) {
+                to_load.push((Origin::Std, "rpc"));
+            }
             // Seed the module's `std::` and `<dep>::` references. Only the *building*
             // package's own code (`Pkg`) is cross-target-gated — a dependency's modules
             // (`Dep`) are its internals, loaded for typing without a gate (the
@@ -12774,6 +12837,12 @@ pub fn analyze<'src>(
         // --- Macro expansion epilogue (runs once loads settle) ---
         let registry = macro_registry.get_or_insert_with(|| {
             let mut registry = crate::macros::MacroRegistry::default();
+            // Inside a macro WORLD, register nothing (see IN_MACRO_WORLD):
+            // expansion below still runs with the empty registry, so std's
+            // own derives generate through the Rust fallback.
+            if crate::macros::in_macro_world() {
+                return registry;
+            }
             let before = analyzer.diagnostics.len();
             crate::macros::register_file(
                 &mut registry,
@@ -12781,6 +12850,7 @@ pub fn analyze<'src>(
                 &nodes.0,
                 entry_source,
                 entry_path,
+                SourceId(0),
                 std,
                 &mut analyzer.diagnostics,
             );
@@ -12799,6 +12869,7 @@ pub fn analyze<'src>(
                     &ast.0,
                     module_text,
                     &file,
+                    *module_source_id,
                     std,
                     &mut analyzer.diagnostics,
                 );
@@ -12813,6 +12884,7 @@ pub fn analyze<'src>(
                     &lib_ast.0,
                     lib_text,
                     &file,
+                    *lib_source_id,
                     std,
                     &mut analyzer.diagnostics,
                 );
@@ -12869,6 +12941,7 @@ pub fn analyze<'src>(
                     let before = analyzer.diagnostics.len();
                     let output = crate::macros::expand_source(
                         &scope,
+                        std,
                         workspace.macro_limits,
                         ast,
                         text,
@@ -12877,6 +12950,13 @@ pub fn analyze<'src>(
                         0,
                     );
                     analyzer.attribute_new_diagnostics(before, source);
+                    // Lazy world-compile failures carry the DEFINING file's
+                    // spans — attribute each to its own source.
+                    for (defining_source, error) in output.world_errors {
+                        let before = analyzer.diagnostics.len();
+                        analyzer.diagnostics.push(error);
+                        analyzer.attribute_new_diagnostics(before, defining_source);
+                    }
                     seed_generated_refs(&output.items, origin, to_load);
                     generated_by_source
                         .entry(source)
