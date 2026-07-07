@@ -243,17 +243,26 @@ have gaps.
    byte-gated on todo/rpc bundles). Scoped names + dissolution SHIPPED
    (2026-07-06): macro names are module-scoped (leaf imports; std prelude ambient; markers
    in the analyzer; lazy per-file worlds), `derives.vl` dissolved into
-   compare/default/debug/json/rpc, outputs self-carry imports. **Remaining:** the derive-name registration mechanism (builtins
-   settle as fn-name = trait name; decoupling deferred to the first user derive needing
-   it); ~~fuel knob~~ (shipped 2026-07-06 as `[macro]` — singular, the user's naming call:
-   `fuel`/`depth`, entry-manifest-governed, CLI-pinned); ~~module-scoped macro names~~ (shipped, above); ~~attribute
-   use inside dependency files~~ (shipped with the unified epilogue); ambient meta vocabulary in macro scope; the
-   **construction API** (macro-engine §3 recorded direction, user request 2026-07-06):
-   ~~`Arguments` typed accessors~~ (step 1, shipped 2026-07-06), ~~macro_std output
-   builders~~ (step 2, **shipped 2026-07-07** as `macro_std::build` — `quote`/`join`/
+   compare/default/debug/json/rpc, outputs self-carry imports. The
+   **construction API** (macro-engine §3, user request 2026-07-06): ~~`Arguments`
+   typed accessors~~ (step 1, shipped 2026-07-06), ~~macro_std output builders~~
+   (step 2, **shipped 2026-07-07** as `macro_std::build` — `quote`/`join`/
    `indent` + `impl_of`/`fun_of`/`match_of`/`struct_of`/`init_of`; all five derives and
-   `[service]` rewritten against them byte-identically; exact-bytes e2e pin), tree
-   interchange (step 3) only if measured; `macro { .. }` blocks (Phase 4).
+   `[service]` rewritten against them byte-identically; exact-bytes e2e pin);
+   ~~tree interchange~~ (step 3, **measured 2026-07-07 and NOT taken**: 0.8% of the
+   rpc example's build parses generated text; a 240-expansion synthetic hits 39% of a
+   188ms first compile, erased by the caches on re-analysis — batching parses is the
+   recorded cheap alternative if it ever matters). ~~Ambient meta vocabulary~~
+   (**shipped 2026-07-07**: the meta types + `source`/`fresh` are ambient in macro
+   bodies via the world prelude; explicit definitions shadow; std macros dropped the
+   boilerplate imports). ~~`macro { .. }` blocks~~ (Phase 4, **shipped 2026-07-07**:
+   item-position comptime families + expression-position constant folding; blocks
+   survive world blanking verbatim and wrap into synthetic `__macro_block_<n>` entries
+   — true spans; 9 pins + the `macro-block.vl` corpus program).
+   **G1 is COMPLETE** — the engine's remaining tail is macro-engine.md §11's
+   explicitly-beyond-v1 list (semantic queries, quasi-quotation, compiled host,
+   on-disk caching, batched parsing), each recorded with its trigger, plus the
+   derive-name registration decoupling (deferred to the first user derive needing it).
 
 ---
 

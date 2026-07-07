@@ -1,13 +1,19 @@
 # The macro engine (roadmap #9)
 
-Status: **design settled; Phases 0–3 SHIPPED; names MODULE-SCOPED and
-`derives.vl` DISSOLVED 2026-07-06** (every §12 question resolved; all built-in
-generation is user-land vilan living in its trait's own std module; macro
-names distribute through the module system with the std prelude ambient —
-see §3/§10/§11). The strategic frontier: user-land vilan code that runs *inside the
-compiler* and generates vilan code. Subsumes the built-in derives and `[service]`
-generation — today's hand-rolled, Rust-side special cases — and unlocks the uses they
-cannot serve (numeric-type families, custom derives, embedded-DSL checking).
+Status: **COMPLETE — every scheduled phase SHIPPED as of 2026-07-07.** Phases
+0–3 (interpreter, attributes, invocations, migration of all five derives +
+`[service]`), module-scoped names with `derives.vl` dissolved, the `[macro]`
+budget knob, editor support, the construction API steps 1–2 (`Arguments`
+accessors + `macro_std::build`), the ambient meta prelude, and Phase 4
+`macro { .. }` blocks. Tree interchange (construction step 3) was
+measurement-gated and is **not taken** — the measured verdict is recorded in
+§3. What remains is the explicitly-beyond-v1 tail at the end of §11 (semantic
+queries, quasi-quotation, the compiled macro host, on-disk caching), each
+recorded with its trigger. The strategic frontier this document opened:
+user-land vilan code that runs *inside the compiler* and generates vilan code.
+It subsumed the built-in derives and `[service]` generation — the hand-rolled,
+Rust-side special cases — and unlocks the uses they cannot serve
+(numeric-type families, custom derives, embedded-DSL checking).
 
 ## 1. Goals and non-goals
 
@@ -69,7 +75,7 @@ struct Point { x: i32, y: i32 }
 ```
 
 **Repetitious generation** (invocation use). The `macro` keyword prefixes every
-compile-time construct — definitions, invocations, and (future) blocks — the same way
+compile-time construct — definitions, invocations, and blocks — the same way
 `async`/`await` mark vilan's other evaluation-mode shifts:
 
 ```vilan
@@ -157,25 +163,38 @@ integer argument out of a string. The evolution, in adoption order:
    containers re-indenting child text line-by-line — nesting works by rendering
    the inner shape into the outer one. Every std derive and `[service]` is
    written against them, byte-identically.
-3. **Tree interchange (last — compiler-visible, decide from measurements).** A
-   `Source` variant carrying reflected AST values the compiler converts directly to
-   nodes, skipping lex+parse of the output. Wins: the perf tail and
-   correct-by-construction output. Costs to solve first: a value→node converter held
-   to the same exhaustiveness discipline as `for_each_child` (a second entry into node
-   construction must not silently lag the grammar); spans for constructed nodes
-   (synthetic-source attribution, like the derive channel's); and caching — §6 stays
-   sound by caching the tree's CANONICAL RENDERING. Since parsing small generated text
-   is cheap, step 2 may capture most of the value; step 3 is taken only if
-   measurements say the parse matters.
+3. **Tree interchange (last — compiler-visible, decide from measurements)** —
+   **measured 2026-07-07: NOT TAKEN.** The idea: a `Source` variant carrying
+   reflected AST values the compiler converts directly to nodes, skipping
+   lex+parse of the output; the costs it would have to pay first: a value→node
+   converter held to `for_each_child`'s exhaustiveness discipline, spans for
+   constructed nodes, and caching the tree's canonical rendering. The
+   measurement (release build, first compile, parse-of-generated-text share of
+   total wall): the **rpc example** — the heaviest real macro consumer,
+   `[service]` + `Wire`/`Json` — spends **0.8%** (15ms of 1.9s, 7.7KB
+   generated); a **synthetic stress** of 60 structs × 4 derives (240
+   expansions, 66KB generated) spends **39%** of a 188ms build. Two facts
+   defuse the stress number: it is FIRST-compile cost only (the §6 expansion
+   cache and the content-addressed parse cache erase it on every re-analysis,
+   which is the LSP's whole workload), and it is per-parse overhead (~0.3ms ×
+   240 invocations), not text volume — so if a derive-heavy first compile ever
+   matters, BATCHING the per-expansion parses captures most of the win with no
+   model change. Tree interchange is re-opened only if a real workload hurts
+   after batching.
 - **The macro world is HERMETIC, per function** (settled in review — one rule solving
   the prelude gate and the helper ambiguity at once): a `macro fun`'s body sees
   **nothing** of its surrounding module — not its imports, not its functions, not its
   module-level `let`s. What a macro body can reference is exactly: its own parameters
   and locals, **other `macro fun`s** (its helpers — inside the macro world, calling one
   is an ordinary call; the `macro name(..)` syntax is for *splice sites* in program
-  code), the language intrinsics (literals, `List`/`str` built-ins), and whatever it
-  imports **inside its own scope** — and macro-scope imports resolve against exactly
-  one package: **`macro_std`**.
+  code), the language intrinsics (literals, `List`/`str` built-ins), **the ambient
+  meta vocabulary** (shipped 2026-07-07: the `meta` reflection types plus
+  `source`/`fresh` are in scope with no imports — the compiler-interaction surface is
+  ambient the way the derive macros are ambient in program code; an explicit same-name
+  definition shadows it), and whatever it imports **inside its own scope** — and
+  macro-scope imports resolve against exactly one package: **`macro_std`**. Libraries
+  (`option`, `build`, …) stay explicit imports: the ambient set is exactly the surface
+  a macro exists to talk to, nothing more.
 - **`macro_std`** is the macro world's std — a separate, toolchain-shipped package,
   *not* a filtered view of `std`: `macro_std::meta` (the reflection types),
   `macro_std::source`, and re-exports of the pure core (`option`, `result`, `list`,
@@ -358,9 +377,11 @@ as incremental analysis; if roadmap #12 ever lands stable ids, revisit).
   sharp edge (the derive prelude's duplicate-import collision we hit in P6) becomes a
   rule: generated imports must be idempotent — the engine dedups exact-duplicate
   `import` lines in spliced output.
-- **`meta::fresh(prefix: str): str`** is the gensym: names that cannot collide with
-  user code or other expansions (reserved `__m` namespace, per-site stamped — §6.4).
-  v1 hygiene = "use `fresh` for anything you bind"; full auto-renaming is future work.
+- **`fresh(): str`** is the gensym (ambient in macro bodies): names that cannot
+  collide with user code or other expansions (reserved `__m` namespace, per-site
+  stamped — §6.4). Shipped without the once-sketched `prefix` parameter — a prefix
+  variant comes with its first consumer. v1 hygiene = "use `fresh` for anything you
+  bind"; full auto-renaming is future work.
 - A macro's *helpers* (other `macro fun`s) are invisible to the program world —
   generated code cannot call them; anything the output needs must be emitted or be
   ordinary library code the *program* imports.
@@ -534,8 +555,9 @@ hashing, mirror lets).
   world's std derives use the Rust fallback, byte-identically). The derive-name
   question (§2) settles for builtins as fn-name = trait name; a
   `proc_macro_derive`-style registration stays deferred until a user derive
-  needs the decoupling. `Json`/`Wire` (the visitor impls, enum tag fallbacks,
-  panic arms — the largest generators) are the next slice.
+  needs the decoupling. (The `derives.vl` seam described here is HISTORICAL —
+  the file was dissolved into the trait modules the same week; §10 records the
+  final shape.)
 - **Phase 5 — the construction API** (§3's recorded direction), in adoption order:
   input accessors on `Arguments` (**SHIPPED 2026-07-06**, with the `Json`/`Wire`
   slice); **output builders — SHIPPED 2026-07-07**: `macro_std::build` (pure
@@ -547,14 +569,38 @@ hashing, mirror lets).
   indentation noise is gone from the templates); proven **byte-identical** on
   the whole corpus, the rpc example, and both todo bundles, and pinned by an
   exact-bytes e2e test (`the_output_builders_render_and_splice`). `source(str)`
-  stays the escape hatch. Tree interchange remains recorded, taken only if
-  measurements say the parse of generated text matters.
-- **Phase 4 (recorded, unscheduled)** — **`macro { .. }` blocks** (an anonymous,
-  immediately-expanded macro: the body runs at expansion time in the macro prelude; in
-  item position its emissions splice in place — comptime-style families without naming
-  a macro; in expression position it yields a spliced `Source` — compile-time constant
-  folding), semantic queries (post-inference expansion stage), quasi-quotation, the
-  compiled macro host, on-disk caching.
+  stays the escape hatch. Tree interchange (step 3) was measured and is NOT
+  taken — §3 records the numbers and the batching alternative.
+- **Phase 4 — `macro { .. }` blocks** — **SHIPPED 2026-07-07.** An anonymous,
+  immediately-expanded macro: in item position its returned `Source` splices as
+  items (comptime-style families without naming a macro); in expression
+  position it splices one expression (compile-time constant folding). The body
+  is hermetic macro code with the ambient meta prelude — the minimal block
+  (`macro { source(..) }`) needs no imports — and calls the file's `macro fun`
+  helpers as plain in-world functions. Mechanism: blocks survive world
+  blanking VERBATIM (keyword included), parse at the world's top level, and
+  the world hook wraps each into a synthetic `fun __macro_block_<n>(): Source`
+  — true spans with zero offset arithmetic, and the content-hash world cache
+  covers block bodies for free; dispatch rides Phase 2's machinery as a
+  zero-argument invocation resolved by node address. Rejected loudly: blocks
+  inside macro code (the enclosing body already runs at expansion time),
+  non-`Source` tails (a world type error at the block), generated output
+  carrying a block (anchored at the generating site, like the macro-fun rule).
+  Pinned by 9 inference tests + the `macro-block.vl` corpus program (item
+  family, expression fold, cross-site gensym anti-capture), which also rides
+  the node-vs-interpreter equivalence gate.
+
+**Beyond v1 (recorded, unscheduled)** — each with its trigger: **semantic
+queries** (a post-inference expansion stage — the §1 non-goal; take it when a
+real macro needs resolved types, not syntax); **quasi-quotation** (sugar over
+`Source` — the construction API's builders cover the shapes so far);
+**the compiled macro host** (§5's escape hatch — only if a real workload
+outgrows the interpreter's measured microseconds-per-item); **on-disk
+expansion caching** (§6's later layer — the in-memory caches already erase
+re-analysis cost; take it if cold-start compiles of macro-heavy trees hurt);
+and **batched expansion parsing** (the §3 step-3 measurement's cheap
+alternative — fold a file's per-expansion parses into one, if a derive-heavy
+first compile ever matters).
 
 ## 12. Open questions for review
 
