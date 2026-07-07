@@ -1,5 +1,7 @@
 
 import pkg::shared::Shared;
+import pkg::option::Option::{ self, Some, None };
+import pkg::compare::PartialEq;
 
 // A resource that can be released. An `Owner` collects `Disposable`s and releases
 // them as a group; `Subscription`, `Owner`, and `std::ui`'s `View` are disposable.
@@ -141,6 +143,12 @@ impl Owner {
 		});
 		item
 	}
+
+	// Register a plain cleanup to run at disposal — for teardown that isn't a
+	// single `Disposable` (e.g. `bind_each` disposing whichever rows are live).
+	fun defer(self, cleanup: || void) {
+		self.cleanups.write().push(cleanup);
+	}
 }
 
 impl Owner with Disposable {
@@ -238,4 +246,93 @@ fun combine<T: (2..)>(sources: (U in T: Signal<U>)): Signal<T> {
 	// the resulting subscriptions are intentionally dropped.
 	let subscriptions = (source in sources => source.sub(|_| { derived.set(snapshot()); }));
 	derived
+}
+
+// The monadic join (backlog A4): follow whichever inner signal the outer
+// currently holds — a DYNAMIC dependency. When the outer switches, the result
+// detaches from the replaced inner and follows the new one from its current
+// value; when the current inner changes, the result updates. Like `map` and
+// `combine`, the subscription into the OUTER is deliberately unowned (it lives
+// as long as the outer does); the rolling INNER subscription is disposed on
+// every switch, so a replaced inner stops driving the result.
+impl Signal<Signal<type U>> {
+	fun flatten(self): Signal<U> {
+		let derived = Signal::new(self.get().get());
+		let inner_subscription: Shared<Option<Subscription>> = Shared::new(None);
+		// `sub` runs its observer immediately, so the first inner wires here too.
+		let outer_subscription = self.sub(|inner| {
+			match inner_subscription.read() {
+				Some(let previous) => previous.dispose(),
+				None => {},
+			}
+			inner_subscription.write() = Some(inner.sub(|value| {
+				derived.set(value);
+			}));
+		});
+		derived
+	}
+}
+
+// === Keyed list reconciliation (backlog A3) — `bind_each`'s engine ===
+//
+// Aligns a keyed row set with a new list of items. Per new item, in order:
+// KEEP a same-key row whose item is unchanged, REFRESH a same-key row whose
+// item changed (the caller disposes the old row and renders anew), or render
+// FRESH when the key is new. Old rows whose keys left the list are REMOVED.
+// A duplicate key claims its old row once — later duplicates render fresh.
+// Pure logic (no DOM), so its edge cases pin in ordinary node tests; the
+// browser's `bind_each` applies the plan to elements.
+
+// One new-position row's fate. `Keep`/`Refresh` carry the OLD row's index.
+enum RowStep {
+	Keep(i32),
+	Refresh(i32),
+	Fresh,
+}
+
+// The plan for one reconcile pass: a step per NEW item (in the new order),
+// then the old indices whose rows are gone entirely.
+struct ReconcilePlan {
+	steps: List<RowStep>,
+	removed: List<i32>,
+}
+
+fun reconcile<T: PartialEq, K: PartialEq>(
+	old_keys: List<K>,
+	old_items: List<T>,
+	items: List<T>,
+	key_of: |T| K,
+): ReconcilePlan {
+	mut claimed: List<bool> = [];
+	for _ in old_keys {
+		claimed.push(false);
+	}
+	mut steps: List<RowStep> = [];
+	for item in items {
+		let item_key = key_of(item);
+		mut step = RowStep::Fresh;
+		mut index = 0;
+		for index < old_keys.len() {
+			if !claimed[index] && old_keys[index] == item_key {
+				claimed[index] = true;
+				step = if old_items[index] == item {
+					RowStep::Keep(index)
+				} else {
+					RowStep::Refresh(index)
+				};
+				jump break;
+			}
+			index += 1;
+		}
+		steps.push(step);
+	}
+	mut removed: List<i32> = [];
+	mut index = 0;
+	for index < old_keys.len() {
+		if !claimed[index] {
+			removed.push(index);
+		}
+		index += 1;
+	}
+	ReconcilePlan { steps = steps, removed = removed }
 }

@@ -9,7 +9,7 @@ import std::reactive::Signal;
 import std::shared::Shared;
 import std::json::Json;
 
-[derive(Wire)]
+[derive(Wire, PartialEq)]
 struct Todo {
 	id: i32,
 	label: str,

@@ -13,7 +13,9 @@
 // Only available when building for the browser (`vilan build --target browser`).
 
 import pkg::dom::{ Element, get_element_by_id, create_element };
-import pkg::reactive::{ Signal, Owner, Disposable };
+import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep };
+import pkg::shared::Shared;
+import pkg::compare::PartialEq;
 
 // A handle to a DOM element under construction. `View` wraps an `Element` (a
 // reference) and an `Owner` collecting the subscriptions its bindings create, so
@@ -109,23 +111,63 @@ impl View {
 		self
 	}
 
-	// A reactive list: render one child view per element of `source`, re-rendering
-	// the whole list whenever it changes (so a row reflects its item's current
-	// value). A child owner holds the current rows' subscriptions; it is disposed
-	// before each rebuild, so old rows don't leak. `key` identifies a row for a
-	// future keyed-reconcile optimization; `render` builds the row's view.
-	fun bind_each<T, K>(self, source: Signal<List<T>>, key: |T| K, render: |T| View): View {
+	// A reactive list, KEYED (backlog A3): one child view per element of
+	// `source`, reconciled by `key` on every change instead of rebuilt. A row
+	// whose key survives is reused — moved into its new position with its
+	// element and subscriptions intact; it re-renders only when its item's
+	// value changed (`T: PartialEq`). Rows whose keys left the list are
+	// disposed and removed. The reconciliation plan itself is
+	// `std::reactive::reconcile` — pure, node-testable logic; this method
+	// applies it to the DOM (appending an existing element MOVES it, so the
+	// order pass is one append per row).
+	fun bind_each<T: PartialEq, K: PartialEq>(self, source: Signal<List<T>>, key: |T| K, render: |T| View): View {
 		let element = self.element;
-		let rows = Owner::new();
-		self.owner.take(rows); // rows are disposed when this view is
-		self.owner.take(source.sub(|list| {
-			rows.dispose(); // drop the previous rows' subscriptions
-			element.clear();
-			for item in list {
-				let row = render(item);
-				rows.take(row);
+		let row_keys: Shared<List<K>> = Shared::new([]);
+		let row_items: Shared<List<T>> = Shared::new([]);
+		let row_views: Shared<List<View>> = Shared::new([]);
+		// Whichever rows are live when this view is disposed go with it.
+		self.owner.defer(|| {
+			for row in row_views.read() {
+				row.dispose();
+			}
+		});
+		self.owner.take(source.sub(|list: List<T>| {
+			let plan = reconcile(row_keys.read(), row_items.read(), list, key);
+			let previous_views = row_views.read();
+			for index in plan.removed {
+				let row = previous_views[index];
+				row.dispose();
+				row.element.remove();
+			}
+			mut next_views: List<View> = [];
+			mut position = 0;
+			for step in plan.steps {
+				let item = list[position];
+				let row = match step {
+					RowStep::Keep(let index) => previous_views[index],
+					RowStep::Refresh(let index) => {
+						let old = previous_views[index];
+						old.dispose();
+						old.element.remove();
+						render(item)
+					},
+					RowStep::Fresh => render(item),
+				};
+				next_views.push(row);
+				position += 1;
+			}
+			// The order pass: append each row in the new order — appending a
+			// kept element moves it; a fresh one inserts.
+			for row in next_views {
 				element.append(row.element);
 			}
+			mut next_keys: List<K> = [];
+			for item in list {
+				next_keys.push(key(item));
+			}
+			row_keys.write() = next_keys;
+			row_items.write() = list;
+			row_views.write() = next_views;
 		}));
 		self
 	}

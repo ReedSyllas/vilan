@@ -1,0 +1,39 @@
+// `reconcile` (backlog A3) — the keyed engine behind `bind_each`, pure and
+// node-testable: per new item KEEP an unchanged same-key row, REFRESH a
+// changed one, render FRESH for a new key; absent keys report as removed;
+// a duplicate key claims its old row once.
+import std::print;
+import std::reactive::{ reconcile, RowStep, ReconcilePlan };
+
+fun show(plan: ReconcilePlan) {
+	mut out = "";
+	for step in plan.steps {
+		let rendered = match step {
+			RowStep::Keep(let index) => i"K{index} ",
+			RowStep::Refresh(let index) => i"R{index} ",
+			RowStep::Fresh => "F ",
+		};
+		out = out + rendered;
+	}
+	out = out + "| removed:";
+	for index in plan.removed {
+		out = out + i" {index}";
+	}
+	print(out);
+}
+
+fun main() {
+	// Reorder: rows move with their keys.
+	show(reconcile([1, 2, 3], [10, 20, 30], [30, 10, 20], |item| item / 10));
+	// Keep the unchanged, refresh the changed, fresh the new.
+	show(reconcile([1, 2], [10, 20], [10, 21, 35], |item| item / 10));
+	// Keys that left the list report their old indices.
+	show(reconcile([1, 2, 3], [10, 20, 30], [30], |item| item / 10));
+	// Duplicate keys: the first claims the old row, later ones are fresh.
+	show(reconcile([1], [10], [10, 10], |item| item / 10));
+	// From empty, and to empty.
+	show(reconcile([], [], [10], |item| item / 10));
+	show(reconcile([1], [10], [], |item| item / 10));
+}
+
+main();

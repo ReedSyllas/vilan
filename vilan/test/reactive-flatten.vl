@@ -1,0 +1,29 @@
+// `flatten` (backlog A4) — the monadic join: follow whichever inner signal
+// the outer currently holds. A DYNAMIC dependency: switching the outer
+// detaches the replaced inner (its later sets must not leak through) and
+// follows the new inner from its current value.
+import std::print;
+import std::reactive::Signal;
+
+fun main() {
+	let first = Signal::new(1);
+	let second = Signal::new(10);
+	let outer = Signal::new(first);
+	let joined = outer.flatten();
+	print(joined.get());
+	first.set(2);
+	print(joined.get());
+	outer.set(second);
+	print(joined.get());
+	first.set(99);
+	print(joined.get());
+	second.set(11);
+	print(joined.get());
+
+	// The joined result is itself a signal: derived work stacks on it.
+	let doubled = joined.map(|value| value * 2);
+	second.set(21);
+	print(doubled.get());
+}
+
+main();

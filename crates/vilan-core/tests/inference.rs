@@ -6551,3 +6551,86 @@ fn a_macro_stamps_a_numeric_family() {
         "5\n45\n",
     );
 }
+
+// --- `flatten` + keyed reconciliation (backlog A4/A3) ---
+
+// The join follows the CURRENT inner: switching detaches the replaced inner
+// (its later sets must not leak through) and adopts the new one's value.
+#[test]
+fn flatten_follows_the_current_inner_and_detaches_the_old() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::Signal;
+
+        fun main() {
+            let first = Signal::new(1);
+            let second = Signal::new(10);
+            let outer = Signal::new(first);
+            let joined = outer.flatten();
+            first.set(2);
+            print(joined.get());
+            outer.set(second);
+            first.set(99);
+            print(joined.get());
+            second.set(11);
+            print(joined.get());
+        }
+
+        main();
+        "#,
+        "2\n10\n11\n",
+    );
+}
+
+// Reconcile distinguishes keep/refresh/fresh per new position and reports
+// removed old indices — including the duplicate-key claim rule.
+#[test]
+fn reconcile_plans_keep_refresh_fresh_and_removals() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ reconcile, RowStep };
+
+        fun main() {
+            let plan = reconcile([1, 2], [10, 20], [20, 11, 35, 20], |item| item / 10);
+            for step in plan.steps {
+                let rendered = match step {
+                    RowStep::Keep(let index) => i"keep {index}",
+                    RowStep::Refresh(let index) => i"refresh {index}",
+                    RowStep::Fresh => "fresh",
+                };
+                print(rendered);
+            }
+            for index in plan.removed {
+                print(i"removed {index}");
+            }
+        }
+
+        main();
+        "#,
+        "keep 1\nrefresh 0\nfresh\nfresh\n",
+    );
+}
+
+// `Owner.defer` runs plain cleanups at disposal, alongside taken disposables.
+#[test]
+fn owner_defer_runs_cleanups_on_dispose() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Owner, Disposable };
+
+        fun main() {
+            let owner = Owner::new();
+            owner.defer(|| print("first"));
+            owner.defer(|| print("second"));
+            owner.dispose();
+            print("done");
+        }
+
+        main();
+        "#,
+        "first\nsecond\ndone\n",
+    );
+}

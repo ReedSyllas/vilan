@@ -8,6 +8,9 @@ import std::ui::{ view, View };
 import std::reactive::{ Signal, combine };
 import std::display::format;
 
+// `bind_each` reconciles by key and re-renders only CHANGED rows — `Todo`
+// derives `PartialEq` so the reconciler can tell.
+[derive(PartialEq)]
 struct Todo {
 	id: i32,
 	label: str,

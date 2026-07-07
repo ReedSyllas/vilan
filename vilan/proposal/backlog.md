@@ -17,12 +17,17 @@ have gaps.
 
 ## A. Reactive core & UI (`std::reactive`, `std::ui`)
 
-3. **`bind_each` keyed reconciliation** (M) — currently clear-and-rebuild on every change (correct
-   but not keyed). The `key` argument is reserved for this. Reorder rows with their items, dispose a
-   removed key's row, re-render only a changed row.
+3. ~~**`bind_each` keyed reconciliation**~~ — **SHIPPED 2026-07-07**: rows move with their
+   keys, a changed row re-renders (`T: PartialEq`), removed rows dispose + leave the DOM;
+   the plan is `std::reactive::reconcile` (pure, node-tested — corpus `reactive-keyed.vl`
+   + pins), applied by `bind_each` (appending a kept element MOVES it, so ordering is one
+   append per row). `Owner.defer` added for non-`Disposable` teardown.
 
-4. **`flatten` reactive combinator** (M) — the monadic join: a `Signal<Signal<U>>` followed to its
-   current inner signal (a dynamic dependency). Listed in the README API table; not built.
+4. ~~**`flatten` reactive combinator**~~ — **SHIPPED 2026-07-07**: `outer.flatten()` on
+   `Signal<Signal<U>>` (a nested-generic impl subject) follows the current inner and
+   DETACHES a replaced one (corpus `reactive-flatten.vl` + pin). Internal subscriptions
+   follow `map`/`combine`'s unowned precedent; the rolling inner subscription is disposed
+   per switch.
 
 5. **Ambient owner / `comp` ergonomic layer** (M; deferred from `reactive-ownership.md`) — sugar
    over the explicit `Owner`/`Disposable` primitives, once an API is proven against

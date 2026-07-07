@@ -8,11 +8,12 @@
 > `vilan build --target browser app.vl` (emits `app.js`; serve `index.html`).
 >
 > **Built:** `combine` (variadic over its inputs' distinct types — a mapped tuple
-> parameter; a `Signal` is passed as `.source()`), `bind_each` (a reactive list —
-> clear-and-rerender on change), and `show` (toggle a node on a `Source<bool>`). So
+> parameter; a `Signal` is passed as `.source()`), `flatten` (the monadic join — a
+> dynamic dependency following whichever inner signal the outer holds), `bind_each`
+> (a reactive list, **keyed-reconciled**: rows move with their keys, only a changed
+> row re-renders, removed rows are disposed — the plan is `std::reactive::reconcile`,
+> pure and node-tested), and `show` (toggle a node on a `Source<bool>`). So
 > [`todos.vl`](todos.vl) now compiles and is mounted by [`app.vl`](app.vl).
-> **Not yet built:** `flatten`. `bind_each` re-renders the whole list on any change
-> (correct, but not yet keyed-reconciled — the `key` argument is reserved for that).
 >
 > **Known limitation:** calling a *generic* function/method (e.g. `format(n)` or
 > `n.to_string()`) on a closure parameter inside a binding doesn't infer the
@@ -62,7 +63,7 @@ fun counter(): View {
     let count = Signal::new(0);
 
     view("section")
-        .child(view("p").bind_text(count.derive(|n| "Count: " + format(n))))
+        .child(view("p").bind_text(count.map(|n| "Count: " + format(n))))
         .child(view("button").text("+").on("click", || count.set_with(|n| n + 1)))
 }
 ```
@@ -75,18 +76,18 @@ fun counter(): View {
 
 The read/write split is the spine: **`Source<T>` is the read interface** every
 reactive value implements; **`Signal<T>` is a writable root** that extends it.
-`derive`/`combine`/`flatten` always yield read-only `Source`s — only a root
-`Signal` can be written. The combinators are monadic: `derive` is map, `combine`
-is the product, `flatten` is join, `sub` is the consumer.
+`map`/`combine`/`flatten` yield derived signals (read-only-by-convention today; the `Source`-typed return is future polish) — only a root
+`Signal` can be written. The combinators are monadic: `map`, `combine`
+the product, `flatten` the join, `sub` the consumer.
 
 ### `Source<T>` — any reactive value
 
 | Item | Meaning |
 | --- | --- |
 | `source.get(): T` | Sample the current value — **non-reactive**, creates no dependency. |
-| `source.derive(\|T\| U): Source<U>` | A derived source; depends structurally on `source`. |
+| `source.map(\|T\| U): Signal<U>` | A derived signal (the README's earlier `derive` name shipped as `map`); depends structurally on `source`. |
 | `source.sub(\|T\| void): Subscription` | Run now and on every change; owned by the active scope (below). |
-| `source.flatten(): Source<U>` *(when `T` is `Source<U>`)* | Follow whichever source `source` currently holds — a **dynamic** dependency. |
+| `source.flatten(): Signal<U>` *(when `T` is `Signal<U>`)* | Follow whichever signal `source` currently holds — a **dynamic** dependency; switching detaches the replaced inner. |
 | `combine(a, b, c, …): Source<(A, B, C, …)>` | **Variadic** product; a source of the tuple, depending on all inputs. |
 
 `combine` yields a plain source rather than taking the mapping function, so it
@@ -191,7 +192,7 @@ impl Client {
 // client — `count` is a remote `Source<i32>`
 let count = client().count;
 let _ = count.sub(|count| print(i"Count is {count}"));   // subscribes over the transport
-let double = count.derive(|count| count * 2);
+let double = count.map(|count| count * 2);
 client().inc();                                          // round-trips; `count`/`double` update
 ```
 
