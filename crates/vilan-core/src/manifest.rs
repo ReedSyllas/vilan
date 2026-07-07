@@ -29,10 +29,22 @@ pub struct Manifest {
     pub library: Option<Library>,
     pub project: Option<Project>,
     pub build: Option<Build>,
+    /// `[macro]` — expansion budgets (macro-engine.md §5): `fuel` (interpreter
+    /// steps per macro run, default 1_000_000) and `depth` (expansion fixpoint
+    /// rounds, default 16).
+    #[serde(rename = "macro", default)]
+    pub macro_: Option<MacroSection>,
     /// Legacy full-stack server entry (`[server]`), kept working through P1.
     pub server: Option<EntrySection>,
     /// Legacy full-stack client entry (`[client]`), kept working through P1.
     pub client: Option<EntrySection>,
+}
+
+/// The `[macro]` section: per-package expansion budgets.
+#[derive(Debug, Default, Deserialize)]
+pub struct MacroSection {
+    pub fuel: Option<u64>,
+    pub depth: Option<u32>,
 }
 
 /// A package: a buildable, importable unit.
@@ -342,8 +354,20 @@ fn validate_dependencies(dependencies: &BTreeMap<String, Dependency>, errors: &m
 /// Shared by the CLI and the language server so both resolve imports identically.
 pub fn resolve_workspace(package_dir: &Path) -> Result<Workspace, String> {
     let manifest = load_manifest(package_dir)?;
+    let defaults = crate::macros::MacroLimits::default();
+    let macro_limits = manifest
+        .macro_
+        .as_ref()
+        .map(|section| crate::macros::MacroLimits {
+            fuel: section.fuel.unwrap_or(defaults.fuel),
+            depth: section.depth.unwrap_or(defaults.depth),
+        })
+        .unwrap_or(defaults);
     let Some(package) = manifest.package else {
-        return Ok(Workspace::default());
+        return Ok(Workspace {
+            macro_limits,
+            ..Workspace::default()
+        });
     };
     let mut packages = Vec::new();
     let mut index_by_path = HashMap::new();
@@ -358,6 +382,7 @@ pub fn resolve_workspace(package_dir: &Path) -> Result<Workspace, String> {
     Ok(Workspace {
         packages,
         entry_dependencies,
+        macro_limits,
     })
 }
 

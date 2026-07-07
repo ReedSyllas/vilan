@@ -33,9 +33,24 @@ use crate::span::{Span, Spanned};
 use crate::transformer::{JsProgram, js, transform_functions};
 use crate::{PackageSpec, Platform, Workspace, analyze_source};
 
-/// Expansion depth cap: a macro's output may carry further attribute
-/// invocations; past this the chain is reported instead of chased.
-const MAX_DEPTH: u32 = 16;
+/// The per-package expansion budgets (`vilan.toml [macro]`, macro-engine.md
+/// §5/§12): `fuel` bounds one macro run's interpreter steps; `depth` bounds
+/// the expansion fixpoint (output carrying further invocations). Defaults are
+/// the settled review values.
+#[derive(Debug, Clone, Copy)]
+pub struct MacroLimits {
+    pub fuel: u64,
+    pub depth: u32,
+}
+
+impl Default for MacroLimits {
+    fn default() -> Self {
+        Self {
+            fuel: 1_000_000,
+            depth: 16,
+        }
+    }
+}
 
 /// A compiled per-file macro world: the transformed program the interpreter
 /// executes, plus each macro's emitted entry name and parameter count.
@@ -279,6 +294,7 @@ fn compile_world(
     let workspace = Workspace {
         packages: vec![macro_std.clone()],
         entry_dependencies: vec![("macro_std".to_string(), 0)],
+        macro_limits: MacroLimits::default(),
     };
     let (program, errors) = analyze_source(
         leaked,
@@ -370,6 +386,7 @@ pub(crate) struct ExpansionOutput {
 struct Expander<'r, 'd> {
     registry: &'r MacroRegistry,
     std: &'r PackageSpec,
+    limits: MacroLimits,
     diagnostics: &'d mut Vec<Error>,
     /// The per-splice-site counter that stamps `__m<N>` gensym placeholders
     /// unique (§7): deterministic — sites are visited in file/node order.
@@ -385,6 +402,7 @@ struct Expander<'r, 'd> {
 pub(crate) fn expand_source(
     registry: &MacroRegistry,
     std: &PackageSpec,
+    limits: MacroLimits,
     nodes: &NodeList,
     text: &str,
     diagnostics: &mut Vec<Error>,
@@ -394,6 +412,7 @@ pub(crate) fn expand_source(
     let mut expander = Expander {
         registry,
         std,
+        limits,
         diagnostics,
         site_counter,
         output: ExpansionOutput::default(),
@@ -613,11 +632,12 @@ impl Expander<'_, '_> {
         depth: u32,
         expression_site: Option<usize>,
     ) {
-        if depth >= MAX_DEPTH {
+        if depth >= self.limits.depth {
+            let cap = self.limits.depth;
             self.diagnostics.push(Error {
                 span: site,
                 msg: format!(
-                    "macro expansion did not settle after {MAX_DEPTH} rounds — the chain ends \
+                    "macro expansion did not settle after {cap} rounds — the chain ends \
                      at `{name}`"
                 ),
             });
@@ -630,7 +650,14 @@ impl Expander<'_, '_> {
         // The RAW output is cached by (world, macro, item source, argument
         // sources) — §6; sound because the interpreter is deterministic.
         // Gensym stamping is per SITE, so it applies after the cache.
-        let raw: &'static str = match cached_run(def, name, item_text, arguments, &call_arguments) {
+        let raw: &'static str = match cached_run(
+            def,
+            name,
+            item_text,
+            arguments,
+            &call_arguments,
+            self.limits.fuel,
+        ) {
             Ok(raw) => raw,
             Err(message) => {
                 self.diagnostics.push(Error {
@@ -716,9 +743,13 @@ impl Expander<'_, '_> {
             }
             self.output.items.push(parsed);
             // The generated code may carry built-in derives and further uses.
-            if let Some(derived) =
-                crate::analyzer::expand_derives(parsed, parsed_text, self.std, self.diagnostics)
-            {
+            if let Some(derived) = crate::analyzer::expand_derives(
+                parsed,
+                parsed_text,
+                self.std,
+                self.limits,
+                self.diagnostics,
+            ) {
                 self.output.items.push(derived);
             }
             self.expand_list(parsed, parsed_text, depth + 1);
@@ -735,6 +766,7 @@ fn cached_run(
     item_text: &str,
     arguments: &[&str],
     call_arguments: &[js::Node<'static>],
+    fuel: u64,
 ) -> Result<&'static str, String> {
     static EXPANSIONS: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
     let key = {
@@ -753,7 +785,10 @@ fn cached_run(
         &def.world.program,
         &def.entry,
         call_arguments,
-        Limits::default(),
+        Limits {
+            fuel,
+            ..Limits::default()
+        },
     )
     .map_err(|failure| failure.message)?;
     let leaked: &'static str = Box::leak(source.into_boxed_str());
@@ -830,9 +865,10 @@ pub(crate) fn run_builtin_derive(
     name: &str,
     item: &Spanned<Node>,
     text: &str,
+    fuel: u64,
 ) -> Result<&'static str, String> {
     let call_arguments = vec![construct_item(item, text)];
-    cached_run(def, name, slice(text, item.1), &[], &call_arguments)
+    cached_run(def, name, slice(text, item.1), &[], &call_arguments, fuel)
 }
 
 /// Looks up a built-in derive by name.
@@ -1165,11 +1201,12 @@ pub(crate) fn run_builtin_service(
     item: &Spanned<Node>,
     nodes: &NodeList,
     text: &str,
+    fuel: u64,
 ) -> Result<&'static str, String> {
     let Some((literal, input)) = construct_service(client_name, item, nodes, text) else {
         return Ok(""); // a bodyless struct generates nothing, like the Rust path
     };
-    cached_run(def, "service", &input, &[], &[literal])
+    cached_run(def, "service", &input, &[], &[literal], fuel)
 }
 
 /// `Arguments { values }` — the invocation's argument source texts.

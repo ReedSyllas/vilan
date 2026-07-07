@@ -246,7 +246,7 @@ The compiler is Rust; macros are vilan. Three ways to run them:
    Option (b) spends its speed winnings buying back, imperfectly, what (a) has by
    construction.
 3. **Fuel bounds the failure mode**: each expansion gets an instruction budget
-   (default: 1M steps; configurable per package in `vilan.toml [macros]`). Exhaustion
+   (default: 1M steps; configurable per package in `vilan.toml [macro]`). Exhaustion
    is a clean spanned error naming the macro — the same pattern as the reactive flush
    budget. An infinite loop in a macro can never hang the compiler or the editor.
 4. **The escape hatch is additive.** If a real macro workload outgrows the interpreter,
@@ -541,8 +541,12 @@ hashing, mirror lets).
    is reserved. Parse decision is one token after `macro` (§3). Refinement (review):
    the prefix is required only in *program* code — inside the macro world, macro funs
    call each other plainly (§2).
-2. ~~Fuel defaults~~ — **resolved (review):** 1M steps/expansion, depth 16, per-package
-   configurable in `vilan.toml [macros]`.
+2. ~~Fuel defaults~~ — **resolved (review), knob SHIPPED 2026-07-06:** 1M
+   steps/expansion, depth 16, per-package configurable in `vilan.toml [macro]`
+   (singular — the user's naming call): `fuel = <steps>`, `depth = <rounds>`.
+   The entry manifest's section governs the whole compilation; a cache hit
+   from a prior, better-fueled run still serves (fuel is a backstop, not a
+   semantic — determinism makes the cached output valid regardless).
 3. ~~Marked vs inferred macro modules~~ — **resolved (review): the question dissolved.**
    There are no macro modules: the macro world is hermetic PER FUNCTION (§3) — a
    `macro fun` sees nothing of its surrounding module and imports only from

@@ -11903,6 +11903,7 @@ pub(crate) fn expand_derives(
     nodes: &NodeList<'_>,
     text: &str,
     std: &PackageSpec,
+    limits: crate::macros::MacroLimits,
     diagnostics: &mut Vec<Error>,
 ) -> Option<&'static NodeList<'static>> {
     use chumsky::prelude::*;
@@ -11930,7 +11931,13 @@ pub(crate) fn expand_derives(
                 for derive in derives.iter() {
                     match crate::macros::builtin_derive(builtins, derive) {
                         Some(def) => {
-                            match crate::macros::run_builtin_derive(def, derive, item, text) {
+                            match crate::macros::run_builtin_derive(
+                                def,
+                                derive,
+                                item,
+                                text,
+                                limits.fuel,
+                            ) {
                                 Ok(generated) => source.push_str(generated),
                                 Err(message) => diagnostics.push(Error {
                                     span: item.1,
@@ -11955,6 +11962,7 @@ pub(crate) fn expand_derives(
                         item,
                         nodes,
                         text,
+                        limits.fuel,
                     ) {
                         Ok(generated) => source.push_str(generated),
                         Err(message) => diagnostics.push(Error {
@@ -12339,6 +12347,9 @@ pub struct Workspace {
     /// The entry package's direct dependencies: `(import name, index into
     /// `packages`)`.
     pub entry_dependencies: Vec<(String, usize)>,
+    /// The entry manifest's `[macro]` budgets (fuel per expansion, fixpoint
+    /// depth) — defaults when absent.
+    pub macro_limits: crate::macros::MacroLimits,
 }
 
 /// A package loaded during analysis: its source root, the namespace its modules
@@ -12481,7 +12492,13 @@ pub fn analyze<'src>(
     // `PartialEq` in `std::compare`) that must be pulled into the reachable set
     // alongside the user's own imports, and they're walked into the entry scope
     // later. Computed once and reused.
-    let derived = expand_derives(&nodes.0, entry_source, std, &mut analyzer.diagnostics);
+    let derived = expand_derives(
+        &nodes.0,
+        entry_source,
+        std,
+        workspace.macro_limits,
+        &mut analyzer.diagnostics,
+    );
 
     let mut to_load: Vec<(Origin, &str)> = lib_ast
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
@@ -12653,8 +12670,13 @@ pub fn analyze<'src>(
             // A dependency's public surface can derive too — expand its `lib.vl`'s
             // `[derive(..)]`, seeding the std modules the impls reference, and carry
             // them to walk into the dependency's namespace below.
-            let lib_derived =
-                expand_derives(&lib_ast.0, lib_loaded.text, std, &mut analyzer.diagnostics);
+            let lib_derived = expand_derives(
+                &lib_ast.0,
+                lib_loaded.text,
+                std,
+                workspace.macro_limits,
+                &mut analyzer.diagnostics,
+            );
             if let Some(generated) = lib_derived {
                 to_load.extend(
                     collect_module_refs(generated, "std")
@@ -12925,7 +12947,13 @@ pub fn analyze<'src>(
             let module_derived = if is_entry_module {
                 derived
             } else {
-                let generated = expand_derives(&ast.0, module_text, std, &mut analyzer.diagnostics);
+                let generated = expand_derives(
+                    &ast.0,
+                    module_text,
+                    std,
+                    workspace.macro_limits,
+                    &mut analyzer.diagnostics,
+                );
                 if let Some(generated) = generated {
                     to_load.extend(
                         collect_module_refs(generated, "std")
@@ -13030,6 +13058,7 @@ pub fn analyze<'src>(
                 let output = crate::macros::expand_source(
                     registry,
                     std,
+                    workspace.macro_limits,
                     &nodes.0,
                     entry_source,
                     &mut analyzer.diagnostics,
@@ -13056,6 +13085,7 @@ pub fn analyze<'src>(
                 let output = crate::macros::expand_source(
                     registry,
                     std,
+                    workspace.macro_limits,
                     &ast.0,
                     module_text,
                     &mut analyzer.diagnostics,

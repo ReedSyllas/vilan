@@ -154,3 +154,59 @@ main();
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// `vilan.toml [macro]` (macro-engine.md §5/§12): the per-package fuel budget.
+// A starved budget stops an expensive macro with the clean expansion-time
+// error; a raised one lets it finish.
+#[test]
+fn the_macro_section_configures_fuel() {
+    let source = r#"macro fun expensive(item: Item): Source {
+	import macro_std::source;
+	import macro_std::meta::{ Item, Source };
+
+	mut n = 0;
+	for n < 100000 {
+		n = n + 1;
+	}
+	source("")
+}
+
+[expensive]
+struct Point {
+	x: i32,
+}
+
+fun main() {}
+
+main();
+"#;
+    for (fuel, expect_success) in [("2000", false), ("5000000", true)] {
+        let dir = temp_project(&format!("fuel_{fuel}"));
+        write(
+            &dir,
+            "vilan.toml",
+            &format!("[package]\nname = \"app\"\ntarget = \"node\"\n\n[macro]\nfuel = {fuel}\n"),
+        );
+        write(&dir, "src/main.vl", source);
+        let output = vilan(&["build", dir.to_str().unwrap()]);
+        if expect_success {
+            assert!(
+                output.status.success(),
+                "fuel {fuel} should suffice: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        } else {
+            assert!(!output.status.success(), "fuel {fuel} should exhaust");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                text.contains("failed at expansion time") && text.contains("fuel"),
+                "unexpected output: {text}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

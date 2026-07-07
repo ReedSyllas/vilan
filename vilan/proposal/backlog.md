@@ -241,7 +241,8 @@ have gaps.
    rpc surface, cache keyed on struct+methods text, in-macro djb2 via new `str.code_at`;
    byte-gated on todo/rpc bundles). **Remaining:** the derive-name registration mechanism (builtins
    settle as fn-name = trait name; decoupling deferred to the first user derive needing
-   it); `vilan.toml [macros]` fuel knob; module-scoped macro names (v1 flat); attribute
+   it); ~~fuel knob~~ (shipped 2026-07-06 as `[macro]` — singular, the user's naming call:
+   `fuel`/`depth`, entry-manifest-governed, CLI-pinned); module-scoped macro names (v1 flat); attribute
    use inside dependency files; ambient meta vocabulary in macro scope; the
    **construction API** (macro-engine §3 recorded direction, user request 2026-07-06:
    `Arguments` typed accessors first, then macro_std output builders, tree interchange
