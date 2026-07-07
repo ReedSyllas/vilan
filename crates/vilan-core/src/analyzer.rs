@@ -1051,7 +1051,7 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
     }
 }
 
-fn flatten_namespace_branch<'src>(
+pub(crate) fn flatten_namespace_branch<'src>(
     branch: &ImportBranch<'src>,
     path: Vec<(&'src str, Span)>,
     entries: &mut Vec<(Vec<(&'src str, Span)>, &'src str, Span)>,
@@ -11381,7 +11381,7 @@ fn service_contract_hash(surface: &str) -> String {
 /// `RemoteSource` mirrors, and a shared `contract_hash()` on both sides. The
 /// service's `[rpc]` methods are gathered from the *same module's* inherent
 /// `impl` blocks (`nodes`).
-fn service_impl_source(
+pub(crate) fn service_impl_source(
     client_name: Option<&str>,
     item: &Spanned<Node<'_>>,
     nodes: &NodeList<'_>,
@@ -11635,7 +11635,7 @@ fn service_impl_source(
     out
 }
 
-fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
+pub(crate) fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
     if let Node::Enum(name, _generics, variants) = &item.0 {
         return derive_enum_impls(derives, name.0, variants);
     }
@@ -11894,138 +11894,6 @@ fn enum_wire_visitor_impls(enum_name: &str, variants: &[(&str, Vec<String>)]) ->
          \t}}\n\
          }}\n"
     )
-}
-
-/// Synthesizes and parses the trait impls for every `[derive(..)]` item at the top
-/// level of `nodes`, returning the appended node list (leaked so it lives for the
-/// whole compilation, like a loaded module), or `None` when there are no derives.
-pub(crate) fn expand_derives(
-    nodes: &NodeList<'_>,
-    text: &str,
-    std: &PackageSpec,
-    limits: crate::macros::MacroLimits,
-    diagnostics: &mut Vec<Error>,
-) -> Option<&'static NodeList<'static>> {
-    use chumsky::prelude::*;
-    let mut source = String::new();
-    let mut traits: HashSet<&str> = HashSet::new();
-    // `[derive(Json)]` synthesizes the reverse `FromJson` impl too, which
-    // references `FromJson`/`JsonValue`/`parse_json_value`; the enum form also
-    // calls `panic` on an unknown tag.
-    let mut enum_derives_json = false;
-    let mut any_service = false;
-    // The migration seam (macro-engine.md §10): a derive that has moved to
-    // user-land vilan (`<std dir>/derives.vl`) generates through the expansion
-    // interpreter; the rest keep their Rust generators. Same text, same walk
-    // position — the corpus goldens referee byte-identity.
-    let (builtins, _builtin_errors) = crate::macros::builtin_derives(std);
-    for (node, _span) in nodes {
-        match node {
-            Node::Derive(derives, item) => {
-                traits.extend(derives.iter().copied());
-                if (derives.contains(&"Json") || derives.contains(&"Wire"))
-                    && matches!(item.0, Node::Enum(..))
-                {
-                    enum_derives_json = true;
-                }
-                for derive in derives.iter() {
-                    match crate::macros::builtin_derive(builtins, derive) {
-                        Some(def) => {
-                            match crate::macros::run_builtin_derive(
-                                def,
-                                derive,
-                                item,
-                                text,
-                                limits.fuel,
-                            ) {
-                                Ok(generated) => source.push_str(generated),
-                                Err(message) => diagnostics.push(Error {
-                                    span: item.1,
-                                    msg: format!(
-                                        "the built-in derive `{derive}` failed: {message}"
-                                    ),
-                                }),
-                            }
-                        }
-                        None => source.push_str(&derive_impl_source(&[derive], item)),
-                    }
-                }
-            }
-            // `[service(Client)]` — generate the dispatcher + client sibling +
-            // contract hash from the struct's same-module `[rpc]` impl methods
-            // and `[expose]`d fields (transport-rpc.md §4.2).
-            Node::Service(client_name, item) => {
-                match crate::macros::builtin_derive(builtins, "service") {
-                    Some(def) => match crate::macros::run_builtin_service(
-                        def,
-                        *client_name,
-                        item,
-                        nodes,
-                        text,
-                        limits.fuel,
-                    ) {
-                        Ok(generated) => source.push_str(generated),
-                        Err(message) => diagnostics.push(Error {
-                            span: item.1,
-                            msg: format!("the built-in `[service]` macro failed: {message}"),
-                        }),
-                    },
-                    None => source.push_str(&service_impl_source(*client_name, item, nodes)),
-                }
-                any_service = true;
-            }
-            _ => {}
-        }
-    }
-    if source.trim().is_empty() {
-        return None;
-    }
-    // Each derived trait lives in a std module; the synthesized impls are walked
-    // in the entry scope, so prepend the imports they reference.
-    let mut prelude = String::new();
-    if traits.contains("PartialEq") {
-        prelude.push_str("import std::compare::PartialEq;\n");
-    }
-    if traits.contains("Default") {
-        prelude.push_str("import std::default::Default;\n");
-    }
-    if traits.contains("Json") || traits.contains("Wire") {
-        prelude.push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
-    }
-    if traits.contains("Wire") {
-        prelude.push_str(
-            "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n",
-        );
-    }
-    if enum_derives_json {
-        prelude.push_str("import std::io::panic;\n");
-    }
-    if traits.contains("Debug") {
-        prelude.push_str("import std::debug::Debug;\n");
-    }
-    // The generated service dispatcher/client reference the std::rpc foundation
-    // (the user's own types resolve in the module's scope, where the generated
-    // items are walked).
-    if any_service {
-        prelude.push_str(
-            "import std::rpc::{ Transport, Dispatcher, RpcError, RpcOutcome, RemoteSource, call, arg, reply, decode_failed, session_of, connect_socket, SocketTransport, bridge, ReactiveClient };\n",
-        );
-        prelude.push_str("import std::wire::{ Codec, Serializer };\n");
-        prelude.push_str("import std::result::Result;\n");
-        prelude.push_str("import std::option::Option;\n");
-    }
-    let source: &'static str = Box::leak(format!("{prelude}{source}").into_boxed_str());
-    let tokens = crate::lexer::lexer().parse(source).into_output()?;
-    let end = source.len();
-    let (root, _span) = crate::parser::parser()
-        .map_with(|ast, e| (ast, e.span()))
-        .parse(
-            tokens
-                .as_slice()
-                .map((end..end).into(), |(token, span)| (token, span)),
-        )
-        .into_output()?;
-    Some(Box::leak(Box::new(root.0)))
 }
 
 /// Builds the path to a module file under the `std` package's source root.
@@ -12450,15 +12318,7 @@ pub fn analyze<'src>(
     // items (or `None`), walked into the module's scope after its body — the general
     // form of the entry's derive expansion, so a derived type imported from another
     // module has its `to_json`/`from_json`/... like one defined in the entry.
-    let mut loaded: Vec<(
-        &str,
-        &Spanned<NodeList>,
-        &str,
-        Option<&'static NodeList<'static>>,
-        Id,
-        SourceId,
-        Origin,
-    )> = Vec::new();
+    let mut loaded: Vec<(&str, &Spanned<NodeList>, &str, Id, SourceId, Origin)> = Vec::new();
     // A module's package: `Std` modules resolve under the `std` library's layered
     // roots and are addressable as both `std::name` and `pkg::name`; `Pkg` modules —
     // the entry program's own multi-file siblings — resolve under `pkg_root` (the
@@ -12488,31 +12348,15 @@ pub fn analyze<'src>(
         Origin::Pkg
     };
 
-    // Synthesize `[derive(..)]` impls up front: they reference std modules (e.g.
-    // `PartialEq` in `std::compare`) that must be pulled into the reachable set
-    // alongside the user's own imports, and they're walked into the entry scope
-    // later. Computed once and reused.
-    let derived = expand_derives(
-        &nodes.0,
-        entry_source,
-        std,
-        workspace.macro_limits,
-        &mut analyzer.diagnostics,
-    );
-
+    // (Derive/macro expansion is unified in the load loop's epilogue: generated
+    // code's module references re-enter the loader there, so no pre-pass seeds
+    // them here.)
     let mut to_load: Vec<(Origin, &str)> = lib_ast
         .map(|ast| collect_module_refs(&ast.0, "pkg"))
         .unwrap_or_default()
         .into_iter()
         .map(|(name, _)| (Origin::Std, name))
         .collect();
-    if let Some(derived) = derived {
-        to_load.extend(
-            collect_module_refs(derived, "std")
-                .into_iter()
-                .map(|(name, _)| (Origin::Std, name)),
-        );
-    }
     // The entry program addresses std submodules by path (`std::option::..`), so
     // its imports also seed the reachable set. Names that aren't modules (e.g. the
     // `print` in `std::print`) simply find no file and are skipped. A cross-target
@@ -12560,13 +12404,8 @@ pub fn analyze<'src>(
         && (!workspace.packages.is_empty() || !workspace.entry_dependencies.is_empty());
     // `lib.vl` bodies are walked after every module is registered (like `std`'s),
     // so cross-module references resolve during `build()`.
-    let mut dependency_lib_walks: Vec<(
-        SourceId,
-        Id,
-        &Spanned<NodeList>,
-        Option<&'static NodeList<'static>>,
-        &'static str,
-    )> = Vec::new();
+    let mut dependency_lib_walks: Vec<(SourceId, Id, &Spanned<NodeList>, usize, &'static str)> =
+        Vec::new();
     if has_dependencies {
         // Package 0 is the entry; its namespace is the existing `pkg`. The entry
         // program (SourceId 0) and its sibling modules belong to it.
@@ -12667,28 +12506,11 @@ pub fn analyze<'src>(
             analyzer
                 .package_of_source
                 .insert(lib_source_id, package_index);
-            // A dependency's public surface can derive too — expand its `lib.vl`'s
-            // `[derive(..)]`, seeding the std modules the impls reference, and carry
-            // them to walk into the dependency's namespace below.
-            let lib_derived = expand_derives(
-                &lib_ast.0,
-                lib_loaded.text,
-                std,
-                workspace.macro_limits,
-                &mut analyzer.diagnostics,
-            );
-            if let Some(generated) = lib_derived {
-                to_load.extend(
-                    collect_module_refs(generated, "std")
-                        .into_iter()
-                        .map(|(module, _)| (Origin::Std, module)),
-                );
-            }
             dependency_lib_walks.push((
                 lib_source_id,
                 namespace_scope_id,
                 lib_ast,
-                lib_derived,
+                index,
                 lib_loaded.text,
             ));
             // A library's own imports are its internals (not the building package's
@@ -12939,35 +12761,10 @@ pub fn analyze<'src>(
                     }
                 }
             }
-            // Expand this module's own `[derive(..)]` — the synthesized impls reference
-            // std modules (e.g. `std::json`), so seed those into the load set, and carry
-            // the impls to walk into this module's scope below (where its types and the
-            // imported traits resolve). The entry module reuses the `derived` already
-            // computed and seeded for it; every other module expands here.
-            let module_derived = if is_entry_module {
-                derived
-            } else {
-                let generated = expand_derives(
-                    &ast.0,
-                    module_text,
-                    std,
-                    workspace.macro_limits,
-                    &mut analyzer.diagnostics,
-                );
-                if let Some(generated) = generated {
-                    to_load.extend(
-                        collect_module_refs(generated, "std")
-                            .into_iter()
-                            .map(|(module, _)| (Origin::Std, module)),
-                    );
-                }
-                generated
-            };
             loaded.push((
                 name,
                 ast,
                 module_text,
-                module_derived,
                 module_scope_id,
                 module_source_id,
                 origin,
@@ -12977,46 +12774,46 @@ pub fn analyze<'src>(
         // --- Macro expansion epilogue (runs once loads settle) ---
         let registry = macro_registry.get_or_insert_with(|| {
             let mut registry = crate::macros::MacroRegistry::default();
-            // The toolchain's built-in derive macros: their compile errors (a
-            // broken derives.vl) surface in every analysis, loudly; their
-            // names are reserved against user macros.
-            let (builtins, builtin_errors) = crate::macros::builtin_derives(std);
-            analyzer.diagnostics.extend(builtin_errors.iter().cloned());
             let before = analyzer.diagnostics.len();
             crate::macros::register_file(
                 &mut registry,
+                crate::macros::ModuleKey::Entry,
                 &nodes.0,
                 entry_source,
                 entry_path,
                 std,
-                Some(builtins),
                 &mut analyzer.diagnostics,
             );
             analyzer.attribute_new_diagnostics(before, SourceId(0));
-            for (_, ast, module_text, _, _, module_source_id, _) in &loaded {
+            for (name, ast, module_text, _, module_source_id, origin) in &loaded {
+                let key = match origin {
+                    Origin::Std => crate::macros::ModuleKey::Std(name.to_string()),
+                    Origin::Pkg => crate::macros::ModuleKey::Pkg(name.to_string()),
+                    Origin::Dep(index) => crate::macros::ModuleKey::Dep(*index, name.to_string()),
+                };
                 let before = analyzer.diagnostics.len();
                 let file = sources[module_source_id.0 as usize].clone();
                 crate::macros::register_file(
                     &mut registry,
+                    key,
                     &ast.0,
                     module_text,
                     &file,
                     std,
-                    Some(builtins),
                     &mut analyzer.diagnostics,
                 );
                 analyzer.attribute_new_diagnostics(before, *module_source_id);
             }
-            for (lib_source_id, _, lib_ast, _, lib_text) in &dependency_lib_walks {
+            for (lib_source_id, _, lib_ast, package_index, lib_text) in &dependency_lib_walks {
                 let before = analyzer.diagnostics.len();
                 let file = sources[lib_source_id.0 as usize].clone();
                 crate::macros::register_file(
                     &mut registry,
+                    crate::macros::ModuleKey::DepLib(*package_index),
                     &lib_ast.0,
                     lib_text,
                     &file,
                     std,
-                    Some(builtins),
                     &mut analyzer.diagnostics,
                 );
                 analyzer.attribute_new_diagnostics(before, *lib_source_id);
@@ -13024,11 +12821,12 @@ pub fn analyze<'src>(
             registry
         });
         {
-            // Expand each not-yet-expanded file; generated code's module references
-            // seed further loads (its `import`s are ordinary — H2 block-scoped
-            // imports let a macro emit code that carries its own dependencies).
-            // This runs even with an empty registry: an unknown `[attribute]` must
-            // error rather than silently skip.
+            // Expand each not-yet-expanded file with ITS OWN macro scope
+            // (same-file macros, then the file's imports, then the std
+            // prelude); generated code's module references seed further loads
+            // (H2 block-scoped imports let a macro emit code carrying its own
+            // dependencies). Runs even with an empty registry: an unknown
+            // `[attribute]` must error, not silently skip.
             let seed_generated_refs =
                 |generated: &[&'static NodeList<'static>],
                  origin: Origin,
@@ -13053,56 +12851,94 @@ pub fn analyze<'src>(
                         }
                     }
                 };
+            let file_package = |origin: &Origin| match origin {
+                Origin::Std => crate::macros::FilePackage::Std,
+                Origin::Pkg => crate::macros::FilePackage::Entry,
+                Origin::Dep(index) => crate::macros::FilePackage::Dep(*index),
+            };
+            let mut expand_one =
+                |key: crate::macros::ModuleKey,
+                 package: crate::macros::FilePackage,
+                 ast: &NodeList,
+                 text: &str,
+                 source: SourceId,
+                 origin: Origin,
+                 analyzer: &mut Analyzer<'src>,
+                 to_load: &mut Vec<(Origin, &str)>| {
+                    let scope = crate::macros::scope_for(registry, workspace, &package, &key, ast);
+                    let before = analyzer.diagnostics.len();
+                    let output = crate::macros::expand_source(
+                        &scope,
+                        workspace.macro_limits,
+                        ast,
+                        text,
+                        &mut analyzer.diagnostics,
+                        &mut macro_site_counter,
+                        0,
+                    );
+                    analyzer.attribute_new_diagnostics(before, source);
+                    seed_generated_refs(&output.items, origin, to_load);
+                    generated_by_source
+                        .entry(source)
+                        .or_default()
+                        .extend(output.items);
+                    analyzer.macro_item_invocations.extend(output.item_sites);
+                    analyzer.macro_failed_sites.extend(output.failed_sites);
+                    analyzer
+                        .macro_expression_expansions
+                        .extend(output.expressions);
+                };
             if !entry_is_module && expanded_sources.insert(SourceId(0)) {
-                let before = analyzer.diagnostics.len();
-                let output = crate::macros::expand_source(
-                    registry,
-                    std,
-                    workspace.macro_limits,
+                expand_one(
+                    crate::macros::ModuleKey::Entry,
+                    match entry_pkg_origin {
+                        Origin::Std => crate::macros::FilePackage::Std,
+                        _ => crate::macros::FilePackage::Entry,
+                    },
                     &nodes.0,
                     entry_source,
-                    &mut analyzer.diagnostics,
-                    &mut macro_site_counter,
-                    0,
+                    SourceId(0),
+                    entry_pkg_origin,
+                    &mut analyzer,
+                    &mut to_load,
                 );
-                analyzer.attribute_new_diagnostics(before, SourceId(0));
-                seed_generated_refs(&output.items, entry_pkg_origin, &mut to_load);
-                generated_by_source
-                    .entry(SourceId(0))
-                    .or_default()
-                    .extend(output.items);
-                analyzer.macro_item_invocations.extend(output.item_sites);
-                analyzer.macro_failed_sites.extend(output.failed_sites);
-                analyzer
-                    .macro_expression_expansions
-                    .extend(output.expressions);
             }
-            for (_, ast, module_text, _, _, module_source_id, origin) in &loaded {
+            for (name, ast, module_text, _, module_source_id, origin) in &loaded {
                 if !expanded_sources.insert(*module_source_id) {
                     continue;
                 }
-                let before = analyzer.diagnostics.len();
-                let output = crate::macros::expand_source(
-                    registry,
-                    std,
-                    workspace.macro_limits,
+                let key = match origin {
+                    Origin::Std => crate::macros::ModuleKey::Std(name.to_string()),
+                    Origin::Pkg => crate::macros::ModuleKey::Pkg(name.to_string()),
+                    Origin::Dep(index) => crate::macros::ModuleKey::Dep(*index, name.to_string()),
+                };
+                expand_one(
+                    key,
+                    file_package(origin),
                     &ast.0,
                     module_text,
-                    &mut analyzer.diagnostics,
-                    &mut macro_site_counter,
-                    0,
+                    *module_source_id,
+                    *origin,
+                    &mut analyzer,
+                    &mut to_load,
                 );
-                analyzer.attribute_new_diagnostics(before, *module_source_id);
-                seed_generated_refs(&output.items, *origin, &mut to_load);
-                generated_by_source
-                    .entry(*module_source_id)
-                    .or_default()
-                    .extend(output.items);
-                analyzer.macro_item_invocations.extend(output.item_sites);
-                analyzer.macro_failed_sites.extend(output.failed_sites);
-                analyzer
-                    .macro_expression_expansions
-                    .extend(output.expressions);
+            }
+            // Dependency `lib.vl`s expand too (attribute use inside a
+            // dependency's surface — the recorded deferral falls here).
+            for (lib_source_id, _, lib_ast, package_index, lib_text) in &dependency_lib_walks {
+                if !expanded_sources.insert(*lib_source_id) {
+                    continue;
+                }
+                expand_one(
+                    crate::macros::ModuleKey::DepLib(*package_index),
+                    crate::macros::FilePackage::Dep(*package_index),
+                    &lib_ast.0,
+                    lib_text,
+                    *lib_source_id,
+                    Origin::Dep(*package_index),
+                    &mut analyzer,
+                    &mut to_load,
+                );
             }
         }
         if to_load.is_empty() {
@@ -13110,7 +12946,7 @@ pub fn analyze<'src>(
         }
     }
 
-    for (_name, ast, _text, derived, module_scope_id, source_id, _origin) in &loaded {
+    for (_name, ast, _text, module_scope_id, source_id, _origin) in &loaded {
         analyzer.set_current_source(*source_id);
         analyzer.module_scope_ids.insert(*module_scope_id);
         let start = analyzer.entity_id;
@@ -13120,19 +12956,9 @@ pub fn analyze<'src>(
             end: analyzer.entity_id,
             source: *source_id,
         });
-        // The module's synthesized derive impls, into the same scope, right after its
-        // body (so they see its types) — mirroring the entry walk below. Their spans
-        // are generated-template offsets, so record them under `DERIVED_SOURCE`.
-        if let Some(derived) = derived {
-            let derived_start = analyzer.entity_id;
-            analyzer.walk_expr_nodes(derived, *module_scope_id);
-            analyzer.source_ranges.push(SourceRange {
-                start: derived_start,
-                end: analyzer.entity_id,
-                source: DERIVED_SOURCE,
-            });
-        }
-        // Macro-generated items likewise walk into the module's own scope; their
+        // Macro-generated items (derives included — expansion is unified) walk
+        // into the module's own scope right after its body, so they see its
+        // types; their
         // spans point into leaked generated text, so they too record under
         // `DERIVED_SOURCE` (editor features skip them).
         for generated in generated_by_source.get(source_id).into_iter().flatten() {
@@ -13158,7 +12984,8 @@ pub fn analyze<'src>(
     }
     // Walk each dependency's `lib.vl` into its own namespace (its public surface),
     // mirroring the `std` lib walk above.
-    for (source_id, namespace_scope_id, lib_ast, derived, _lib_text) in &dependency_lib_walks {
+    for (source_id, namespace_scope_id, lib_ast, _package_index, _lib_text) in &dependency_lib_walks
+    {
         analyzer.set_current_source(*source_id);
         analyzer.module_scope_ids.insert(*namespace_scope_id);
         let start = analyzer.entity_id;
@@ -13168,13 +12995,13 @@ pub fn analyze<'src>(
             end: analyzer.entity_id,
             source: *source_id,
         });
-        // Synthesized derive impls carry generated-template spans, not the lib's
-        // file, so record them under `DERIVED_SOURCE` (see the entry walk).
-        if let Some(derived) = derived {
-            let derived_start = analyzer.entity_id;
-            analyzer.walk_expr_nodes(derived, *namespace_scope_id);
+        // Macro-generated items (derives included) walk into the lib's
+        // namespace; generated-text spans record under `DERIVED_SOURCE`.
+        for generated in generated_by_source.get(source_id).into_iter().flatten() {
+            let generated_start = analyzer.entity_id;
+            analyzer.walk_expr_nodes(generated, *namespace_scope_id);
             analyzer.source_ranges.push(SourceRange {
-                start: derived_start,
+                start: generated_start,
                 end: analyzer.entity_id,
                 source: DERIVED_SOURCE,
             });
@@ -13358,15 +13185,6 @@ pub fn analyze<'src>(
         // right after the user's items, so they see the derived types — but their
         // spans are generated-template offsets, not the user's file, so record them
         // under `DERIVED_SOURCE` so editor features skip them.
-        if let Some(derived) = derived {
-            let derived_start = analyzer.entity_id;
-            analyzer.walk_expr_nodes(derived, global_scope_id);
-            analyzer.source_ranges.push(SourceRange {
-                start: derived_start,
-                end: analyzer.entity_id,
-                source: DERIVED_SOURCE,
-            });
-        }
         for generated in generated_by_source.get(&SourceId(0)).into_iter().flatten() {
             let generated_start = analyzer.entity_id;
             analyzer.walk_expr_nodes(generated, global_scope_id);

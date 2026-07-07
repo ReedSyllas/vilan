@@ -33,6 +33,11 @@ use crate::span::{Span, Spanned};
 use crate::transformer::{JsProgram, js, transform_functions};
 use crate::{PackageSpec, Platform, Workspace, analyze_source};
 
+/// The derive names the RUST generators still serve when no macro is in
+/// scope (fixture stds without the std macros; the macro world's own nested
+/// compile). Frozen byte-identical copies of the migrated macros.
+const RUST_DERIVES: &[&str] = &["PartialEq", "Default", "Debug", "Json", "Wire"];
+
 /// The per-package expansion budgets (`vilan.toml [macro]`, macro-engine.md
 /// §5/§12): `fuel` bounds one macro run's interpreter steps; `depth` bounds
 /// the expansion fixpoint (output carrying further invocations). Defaults are
@@ -60,9 +65,140 @@ pub(crate) struct World {
     entries: HashMap<String, (String, Option<MacroShape>)>,
 }
 
+/// A module's identity for macro scoping: which package, which module. Macro
+/// NAMES distribute through the module system (macro-engine.md §3) — a macro
+/// is in scope in the file that defines it, in files that import it by leaf
+/// (`import pkg::x::my_macro`), and — for macros defined in `std` modules —
+/// everywhere (the macro PRELUDE: the built-in derives are ambient vocabulary,
+/// like the primitive types).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum ModuleKey {
+    /// The entry file.
+    Entry,
+    /// A std module, by name (its macros are the prelude).
+    Std(String),
+    /// An entry-package sibling module, by name.
+    Pkg(String),
+    /// A dependency's module: (package index, module name).
+    Dep(usize, String),
+    /// A dependency's `lib.vl` (its root-level surface), by package index.
+    DepLib(usize),
+}
+
 #[derive(Default)]
 pub(crate) struct MacroRegistry {
-    by_name: HashMap<String, MacroDef>,
+    by_module: HashMap<ModuleKey, HashMap<String, MacroDef>>,
+}
+
+impl MacroRegistry {
+    fn module(&self, key: &ModuleKey) -> Option<&HashMap<String, MacroDef>> {
+        self.by_module.get(key)
+    }
+}
+
+/// The macros in scope for ONE file: same-file definitions shadow imported
+/// ones, which shadow the std prelude — the ordinary name-resolution order.
+pub(crate) struct MacroScope<'r> {
+    names: HashMap<String, &'r MacroDef>,
+}
+
+impl<'r> MacroScope<'r> {
+    fn get(&self, name: &str) -> Option<&'r MacroDef> {
+        self.names.get(name).copied()
+    }
+}
+
+/// Builds a file's macro scope: the std prelude, then the file's imports
+/// (any depth — H2 imports are statements; macro visibility is file-flat),
+/// then the file's own macros. `package` locates the file for `pkg::` and
+/// dependency-root resolution.
+pub(crate) fn scope_for<'r>(
+    registry: &'r MacroRegistry,
+    workspace: &Workspace,
+    package: &FilePackage,
+    key: &ModuleKey,
+    nodes: &NodeList,
+) -> MacroScope<'r> {
+    let mut names: HashMap<String, &MacroDef> = HashMap::new();
+    // 1. The std prelude.
+    for (module_key, macros) in &registry.by_module {
+        if matches!(module_key, ModuleKey::Std(_)) {
+            for (name, def) in macros {
+                names.insert(name.clone(), def);
+            }
+        }
+    }
+    // 2. The file's imports, resolved to registered macros by leaf name.
+    let mut imports: Vec<(Vec<&str>, &str)> = Vec::new();
+    fn collect_imports<'a>(node: &'a Spanned<Node<'a>>, out: &mut Vec<(Vec<&'a str>, &'a str)>) {
+        if let Node::Import(branch) | Node::Use(branch) = &node.0 {
+            let mut entries = Vec::new();
+            crate::analyzer::flatten_namespace_branch(branch, Vec::new(), &mut entries);
+            for (path, leaf, _leaf_span) in entries {
+                out.push((path.iter().map(|(name, _)| *name).collect(), leaf));
+            }
+        }
+        node.0
+            .for_each_child(&mut |child| collect_imports(child, out));
+    }
+    for node in nodes {
+        collect_imports(node, &mut imports);
+    }
+    for (path, leaf) in imports {
+        let Some(root) = path.first().copied() else {
+            continue;
+        };
+        let module = path.get(1).copied();
+        let target: Option<ModuleKey> = match root {
+            "std" => module.map(|module| ModuleKey::Std(module.to_string())),
+            "pkg" => match package {
+                FilePackage::Entry => module.map(|module| ModuleKey::Pkg(module.to_string())),
+                FilePackage::Std => module.map(|module| ModuleKey::Std(module.to_string())),
+                FilePackage::Dep(index) => {
+                    module.map(|module| ModuleKey::Dep(*index, module.to_string()))
+                }
+            },
+            dependency => {
+                let edges = match package {
+                    FilePackage::Entry => &workspace.entry_dependencies,
+                    FilePackage::Std => return_none_edges(),
+                    FilePackage::Dep(index) => &workspace.packages[*index].dependencies,
+                };
+                edges
+                    .iter()
+                    .find(|(name, _)| name == dependency)
+                    .map(|(_, index)| match module {
+                        Some(module) => ModuleKey::Dep(*index, module.to_string()),
+                        None => ModuleKey::DepLib(*index),
+                    })
+            }
+        };
+        if let Some(target) = target {
+            if let Some(def) = registry.module(&target).and_then(|macros| macros.get(leaf)) {
+                names.insert(leaf.to_string(), def);
+            }
+        }
+    }
+    // 3. The file's own macros (highest precedence).
+    if let Some(own) = registry.module(key) {
+        for (name, def) in own {
+            names.insert(name.clone(), def);
+        }
+    }
+    MacroScope { names }
+}
+
+/// Which package a file belongs to, for import-root resolution.
+pub(crate) enum FilePackage {
+    Entry,
+    Std,
+    Dep(usize),
+}
+
+/// std files have no dependency edges.
+fn return_none_edges() -> &'static Vec<(String, usize)> {
+    static EMPTY: Vec<(String, usize)> = Vec::new();
+    &EMPTY
 }
 
 /// What a macro's signature says it consumes — which dispatch forms fit.
@@ -116,11 +252,11 @@ fn macro_funs<'a, 'src>(nodes: &'a NodeList<'src>) -> Vec<(&'a Func<'src>, Span)
 /// name. Diagnostics carry spans into THIS file (the caller attributes them).
 pub(crate) fn register_file(
     registry: &mut MacroRegistry,
+    key: ModuleKey,
     nodes: &NodeList,
     text: &str,
     file: &Path,
     std: &PackageSpec,
-    builtins: Option<&MacroRegistry>,
     diagnostics: &mut Vec<Error>,
 ) {
     let definitions = macro_funs(nodes);
@@ -159,33 +295,20 @@ pub(crate) fn register_file(
             return;
         }
     };
+    let module = registry.by_module.entry(key).or_default();
     for (function, _) in &definitions {
         let name = function.name.0.to_string();
-        if registry.by_name.contains_key(&name) {
+        if module.contains_key(&name) {
             diagnostics.push(Error {
                 span: function.name.1,
-                msg: format!("a macro named `{name}` is already defined"),
+                msg: format!("a macro named `{name}` is already defined in this module"),
             });
             continue;
-        }
-        // Built-in derive names are reserved: a user macro shadowing
-        // `PartialEq` would fire twice (the builtin channel AND the user
-        // registry). The builtins file itself registers with `builtins: None`.
-        if let Some(builtins) = builtins {
-            if builtins.by_name.contains_key(&name) {
-                diagnostics.push(Error {
-                    span: function.name.1,
-                    msg: format!(
-                        "`{name}` is a built-in derive — a user macro cannot take its name"
-                    ),
-                });
-                continue;
-            }
         }
         let Some((entry, shape)) = world.entries.get(&name).cloned() else {
             continue; // the world compile reported why
         };
-        registry.by_name.insert(
+        module.insert(
             name,
             MacroDef {
                 world: world.clone(),
@@ -384,9 +507,16 @@ pub(crate) struct ExpansionOutput {
 }
 
 struct Expander<'r, 'd> {
-    registry: &'r MacroRegistry,
-    std: &'r PackageSpec,
+    scope: &'r MacroScope<'r>,
     limits: MacroLimits,
+    /// Rust-generated fallback text (derive/service names with no macro in
+    /// scope — fixture stds without the std macros). Flushed as ONE list,
+    /// prelude-first, ahead of the macro-generated lists — the shape the
+    /// pre-unification channel produced.
+    rust_source: String,
+    rust_traits: std::collections::HashSet<&'static str>,
+    rust_any_service: bool,
+    rust_enum_json: bool,
     diagnostics: &'d mut Vec<Error>,
     /// The per-splice-site counter that stamps `__m<N>` gensym placeholders
     /// unique (§7): deterministic — sites are visited in file/node order.
@@ -400,8 +530,7 @@ struct Expander<'r, 'd> {
 /// macro definitions) record their spliced replacement. Nested uses in
 /// generated code are chased to the depth cap.
 pub(crate) fn expand_source(
-    registry: &MacroRegistry,
-    std: &PackageSpec,
+    scope: &MacroScope,
     limits: MacroLimits,
     nodes: &NodeList,
     text: &str,
@@ -410,33 +539,44 @@ pub(crate) fn expand_source(
     depth: u32,
 ) -> ExpansionOutput {
     let mut expander = Expander {
-        registry,
-        std,
+        scope,
         limits,
+        rust_source: String::new(),
+        rust_traits: std::collections::HashSet::new(),
+        rust_any_service: false,
+        rust_enum_json: false,
         diagnostics,
         site_counter,
         output: ExpansionOutput::default(),
     };
     expander.expand_list(nodes, text, depth);
+    expander.flush_rust_fallback();
     expander.output
 }
 
 impl Expander<'_, '_> {
     fn expand_list(&mut self, nodes: &NodeList, text: &str, depth: u32) {
         for node in nodes {
-            self.expand_item_position(node, text, depth);
+            self.expand_item_position(node, nodes, text, depth);
         }
     }
 
     /// A node in ITEM position: attributes, item invocations, derives — and a
     /// sweep of everything else for expression-position invocations.
-    fn expand_item_position(&mut self, node: &Spanned<Node>, text: &str, depth: u32) {
+    fn expand_item_position(
+        &mut self,
+        node: &Spanned<Node>,
+        siblings: &NodeList,
+        text: &str,
+        depth: u32,
+    ) {
         match &node.0 {
-            Node::Export(inner) => self.expand_item_position(inner, text, depth),
-            // `mod` bodies are item position too.
+            Node::Export(inner) => self.expand_item_position(inner, siblings, text, depth),
+            // `mod` bodies are item position too (a service there gathers its
+            // rpc surface from the mod's own items).
             Node::Module(_, body) => {
                 for child in &body.0 {
-                    self.expand_item_position(child, text, depth);
+                    self.expand_item_position(child, &body.0, text, depth);
                 }
             }
             // A macro definition: its body is the macro world's, never
@@ -451,13 +591,44 @@ impl Expander<'_, '_> {
                 // The annotated item may contain expression invocations.
                 self.sweep_expressions(item, text, depth);
             }
-            // `[derive(Name)]` with a registered name dispatches like an
-            // attribute with no arguments; built-in names keep their Rust
-            // generators; unknown names keep today's behavior.
+            // `[derive(Name)]`: a macro named `Name` in scope dispatches like
+            // an attribute with no arguments; the historical built-in names
+            // fall back to the Rust generators when no macro is in scope
+            // (fixture stds); unknown names keep today's behavior (skip — the
+            // missing impl surfaces at the use site).
             Node::Derive(names, item) => {
                 for name in names.iter() {
-                    if self.registry.by_name.contains_key(*name) {
+                    if self.scope.get(name).is_some() {
                         self.run_attribute(name, node.1, item, &[], text, depth);
+                    } else if let Some(known) =
+                        RUST_DERIVES.iter().find(|known| **known == *name).copied()
+                    {
+                        self.rust_traits.insert(known);
+                        if matches!(known, "Json" | "Wire") && matches!(item.0, Node::Enum(..)) {
+                            self.rust_enum_json = true;
+                        }
+                        self.rust_source
+                            .push_str(&crate::analyzer::derive_impl_source(&[name], item));
+                    }
+                }
+                self.sweep_expressions(item, text, depth);
+            }
+            // `[service(Client)]`: the std `service` macro (in the prelude) —
+            // or the Rust generator when absent. The compiler gathers the
+            // same-module [rpc] surface either way.
+            Node::Service(client_name, item) => {
+                match self.scope.get("service") {
+                    Some(def) => {
+                        self.run_service(def, *client_name, item, siblings, text, depth);
+                    }
+                    None => {
+                        self.rust_any_service = true;
+                        self.rust_source
+                            .push_str(&crate::analyzer::service_impl_source(
+                                *client_name,
+                                item,
+                                siblings,
+                            ));
                     }
                 }
                 self.sweep_expressions(item, text, depth);
@@ -498,6 +669,81 @@ impl Expander<'_, '_> {
         }
     }
 
+    /// `[service(..)]` dispatch through the std `service` macro.
+    fn run_service(
+        &mut self,
+        def: &MacroDef,
+        client_name: Option<&str>,
+        item: &Spanned<Node>,
+        siblings: &NodeList,
+        text: &str,
+        depth: u32,
+    ) {
+        let Some((literal, input)) = construct_service(client_name, item, siblings, text) else {
+            return; // a bodyless struct generates nothing, like the Rust path
+        };
+        // The input text (struct + gathered methods) is the cache key: leak it
+        // to reuse expand_call's borrowed-slice shape.
+        let input: &'static str = Box::leak(input.into_boxed_str());
+        self.expand_call(
+            def,
+            "service",
+            item.1,
+            input,
+            &[],
+            vec![literal],
+            depth,
+            None,
+        );
+    }
+
+    /// Flushes the Rust-generated fallback text (if any) as the FIRST items
+    /// list, prefixed with the trait-import prelude the Rust generators
+    /// assume — exactly the pre-unification channel's shape.
+    fn flush_rust_fallback(&mut self) {
+        if self.rust_source.trim().is_empty() {
+            return;
+        }
+        let mut prelude = String::new();
+        if self.rust_traits.contains("PartialEq") {
+            prelude.push_str("import std::compare::PartialEq;\n");
+        }
+        if self.rust_traits.contains("Default") {
+            prelude.push_str("import std::default::Default;\n");
+        }
+        if self.rust_traits.contains("Json") || self.rust_traits.contains("Wire") {
+            prelude
+                .push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
+        }
+        if self.rust_traits.contains("Wire") {
+            prelude.push_str(
+                "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n",
+            );
+        }
+        if self.rust_enum_json {
+            prelude.push_str("import std::io::panic;\n");
+        }
+        if self.rust_traits.contains("Debug") {
+            prelude.push_str("import std::debug::Debug;\n");
+        }
+        if self.rust_any_service {
+            prelude.push_str(
+                "import std::rpc::{ Transport, Dispatcher, RpcError, RpcOutcome, RemoteSource, call, arg, reply, decode_failed, session_of, connect_socket, SocketTransport, bridge, ReactiveClient };\n",
+            );
+            prelude.push_str("import std::wire::{ Codec, Serializer };\n");
+            prelude.push_str("import std::result::Result;\n");
+            prelude.push_str("import std::option::Option;\n");
+        }
+        let combined = format!("{prelude}{}", self.rust_source);
+        match parse_generated(&combined) {
+            Ok((parsed, _)) => self.output.items.insert(0, parsed),
+            Err(message) => self.diagnostics.push(Error {
+                span: (0..0).into(),
+                msg: format!("the built-in derive generators produced invalid vilan ({message})"),
+            }),
+        }
+    }
+
     /// Attribute/derive dispatch: the macro must be Item-shaped.
     fn run_attribute(
         &mut self,
@@ -508,7 +754,7 @@ impl Expander<'_, '_> {
         text: &str,
         depth: u32,
     ) {
-        let Some(def) = self.registry.by_name.get(name) else {
+        let Some(def) = self.scope.get(name) else {
             self.diagnostics.push(Error {
                 span: site,
                 msg: format!("no macro named `{name}` is in scope"),
@@ -565,7 +811,7 @@ impl Expander<'_, '_> {
         depth: u32,
         expression_site: Option<usize>,
     ) {
-        let Some(def) = self.registry.by_name.get(name) else {
+        let Some(def) = self.scope.get(name) else {
             self.diagnostics.push(Error {
                 span: site,
                 msg: format!("no macro named `{name}` is in scope"),
@@ -742,16 +988,8 @@ impl Expander<'_, '_> {
                 return;
             }
             self.output.items.push(parsed);
-            // The generated code may carry built-in derives and further uses.
-            if let Some(derived) = crate::analyzer::expand_derives(
-                parsed,
-                parsed_text,
-                self.std,
-                self.limits,
-                self.diagnostics,
-            ) {
-                self.output.items.push(derived);
-            }
+            // The generated code may carry derives, services, and further
+            // macro uses — the unified item scan handles them all.
             self.expand_list(parsed, parsed_text, depth + 1);
         }
     }
@@ -794,86 +1032,6 @@ fn cached_run(
     let leaked: &'static str = Box::leak(source.into_boxed_str());
     expansions.lock().unwrap().insert(key, leaked);
     Ok(leaked)
-}
-
-/// The toolchain's BUILT-IN derive macros (`<std package dir>/derives.vl` —
-/// deliberately outside the layer roots, so it can never load as a module):
-/// compiled once per std path and consulted by `expand_derives` before the
-/// Rust generators. This is Phase 3's migration seam (§10): a derive moves to
-/// user-land vilan by gaining a `macro fun` here whose output is byte-
-/// identical to the Rust generator it replaces; the corpus goldens referee.
-pub(crate) fn builtin_derives(std: &PackageSpec) -> &'static (MacroRegistry, Vec<Error>) {
-    static BUILTINS: OnceLock<
-        Mutex<HashMap<std::path::PathBuf, &'static (MacroRegistry, Vec<Error>)>>,
-    > = OnceLock::new();
-    let by_root = BUILTINS.get_or_init(|| Mutex::new(HashMap::new()));
-    let root = std.base_root.clone();
-    if let Some(cached) = by_root.lock().unwrap().get(&root) {
-        return cached;
-    }
-    // Compiling derives.vl's macro world runs a nested `analyze`, whose own
-    // `expand_derives` re-enters here. Seed an EMPTY registry first so the
-    // nested lookup terminates — inside the macro world the Rust generators
-    // (byte-identical by the migration contract) serve any std derive.
-    let placeholder: &'static (MacroRegistry, Vec<Error>) =
-        Box::leak(Box::new((MacroRegistry::default(), Vec::new())));
-    by_root.lock().unwrap().insert(root.clone(), placeholder);
-    let mut registry = MacroRegistry::default();
-    let mut diagnostics = Vec::new();
-    let path = std
-        .base_root
-        .parent()
-        .map(|parent| parent.join("derives.vl"));
-    if let Some(path) = path.filter(|path| path.is_file()) {
-        match crate::analyzer::load_package_module(&path.to_string_lossy()) {
-            Some(loaded) => {
-                for error in loaded.parse_errors {
-                    diagnostics.push(Error {
-                        span: (0..0).into(),
-                        msg: format!("in the built-in derives ({}): {error}", path.display()),
-                    });
-                }
-                register_file(
-                    &mut registry,
-                    &loaded.ast.0,
-                    loaded.text,
-                    &path,
-                    std,
-                    None,
-                    &mut diagnostics,
-                );
-            }
-            None => diagnostics.push(Error {
-                span: (0..0).into(),
-                msg: format!(
-                    "the built-in derives file is unreadable: {}",
-                    path.display()
-                ),
-            }),
-        }
-    }
-    let leaked: &'static (MacroRegistry, Vec<Error>) = Box::leak(Box::new((registry, diagnostics)));
-    by_root.lock().unwrap().insert(root, leaked);
-    leaked
-}
-
-/// Runs a built-in derive against an item, returning the generated source
-/// text (uncached failures are the caller's diagnostics; output rides the
-/// same expansion cache as user macros).
-pub(crate) fn run_builtin_derive(
-    def: &MacroDef,
-    name: &str,
-    item: &Spanned<Node>,
-    text: &str,
-    fuel: u64,
-) -> Result<&'static str, String> {
-    let call_arguments = vec![construct_item(item, text)];
-    cached_run(def, name, slice(text, item.1), &[], &call_arguments, fuel)
-}
-
-/// Looks up a built-in derive by name.
-pub(crate) fn builtin_derive<'r>(builtins: &'r MacroRegistry, name: &str) -> Option<&'r MacroDef> {
-    builtins.by_name.get(name)
 }
 
 /// Replaces whole-identifier `__m<digits>` gensym placeholders (`meta::fresh`'s
@@ -1192,21 +1350,6 @@ pub(crate) fn construct_service(
         ]),
     ]);
     Some((literal, input))
-}
-
-/// Runs the built-in `service` macro against a `[service(..)]` struct.
-pub(crate) fn run_builtin_service(
-    def: &MacroDef,
-    client_name: Option<&str>,
-    item: &Spanned<Node>,
-    nodes: &NodeList,
-    text: &str,
-    fuel: u64,
-) -> Result<&'static str, String> {
-    let Some((literal, input)) = construct_service(client_name, item, nodes, text) else {
-        return Ok(""); // a bodyless struct generates nothing, like the Rust path
-    };
-    cached_run(def, "service", &input, &[], &[literal], fuel)
 }
 
 /// `Arguments { values }` — the invocation's argument source texts.
