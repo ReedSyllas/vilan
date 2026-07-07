@@ -658,9 +658,9 @@ impl Expander<'_, '_> {
             // (fixture stds); unknown names keep today's behavior (skip — the
             // missing impl surfaces at the use site).
             Node::Derive(names, item) => {
-                for name in names.iter() {
+                for (name, name_span) in names.iter() {
                     if self.scope.get(name).is_some() {
-                        self.run_attribute(name, node.1, item, &[], text, depth);
+                        self.run_attribute(name, *name_span, item, &[], text, depth);
                     } else if let Some(known) =
                         RUST_DERIVES.iter().find(|known| **known == *name).copied()
                     {

@@ -163,13 +163,14 @@ have gaps.
 
 ---
 
-8. **LSP + editor support for the macro engine** (M; after the macro phases settle) — the
-   TextMate grammar doesn't know the `macro` keyword or generic `[name(args)]` attributes;
-   semantic tokens should classify macro names distinctly; completion should offer registered
-   macro names at attribute sites; hover on `[name]` should show the macro's signature;
-   go-to-definition on an attribute should jump to its `macro fun` (the registry knows the
-   defining file); and diagnostics inside macro bodies already carry true spans (the blanked
-   world) — verify the editor experience end to end once Phase 2/3 land.
+8. **LSP + editor support for the macro engine** (M) — **core shipped 2026-07-07**: the
+   TextMate grammar knows the `macro` keyword, `macro fun` definitions, `macro name(..)`
+   invocations, and generic line-anchored `[name(args)]` attributes; hover on `[name]` /
+   `[derive(Name)]` / `macro name(..)` shows the macro's `macro fun` signature; go-to-definition
+   jumps to the defining `macro fun`, cross-file into `std` for prelude derives (derive names
+   now carry per-name spans; macro names live in a separate scope namespace so trait/macro
+   name sharing resolves both ways). Remaining: completion offering registered macro names at
+   attribute sites, and semantic tokens classifying macro names distinctly (see #2 above).
 
 ## F. Backend & platform
 

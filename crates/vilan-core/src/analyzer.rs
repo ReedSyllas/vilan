@@ -724,6 +724,11 @@ pub struct Scope<'src> {
     pub id: Id,
     pub parent_id: Option<Id>,
     pub name_to_id_map: IndexMap<&'src str, Id>,
+    /// Macro names — a SEPARATE namespace (macro-engine.md §4): a derive
+    /// macro deliberately shares its trait's name in the trait's own module,
+    /// so markers live here regardless of item collisions. Feeds editor
+    /// navigation and macro-name imports; expansion scoping stays syntactic.
+    pub macro_name_to_id: IndexMap<&'src str, Id>,
 }
 
 /// A `[derive(Wire)]` type awaiting the all-fields-Wire check: its name, plus each
@@ -886,6 +891,9 @@ pub struct Analyzer<'src> {
     // Item-position invocations walk to nothing (their output was appended to
     // the module); expression-position ones walk their spliced replacement.
     macro_item_invocations: HashSet<usize>,
+    // Marker id → the rendered `macro fun name(..): Source` signature, for
+    // editor hover at attribute/invocation/derive sites.
+    macro_signatures: HashMap<Id, String>,
     macro_expression_expansions: HashMap<usize, &'static Spanned<Node<'static>>>,
     // Expression sites whose expansion failed — already diagnosed; they walk
     // to an error entity without a second (misleading) message.
@@ -1124,6 +1132,7 @@ impl<'src> Analyzer<'src> {
             prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             macro_item_invocations: HashSet::new(),
+            macro_signatures: HashMap::new(),
             macro_expression_expansions: HashMap::new(),
             macro_failed_sites: HashSet::new(),
             module_scope_ids: HashSet::new(),
@@ -1712,6 +1721,7 @@ impl<'src> Analyzer<'src> {
             id,
             parent_id,
             name_to_id_map: IndexMap::new(),
+            macro_name_to_id: IndexMap::new(),
         }
     }
 
@@ -1727,6 +1737,7 @@ impl<'src> Analyzer<'src> {
             id,
             parent_id,
             name_to_id_map: IndexMap::new(),
+            macro_name_to_id: IndexMap::new(),
         };
         self.scopes.insert(id, scope);
         self.scopes.get_mut(&id).unwrap()
@@ -4091,7 +4102,30 @@ impl<'src> Analyzer<'src> {
                 self.expr_id_to_expr_map.insert(marker, Expr::Macro);
                 self.span_map.insert(marker, &function.name.1);
                 self.expr_id_to_scope_id_map.insert(marker, scope_id);
+                let mut signature = format!("macro fun {}(", function.name.0);
+                for (index, (pattern, type_, _, _)) in function.parameters.0.iter().enumerate() {
+                    if index > 0 {
+                        signature.push_str(", ");
+                    }
+                    match pattern {
+                        Pattern::Binding(name, _) => signature.push_str(name),
+                        _ => signature.push('_'),
+                    }
+                    if let Some(type_) = type_.as_deref() {
+                        signature.push_str(": ");
+                        signature.push_str(&render_type(&type_.0));
+                    }
+                }
+                signature.push(')');
+                if let Some(return_type) = function.return_type.as_deref() {
+                    signature.push_str(": ");
+                    signature.push_str(&render_type(&return_type.0));
+                }
+                self.macro_signatures.insert(marker, signature);
                 let scope = self.mut_scope_for_scope_id(scope_id);
+                scope.macro_name_to_id.insert(function.name.0, marker);
+                // Also visible as an ITEM name when nothing shadows it, so
+                // `import pkg::x::my_macro` resolves; items win collisions.
                 scope
                     .name_to_id_map
                     .entry(function.name.0)
@@ -4100,7 +4134,8 @@ impl<'src> Analyzer<'src> {
             }
             // A macro attribute: expansion already ran (pre-walk) and appended
             // the generated items; the annotated item itself walks normally.
-            Node::MacroAttribute(_, _, _, inner) => {
+            Node::MacroAttribute(name, name_span, _, inner) => {
+                self.record_macro_reference(name, *name_span, scope_id);
                 self.walk_expr_node(inner, scope_id);
                 Some(Expr::Void)
             }
@@ -4108,7 +4143,8 @@ impl<'src> Analyzer<'src> {
             // output (nothing to walk); expression-position ones walk their
             // spliced replacement, aliased through an empty block so this
             // node's entity IS the replacement's value.
-            Node::MacroInvocation(name, _, _) => {
+            Node::MacroInvocation(name, name_span, _) => {
+                self.record_macro_reference(name, *name_span, scope_id);
                 let key = node as *const Spanned<Node> as usize;
                 if self.macro_item_invocations.contains(&key) {
                     Some(Expr::Void)
@@ -4154,8 +4190,11 @@ impl<'src> Analyzer<'src> {
             Node::Derive(derives, inner) => {
                 // Collect `[derive(Wire)]` types for the all-fields-Wire check
                 // (`check_wire_boundary`), which runs once every module is walked.
-                if derives.contains(&"Wire") {
+                if derives.iter().any(|(name, _)| *name == "Wire") {
                     self.collect_wire_type(&inner.0);
+                }
+                for (name, name_span) in derives {
+                    self.record_macro_reference(name, *name_span, scope_id);
                 }
                 self.walk_expr_node(inner, scope_id);
                 None
@@ -7289,6 +7328,32 @@ impl<'src> Analyzer<'src> {
     /// Record a name→definition reference for the language server (drives
     /// go-to-definition and hover): `span` is where the name appears, `target_id`
     /// the entity it refers to. A label is rendered from the entity's kind.
+    /// Editor navigation for a macro NAME at an attribute/invocation/derive
+    /// site: resolve to its marker entity — the scope chain (same-file and
+    /// imported markers), then the std prelude (module scopes) — and record
+    /// the reference. Best-effort: expansion has its own (syntactic) scoping;
+    /// this only feeds go-to-definition / find-references.
+    fn record_macro_reference(&mut self, name: &'src str, name_span: Span, scope_id: Id) {
+        let is_marker = |analyzer: &Self, id: &Id| {
+            matches!(analyzer.expr_id_to_expr_map.get(id), Some(Expr::Macro))
+        };
+        let target = self
+            .try_get_expr_id_by_name(name, scope_id)
+            .filter(|id| is_marker(self, id))
+            .or_else(|| {
+                // The macro NAMESPACE: same-module and prelude macros resolve
+                // here even when an item owns the plain name.
+                self.modules.values().find_map(|module| {
+                    self.scopes
+                        .get(&module.body.1)
+                        .and_then(|scope| scope.macro_name_to_id.get(name).copied())
+                })
+            });
+        if let Some(target) = target {
+            self.record_reference(self.current_source_id, name_span, target);
+        }
+    }
+
     fn record_reference(&mut self, source_id: SourceId, span: Span, target_id: Id) {
         let label_type = match self.expr_id_to_expr_map.get(&target_id) {
             Some(Expr::Enum(id)) | Some(Expr::EnumVariant(id, _)) => Type::Enum(*id, Vec::new()),
@@ -13598,6 +13663,12 @@ pub fn analyze<'src>(
         .type_references
         .iter()
         .map(|(source, span, definition, type_id)| {
+            // A macro marker's hover label is its rendered signature.
+            if let Some(signature) =
+                definition.and_then(|definition| analyzer.macro_signatures.get(&definition))
+            {
+                return (*source, *span, *definition, signature.clone());
+            }
             let type_ = type_id.get_type(&analyzer);
             let label = analyzer.pretty_print_type(&type_, &empty_substitution);
             (*source, *span, *definition, label)

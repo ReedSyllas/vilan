@@ -277,7 +277,7 @@ pub enum Node<'src> {
     // `[derive(A, B)] <struct|enum>` — the derive trait names and the item they
     // annotate. Transparent to analysis (the inner item is walked normally); a
     // pre-analysis pass generates the trait impls from the item's fields.
-    Derive(Vec<&'src str>, Box<Spanned<Self>>),
+    Derive(Vec<(&'src str, Span)>, Box<Spanned<Self>>),
     // `[service(Client)] struct …` — a per-connection service struct
     // (`proposal/transport-rpc.md` §4.2). Transparent to analysis; a
     // pre-analysis pass generates its dispatcher, its client sibling (named by

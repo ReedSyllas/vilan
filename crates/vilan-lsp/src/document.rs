@@ -242,6 +242,22 @@ fn span_of(program: &Program, id: Id) -> Option<Span> {
 
 impl Document {
     pub fn analyze(text: &str, std_dir: &Path, entry_path: &Path) -> Self {
+        // The pipeline recurses deeply (chumsky), and macro-world compiles NEST
+        // a full analysis inside the analysis — run the whole thing on a
+        // dedicated big-stack thread, like the CLI's compiler thread. Callers
+        // stay synchronous (the LSP already wraps this in spawn_blocking).
+        let text = text.to_string();
+        let std_dir = std_dir.to_path_buf();
+        let entry_path = entry_path.to_path_buf();
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || Self::analyze_on_this_thread(&text, &std_dir, &entry_path))
+            .expect("spawn analysis thread")
+            .join()
+            .expect("analysis thread panicked")
+    }
+
+    fn analyze_on_this_thread(text: &str, std_dir: &Path, entry_path: &Path) -> Self {
         let line_index = LineIndex::new(text);
         let text_hash = hash_text(text);
         // The program borrows its source for `'static`, so leak a copy (the
@@ -1600,6 +1616,59 @@ mod tests {
         assert!(
             !labels.contains(&"bump".to_string()),
             "instance excluded: {labels:?}"
+        );
+    }
+
+    // --- E8: editor support for macros ---
+
+    // Hover on a macro attribute shows the macro's signature; definition
+    // jumps to the `macro fun` (same file here).
+    #[test]
+    fn macro_attribute_hover_and_definition() {
+        let source = "macro fun derive_tag(item: Item): Source {\n\timport macro_std::source;\n\timport macro_std::meta::{ Item, Source };\n\tsource(\"\")\n}\n\n[derive_tag]\nstruct Point {\n\tx: i32,\n}\n\nfun main() {}\n\nmain();\n";
+        let (_dir, document) = analyze_workspace(&[("main.vl", source)]);
+        // The attribute site is the SECOND occurrence of the name.
+        let definition_at = source.find("derive_tag").unwrap();
+        let use_at = source[definition_at + 1..].find("derive_tag").unwrap() + definition_at + 1;
+        let hover = document
+            .hover(use_at + 2)
+            .expect("hover on the attribute name");
+        assert!(
+            hover.contains("macro fun derive_tag(item: Item): Source"),
+            "hover should show the signature, got: {hover}"
+        );
+        let (source_id, span) = document
+            .definition(use_at + 2)
+            .expect("definition on the attribute name");
+        assert_eq!(source_id, vilan_core::analyzer::SourceId(0));
+        assert_eq!(
+            span.into_range().start,
+            definition_at,
+            "definition should land on the macro fun's name"
+        );
+    }
+
+    // A prelude derive navigates CROSS-FILE into std (compare.vl).
+    #[test]
+    fn prelude_derive_definition_reaches_std() {
+        let source =
+            "[derive(PartialEq)]\nstruct Point {\n\tx: i32,\n}\n\nfun main() {}\n\nmain();\n";
+        let (_dir, document) = analyze_workspace(&[("main.vl", source)]);
+        let use_at = source.find("PartialEq").unwrap();
+        let hover = document
+            .hover(use_at + 2)
+            .expect("hover on the derive name");
+        assert!(
+            hover.contains("macro fun PartialEq(item: Item): Source"),
+            "hover should show the prelude macro's signature, got: {hover}"
+        );
+        let (source_id, _span) = document
+            .definition(use_at + 2)
+            .expect("definition on the derive name");
+        assert_ne!(
+            source_id,
+            vilan_core::analyzer::SourceId(0),
+            "the definition lives in std's compare.vl, not the entry"
         );
     }
 }

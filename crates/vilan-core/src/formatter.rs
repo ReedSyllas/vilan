@@ -369,6 +369,7 @@ impl<'src> Printer<'src> {
             // `[derive(A, B)]` sits on its own line above the item it annotates.
             Node::Derive(names, derived) => {
                 self.out.push_str("[derive(");
+                let names: Vec<&str> = names.iter().map(|(name, _)| *name).collect();
                 self.out.push_str(&names.join(", "));
                 self.out.push_str(")]");
                 self.line();

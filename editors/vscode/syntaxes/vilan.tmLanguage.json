@@ -69,11 +69,12 @@
     "attributes": {
       "patterns": [
         {
-          "comment": "Bracket attributes `[extern(..)]`, `[derive(..)]`, `[must_use]`. The lookahead keeps array literals `[1, 2]` out.",
+          "comment": "Bracket attributes: the built-in markers anywhere, plus GENERIC macro attributes `[name]` / `[name(args)]` at the start of a line (an expression's list literal never opens an item line, which keeps `[1, 2]` and `[x]` out).",
           "name": "meta.attribute.vilan",
-          "begin": "(\\[)(?=\\s*(extern|derive|must_use)\\b)",
+          "begin": "(\\[)(?=\\s*(extern|derive|must_use|service|rpc|expose|trait_only|doc)\\b)|^\\s*(\\[)(?=\\s*[A-Za-z_][A-Za-z0-9_]*\\s*[\\(\\]])",
           "beginCaptures": {
-            "1": { "name": "punctuation.definition.attribute.begin.vilan" }
+            "1": { "name": "punctuation.definition.attribute.begin.vilan" },
+            "3": { "name": "punctuation.definition.attribute.begin.vilan" }
           },
           "end": "(\\])",
           "endCaptures": {
@@ -81,7 +82,7 @@
           },
           "patterns": [
             {
-              "match": "\\b(extern|derive|must_use)\\b",
+              "match": "\\b(extern|derive|must_use|service|rpc|expose|trait_only|doc)\\b",
               "name": "keyword.other.attribute.vilan"
             },
             {
@@ -90,13 +91,35 @@
               "name": "support.constant.attribute.vilan"
             },
             { "include": "#strings" },
-            { "include": "#types" }
+            { "include": "#types" },
+            {
+              "comment": "A macro name — the attribute itself, or a lowercase derive name like `[derive(derive_display)]` (capitalized ones color as types above).",
+              "match": "\\b[a-z_][A-Za-z0-9_]*\\b",
+              "name": "entity.name.function.macro.vilan"
+            }
           ]
         }
       ]
     },
     "function-definition": {
       "patterns": [
+        {
+          "comment": "`macro fun name` — a macro definition (macro-engine.md §3).",
+          "match": "\\b(macro)\\s+(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.macro.vilan" },
+            "2": { "name": "storage.type.function.vilan" },
+            "3": { "name": "entity.name.function.macro.vilan" }
+          }
+        },
+        {
+          "comment": "`macro name(..)` — a macro invocation (splice site).",
+          "match": "\\b(macro)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "keyword.control.macro.vilan" },
+            "2": { "name": "entity.name.function.macro.vilan" }
+          }
+        },
         {
           "comment": "`fun name` — the name in a function/method declaration.",
           "match": "\\b(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)",
@@ -120,7 +143,7 @@
         {
           "comment": "Declaration keywords that introduce a named item.",
           "name": "storage.type.vilan",
-          "match": "\\b(fun|struct|enum|impl|trait|type|mod)\\b"
+          "match": "\\b(fun|struct|enum|impl|trait|type|mod|macro)\\b"
         },
         {
           "name": "storage.modifier.vilan",

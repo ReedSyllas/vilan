@@ -1263,6 +1263,7 @@ where
         .ignore_then(select! { Token::Ident("derive") => () }.labelled("`derive`"))
         .ignore_then(
             identifier
+                .map_with(|name, e| (name, e.span()))
                 .separated_by(just(Token::Ctrl(',')))
                 .allow_trailing()
                 .collect::<Vec<_>>()
