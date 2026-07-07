@@ -42,7 +42,8 @@ have gaps.
    exemption (an uncalled, un-taken, non-top-level function cannot run uncovered) — without
    it every `std::reactive` importer failed. **Remaining:** `comp` sugar, `std::ui`
    integration (views self-registering), `get_safe` (recorded with the `Option`-parameter
-   sketch), `effect` on the `Source` trait (blocked on B14), fence-diagnostic anchoring.
+   sketch), fence-diagnostic anchoring. ~~`effect` on the `Source` trait~~ (shipped with
+   B14's fix, 2026-07-07).
 
 6. **Ambient microtask flush + async turns/actions** (M–L; the future sections of
    `reactive-batching.md`) — auto-`flush` on the next microtask (committed, deferred), and the
