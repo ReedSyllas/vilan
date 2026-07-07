@@ -121,6 +121,27 @@ argument). Compatibility: a context-free closure passes where an annotated
 one is expected (the extra hidden argument is unread); a closure literal in
 an annotated position defers instead of capturing; a closure that already
 captured (created inside an extent) keeps its captured value — capture wins,
-the deferred argument is unread. Multiple contexts: a comma list. This is a
-REAL slice (parser clause, a closure-type effect row, coverage + threading
-extensions) — design settled here, taken as its own slice.
+the deferred argument is unread.
+
+**Multiple contexts** (settled 2026-07-07): the single form stays bare —
+`context owner_scope` — and several are a parenthesized comma list:
+
+```vilan
+fn: (|| void) context (owner_scope, request_id)
+```
+
+A bare comma list is grammatically unavailable (the clause sits inside
+parameter lists and generic argument lists, which own the comma), and
+parens-with-commas is the language's value-list shape (call arguments,
+tuples, `[derive(A, B, C)]`) — braces would echo import name-SETS, which
+these aren't. A repeated clause (`context a context b`) was considered and
+rejected: no clause repeats in the grammar today, and one clause node avoids
+order/duplicate normalization questions. Two rules ride the written order:
+the clause's declaration order IS the hidden-argument order at call sites
+(deterministic, visible, formatter-preserved), and a duplicate context in one
+clause is a compile error. This also sets the shape for any future
+multi-value clause (`borrows (a, b)`, if destruction work ever needs it).
+
+This is a REAL slice (parser clause, a closure-type effect row, coverage +
+threading extensions) — design settled here, taken as its own slice
+(backlog B15).
