@@ -18,7 +18,7 @@ add_ten(b);
 console.log("" + a[0] + " " + b[0][b[1]]);
 const $a = same(c);
 const $b = same(c);
-$b[0][$b[1]] = $a[0][$a[1]] / 10;
+$b[0][$b[1]] = Math.trunc($a[0][$a[1]] / 10);
 console.log("" + a[0] + " " + b[0][b[1]]);
 let cell = [ 100 ];
 const $c = slot(cell);

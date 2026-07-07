@@ -912,6 +912,7 @@ impl Interpreter {
             )),
             "Math.abs" => Ok(Value::Number(expect_number(&take(0))?.abs())),
             "Math.floor" => Ok(Value::Number(expect_number(&take(0))?.floor())),
+            "Math.trunc" => Ok(Value::Number(expect_number(&take(0))?.trunc())),
             "Math.ceil" => Ok(Value::Number(expect_number(&take(0))?.ceil())),
             "Math.sqrt" => Ok(Value::Number(expect_number(&take(0))?.sqrt())),
             "Math.round" => {

@@ -304,3 +304,890 @@ impl u32 {
 		(self & 1u32) == 1u32
 	}
 }
+
+// --- The sized numeric family (proposal/numeric-types.md) ---------------------
+//
+// Nominal widths on the JS backend: every sized integer lowers to a plain JS
+// number (i64/u64 exact within ±2^53 — the measured f64-over-BigInt decision,
+// §1), `f32` lowers to `f64`. Distinct types, range-checked literals, native
+// operators, truncating integer division; width semantics become real on a
+// non-JS backend.
+//
+// GENERATED ONCE by a macro and checked in as plain source: `number.vl` is
+// loaded inside every macro world (via std's lib surface), and world files
+// must not DISPATCH macros — a world expands with an empty macro scope
+// (macro-engine.md §10). The family's shape is pinned by the numeric corpus
+// program; regenerate by hand if the surface changes.
+
+external struct i8;
+
+external struct u8;
+
+external struct i16;
+
+external struct u16;
+
+external struct i64;
+
+external struct u64;
+
+external struct f32;
+
+// Conversions (`as_*`, numeric-types.md §4): truncate toward zero, then fold
+// into the target's range (two's-complement wrap) — Rust-`as` semantics. All
+// arithmetic happens in f64 space: `as_f64` widens (the host `Number` is the
+// identity on numbers), the folds below shape the value, and a `label_*`
+// extern re-types the result (identity at the JS level).
+
+[extern("Number")]
+external fun label_i8(value: f64): i8;
+
+[extern("Number")]
+external fun label_u8(value: f64): u8;
+
+[extern("Number")]
+external fun label_i16(value: f64): i16;
+
+[extern("Number")]
+external fun label_u16(value: f64): u16;
+
+[extern("Number")]
+external fun label_i32(value: f64): i32;
+
+[extern("Number")]
+external fun label_u32(value: f64): u32;
+
+[extern("Number")]
+external fun label_i64(value: f64): i64;
+
+[extern("Number")]
+external fun label_u64(value: f64): u64;
+
+[extern("Number")]
+external fun label_f32(value: f64): f32;
+
+[extern("Number")]
+external fun label_f64(value: f64): f64;
+
+// `value` truncated toward zero, folded into `0 ..= modulus - 1`. (Spelled
+// with a truncating quotient — vilan has no `%` operator yet.)
+fun fold_unsigned(value: f64, modulus: f64): f64 {
+	let truncated = value.trunc();
+	let wrapped = truncated - (truncated / modulus).trunc() * modulus;
+	if wrapped < 0f {
+		wrapped + modulus
+	} else {
+		wrapped
+	}
+}
+
+// The signed fold: two's-complement at `modulus`, so `half ..` goes negative.
+fun fold_signed(value: f64, modulus: f64, half: f64): f64 {
+	let wrapped = fold_unsigned(value, modulus);
+	if wrapped >= half {
+		wrapped - modulus
+	} else {
+		wrapped
+	}
+}
+
+impl f64 {
+	// Truncation toward zero — the integer-division primitive (§2) and the
+	// first step of every narrowing conversion.
+	[extern("Math.trunc")]
+	external fun trunc(self): f64;
+}
+
+impl i8 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		self
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl u8 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		self
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl i16 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		self
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl u16 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		self
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl i32 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		self
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl u32 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		self
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl i64 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		self
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl u64 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		self
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl f32 {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		self
+	}
+}
+
+impl f64 {
+	fun as_i8(self): i8 {
+		let widened = self;
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self;
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self;
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self;
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self;
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self;
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self;
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self;
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self;
+		label_f32(widened)
+	}
+
+	fun as_f64(self): f64 {
+		self
+	}
+}
+
+impl BigInt {
+	[extern("Number")]
+	external fun as_f64(self): f64;
+
+	fun as_i8(self): i8 {
+		let widened = self.as_f64();
+		label_i8(fold_signed(widened, 256f, 128f))
+	}
+
+	fun as_u8(self): u8 {
+		let widened = self.as_f64();
+		label_u8(fold_unsigned(widened, 256f))
+	}
+
+	fun as_i16(self): i16 {
+		let widened = self.as_f64();
+		label_i16(fold_signed(widened, 65536f, 32768f))
+	}
+
+	fun as_u16(self): u16 {
+		let widened = self.as_f64();
+		label_u16(fold_unsigned(widened, 65536f))
+	}
+
+	fun as_i32(self): i32 {
+		let widened = self.as_f64();
+		label_i32(fold_signed(widened, 4294967296f, 2147483648f))
+	}
+
+	fun as_u32(self): u32 {
+		let widened = self.as_f64();
+		label_u32(fold_unsigned(widened, 4294967296f))
+	}
+
+	fun as_i64(self): i64 {
+		let widened = self.as_f64();
+		label_i64(widened.trunc())
+	}
+
+	fun as_u64(self): u64 {
+		let widened = self.as_f64();
+		label_u64(widened.trunc())
+	}
+
+	fun as_f32(self): f32 {
+		let widened = self.as_f64();
+		label_f32(widened)
+	}
+}
+
+impl i8 with Default {
+	fun default(): i8 {
+		0i8
+	}
+}
+
+impl i8 with PartialEq {
+	fun eq(self, b: i8): bool {
+		self == b
+	}
+}
+
+impl i8 with Add {
+	fun add(self, b: i8): i8 {
+		self + b
+	}
+}
+
+impl i8 with Sub {
+	fun sub(self, b: i8): i8 {
+		self - b
+	}
+}
+
+impl i8 with Mul {
+	fun mul(self, b: i8): i8 {
+		self * b
+	}
+}
+
+impl i8 with Div {
+	fun div(self, b: i8): i8 {
+		self / b
+	}
+}
+
+impl u8 with Default {
+	fun default(): u8 {
+		0u8
+	}
+}
+
+impl u8 with PartialEq {
+	fun eq(self, b: u8): bool {
+		self == b
+	}
+}
+
+impl u8 with Add {
+	fun add(self, b: u8): u8 {
+		self + b
+	}
+}
+
+impl u8 with Sub {
+	fun sub(self, b: u8): u8 {
+		self - b
+	}
+}
+
+impl u8 with Mul {
+	fun mul(self, b: u8): u8 {
+		self * b
+	}
+}
+
+impl u8 with Div {
+	fun div(self, b: u8): u8 {
+		self / b
+	}
+}
+
+impl i16 with Default {
+	fun default(): i16 {
+		0i16
+	}
+}
+
+impl i16 with PartialEq {
+	fun eq(self, b: i16): bool {
+		self == b
+	}
+}
+
+impl i16 with Add {
+	fun add(self, b: i16): i16 {
+		self + b
+	}
+}
+
+impl i16 with Sub {
+	fun sub(self, b: i16): i16 {
+		self - b
+	}
+}
+
+impl i16 with Mul {
+	fun mul(self, b: i16): i16 {
+		self * b
+	}
+}
+
+impl i16 with Div {
+	fun div(self, b: i16): i16 {
+		self / b
+	}
+}
+
+impl u16 with Default {
+	fun default(): u16 {
+		0u16
+	}
+}
+
+impl u16 with PartialEq {
+	fun eq(self, b: u16): bool {
+		self == b
+	}
+}
+
+impl u16 with Add {
+	fun add(self, b: u16): u16 {
+		self + b
+	}
+}
+
+impl u16 with Sub {
+	fun sub(self, b: u16): u16 {
+		self - b
+	}
+}
+
+impl u16 with Mul {
+	fun mul(self, b: u16): u16 {
+		self * b
+	}
+}
+
+impl u16 with Div {
+	fun div(self, b: u16): u16 {
+		self / b
+	}
+}
+
+impl i64 with Default {
+	fun default(): i64 {
+		0i64
+	}
+}
+
+impl i64 with PartialEq {
+	fun eq(self, b: i64): bool {
+		self == b
+	}
+}
+
+impl i64 with Add {
+	fun add(self, b: i64): i64 {
+		self + b
+	}
+}
+
+impl i64 with Sub {
+	fun sub(self, b: i64): i64 {
+		self - b
+	}
+}
+
+impl i64 with Mul {
+	fun mul(self, b: i64): i64 {
+		self * b
+	}
+}
+
+impl i64 with Div {
+	fun div(self, b: i64): i64 {
+		self / b
+	}
+}
+
+impl u64 with Default {
+	fun default(): u64 {
+		0u64
+	}
+}
+
+impl u64 with PartialEq {
+	fun eq(self, b: u64): bool {
+		self == b
+	}
+}
+
+impl u64 with Add {
+	fun add(self, b: u64): u64 {
+		self + b
+	}
+}
+
+impl u64 with Sub {
+	fun sub(self, b: u64): u64 {
+		self - b
+	}
+}
+
+impl u64 with Mul {
+	fun mul(self, b: u64): u64 {
+		self * b
+	}
+}
+
+impl u64 with Div {
+	fun div(self, b: u64): u64 {
+		self / b
+	}
+}
+
+impl f32 with Default {
+	fun default(): f32 {
+		0f32
+	}
+}
+
+impl f32 with PartialEq {
+	fun eq(self, b: f32): bool {
+		self == b
+	}
+}
+
+impl f32 with Add {
+	fun add(self, b: f32): f32 {
+		self + b
+	}
+}
+
+impl f32 with Sub {
+	fun sub(self, b: f32): f32 {
+		self - b
+	}
+}
+
+impl f32 with Mul {
+	fun mul(self, b: f32): f32 {
+		self * b
+	}
+}
+
+impl f32 with Div {
+	fun div(self, b: f32): f32 {
+		self / b
+	}
+}

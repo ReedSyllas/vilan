@@ -2852,9 +2852,10 @@ fn emitted_js_preserves_grouping_across_precedence() {
             print(0 - (a - b));
             print(a - (b - c));
             print((a + b) / (b + c) + 1);
+            print((1.0 + 2.0) / (2.0 + 3.0) + 1.0);
         }
         "#,
-        "9\n9\n1\n2\n1.6\n",
+        "9\n9\n1\n2\n1\n1.6\n",
     );
 }
 
@@ -6313,5 +6314,240 @@ main();
             message.contains("generated a `macro { .. }` block") && range.start == invocation_name
         }),
         "expected the generated-block rejection at the invocation; got: {diagnostics:#?}"
+    );
+}
+
+// --- Sized numeric types (proposal/numeric-types.md) ---
+
+// Every new suffix types its literal; `128i8` is admitted (the minimum is
+// written as unary minus over the literal); unsuffixed literals adopt an
+// expected sized type.
+#[test]
+fn sized_numeric_literals_type_and_run() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let a = 5i8;
+            let b = 200u8;
+            let c = 5i16;
+            let d = 60000u16;
+            let e = 5i64;
+            let f = 5u64;
+            let g = 2.5f32;
+            let allowed = 128i8;
+            let expected: u8 = 7;
+            let fractional: f32 = 1.5;
+            print(a + a);
+            print(b);
+            print(c + c);
+            print(d);
+            print(e + f.as_i64());
+            print(g);
+            print(allowed);
+            print(expected);
+            print(fractional);
+        }
+
+        main();
+        "#,
+        "10\n200\n10\n60000\n10\n2.5\n128\n7\n1.5\n",
+    );
+}
+
+#[test]
+fn a_u8_literal_out_of_range_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 300u8; }\nmain();\n",
+        "300u8",
+        "out of range for `u8` (0 ..= 255)",
+    );
+}
+
+#[test]
+fn an_i8_literal_out_of_range_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 129i8; }\nmain();\n",
+        "129i8",
+        "out of range for `i8` (-128 ..= 127)",
+    );
+}
+
+#[test]
+fn a_u16_literal_out_of_range_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 70000u16; }\nmain();\n",
+        "70000u16",
+        "out of range for `u16`",
+    );
+}
+
+#[test]
+fn an_i16_literal_out_of_range_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 40000i16; }\nmain();\n",
+        "40000i16",
+        "out of range for `i16`",
+    );
+}
+
+#[test]
+fn a_u32_literal_out_of_range_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 5000000000u32; }\nmain();\n",
+        "5000000000u32",
+        "out of range for `u32`",
+    );
+}
+
+#[test]
+fn an_i32_literal_out_of_range_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 3000000000i32; }\nmain();\n",
+        "3000000000i32",
+        "out of range for `i32`",
+    );
+}
+
+#[test]
+fn an_i64_literal_beyond_the_f64_window_errors() {
+    assert_fails_spanning(
+        "fun main() { let x = 9007199254740993i64; }\nmain();\n",
+        "9007199254740993i64",
+        "use `BigInt` for larger values",
+    );
+}
+
+#[test]
+fn a_hex_literal_is_range_checked() {
+    assert_fails_spanning(
+        "fun main() { let x = 0x100u8; }\nmain();\n",
+        "0x100u8",
+        "out of range for `u8`",
+    );
+}
+
+// An unsuffixed literal adopting an expected sized type is range-checked
+// against that type.
+#[test]
+fn an_expected_type_literal_is_range_checked() {
+    assert_fails_spanning(
+        "fun main() { let x: u8 = 300; }\nmain();\n",
+        "300",
+        "out of range for `u8`",
+    );
+}
+
+// Integer division truncates toward zero (numeric-types.md §2) — both signs,
+// every width, the compound form, and generic `T: Div` dispatch; float and
+// BigInt division are untouched.
+#[test]
+fn integer_division_truncates_toward_zero() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::operators::Div;
+
+        fun halve<T: Div>(value: T, divisor: T): T {
+            value / divisor
+        }
+
+        fun main() {
+            print(7 / 2);
+            print(-7 / 2);
+            print(7u32 / 2u32);
+            print(100u8 / 3u8);
+            print(100i64 / 8i64);
+            mut compound = 9;
+            compound /= 2;
+            print(compound);
+            print(halve(100i16, 8i16));
+            print(7.0 / 2.0);
+            print(7n / 2n);
+        }
+
+        main();
+        "#,
+        "3\n-3\n3\n33\n12\n4\n12\n3.5\n3n\n",
+    );
+}
+
+// Conversions carry Rust-`as` semantics: truncate toward zero, then fold
+// two's-complement into the target's width.
+#[test]
+fn numeric_conversions_fold_into_the_target_width() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            print((300).as_u8());
+            print((-1).as_u8());
+            print((130).as_i8());
+            print((70000).as_u16());
+            print((3.9).as_i32());
+            print((-3.9).as_i32());
+            print((200u8).as_f64() + 0.5);
+            print((2.5f32).as_i64());
+            print((5i64).as_u64());
+        }
+
+        main();
+        "#,
+        "44\n255\n-126\n4464\n3\n-3\n200.5\n2\n5\n",
+    );
+}
+
+// The macro-engine flagship (macro-engine.md §2) realized: one macro stamps
+// the operator family for several types at once. (The std family itself is
+// generated-and-checked-in because `number.vl` loads inside macro worlds,
+// which expand with an empty macro scope — world files must not dispatch.)
+#[test]
+fn a_macro_stamps_a_numeric_family() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::operators::Add;
+
+        macro fun arithmetic_family(arguments: Arguments): Source {
+            import macro_std::option::Option::{ self, Some, None };
+            import macro_std::build::{ impl_of, fun_of };
+
+            mut generated = "import std::operators::Add;\n";
+            mut index = 0;
+            for index < arguments.len() {
+                let name = match arguments.as_identifier(index) {
+                    Some(let found) => found,
+                    None => "?",
+                };
+                let add = fun_of("add")
+                    .parameter("self")
+                    .parameter(i"b: {name}")
+                    .returns(name)
+                    .expr(i"{name} \{ value = self.value + b.value \}");
+                generated = generated + impl_of(name).implements("Add").method(add).render();
+                index = index + 1;
+            }
+            source(generated)
+        }
+
+        struct Meters { value: i32 }
+        struct Seconds { value: i32 }
+
+        macro arithmetic_family(Meters, Seconds)
+
+        fun total<T: Add>(a: T, b: T): T {
+            a + b
+        }
+
+        fun main() {
+            print(total(Meters { value = 2 }, Meters { value = 3 }).value);
+            print(total(Seconds { value = 40 }, Seconds { value = 5 }).value);
+        }
+
+        main();
+        "#,
+        "5\n45\n",
     );
 }

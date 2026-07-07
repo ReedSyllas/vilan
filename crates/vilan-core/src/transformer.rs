@@ -708,7 +708,21 @@ impl<'src> Transformer<'src> {
             self.program.type_id_to_type_map.get(&self.resolve_type_id(type_id)),
             Some(Type::Struct(id, _))
                 if self.program.structs.get(id).is_some_and(|struct_|
-                    matches!(struct_.name, "str" | "i32" | "u32" | "f64" | "BigInt" | "null"))
+                    matches!(
+                    struct_.name,
+                    "str" | "i32"
+                        | "u32"
+                        | "f64"
+                        | "BigInt"
+                        | "null"
+                        | "i8"
+                        | "u8"
+                        | "i16"
+                        | "u16"
+                        | "i64"
+                        | "u64"
+                        | "f32"
+                ))
         )
     }
 
@@ -730,6 +744,31 @@ impl<'src> Transformer<'src> {
                 .get(&self.resolve_type_id(*constraint_id)),
             Some(Type::Struct(id, _))
                 if self.program.structs.get(id).is_some_and(|struct_| struct_.name == "u32")
+        )
+    }
+
+    /// Whether a division's operands are an INTEGER primitive — the switch to
+    /// the truncating `Math.trunc` emission (proposal/numeric-types.md §2).
+    /// Concrete verdicts were recorded by the analyzer; a generic operand
+    /// resolves under the active monomorphization's substitution.
+    fn binary_operands_are_integer(&self, binary_id: Id) -> bool {
+        const INTEGER_PRIMITIVES: &[&str] = &["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"];
+        if self.program.integer_division.contains(&binary_id) {
+            return true;
+        }
+        let Some(constraint_id) = self.program.division_generic_lhs.get(&binary_id) else {
+            return false;
+        };
+        matches!(
+            self.program
+                .type_id_to_type_map
+                .get(&self.resolve_type_id(*constraint_id)),
+            Some(Type::Struct(id, _))
+                if self
+                    .program
+                    .structs
+                    .get(id)
+                    .is_some_and(|struct_| INTEGER_PRIMITIVES.contains(&struct_.name))
         )
     }
 
@@ -1408,6 +1447,15 @@ impl<'src> Transformer<'src> {
                         BinaryOp::UShr,
                         binary(*op, lhs, rhs),
                         js::Node::Number("0".to_string(), None),
+                    ));
+                }
+                // Integer division truncates toward zero
+                // (proposal/numeric-types.md §2): `Math.trunc(a / b)`.
+                // Float and BigInt division stay native.
+                if matches!(op, BinaryOp::Div) && self.binary_operands_are_integer(id) {
+                    return Some(js::Node::Call(
+                        Box::new(js::Node::Local("Math.trunc".to_string())),
+                        vec![binary(*op, lhs, rhs)],
                     ));
                 }
                 binary(*op, lhs, rhs)

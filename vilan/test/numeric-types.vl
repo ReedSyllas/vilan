@@ -1,0 +1,72 @@
+// The sized numeric family (proposal/numeric-types.md): nominal widths on the
+// JS backend — distinct types, range-checked literals, native operators,
+// truncating integer division, and explicit value-converting `as_*`
+// conversions (Rust-`as` semantics: truncate toward zero, fold two's-
+// complement into the target's width).
+import std::print;
+import std::debug::Debug;
+import std::json::Json;
+import std::operators::Div;
+
+[derive(Json)]
+struct Packet {
+	kind: u8,
+	sequence: u16,
+	stamp: i64,
+}
+
+// Generic dispatch reaches a sized type's operator impls (the trait bodies
+// are the native operator; division through `T: Div` truncates like the
+// direct form).
+fun halve<T: Div>(value: T, divisor: T): T {
+	value / divisor
+}
+
+fun main() {
+	// Literals across the family, hex included.
+	let byte = 0xFFu8;
+	let short = 60000u16;
+	let wide = 9007199254740992i64;
+	let ratio = 2.5f32;
+	print(byte);
+	print(short);
+	print(wide);
+	print(ratio);
+
+	// Truncating integer division — toward zero, both signs; float and
+	// BigInt division untouched; compound assignment rides the verdict.
+	print(7 / 2);
+	print(-7 / 2);
+	print(7u32 / 2u32);
+	print(100u8 / 3u8);
+	print(7.0 / 2.0);
+	print(7n / 2n);
+	mut counter = 9;
+	counter /= 2;
+	print(counter);
+	print(halve(100i16, 8i16));
+
+	// Conversions: identity, widening, narrowing folds, float truncation.
+	print((300).as_u8());
+	print((-1).as_u8());
+	print((130).as_i8());
+	print((3.9).as_i32());
+	print((-3.9).as_i32());
+	print((70000).as_u16());
+	print(byte.as_f64() + 0.25);
+	print(wide.as_i32());
+	print((2.5f32).as_i64());
+
+	// Same-width arithmetic and comparison stay native.
+	let doubled = 100u8 + 100u8;
+	print(doubled);
+	print(100i64 * 3i64);
+	print(5u16 < 6u16);
+
+	// The family carries Debug and Json like every scalar.
+	print(200u8.debug());
+	let packet = Packet { kind = 7u8, sequence = 300u16, stamp = 5i64 };
+	print(packet.to_json());
+}
+
+main();

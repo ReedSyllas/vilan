@@ -95,3 +95,40 @@ macro fun Debug(item: Item): Source {
 }
 
 // --- Json / Wire (shared JSON impls via in-world helpers) ---
+
+// --- The sized numeric family (proposal/numeric-types.md §5) ---
+
+impl i8 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}
+
+impl u8 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}
+
+impl i16 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}
+
+impl u16 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}
+
+impl i64 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}
+
+impl u64 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}
+
+impl f32 with Debug {
+	[extern("JSON.stringify")]
+	external fun debug(self): str;
+}

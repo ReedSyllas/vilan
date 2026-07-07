@@ -82,9 +82,10 @@ A compact chronicle — details live in the named proposals and the git history.
 13. **LSP sub-file incremental parsing** (L) — tree-sitter-style reuse; chumsky is a
     batch parser, so this is the largest, lowest-priority LSP item.
 
-15. **Numeric types `u8`…`i64`/`f32`** (S) — low value for a JS target (collapse to
-    `f64`/`BigInt`); do via #9's macro engine, or defer to a non-JS backend (backlog
-    F3/F4, where distinct integer widths are real).
+15. **Numeric types `u8`…`i64`/`f32`** (S) — **SHIPPED 2026-07-07**
+    (`proposal/numeric-types.md`; backlog F2): nominal widths collapsing to plain JS
+    numbers (64-bit lowering profiled: f64+`Math.trunc` over BigInt), truncating
+    integer division, range-checked literals, `as_*` conversions.
 
 **Strategic candidates, not yet ranked/committed** (each wants its own proposal before
 building): the **WASM backend** (backlog F3), the **native backend** (backlog F4), the

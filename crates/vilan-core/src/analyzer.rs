@@ -947,6 +947,15 @@ pub struct Analyzer<'src> {
     // unsigned emission (proposal/bits-and-bytes.md §2).
     bitwise_u32: HashSet<Id>,
     bitwise_generic_lhs: HashMap<Id, TypeId>,
+    // Division binaries whose operands are an INTEGER primitive — settled
+    // here, or generic and resolved per monomorphization (the same channel
+    // shape as the bitwise verdict). Drives the truncating `Math.trunc`
+    // emission (proposal/numeric-types.md §2).
+    integer_division: HashSet<Id>,
+    division_generic_lhs: HashMap<Id, TypeId>,
+    // Integer literals awaiting their post-solve range check
+    // (proposal/numeric-types.md §3), in walk order.
+    prepped_number_literals: Vec<Id>,
     // Method calls (by call id) on a generic impl whose generic parameters bind
     // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
@@ -1146,6 +1155,9 @@ impl<'src> Analyzer<'src> {
             binary_op_dispatch: HashMap::new(),
             bitwise_u32: HashSet::new(),
             bitwise_generic_lhs: HashMap::new(),
+            integer_division: HashSet::new(),
+            division_generic_lhs: HashMap::new(),
+            prepped_number_literals: Vec::new(),
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
@@ -1538,9 +1550,11 @@ impl<'src> Analyzer<'src> {
     /// dispatching would recurse anyway, since the impl body uses the same operator.
     fn is_native_operator_type(&self, type_: &Type) -> bool {
         match type_ {
-            Type::Struct(id, _) => ["i32", "u32", "f64", "BigInt", "str"]
-                .iter()
-                .any(|name| self.primitive_struct_ids.get(*name).copied() == Some(*id)),
+            Type::Struct(id, _) => [
+                "i32", "u32", "f64", "BigInt", "str", "i8", "u8", "i16", "u16", "i64", "u64", "f32",
+            ]
+            .iter()
+            .any(|name| self.primitive_struct_ids.get(*name).copied() == Some(*id)),
             Type::Enum(id, _) => {
                 self.bool_enum_id == Some(*id)
                     || self.enums.get(id).is_some_and(|enum_| enum_.is_numeric)
@@ -1787,9 +1801,12 @@ impl<'src> Analyzer<'src> {
     /// *aggregate* primitives (`List`, `Context`), which lower to mutable JS
     /// arrays and do.
     fn is_scalar_primitive(&self, id: Id) -> bool {
-        ["str", "i32", "u32", "f64", "BigInt", "null"]
-            .iter()
-            .any(|name| self.primitive_struct_ids.get(name) == Some(&id))
+        [
+            "str", "i32", "u32", "f64", "BigInt", "null", "i8", "u8", "i16", "u16", "i64", "u64",
+            "f32",
+        ]
+        .iter()
+        .any(|name| self.primitive_struct_ids.get(name) == Some(&id))
     }
 
     /// Whether a type lowers to a mutable JS aggregate (a struct, `List`,
@@ -3858,7 +3875,10 @@ impl<'src> Analyzer<'src> {
             Node::Null => Some(Expr::Null),
             Node::Bool(x) => Some(Expr::Bool(*x)),
             Node::String(x) => Some(Expr::String(x)),
-            Node::Number(whole, fraction, suffix) => Some(Expr::Number(whole, *fraction, *suffix)),
+            Node::Number(whole, fraction, suffix) => {
+                self.prepped_number_literals.push(id);
+                Some(Expr::Number(whole, *fraction, *suffix))
+            }
             Node::Accessor(name) => {
                 self.prepped_locals.push((id, name));
                 None
@@ -6259,32 +6279,39 @@ impl<'src> Analyzer<'src> {
             // fractional part (`0.0` is a float), then the expected type
             // (`0` against an `f64` field), defaulting to `i32`.
             Expr::Number(_, fraction, suffix) => {
+                const NUMERIC_PRIMITIVES: &[&str] = &[
+                    "f64", "u32", "i32", "BigInt", "i8", "u8", "i16", "u16", "i64", "u64", "f32",
+                ];
                 let name = match *suffix {
                     Some("u32") => "u32",
                     Some("i32") => "i32",
                     Some("f64") | Some("f") => "f64",
+                    Some("f32") => "f32",
                     Some("n") => "BigInt",
+                    Some("i8") => "i8",
+                    Some("u8") => "u8",
+                    Some("i16") => "i16",
+                    Some("u16") => "u16",
+                    Some("i64") => "i64",
+                    Some("u64") => "u64",
                     _ => {
+                        // Unsuffixed: a fractional literal is a float (`f32`
+                        // only by expectation); an integer takes the expected
+                        // numeric type, defaulting to `i32`.
+                        let expected = match &constraint {
+                            Type::Struct(id, _) => NUMERIC_PRIMITIVES
+                                .iter()
+                                .find(|name| self.primitive_struct_ids.get(**name) == Some(id))
+                                .copied(),
+                            _ => None,
+                        };
                         if fraction.is_some() {
-                            "f64"
-                        } else {
-                            match &constraint {
-                                Type::Struct(id, _) if *id == self.primitive_struct_ids["f64"] => {
-                                    "f64"
-                                }
-                                Type::Struct(id, _) if *id == self.primitive_struct_ids["u32"] => {
-                                    "u32"
-                                }
-                                Type::Struct(id, _) if *id == self.primitive_struct_ids["i32"] => {
-                                    "i32"
-                                }
-                                Type::Struct(id, _)
-                                    if *id == self.primitive_struct_ids["BigInt"] =>
-                                {
-                                    "BigInt"
-                                }
-                                _ => "i32",
+                            match expected {
+                                Some("f32") => "f32",
+                                _ => "f64",
                             }
+                        } else {
+                            expected.unwrap_or("i32")
                         }
                     }
                 };
@@ -10318,6 +10345,24 @@ impl<'src> Analyzer<'src> {
                     _ => {}
                 }
             }
+            // Record the truncating-division verdict (numeric-types.md §2)
+            // the same way: integer operands settle here; a generic operand
+            // resolves under each monomorphization.
+            if matches!(op, BinaryOp::Div) {
+                match &lhs_type {
+                    Type::Struct(id, _)
+                        if ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
+                            .iter()
+                            .any(|name| self.primitive_struct_ids.get(*name) == Some(id)) =>
+                    {
+                        self.integer_division.insert(binary_id);
+                    }
+                    Type::Generic(constraint_id) => {
+                        self.division_generic_lhs.insert(binary_id, *constraint_id);
+                    }
+                    _ => {}
+                }
+            }
             // A generic-bounded operand (`x == y` where `x: T: PartialEq`, e.g. the
             // element compare inside `Option<T>::eq`) dispatches to the operator
             // trait method, re-resolved to T's concrete impl at each monomorphization
@@ -10381,6 +10426,84 @@ impl<'src> Analyzer<'src> {
                         ),
                     });
                 }
+            }
+        }
+
+        // --- Range-check integer literals (numeric-types.md §3) --- now that
+        // the solver settled each literal's type. Signed bounds admit 2^(n-1)
+        // itself: the minimum value is written as unary minus OVER the literal
+        // (`-128i8`), which is checked before the minus applies. The 64-bit
+        // bound is f64's exact-integer window — the JS backend's carrier.
+        for literal_id in std::mem::take(&mut self.prepped_number_literals) {
+            let (whole, has_fraction, suffix) = match self.expr_id_to_expr_map.get(&literal_id) {
+                Some(Expr::Number(whole, fraction, suffix)) => {
+                    (*whole, fraction.is_some(), *suffix)
+                }
+                _ => continue,
+            };
+            if has_fraction {
+                continue;
+            }
+            // Check only literals whose type is RECORDED: the suffix names it
+            // outright; an annotated let seeds `expected_types`; the solver
+            // may have written `expr_id_to_type_id_map`. A literal typed only
+            // through a constraint (a struct-initializer field, a call
+            // argument) leaves no record here and is skipped rather than
+            // re-inferred out of context — under-checking, never a false
+            // positive. (Threading constraint expectations into the record is
+            // the follow-up.)
+            let literal_type = if suffix.is_some() {
+                self.infer_type(literal_id, &Type::Unknown, &HashMap::new())
+            } else if let Some(type_id) = self
+                .expected_types
+                .get(&literal_id)
+                .or_else(|| self.expr_id_to_type_id_map.get(&literal_id))
+            {
+                type_id.get_type(self)
+            } else {
+                continue;
+            };
+            let Type::Struct(type_id, _) = literal_type else {
+                continue;
+            };
+            const BOUNDS: &[(&str, u128, bool)] = &[
+                ("u8", 255, false),
+                ("i8", 128, true),
+                ("u16", 65_535, false),
+                ("i16", 32_768, true),
+                ("u32", 4_294_967_295, false),
+                ("i32", 2_147_483_648, true),
+                ("u64", 9_007_199_254_740_992, false),
+                ("i64", 9_007_199_254_740_992, true),
+            ];
+            let Some((name, bound, signed)) = BOUNDS
+                .iter()
+                .find(|(name, _, _)| self.primitive_struct_ids.get(name) == Some(&type_id))
+                .copied()
+            else {
+                continue;
+            };
+            let value = match whole.strip_prefix("0x") {
+                Some(hex) => u128::from_str_radix(hex, 16),
+                None => whole.parse::<u128>(),
+            };
+            if value.map(|value| value <= bound).unwrap_or(false) {
+                continue;
+            }
+            let range = if matches!(name, "i64" | "u64") {
+                "exact integers span ±2^53 on the JS backend — use `BigInt` for larger values"
+                    .to_string()
+            } else if signed {
+                format!("-{bound} ..= {}", bound - 1)
+            } else {
+                format!("0 ..= {bound}")
+            };
+            if let Some(span) = self.span_map.get(&literal_id) {
+                let span = **span;
+                self.diagnostics.push(Error {
+                    span,
+                    msg: format!("the literal `{whole}` is out of range for `{name}` ({range})"),
+                });
             }
         }
 
@@ -11048,6 +11171,8 @@ pub struct Program<'src> {
     pub lift_dispatch: HashMap<Id, LiftDispatch>,
     pub bitwise_u32: HashSet<Id>,
     pub bitwise_generic_lhs: HashMap<Id, TypeId>,
+    pub integer_division: HashSet<Id>,
+    pub division_generic_lhs: HashMap<Id, TypeId>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
@@ -13224,6 +13349,13 @@ pub fn analyze<'src>(
         ("f64", "number"),
         ("BigInt", "number"),
         ("null", "null"),
+        ("i8", "number"),
+        ("u8", "number"),
+        ("i16", "number"),
+        ("u16", "number"),
+        ("i64", "number"),
+        ("u64", "number"),
+        ("f32", "number"),
     ] {
         let id = module_scopes
             .get(module)
@@ -13739,6 +13871,8 @@ pub fn analyze<'src>(
         try_dispatch: analyzer.try_dispatch,
         lift_dispatch: analyzer.lift_dispatch,
         bitwise_u32: analyzer.bitwise_u32,
+        integer_division: analyzer.integer_division,
+        division_generic_lhs: analyzer.division_generic_lhs,
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,
         intrinsics,

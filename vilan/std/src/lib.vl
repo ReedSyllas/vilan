@@ -8,5 +8,5 @@ export import pkg::io::print;
 export import pkg::io::panic;
 export import pkg::io::assert;
 export import pkg::string::str;
-export import pkg::number::{ u32, i32, f64, BigInt };
+export import pkg::number::{ u32, i32, f64, BigInt, i8, u8, i16, u16, i64, u64, f32 };
 export import pkg::default::Default;

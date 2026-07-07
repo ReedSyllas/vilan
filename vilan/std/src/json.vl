@@ -860,3 +860,91 @@ macro fun Wire(item: Item): Source {
 }
 
 // --- [service] (transport-rpc.md §4.2) ---
+
+// --- The sized numeric family (proposal/numeric-types.md §5) ---
+// Scalar Json/FromJson over the host JSON functions, exactly the i32 shape:
+// every sized value is a plain JS number, so it serializes as one.
+
+impl i8 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl i8 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): i8;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): i8;
+}
+
+impl u8 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl u8 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): u8;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): u8;
+}
+
+impl i16 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl i16 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): i16;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): i16;
+}
+
+impl u16 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl u16 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): u16;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): u16;
+}
+
+impl i64 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl i64 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): i64;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): i64;
+}
+
+impl u64 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl u64 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): u64;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): u64;
+}
+
+impl f32 with Json {
+	[extern("JSON.stringify")]
+	external fun to_json(self): str;
+}
+
+impl f32 with FromJson {
+	[extern("JSON.parse")]
+	external fun from_json(text: str): f32;
+	[extern("Number")]
+	external fun from_json_value(value: JsonValue): f32;
+}

@@ -174,9 +174,21 @@ have gaps.
 
 ## F. Backend & platform
 
-2. **Numeric types `u8`…`i64`/`f32`** (S; roadmap #15) — low value on a JS target (collapse to
-   `f64`/`BigInt`); do via the macro engine (G1) or defer to a non-JS backend (F3/F4, where the
-   distinct integer widths are real). Prune superseded `vilan/outdated/` sketches.
+2. **Numeric types `u8`…`i64`/`f32`** (S; roadmap #15) — **SHIPPED 2026-07-07**
+   (`proposal/numeric-types.md`): `i8`/`u8`/`i16`/`u16`/`i64`/`u64`/`f32` as nominal
+   primitives collapsing to plain JS numbers — the 64-bit lowering PROFILED
+   (f64+`Math.trunc` beats BigInt 5.2–14.1× on speed, 4× on memory; `BigInt` stays the
+   exact escape hatch). With it, two semantic repairs: **truncating integer division**
+   (`7 / 2` is now `3` — `Math.trunc` on every integer type, generic dispatch included;
+   one corpus golden regenerated run-verified) and **range-checked integer literals**
+   (suffix/annotation-typed, `-128i8`-style minimums admitted at `2^(n-1)`; 64-bit bound
+   = f64's ±2^53 window, error names `BigInt`). Explicit `as_*` conversions with
+   Rust-`as` fold semantics; Json/Debug/operator families mirror `i32` (generated once
+   by a macro, checked in — `number.vl` loads inside macro worlds, which expand with an
+   empty scope, so world-loaded std files must not dispatch; the flagship
+   `numeric_family` macro lives on as a pinned test). `vilan/outdated/` pruned.
+   Remaining (recorded in the proposal §7): wrapping arithmetic + real widths on a
+   non-JS backend, `f32` fround, Wire slots, parse family, numeric→`BigInt`.
 
 3. **WASM backend** (L; far future) — the second emitter on the platform model's `Backend` axis
    (`Js` is the only variant today; `platform-model.md` §7.1 reserves `Wasm`). Three parts, only
@@ -271,6 +283,11 @@ have gaps.
 1. **Struct literal as an operator operand** (S) — `Point { .. } == x` fails (bind to a variable
    first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
    degrades to a clean parse error, documented at the parser site.
+
+5. **The `%` remainder operator** (S; found by F2) — vilan has no `%`; the numeric
+   conversions spell remainder as `x - (x / m).trunc() * m` (numeric-types.md §5). Add
+   the operator (lexer, `Rem` trait in `operators.vl`, native emission — exact for every
+   integer type under F2's truncating division; JS `%` is already truncated remainder).
 
 2. ~~Block-scoped imports~~ — **shipped 2026-07-05** (kept as the design record; macro-engine
    §3 consumes it for `macro_std` resolution). `import`/`use` are statements, legal in any
