@@ -94,9 +94,28 @@ callbacks and post-`await` registrations included (§1).
   `run_with_owner` yields its body's value too). Open (recorded): whether a
   `View`-producing `comp` should fold its scope INTO the view's owner — the
   `std::ui` integration question below.
-- **`std::ui` integration**: `View` construction under an ambient scope
-  (bindings self-registering) — deliberately out of this slice, which touches
-  `std::reactive` only.
+- **`std::ui` integration — design settled 2026-07-07: owners at DISPOSAL
+  BOUNDARIES only.** Today `ui.vl` gives every element an `Owner`
+  (`View { element, owner }`, `child()` linking an ownership tree) — heavier
+  than needed: a subscription must die exactly when its subtree becomes
+  garbage, and subtrees only become garbage at DYNAMIC boundaries. Static
+  content shares its nearest boundary's lifetime, so per-element owners are
+  redundant bookkeeping. The model: bindings register into the nearest
+  boundary's owner AMBIENTLY (`bind_*` become `effect`-shaped registrations);
+  owners exist only at (1) mount/`comp` roots, (2) `bind_each` rows (already
+  per-row since A3), and (3) a NEW `when(condition, || view)` conditional
+  renderer that mounts/unmounts per instantiation. `show` deliberately stays
+  a visibility toggle (content mounted, state preserved — the cheap form);
+  `when` is the state-dropping boundary. Arbitrary boundaries stay available
+  opt-in via `comp`. The static fence then makes an unrooted binding a
+  COMPILE error — every UI entry point must establish a root — and `View`
+  collapses toward a plain element wrapper (no owner field, no ownership
+  `child()` bookkeeping). A component-function attribute wrapping bodies in
+  owners was considered and REJECTED: function boundaries usually aren't
+  disposal boundaries — owners there would be sensitivity without semantics.
+  Wins: flat one-list-per-boundary disposal instead of an owner tree, zero
+  owner allocations for static trees, ownership visible exactly where
+  teardown is possible. This is the remaining A5 implementation slice.
 - **Error-message anchoring**: the static fence's diagnostic points at the
   `get()` inside `std::reactive` when the uncovered path starts in user code;
   anchoring it at the uncovered root's call site is a diagnostics follow-up.
