@@ -33,6 +33,7 @@ use crate::analyzer::{Expr, Program};
 use crate::call_graph::{CallGraph, CallTarget, IndirectReason, Node};
 use crate::error::Error;
 use crate::id::Id;
+use crate::type_::Type;
 
 /// Entry point: thread every context in `program`, or record diagnostics if any
 /// context is read where its value can't be supplied.
@@ -71,12 +72,15 @@ struct GetSite {
 }
 
 /// A `run(value, body)` call: the call entity, the context, the value argument,
-/// the body-closure argument entity (the call's new subject), and the closure.
+/// the body argument entity (the call's new subject), and — for a closure
+/// LITERAL body — the closure. `None` when the body is an injected
+/// `context`-typed closure VALUE (proposal/ambient-owner.md §5), which
+/// carries its own hidden parameter and needs no capture marking.
 struct RunSite {
     call_id: Id,
     value_id: Id,
     closure_entity: Id,
-    closure_id: Id,
+    closure_id: Option<Id>,
 }
 
 /// The rewrite to apply once analysis succeeds. Node ids are sorted/owned so the
@@ -207,8 +211,17 @@ fn analyze(
                     Some(Expr::Closure(closure_id)) => Some(*closure_id),
                     _ => None,
                 });
-            let (Some(context), Some(value_id), Some(closure_entity), Some(closure_id)) =
-                (context, value_id, closure_entity, closure_id)
+            // An injected `context`-typed closure VALUE is a legal body when
+            // its clause is exactly this context (the deferred argument is
+            // what `run` supplies) — proposal/ambient-owner.md §5.
+            let injected_body = closure_entity
+                .and_then(|entity| match program.entity_map.get(&entity) {
+                    Some(Expr::Local(target)) => program.parameter_contexts.get(target),
+                    _ => None,
+                })
+                .is_some_and(|clause| context.is_some_and(|context| clause == &vec![context]));
+            let (Some(context), Some(value_id), Some(closure_entity)) =
+                (context, value_id, closure_entity)
             else {
                 errors.push(Error {
                     span: span_of(program, call_id),
@@ -217,6 +230,14 @@ fn analyze(
                 });
                 continue;
             };
+            if closure_id.is_none() && !injected_body {
+                errors.push(Error {
+                    span: span_of(program, call_id),
+                    msg: "`run` must be called on a named context with a closure literal body, or a closure value whose type is `context`-annotated with exactly this context"
+                        .to_string(),
+                });
+                continue;
+            }
             contexts.insert(context);
             runs.push(RunSite {
                 call_id,
@@ -227,9 +248,13 @@ fn analyze(
         }
     }
 
-    if contexts.is_empty() {
+    if contexts.is_empty() && program.parameter_contexts.is_empty() {
         return if errors.is_empty() {
-            Ok(Plan::default())
+            // No reads, no runs — but `Context::new()` calls still lower to
+            // their opaque value (previously they emitted a dangling call).
+            let mut plan = Plan::default();
+            plan.news = news;
+            Ok(plan)
         } else {
             Err(errors)
         };
@@ -240,13 +265,15 @@ fn analyze(
     // parameter rather than capturing it.
     let mut run_closures: HashMap<Id, Id> = HashMap::new();
     for site in &runs {
-        if let Some(context) = program
-            .function_calls
-            .get(&site.call_id)
-            .and_then(|call| call.argument_ids.first().copied())
-            .and_then(|receiver| local_target(program, receiver))
-        {
-            run_closures.insert(site.closure_id, context);
+        if let (Some(closure_id), Some(context)) = (
+            site.closure_id,
+            program
+                .function_calls
+                .get(&site.call_id)
+                .and_then(|call| call.argument_ids.first().copied())
+                .and_then(|receiver| local_target(program, receiver)),
+        ) {
+            run_closures.insert(closure_id, context);
         }
     }
 
@@ -372,6 +399,134 @@ fn analyze(
         })
         .collect();
 
+    // --- Injected (`context`-typed) closures — proposal/ambient-owner.md §5. ---
+    // A clause on a parameter's closure type defers that closure's context
+    // binding to its CALL sites: the literal passed in takes its own hidden
+    // parameter (no creation capture), each call through the parameter is a
+    // read-like demand on the caller (and a threading site), and the value
+    // may only flow where the threading can follow it — a call, a forward to
+    // a parameter with the SAME clause, or `run`'s body position.
+    let mut deferred: HashMap<Id, HashSet<Id>> = HashMap::new(); // ctx -> closures
+    let mut injected_calls: HashMap<Id, Vec<(Node, Id)>> = HashMap::new(); // ctx -> (caller, call)
+    {
+        // Validate each clause names actual contexts, and admit them to the
+        // per-context loop (a clause context may have no direct get/run).
+        for (&parameter, clause) in &program.parameter_contexts {
+            for &context in clause {
+                let is_context = program
+                    .variables
+                    .get(&context)
+                    .and_then(|variable| program.type_id_to_type_map.get(&variable.type_id))
+                    .is_some_and(|type_| {
+                        matches!(
+                            type_,
+                            Type::Struct(id, _)
+                                if program
+                                    .structs
+                                    .get(id)
+                                    .is_some_and(|struct_| struct_.name == "Context")
+                        )
+                    });
+                if is_context {
+                    contexts.insert(context);
+                } else {
+                    errors.push(Error {
+                        span: span_of(program, parameter),
+                        msg:
+                            "this parameter's `context` clause names a value that is not a context"
+                                .to_string(),
+                    });
+                }
+            }
+        }
+
+        // Calls THROUGH an annotated parameter.
+        for node in graph.nodes() {
+            for call in graph.calls_of(node.id()) {
+                let Some(function_call) = program.function_calls.get(&call.call_id) else {
+                    continue;
+                };
+                if let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id)
+                {
+                    if let Some(clause) = program.parameter_contexts.get(target) {
+                        for &context in clause {
+                            injected_calls
+                                .entry(context)
+                                .or_default()
+                                .push((*node, call.call_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Closure literals landing in annotated positions defer; annotated
+        // values may forward to a parameter with the SAME clause.
+        let mut allowed_forwards: HashSet<Id> = HashSet::new();
+        for (&call_id, function_call) in &program.function_calls {
+            let Some(target) = call_target(program, call_id) else {
+                continue;
+            };
+            let Some(function) = program.functions.get(&target) else {
+                continue;
+            };
+            for (argument, parameter) in function_call.argument_ids.iter().zip(&function.parameters)
+            {
+                let Some(clause) = program.parameter_contexts.get(parameter) else {
+                    continue;
+                };
+                match program.entity_map.get(argument) {
+                    Some(Expr::Closure(closure_id)) => {
+                        for &context in clause {
+                            deferred.entry(context).or_default().insert(*closure_id);
+                        }
+                    }
+                    Some(Expr::Local(source))
+                        if program.parameter_contexts.get(source) == Some(clause) =>
+                    {
+                        allowed_forwards.insert(*argument);
+                    }
+                    _ => {
+                        errors.push(Error {
+                            span: span_of(program, *argument),
+                            msg: "a `context`-typed parameter takes a closure literal, or a forwarded parameter with the same `context` clause"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // The value-flow restriction: everywhere else an annotated value
+        // appears is an escape the threading cannot follow.
+        let run_body_entities: HashSet<Id> =
+            plan.runs.iter().map(|site| site.closure_entity).collect();
+        for (&entity, expr) in &program.entity_map {
+            let Expr::Local(target) = expr else {
+                continue;
+            };
+            if !program.parameter_contexts.contains_key(target) {
+                continue;
+            }
+            if call_subject_entities.contains(&entity)
+                || allowed_forwards.contains(&entity)
+                || run_body_entities.contains(&entity)
+            {
+                continue;
+            }
+            errors.push(Error {
+                span: span_of(program, entity),
+                msg: "an injected (`context`-typed) closure can only be called, forwarded to a parameter with the same `context` clause, or passed to `run`"
+                    .to_string(),
+            });
+        }
+    }
+    plan.contexts = {
+        let mut sorted: Vec<Id> = contexts.iter().copied().collect();
+        sorted.sort_by_key(|id| id.0);
+        sorted
+    };
+
     // --- Per-context effect inference + coverage. ---
     for &context in &plan.contexts {
         // Seed with the nodes that directly read this context.
@@ -380,6 +535,13 @@ fn analyze(
         for get in gets.iter().filter(|get| get.context == context) {
             if needs.insert(get.owner.id()) {
                 worklist.push(get.owner.id());
+            }
+        }
+        // A call through an injected closure demands the context on its
+        // caller, exactly like a read (proposal/ambient-owner.md §5).
+        for (owner, _call) in injected_calls.get(&context).into_iter().flatten() {
+            if needs.insert(owner.id()) {
+                worklist.push(owner.id());
             }
         }
         // Backward reachability: a caller of a needs-context node needs it too
@@ -401,6 +563,10 @@ fn analyze(
             .iter()
             .filter(|(_, bound)| **bound == context)
             .map(|(closure, _)| *closure)
+            // A deferred (injected) literal behaves like a `run` body here:
+            // it always takes its own hidden parameter and is covered by
+            // construction — its callers supply the value.
+            .chain(deferred.get(&context).into_iter().flatten().copied())
             .collect();
 
         // Classify each needs-context node.
@@ -462,6 +628,19 @@ fn analyze(
                     span: span_of(program, get.call_id),
                     msg: format!(
                         "context `{}` is read here, but this code can be reached without an enclosing `run`",
+                        context_name(program, context)
+                    ),
+                });
+            }
+        }
+        // Calling an injected closure IS a read: its deferred argument comes
+        // from the caller, so an unbound caller has nothing to supply.
+        for (owner, call_id) in injected_calls.get(&context).into_iter().flatten() {
+            if !bound.contains(&owner.id()) {
+                errors.push(Error {
+                    span: span_of(program, *call_id),
+                    msg: format!(
+                        "an injected closure is called here, but this code can be reached without an enclosing `run` for context `{}`",
                         context_name(program, context)
                     ),
                 });
@@ -560,6 +739,11 @@ fn analyze(
             };
             plan.thread_calls.push((*call_id, context, owner));
         }
+        // Calls through injected closures: the caller's value rides as the
+        // deferred trailing argument.
+        for (owner, call_id) in injected_calls.get(&context).into_iter().flatten() {
+            plan.thread_calls.push((*call_id, context, *owner));
+        }
     }
 
     if errors.is_empty() {
@@ -629,6 +813,12 @@ fn apply(program: &mut Program, plan: Plan) {
             call.subject_id = site.closure_entity;
             call.argument_ids = vec![site.value_id];
         }
+        // The call entity keeps its id, so purge the METHOD-call records the
+        // analyzer attached to `Context::run` — a stale substitution would
+        // make the emitter monomorphize the new subject (for a value body, a
+        // plain parameter) as if it were a generic function.
+        program.method_call_substitution.remove(&site.call_id);
+        program.generic_dispatch.remove(&site.call_id);
     }
 
     // `Context::new()` lowers to an opaque value; its binding is now unused.

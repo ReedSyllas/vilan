@@ -1477,18 +1477,43 @@ where
             )
         });
 
+    // `<type> context <name>` / `context (<a>, <b>)` — the context clause on a
+    // closure type (proposal/ambient-owner.md §5). `context` is a CONTEXTUAL
+    // keyword: it lexes as an identifier (so `std::context` paths and
+    // `context`-named values stay legal) and only means the clause directly
+    // after a type. The analyzer rejects the clause on non-closure types.
+    let context_clause = select! { Token::Ident("context") => () }
+        .ignore_then(choice((
+            identifier
+                .map_with(|name, e| (name, e.span()))
+                .separated_by(just(Token::Ctrl(',')))
+                .at_least(1)
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+            identifier.map_with(|name, e| vec![(name, e.span())]),
+        )))
+        .labelled("context clause");
+
     // `local_type` (e.g. `FromFn<T>`) must come before the plain identifier so
     // generic arguments are consumed as part of the type. `type_binder` is first
     // so the `type` keyword isn't mistaken for an identifier.
-    type_.define(choice((
-        reference_type,
-        type_binder,
-        closure_type,
-        local_type,
-        local,
-        mapped_type,
-        tuple_type,
-    )));
+    type_.define(
+        choice((
+            reference_type,
+            type_binder,
+            closure_type,
+            local_type,
+            local,
+            mapped_type,
+            tuple_type,
+        ))
+        .then(context_clause.or_not())
+        .map_with(|(inner, contexts), e| match contexts {
+            Some(contexts) => (Node::TypeWithContexts(Box::new(inner), contexts), e.span()),
+            None => inner,
+        }),
+    );
 
     statement
         .clone()

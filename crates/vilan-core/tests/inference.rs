@@ -6819,3 +6819,287 @@ fn an_inherited_default_on_a_generic_subject_dispatches() {
         "42\n",
     );
 }
+
+// --- Context-typed closure parameters (proposal/ambient-owner.md §5, B15) ---
+
+// The flagship: an injected closure rides a PLAIN function into `run` — the
+// literal is born outside the extent and defers its binding to the call.
+#[test]
+fn an_injected_closure_rides_a_plain_wrapper_into_run() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        fun run_with(value: i32, body: (|| void) context current) {
+            current.run(value, body);
+        }
+
+        fun main() {
+            run_with(5, || print(current.get()));
+            run_with(9, || print(current.get() + 1));
+        }
+
+        main();
+        "#,
+        "5\n10\n",
+    );
+}
+
+// Injected values forward to parameters with the SAME clause, and calls
+// through them thread the deferred argument on.
+#[test]
+fn injected_closures_forward_and_thread_through_calls() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        fun call_it(body: (|| void) context current) {
+            body();
+        }
+
+        fun forward(body: (|| void) context current) {
+            call_it(body);
+        }
+
+        fun main() {
+            current.run(7, || {
+                forward(|| print(current.get() + 100));
+            });
+        }
+
+        main();
+        "#,
+        "107\n",
+    );
+}
+
+// A multi-context clause: both deferred arguments supply, in clause order.
+#[test]
+fn a_multi_context_clause_injects_both_values() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let left: Context<i32> = Context::new();
+        let right: Context<i32> = Context::new();
+
+        fun call_it(body: (|| void) context (left, right)) {
+            body();
+        }
+
+        fun main() {
+            left.run(3, || {
+                right.run(4, || {
+                    call_it(|| print(left.get() * 10 + right.get()));
+                });
+            });
+        }
+
+        main();
+        "#,
+        "34\n",
+    );
+}
+
+// Calling an injected closure is a read: an uncovered caller is fenced.
+#[test]
+fn an_uncovered_injected_call_is_a_compile_error() {
+    let diagnostics = failure_diagnostics(
+        r#"
+import std::print;
+import std::context::Context;
+
+let current: Context<i32> = Context::new();
+
+fun call_it(body: (|| void) context current) {
+    body();
+}
+
+fun main() {
+    call_it(|| print(current.get()));
+}
+main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("injected closure is called here")),
+        "expected the injected-call fence; got: {diagnostics:#?}"
+    );
+}
+
+// The value-flow restriction: an injected closure may be called, forwarded to
+// a matching clause, or handed to `run` — nothing else.
+#[test]
+fn an_injected_closure_cannot_escape() {
+    let source = r#"
+import std::context::Context;
+
+let current: Context<i32> = Context::new();
+
+fun hold(body: (|| void) context current) {
+    let escaped = body;
+}
+
+fun main() {}
+main();
+        "#;
+    let diagnostics = failure_diagnostics(source);
+    // The error anchors at the escaping USE (the second `body`), not the
+    // parameter declaration.
+    let use_site = source.rfind("body").unwrap();
+    assert!(
+        diagnostics.iter().any(|(message, range)| {
+            message.contains("can only be called, forwarded") && range.start == use_site
+        }),
+        "expected the escape error at the use; got: {diagnostics:#?}"
+    );
+}
+
+// Clause validation: the named value must be a context.
+#[test]
+fn a_clause_naming_a_non_context_errors() {
+    let diagnostics = failure_diagnostics(
+        r#"
+import std::context::Context;
+
+let unused: Context<i32> = Context::new();
+let plain = 5;
+
+fun bad(body: (|| void) context plain) {
+    body();
+}
+
+fun main() {}
+main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("names a value that is not a context")),
+        "expected the non-context clause error; got: {diagnostics:#?}"
+    );
+}
+
+// Clause placement: closure types only.
+#[test]
+fn a_clause_on_a_non_closure_type_errors() {
+    let diagnostics = failure_diagnostics(
+        r#"
+import std::context::Context;
+
+let current: Context<i32> = Context::new();
+
+fun bad(value: (i32) context current) {}
+
+fun main() {}
+main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("only supported on a closure type")),
+        "expected the placement error; got: {diagnostics:#?}"
+    );
+}
+
+// Clause resolution: unknown names error at the name.
+#[test]
+fn a_clause_naming_an_unknown_value_errors() {
+    assert_fails_spanning(
+        r#"
+fun bad(body: (|| void) context missing_name) {
+    body();
+}
+
+fun main() {}
+main();
+        "#,
+        "missing_name",
+        "cannot find context `missing_name`",
+    );
+}
+
+// Duplicate contexts in one clause error.
+#[test]
+fn a_duplicate_context_in_a_clause_errors() {
+    let diagnostics = failure_diagnostics(
+        r#"
+import std::context::Context;
+
+let current: Context<i32> = Context::new();
+
+fun bad(body: (|| void) context (current, current)) {
+    body();
+}
+
+fun main() {}
+main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("duplicate context `current`")),
+        "expected the duplicate error; got: {diagnostics:#?}"
+    );
+}
+
+// `run` accepts an injected value only when its clause is exactly the run's
+// context.
+#[test]
+fn run_rejects_a_mismatched_injected_body() {
+    let diagnostics = failure_diagnostics(
+        r#"
+import std::context::Context;
+
+let current: Context<i32> = Context::new();
+let other: Context<i32> = Context::new();
+
+fun mismatch(body: (|| void) context current) {
+    other.run(1, body);
+}
+
+fun main() {}
+main();
+        "#,
+    );
+    assert!(
+        diagnostics.iter().any(|(message, _)| {
+            message.contains("closure value whose type is `context`-annotated")
+        }),
+        "expected the run-mismatch error; got: {diagnostics:#?}"
+    );
+}
+
+// FIXED alongside B15: a context that is created but never read or run no
+// longer emits a dangling `Context::new()` call — the news lower on the
+// early path too.
+#[test]
+fn an_unused_context_compiles_and_runs() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        fun main() {
+            print("quiet");
+        }
+
+        main();
+        "#,
+        "quiet\n",
+    );
+}

@@ -189,6 +189,12 @@ pub enum Node<'src> {
         Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
         Option<Box<Spanned<Node<'src>>>>,
     ),
+    // `(|| void) context owner_scope` / `context (a, b)` — a closure type
+    // carrying a context requirement (proposal/ambient-owner.md §5): the
+    // closure defers those contexts' bindings to its CALL sites instead of
+    // capturing at creation. The names (with spans) name context VALUES;
+    // written order is the hidden-argument order.
+    TypeWithContexts(Box<Spanned<Self>>, Vec<(&'src str, Span)>),
     // A mapped tuple type `(U in T: F<U>)`: bind each element of the source tuple
     // type `T` as `U`, and the corresponding result slot is the template `F<U>`.
     MappedType {
@@ -482,6 +488,7 @@ impl<'src> Node<'src> {
                 visit(right);
             }
             Node::Block(body) | Node::MacroBlock(body) => visit_body(&body.0, visit),
+            Node::TypeWithContexts(inner, _) => visit(inner),
             Node::Call(subject, generic_arguments, arguments) => {
                 visit(subject);
                 for argument in generic_arguments.iter().flat_map(|arguments| &arguments.0) {

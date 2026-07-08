@@ -3,7 +3,7 @@
 // keep firing after the extent exits and die with their owner. Extents nest;
 // the nearest wins.
 import std::print;
-import std::reactive::{ Signal, Owner, Disposable, owner_scope, get_owner };
+import std::reactive::{ Signal, Owner, Disposable, owner_scope, get_owner, run_with_owner };
 
 fun main() {
 	let count = Signal::new(1);
@@ -30,6 +30,18 @@ fun main() {
 	outer.dispose();
 	count.set(6);
 	print("end");
+
+	// `run_with_owner` — the plain-function wrapper over the extent (backlog
+	// B15: the body is an INJECTED closure; it defers its ambient binding to
+	// the call, so the literal is legal here, outside any extent).
+	let wrapped = Owner::new();
+	run_with_owner(wrapped, || {
+		count.effect(|value| print(i"wrapped {value}"));
+	});
+	count.set(7);
+	wrapped.dispose();
+	count.set(8);
+	print("fin");
 }
 
 main();

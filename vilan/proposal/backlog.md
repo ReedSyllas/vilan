@@ -106,12 +106,15 @@ have gaps.
     (B12's shape) — now nominal matching, pinned
     (`an_inherited_default_on_a_generic_subject_dispatches`).
 
-15. **Context-typed closure parameters** (M; design settled in
-    `proposal/ambient-owner.md` §5) — `body: (|| void) context owner_scope`: a closure
-    type carrying a context requirement, so closures can be INJECTED into an extent
-    (deferred call-site binding instead of capture-at-creation). Unblocks
-    `run_with_owner` as a plain function. Clause names the context VALUE (`borrows`
-    precedent); call sites take the coverage demand; `run` accepts annotated values.
+15. ~~**Context-typed closure parameters**~~ — **SHIPPED 2026-07-07**
+    (`proposal/ambient-owner.md` §5): `body: (|| void) context owner_scope` (multi:
+    `context (a, b)`), a contextual keyword on parameter closure types. Injected
+    literals defer (own hidden parameter instead of creation capture); calls through
+    the parameter are reads (fenced when uncovered) and thread the argument; values
+    flow only where threading follows (call / same-clause forward / `run` body);
+    `run` accepts a matching annotated value. `std::reactive::run_with_owner`
+    shipped on it. Also fixed: unused `Context::new()` emitted a dangling call.
+    Deferred: clauses on `let`/return types; superset-clause forwarding.
 
 13. **A direct call on a closure-typed local doesn't type its unannotated parameter** (M;
     pinned `#[ignore]`d; surfaced writing macro `unroll` callbacks 2026-07-06) — `let f = |i|

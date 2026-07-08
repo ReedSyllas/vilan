@@ -956,6 +956,10 @@ pub struct Analyzer<'src> {
     // Integer literals awaiting their post-solve range check
     // (proposal/numeric-types.md §3), in walk order.
     prepped_number_literals: Vec<Id>,
+    // `context`-typed closure parameters (proposal/ambient-owner.md §5):
+    // parameter entity -> the context bindings its clause names, in written
+    // order (the hidden-argument order). The context pass consumes this.
+    parameter_contexts: HashMap<Id, Vec<Id>>,
     // Method calls (by call id) on a generic impl whose generic parameters bind
     // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
@@ -1158,6 +1162,7 @@ impl<'src> Analyzer<'src> {
             integer_division: HashSet::new(),
             division_generic_lhs: HashMap::new(),
             prepped_number_literals: Vec::new(),
+            parameter_contexts: HashMap::new(),
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
@@ -5167,6 +5172,15 @@ impl<'src> Analyzer<'src> {
                 });
                 Some(Expr::Error)
             }
+            Node::TypeWithContexts(_, _) => {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg:
+                        "a `context`-typed closure type is not valid here (expected an expression)"
+                            .to_string(),
+                });
+                Some(Expr::Error)
+            }
             Node::MappedType { .. } => {
                 self.diagnostics.push(Error {
                     span: node.1,
@@ -5241,7 +5255,52 @@ impl<'src> Analyzer<'src> {
     ) -> Id {
         let (pattern, parameter_type, convention, span) = parameter;
         let parameter_id = self.new_entity_id();
-        let type_id = match (pattern, parameter_type) {
+        // Peel a `context` clause (proposal/ambient-owner.md §5) — a
+        // parameter's closure type is the one position v1 supports. The
+        // clause's names resolve as VALUES (the context bindings) in the
+        // signature's scope; written order is recorded (it is the
+        // hidden-argument order at call sites).
+        let mut declared_type: Option<&Spanned<Node<'src>>> = parameter_type.as_deref();
+        if let Some((Node::TypeWithContexts(inner, names), clause_span)) =
+            declared_type.map(|node| (&node.0, node.1))
+        {
+            // `(|| void)` parses as a 1-tuple in type position — grouping,
+            // like the expression rule; peel it for the closure check.
+            let grouped = match &inner.0 {
+                Node::Tuple(elements) if elements.len() == 1 => &elements[0].0,
+                other => other,
+            };
+            if !matches!(grouped, Node::ClosureType(..)) {
+                self.diagnostics.push(Error {
+                    span: clause_span,
+                    msg: "a `context` clause is only supported on a closure type".to_string(),
+                });
+            }
+            let mut context_ids: Vec<Id> = Vec::new();
+            for (name, name_span) in names {
+                let Some(target) = self.try_get_expr_id_by_name(name, type_scope_id) else {
+                    self.diagnostics.push(Error {
+                        span: *name_span,
+                        msg: format!("cannot find context `{name}` in this scope"),
+                    });
+                    continue;
+                };
+                if context_ids.contains(&target) {
+                    self.diagnostics.push(Error {
+                        span: *name_span,
+                        msg: format!("duplicate context `{name}` in this clause"),
+                    });
+                    continue;
+                }
+                self.record_reference(self.current_source_id, *name_span, target);
+                context_ids.push(target);
+            }
+            if !context_ids.is_empty() {
+                self.parameter_contexts.insert(parameter_id, context_ids);
+            }
+            declared_type = Some(inner);
+        }
+        let type_id = match (pattern, declared_type) {
             (_, Some(type_node)) => self.walk_type_node(type_node, type_scope_id),
             // A bare `self` (incl. `&self` / `&mut self`) takes the enclosing
             // `Self` type.
@@ -5733,6 +5792,18 @@ impl<'src> Analyzer<'src> {
                     .map(|return_type| self.walk_type_node(&*return_type, scope_id))
                     .unwrap_or_else(|| Type::Unknown.get_type_id(self));
                 Some(Type::Closure(t_parameter_type_ids, t_return_type_id))
+            }
+            // A context clause reaching the general type walk is misplaced —
+            // `walk_parameter` peels it off parameter types, the one position
+            // v1 supports (proposal/ambient-owner.md §5). The inner type still
+            // walks, so downstream inference stays coherent.
+            Node::TypeWithContexts(inner, _) => {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "a `context` clause is only supported on a parameter's closure type"
+                        .to_string(),
+                });
+                return self.walk_type_node(inner, scope_id);
             }
             // A mapped tuple type `(U in T: F<U>)`. Walk the source in this scope;
             // bind `U` in a child scope and walk the template there. Expand now if
@@ -11173,6 +11244,9 @@ pub struct Program<'src> {
     pub bitwise_generic_lhs: HashMap<Id, TypeId>,
     pub integer_division: HashSet<Id>,
     pub division_generic_lhs: HashMap<Id, TypeId>,
+    /// `context`-typed closure parameters (proposal/ambient-owner.md §5):
+    /// parameter entity -> the named context bindings, in clause order.
+    pub parameter_contexts: HashMap<Id, Vec<Id>>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
@@ -13873,6 +13947,7 @@ pub fn analyze<'src>(
         bitwise_u32: analyzer.bitwise_u32,
         integer_division: analyzer.integer_division,
         division_generic_lhs: analyzer.division_generic_lhs,
+        parameter_contexts: analyzer.parameter_contexts,
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,
         intrinsics,

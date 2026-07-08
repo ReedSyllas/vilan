@@ -47,6 +47,9 @@ function dispose2(self) {
 function get_owner($e) {
 	return $e;
 }
+function run_with_owner(owner2, body) {
+	body(owner2);
+}
 function $a(value) {
 	let subscribers = [  ];
 	return [ __shared_new(value), __shared_new(subscribers) ];
@@ -121,3 +124,14 @@ $i(count, 5);
 dispose2(outer);
 $i(count, 6);
 console.log("end");
+const wrapped = new2();
+run_with_owner(wrapped, ($m) => {
+	$c(count, (value) => {
+		return console.log("wrapped " + value);
+	}, $m);
+	return;
+});
+$i(count, 7);
+dispose2(wrapped);
+$i(count, 8);
+console.log("fin");

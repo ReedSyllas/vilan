@@ -189,6 +189,15 @@ fun get_owner(): Owner {
 	owner_scope.get()
 }
 
+// Establish `owner` as the ambient owner for the dynamic extent of `body` —
+// the plain-function wrapper, made possible by the `context` clause
+// (proposal/ambient-owner.md §5): `body` is an INJECTED closure, deferring
+// its ambient reads to call-supplied binding instead of capturing at
+// creation, so the literal may be born at the caller's site.
+fun run_with_owner(owner: Owner, body: (|| void) context owner_scope) {
+	owner_scope.run(owner, body);
+}
+
 // The read-only view of a reactive value: read the current value and subscribe to its
 // changes. `Signal<T>` implements it (and adds `set`/`set_with`); a *remote* handle
 // implements it too (its `sub` flows over a transport), so code that only observes can't

@@ -95,7 +95,7 @@ callbacks and post-`await` registrations included (§1).
   anchoring it at the uncovered root's call site is a diagnostics follow-up.
 - **`get_safe`** (§2.1), with the `Option`-parameter sketch.
 
-## 5. Context-typed closure parameters (recorded direction, 2026-07-07)
+## 5. Context-typed closure parameters — SHIPPED 2026-07-07 (backlog B15)
 
 The user-requested route back to `run_with_owner(owner, body)` as a plain
 function: a closure TYPE that carries a context requirement, so a closure can
@@ -142,6 +142,21 @@ the clause's declaration order IS the hidden-argument order at call sites
 clause is a compile error. This also sets the shape for any future
 multi-value clause (`borrows (a, b)`, if destruction work ever needs it).
 
-This is a REAL slice (parser clause, a closure-type effect row, coverage +
-threading extensions) — design settled here, taken as its own slice
-(backlog B15).
+**Shipped shape** (v1): the clause is legal on a PARAMETER's closure type
+(other positions are a clean error); it parses as a contextual keyword (no
+lexer change — `std::context` paths and `context`-named values stay legal).
+The pass validates the named values are contexts, treats each call through an
+annotated parameter as a read (the fence covers uncovered callers), gives an
+injected LITERAL its own hidden parameter (the run-closure machinery,
+reused), threads the deferred argument at every call, lets `run` accept an
+annotated VALUE whose clause is exactly its context (purging the rewritten
+call's stale method records — a fresh substitution would monomorphize the
+parameter as a function), and restricts the value's flow to the three places
+threading can follow: a call, a forward to a parameter with the SAME clause,
+or `run`'s body position. `std::reactive::run_with_owner(owner, body)` now
+exists — the motivating API. Fixed alongside: a context that was created but
+never read or run used to emit a dangling `Context::new()` call (the
+news-only early path now lowers them). Eleven pins + the extended
+`reactive-owner.vl` corpus program. Deferred: clauses on `let` annotations
+and return types, and forwarding to a SUPERSET clause (v1 requires exact
+match).
