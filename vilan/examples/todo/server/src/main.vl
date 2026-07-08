@@ -15,7 +15,7 @@ import std::shared::Shared;
 import std::json::json_codec;
 import std::wire::{ encode, decode, Frame };
 import std::result::Result::{ self, Ok, Err };
-import std::fs::{ exists, read_file_to_str, write_file };
+import std::fs;
 import std::http::Response;
 import std::rpc_server::serve_service;
 import common::{ Todo, TodoStore };
@@ -26,7 +26,9 @@ let storage = "todos.json";
 async fun main() {
 	// Read the browser bundle once (`vilan build`/`run` writes it to
 	// `dist/client.js`, and the server runs from the project root).
-	let client_js = read_file_to_str("dist/client.js");
+	let client_js = fs::read_file_to_str("dist/client.js");
+
+	let app_html = fs::read_file_to_str("server/src/app.html");
 
 	let stored = load();
 	let store = TodoStore {
@@ -40,7 +42,7 @@ async fun main() {
 	// a real app would serialize its writes.)
 	let saving = store.todos.sub(|list| {
 		match encode(json_codec(), list) {
-			Frame::Text(let text) => write_file(storage, text),
+			Frame::Text(let text) => fs::write_file(storage, text),
 			Frame::Binary(let _bytes) => {},
 		}
 	});
@@ -56,7 +58,7 @@ async fun main() {
 					.build(),
 				_ => Response::builder()
 					.set_header("Content-Type", "text/html")
-					.body(page())
+					.body(app_html)
 					.build(),
 			}
 		},
@@ -67,8 +69,8 @@ async fun main() {
 // The stored list — empty on a first run, and empty (not a crash) if the file
 // is corrupt: the codec's decode is validating.
 fun load(): List<Todo> {
-	if exists(storage) {
-		let stored: Result<List<Todo>, str> = decode(json_codec(), Frame::Text(read_file_to_str(storage)));
+	if fs::exists(storage) {
+		let stored: Result<List<Todo>, str> = decode(json_codec(), Frame::Text(fs::read_file_to_str(storage)));
 		match stored {
 			Ok(let list) => list,
 			Err(let _reason) => [],
@@ -87,9 +89,4 @@ fun next_id_after(todos: List<Todo>): i32 {
 		}
 	}
 	next
-}
-
-fun page(): str {
-	let style = "<style>body { font: 16px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; } section { margin-block: 2rem; } button { margin-right: 0.25rem; } .todos .row { display: flex; gap: 0.5rem; } .todos ul { list-style: none; padding: 0; } .todos li { display: flex; gap: 0.5rem; align-items: center; } .todos li.done span { text-decoration: line-through; opacity: 0.5; } .todos .remove { margin-left: auto; } .todos .filters .active { font-weight: bold; } .todos .empty { opacity: 0.6; } .hint { opacity: 0.6; font-size: 0.875rem; } </style>";
-	i"<!doctype html><html><head><meta charset=\"utf-8\"><title>Vilan todos</title>{style}</head><body><div id=\"app\"></div><p class=\"hint\">The list lives on the server — open this page in a second tab and watch them stay in sync.</p><script type=\"module\" src=\"/client.js\"></script></body></html>"
 }
