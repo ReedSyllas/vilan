@@ -25,8 +25,9 @@
     "strings": {
       "patterns": [
         {
+          "comment": "Interpolated string `i\"...{expr}...\"` — ONLY `i\"` strings have holes; a `{` in a plain string is literal. `\\b` keeps a trailing `i` of an identifier (`hi\"..\"`) from reading as the prefix.",
           "name": "string.quoted.double.vilan",
-          "begin": "(i)?(\")",
+          "begin": "\\b(i)(\")",
           "beginCaptures": {
             "1": { "name": "storage.type.string.vilan" },
             "2": { "name": "punctuation.definition.string.begin.vilan" }
@@ -41,10 +42,10 @@
               "match": "\\\\."
             },
             {
-              "comment": "Interpolation `{expr}` in an `i\"...\"` string.",
+              "comment": "An interpolation hole. Its end also stops (without consuming) at a `\"`, so a hole can never swallow the string's closing quote — an unclosed `{` while typing corrupts at most its own line. The trade: a string literal NESTED in a hole ends the hole early; rare, and the damage stays local.",
               "name": "meta.template.expression.vilan",
               "begin": "\\{",
-              "end": "\\}",
+              "end": "\\}|(?=\")",
               "beginCaptures": {
                 "0": { "name": "punctuation.definition.template-expression.begin.vilan" }
               },
@@ -52,6 +53,24 @@
                 "0": { "name": "punctuation.definition.template-expression.end.vilan" }
               },
               "patterns": [{ "include": "$self" }]
+            }
+          ]
+        },
+        {
+          "comment": "Plain string — `{`/`}` are literal characters, never interpolation.",
+          "name": "string.quoted.double.vilan",
+          "begin": "(\")",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.string.begin.vilan" }
+          },
+          "end": "(\")",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.vilan" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.vilan",
+              "match": "\\\\."
             }
           ]
         }
