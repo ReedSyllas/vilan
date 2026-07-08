@@ -361,6 +361,42 @@ have gaps.
    body needs (the raw-ish appeal is pasting code verbatim). Complements, not replaces, the
    `\{`/`\}` escapes in ordinary i-strings.
 
+6. **Handwritten recursive-descent frontend — replace chumsky** (L; recorded 2026-07-08; take
+   it when the combinator model gives trouble, not before) — after the 2026-07-08 perf arc
+   (the lexer-trivia quadratic + cheap-first/rich-fallback parsing, commits 5752f76/7b026bc),
+   a cold compile is *still* ~95% lex+parse (todo client: 2.43B instructions; type solver 2%,
+   macro interpreter 0.09%). What remains is chumsky's **structural** overhead, not a fixable
+   pathology: `choice()` finds the right branch by attempting alternatives in order where
+   recursive descent switches on the lookahead token; tokens are wrapped and compared per
+   attempted primitive (`to_maybe_ref` + `Token::eq` ≈ 17% of the whole build); the
+   precedence tower is a `foldl` chain; recursion is boxed. A handwritten frontend is the one
+   remaining big multiplier: expect 3–5× on parse — todo ~0.43s → ~0.10–0.15s release — with
+   the **debug binary** gaining most (4.8s → likely under 1s; deep combinator towers are what
+   unoptimized builds execute worst), and vilan-core's own rustc build gets cheaper too (the
+   grammar has been instantiated twice — cheap + rich — since 7b026bc; both towers dissolve).
+   - **Speed is the bonus; control is the driver.** The friction is already visible in the
+     grammar: the split-shift `try_map` hack, `<`/`>` as control tokens, contextual keywords
+     (`context`) via ident-guards. Diagnostics are generated expected-lists (a broken shift
+     names 15 candidates) where a handwritten parser gives curated messages. And a handwritten
+     parser is fast AND rich in one pass, so `parse_clean`, `CustomParseError`, and the
+     cheap/rich double instantiation all dissolve. Mature frontends (rustc, TypeScript, swc)
+     ended up handwritten for exactly these reasons.
+   - **Do NOT do instead:** another combinator library (winnow/nom — ~2–3× at best, loses
+     chumsky's recovery + rich errors, so the hard parts get hand-built anyway: worst of
+     both); Tier-2 on-disk/embedded std ASTs (obsoleted — a 5× parser makes cold std parsing
+     ~50ms with no owned-AST lifetime surgery and no invalidation story).
+   - **Proof strategy:** the corpus byte-gate pins acceptance; scale
+     `tests/parse_fast_path.rs`'s tree-equality pattern into a differential harness — both
+     parsers over corpus + std + examples, identical trees required. The true cost center is
+     **LSP-grade recovery** (the `nested_delimiters`-equivalent partial ASTs the language
+     server depends on): hand-designed sync points typically end up *better*, but they — not
+     the grammar — are the work.
+   - **Triggers:** release builds creeping past ~1s on real projects; LSP latency on large
+     files; the next grammar feature that fights the combinator model. Best taken after D1
+     (the language spec) exists to check the new parser against, and with the grammar stable —
+     a rewrite chasing a moving grammar pays twice. Unblocks E4 (sub-file incremental
+     parsing), which is impractical over chumsky's batch model.
+
 ---
 
 ## I. Collections
