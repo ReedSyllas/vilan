@@ -84,9 +84,16 @@ callbacks and post-`await` registrations included (§1).
 
 ## 4. Recorded follow-ups
 
-- **`comp`-style sugar**: `comp(|| view(..))` creating the owner, running the
-  body under it, and returning owner+result together — after the v1 surface
-  proves the shape in the examples.
+- ~~**`comp`-style sugar**~~ — **SHIPPED 2026-07-07**:
+  `comp<T>(body: (|| T) context owner_scope): (T, Owner)` — a fresh owner,
+  the body run under it, and the product PAIRED with the disposal handle.
+  Built on two same-day pieces: B15's injected closures (the body is born at
+  the caller's site) and **`Context.run` made generic over its return**
+  (`run<U>(self, value: T, body: || U): U` — the `batch` shape; the threading
+  rewrite already evaluated to `body(value)`, so the value was free;
+  `run_with_owner` yields its body's value too). Open (recorded): whether a
+  `View`-producing `comp` should fold its scope INTO the view's owner — the
+  `std::ui` integration question below.
 - **`std::ui` integration**: `View` construction under an ambient scope
   (bindings self-registering) — deliberately out of this slice, which touches
   `std::reactive` only.

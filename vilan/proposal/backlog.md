@@ -43,7 +43,9 @@ have gaps.
    it every `std::reactive` importer failed. **Remaining:** `comp` sugar, `std::ui`
    integration (views self-registering), `get_safe` (recorded with the `Option`-parameter
    sketch), fence-diagnostic anchoring. ~~`effect` on the `Source` trait~~ (shipped with
-   B14's fix, 2026-07-07).
+   B14's fix, 2026-07-07). ~~`comp` sugar~~ (**shipped 2026-07-07** on B15 +
+   value-returning `Context.run<U>` — the `batch` shape; `run_with_owner` yields too);
+   the `std::ui` fold-scope-into-View question stays open with the ui integration.
 
 6. **Ambient microtask flush + async turns/actions** (M–L; the future sections of
    `reactive-batching.md`) — auto-`flush` on the next microtask (committed, deferred), and the

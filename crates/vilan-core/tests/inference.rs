@@ -7103,3 +7103,76 @@ fn an_unused_context_compiles_and_runs() {
         "quiet\n",
     );
 }
+
+// `Context.run` yields its body's value (the `batch` shape): direct,
+// expression-position, and void bodies stay compatible.
+#[test]
+fn run_yields_the_body_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        fun main() {
+            let answer = current.run(21, || current.get() * 2);
+            print(answer);
+            print(current.run(5, || current.get() + 1) + 100);
+            current.run(1, || {
+                print(current.get());
+            });
+        }
+
+        main();
+        "#,
+        "42\n106\n1\n",
+    );
+}
+
+// `comp` — the component scope: the body's product pairs with the disposal
+// handle, and the component's effects die with it.
+#[test]
+fn comp_returns_the_product_and_the_scope() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner, Disposable, comp };
+
+        fun main() {
+            let count = Signal::new(1);
+            let (label, scope) = comp(|| {
+                count.effect(|value| print(value));
+                "built"
+            });
+            print(label);
+            count.set(2);
+            scope.dispose();
+            count.set(3);
+            print("done");
+        }
+
+        main();
+        "#,
+        "1\nbuilt\n2\ndone\n",
+    );
+}
+
+// `run_with_owner` yields its body's value too.
+#[test]
+fn run_with_owner_yields_the_body_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Owner, run_with_owner };
+
+        fun main() {
+            let owner = Owner::new();
+            print(run_with_owner(owner, || 40 + 2));
+        }
+
+        main();
+        "#,
+        "42\n",
+    );
+}

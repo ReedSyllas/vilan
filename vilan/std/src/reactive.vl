@@ -193,9 +193,21 @@ fun get_owner(): Owner {
 // the plain-function wrapper, made possible by the `context` clause
 // (proposal/ambient-owner.md §5): `body` is an INJECTED closure, deferring
 // its ambient reads to call-supplied binding instead of capturing at
-// creation, so the literal may be born at the caller's site.
-fun run_with_owner(owner: Owner, body: (|| void) context owner_scope) {
-	owner_scope.run(owner, body);
+// creation, so the literal may be born at the caller's site. Yields the
+// body's value, like `run` and `batch`.
+fun run_with_owner<T>(owner: Owner, body: (|| T) context owner_scope): T {
+	owner_scope.run(owner, body)
+}
+
+// A component scope in one expression (proposal/ambient-owner.md §4): a
+// fresh owner, the body run under it as the ambient extent, and the body's
+// product PAIRED with the disposal handle — `scope.dispose()` tears down
+// every effect the component registered, stored callbacks and post-`await`
+// registrations included.
+fun comp<T>(body: (|| T) context owner_scope): (T, Owner) {
+	let scope = Owner::new();
+	let result = owner_scope.run(scope, body);
+	(result, scope)
 }
 
 // The read-only view of a reactive value: read the current value and subscribe to its

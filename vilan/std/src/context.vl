@@ -18,7 +18,9 @@ external struct Context<T>;
 impl Context<type T> {
 	external fun new(): Context<T>;
 
-	external fun run(self, value: T, body: || void): void;
+	// `run` yields its body's value (like `batch`): the threading pass
+	// rewrites the call to `body(value)`, whose result this is.
+	external fun run<U>(self, value: T, body: || U): U;
 
 	external fun get(self): T;
 }

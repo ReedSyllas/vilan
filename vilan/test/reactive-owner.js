@@ -47,9 +47,6 @@ function dispose2(self) {
 function get_owner($e) {
 	return $e;
 }
-function run_with_owner(owner2, body) {
-	body(owner2);
-}
 function $a(value) {
 	let subscribers = [  ];
 	return [ __shared_new(value), __shared_new(subscribers) ];
@@ -89,6 +86,14 @@ function $i(self, value) {
 	}
 	return $j;
 }
+function $n(owner2, body) {
+	return body(owner2);
+}
+function $p(body) {
+	const scope2 = new2();
+	const result = body(scope2);
+	return [ result, scope2 ];
+}
 const owner_scope = null;
 const next_subscriber_id = __shared_new(0);
 const scheduler = [ __shared_new([  ]), __shared_new(0), __shared_new(false) ];
@@ -125,7 +130,7 @@ dispose2(outer);
 $i(count, 6);
 console.log("end");
 const wrapped = new2();
-run_with_owner(wrapped, ($m) => {
+$n(wrapped, ($m) => {
 	$c(count, (value) => {
 		return console.log("wrapped " + value);
 	}, $m);
@@ -135,3 +140,16 @@ $i(count, 7);
 dispose2(wrapped);
 $i(count, 8);
 console.log("fin");
+const $q = $p(($o) => {
+	$c(count, (value) => {
+		return console.log("comp " + value);
+	}, $o);
+	return "built";
+});
+const label = $q[0];
+const scope = $q[1];
+console.log(label);
+$i(count, 9);
+dispose2(scope);
+$i(count, 10);
+console.log("post");

@@ -3,7 +3,7 @@
 // keep firing after the extent exits and die with their owner. Extents nest;
 // the nearest wins.
 import std::print;
-import std::reactive::{ Signal, Owner, Disposable, owner_scope, get_owner, run_with_owner };
+import std::reactive::{ Signal, Owner, Disposable, owner_scope, get_owner, run_with_owner, comp };
 
 fun main() {
 	let count = Signal::new(1);
@@ -42,6 +42,18 @@ fun main() {
 	wrapped.dispose();
 	count.set(8);
 	print("fin");
+
+	// `comp` — the component scope in one expression: the body's product
+	// comes back PAIRED with the disposal handle.
+	let (label, scope) = comp(|| {
+		count.effect(|value| print(i"comp {value}"));
+		"built"
+	});
+	print(label);
+	count.set(9);
+	scope.dispose();
+	count.set(10);
+	print("post");
 }
 
 main();
