@@ -176,10 +176,19 @@ pub fn lexer<'src>()
     // token for that padding to attach to, so consume a leading run of trivia up
     // front — leaving a clean, possibly empty, token stream rather than leaking
     // the trivia into the parser.
-    let trivia = comment
-        .clone()
+    //
+    // ORDER AND GREED MATTER: whitespace is consumed as a RUN, and before the
+    // comment alternative. The previous shape (comment first, then ONE
+    // whitespace char per iteration) was quadratic in a whitespace run's
+    // length — each iteration's comment attempt `.padded()`-scanned the whole
+    // remaining run before failing on `//` — which made lexing a macro
+    // WORLD's blanked file (mostly spaces by construction) take seconds.
+    let trivia = any()
+        .filter(|c: &char| c.is_whitespace())
+        .repeated()
+        .at_least(1)
         .ignored()
-        .or(any().filter(|c: &char| c.is_whitespace()).ignored())
+        .or(comment.clone().ignored())
         .repeated();
 
     // Each lexeme produces one or more tokens — interpolated strings expand to
@@ -194,4 +203,73 @@ pub fn lexer<'src>()
             .collect::<Vec<_>>()
             .map(|chunks: Vec<Vec<_>>| chunks.into_iter().flatten().collect()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(source: &str) -> Vec<Token<'_>> {
+        let (tokens, errors) = lexer().parse(source).into_output_errors();
+        assert!(errors.is_empty(), "lex errors: {errors:?}");
+        tokens
+            .expect("lexing produced no output")
+            .into_iter()
+            .map(|(token, _span)| token)
+            .collect()
+    }
+
+    #[test]
+    fn trivia_only_files_lex_to_empty_streams() {
+        assert!(lex("").is_empty());
+        assert!(lex("   \n\t \n").is_empty());
+        assert!(lex("// just a comment").is_empty());
+        assert!(lex("  // padded comment\n   ").is_empty());
+        assert!(lex("// one\n// two\n").is_empty());
+    }
+
+    #[test]
+    fn leading_trivia_interleavings_reach_the_first_token() {
+        let expected = vec![Token::Fun, Token::Ident("main")];
+        assert_eq!(lex("fun main"), expected);
+        assert_eq!(lex("   \n\n  fun main"), expected);
+        assert_eq!(lex("// header\nfun main"), expected);
+        assert_eq!(lex("  \n// a\n  // b\n\n  fun main"), expected);
+    }
+
+    #[test]
+    fn trivia_between_and_after_tokens() {
+        assert_eq!(
+            lex("fun // trailing comment\n   main   // eof comment"),
+            vec![Token::Fun, Token::Ident("main")]
+        );
+    }
+
+    #[test]
+    fn comment_at_end_of_input_without_newline() {
+        assert_eq!(lex("main // no newline"), vec![Token::Ident("main")]);
+    }
+
+    // Macro-world files are BLANKED source: every byte outside a kept span
+    // becomes a space, so a world's text is dominated by huge whitespace runs
+    // (often tens of kilobytes before the first token). Lexing must stay
+    // linear in such runs — a comment-first trivia loop that consumed one
+    // whitespace char per iteration was quadratic here and took seconds per
+    // world. A quadratic lexer takes hours on this input; the generous bound
+    // only guards against that class.
+    #[test]
+    fn huge_whitespace_runs_lex_in_linear_time() {
+        let mut source = String::new();
+        for _ in 0..20_000 {
+            source.push_str("                                                \n");
+        }
+        source.push_str("fun main");
+        let start = std::time::Instant::now();
+        assert_eq!(lex(&source), vec![Token::Fun, Token::Ident("main")]);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "lexing a ~1MB whitespace prefix took {:?} — the trivia loop has gone quadratic again",
+            start.elapsed()
+        );
+    }
 }
