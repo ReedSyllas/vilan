@@ -1,7 +1,11 @@
 # The ambient owner (backlog A5)
 
-Status: **v1 settled 2026-07-07; basics land in this slice.** The ergonomic
-layer over the explicit `Owner`/`Disposable` primitives
+Status: **COMPLETE 2026-07-07** — the basics (`owner_scope`/`get_owner`/
+`effect`), `comp`, value-returning `run`, B15's context-typed closure
+parameters, and the `std::ui` boundary-ownership integration (`when`,
+`mount_root`, owner-less `View`) all shipped the same day. Remaining tails
+are recorded in §4 with triggers: `get_safe` and fence-diagnostic anchoring.
+The ergonomic layer over the explicit `Owner`/`Disposable` primitives
 (the pruned `reactive-ownership.md` shipped those; git keeps its context):
 reactive registrations that tie themselves to the enclosing scope without the
 owner being passed by hand.
@@ -94,8 +98,20 @@ callbacks and post-`await` registrations included (§1).
   `run_with_owner` yields its body's value too). Open (recorded): whether a
   `View`-producing `comp` should fold its scope INTO the view's owner — the
   `std::ui` integration question below.
-- **`std::ui` integration — design settled 2026-07-07: owners at DISPOSAL
-  BOUNDARIES only.** Today `ui.vl` gives every element an `Owner`
+- **`std::ui` integration — SHIPPED 2026-07-07: owners at DISPOSAL
+  BOUNDARIES only.** As designed below, with `when(condition, body)` and
+  `mount_root(id, body)` landing alongside: `View` is now a plain element
+  wrapper (no owner field, no `Disposable`, no ownership `child()`); every
+  `bind_*` and `show` register ambiently (`effect`); `bind_each` owns its
+  rows (an `Owner` per row, `render` an injected closure run under it);
+  `when` mounts/unmounts its body under a per-instantiation owner; `comp` /
+  `mount_root` are the roots. Both example apps migrated (`mount` →
+  `mount_root`; the todos example demonstrates `show` vs `when` side by
+  side) and the whole component call graph threads the ambient owner
+  automatically. One more B15 gap closed en route: clause names resolve
+  AFTER the import fixpoint (following the import alias to the defining
+  binding), so a clause may name an imported context — the `std::ui` shape
+  itself (pinned). Original design rationale follows. Today `ui.vl` gives every element an `Owner`
   (`View { element, owner }`, `child()` linking an ownership tree) — heavier
   than needed: a subscription must die exactly when its subtree becomes
   garbage, and subtrees only become garbage at DYNAMIC boundaries. Static

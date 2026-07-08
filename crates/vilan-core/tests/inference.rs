@@ -7176,3 +7176,30 @@ fn run_with_owner_yields_the_body_value() {
         "42\n",
     );
 }
+
+// The clause may name an IMPORTED context (the `std::ui` shape) — resolution
+// runs after the import fixpoint, following the import alias to the defining
+// binding so identity agrees with the threading pass.
+#[test]
+fn a_clause_can_name_an_imported_context() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner, Disposable, owner_scope, run_with_owner };
+
+        fun boundary(body: (|| void) context owner_scope) {
+            let owner = Owner::new();
+            run_with_owner(owner, || body());
+        }
+
+        fun main() {
+            let count = Signal::new(4);
+            boundary(|| count.effect(|value| print(value)));
+            print("ok");
+        }
+
+        main();
+        "#,
+        "4\nok\n",
+    );
+}

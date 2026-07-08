@@ -4,11 +4,15 @@
 // Both components build and run: the counter, and the todo list (`todos.vl`) now
 // that `combine` (variadic generics), `bind_each`, and `show` are implemented.
 
-import std::ui::mount;
+import std::ui::mount_root;
 import pkg::counter::counter;
 import pkg::todos::todos;
 
 fun main() {
-	mount("counter", counter());
-	mount("todos", todos());
+	// Each root is a DISPOSAL BOUNDARY: everything the component binds
+	// registers into it ambiently (proposal/ambient-owner.md §4). The
+	// returned root owners would tear the components down; an app lets
+	// them live.
+	let counter_root = mount_root("counter", || counter());
+	let todos_root = mount_root("todos", || todos());
 }

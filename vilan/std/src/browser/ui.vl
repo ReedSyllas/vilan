@@ -2,32 +2,39 @@
 //
 // A `View` describes a DOM element; methods chain to build it. Plain setters
 // (`text`/`class`/`attr`) set static content; the `bind_*` setters take a
-// `Signal` and keep one DOM property in sync — each is just a `sub`, so when the
-// signal changes only that property updates, with no re-render.
+// `Signal` and keep one DOM property in sync — each is an `effect`, so when
+// the signal changes only that property updates, with no re-render.
 //
-// A `View` owns the subscriptions its bindings create (and its children's): it is
-// `Disposable`, so `owner.take(view)` ties the whole subtree to an owner, and
-// disposing that owner tears every binding down. `bind_each` manages a child
-// owner per render so a list's old rows are disposed as it reconciles.
+// OWNERSHIP LIVES AT DISPOSAL BOUNDARIES (proposal/ambient-owner.md §4): a
+// subscription must die exactly when its subtree becomes garbage, and
+// subtrees only become garbage at DYNAMIC boundaries — a `mount_root`/`comp`
+// root, a `bind_each` row, a `when` instantiation. Static content shares its
+// nearest boundary's lifetime, so `View` carries no owner and bindings
+// register AMBIENTLY into the nearest boundary. Building UI outside every
+// boundary is a COMPILE error (the context coverage fence): every entry
+// point establishes a root, so no subscription can be unrooted.
+//
+// `show` deliberately stays a visibility toggle — content mounted, state
+// preserved, no boundary. `when` is the state-dropping form: it mounts its
+// body under a fresh owner per instantiation and disposes it on the way out.
 //
 // Only available when building for the browser (`vilan build --target browser`).
 
 import pkg::dom::{ Element, get_element_by_id, create_element };
-import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep };
+import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp };
 import pkg::shared::Shared;
 import pkg::compare::PartialEq;
+import pkg::option::Option::{ self, Some, None };
 
-// A handle to a DOM element under construction. `View` wraps an `Element` (a
-// reference) and an `Owner` collecting the subscriptions its bindings create, so
-// chaining returns the same underlying element and owner.
+// A handle to a DOM element under construction — nothing more: ownership is
+// the enclosing boundary's job.
 struct View {
 	element: Element,
-	owner: Owner,
 }
 
 // A fresh element of the given tag (`view("div")`, `view("button")`, …).
 fun view(tag: str): View {
-	View { element = create_element(tag), owner = Owner::new() }
+	View { element = create_element(tag) }
 }
 
 impl View {
@@ -49,16 +56,16 @@ impl View {
 		self
 	}
 
-	// An event listener (`"click"`, `"input"`, …).
+	// An event listener (`"click"`, `"input"`, …). Handlers die with the DOM
+	// node — no registration needed.
 	fun on(self, event: str, handler: || void): View {
 		self.element.on(event, handler);
 		self
 	}
 
-	// Append a child view, taking ownership of its subtree's subscriptions.
+	// Append a child view — structure only, no ownership bookkeeping.
 	fun child(self, child: View): View {
 		self.element.append(child.element);
-		self.owner.take(child);
 		self
 	}
 
@@ -66,45 +73,45 @@ impl View {
 	fun children(self, items: List<View>): View {
 		for item in items {
 			self.element.append(item.element);
-			self.owner.take(item);
 		}
 		self
 	}
 
-	// Reactive text content — re-set whenever `source` changes.
+	// Reactive text content — re-set whenever `source` changes. Registers
+	// with the nearest enclosing boundary (an ambient `effect`).
 	fun bind_text(self, source: Signal<str>): View {
 		let element = self.element;
-		self.owner.take(source.sub(|value| {
+		source.effect(|value| {
 			element.set_text(value);
-		}));
+		});
 		self
 	}
 
 	// Reactive CSS class.
 	fun bind_class(self, source: Signal<str>): View {
 		let element = self.element;
-		self.owner.take(source.sub(|value| {
+		source.effect(|value| {
 			element.set_class(value);
-		}));
+		});
 		self
 	}
 
 	// Reactive attribute.
 	fun bind_attr(self, name: str, source: Signal<str>): View {
 		let element = self.element;
-		self.owner.take(source.sub(|value| {
+		source.effect(|value| {
 			element.set_attribute(name, value);
-		}));
+		});
 		self
 	}
 
-	// Two-way bind an `<input>`'s value to a signal: the input shows the signal,
-	// and typing writes it back.
+	// Two-way bind an `<input>`'s value to a signal: the input shows the
+	// signal, and typing writes it back.
 	fun bind_value(self, signal: Signal<str>): View {
 		let element = self.element;
-		self.owner.take(signal.sub(|value| {
+		signal.effect(|value| {
 			element.set_value(value);
-		}));
+		});
 		element.on("input", || {
 			signal.set(element.value());
 		});
@@ -112,48 +119,62 @@ impl View {
 	}
 
 	// A reactive list, KEYED (backlog A3): one child view per element of
-	// `source`, reconciled by `key` on every change instead of rebuilt. A row
-	// whose key survives is reused — moved into its new position with its
-	// element and subscriptions intact; it re-renders only when its item's
-	// value changed (`T: PartialEq`). Rows whose keys left the list are
-	// disposed and removed. The reconciliation plan itself is
-	// `std::reactive::reconcile` — pure, node-testable logic; this method
-	// applies it to the DOM (appending an existing element MOVES it, so the
-	// order pass is one append per row).
-	fun bind_each<T: PartialEq, K: PartialEq>(self, source: Signal<List<T>>, key: |T| K, render: |T| View): View {
+	// `source`, reconciled by `key` on every change. Each row is a DISPOSAL
+	// BOUNDARY: `render` is an injected closure (proposal/ambient-owner.md
+	// §5) run under the row's own fresh owner, so a row's bindings die with
+	// the row — on refresh, on removal, and when the enclosing boundary goes.
+	// A row whose key survives is reused (its element MOVES into the new
+	// order, subscriptions intact); it re-renders only when its item's value
+	// changed (`T: PartialEq`).
+	fun bind_each<T: PartialEq, K: PartialEq>(
+		self,
+		source: Signal<List<T>>,
+		key: |T| K,
+		render: (|T| View) context owner_scope,
+	): View {
 		let element = self.element;
 		let row_keys: Shared<List<K>> = Shared::new([]);
 		let row_items: Shared<List<T>> = Shared::new([]);
 		let row_views: Shared<List<View>> = Shared::new([]);
-		// Whichever rows are live when this view is disposed go with it.
-		self.owner.defer(|| {
-			for row in row_views.read() {
-				row.dispose();
+		let row_owners: Shared<List<Owner>> = Shared::new([]);
+		// Whichever rows are live when the enclosing boundary is disposed go
+		// with it.
+		get_owner().defer(|| {
+			for owner in row_owners.read() {
+				owner.dispose();
 			}
 		});
-		self.owner.take(source.sub(|list: List<T>| {
+		source.effect(|list: List<T>| {
 			let plan = reconcile(row_keys.read(), row_items.read(), list, key);
 			let previous_views = row_views.read();
+			let previous_owners = row_owners.read();
 			for index in plan.removed {
-				let row = previous_views[index];
-				row.dispose();
-				row.element.remove();
+				previous_owners[index].dispose();
+				previous_views[index].element.remove();
 			}
 			mut next_views: List<View> = [];
+			mut next_owners: List<Owner> = [];
 			mut position = 0;
 			for step in plan.steps {
 				let item = list[position];
-				let row = match step {
-					RowStep::Keep(let index) => previous_views[index],
-					RowStep::Refresh(let index) => {
-						let old = previous_views[index];
-						old.dispose();
-						old.element.remove();
-						render(item)
+				match step {
+					RowStep::Keep(let index) => {
+						next_views.push(previous_views[index]);
+						next_owners.push(previous_owners[index]);
 					},
-					RowStep::Fresh => render(item),
-				};
-				next_views.push(row);
+					RowStep::Refresh(let index) => {
+						previous_owners[index].dispose();
+						previous_views[index].element.remove();
+						let owner = Owner::new();
+						next_views.push(run_with_owner(owner, || render(item)));
+						next_owners.push(owner);
+					},
+					RowStep::Fresh => {
+						let owner = Owner::new();
+						next_views.push(run_with_owner(owner, || render(item)));
+						next_owners.push(owner);
+					},
+				}
 				position += 1;
 			}
 			// The order pass: append each row in the new order — appending a
@@ -168,29 +189,72 @@ impl View {
 			row_keys.write() = next_keys;
 			row_items.write() = list;
 			row_views.write() = next_views;
-		}));
+			row_owners.write() = next_owners;
+		});
 		self
 	}
 
-	// Show or hide the element on a reactive condition — present when `condition`
-	// is true, hidden otherwise.
+	// Conditional CONTENT — the state-dropping boundary: while `condition` is
+	// true the body's view is mounted under a fresh owner; when it turns
+	// false the owner is disposed and the content removed. Toggling back on
+	// re-renders from scratch. (For a state-PRESERVING toggle, use `show`.)
+	fun when(self, condition: Signal<bool>, body: (|| View) context owner_scope): View {
+		let element = self.element;
+		let live_view: Shared<Option<View>> = Shared::new(None);
+		let live_owner: Shared<Option<Owner>> = Shared::new(None);
+		// Live content dies with the enclosing boundary.
+		get_owner().defer(|| {
+			live_owner.read()?.dispose();
+		});
+		condition.effect(|on| {
+			if on {
+				match live_view.read() {
+					Some(let _present) => {},
+					None => {
+						let owner = Owner::new();
+						let built = run_with_owner(owner, body);
+						element.append(built.element);
+						live_view.write() = Some(built);
+						live_owner.write() = Some(owner);
+					},
+				}
+			} else {
+				match live_view.read() {
+					Some(let built) => {
+						live_owner.read()?.dispose();
+						built.element.remove();
+						live_view.write() = None;
+						live_owner.write() = None;
+					},
+					None => {},
+				}
+			}
+		});
+		self
+	}
+
+	// Show or hide the element on a reactive condition — present when
+	// `condition` is true, hidden otherwise. A pure visibility toggle: the
+	// content stays mounted and its state (bindings, input text) survives.
 	fun show(self, condition: Signal<bool>): View {
 		let element = self.element;
-		self.owner.take(condition.sub(|visible| {
+		condition.effect(|visible| {
 			element.set_hidden(!visible);
-		}));
+		});
 		self
-	}
-}
-
-impl View with Disposable {
-	// Release every subscription this view and its children created.
-	fun dispose(self) {
-		self.owner.dispose();
 	}
 }
 
 // Attach a view to the page element with the given id.
 fun mount(id: str, view: View) {
 	get_element_by_id(id).append(view.element);
+}
+
+// Mount a component ROOT: the body builds under a fresh ambient owner (the
+// root boundary — every binding inside registers into it) and the view is
+// attached. Returns the root owner; most apps let it live forever.
+fun mount_root(id: str, body: (|| View) context owner_scope): Owner {
+	let (built, root) = comp(body);
+	mount(id, built);
+	root
 }

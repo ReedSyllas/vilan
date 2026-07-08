@@ -960,6 +960,10 @@ pub struct Analyzer<'src> {
     // parameter entity -> the context bindings its clause names, in written
     // order (the hidden-argument order). The context pass consumes this.
     parameter_contexts: HashMap<Id, Vec<Id>>,
+    // Clause sites awaiting post-import resolution: the names may be
+    // IMPORTED bindings, which only resolve after the import fixpoint —
+    // walk-time lookup sees same-file names only.
+    prepped_context_clauses: Vec<(Id, Vec<(&'src str, Span)>, Id)>,
     // Method calls (by call id) on a generic impl whose generic parameters bind
     // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
@@ -1163,6 +1167,7 @@ impl<'src> Analyzer<'src> {
             division_generic_lhs: HashMap::new(),
             prepped_number_literals: Vec::new(),
             parameter_contexts: HashMap::new(),
+            prepped_context_clauses: Vec::new(),
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
@@ -5276,28 +5281,14 @@ impl<'src> Analyzer<'src> {
                     msg: "a `context` clause is only supported on a closure type".to_string(),
                 });
             }
-            let mut context_ids: Vec<Id> = Vec::new();
-            for (name, name_span) in names {
-                let Some(target) = self.try_get_expr_id_by_name(name, type_scope_id) else {
-                    self.diagnostics.push(Error {
-                        span: *name_span,
-                        msg: format!("cannot find context `{name}` in this scope"),
-                    });
-                    continue;
-                };
-                if context_ids.contains(&target) {
-                    self.diagnostics.push(Error {
-                        span: *name_span,
-                        msg: format!("duplicate context `{name}` in this clause"),
-                    });
-                    continue;
-                }
-                self.record_reference(self.current_source_id, *name_span, target);
-                context_ids.push(target);
-            }
-            if !context_ids.is_empty() {
-                self.parameter_contexts.insert(parameter_id, context_ids);
-            }
+            // Resolution is DEFERRED past the import fixpoint: the clause may
+            // name an imported context (`import std::reactive::owner_scope`),
+            // which walk-time lookup cannot see yet.
+            self.prepped_context_clauses.push((
+                parameter_id,
+                names.iter().map(|(name, span)| (*name, *span)).collect(),
+                type_scope_id,
+            ));
             declared_type = Some(inner);
         }
         let type_id = match (pattern, declared_type) {
@@ -10497,6 +10488,40 @@ impl<'src> Analyzer<'src> {
                         ),
                     });
                 }
+            }
+        }
+
+        // --- Resolve `context` clauses (ambient-owner.md §5) --- after the
+        // import fixpoint, so a clause may name an imported context.
+        for (parameter_id, names, scope_id) in std::mem::take(&mut self.prepped_context_clauses) {
+            let mut context_ids: Vec<Id> = Vec::new();
+            for (name, name_span) in names {
+                let Some(target) = self.try_get_expr_id_by_name(name, scope_id) else {
+                    self.diagnostics.push(Error {
+                        span: name_span,
+                        msg: format!("cannot find context `{name}` in this scope"),
+                    });
+                    continue;
+                };
+                // An imported name binds to the IMPORT's local entity; follow
+                // it to the defining binding so the context pass and the
+                // clause agree on identity.
+                let target = match self.expr_id_to_expr_map.get(&target) {
+                    Some(Expr::Local(inner)) => *inner,
+                    _ => target,
+                };
+                if context_ids.contains(&target) {
+                    self.diagnostics.push(Error {
+                        span: name_span,
+                        msg: format!("duplicate context `{name}` in this clause"),
+                    });
+                    continue;
+                }
+                self.record_reference(self.current_source_id, name_span, target);
+                context_ids.push(target);
+            }
+            if !context_ids.is_empty() {
+                self.parameter_contexts.insert(parameter_id, context_ids);
             }
         }
 

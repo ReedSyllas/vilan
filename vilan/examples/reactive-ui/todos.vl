@@ -90,8 +90,26 @@ fun todos(): View {
 		// `bind_each` renders one view per element, keyed by `Todo.id`, and
 		// reconciles the DOM against `visible` as it changes.
 		.child(view("ul").bind_each(visible, |todo| todo.id, |todo| todo_row(items, todo)))
-		// `show` includes/removes a node on a reactive condition.
+		// `show` toggles VISIBILITY — the node stays mounted, state preserved.
 		.child(view("p").class("empty").text("Nothing here 🎉").show(visible.map(|list| list.len() == 0)))
+		// `when` mounts/unmounts CONTENT — a disposal boundary: the summary's
+		// binding below exists only while something is done, and is disposed
+		// (not just hidden) when the condition drops.
+		.when(items.map(|list| count_done(list) > 0), || {
+			view("p")
+				.class("summary")
+				.bind_text(items.map(|list| i"{count_done(list)} done"))
+		})
+}
+
+fun count_done(list: List<Todo>): i32 {
+	mut done = 0;
+	for todo in list {
+		if todo.done {
+			done += 1;
+		}
+	}
+	done
 }
 
 // A filter button highlights itself when its value is the active filter — a

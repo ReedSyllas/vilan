@@ -29,8 +29,10 @@ have gaps.
    follow `map`/`combine`'s unowned precedent; the rolling inner subscription is disposed
    per switch.
 
-5. **Ambient owner / `comp` ergonomic layer** (M; `proposal/ambient-owner.md`) — **v1 basics
-   SHIPPED 2026-07-07**: `owner_scope` (a `Context<Owner>`), `get_owner()`, and
+5. **Ambient owner / `comp` ergonomic layer** (`proposal/ambient-owner.md`) — **COMPLETE
+   2026-07-07** (basics + `comp` + B15 + the `std::ui` boundary-ownership integration:
+   owner-less `View`, ambient `bind_*`, per-row owners, `when`, `mount_root`; remaining
+   tails recorded with triggers: `get_safe`, fence-diagnostic anchoring). History: `owner_scope` (a `Context<Owner>`), `get_owner()`, and
    `Signal.effect` (the scope-tied `sub` — registers into the ambient owner, nothing to
    hold; misuse outside an extent is a COMPILE error via the context coverage fence). The
    substrate was proven against stored callbacks AND async first (probes: capture survives
