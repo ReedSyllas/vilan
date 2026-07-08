@@ -9,12 +9,12 @@
 
 use chumsky::prelude::*;
 
-use crate::lexer::lexer;
+use crate::lexer::lexer_with;
 use crate::node::{
     BinaryOp, Convention, ExternBinding, Func, GenericParameters, ImportBranch, Node, NodeIfBranch,
     NodeList, Pattern,
 };
-use crate::parser::parser;
+use crate::parser::parser_with;
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 
@@ -51,7 +51,7 @@ pub fn extract_comments(source: &str) -> Vec<(Span, &str)> {
 /// The lexer's token stream with spans stripped — the formatter's notion of "the
 /// same code", used to check a reprint didn't change anything but trivia.
 fn code_tokens(source: &str) -> Option<Vec<Token<'_>>> {
-    lexer()
+    lexer_with::<extra::Default>()
         .parse(source)
         .into_output()
         .map(|tokens| tokens.into_iter().map(|(token, _)| token).collect())
@@ -79,12 +79,15 @@ fn normalize(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
 
 /// Parses `source` into its top-level item list, or `None` if it doesn't parse.
 fn parse(source: &str) -> Option<NodeList<'_>> {
-    let tokens = lexer().parse(source).into_output()?;
+    let tokens = lexer_with::<extra::Default>().parse(source).into_output()?;
     let end = source.len();
     let stream = tokens
         .as_slice()
         .map((end..end).into(), |(token, span)| (token, span));
-    parser().parse(stream).into_output().map(|(items, _)| items)
+    parser_with::<_, extra::Default>()
+        .parse(stream)
+        .into_output()
+        .map(|(items, _)| items)
 }
 
 /// Formats `source`, returning the reprinted text. Returns the input unchanged if

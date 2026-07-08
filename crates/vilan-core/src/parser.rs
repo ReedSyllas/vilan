@@ -4,7 +4,35 @@ use crate::node::{
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
-use chumsky::{input::ValueInput, prelude::*};
+use chumsky::extra::ParserExtra;
+use chumsky::label::LabelError;
+use chumsky::{DefaultExpected, input::ValueInput, prelude::*};
+
+/// The grammar is generic over its chumsky error type so a compile's happy
+/// path can run with zero-size errors (see [`crate::parse_clean`]) while the
+/// failure path re-parses with `Rich` diagnostics. This trait covers the one
+/// custom-MESSAGE error the grammar produces (the split-shift check): `Rich`
+/// keeps the message; the fast types drop it — their error exists only to
+/// trigger the rich re-parse that reproduces the message for the user.
+pub trait CustomParseError<'tokens, I: Input<'tokens>>: Sized {
+    fn custom(span: I::Span, message: &'static str) -> Self;
+}
+
+impl<'tokens, I: Input<'tokens>> CustomParseError<'tokens, I> for Rich<'tokens, I::Token, I::Span> {
+    fn custom(span: I::Span, message: &'static str) -> Self {
+        Rich::custom(span, message)
+    }
+}
+
+impl<'tokens, I: Input<'tokens>> CustomParseError<'tokens, I> for EmptyErr {
+    fn custom(span: I::Span, _message: &'static str) -> Self {
+        <EmptyErr as LabelError<'tokens, I, DefaultExpected<'tokens, I::Token>>>::expected_found(
+            [],
+            None,
+            span,
+        )
+    }
+}
 
 // One argument inside a `[extern(..)]` attribute — a bare word (`method`/`get`/
 // `set`) or a quoted string (a module path or host symbol).
@@ -56,10 +84,27 @@ fn extern_binding_from_args<'src>(args: &[ExternArg<'src>]) -> ExternBinding<'sr
     }
 }
 
+/// The grammar with full `Rich` diagnostics — the error-path instantiation.
+/// A clean compile never needs these: parse with [`crate::parse_clean`] first
+/// and fall back here only when it fails, because rich-error bookkeeping is
+/// most of a successful parse's cost.
 pub fn parser<'tokens, 'src: 'tokens, I>()
 -> impl Parser<'tokens, I, Spanned<NodeList<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
+{
+    parser_with()
+}
+
+/// The grammar, generic over its error type. `E::Error` decides what a failed
+/// alternative costs: `Rich` builds expected-sets and merges them (expensive,
+/// informative), `EmptyErr` is free (fast, mute).
+pub fn parser_with<'tokens, 'src: 'tokens, I, E>()
+-> impl Parser<'tokens, I, Spanned<NodeList<'src>>, E> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
+    E: ParserExtra<'tokens, I> + 'tokens,
+    E::Error: LabelError<'tokens, I, &'static str> + CustomParseError<'tokens, I>,
 {
     let mut statement = Recursive::declare();
 
@@ -1522,46 +1567,20 @@ where
         .map_with(|children, e| (children, e.span()))
 }
 
-fn chain_expr_parser<'tokens, 'src: 'tokens, I>(
-    identifier: impl Parser<'tokens, I, &'src str, extra::Err<Rich<'tokens, Token<'src>, Span>>>
-    + Copy
-    + 'tokens,
-    generic_arguments: impl Parser<
-        'tokens,
-        I,
-        GenericArguments<'src>,
-        extra::Err<Rich<'tokens, Token<'src>, Span>>,
-    > + Clone
-    + 'tokens,
-    expression_list: impl Parser<
-        'tokens,
-        I,
-        NodeList<'src>,
-        extra::Err<Rich<'tokens, Token<'src>, Span>>,
-    > + Clone
-    + 'tokens,
+fn chain_expr_parser<'tokens, 'src: 'tokens, I, E>(
+    identifier: impl Parser<'tokens, I, &'src str, E> + Copy + 'tokens,
+    generic_arguments: impl Parser<'tokens, I, GenericArguments<'src>, E> + Clone + 'tokens,
+    expression_list: impl Parser<'tokens, I, NodeList<'src>, E> + Clone + 'tokens,
     // A single expression, for a subscript index (`list[i]`).
-    expression: impl Parser<
-        'tokens,
-        I,
-        Spanned<Node<'src>>,
-        extra::Err<Rich<'tokens, Token<'src>, Span>>,
-    > + Clone
-    + 'tokens,
-    atom: impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>>
-    + Clone
-    + 'tokens,
+    expression: impl Parser<'tokens, I, Spanned<Node<'src>>, E> + Clone + 'tokens,
+    atom: impl Parser<'tokens, I, Spanned<Node<'src>>, E> + Clone + 'tokens,
     // A `{ .. }` block already mapped to a `Node::Block`, for `async { .. }`.
-    block_expr: impl Parser<
-        'tokens,
-        I,
-        Spanned<Node<'src>>,
-        extra::Err<Rich<'tokens, Token<'src>, Span>>,
-    > + Clone
-    + 'tokens,
-) -> impl Parser<'tokens, I, Spanned<Node<'src>>, extra::Err<Rich<'tokens, Token<'src>, Span>>> + Clone
+    block_expr: impl Parser<'tokens, I, Spanned<Node<'src>>, E> + Clone + 'tokens,
+) -> impl Parser<'tokens, I, Spanned<Node<'src>>, E> + Clone
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
+    E: ParserExtra<'tokens, I> + 'tokens,
+    E::Error: LabelError<'tokens, I, &'static str> + CustomParseError<'tokens, I>,
 {
     // `Name<Args>` is the head of a `::` path only when a `::` actually
     // follows (e.g. `List<str>::new()`); the trailing `::` is matched with a
@@ -1792,7 +1811,10 @@ where
                 if first.into_range().end == second.into_range().start {
                     Ok(op)
                 } else {
-                    Err(Rich::custom(span, "split shift operator"))
+                    Err(<E::Error as CustomParseError<'tokens, I>>::custom(
+                        span,
+                        "split shift operator",
+                    ))
                 }
             })
     };

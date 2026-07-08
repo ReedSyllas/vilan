@@ -97,6 +97,41 @@ fn infer_platform(root: &NodeList, std: &PackageSpec) -> Platform {
     }
 }
 
+/// One fast lex + parse with zero-size errors: `Some(root)` exactly when the
+/// source is completely clean — no lex errors, no parse errors, no recovery.
+/// On any failure the caller re-runs the `Rich` pipeline (`lexer()`/`parser()`)
+/// to get the real diagnostics; this double-parse trade is the point.
+/// Profiling (2026-07-08, the todo example) showed `Rich` bookkeeping — merging
+/// failed alternatives, deduplicating expected-token sets, allocating and
+/// dropping the reasons — dominating SUCCESSFUL parses, roughly 40% of a whole
+/// build's instructions. Clean files (the overwhelming case: every std module,
+/// every macro world, every warm re-analysis) now skip all of it, and broken
+/// files pay one extra cheap pass before their diagnostics, which reproduce
+/// the all-rich pipeline's byte for byte.
+pub fn parse_clean(source: &str) -> Option<Spanned<node::NodeList<'_>>> {
+    use chumsky::prelude::*;
+
+    let (tokens, lex_errors) = lexer::lexer_with::<extra::Default>()
+        .parse(source)
+        .into_output_errors();
+    if !lex_errors.is_empty() {
+        return None;
+    }
+    let tokens = tokens?;
+    let end = source.len();
+    let (root, parse_errors) = parser::parser_with::<_, extra::Default>()
+        .parse(
+            tokens
+                .as_slice()
+                .map((end..end).into(), |(token, span)| (token, span)),
+        )
+        .into_output_errors();
+    if !parse_errors.is_empty() {
+        return None;
+    }
+    root
+}
+
 /// Lex, parse, and fully analyze a source string. The source must already be
 /// leaked to `'static` so the returned `Program` (which borrows it) can outlive
 /// this call — the front-end that owns the document lifecycle does the leak.
@@ -119,34 +154,43 @@ pub fn analyze_source(
 ) -> (Option<Program<'static>>, Vec<Error>) {
     use chumsky::prelude::*;
 
-    let (tokens, lex_errors) = lexer().parse(source).into_output_errors();
-    let mut diagnostics: Vec<Error> = lex_errors
-        .iter()
-        .map(|error| Error {
+    // Fast path: a clean file parses once with zero-size errors. The rich
+    // pipeline below runs only when something is actually wrong (or was
+    // recovered), so diagnostics are unchanged — just no longer paid for by
+    // every clean keystroke and module.
+    let (mut root, mut diagnostics) = if let Some(root) = parse_clean(source) {
+        (root, Vec::new())
+    } else {
+        let (tokens, lex_errors) = lexer().parse(source).into_output_errors();
+        let mut diagnostics: Vec<Error> = lex_errors
+            .iter()
+            .map(|error| Error {
+                span: *error.span(),
+                msg: error.to_string(),
+            })
+            .collect();
+        let Some(tokens) = tokens else {
+            return (None, diagnostics);
+        };
+
+        let (ast, parse_errors) = parser()
+            .map_with(|ast, extra| (ast, extra.span()))
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((source.len()..source.len()).into(), |(token, span)| {
+                        (token, span)
+                    }),
+            )
+            .into_output_errors();
+        diagnostics.extend(parse_errors.iter().map(|error| Error {
             span: *error.span(),
             msg: error.to_string(),
-        })
-        .collect();
-    let Some(tokens) = tokens else {
-        return (None, diagnostics);
-    };
-
-    let (ast, parse_errors) = parser()
-        .map_with(|ast, extra| (ast, extra.span()))
-        .parse(
-            tokens
-                .as_slice()
-                .map((source.len()..source.len()).into(), |(token, span)| {
-                    (token, span)
-                }),
-        )
-        .into_output_errors();
-    diagnostics.extend(parse_errors.iter().map(|error| Error {
-        span: *error.span(),
-        msg: error.to_string(),
-    }));
-    let Some((mut root, _file_span)) = ast else {
-        return (None, diagnostics);
+        }));
+        let Some((root, _file_span)) = ast else {
+            return (None, diagnostics);
+        };
+        (root, diagnostics)
     };
 
     // A macro WORLD's entry gets the ambient meta prelude (macro-engine.md

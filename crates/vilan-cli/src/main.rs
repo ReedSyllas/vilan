@@ -1052,60 +1052,73 @@ fn compile_to_js(
     let std = vilan_core::manifest::resolve_std(&std_dir());
     let mut output = None;
 
-    let (tokens, mut errs) = lexer().parse(src.as_str()).into_output_errors();
+    // Fast path: a clean entry file lexes and parses once with zero-size
+    // errors (see `vilan_core::parse_clean`); the rich pipeline below runs
+    // only when there are diagnostics to name.
+    let clean_root = vilan_core::parse_clean(src.as_str());
+    let (tokens, mut errs) = match &clean_root {
+        Some(_) => (None, Vec::new()),
+        None => lexer().parse(src.as_str()).into_output_errors(),
+    };
 
-    let parse_errs = if let Some(tokens) = &tokens {
-        let (ast, parse_errs) = parser()
-            .map_with(|ast, e| (ast, e.span()))
-            .parse(
-                tokens
-                    .as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-            )
-            .into_output_errors();
-
-        if let Some((root, _file_span)) = ast.filter(|_| errs.len() + parse_errs.len() == 0) {
-            if emit_debug {
-                write_debug(file, "parse.out", &format!("{root:#?}"));
+    let mut parse_errs = Vec::new();
+    let root = match clean_root {
+        Some(root) => Some(root),
+        None => match &tokens {
+            Some(tokens) => {
+                let (ast, errors) = parser()
+                    .map_with(|ast, e| (ast, e.span()))
+                    .parse(
+                        tokens
+                            .as_slice()
+                            .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                    )
+                    .into_output_errors();
+                parse_errs = errors;
+                ast.filter(|_| errs.len() + parse_errs.len() == 0)
+                    .map(|(root, _file_span)| root)
             }
+            None => None,
+        },
+    };
 
-            let mut program = analyze(&root, &src, &std, pkg_root, file, platform, workspace);
-
-            // Thread `std::context::Context` values as hidden parameters (a no-op
-            // unless the program creates a context).
-            context::thread_contexts(&mut program);
-
-            // Infer which functions/closures are async (drives `async`/`await`
-            // code generation).
-            async_infer::infer(&mut program);
-
-            for error in &program.diagnostics {
-                errs.push(Rich::custom(error.span, error.msg.as_str()));
-            }
-            // Warnings are non-fatal: render them, but they do not enter `errs`,
-            // so they don't block codegen.
-            for warning in &program.warnings {
-                report_warning(&filename, &src, warning.span.into_range(), &warning.msg);
-            }
-
-            if emit_debug {
-                write_debug(file, "analyze.out", &format!("{program:#?}"));
-                let call_graph = CallGraph::build(&program);
-                write_debug(file, "callgraph.out", &call_graph.debug_dump(&program));
-            }
-
-            if errs.is_empty() {
-                match transform(&program, options) {
-                    Ok(javascript) => output = Some(javascript),
-                    Err(error) => errs.push(Rich::custom(error.span, error.msg)),
-                }
-            }
+    if let Some(root) = root {
+        if emit_debug {
+            write_debug(file, "parse.out", &format!("{root:#?}"));
         }
 
-        parse_errs
-    } else {
-        Vec::new()
-    };
+        let mut program = analyze(&root, &src, &std, pkg_root, file, platform, workspace);
+
+        // Thread `std::context::Context` values as hidden parameters (a no-op
+        // unless the program creates a context).
+        context::thread_contexts(&mut program);
+
+        // Infer which functions/closures are async (drives `async`/`await`
+        // code generation).
+        async_infer::infer(&mut program);
+
+        for error in &program.diagnostics {
+            errs.push(Rich::custom(error.span, error.msg.as_str()));
+        }
+        // Warnings are non-fatal: render them, but they do not enter `errs`,
+        // so they don't block codegen.
+        for warning in &program.warnings {
+            report_warning(&filename, &src, warning.span.into_range(), &warning.msg);
+        }
+
+        if emit_debug {
+            write_debug(file, "analyze.out", &format!("{program:#?}"));
+            let call_graph = CallGraph::build(&program);
+            write_debug(file, "callgraph.out", &call_graph.debug_dump(&program));
+        }
+
+        if errs.is_empty() {
+            match transform(&program, options) {
+                Ok(javascript) => output = Some(javascript),
+                Err(error) => errs.push(Rich::custom(error.span, error.msg)),
+            }
+        }
+    }
 
     let clean = errs.is_empty() && parse_errs.is_empty();
     report(&filename, &src, errs, parse_errs);

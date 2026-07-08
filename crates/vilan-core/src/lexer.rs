@@ -1,9 +1,27 @@
 use crate::span::{Span, Spanned};
 use crate::token::Token;
+use chumsky::extra::ParserExtra;
+use chumsky::label::LabelError;
 use chumsky::prelude::*;
+use chumsky::text::TextExpected;
+use chumsky::util::MaybeRef;
 
+/// The lexer with full `Rich` diagnostics — the error-path instantiation.
+/// A clean compile never needs these: lex/parse with [`crate::parse_clean`]
+/// first and fall back here only when it fails.
 pub fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
+    lexer_with()
+}
+
+/// The lexer, generic over its error type — see [`crate::parser::parser_with`]
+/// for why. The `TextExpected` bound is what `text::int`/`text::ident` demand.
+pub fn lexer_with<'src, E>() -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, E>
+where
+    E: ParserExtra<'src, &'src str> + 'src,
+    E::Error: LabelError<'src, &'src str, TextExpected<()>>
+        + LabelError<'src, &'src str, MaybeRef<'src, char>>,
+{
     // A parser for numbers. A trailing type suffix (`0u32`, `1f`, `2n`, ...)
     // is captured; otherwise the literal's type is inferred from the fractional
     // part or the surrounding context.

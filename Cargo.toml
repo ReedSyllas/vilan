@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/vilan-core", "crates/vilan-cli", "crates/vilan-lsp"]
+
+# Release performance with debug symbols, for profilers (perf, callgrind):
+# `cargo build --profile profiling`.
+[profile.profiling]
+inherits = "release"
+debug = true

@@ -605,7 +605,6 @@ const AMBIENT_FUNCTIONS: &[&str] = &["source", "fresh"];
 pub(crate) fn world_prelude_nodes(
     defined: &std::collections::HashSet<&str>,
 ) -> Option<NodeList<'static>> {
-    use chumsky::prelude::*;
     let survivors: Vec<&str> = AMBIENT_META_TYPES
         .iter()
         .copied()
@@ -628,17 +627,8 @@ pub(crate) fn world_prelude_nodes(
         return Some(Vec::new());
     }
     let text: &'static str = Box::leak(text.into_boxed_str());
-    let tokens = crate::lexer().parse(text).into_output()?;
-    let root = crate::parser()
-        .parse(
-            tokens
-                .as_slice()
-                .map((text.len()..text.len()).into(), |(token, span)| {
-                    (token, span)
-                }),
-        )
-        .into_output()?;
-    Some(root.0)
+    let (root, _span) = crate::parse_clean(text)?;
+    Some(root)
 }
 
 fn compile_world(
@@ -1455,6 +1445,12 @@ fn parse_cached(text: &'static str) -> Result<(&'static NodeList<'static>, &'sta
 fn parse_generated(source: &str) -> Result<(&'static NodeList<'static>, &'static str), String> {
     use chumsky::prelude::*;
     let source: &'static str = Box::leak(source.to_string().into_boxed_str());
+    // Fast path for clean output; the rich pipeline below runs only to name
+    // what's wrong with a macro's malformed source.
+    if let Some(root) = crate::parse_clean(source) {
+        let leaked: &'static crate::span::Spanned<NodeList<'static>> = Box::leak(Box::new(root));
+        return Ok((&leaked.0, source));
+    }
     let (tokens, lex_errors) = crate::lexer::lexer().parse(source).into_output_errors();
     if let Some(error) = lex_errors.first() {
         return Err(error.to_string());

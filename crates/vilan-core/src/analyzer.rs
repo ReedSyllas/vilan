@@ -11433,6 +11433,20 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     // borrows it) can live for the whole compilation. The token vector is
     // transient — the AST holds `&'static str` slices into the source.
     let source: &'static str = Box::leak(source.into_boxed_str());
+
+    // The fast path: a clean module (the overwhelming case — std parses clean
+    // on every compile) skips rich-error bookkeeping entirely; anything else
+    // falls through to the rich parse below for its diagnostics.
+    if let Some(root) = crate::parse_clean(source) {
+        let loaded = LoadedModule {
+            ast: &*Box::leak(Box::new(root)),
+            text: source,
+            parse_errors: &[],
+        };
+        cache.lock().unwrap().insert(key, loaded);
+        return Some(loaded);
+    }
+
     let mut errors: Vec<String> = Vec::new();
     fn empty_ast() -> &'static crate::span::Spanned<NodeList<'static>> {
         &*Box::leak(Box::new((Vec::new(), (0..0).into())))
