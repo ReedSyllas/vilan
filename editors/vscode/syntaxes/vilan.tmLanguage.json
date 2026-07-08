@@ -79,9 +79,14 @@
     "numbers": {
       "patterns": [
         {
-          "comment": "Decimal literal with an optional type suffix (`42u32`, `3.5f`, `0n`).",
+          "comment": "Hex literal with an optional type suffix (`0xFF`, `0x80000000u32`, `0xDEADn`) — before the decimal rule, like the lexer.",
+          "name": "constant.numeric.hex.vilan",
+          "match": "\\b0x[0-9a-fA-F]+([A-Za-z_][A-Za-z0-9_]*)?\\b"
+        },
+        {
+          "comment": "Decimal literal with an optional type suffix (`42u32`, `3.5f`, `0n`). The suffix admits digits after its first letter — `[A-Za-z_]*` alone can never satisfy the trailing `\\b` inside `u32`, which left every digit-bearing suffix uncolored.",
           "name": "constant.numeric.vilan",
-          "match": "\\b[0-9]+(\\.[0-9]+)?[A-Za-z_]*\\b"
+          "match": "\\b[0-9]+(\\.[0-9]+)?([A-Za-z_][A-Za-z0-9_]*)?\\b"
         }
       ]
     },
@@ -174,6 +179,13 @@
           "match": "\\b(with|borrows)\\b"
         },
         {
+          "comment": "The `context` CLAUSE on a closure type — `(|| void) context owner_scope`, multi `context (a, b)`. It is a contextual keyword (a value or module may be NAMED `context`), and the clause only ever follows a parenthesized closure type — so the guard is: keyword only right after a `)`.",
+          "match": "(?<=\\))\\s+(context)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.vilan" }
+          }
+        },
+        {
           "name": "constant.language.vilan",
           "match": "\\b(true|false|null)\\b"
         },
@@ -209,9 +221,9 @@
     "operators": {
       "patterns": [
         {
-          "comment": "Multi-char operators first (`&mut`, `||`, `::`, `=>`, compound assigns, comparisons), then single-char.",
+          "comment": "Multi-char operators first (`&mut`, `||`, `::`, `=>`, `?.`, compound assigns, comparisons), then single-char (incl. `^` bitwise-xor and postfix `?`/`!`).",
           "name": "keyword.operator.vilan",
-          "match": "&mut|\\|\\||&&|::|=>|==|!=|<=|>=|\\+=|-=|\\*=|/=|[-+*/=<>!&|]"
+          "match": "&mut|\\|\\||&&|::|=>|==|!=|<=|>=|\\+=|-=|\\*=|/=|\\?\\.|[-+*/=<>!&|^?]"
         }
       ]
     }
