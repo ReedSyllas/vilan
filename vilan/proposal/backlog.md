@@ -42,12 +42,11 @@ have gaps.
    outside the extent), so the extent is entered as `owner_scope.run(owner, || ..)`; macro
    sugar can restore the wrapper spelling later. The coverage check gained the DEAD-reader
    exemption (an uncalled, un-taken, non-top-level function cannot run uncovered) — without
-   it every `std::reactive` importer failed. **Remaining:** `comp` sugar, `std::ui`
-   integration (views self-registering), `get_safe` (recorded with the `Option`-parameter
-   sketch), fence-diagnostic anchoring. ~~`effect` on the `Source` trait~~ (shipped with
-   B14's fix, 2026-07-07). ~~`comp` sugar~~ (**shipped 2026-07-07** on B15 +
-   value-returning `Context.run<U>` — the `batch` shape; `run_with_owner` yields too);
-   the `std::ui` fold-scope-into-View question stays open with the ui integration.
+   it every `std::reactive` importer failed. ~~`effect` on the `Source` trait~~ (shipped
+   with B14's fix). ~~`comp` sugar~~ (shipped on B15 + value-returning `Context.run<U>`
+   — the `batch` shape; `run_with_owner` yields too). ~~`std::ui` integration~~ (shipped:
+   the boundary-ownership model — the fold-scope-into-View question resolved as
+   `mount_root`/`comp` roots owning everything ambiently).
 
 6. **Ambient microtask flush + async turns/actions** (M–L; the future sections of
    `reactive-batching.md`) — auto-`flush` on the next microtask (committed, deferred), and the
