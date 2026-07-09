@@ -320,6 +320,24 @@ have gaps.
    Remaining (recorded in the proposal §7): wrapping arithmetic + real widths on a
    non-JS backend, `f32` fround, Wire slots, parse family, numeric→`BigInt`.
 
+6. **Tree-shake module-level bindings** (S–M; found by K2, 2026-07-09) — module-level
+   `let`s emit unconditionally whenever their module loads, unlike functions (which the
+   transformer already emits reachability-only). Two observed consequences: `number.vl`
+   cannot import `std::math::PI` — every program would gain a stray `const PI`, since
+   `number.vl` is always loaded (K2 worked around it by inlining the literal, with a
+   comment at the site; remove the workaround when this ships) — and a DROPPED unused
+   binding with a call initializer degenerates to a bare side-effect statement
+   (`Math.pow(2, 0 - 52);` appeared in every golden from `EPSILON`'s initializer — the
+   same shape as the fixed dangling-`Context::new()`, which was handled for the
+   news-only path specifically). Wanted: extend the existing function-reachability walk
+   to module-level bindings — emit a binding only when a reachable item references it,
+   and drop its initializer with it. One semantics decision to state: a truly-unreferenced
+   module `let` with a SIDE-EFFECTING initializer (`Shared::new`, `Context::new`) —
+   today's live ones (`scheduler`, `owner_scope`) are referenced by any program that
+   loads them, so reachability keeps them; declare unused-initializer dropping as the
+   defined behavior (module state exists only if something reaches it) rather than
+   promising top-level side effects.
+
 5. **Project-model deferrals from P1/P2** (M) — registry-dependency loading (only `path`
    dependencies resolve today), `[project.dependencies]` inheritance, and P1's server-side
    manifest completions. (Captured here when the shipped `project-model-p1/p2` proposals
