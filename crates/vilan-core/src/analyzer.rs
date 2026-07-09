@@ -12418,6 +12418,7 @@ pub struct Program<'src> {
     pub context_new_fn_id: Option<Id>,
     pub context_run_fn_id: Option<Id>,
     pub context_get_fn_id: Option<Id>,
+    pub context_get_safe_fn_id: Option<Id>,
     // `external` std functions the transformer lowers to native JS or a runtime
     // helper (`str.trim()`, `scan()`, `random::range_i32(..)`, ...), keyed by fn id.
     // (The per-type `range_*` are forwarded to by the `Random` trait impls.)
@@ -14770,6 +14771,7 @@ pub fn analyze<'src>(
     let mut context_new_fn_id: Option<Id> = None;
     let mut context_run_fn_id: Option<Id> = None;
     let mut context_get_fn_id: Option<Id> = None;
+    let mut context_get_safe_fn_id: Option<Id> = None;
     if let Some(context_struct_id) = context_struct_id {
         for implementation in &analyzer.implementations {
             let subject_is_context = matches!(
@@ -14792,6 +14794,11 @@ pub fn analyze<'src>(
                     .get("get")
                     .copied()
                     .or(context_get_fn_id);
+                context_get_safe_fn_id = implementation
+                    .declarations
+                    .get("get_safe")
+                    .copied()
+                    .or(context_get_safe_fn_id);
             }
         }
     }
@@ -15128,6 +15135,7 @@ pub fn analyze<'src>(
         context_new_fn_id,
         context_run_fn_id,
         context_get_fn_id,
+        context_get_safe_fn_id,
         bool_enum_id: analyzer.bool_enum_id,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,

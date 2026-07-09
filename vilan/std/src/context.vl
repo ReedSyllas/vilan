@@ -13,6 +13,8 @@
 // `run` (`count.run(0, ..)` makes it `Context<i32>`), exactly as `List<T>`'s
 // element type is inferred from `push`.
 
+import pkg::option::Option;
+
 external struct Context<T>;
 
 impl Context<type T> {
@@ -23,4 +25,12 @@ impl Context<type T> {
 	external fun run<U>(self, value: T, body: || U): U;
 
 	external fun get(self): T;
+
+	// The possibly-established read: `Some(value)` under an enclosing `run`,
+	// `None` otherwise — no coverage fence. Code reachable only through
+	// `get_safe` carries the value as an `Option<T>` hidden parameter
+	// (strict `get` regions keep the bare `T` flavor and the static check);
+	// the covered→safe boundary `Some`-wraps, and safe-only roots receive
+	// `None` (proposal/reactive-turns.md §5.1, ambient-owner.md §2.1).
+	external fun get_safe(self): Option<T>;
 }

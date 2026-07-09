@@ -8473,3 +8473,184 @@ fn a_same_named_member_from_an_unrelated_trait_does_not_satisfy() {
         "#;
     assert_fails(source);
 }
+
+// --- reactive-turns §5.1: `get_safe` — the possibly-established context ---
+// --- read (ambient-owner.md §2.1's sketch; turn_scope's prerequisite).  ---
+
+#[test]
+fn get_safe_yields_none_outside_and_some_inside_a_run() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+        import std::option::Option::{ Some, None };
+
+        let current: Context<i32> = Context::new();
+
+        fun describe(): str {
+            match current.get_safe() {
+                Some(let value) => i"some {value}",
+                None => "none",
+            }
+        }
+
+        fun main() {
+            print(describe());
+            current.run(7, || {
+                print(describe());
+            });
+            print(describe());
+        }
+        main();
+        "#,
+        "none\nsome 7\nnone\n",
+    );
+}
+
+#[test]
+fn get_safe_wraps_inside_a_strict_covered_region() {
+    // A strict (get-reading) function calls a safe-only one: the boundary
+    // Some-wraps the bare value.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+        import std::option::Option::{ Some, None };
+
+        let current: Context<i32> = Context::new();
+
+        fun peek(): str {
+            match current.get_safe() {
+                Some(let value) => i"peeked {value}",
+                None => "nothing",
+            }
+        }
+
+        fun strict_report() {
+            let value = current.get();
+            print(i"strict {value}");
+            print(peek());
+        }
+
+        fun main() {
+            current.run(9, || {
+                strict_report();
+            });
+        }
+        main();
+        "#,
+        "strict 9\npeeked 9\n",
+    );
+}
+
+#[test]
+fn get_safe_threads_through_a_transitive_chain() {
+    // The middle function neither reads nor runs — the Option threads
+    // through it, Some on the covered path and None from the top level.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+        import std::option::Option::{ Some, None };
+
+        let current: Context<i32> = Context::new();
+
+        fun leaf(): str {
+            match current.get_safe() {
+                Some(let value) => i"leaf {value}",
+                None => "leaf none",
+            }
+        }
+
+        fun middle(): str {
+            leaf()
+        }
+
+        fun main() {
+            print(middle());
+            current.run(3, || {
+                print(middle());
+            });
+        }
+        main();
+        "#,
+        "leaf none\nleaf 3\n",
+    );
+}
+
+#[test]
+fn get_safe_survives_await_and_stored_closures() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+        import std::option::Option::{ Some, None };
+
+        let current: Context<i32> = Context::new();
+
+        fun label(): str {
+            match current.get_safe() {
+                Some(let value) => i"got {value}",
+                None => "got none",
+            }
+        }
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            mut stored: List<|| void> = [];
+            current.run(5, || {
+                let task = async {
+                    await tick();
+                    print(label());
+                };
+                stored.push(|| print(label()));
+            });
+            print(label());
+            for callback in stored {
+                callback();
+            }
+        }
+        main();
+        "#,
+        "got none\ngot 5\ngot 5\n",
+    );
+}
+
+#[test]
+fn the_strict_fence_is_unchanged_by_get_safe() {
+    // A strict `get` on an uncovered path still errors, even in a program
+    // that also uses `get_safe`; and a get_safe-only function pulled onto a
+    // strict chain is fenced like any strict code.
+    let source = r#"
+        import std::print;
+        import std::context::Context;
+        import std::option::Option::{ Some, None };
+
+        let current: Context<i32> = Context::new();
+
+        fun sneaky(): i32 {
+            current.get()
+        }
+
+        fun probe(): str {
+            match current.get_safe() {
+                Some(let value) => i"some {value}",
+                None => "none",
+            }
+        }
+
+        fun main() {
+            print(probe());
+            print(sneaky());
+        }
+        main();
+        "#;
+    assert_fails_spanning(
+        source,
+        "current.get()",
+        "can be reached without an enclosing `run`",
+    );
+}

@@ -46,10 +46,12 @@ pub fn thread_contexts(program: &mut Program) {
         // `context.vl` wasn't loaded — no contexts to thread.
         return;
     };
+    // Absent only against an older `context.vl` without `get_safe`.
+    let get_safe_fn = program.context_get_safe_fn_id;
 
     let plan = {
         let graph = CallGraph::build(program);
-        match analyze(program, &graph, get_fn, run_fn, new_fn) {
+        match analyze(program, &graph, get_fn, get_safe_fn, run_fn, new_fn) {
             Ok(plan) => plan,
             Err(errors) => {
                 program.diagnostics.extend(errors);
@@ -63,12 +65,15 @@ pub fn thread_contexts(program: &mut Program) {
     }
 }
 
-/// A `get()` call: the call entity, the context it reads, and the function or
-/// closure it sits in.
+/// A `get()`/`get_safe()` call: the call entity, the context it reads, the
+/// function or closure it sits in, and the read's FLAVOR — a strict `get`
+/// demands the bare value (and the coverage fence); a `safe` read receives
+/// `Option<T>` and never fences (reactive-turns.md §5.1).
 struct GetSite {
     call_id: Id,
     context: Id,
     owner: Node,
+    safe: bool,
 }
 
 /// A `run(value, body)` call: the call entity, the context, the value argument,
@@ -95,11 +100,28 @@ struct Plan {
     /// `(context, closure, provider node)` — the closure reuses the provider's
     /// parameter rather than taking its own.
     captures: Vec<(Id, Id, Id)>,
-    /// `get()` calls to replace with a read of the in-scope parameter.
-    gets: Vec<(Id, Id, Node)>,
+    /// `get()`/`get_safe()` calls to replace with a read of the in-scope
+    /// parameter; `wrap_some` marks a safe read inside a STRICT holder, whose
+    /// bare value must be `Some`-wrapped.
+    gets: Vec<(Id, Id, Node, bool)>,
     /// Calls to needs-context functions, to thread the value into, as
-    /// `(call, context, owner)`.
-    thread_calls: Vec<(Id, Id, Node)>,
+    /// `(call, context, owner, wrap_some)` — `wrap_some` for the
+    /// covered→safe boundary (a strict holder supplying an `Option` callee).
+    thread_calls: Vec<(Id, Id, Node, bool)>,
+    /// Top-level calls to SAFE-flavored functions: the one entry point with
+    /// no value to give — append a literal `None`.
+    top_level_nones: Vec<Id>,
+    /// Safe reads INSIDE the entry `main`, which the transformer inlines at
+    /// top level (it can carry no hidden parameter): each becomes a literal
+    /// `None`.
+    none_gets: Vec<Id>,
+    /// Calls from the entry `main` to safe callees: the argument is a
+    /// literal `None` (main holds no value).
+    none_threads: Vec<Id>,
+    /// The `Option::Some` / `Option::None` variant entities, for synthesizing
+    /// wraps; resolved once when any safe site exists.
+    some_variant: Option<Id>,
+    none_variant: Option<Id>,
     /// `run` calls to lower to `body(value)`.
     runs: Vec<RunSite>,
     /// `Context::new()` calls to lower to an opaque value.
@@ -155,10 +177,23 @@ fn analyze(
     program: &Program,
     graph: &CallGraph,
     get_fn: Id,
+    get_safe_fn: Option<Id>,
     run_fn: Id,
     new_fn: Id,
 ) -> Result<Plan, Vec<Error>> {
     let mut errors = Vec::new();
+
+    // The entry `main` is special: the transformer inlines its body as the
+    // program's top-level statements, so it can never carry a hidden
+    // parameter — and semantically it IS the uncovered root. Its safe reads
+    // become literal `None`s; a STRICT-needy main fences like any
+    // top-level-called function.
+    let entry_main: Option<Id> = program
+        .scopes
+        .get(&program.global_scope_id)
+        .and_then(|scope| scope.name_to_id_map.get("main"))
+        .copied()
+        .filter(|id| program.functions.contains_key(id));
 
     // call id -> the function/closure it sits in.
     let mut owner_of: HashMap<Id, Node> = HashMap::new();
@@ -180,14 +215,17 @@ fn analyze(
         };
         if target == new_fn {
             news.push(call_id);
-        } else if target == get_fn {
-            // `receiver.get()` — argument 0 is the receiver.
+        } else if target == get_fn || Some(target) == get_safe_fn {
+            let safe = Some(target) == get_safe_fn;
+            // `receiver.get()` / `receiver.get_safe()` — argument 0 is the
+            // receiver.
             let receiver = function_call.argument_ids.first().copied();
             let context = receiver.and_then(|receiver| local_target(program, receiver));
             let (Some(context), Some(&owner)) = (context, owner_of.get(&call_id)) else {
+                let method = if safe { "get_safe" } else { "get" };
                 errors.push(Error {
                     span: span_of(program, call_id),
-                    msg: "`get` must be called on a context bound to a name".to_string(),
+                    msg: format!("`{method}` must be called on a context bound to a name"),
                 });
                 continue;
             };
@@ -196,6 +234,7 @@ fn analyze(
                 call_id,
                 context,
                 owner,
+                safe,
             });
         } else if target == run_fn {
             // `receiver.run(value, body)` — arguments [receiver, value, body].
@@ -559,6 +598,65 @@ fn analyze(
             }
         }
 
+        // --- Flavor (reactive-turns.md §5.1): STRICT nodes hold the bare
+        // value (a strict `get`, or a call through an injected closure,
+        // reaches them) and keep the coverage fence; the rest of `needs` is
+        // SAFE — it holds `Option<T>` and never fences. Strictness propagates
+        // backward exactly like `needs` (a caller of a strict node must
+        // supply the bare value), so strict ⊆ needs.
+        let mut strict: HashSet<Id> = HashSet::new();
+        let mut strict_worklist: Vec<Id> = Vec::new();
+        for get in gets
+            .iter()
+            .filter(|get| get.context == context && !get.safe)
+        {
+            if strict.insert(get.owner.id()) {
+                strict_worklist.push(get.owner.id());
+            }
+        }
+        for (owner, _call) in injected_calls.get(&context).into_iter().flatten() {
+            if strict.insert(owner.id()) {
+                strict_worklist.push(owner.id());
+            }
+        }
+        loop {
+            while let Some(id) = strict_worklist.pop() {
+                for caller in graph.callers_of(id) {
+                    if strict.insert(caller.id()) {
+                        strict_worklist.push(caller.id());
+                    }
+                }
+                for caller in dispatch_callers.get(&id).into_iter().flatten() {
+                    if strict.insert(*caller) {
+                        strict_worklist.push(*caller);
+                    }
+                }
+            }
+            // A dispatch site whose needy candidates MIX flavors would need
+            // two argument forms at one call — promote its safe candidates
+            // to strict (they gain the fence) and re-propagate.
+            let mut promoted = false;
+            for (_caller, _call_id, candidates) in &dispatch_sites {
+                let needy: Vec<Id> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|candidate| needs.contains(candidate))
+                    .collect();
+                if needy.is_empty() || needy.iter().all(|id| !strict.contains(id)) {
+                    continue;
+                }
+                for id in needy {
+                    if strict.insert(id) {
+                        strict_worklist.push(id);
+                        promoted = true;
+                    }
+                }
+            }
+            if !promoted {
+                break;
+            }
+        }
+
         let run_closure_ids: HashSet<Id> = run_closures
             .iter()
             .filter(|(_, bound)| **bound == context)
@@ -575,15 +673,21 @@ fn analyze(
         // --- Coverage (greatest fixpoint): assume every node is covered, then
         // remove any that can be entered without the value. A `run` closure
         // always receives the value from `run`, so it is covered even when it
-        // doesn't read the context itself (a nested closure may capture it). ---
+        // doesn't read the context itself (a nested closure may capture it).
+        // Only STRICT nodes are checked — a safe node legitimately runs
+        // uncovered (its parameter is then `None`). ---
         let mut bound: HashSet<Id> = needs
             .iter()
             .copied()
             .chain(run_closure_ids.iter().copied())
             .collect();
+        // The inlined entry `main` never receives a value.
+        if let Some(main) = entry_main {
+            bound.remove(&main);
+        }
         loop {
             let mut removed = false;
-            for &id in &needs {
+            for &id in &strict {
                 if !bound.contains(&id) || run_closure_ids.contains(&id) {
                     continue;
                 }
@@ -621,8 +725,12 @@ fn analyze(
             }
         }
 
-        // Any get whose owner stayed unbound is read outside every `run`.
-        for get in gets.iter().filter(|get| get.context == context) {
+        // Any STRICT get whose owner stayed unbound is read outside every
+        // `run`; a safe read never fences.
+        for get in gets
+            .iter()
+            .filter(|get| get.context == context && !get.safe)
+        {
             if !bound.contains(&get.owner.id()) {
                 errors.push(Error {
                     span: span_of(program, get.call_id),
@@ -687,9 +795,18 @@ fn analyze(
         // closure does, even one not in `needs`, since `run` always passes it
         // the value (a nested closure may capture it).
         let mut param_nodes: HashSet<Id> = run_closure_ids.clone();
+        // node -> the node whose parameter it reads (itself, or the capture
+        // provider) — the parameter's FLAVOR is the provider's.
+        let mut provider_of: HashMap<Id, Id> = HashMap::new();
         for &id in &needs {
+            if entry_main == Some(id) {
+                // Inlined at top level — no parameter to declare; its reads
+                // and threads become literal `None`s below.
+                continue;
+            }
             if is_function(id) || run_closure_ids.contains(&id) {
                 param_nodes.insert(id);
+                provider_of.insert(id, id);
             } else {
                 // A captured closure: walk up to the nearest enclosing node that
                 // holds the value (a function or `run` closure).
@@ -697,24 +814,51 @@ fn analyze(
                 while let Some(parent) = provider {
                     if is_function(parent) || run_closure_ids.contains(&parent) {
                         plan.captures.push((context, id, parent));
+                        provider_of.insert(id, parent);
                         break;
                     }
                     provider = graph.closure_parent_of(parent);
                 }
             }
         }
+        for &id in &param_nodes {
+            provider_of.entry(id).or_insert(id);
+        }
         for id in param_nodes {
             plan.param_nodes.push((context, id));
         }
+        // A parameter holds the BARE value when its provider is strict or a
+        // `run` closure (which `run` hands the bare value); otherwise it
+        // holds `Option<T>`.
+        let holds_bare = |node: Id| -> bool {
+            provider_of
+                .get(&node)
+                .map(|provider| strict.contains(provider) || run_closure_ids.contains(provider))
+                .unwrap_or(false)
+        };
 
         for get in gets.iter().filter(|get| get.context == context) {
-            plan.gets.push((get.call_id, context, get.owner));
+            if entry_main == Some(get.owner.id()) {
+                // Only reachable for SAFE reads (a strict get in main already
+                // failed the fence): the value is definitionally absent.
+                plan.none_gets.push(get.call_id);
+                continue;
+            }
+            // A safe read of a BARE holder wraps; everything else reads the
+            // parameter as-is (bare for strict gets, `Option` for safe reads
+            // in safe holders).
+            let wrap_some = get.safe && holds_bare(get.owner.id());
+            plan.gets.push((get.call_id, context, get.owner, wrap_some));
         }
 
         // Thread the value into every call from a needs-context node to a
         // needs-context function — direct calls, and dispatch sites whose
         // candidate callees include a needy one (B14; a candidate that does
-        // not need the value ignores the extra trailing argument).
+        // not need the value ignores the extra trailing argument). The
+        // argument form follows the flavors: bare→bare and Option→Option
+        // pass the parameter through; a BARE holder supplying a SAFE callee
+        // `Some`-wraps (the covered→safe boundary). Safe→strict cannot occur
+        // (strictness propagated to the caller).
         for &node_id in &needs {
             let Some(&owner) = graph.nodes().iter().find(|node| node.id() == node_id) else {
                 continue;
@@ -722,7 +866,17 @@ fn analyze(
             for call in graph.calls_of(node_id) {
                 if let CallTarget::Function(callee) = call.target {
                     if needs.contains(&callee) {
-                        plan.thread_calls.push((call.call_id, context, owner));
+                        if entry_main == Some(node_id) {
+                            // main holds no value: safe callees get `None`
+                            // (a strict callee under main already fenced).
+                            if !strict.contains(&callee) {
+                                plan.none_threads.push(call.call_id);
+                            }
+                            continue;
+                        }
+                        let wrap_some = !strict.contains(&callee) && holds_bare(node_id);
+                        plan.thread_calls
+                            .push((call.call_id, context, owner, wrap_some));
                     }
                 }
             }
@@ -731,18 +885,74 @@ fn analyze(
             if !needs.contains(caller) {
                 continue;
             }
-            if !candidates.iter().any(|candidate| needs.contains(candidate)) {
+            let needy: Vec<Id> = candidates
+                .iter()
+                .copied()
+                .filter(|candidate| needs.contains(candidate))
+                .collect();
+            if needy.is_empty() {
                 continue;
             }
             let Some(&owner) = graph.nodes().iter().find(|node| node.id() == *caller) else {
                 continue;
             };
-            plan.thread_calls.push((*call_id, context, owner));
+            // Mixed flavors were promoted away: needy candidates are now all
+            // strict or all safe.
+            let callee_safe = needy.iter().all(|id| !strict.contains(id));
+            let wrap_some = callee_safe && holds_bare(*caller);
+            plan.thread_calls
+                .push((*call_id, context, owner, wrap_some));
         }
         // Calls through injected closures: the caller's value rides as the
-        // deferred trailing argument.
+        // deferred trailing argument (the bare channel).
         for (owner, call_id) in injected_calls.get(&context).into_iter().flatten() {
-            plan.thread_calls.push((*call_id, context, *owner));
+            plan.thread_calls.push((*call_id, context, *owner, false));
+        }
+        // Top-level calls to safe functions: the entry point with no value —
+        // a literal `None` rides along. (Top-level calls to STRICT functions
+        // already failed the fence.)
+        for (&call_id, function_call) in &program.function_calls {
+            if owned_call_ids.contains(&call_id) {
+                continue;
+            }
+            let Some(target) = local_target(program, function_call.subject_id) else {
+                continue;
+            };
+            if needs.contains(&target) && !strict.contains(&target) {
+                plan.top_level_nones.push(call_id);
+            }
+        }
+    }
+
+    // Safe reads synthesize `Some`/`None` — resolve the `Option` variant
+    // entities once. Missing `Option` with safe sites in play is a hard
+    // error rather than a miscompile.
+    let any_safe = gets.iter().any(|get| get.safe);
+    if any_safe || !plan.top_level_nones.is_empty() || !plan.none_threads.is_empty() {
+        let variants = program
+            .enums
+            .values()
+            .find(|enum_| enum_.name == "Option")
+            .and_then(|enum_| program.scopes.get(&enum_.variants_scope_id))
+            .map(|scope| {
+                (
+                    scope.name_to_id_map.get("Some").copied(),
+                    scope.name_to_id_map.get("None").copied(),
+                )
+            });
+        match variants {
+            Some((Some(some_variant), Some(none_variant))) => {
+                plan.some_variant = Some(some_variant);
+                plan.none_variant = Some(none_variant);
+            }
+            _ => errors.push(Error {
+                span: crate::span::Span {
+                    start: 0,
+                    end: 0,
+                    context: (),
+                },
+                msg: "`get_safe` needs `std::option::Option` loaded".to_string(),
+            }),
         }
     }
 
@@ -786,22 +996,124 @@ fn apply(program: &mut Program, plan: Plan) {
         }
     }
 
-    // `get()` becomes a read of the in-scope parameter.
-    for &(call_id, context, owner) in &plan.gets {
+    let empty_span = crate::span::Span {
+        start: 0,
+        end: 0,
+        context: (),
+    };
+    // Synthesizes `Some(parameter)`: a fresh call to the `Option::Some`
+    // variant constructor. The transformer lowers a variant-subject call to
+    // the variant value directly, so no method records are needed.
+    let mut wrap_in_some = |program: &mut Program, parameter: Id, next: &mut dyn FnMut() -> Id| {
+        let some_variant = plan
+            .some_variant
+            .expect("safe sites resolved the Option variants");
+        let subject = next();
+        program
+            .entity_map
+            .insert(subject, Expr::Local(some_variant));
+        let value_reference = next();
+        program
+            .entity_map
+            .insert(value_reference, Expr::Local(parameter));
+        let call = next();
+        program.function_calls.insert(
+            call,
+            crate::analyzer::FunctionCall {
+                id: call,
+                subject_id: subject,
+                generic_argument_ids: Vec::new(),
+                argument_ids: vec![value_reference],
+                arguments_span: empty_span,
+            },
+        );
+        program.entity_map.insert(call, Expr::Call(call));
+        call
+    };
+
+    // `get()` becomes a read of the in-scope parameter; a safe read of a
+    // BARE holder becomes `Some(parameter)` (the get's own call entity is
+    // rewritten into the wrap, its method records purged like `run`'s).
+    for &(call_id, context, owner, wrap_some) in &plan.gets {
         if let Some(&parameter) = source.get(&(context, owner.id())) {
-            program.entity_map.insert(call_id, Expr::Local(parameter));
+            if wrap_some {
+                let some_variant = plan
+                    .some_variant
+                    .expect("safe sites resolved the Option variants");
+                let subject = fresh();
+                program
+                    .entity_map
+                    .insert(subject, Expr::Local(some_variant));
+                let value_reference = fresh();
+                program
+                    .entity_map
+                    .insert(value_reference, Expr::Local(parameter));
+                if let Some(call) = program.function_calls.get_mut(&call_id) {
+                    call.subject_id = subject;
+                    call.generic_argument_ids = Vec::new();
+                    call.argument_ids = vec![value_reference];
+                }
+                program.method_call_substitution.remove(&call_id);
+                program.generic_dispatch.remove(&call_id);
+            } else {
+                program.entity_map.insert(call_id, Expr::Local(parameter));
+            }
         }
     }
 
     // Each call to a needs-context function gets the value appended as an
-    // argument, referencing the caller's parameter.
-    for &(call_id, context, owner) in &plan.thread_calls {
+    // argument — the caller's parameter, `Some`-wrapped at a covered→safe
+    // boundary.
+    for &(call_id, context, owner, wrap_some) in &plan.thread_calls {
         if let Some(&parameter) = source.get(&(context, owner.id())) {
-            let reference = fresh();
-            program.entity_map.insert(reference, Expr::Local(parameter));
+            let argument = if wrap_some {
+                wrap_in_some(program, parameter, &mut fresh)
+            } else {
+                let reference = fresh();
+                program.entity_map.insert(reference, Expr::Local(parameter));
+                reference
+            };
             if let Some(call) = program.function_calls.get_mut(&call_id) {
-                call.argument_ids.push(reference);
+                call.argument_ids.push(argument);
             }
+        }
+    }
+
+    // Safe reads inside the inlined entry `main` are literal `None`s.
+    for &call_id in &plan.none_gets {
+        let none_variant = plan
+            .none_variant
+            .expect("safe sites resolved the Option variants");
+        program
+            .entity_map
+            .insert(call_id, Expr::Local(none_variant));
+    }
+
+    // Calls from the entry `main` to safe callees carry a literal `None`.
+    for &call_id in &plan.none_threads {
+        let none_variant = plan
+            .none_variant
+            .expect("safe sites resolved the Option variants");
+        let reference = fresh();
+        program
+            .entity_map
+            .insert(reference, Expr::Local(none_variant));
+        if let Some(call) = program.function_calls.get_mut(&call_id) {
+            call.argument_ids.push(reference);
+        }
+    }
+
+    // Top-level calls to safe functions carry a literal `None`.
+    for &call_id in &plan.top_level_nones {
+        let none_variant = plan
+            .none_variant
+            .expect("safe sites resolved the Option variants");
+        let reference = fresh();
+        program
+            .entity_map
+            .insert(reference, Expr::Local(none_variant));
+        if let Some(call) = program.function_calls.get_mut(&call_id) {
+            call.argument_ids.push(reference);
         }
     }
 

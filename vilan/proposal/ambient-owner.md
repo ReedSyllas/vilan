@@ -135,7 +135,13 @@ callbacks and post-`await` registrations included (§1).
 - **Error-message anchoring**: the static fence's diagnostic points at the
   `get()` inside `std::reactive` when the uncovered path starts in user code;
   anchoring it at the uncovered root's call site is a diagnostics follow-up.
-- **`get_safe`** (§2.1), with the `Option`-parameter sketch.
+- ~~**`get_safe`** (§2.1), with the `Option`-parameter sketch~~ — **SHIPPED
+  2026-07-09** as reactive-turns.md §5.1's prerequisite (its first real
+  consumer): strict/safe FLAVORS on the threading pass — strictness
+  propagates backward and keeps the fence; safe holders carry `Option<T>`;
+  the covered→safe boundary `Some`-wraps; top-level calls to safe functions
+  append a literal `None`; and the inlined entry `main` (which can carry no
+  hidden parameter) reads/threads literal `None`s.
 
 ## 5. Context-typed closure parameters — SHIPPED 2026-07-07 (backlog B15)
 
