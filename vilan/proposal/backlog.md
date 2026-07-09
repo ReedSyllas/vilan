@@ -48,10 +48,22 @@ have gaps.
    the boundary-ownership model — the fold-scope-into-View question resolved as
    `mount_root`/`comp` roots owning everything ambiently).
 
-6. **Ambient microtask flush + async turns/actions** (M–L; the future sections of
-   `reactive-batching.md`) — auto-`flush` on the next microtask (committed, deferred), and the
-   optimistic-write → `await` → reconcile lifecycle for handlers that span ticks. The async-turn
-   half interacts with C3 (no-view-across-`await`).
+6. **Reactive turns — scoped flush + async turns** (M–L; **proposal:
+   `reactive-turns.md`, 2026-07-09** — supersedes the original "auto-flush on the next
+   microtask" sketch, which a review scenario killed: the scheduler's single global
+   pending queue means one request's `flush` drains every interleaved request's
+   notifications, and a global microtask hook makes that routine). The redesign: a
+   `Turn` (queue + policy) established through `turn_scope: Context<Turn>` at
+   boundaries — UI events/`mount_root` (`AtSuspension`: settle at each await +
+   end, the optimistic-paint cadence), `serve_connected`/RPC dispatch (`AtEnd`:
+   transactional) — with `set` routing via `get_safe` (no turn → inline, status
+   quo), `flush` draining only the ambient turn, `batch` dissolving into
+   join-or-create. Context capture-at-creation makes a request's turn follow its
+   own awaits (the A5 probes). Prerequisite sub-slice: **`get_safe`** (the A5
+   tail's first real consumer). Honest limit recorded: turns isolate NOTIFICATION
+   waves, not value visibility on shared signals (eager commit; last-flush-wins).
+   The optimistic-write → reconcile lifecycle remains the follow-on, riding turns.
+   C3 shipped, so nothing blocks this.
 
 7. **Server-side rendering (SSR) + hydration vs resumability** (L–XL; recorded 2026-07-08;
    proposal first) — render the initial UI as HTML on the server (first paint before any JS,
