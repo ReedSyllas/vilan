@@ -194,17 +194,31 @@ have gaps.
 
 1. **`Weak<T>`** (M) — non-owning handle for breaking `Shared` cycles.
 
-2. **Dynamic rule-4** (M) — the write-while-view-live trap (a write through one path while a live
-   view of the same place exists).
+2. **Dynamic rule-4** (M; **re-scoped 2026-07-09 by `proposal/view-invalidation.md`**) — the
+   STATIC half (a mutating call on the viewed root: `a.remove(i)`, `a.push(x)`,
+   `free_fn(&mut a)` — constant or dynamic index alike, via `&mut` conventions) moves into
+   the rule-4 scan as event **E2** of that proposal; what remains HERE is the genuinely
+   dynamic remainder — writes through ALIASED paths (two `Shared` handles to one cell) —
+   runtime-check territory (generation counters / poisoned views), to be sized only after
+   E2/E3 have been in use.
 
-3. **No-view-across-`await`** (M) — reject a second-class view held across a suspension point.
-   Open sub-question: whether `Shared`'s view is exempt (a ref-counted cell, so the usual escape
-   restriction may be false). Interacts with A6's async turns.
+3. **No-view-across-`await`** (M; **proposal: `view-invalidation.md` §3, settled
+   2026-07-09**) — reject a view live across a suspension point, as event **E3** of the
+   unified invalidating-events model: one lexical-liveness scan, three events (E1
+   reassignment — shipped; E2 mutating call; E3 `await`). Includes the signature rule
+   (async fns take no `&`/`&mut` parameters), the async-closure capture rule, and the
+   sub-question ANSWERED: `Shared` is NOT exempt (the handle pins the cell — memory-safe —
+   but another turn's write still reseats elements under the view; re-acquire after the
+   await). Ground rule for A6, not blocked by it.
 
 4. **Deterministic destruction** (L) — scope-end destructors / `Drop`-equivalent.
 
 5. **Transparent-references remainder** (M; `transparent-references.md` shipped the model) —
-   two sub-items:
+   three sub-items:
+   - **Scalar views don't auto-deref in argument position** (found 2026-07-09 probing
+     `view-invalidation.md`): `print(b)` for `let b = &mut a[0]` prints the raw
+     `(base, key)` pair (`[ [ 99 ], 0 ]`) instead of the element — a view passed where a
+     value is expected (at least for `any`-typed parameters) leaks the representation.
    - **Inline `Option<&mut T>` transient:** `match Some(&mut a) { Some(let x) => … }` —
      constructing and matching a wrapped view *inline* is only recognized when the subject is a
      view-returning *call*; extend `compute_wrapped_view_captures` (and the escape analysis) to
@@ -477,6 +491,21 @@ have gaps.
    surface is what remains trusting: a missing/mistyped field decodes to `undefined` and flows
    onward as garbage — the *silent* failure mode. Wanted: decode reports an error (a `Result`, or
    at minimum a `panic` naming the field) when a field is absent or the wrong shape.
+
+4. **Subscript absence semantics** (S–M; surfaced 2026-07-09 by
+   `proposal/view-invalidation.md` §1's P1 case) — what `a[0]` means — read, write, or
+   `&mut a[0]` view — when the element does not exist (`mut a = []; let b = &mut a[0]`).
+   Today nothing consults bounds: a read is JS `undefined`, a write CREATES the slot (probed:
+   a stale view write RESURRECTS a popped element), and a subscript VIEW mints its
+   `(base, key)` pair regardless — all silent. (The empty-LITERAL spelling happens to error
+   today, but only because the element type never grounds, with a circular message —
+   "cannot index List (only a `List` is indexable)" — fix the message with the item.) Bounds, not
+   aliasing (deliberately out of the view-invalidation proposal's scope: it is the same
+   question with or without a view). Design space: panic (checked subscript, `get()` stays
+   the `Option` form), `undefined`-propagation (status quo, unacceptable long-term), or
+   making bare subscript reads a compile error in favor of `get()`. Interacts with I3's
+   silent-`undefined` theme and F3/F4 (a native backend cannot silently grow on
+   out-of-bounds write).
 
 ---
 
