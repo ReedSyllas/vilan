@@ -1107,11 +1107,19 @@ macro fun nibble_char(digit: u32): str {
 macro fun route_block(name: str, statements: List<str>): str {
 	import macro_std::build::{ quote, indent };
 
+	// The route body runs inside a fresh per-dispatch TURN
+	// (proposal/reactive-turns.md): the generated closure below is STORED at
+	// registration (capture-at-creation would see nothing), but the `turn`
+	// call happens at INVOCATION, and its literal contains the DIRECT call
+	// into the user's handler method — so the turn threads compile-time into
+	// real handler code, and one request's signal writes settle as one wave.
 	let label = quote(name);
 	mut closure = i".on({label}, |request| \{\n";
+	closure = closure + indent("turn(FlushPolicy::AtEnd, || {", 1) + "\n";
 	for statement in statements {
-		closure = closure + indent(statement, 1) + "\n";
+		closure = closure + indent(statement, 2) + "\n";
 	}
+	closure = closure + indent("})", 1) + "\n";
 	closure + "})"
 }
 
@@ -1299,6 +1307,7 @@ macro fun service(item: Item): Source {
 	let imports = "import std::rpc::{ Transport, Dispatcher, RpcError, RpcOutcome, RemoteSource, call, arg, reply, decode_failed, session_of, connect_socket, SocketTransport, bridge, ReactiveClient };\n"
 		+ "import std::wire::{ Codec, Serializer };\n"
 		+ "import std::result::Result;\n"
-		+ "import std::option::Option;\n";
+		+ "import std::option::Option;\n"
+		+ "import std::reactive::{ turn, FlushPolicy };\n";
 	source(imports + service_impl + client_struct.render() + client_impl.render() + connect_impl)
 }

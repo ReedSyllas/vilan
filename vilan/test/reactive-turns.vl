@@ -1,0 +1,64 @@
+// Turn-scoped flush (proposal/reactive-turns.md): a `Turn` owns its pending
+// queue, so two extents can never drain each other's notifications — the
+// two-requests scenario, distilled — and a turn follows its own extent's
+// continuations across `await` (capture-at-creation).
+import std::print;
+import std::reactive::{ Signal, Subscription, Turn, FlushPolicy, turn_scope, turn, batch, flush };
+
+async fun tick() {
+	let _beat = 1;
+}
+
+fun main() {
+	let a = Signal::new(0);
+	let b = Signal::new(0);
+	let _watch_a = a.sub(|value| print(i"a -> {value}"));
+	let _watch_b = b.sub(|value| print(i"b -> {value}"));
+
+	// Isolation: two open extents; B's flush must not fire A's pending.
+	let turn_a = Turn::new();
+	let turn_b = Turn::new();
+	turn_scope.run(turn_a, || {
+		a.set(1);
+	});
+	turn_scope.run(turn_b, || {
+		b.set(1);
+		flush();
+	});
+	print("mid");
+	turn_scope.run(turn_a, || flush());
+
+	// `turn` settles at the extent's end; writes coalesce until then.
+	turn(FlushPolicy::AtEnd, || {
+		a.set(2);
+		b.set(2);
+		print("inside");
+	});
+
+	// `batch` with no ambient turn creates one (at-end).
+	batch(|| {
+		a.set(3);
+		print("batched");
+	});
+
+	// `batch` under an ambient turn JOINS it: the outer settle fires once.
+	turn(FlushPolicy::AtEnd, || {
+		batch(|| {
+			a.set(4);
+		});
+		print("joined");
+	});
+
+	// A turn follows its own continuations across await: the async block
+	// captures turn_c, so its post-await set queues (and drains) there.
+	let turn_c = Turn::new();
+	turn_scope.run(turn_c, || {
+		let task = async {
+			await tick();
+			a.set(5);
+			flush();
+		};
+	});
+	print("end-sync");
+}
+main();

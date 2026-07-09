@@ -1,10 +1,37 @@
 # Reactive turns — flush is scoped, not global (A6 redesigned)
 
-Status: **PROPOSED 2026-07-09.** Design from review discussion (the
-two-requests scenario); not started. Supersedes A6's original sketch
-("auto-`flush` on the next microtask") — the microtask hook dissolves into
-boundary-established turns. Prerequisite sub-slice: `get_safe`
-(ambient-owner.md §2.1's recorded tail — its first real consumer appeared).
+Status: **CORE SHIPPED 2026-07-09** — `get_safe` (§5.1) and the Turn
+machinery + server boundary (§5.2–5.3) landed the same day; §5.5's
+optimistic-reconcile follow-on and the `AtSuspension` await-hook remain
+recorded. Three implementation findings amended the design:
+
+1. **Injected bodies, not captured** (`turn` AND `batch`): a batch body is a
+   literal at the call site, created BEFORE the extent exists —
+   capture-at-creation would hand it the caller's (usually absent) turn. Both
+   enter through `run`, which supplies the turn to the deferred literal;
+   `batch`'s join arm re-establishes the CURRENT turn (same queue, outer
+   settle).
+2. **Drain affinity — the one runtime device.** A notify fired during a
+   drain may `set` (a derived recomputing), but notifiers are closures
+   created anywhere; compile-time capture cannot hand them the draining
+   turn. A `set` with no ambient turn joins the currently draining one
+   (a module-level stack, pushed/popped around the synchronous drain loop —
+   it can never cross an `await` or interleave extents). This is what keeps
+   cascades coalescing (the glitch-free dedup) inside their own settle.
+3. **The boundary must sit where user code is called DIRECTLY.** Stored
+   handler closures capture at REGISTRATION (nothing), so wrapping an outer
+   dispatch in a turn cannot reach them. `[service]`-generated routes wrap
+   their bodies in `turn(AtEnd, ..)` — the generated literal contains the
+   direct call into the user's handler method, so the turn threads
+   compile-time into real handler code. MANUAL `dispatcher.on(|req| ..)`
+   handlers self-`batch` (one line, documented); `std::ui` event listeners
+   have the same stored shape, so the UI boundary is RECORDED, not shipped —
+   it wants storable injected closures (a B15 extension) or the async hook.
+
+Supersedes A6's original sketch ("auto-`flush` on the next microtask") — the
+microtask hook dissolves into boundary-established turns. Prerequisite
+sub-slice: `get_safe` (ambient-owner.md §2.1's recorded tail — shipped with
+strict/safe flavors on the threading pass).
 
 ## 0. The problem
 

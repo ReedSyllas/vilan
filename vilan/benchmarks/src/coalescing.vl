@@ -70,9 +70,17 @@ fun run() {
 		match decode_failed(request) {
 			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
 			None => {
-				counter.set(counter.get() + by);
-				counter.set(counter.get() + by);
-				counter.set(counter.get() + by);
+				// A MANUAL handler closure is created at registration —
+				// outside any extent (capture-at-creation) — so it wraps its
+				// own writes in a `batch`: the injected body receives the
+				// batch's fresh turn, and the three writes settle as one
+				// wave. ([service]-generated routes get this per-dispatch
+				// turn automatically.)
+				batch(|| {
+					counter.set(counter.get() + by);
+					counter.set(counter.get() + by);
+					counter.set(counter.get() + by);
+				});
 				reply(counter.get())
 			},
 		}

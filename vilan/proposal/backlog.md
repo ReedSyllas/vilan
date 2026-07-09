@@ -48,8 +48,17 @@ have gaps.
    the boundary-ownership model — the fold-scope-into-View question resolved as
    `mount_root`/`comp` roots owning everything ambiently).
 
-6. **Reactive turns — scoped flush + async turns** (M–L; **proposal:
-   `reactive-turns.md`, 2026-07-09** — supersedes the original "auto-flush on the next
+6. **Reactive turns — scoped flush + async turns** (M–L; **CORE SHIPPED
+   2026-07-09** — `get_safe` + `Turn`/`turn_scope`/`flush`/`turn`/`batch` in
+   `std::reactive` (injected bodies; drain-affinity stack for mid-settle
+   cascades — the one runtime device; per-turn dedup + budget) + the server
+   boundary (`[service]` routes wrap their bodies in per-dispatch `turn(AtEnd, ..)`;
+   manual `dispatcher.on` handlers self-`batch`, as the coalescing benchmark now
+   spells). REMAINING, recorded in the proposal status: the `AtSuspension`
+   await-boundary auto-flush (async-lowering hook), the `std::ui` event boundary
+   (stored listeners capture at registration — wants storable injected closures,
+   a B15 extension), and the optimistic-write → reconcile follow-on. Original
+   design: **proposal: `reactive-turns.md`, 2026-07-09** — supersedes the original "auto-flush on the next
    microtask" sketch, which a review scenario killed: the scheduler's single global
    pending queue means one request's `flush` drains every interleaved request's
    notifications, and a global microtask hook makes that routine). The redesign: a

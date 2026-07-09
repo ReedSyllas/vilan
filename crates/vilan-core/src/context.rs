@@ -88,6 +88,16 @@ struct RunSite {
     closure_id: Option<Id>,
 }
 
+/// How a threaded call site obtains one context's argument: the caller's
+/// own parameter (bare or already-`Option`), that parameter `Some`-wrapped
+/// (the covered→safe boundary), or a literal `None` (an entry point with no
+/// value — a top-level call, or the inlined entry `main`).
+enum ThreadForm {
+    Param { owner: Node },
+    WrapSome { owner: Node },
+    NoneLiteral,
+}
+
 /// The rewrite to apply once analysis succeeds. Node ids are sorted/owned so the
 /// plan outlives the borrow of the call graph.
 #[derive(Default)]
@@ -104,20 +114,16 @@ struct Plan {
     /// parameter; `wrap_some` marks a safe read inside a STRICT holder, whose
     /// bare value must be `Some`-wrapped.
     gets: Vec<(Id, Id, Node, bool)>,
-    /// Calls to needs-context functions, to thread the value into, as
-    /// `(call, context, owner, wrap_some)` — `wrap_some` for the
-    /// covered→safe boundary (a strict holder supplying an `Option` callee).
-    thread_calls: Vec<(Id, Id, Node, bool)>,
-    /// Top-level calls to SAFE-flavored functions: the one entry point with
-    /// no value to give — append a literal `None`.
-    top_level_nones: Vec<Id>,
+    /// Calls to needs-context functions, to thread one context's argument
+    /// into, as `(call, context, form)`. ONE channel for every append, built
+    /// context-by-context, so a call site's arguments accumulate in
+    /// `contexts` order — matching the callee's parameter order — whatever
+    /// mix of forms it needs.
+    thread_calls: Vec<(Id, Id, ThreadForm)>,
     /// Safe reads INSIDE the entry `main`, which the transformer inlines at
     /// top level (it can carry no hidden parameter): each becomes a literal
     /// `None`.
     none_gets: Vec<Id>,
-    /// Calls from the entry `main` to safe callees: the argument is a
-    /// literal `None` (main holds no value).
-    none_threads: Vec<Id>,
     /// The `Option::Some` / `Option::None` variant entities, for synthesizing
     /// wraps; resolved once when any safe site exists.
     some_variant: Option<Id>,
@@ -583,8 +589,21 @@ fn analyze(
                 worklist.push(owner.id());
             }
         }
+        // A closure that RECEIVES the value as its own parameter — a `run`
+        // body for this context, or a deferred (injected) literal — does not
+        // capture from its creator, so needs must not leak to its parent.
+        let own_param_closure = |id: Id| -> bool {
+            run_closures.get(&id) == Some(&context)
+                || deferred
+                    .get(&context)
+                    .is_some_and(|closures| closures.contains(&id))
+        };
         // Backward reachability: a caller of a needs-context node needs it too
-        // — through direct edges and through dispatch (B14).
+        // — through direct edges, through dispatch (B14), and — for CAPTURING
+        // closures only — through the enclosing scope (the closure reads its
+        // provider's parameter, so the provider must hold one; a stored
+        // notify closure created inside `map` makes `map` needy, and `map`
+        // created under a turn then hands that turn to the closure).
         while let Some(id) = worklist.pop() {
             for caller in graph.callers_of(id) {
                 if needs.insert(caller.id()) {
@@ -594,6 +613,13 @@ fn analyze(
             for caller in dispatch_callers.get(&id).into_iter().flatten() {
                 if needs.insert(*caller) {
                     worklist.push(*caller);
+                }
+            }
+            if !own_param_closure(id) {
+                if let Some(parent) = graph.closure_parent_of(id) {
+                    if needs.insert(parent) {
+                        worklist.push(parent);
+                    }
                 }
             }
         }
@@ -629,6 +655,13 @@ fn analyze(
                 for caller in dispatch_callers.get(&id).into_iter().flatten() {
                     if strict.insert(*caller) {
                         strict_worklist.push(*caller);
+                    }
+                }
+                if !own_param_closure(id) {
+                    if let Some(parent) = graph.closure_parent_of(id) {
+                        if strict.insert(parent) {
+                            strict_worklist.push(parent);
+                        }
                     }
                 }
             }
@@ -798,26 +831,47 @@ fn analyze(
         // node -> the node whose parameter it reads (itself, or the capture
         // provider) — the parameter's FLAVOR is the provider's.
         let mut provider_of: HashMap<Id, Id> = HashMap::new();
+        // Nodes with no value source: the inlined entry `main` (it can carry
+        // no hidden parameter), and any closure whose provider chain roots at
+        // it — their safe reads and threads become literal `None`s.
+        let mut none_rooted: HashSet<Id> = HashSet::new();
+        if let Some(main) = entry_main {
+            if needs.contains(&main) {
+                none_rooted.insert(main);
+            }
+        }
         for &id in &needs {
             if entry_main == Some(id) {
-                // Inlined at top level — no parameter to declare; its reads
-                // and threads become literal `None`s below.
                 continue;
             }
             if is_function(id) || run_closure_ids.contains(&id) {
                 param_nodes.insert(id);
                 provider_of.insert(id, id);
             } else {
-                // A captured closure: walk up to the nearest enclosing node that
-                // holds the value (a function or `run` closure).
+                // A captured closure: walk up to the nearest enclosing node
+                // that holds the value (a function or `run` closure). A walk
+                // that lands on the entry `main` first has no value to
+                // capture — the closure is None-rooted.
                 let mut provider = graph.closure_parent_of(id);
-                while let Some(parent) = provider {
-                    if is_function(parent) || run_closure_ids.contains(&parent) {
-                        plan.captures.push((context, id, parent));
-                        provider_of.insert(id, parent);
-                        break;
+                loop {
+                    match provider {
+                        Some(parent) if entry_main == Some(parent) => {
+                            none_rooted.insert(id);
+                            break;
+                        }
+                        Some(parent)
+                            if is_function(parent) || run_closure_ids.contains(&parent) =>
+                        {
+                            plan.captures.push((context, id, parent));
+                            provider_of.insert(id, parent);
+                            break;
+                        }
+                        Some(parent) => provider = graph.closure_parent_of(parent),
+                        None => {
+                            none_rooted.insert(id);
+                            break;
+                        }
                     }
-                    provider = graph.closure_parent_of(parent);
                 }
             }
         }
@@ -838,8 +892,8 @@ fn analyze(
         };
 
         for get in gets.iter().filter(|get| get.context == context) {
-            if entry_main == Some(get.owner.id()) {
-                // Only reachable for SAFE reads (a strict get in main already
+            if none_rooted.contains(&get.owner.id()) {
+                // Only reachable for SAFE reads (a strict get here already
                 // failed the fence): the value is definitionally absent.
                 plan.none_gets.push(get.call_id);
                 continue;
@@ -866,17 +920,25 @@ fn analyze(
             for call in graph.calls_of(node_id) {
                 if let CallTarget::Function(callee) = call.target {
                     if needs.contains(&callee) {
-                        if entry_main == Some(node_id) {
-                            // main holds no value: safe callees get `None`
-                            // (a strict callee under main already fenced).
+                        if none_rooted.contains(&node_id) {
+                            // No value here: safe callees get `None` (a
+                            // strict callee under a None root already
+                            // fenced).
                             if !strict.contains(&callee) {
-                                plan.none_threads.push(call.call_id);
+                                plan.thread_calls.push((
+                                    call.call_id,
+                                    context,
+                                    ThreadForm::NoneLiteral,
+                                ));
                             }
                             continue;
                         }
-                        let wrap_some = !strict.contains(&callee) && holds_bare(node_id);
-                        plan.thread_calls
-                            .push((call.call_id, context, owner, wrap_some));
+                        let form = if !strict.contains(&callee) && holds_bare(node_id) {
+                            ThreadForm::WrapSome { owner }
+                        } else {
+                            ThreadForm::Param { owner }
+                        };
+                        plan.thread_calls.push((call.call_id, context, form));
                     }
                 }
             }
@@ -899,14 +961,25 @@ fn analyze(
             // Mixed flavors were promoted away: needy candidates are now all
             // strict or all safe.
             let callee_safe = needy.iter().all(|id| !strict.contains(id));
-            let wrap_some = callee_safe && holds_bare(*caller);
-            plan.thread_calls
-                .push((*call_id, context, owner, wrap_some));
+            if none_rooted.contains(caller) {
+                if callee_safe {
+                    plan.thread_calls
+                        .push((*call_id, context, ThreadForm::NoneLiteral));
+                }
+                continue;
+            }
+            let form = if callee_safe && holds_bare(*caller) {
+                ThreadForm::WrapSome { owner }
+            } else {
+                ThreadForm::Param { owner }
+            };
+            plan.thread_calls.push((*call_id, context, form));
         }
         // Calls through injected closures: the caller's value rides as the
         // deferred trailing argument (the bare channel).
         for (owner, call_id) in injected_calls.get(&context).into_iter().flatten() {
-            plan.thread_calls.push((*call_id, context, *owner, false));
+            plan.thread_calls
+                .push((*call_id, context, ThreadForm::Param { owner: *owner }));
         }
         // Top-level calls to safe functions: the entry point with no value —
         // a literal `None` rides along. (Top-level calls to STRICT functions
@@ -919,7 +992,8 @@ fn analyze(
                 continue;
             };
             if needs.contains(&target) && !strict.contains(&target) {
-                plan.top_level_nones.push(call_id);
+                plan.thread_calls
+                    .push((call_id, context, ThreadForm::NoneLiteral));
             }
         }
     }
@@ -928,7 +1002,11 @@ fn analyze(
     // entities once. Missing `Option` with safe sites in play is a hard
     // error rather than a miscompile.
     let any_safe = gets.iter().any(|get| get.safe);
-    if any_safe || !plan.top_level_nones.is_empty() || !plan.none_threads.is_empty() {
+    let any_none = plan
+        .thread_calls
+        .iter()
+        .any(|(_, _, form)| matches!(form, ThreadForm::NoneLiteral));
+    if any_safe || any_none {
         let variants = program
             .enums
             .values()
@@ -1004,7 +1082,7 @@ fn apply(program: &mut Program, plan: Plan) {
     // Synthesizes `Some(parameter)`: a fresh call to the `Option::Some`
     // variant constructor. The transformer lowers a variant-subject call to
     // the variant value directly, so no method records are needed.
-    let mut wrap_in_some = |program: &mut Program, parameter: Id, next: &mut dyn FnMut() -> Id| {
+    let wrap_in_some = |program: &mut Program, parameter: Id, next: &mut dyn FnMut() -> Id| {
         let some_variant = plan
             .some_variant
             .expect("safe sites resolved the Option variants");
@@ -1064,18 +1142,35 @@ fn apply(program: &mut Program, plan: Plan) {
     // Each call to a needs-context function gets the value appended as an
     // argument — the caller's parameter, `Some`-wrapped at a covered→safe
     // boundary.
-    for &(call_id, context, owner, wrap_some) in &plan.thread_calls {
-        if let Some(&parameter) = source.get(&(context, owner.id())) {
-            let argument = if wrap_some {
-                wrap_in_some(program, parameter, &mut fresh)
-            } else {
+    for &(call_id, context, ref form) in &plan.thread_calls {
+        let argument = match *form {
+            ThreadForm::Param { owner } => {
+                let Some(&parameter) = source.get(&(context, owner.id())) else {
+                    continue;
+                };
                 let reference = fresh();
                 program.entity_map.insert(reference, Expr::Local(parameter));
                 reference
-            };
-            if let Some(call) = program.function_calls.get_mut(&call_id) {
-                call.argument_ids.push(argument);
             }
+            ThreadForm::WrapSome { owner } => {
+                let Some(&parameter) = source.get(&(context, owner.id())) else {
+                    continue;
+                };
+                wrap_in_some(program, parameter, &mut fresh)
+            }
+            ThreadForm::NoneLiteral => {
+                let none_variant = plan
+                    .none_variant
+                    .expect("safe sites resolved the Option variants");
+                let reference = fresh();
+                program
+                    .entity_map
+                    .insert(reference, Expr::Local(none_variant));
+                reference
+            }
+        };
+        if let Some(call) = program.function_calls.get_mut(&call_id) {
+            call.argument_ids.push(argument);
         }
     }
 
@@ -1087,34 +1182,6 @@ fn apply(program: &mut Program, plan: Plan) {
         program
             .entity_map
             .insert(call_id, Expr::Local(none_variant));
-    }
-
-    // Calls from the entry `main` to safe callees carry a literal `None`.
-    for &call_id in &plan.none_threads {
-        let none_variant = plan
-            .none_variant
-            .expect("safe sites resolved the Option variants");
-        let reference = fresh();
-        program
-            .entity_map
-            .insert(reference, Expr::Local(none_variant));
-        if let Some(call) = program.function_calls.get_mut(&call_id) {
-            call.argument_ids.push(reference);
-        }
-    }
-
-    // Top-level calls to safe functions carry a literal `None`.
-    for &call_id in &plan.top_level_nones {
-        let none_variant = plan
-            .none_variant
-            .expect("safe sites resolved the Option variants");
-        let reference = fresh();
-        program
-            .entity_map
-            .insert(reference, Expr::Local(none_variant));
-        if let Some(call) = program.function_calls.get_mut(&call_id) {
-            call.argument_ids.push(reference);
-        }
     }
 
     // `run(value, body)` becomes `body(value)`: the body closure is the new

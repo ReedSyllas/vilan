@@ -8654,3 +8654,87 @@ fn the_strict_fence_is_unchanged_by_get_safe() {
         "can be reached without an enclosing `run`",
     );
 }
+
+// --- reactive-turns §5.2: turn-scoped flush — the isolation model. ---
+
+#[test]
+fn a_turn_flush_cannot_drain_another_turns_queue() {
+    // The two-requests scenario, distilled: B's flush must not fire A's
+    // pending notification.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Turn, turn_scope, flush };
+
+        fun main() {
+            let a = Signal::new(0);
+            let _watch = a.sub(|value| print(i"a {value}"));
+            let turn_a = Turn::new();
+            let turn_b = Turn::new();
+            turn_scope.run(turn_a, || {
+                a.set(1);
+            });
+            turn_scope.run(turn_b, || flush());
+            print("b flushed");
+            turn_scope.run(turn_a, || flush());
+        }
+        main();
+        "#,
+        "a 0\nb flushed\na 1\n",
+    );
+}
+
+#[test]
+fn a_batch_body_defers_even_at_the_top_level() {
+    // The batch body is INJECTED (created before the extent exists), so its
+    // writes defer to batch's own fresh turn — the shipped batch semantics,
+    // now per-extent instead of a global depth counter.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, batch };
+
+        fun main() {
+            let count = Signal::new(0);
+            let _watch = count.sub(|value| print(i"seen {value}"));
+            batch(|| {
+                count.set(1);
+                count.set(2);
+                print("settling");
+            });
+        }
+        main();
+        "#,
+        "seen 0\nsettling\nseen 2\n",
+    );
+}
+
+#[test]
+fn a_turn_follows_its_extents_continuation_across_await() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Turn, turn_scope, flush };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let count = Signal::new(0);
+            let _watch = count.sub(|value| print(i"seen {value}"));
+            let mine = Turn::new();
+            turn_scope.run(mine, || {
+                let task = async {
+                    await tick();
+                    count.set(7);
+                    flush();
+                };
+            });
+            print("sync done");
+        }
+        main();
+        "#,
+        "seen 0\nsync done\nseen 7\n",
+    );
+}

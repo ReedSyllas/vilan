@@ -61,7 +61,8 @@ function $a(old_keys, old_items, items, key_of) {
 	return [ steps, removed ];
 }
 const next_subscriber_id = __shared_new(0);
-const scheduler = [ __shared_new([  ]), __shared_new(0), __shared_new(false) ];
+const turn_scope = null;
+const draining_turns = __shared_new([  ]);
 const owner_scope = null;
 show($a([ 1, 2, 3 ], [ 10, 20, 30 ], [ 30, 10, 20 ], (item) => {
 	return Math.trunc(item / 10);
