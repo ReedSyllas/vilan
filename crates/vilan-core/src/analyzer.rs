@@ -1397,6 +1397,138 @@ impl<'src> Analyzer<'src> {
                 }
             }
         }
+        // --- Construction sites: a struct literal or enum-variant call ---
+        // --- binding a DECLARED generic must satisfy the declaration's  ---
+        // --- bounds, independent of whether the value ever meets a call ---
+        // --- bound (`Kennel2 { inner = cat }` with `struct Kennel2<T:   ---
+        // --- Greet>` is wrong at the literal).                          ---
+        let mut constructions: Vec<(Id, &'src str, Vec<TypeId>, Vec<TypeId>)> = Vec::new();
+        for (&initializer_id, &struct_def_id) in &self.struct_initializer_to_def {
+            let Some(struct_) = self.structs.get(&struct_def_id) else {
+                continue;
+            };
+            if struct_.generic_parameter_constraint_ids.is_empty() {
+                continue;
+            }
+            let Some(Type::Struct(_, arguments)) = self.type_of_expr(initializer_id) else {
+                continue;
+            };
+            constructions.push((
+                initializer_id,
+                struct_.name,
+                struct_.generic_parameter_constraint_ids.clone(),
+                arguments,
+            ));
+        }
+        // A variant construction records neither a substitution nor a
+        // concretely-typed call expr (its type stays in the enum's own
+        // generic terms; the instantiation materializes downstream), so the
+        // bindings are derived HERE: reconcile each declared payload type
+        // against the matching argument's type, keying on the enum's
+        // declared constraints.
+        let variant_calls: Vec<(Id, Id, usize, Vec<Id>)> = self
+            .function_calls
+            .iter()
+            .filter_map(|(&call_id, function_call)| {
+                let subject_expr = self.expr_id_to_expr_map.get(&function_call.subject_id);
+                let target_expr = match subject_expr {
+                    Some(Expr::Local(target_id)) => self.expr_id_to_expr_map.get(target_id),
+                    other => other,
+                };
+                let Some(Expr::EnumVariant(enum_id, variant_index)) = target_expr else {
+                    return None;
+                };
+                Some((
+                    call_id,
+                    *enum_id,
+                    *variant_index,
+                    function_call.argument_ids.clone(),
+                ))
+            })
+            .collect();
+        for (call_id, enum_id, variant_index, argument_ids) in variant_calls {
+            let Some(enum_) = self.enums.get(&enum_id) else {
+                continue;
+            };
+            if enum_.generic_parameter_constraint_ids.is_empty() {
+                continue;
+            }
+            let Some(variant) = enum_.variants.get(variant_index) else {
+                continue;
+            };
+            let enum_name = enum_.name;
+            let declared_constraints = enum_.generic_parameter_constraint_ids.clone();
+            let payload_type_ids = variant.data_type_ids.clone();
+            let mut bindings: SubstitutionContext = SubstitutionContext::new();
+            for (payload_type_id, argument_id) in payload_type_ids.iter().zip(&argument_ids) {
+                let payload_type = payload_type_id.get_type(self);
+                let Some(argument_type) = self.type_of_expr(*argument_id) else {
+                    continue;
+                };
+                if let Some((_unified, pairs)) =
+                    self.reconcile_type(&payload_type, &argument_type, &bindings)
+                {
+                    for (constraint_id, bound_type_id) in pairs {
+                        if declared_constraints.contains(&constraint_id) {
+                            bindings.insert(constraint_id, bound_type_id);
+                        }
+                    }
+                }
+            }
+            // Check exactly the constraints THIS variant's payload binds — a
+            // multi-generic enum's variant may bind only some (`Pair::Left(a)`
+            // binds `A`, not `B`), and `Slot::Empty` binds none.
+            let mut bound_constraints = Vec::new();
+            let mut bound_arguments = Vec::new();
+            for constraint_id in &declared_constraints {
+                if let Some(bound_type_id) = bindings.get(constraint_id) {
+                    bound_constraints.push(*constraint_id);
+                    bound_arguments.push(*bound_type_id);
+                }
+            }
+            if bound_constraints.is_empty() {
+                continue;
+            }
+            constructions.push((call_id, enum_name, bound_constraints, bound_arguments));
+        }
+        for (site_id, owner_name, declared_constraints, arguments) in constructions {
+            for (constraint_id, argument_type_id) in declared_constraints.iter().zip(arguments) {
+                let bound_traits = self.generic_bound_traits(*constraint_id);
+                if bound_traits.is_empty() {
+                    continue;
+                }
+                let argument_type = argument_type_id.get_type(self);
+                if matches!(
+                    argument_type,
+                    Type::Any | Type::Unknown | Type::Unresolved | Type::Trait(..)
+                ) {
+                    continue;
+                }
+                for (required_trait_id, _trait_arguments) in &bound_traits {
+                    if self.satisfies_trait_bound(&argument_type, *required_trait_id, 0) {
+                        continue;
+                    }
+                    let Some(trait_name) = self.traits.get(required_trait_id).map(|t| t.name)
+                    else {
+                        continue;
+                    };
+                    let type_label = self.pretty_print_type(&argument_type, &HashMap::new());
+                    let msg = if matches!(argument_type, Type::Generic(_)) {
+                        format!(
+                            "generic parameter '{type_label}' is missing the bound \
+                             ': {trait_name}' required by '{owner_name}'"
+                        )
+                    } else {
+                        format!(
+                            "'{type_label}' does not implement trait '{trait_name}', \
+                             required by a declared bound of '{owner_name}'"
+                        )
+                    };
+                    errors.push((**self.span_map.get(&site_id).unwrap_or(&&EMPTY_SPAN), msg));
+                }
+            }
+        }
+
         // The substitution maps iterate in hash order — sort for deterministic
         // diagnostics, and dedup: one call can bind the same constraint along
         // several recorded routes.

@@ -7577,3 +7577,135 @@ fn an_inherited_binder_bound_conditions_the_impl() {
         "does not implement trait 'Show'",
     );
 }
+
+// --- B12 family: DECLARED bounds check at CONSTRUCTION — a struct literal ---
+// --- or enum-variant call binding a declared generic must satisfy it.     ---
+
+#[test]
+fn a_struct_literal_satisfying_the_declared_bound_compiles() {
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        struct Kennel2<T: Greet> {{ inner: T }}
+        fun main() {{
+            let _kennel = Kennel2 {{ inner = Dog {{ name = "rex" }} }};
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_struct_literal_violating_the_declared_bound_is_rejected() {
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        struct Kennel2<T: Greet> {{ inner: T }}
+        fun main() {{
+            let _kennel = Kennel2 {{ inner = Cat {{ name = "tom" }} }};
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"Kennel2 {{ inner = Cat {{ name = "tom" }} }}"#
+            .replace("{{", "{")
+            .replace("}}", "}")
+            .as_str(),
+        "does not implement trait 'Greet'",
+    );
+}
+
+#[test]
+fn an_enum_variant_violating_the_declared_bound_is_rejected() {
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        enum Slot<T: Greet> {{
+            Filled(T),
+            Empty,
+        }}
+        fun main() {{
+            let _slot = Slot::Filled(Cat {{ name = "tom" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
+
+#[test]
+fn an_enum_variant_satisfying_the_declared_bound_compiles() {
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        enum Slot<T: Greet> {{
+            Filled(T),
+            Empty,
+        }}
+        fun main() {{
+            let _slot = Slot::Filled(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_generic_struct_literal_with_a_bounded_forward_compiles() {
+    // Construction inside a generic function whose parameter re-declares the
+    // bound is legal.
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        struct Kennel2<T: Greet> {{ inner: T }}
+        fun pack<U: Greet>(value: U) {{
+            let _kennel = Kennel2 {{ inner = value }};
+        }}
+        fun main() {{
+            pack(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    ));
+}
+
+// KNOWN GAP: an UNBOUNDED generic filling a bounded declared parameter
+// (`fun pack<U>(value: U) { Kennel2 { inner = value } }`) is not rejected —
+// the initializer's type-argument fallback publishes the parameter's own
+// constraint when the binding is unbound, so post-solve the argument is
+// indistinguishable from satisfied. The root fix is in initializer inference
+// (bind the declared parameter from a generic field value instead of falling
+// back), not in the checker. Un-ignore when that lands.
+#[test]
+#[ignore]
+fn a_generic_struct_literal_with_an_unbounded_forward_is_rejected() {
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        struct Kennel2<T: Greet> {{ inner: T }}
+        fun pack<U>(value: U) {{
+            let _kennel = Kennel2 {{ inner = value }};
+        }}
+        fun main() {{
+            pack(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
+
+#[test]
+fn a_partially_binding_variant_still_checks_its_bound_parameter() {
+    // `Pair::Left` binds only `A` — the check must still fire on `A` even
+    // though `B` stays unbound at this construction.
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        enum Pair<A: Greet, B: Greet> {{
+            Left(A),
+            Right(B),
+        }}
+        fun main() {{
+            let _left = Pair::Left(Cat {{ name = "tom" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
