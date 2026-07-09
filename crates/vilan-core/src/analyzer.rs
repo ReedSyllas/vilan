@@ -1269,6 +1269,7 @@ impl<'src> Analyzer<'src> {
         &mut self,
         value_type: &Type,
         required_trait_id: Id,
+        required_arguments: &[TypeId],
         depth: u32,
     ) -> bool {
         // Conditional impls recurse through their arguments; a pathological
@@ -1288,7 +1289,11 @@ impl<'src> Analyzer<'src> {
                         .contains(&required_trait_id)
                 });
         }
-        let candidate_subjects: Vec<TypeId> = self
+        // Each candidate keeps the arguments it provides for the required
+        // trait when it names it DIRECTLY (`with Feed<i32>`); a match via a
+        // subtrait stays trait-level (v1 — supertrait argument threading is
+        // recorded, not taken).
+        let candidates: Vec<(TypeId, Option<Vec<TypeId>>)> = self
             .implementations
             .iter()
             .filter(|implementation| {
@@ -1297,9 +1302,16 @@ impl<'src> Analyzer<'src> {
                         .contains(&required_trait_id)
                 })
             })
-            .map(|implementation| implementation.subject)
+            .map(|implementation| {
+                let provided = implementation
+                    .trait_args
+                    .iter()
+                    .find(|(provided_trait, _)| *provided_trait == required_trait_id)
+                    .map(|(_, arguments)| arguments.clone());
+                (implementation.subject, provided)
+            })
             .collect();
-        'candidates: for subject_id in candidate_subjects {
+        'candidates: for (subject_id, provided_arguments) in candidates {
             let subject_type = subject_id.get_type(self);
             // Reconcile subject-first so the bindings key on the impl's
             // binders (`impl Box2<type X>` against `Box2<Cat>` binds X = Cat).
@@ -1308,6 +1320,7 @@ impl<'src> Analyzer<'src> {
             else {
                 continue;
             };
+            let binding_context: SubstitutionContext = bindings.iter().copied().collect();
             for (binder_constraint_id, argument_type_id) in bindings {
                 let binder_traits = self.generic_bound_traits(binder_constraint_id);
                 if binder_traits.is_empty() {
@@ -1322,9 +1335,57 @@ impl<'src> Analyzer<'src> {
                 ) {
                     continue;
                 }
-                for (binder_trait_id, _arguments) in binder_traits {
-                    if !self.satisfies_trait_bound(&argument_type, binder_trait_id, depth + 1) {
+                for (binder_trait_id, binder_trait_arguments) in binder_traits {
+                    // The binder bound's own arguments (`X: Feed<i32>`) are in
+                    // the impl's terms — substitute before recursing.
+                    let substituted: Vec<TypeId> = binder_trait_arguments
+                        .iter()
+                        .map(|argument| {
+                            let argument = argument.get_type(self);
+                            self.substitute_type(&argument, &binding_context)
+                                .get_type_id(self)
+                        })
+                        .collect();
+                    if !self.satisfies_trait_bound(
+                        &argument_type,
+                        binder_trait_id,
+                        &substituted,
+                        depth + 1,
+                    ) {
                         continue 'candidates;
+                    }
+                }
+            }
+            // Bound ARGUMENTS: an impl naming the required trait directly must
+            // provide matching arguments (`Feed<str>` never satisfies
+            // `: Feed<i32>`); indeterminate sides stay lenient.
+            if !required_arguments.is_empty() {
+                if let Some(provided_arguments) = provided_arguments {
+                    if provided_arguments.len() == required_arguments.len() {
+                        for (required_id, provided_id) in
+                            required_arguments.iter().zip(&provided_arguments)
+                        {
+                            let required_type = required_id.get_type(self);
+                            let provided_type = provided_id.get_type(self);
+                            let provided_type =
+                                self.substitute_type(&provided_type, &binding_context);
+                            let indeterminate = |type_: &Type| {
+                                matches!(
+                                    type_,
+                                    Type::Any
+                                        | Type::Unknown
+                                        | Type::Unresolved
+                                        | Type::Generic(_)
+                                        | Type::Trait(..)
+                                )
+                            };
+                            if indeterminate(&required_type) || indeterminate(&provided_type) {
+                                continue;
+                            }
+                            if !self.compare_type(&required_type, &provided_type, &HashMap::new()) {
+                                continue 'candidates;
+                            }
+                        }
                     }
                 }
             }
@@ -1345,17 +1406,13 @@ impl<'src> Analyzer<'src> {
     /// trait-parameter bindings).
     fn check_generic_bound_satisfaction(&mut self) {
         let mut errors: Vec<(Span, String)> = Vec::new();
-        let recorded: Vec<(Id, TypeId, TypeId)> = self
+        let recorded: Vec<(Id, SubstitutionContext)> = self
             .method_call_substitution
             .iter()
-            .flat_map(|(call_id, substitution)| {
-                substitution.iter().map(|(&constraint_id, &value_type_id)| {
-                    (*call_id, constraint_id, value_type_id)
-                })
-            })
+            .map(|(call_id, substitution)| (*call_id, substitution.clone()))
             .collect();
-        for (call_id, constraint_id, value_type_id) in recorded {
-            {
+        for (call_id, substitution) in recorded {
+            for (&constraint_id, &value_type_id) in &substitution {
                 let bound_traits = self.generic_bound_traits(constraint_id);
                 if bound_traits.is_empty() {
                     continue;
@@ -1370,11 +1427,28 @@ impl<'src> Analyzer<'src> {
                 ) {
                     continue;
                 }
-                for (required_trait_id, _trait_arguments) in &bound_traits {
-                    if self.satisfies_trait_bound(&value_type, *required_trait_id, 0) {
+                for (required_trait_id, required_arguments) in &bound_traits {
+                    // A parameterized bound's arguments are written in the
+                    // callee's generic terms (`F: Feed<T>`) — the same call's
+                    // substitution grounds them.
+                    let required_arguments: Vec<TypeId> = required_arguments
+                        .iter()
+                        .map(|argument| {
+                            let argument = argument.get_type(self);
+                            self.substitute_type(&argument, &substitution)
+                                .get_type_id(self)
+                        })
+                        .collect();
+                    if self.satisfies_trait_bound(
+                        &value_type,
+                        *required_trait_id,
+                        &required_arguments,
+                        0,
+                    ) {
                         continue;
                     }
-                    let Some(trait_name) = self.traits.get(required_trait_id).map(|t| t.name)
+                    let Some(trait_label) =
+                        self.bound_trait_label(*required_trait_id, &required_arguments)
                     else {
                         continue;
                     };
@@ -1385,11 +1459,11 @@ impl<'src> Analyzer<'src> {
                     let msg = if matches!(value_type, Type::Generic(_)) {
                         format!(
                             "generic parameter '{type_label}' is missing the bound \
-                             ': {trait_name}' required by this call"
+                             ': {trait_label}' required by this call"
                         )
                     } else {
                         format!(
-                            "'{type_label}' does not implement trait '{trait_name}', \
+                            "'{type_label}' does not implement trait '{trait_label}', \
                              required by a generic bound of this call"
                         )
                     };
@@ -1492,7 +1566,15 @@ impl<'src> Analyzer<'src> {
             constructions.push((call_id, enum_name, bound_constraints, bound_arguments));
         }
         for (site_id, owner_name, declared_constraints, arguments) in constructions {
-            for (constraint_id, argument_type_id) in declared_constraints.iter().zip(arguments) {
+            // A declared bound's arguments may name SIBLING parameters
+            // (`struct S<A, B: Feed<A>>`) — ground them in this
+            // construction's own bindings.
+            let declared_bindings: SubstitutionContext = declared_constraints
+                .iter()
+                .copied()
+                .zip(arguments.iter().copied())
+                .collect();
+            for (constraint_id, argument_type_id) in declared_constraints.iter().zip(&arguments) {
                 let bound_traits = self.generic_bound_traits(*constraint_id);
                 if bound_traits.is_empty() {
                     continue;
@@ -1504,11 +1586,25 @@ impl<'src> Analyzer<'src> {
                 ) {
                     continue;
                 }
-                for (required_trait_id, _trait_arguments) in &bound_traits {
-                    if self.satisfies_trait_bound(&argument_type, *required_trait_id, 0) {
+                for (required_trait_id, required_arguments) in &bound_traits {
+                    let required_arguments: Vec<TypeId> = required_arguments
+                        .iter()
+                        .map(|argument| {
+                            let argument = argument.get_type(self);
+                            self.substitute_type(&argument, &declared_bindings)
+                                .get_type_id(self)
+                        })
+                        .collect();
+                    if self.satisfies_trait_bound(
+                        &argument_type,
+                        *required_trait_id,
+                        &required_arguments,
+                        0,
+                    ) {
                         continue;
                     }
-                    let Some(trait_name) = self.traits.get(required_trait_id).map(|t| t.name)
+                    let Some(trait_label) =
+                        self.bound_trait_label(*required_trait_id, &required_arguments)
                     else {
                         continue;
                     };
@@ -1516,11 +1612,11 @@ impl<'src> Analyzer<'src> {
                     let msg = if matches!(argument_type, Type::Generic(_)) {
                         format!(
                             "generic parameter '{type_label}' is missing the bound \
-                             ': {trait_name}' required by '{owner_name}'"
+                             ': {trait_label}' required by '{owner_name}'"
                         )
                     } else {
                         format!(
-                            "'{type_label}' does not implement trait '{trait_name}', \
+                            "'{type_label}' does not implement trait '{trait_label}', \
                              required by a declared bound of '{owner_name}'"
                         )
                     };
@@ -1537,6 +1633,23 @@ impl<'src> Analyzer<'src> {
         for (span, msg) in errors {
             self.diagnostics.push(Error { span, msg });
         }
+    }
+
+    /// The user-facing label of a bound trait: bare (`Greet`) or with its
+    /// grounded arguments (`Feed<i32>`), matching how the bound reads.
+    fn bound_trait_label(&mut self, trait_id: Id, arguments: &[TypeId]) -> Option<String> {
+        let name = self.traits.get(&trait_id).map(|trait_| trait_.name)?;
+        if arguments.is_empty() {
+            return Some(name.to_string());
+        }
+        let rendered: Vec<String> = arguments
+            .iter()
+            .map(|argument| {
+                let argument = argument.get_type(self);
+                self.pretty_print_type(&argument, &HashMap::new())
+            })
+            .collect();
+        Some(format!("{name}<{}>", rendered.join(", ")))
     }
 
     /// Whether a concrete `subject_type` implements `trait_id` — has an

@@ -142,11 +142,22 @@ have gaps.
     bind its binders and recursively requires each binder bound — explicit
     (`impl Box2<type X: Greet> with Greet`) or inherited from the struct
     declaration — to hold at the argument (`Box2<Box2<Dog>>` greets,
-    `Box2<Cat>` errors; depth-capped, lenient past the cap). Remaining smaller
-    residuals of the family: struct-LITERAL declared bounds are unchecked
-    (`Kennel2 { inner = cat }` with `struct Kennel2<T: Greet>` constructs
-    fine; only binding through an impl errors), and bound trait ARGUMENTS
-    match at trait level only (`Feed<str>` satisfies `T: Feed<i32>`).
+    `Box2<Cat>` errors; depth-capped, lenient past the cap). **The family is
+    CLOSED 2026-07-08** (three follow-on slices, 17 more pins): construction
+    sites check DECLARED bounds (struct literals via the initializer's solved
+    arguments; enum-variant calls by locally reconciling payload types against
+    argument types — partial variants check exactly what they bind), and bound
+    trait ARGUMENTS match (`Feed<str>` no longer satisfies `F: Feed<i32>`;
+    required args ground through the call's substitution / the construction's
+    own bindings / the conditional impl's binder bindings, and errors read
+    "does not implement trait 'Feed<i32>'"). Remaining leniencies, each
+    deliberate and pinned or noted: an impl reached via a SUBTRAIT keeps
+    trait-level argument matching; generic-value bound-to-bound flow stays
+    trait-level; and one `#[ignore]` — an UNBOUNDED generic filling a bounded
+    declared parameter isn't rejected (the initializer's type-argument
+    fallback publishes the constraint itself, so post-solve it is
+    indistinguishable from satisfied; root fix belongs in initializer
+    inference).
 
 14. ~~**Context threading misses trait-default dispatch edges**~~ — **FIXED 2026-07-07**:
     the context pass adds trait-dispatch edges locally (coverage, backward needs

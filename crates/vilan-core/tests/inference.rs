@@ -7709,3 +7709,126 @@ fn a_partially_binding_variant_still_checks_its_bound_parameter() {
     );
     assert_fails(&source);
 }
+
+// --- B12 family: bound trait ARGUMENTS must match — an impl providing ---
+// --- `Feed<str>` does not satisfy `F: Feed<i32>`.                     ---
+
+const FEED_PRELUDE: &str = r#"
+    trait Feed<T> {
+        fun feed(self, food: T);
+    }
+    struct Bird { name: str }
+    struct Fish { name: str }
+    impl Bird with Feed<str> {
+        fun feed(self, food: str) {
+            let _crumbs = food;
+        }
+    }
+    impl Fish with Feed<i32> {
+        fun feed(self, food: i32) {
+            let _flakes = food;
+        }
+    }
+"#;
+
+#[test]
+fn a_matching_trait_argument_satisfies_the_bound() {
+    assert_compiles(&format!(
+        r#"{FEED_PRELUDE}
+        fun wants_numbers<F: Feed<i32>>(feeder: F) {{
+            feeder.feed(3);
+        }}
+        fun main() {{
+            wants_numbers(Fish {{ name = "bubbles" }});
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_mismatched_trait_argument_is_rejected() {
+    let source = format!(
+        r#"{FEED_PRELUDE}
+        fun wants_numbers<F: Feed<i32>>(feeder: F) {{
+            feeder.feed(3);
+        }}
+        fun main() {{
+            wants_numbers(Bird {{ name = "tweety" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"wants_numbers(Bird { name = "tweety" })"#,
+        "does not implement trait 'Feed<i32>'",
+    );
+}
+
+#[test]
+fn a_bound_argument_flowing_from_another_generic_is_checked() {
+    // `F: Feed<T>` with `T` bound by a sibling argument: eat(bird, 5) needs
+    // Feed<i32>, and Bird only provides Feed<str>.
+    assert_compiles(&format!(
+        r#"{FEED_PRELUDE}
+        fun eat<T, F: Feed<T>>(feeder: F, seed: T) {{
+            feeder.feed(seed);
+        }}
+        fun main() {{
+            eat(Bird {{ name = "tweety" }}, "worm");
+        }}
+        main();
+        "#
+    ));
+    let source = format!(
+        r#"{FEED_PRELUDE}
+        fun eat<T, F: Feed<T>>(feeder: F, seed: T) {{
+            feeder.feed(seed);
+        }}
+        fun main() {{
+            eat(Bird {{ name = "tweety" }}, 5);
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
+
+#[test]
+fn a_declared_bound_trait_argument_is_checked_at_construction() {
+    let source = format!(
+        r#"{FEED_PRELUDE}
+        struct Aviary<F: Feed<i32>> {{ feeder: F }}
+        fun main() {{
+            let _aviary = Aviary {{ feeder = Bird {{ name = "tweety" }} }};
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
+
+#[test]
+fn a_conditional_impl_binder_trait_argument_is_checked() {
+    // The binder bound carries arguments too: a box is only numeric-feedable
+    // when its content feeds on numbers.
+    let source = format!(
+        r#"{FEED_PRELUDE}
+        struct Box3<T> {{ inner: T }}
+        impl Box3<type X: Feed<i32>> with Feed<i32> {{
+            fun feed(self, food: i32) {{
+                self.inner.feed(food);
+            }}
+        }}
+        fun wants_numbers<F: Feed<i32>>(feeder: F) {{
+            feeder.feed(3);
+        }}
+        fun main() {{
+            wants_numbers(Box3 {{ inner = Bird {{ name = "tweety" }} }});
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
