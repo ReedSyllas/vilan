@@ -1256,6 +1256,99 @@ impl<'src> Analyzer<'src> {
         false
     }
 
+    /// Whether `value_type` satisfies a `: Trait` generic bound. A concrete
+    /// type satisfies it through an `impl .. with` naming the trait or any
+    /// subtrait of it (implementing `Ord` satisfies a `PartialEq` bound); a
+    /// generic argument satisfies it when its OWN declared bounds carry the
+    /// trait (bound-to-bound flow, `relay<U: Greet>` forwarding to
+    /// `describe<T: Greet>`).
+    fn satisfies_trait_bound(&self, value_type: &Type, required_trait_id: Id) -> bool {
+        if let Type::Generic(inner_constraint_id) = value_type {
+            return self
+                .generic_bound_trait_ids(*inner_constraint_id)
+                .iter()
+                .any(|declared| {
+                    self.trait_with_supertraits(*declared)
+                        .contains(&required_trait_id)
+                });
+        }
+        self.implementations.iter().any(|implementation| {
+            implementation.trait_ids.iter().any(|implemented| {
+                self.trait_with_supertraits(*implemented)
+                    .contains(&required_trait_id)
+            }) && self.compare_type(
+                value_type,
+                &implementation.subject.get_type(self),
+                &HashMap::new(),
+            )
+        })
+    }
+
+    /// B12: every recorded generic instantiation must SATISFY its parameter's
+    /// trait bounds. The solver uses bounds only to ROUTE member lookup, so a
+    /// call binding `T: Greet` to a type with no `Greet` impl used to
+    /// monomorphize to the trait's abstract (empty) member — silently doing
+    /// nothing at runtime, or surfacing as a wrong-span `void` type error from
+    /// the empty body. Post-solve, so bindings and impls (across the whole
+    /// import fixpoint) are final; `method_call_substitution` is the single
+    /// channel every instantiation shape records into (free functions incl.
+    /// explicit `f<Cat>()` arguments, method own-generics, impl-subject and
+    /// trait-parameter bindings).
+    fn check_generic_bound_satisfaction(&mut self) {
+        let mut errors: Vec<(Span, String)> = Vec::new();
+        for (call_id, substitution) in &self.method_call_substitution {
+            for (&constraint_id, &value_type_id) in substitution {
+                let bound_traits = self.generic_bound_traits(constraint_id);
+                if bound_traits.is_empty() {
+                    continue;
+                }
+                let value_type = value_type_id.get_type(self);
+                // Indeterminate values are other diagnostics' business: an
+                // unresolved binding already failed elsewhere, and a value
+                // typed AS a bare trait is the trait-object error's.
+                if matches!(
+                    value_type,
+                    Type::Any | Type::Unknown | Type::Unresolved | Type::Trait(..)
+                ) {
+                    continue;
+                }
+                for (required_trait_id, _trait_arguments) in &bound_traits {
+                    if self.satisfies_trait_bound(&value_type, *required_trait_id) {
+                        continue;
+                    }
+                    let Some(trait_name) = self.traits.get(required_trait_id).map(|t| t.name)
+                    else {
+                        continue;
+                    };
+                    let type_label = self.pretty_print_type(&value_type, &HashMap::new());
+                    // A generic argument fails by MISSING the bound on its own
+                    // declaration — name that fix; a concrete one by missing
+                    // the impl.
+                    let msg = if matches!(value_type, Type::Generic(_)) {
+                        format!(
+                            "generic parameter '{type_label}' is missing the bound \
+                             ': {trait_name}' required by this call"
+                        )
+                    } else {
+                        format!(
+                            "'{type_label}' does not implement trait '{trait_name}', \
+                             required by a generic bound of this call"
+                        )
+                    };
+                    errors.push((**self.span_map.get(call_id).unwrap_or(&&EMPTY_SPAN), msg));
+                }
+            }
+        }
+        // The substitution maps iterate in hash order — sort for deterministic
+        // diagnostics, and dedup: one call can bind the same constraint along
+        // several recorded routes.
+        errors.sort_by_key(|(span, msg)| (span.start, span.end, msg.clone()));
+        errors.dedup();
+        for (span, msg) in errors {
+            self.diagnostics.push(Error { span, msg });
+        }
+    }
+
     /// Whether a concrete `subject_type` implements `trait_id` — has an
     /// `impl Subject with Trait`. Lets a concrete value satisfy a trait-typed
     /// parameter (e.g. a `Self`-defaulted generic that resolved to the trait).
@@ -13634,6 +13727,7 @@ pub fn analyze<'src>(
     analyzer.check_wire_boundary();
     analyzer.check_rpc_signatures();
     analyzer.check_expose_fields();
+    analyzer.check_generic_bound_satisfaction();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

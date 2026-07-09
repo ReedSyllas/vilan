@@ -124,13 +124,23 @@ have gaps.
     conversion at the `!` boundary, expression lifting (`a? + 10`), applicatives, and
     `Signal`/`Promise` `Lift` opt-ins.
 
-12. **Missing-impl bound dispatch emits the abstract method** (M; found via `format(7u32)`
-    before u32 had a `Display` impl) — a generic bound's dispatch at a type LACKING the
-    impl silently monomorphizes to the trait's abstract method and returns `undefined` —
-    the silent-miscompile class. The conformance side exists (an `impl .. with` missing
-    members errors); the MONOMORPHIZATION side doesn't: instantiating a bound at a type
-    with no impl should be a spanned compile error at the call site. (The u32/BigInt
-    `Display` holes are fixed; the general check remains.)
+12. ~~**Missing-impl bound dispatch emits the abstract method**~~ — **FIXED 2026-07-08**:
+    `check_generic_bound_satisfaction`, a post-solve pass over
+    `method_call_substitution` (the one channel every instantiation shape records
+    into — free functions incl. explicit `f<Cat>()` arguments, method own-generics,
+    impl-subject and trait-parameter bindings): every binding of a bounded generic
+    must SATISFY the bound — a concrete type through an impl of the trait or any
+    SUBTRAIT of it, a generic argument through its own declared bounds
+    (bound-to-bound flow; forwarding through an under-bounded wrapper is rejected
+    at the inner call with "add `: Trait`" wording — bounds must be re-declared,
+    which is also what closes the nested-call hole: the transformer's inherited
+    substitutions never cross an unchecked edge). Spanned at the full call.
+    Eleven pins (free fn, method, multi-bound naming the missing trait, static
+    channel, trait-default-without-impl, subtrait satisfaction, generic impl
+    subject, rebounded forward, under-bounded forward). Residual (recorded in the
+    analyzer-stabilization memory): conditional-impl DEPTH — `List<Cat>` satisfies
+    a bound via `impl List<type X> with T` without checking `Cat` against `X`'s
+    own bounds; the same recursive-syntactic gap as `[derive(Wire)]`'s check.
 
 14. ~~**Context threading misses trait-default dispatch edges**~~ — **FIXED 2026-07-07**:
     the context pass adds trait-dispatch edges locally (coverage, backward needs

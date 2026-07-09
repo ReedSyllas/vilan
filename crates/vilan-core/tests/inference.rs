@@ -7203,3 +7203,256 @@ fn a_clause_can_name_an_imported_context() {
         "4\nok\n",
     );
 }
+
+// --- B12: a generic bound instantiated at a type LACKING the impl must be a ---
+// --- spanned compile error, not a silent dispatch to the abstract member.  ---
+
+// The shared shape: `Dog` implements `Greet`, `Cat` does not. `greet` returns
+// void so a miss is the fully SILENT miscompile (no return-type error to trip
+// over) — the worst form of the class.
+const GREET_PRELUDE: &str = r#"
+    trait Greet {
+        fun greet(self);
+    }
+    struct Dog { name: str }
+    struct Cat { name: str }
+    impl Dog with Greet {
+        fun greet(self) {
+            let _woof = self.name;
+        }
+    }
+"#;
+
+#[test]
+fn a_bound_satisfied_by_an_impl_still_compiles() {
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        fun describe<T: Greet>(subject: T) {{
+            subject.greet();
+        }}
+        fun main() {{
+            describe(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_free_function_bound_rejects_a_type_without_the_impl() {
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        fun describe<T: Greet>(subject: T) {{
+            subject.greet();
+        }}
+        fun main() {{
+            describe(Cat {{ name = "tom" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"describe(Cat { name = "tom" })"#,
+        "does not implement trait 'Greet'",
+    );
+}
+
+#[test]
+fn a_method_own_generic_bound_rejects_a_type_without_the_impl() {
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        struct Kennel {{ size: i32 }}
+        impl Kennel {{
+            fun admit<T: Greet>(self, guest: T) {{
+                guest.greet();
+            }}
+        }}
+        fun main() {{
+            let kennel = Kennel {{ size = 3 }};
+            kennel.admit(Cat {{ name = "tom" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"kennel.admit(Cat { name = "tom" })"#,
+        "does not implement trait 'Greet'",
+    );
+}
+
+#[test]
+fn a_multi_bound_names_the_missing_trait() {
+    // `Dog` implements `Greet` but not `Fetch` — the error must name `Fetch`.
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        trait Fetch {{
+            fun fetch(self);
+        }}
+        fun train<T: Greet + Fetch>(subject: T) {{
+            subject.greet();
+            subject.fetch();
+        }}
+        fun main() {{
+            train(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"train(Dog { name = "rex" })"#,
+        "does not implement trait 'Fetch'",
+    );
+}
+
+#[test]
+fn a_static_bound_call_rejects_a_type_without_the_impl() {
+    // The `T::member()` channel: an explicit generic argument that fails the bound.
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        trait Fresh {{
+            fun fresh(): Self;
+        }}
+        impl Dog with Fresh {{
+            fun fresh(): Self {{
+                ret Dog {{ name = "pup" }};
+            }}
+        }}
+        fun spawn<T: Fresh>(): T {{
+            ret T::fresh();
+        }}
+        fun main() {{
+            let _cat: Cat = spawn<Cat>();
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
+
+#[test]
+fn a_rebounded_forward_still_compiles() {
+    // A wrapper that re-declares the bound forwards legally.
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        fun describe<T: Greet>(subject: T) {{
+            subject.greet();
+        }}
+        fun relay<U: Greet>(subject: U) {{
+            describe(subject);
+        }}
+        fun main() {{
+            relay(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_generic_impl_subject_satisfies_the_bound() {
+    // `impl Crate2<type X> with Greet` covers every `Crate2<..>` instantiation.
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        struct Crate2<T> {{ inner: T }}
+        impl Crate2<type X> with Greet {{
+            fun greet(self) {{
+                let _hi = 1;
+            }}
+        }}
+        fun describe<T: Greet>(subject: T) {{
+            subject.greet();
+        }}
+        fun main() {{
+            describe(Crate2 {{ inner = 5 }});
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_trait_default_without_an_impl_does_not_satisfy_the_bound() {
+    // A default body is inherited THROUGH an impl; with no `impl Cat with
+    // Chatty` at all, the bound stays unsatisfied.
+    let source = r#"
+        trait Chatty {
+            fun chat(self) {
+                let _hello = 1;
+            }
+        }
+        struct Cat { name: str }
+        fun engage<T: Chatty>(subject: T) {
+            subject.chat();
+        }
+        fun main() {
+            engage(Cat { name = "tom" });
+        }
+        main();
+        "#;
+    assert_fails_spanning(
+        source,
+        r#"engage(Cat { name = "tom" })"#,
+        "does not implement trait 'Chatty'",
+    );
+}
+
+#[test]
+fn an_under_bounded_forward_is_rejected_at_the_inner_call() {
+    // Forwarding through a wrapper does NOT launder the requirement: the
+    // wrapper's own parameter must re-declare the bound (see
+    // `a_rebounded_forward_still_compiles` for the legal spelling).
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        fun describe<T: Greet>(subject: T) {{
+            subject.greet();
+        }}
+        fun outer<U>(x: U) {{
+            describe(x);
+        }}
+        fun main() {{
+            outer(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        "describe(x)",
+        "generic parameter 'U' is missing the bound ': Greet'",
+    );
+}
+
+#[test]
+fn a_bound_satisfied_through_a_subtrait_impl_compiles() {
+    // Implementing a SUBTRAIT satisfies a supertrait bound: `Loud` extends
+    // `Greet`, and `impl Dog with Loud` must satisfy `T: Greet`.
+    assert_compiles(
+        r#"
+        trait Greet {
+            fun greet(self);
+        }
+        trait Loud with Greet {
+            fun shout(self);
+        }
+        struct Dog { name: str }
+        impl Dog with Loud {
+            fun greet(self) {
+                let _quiet = 1;
+            }
+            fun shout(self) {
+                let _loud = 2;
+            }
+        }
+        fun describe<T: Greet>(subject: T) {
+            subject.greet();
+        }
+        fun main() {
+            describe(Dog { name = "rex" });
+        }
+        main();
+        "#,
+    );
+}
