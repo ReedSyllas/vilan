@@ -910,7 +910,39 @@ impl Interpreter {
             "Number.isNaN" => Ok(Value::Bool(
                 matches!(take(0), Value::Number(n) if n.is_nan()),
             )),
+            "Number.isFinite" => Ok(Value::Bool(
+                matches!(take(0), Value::Number(n) if n.is_finite()),
+            )),
             "Math.abs" => Ok(Value::Number(expect_number(&take(0))?.abs())),
+            "Math.sin" => Ok(Value::Number(expect_number(&take(0))?.sin())),
+            "Math.cos" => Ok(Value::Number(expect_number(&take(0))?.cos())),
+            "Math.tan" => Ok(Value::Number(expect_number(&take(0))?.tan())),
+            "Math.asin" => Ok(Value::Number(expect_number(&take(0))?.asin())),
+            "Math.acos" => Ok(Value::Number(expect_number(&take(0))?.acos())),
+            "Math.atan" => Ok(Value::Number(expect_number(&take(0))?.atan())),
+            "Math.atan2" => Ok(Value::Number(
+                expect_number(&take(0))?.atan2(expect_number(&take(1))?),
+            )),
+            "Math.exp" => Ok(Value::Number(expect_number(&take(0))?.exp())),
+            "Math.log" => Ok(Value::Number(expect_number(&take(0))?.ln())),
+            "Math.log2" => Ok(Value::Number(expect_number(&take(0))?.log2())),
+            "Math.log10" => Ok(Value::Number(expect_number(&take(0))?.log10())),
+            "Math.cbrt" => Ok(Value::Number(expect_number(&take(0))?.cbrt())),
+            "Math.hypot" => Ok(Value::Number(
+                expect_number(&take(0))?.hypot(expect_number(&take(1))?),
+            )),
+            "Math.sign" => {
+                // JS semantics: NaN passes through, ±0 keep their sign.
+                let n = expect_number(&take(0))?;
+                let sign = if n.is_nan() || n == 0.0 {
+                    n
+                } else if n > 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                Ok(Value::Number(sign))
+            }
             "Math.floor" => Ok(Value::Number(expect_number(&take(0))?.floor())),
             "Math.trunc" => Ok(Value::Number(expect_number(&take(0))?.trunc())),
             "Math.ceil" => Ok(Value::Number(expect_number(&take(0))?.ceil())),

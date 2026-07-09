@@ -539,26 +539,28 @@ have gaps.
    `std/src/process/rpc_server.vl`'s header). Give `Server` streaming-response support and move
    `serve_connected` onto its public surface.
 
-2. **Expand the std math surface** (S–M; recorded 2026-07-09) — today `number.vl` gives
+2. ~~**Expand the std math surface**~~ — **SHIPPED 2026-07-09**: `std::math` (constants
+   `PI`/`TAU`/`E`/`EPSILON`/`INFINITY`/`NAN` — EPSILON computed, the lexer has no exponent
+   literals — plus the `Ord` free functions `min`/`max`/`minmax` MOVED from `compare.vl`,
+   which had zero users and were latent-broken: primitives had no `Ord`); the f64 method
+   family (trig + `atan2`, `exp`/`ln`/`log2`/`log10`, `cbrt`/`hypot`, `sign`/`fract`/
+   `lerp`/`to_radians`/`to_degrees` — pi inlined there, `number.vl` must not import
+   `math` or its module-level constants emit into EVERY program — `is_nan`/`is_finite`/
+   `is_infinite`); sized-type parity (`abs` signed-only, `pow`/`min`/`max` everywhere,
+   f32 mirror incl. `sqrt`..`trunc`); truncated `rem` on every numeric type (exact for
+   ints — `/` truncates; the H5 stopgap). En route, three real fixes: the comparable
+   primitives gained `Eq`/`PartialOrd`/`Ord` impls (ints + `str` + `BigInt` total; floats
+   `PartialOrd` ONLY — the stated NaN answer: `partial_compare` is None for unordered,
+   no total-order lie; hand-written, `number.vl` is world-loaded so no macro dispatch);
+   the CONFORMANCE checker now credits a supertrait member provided by a SEPARATE impl
+   of the declaring trait on the same subject (`impl str with Eq {}` no longer demands
+   `eq` be restated — same-named members from unrelated traits still rejected; 3 pins);
+   and the macro interpreter's host table learned the `Math.*` set + `Number.isFinite`
+   (the corpus-equivalence gate caught it). Corpus `math.vl` (run-verified golden) +
+   7 pins; existing goldens byte-identical. Original wanted-list follows for the record —
+   today `number.vl` gives
    `i32` only `abs/pow/min/max` and `f64` adds `sqrt/floor/ceil/round/trunc`; generic
    `min/max/clamp/minmax` live on `Ord` (`compare.vl`); `std::random` exists. Missing,
    roughly in demand order:
-   - **`f64` methods:** trig (`sin/cos/tan`, `asin/acos/atan`, `atan2`), `exp`/`ln`/
-     `log2`/`log10`, `cbrt`, `hypot`, `sign`, `fract`, `lerp`, `to_radians`/
-     `to_degrees`, and the predicates `is_nan`/`is_finite`/`is_infinite` (NaN's
-     interaction with the shipped `PartialEq`/`Ord` families needs a stated answer,
-     not an accident).
-   - **Constants:** `PI`, `TAU`, `E`, `EPSILON`, `INFINITY`, `NAN`, and per-type
-     `MIN`/`MAX` — these need a *home*, which is the one real design point: extend the
-     method families on the numeric types (matching everything shipped so far) and put
-     constants + free-function forms in a `std::math` module, or hang constants off the
-     types (`f64::PI`) if static members fit better. Method-style should stay primary —
-     it is the established idiom.
-   - **Family parity:** F2's sized types (`i8`…`u64`, `f32`) get the applicable subset
-     (`abs` is signed-only, etc.) via the `numeric_family` macro precedent
-     (generated-once, checked in — world-loaded std files must not dispatch macros).
-   - **Remainder:** a `rem` method as the stopgap until H5's `%` operator lands
-     (numeric-types.md §5 currently spells it `x - (x / m).trunc() * m`).
-   JS lowering is trivial (`[extern]` onto `Math.*`); the native backends (F3/F4) will
-   need real implementations eventually, so keep the surface conservative — things
-   `libm` provides, not JS-isms.
+   Remaining tail (deliberately not taken): per-type `MIN`/`MAX` constants (want a
+   static-member story or per-type modules — neither exists; revisit with F5/spec work).

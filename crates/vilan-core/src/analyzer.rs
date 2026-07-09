@@ -11340,16 +11340,16 @@ impl<'src> Analyzer<'src> {
             // AND its supertraits (a member with a default body is inherited, so
             // an impl need not provide it). Implementing `X with Ord` thus
             // requires the members of `Ord` plus `Eq`/`PartialOrd`/`PartialEq`.
-            let required: Vec<&'src str> = self
+            let required: Vec<(&'src str, Id)> = self
                 .trait_with_supertraits(trait_id)
                 .into_iter()
-                .filter_map(|id| self.traits.get(&id))
-                .flat_map(|trait_| {
+                .filter_map(|id| self.traits.get(&id).map(|trait_| (id, trait_)))
+                .flat_map(|(declaring_trait_id, trait_)| {
                     trait_
                         .declarations
                         .iter()
                         .filter(|(_, member_id)| !self.member_has_default_body(**member_id))
-                        .map(|(name, _)| *name)
+                        .map(move |(name, _)| (*name, declaring_trait_id))
                 })
                 .collect();
             let subject_name = match check.subject_type_id.get_type(self) {
@@ -11360,16 +11360,48 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or("type"),
                 _ => "type",
             };
-            for member_name in required {
-                if !check.declarations.contains_key(member_name) {
-                    self.diagnostics.push(Error {
-                        span: check.span,
-                        msg: format!(
-                            "'{}' does not implement trait '{}': missing '{}'",
-                            subject_name, check.trait_name, member_name
-                        ),
-                    });
+            let check_subject_type = check.subject_type_id.get_type(self);
+            for (member_name, declaring_trait_id) in required {
+                if check.declarations.contains_key(member_name) {
+                    continue;
                 }
+                // A supertrait member may be provided by a SEPARATE impl of
+                // the declaring (super)trait on the same subject —
+                // `impl str with Eq {}` need not restate `eq` when
+                // `impl str with PartialEq` provides it. The trait gate
+                // matters: a same-named member from an UNRELATED trait's
+                // impl does not satisfy the requirement.
+                let candidates: Vec<(TypeId, Vec<Id>)> = self
+                    .implementations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, implementation)| {
+                        *index != check.implementation_index
+                            && implementation.declarations.contains_key(member_name)
+                    })
+                    .map(|(_, implementation)| {
+                        (implementation.subject, implementation.trait_ids.clone())
+                    })
+                    .collect();
+                let provided_elsewhere = candidates.iter().any(|(subject_id, trait_ids)| {
+                    trait_ids.iter().any(|implemented| {
+                        self.trait_with_supertraits(*implemented)
+                            .contains(&declaring_trait_id)
+                    }) && {
+                        let candidate_subject = subject_id.get_type(self);
+                        self.compare_type(&check_subject_type, &candidate_subject, &HashMap::new())
+                    }
+                });
+                if provided_elsewhere {
+                    continue;
+                }
+                self.diagnostics.push(Error {
+                    span: check.span,
+                    msg: format!(
+                        "'{}' does not implement trait '{}': missing '{}'",
+                        subject_name, check.trait_name, member_name
+                    ),
+                });
             }
         }
 

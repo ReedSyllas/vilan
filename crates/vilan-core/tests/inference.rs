@@ -8312,3 +8312,164 @@ fn an_await_with_no_live_views_compiles() {
         "#,
     );
 }
+
+// --- K2: the std math surface (proposal: backlog K2) ---
+
+#[test]
+fn math_constants_and_moved_free_functions_import() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::math::{ PI, TAU, E, EPSILON, min, max, minmax };
+
+        fun main() {
+            print(PI);
+            print(TAU == PI * 2f);
+            print(E > 2.7f && E < 2.8f);
+            print(EPSILON > 0f);
+            print(min(3, 9));
+            print(max(3, 9));
+            let (low, high) = minmax(9, 3);
+            print(low);
+            print(high);
+        }
+        main();
+        "#,
+        "3.141592653589793\ntrue\ntrue\ntrue\n3\n9\n3\n9\n",
+    );
+}
+
+#[test]
+fn f64_float_classification_predicates() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::math::{ NAN, INFINITY };
+
+        fun main() {
+            print(NAN.is_nan());
+            print(1.5f.is_nan());
+            print(1.5f.is_finite());
+            print(INFINITY.is_finite());
+            print(INFINITY.is_infinite());
+            print(NAN.is_infinite());
+        }
+        main();
+        "#,
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\n",
+    );
+}
+
+#[test]
+fn rem_is_truncated_remainder_across_the_families() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            print(7.rem(3));
+            print((0 - 7).rem(3));
+            print(7.5f.rem(2f));
+            print(250u8.rem(7u8));
+            print(9i64.rem(4i64));
+        }
+        main();
+        "#,
+        "1\n-1\n1.5\n5\n1\n",
+    );
+}
+
+#[test]
+fn sized_types_carry_the_applicable_math_family() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            print((0i8 - 5i8).abs());
+            print(3i16.pow(2i16));
+            print(200u16.min(90u16));
+            print(7u64.max(9u64));
+            print(2f32.pow(3f32));
+            print(2.25f32.sqrt());
+        }
+        main();
+        "#,
+        "5\n9\n90\n9\n8\n1.5\n",
+    );
+}
+
+// --- K2 side-fix: conformance credits a SEPARATE impl of the declaring ---
+// --- supertrait (impl X with Eq {} need not restate PartialEq's eq).   ---
+
+#[test]
+fn a_marker_impl_rides_a_separate_supertrait_impl() {
+    assert_compiles(
+        r#"
+        trait Alike<B = Self> {
+            fun same(self, b: B): bool;
+        }
+        trait Settled with Alike {}
+        struct Coin { face: i32 }
+        impl Coin with Alike {
+            fun same(self, b: Coin): bool {
+                self.face == b.face
+            }
+        }
+        impl Coin with Settled {}
+        fun main() {
+            let _ok = Coin { face = 1 }.same(Coin { face = 1 });
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn a_missing_supertrait_member_still_errors() {
+    let source = r#"
+        trait Alike<B = Self> {
+            fun same(self, b: B): bool;
+        }
+        trait Settled with Alike {}
+        struct Coin { face: i32 }
+        impl Coin with Settled {}
+        fun main() {
+            let _coin = Coin { face = 1 };
+        }
+        main();
+        "#;
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics.iter().any(|(message, _)| message
+            .contains("'Coin' does not implement trait 'Settled': missing 'same'")),
+        "got: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_same_named_member_from_an_unrelated_trait_does_not_satisfy() {
+    // `same` provided via an UNRELATED trait's impl must not satisfy
+    // `Settled`'s inherited requirement.
+    let source = r#"
+        trait Alike<B = Self> {
+            fun same(self, b: B): bool;
+        }
+        trait Settled with Alike {}
+        trait Lookalike {
+            fun same(self, b: Self): bool;
+        }
+        struct Coin { face: i32 }
+        impl Coin with Lookalike {
+            fun same(self, b: Coin): bool {
+                self.face == b.face
+            }
+        }
+        impl Coin with Settled {}
+        fun main() {
+            let _coin = Coin { face = 1 };
+        }
+        main();
+        "#;
+    assert_fails(source);
+}

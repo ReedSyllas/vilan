@@ -60,19 +60,41 @@ trait Ord with Eq + PartialOrd {
 	}
 }
 
-fun min<T: Ord>(a: T, b: T): T {
-	a.min(b)
+// The free-function forms of `min`/`max` (and `minmax`) moved to `std::math`
+// (backlog K2) — the trait METHODS above are the primary surface and stay.
+
+// `str` carries the full ordering family (lexicographic, the native `<`), so
+// generic `T: Ord` code (sorting, `math::min`/`max`, `clamp`) accepts it.
+// The numeric primitives' ordering impls live with their other trait impls
+// in `number.vl`; the floats are deliberately NOT `Ord` (NaN — see there).
+
+impl str with Eq {}
+
+impl str with PartialOrd {
+	fun partial_compare(self, b: str): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
 }
 
-fun max<T: Ord>(a: T, b: T): T {
-	a.max(b)
-}
-
-fun minmax<T: Ord>(a: T, b: T): (T, T) {
-	if a <= b {
-		(a, b)
-	} else {
-		(b, a)
+impl str with Ord {
+	fun compare(self, b: str): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
 	}
 }
 

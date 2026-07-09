@@ -1,8 +1,24 @@
 import pkg::default::Default;
-import pkg::compare::PartialEq;
+import pkg::compare::{ PartialEq, Eq, PartialOrd, Ord, Ordering };
+import pkg::option::Option::{ self, Some, None };
 import pkg::operators::{ Add, Sub, Mul, Div, Shl, Shr, BitAnd, BitOr, BitXor };
 
 external struct u32;
+
+impl u32 {
+	[extern("Math.pow")]
+	external fun pow(self, exponent: u32): u32;
+
+	[extern("Math.min")]
+	external fun min(self, other: u32): u32;
+
+	[extern("Math.max")]
+	external fun max(self, other: u32): u32;
+
+	fun rem(self, m: u32): u32 {
+		self - self / m * m
+	}
+}
 
 impl u32 with Default {
 	fun default(): u32 {
@@ -34,6 +50,12 @@ impl i32 {
 
 	[extern("Math.max")]
 	external fun max(self, other: i32): i32;
+
+	// Truncated remainder — exact for every integer type (`/` truncates, §F2),
+	// the stopgap spelling until the `%` operator lands (backlog H5).
+	fun rem(self, m: i32): i32 {
+		self - self / m * m
+	}
 }
 
 impl i32 with Default {
@@ -69,6 +91,101 @@ impl f64 {
 
 	[extern("Math.max")]
 	external fun max(self, other: f64): f64;
+
+	// --- Trigonometry (radians) ---
+
+	[extern("Math.sin")]
+	external fun sin(self): f64;
+
+	[extern("Math.cos")]
+	external fun cos(self): f64;
+
+	[extern("Math.tan")]
+	external fun tan(self): f64;
+
+	[extern("Math.asin")]
+	external fun asin(self): f64;
+
+	[extern("Math.acos")]
+	external fun acos(self): f64;
+
+	[extern("Math.atan")]
+	external fun atan(self): f64;
+
+	// The two-argument arctangent: `y.atan2(x)` is the angle of the point
+	// `(x, y)` — the receiver is `y`, matching the host argument order.
+	[extern("Math.atan2")]
+	external fun atan2(self, x: f64): f64;
+
+	// --- Exponentials and logarithms ---
+
+	[extern("Math.exp")]
+	external fun exp(self): f64;
+
+	// The natural logarithm (the host names it `log`; `ln` avoids the
+	// base-ambiguity trap).
+	[extern("Math.log")]
+	external fun ln(self): f64;
+
+	[extern("Math.log2")]
+	external fun log2(self): f64;
+
+	[extern("Math.log10")]
+	external fun log10(self): f64;
+
+	[extern("Math.cbrt")]
+	external fun cbrt(self): f64;
+
+	// `sqrt(x² + y²)` without intermediate overflow.
+	[extern("Math.hypot")]
+	external fun hypot(self, other: f64): f64;
+
+	// --- Shape and structure ---
+
+	// `-1`, `0`, or `1` by sign (`-0` and `NaN` pass through, host semantics).
+	[extern("Math.sign")]
+	external fun sign(self): f64;
+
+	// The fractional part, truncation's complement: `x == x.trunc() + x.fract()`.
+	fun fract(self): f64 {
+		self - self.trunc()
+	}
+
+	// Linear interpolation: `self` at `t == 0`, `to` at `t == 1`.
+	fun lerp(self, to: f64, t: f64): f64 {
+		self + (to - self) * t
+	}
+
+	// The pi literal is inlined (it also lives in `std::math::PI`): importing
+	// `math` from HERE would emit its module-level constants into every
+	// program, since `number.vl` is always loaded and module `let`s are not
+	// tree-shaken.
+	fun to_radians(self): f64 {
+		self * (3.141592653589793 / 180f)
+	}
+
+	fun to_degrees(self): f64 {
+		self * (180f / 3.141592653589793)
+	}
+
+	// Truncated remainder (sign follows the dividend, like the host `%`).
+	fun rem(self, m: f64): f64 {
+		self - (self / m).trunc() * m
+	}
+
+	// --- Classification ---
+
+	// IEEE: NaN is the one value that is not equal to itself.
+	fun is_nan(self): bool {
+		self != self
+	}
+
+	[extern("Number.isFinite")]
+	external fun is_finite(self): bool;
+
+	fun is_infinite(self): bool {
+		!self.is_finite() && !self.is_nan()
+	}
 }
 
 impl f64 with Default {
@@ -82,6 +199,323 @@ external struct BigInt;
 impl BigInt with Default {
 	fun default(): BigInt {
 		0n
+	}
+}
+
+// --- Ordering impls (backlog K2) — generated once, checked in (this file is
+// world-loaded, so it must not dispatch macros). Native `<`/`>` bodies, like
+// the `PartialEq` impls above: generic `T: Ord` code accepts the integer
+// primitives; the floats are `PartialOrd` ONLY (the stated NaN answer).
+
+impl i32 with Eq {}
+
+impl i32 with PartialOrd {
+	fun partial_compare(self, b: i32): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl i32 with Ord {
+	fun compare(self, b: i32): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl u32 with Eq {}
+
+impl u32 with PartialOrd {
+	fun partial_compare(self, b: u32): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl u32 with Ord {
+	fun compare(self, b: u32): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl i8 with Eq {}
+
+impl i8 with PartialOrd {
+	fun partial_compare(self, b: i8): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl i8 with Ord {
+	fun compare(self, b: i8): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl u8 with Eq {}
+
+impl u8 with PartialOrd {
+	fun partial_compare(self, b: u8): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl u8 with Ord {
+	fun compare(self, b: u8): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl i16 with Eq {}
+
+impl i16 with PartialOrd {
+	fun partial_compare(self, b: i16): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl i16 with Ord {
+	fun compare(self, b: i16): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl u16 with Eq {}
+
+impl u16 with PartialOrd {
+	fun partial_compare(self, b: u16): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl u16 with Ord {
+	fun compare(self, b: u16): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl i64 with Eq {}
+
+impl i64 with PartialOrd {
+	fun partial_compare(self, b: i64): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl i64 with Ord {
+	fun compare(self, b: i64): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl u64 with Eq {}
+
+impl u64 with PartialOrd {
+	fun partial_compare(self, b: u64): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl u64 with Ord {
+	fun compare(self, b: u64): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl BigInt with Eq {}
+
+impl BigInt with PartialOrd {
+	fun partial_compare(self, b: BigInt): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				Some(Ordering::Equal)
+			}
+		}
+	}
+}
+
+impl BigInt with Ord {
+	fun compare(self, b: BigInt): Ordering {
+		if self < b {
+			Ordering::Less
+		} else {
+			if self > b {
+				Ordering::Greater
+			} else {
+				Ordering::Equal
+			}
+		}
+	}
+}
+
+impl f64 with PartialOrd {
+	// NaN-honest: unordered comparisons yield `None`. The floats are
+	// deliberately NOT `Ord` — a total order over NaN would be a lie; use
+	// the `Math`-backed `min`/`max` METHODS for float pairs.
+	fun partial_compare(self, b: f64): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				if self == b {
+					Some(Ordering::Equal)
+				} else {
+					None
+				}
+			}
+		}
+	}
+}
+
+impl f32 with PartialOrd {
+	// NaN-honest: unordered comparisons yield `None`. The floats are
+	// deliberately NOT `Ord` — a total order over NaN would be a lie; use
+	// the `Math`-backed `min`/`max` METHODS for float pairs.
+	fun partial_compare(self, b: f32): Option<Ordering> {
+		if self < b {
+			Some(Ordering::Less)
+		} else {
+			if self > b {
+				Some(Ordering::Greater)
+			} else {
+				if self == b {
+					Some(Ordering::Equal)
+				} else {
+					None
+				}
+			}
+		}
 	}
 }
 
@@ -399,6 +833,22 @@ impl f64 {
 }
 
 impl i8 {
+	[extern("Math.abs")]
+	external fun abs(self): i8;
+
+	[extern("Math.pow")]
+	external fun pow(self, exponent: i8): i8;
+
+	[extern("Math.min")]
+	external fun min(self, other: i8): i8;
+
+	[extern("Math.max")]
+	external fun max(self, other: i8): i8;
+
+	fun rem(self, m: i8): i8 {
+		self - self / m * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 
@@ -448,6 +898,19 @@ impl i8 {
 }
 
 impl u8 {
+	[extern("Math.pow")]
+	external fun pow(self, exponent: u8): u8;
+
+	[extern("Math.min")]
+	external fun min(self, other: u8): u8;
+
+	[extern("Math.max")]
+	external fun max(self, other: u8): u8;
+
+	fun rem(self, m: u8): u8 {
+		self - self / m * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 
@@ -497,6 +960,22 @@ impl u8 {
 }
 
 impl i16 {
+	[extern("Math.abs")]
+	external fun abs(self): i16;
+
+	[extern("Math.pow")]
+	external fun pow(self, exponent: i16): i16;
+
+	[extern("Math.min")]
+	external fun min(self, other: i16): i16;
+
+	[extern("Math.max")]
+	external fun max(self, other: i16): i16;
+
+	fun rem(self, m: i16): i16 {
+		self - self / m * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 
@@ -546,6 +1025,19 @@ impl i16 {
 }
 
 impl u16 {
+	[extern("Math.pow")]
+	external fun pow(self, exponent: u16): u16;
+
+	[extern("Math.min")]
+	external fun min(self, other: u16): u16;
+
+	[extern("Math.max")]
+	external fun max(self, other: u16): u16;
+
+	fun rem(self, m: u16): u16 {
+		self - self / m * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 
@@ -693,6 +1185,22 @@ impl u32 {
 }
 
 impl i64 {
+	[extern("Math.abs")]
+	external fun abs(self): i64;
+
+	[extern("Math.pow")]
+	external fun pow(self, exponent: i64): i64;
+
+	[extern("Math.min")]
+	external fun min(self, other: i64): i64;
+
+	[extern("Math.max")]
+	external fun max(self, other: i64): i64;
+
+	fun rem(self, m: i64): i64 {
+		self - self / m * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 
@@ -742,6 +1250,19 @@ impl i64 {
 }
 
 impl u64 {
+	[extern("Math.pow")]
+	external fun pow(self, exponent: u64): u64;
+
+	[extern("Math.min")]
+	external fun min(self, other: u64): u64;
+
+	[extern("Math.max")]
+	external fun max(self, other: u64): u64;
+
+	fun rem(self, m: u64): u64 {
+		self - self / m * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 
@@ -791,6 +1312,38 @@ impl u64 {
 }
 
 impl f32 {
+	[extern("Math.abs")]
+	external fun abs(self): f32;
+
+	[extern("Math.sqrt")]
+	external fun sqrt(self): f32;
+
+	[extern("Math.pow")]
+	external fun pow(self, exponent: f32): f32;
+
+	[extern("Math.floor")]
+	external fun floor(self): f32;
+
+	[extern("Math.ceil")]
+	external fun ceil(self): f32;
+
+	[extern("Math.round")]
+	external fun round(self): f32;
+
+	[extern("Math.trunc")]
+	external fun trunc(self): f32;
+
+	[extern("Math.min")]
+	external fun min(self, other: f32): f32;
+
+	[extern("Math.max")]
+	external fun max(self, other: f32): f32;
+
+	// Truncated remainder (sign follows the dividend).
+	fun rem(self, m: f32): f32 {
+		self - (self / m).trunc() * m
+	}
+
 	[extern("Number")]
 	external fun as_f64(self): f64;
 

@@ -1,0 +1,45 @@
+// std::math — mathematical constants and generic free functions (backlog K2).
+//
+// The METHOD families on the numeric types (`x.sin()`, `x.abs()`, `x.rem(m)`)
+// are the primary surface and live in `number.vl`; this module holds what has
+// no receiver: the constants, and the `Ord`-generic free functions (moved
+// here from `compare.vl` — the trait METHODS `Ord::min`/`max`/`clamp` stay
+// there). The surface is bounded to what `libm` provides, so the native
+// backends (F3/F4) stay implementable — no JS-isms.
+
+import pkg::compare::Ord;
+
+// --- Constants -----------------------------------------------------------------
+//
+// Plain module-level values. `EPSILON` is computed (the lexer has no exponent
+// literals): 2^-52 is exactly f64's unit of least precision at 1.0.
+// `INFINITY`/`NAN` are the IEEE results of the expressions that define them.
+
+let PI: f64 = 3.141592653589793;
+let TAU: f64 = 6.283185307179586;
+let E: f64 = 2.718281828459045;
+let EPSILON: f64 = 2f.pow(0f - 52f);
+let INFINITY: f64 = 1f / 0f;
+let NAN: f64 = 0f / 0f;
+
+// --- Generic comparisons ---------------------------------------------------------
+//
+// Free-function forms of the `Ord` methods, for call sites without a natural
+// receiver (`min(a, b)` over `a.min(b)`).
+
+fun min<T: Ord>(a: T, b: T): T {
+	a.min(b)
+}
+
+fun max<T: Ord>(a: T, b: T): T {
+	a.max(b)
+}
+
+// Both values, ordered — `(smaller, larger)`.
+fun minmax<T: Ord>(a: T, b: T): (T, T) {
+	if a <= b {
+		(a, b)
+	} else {
+		(b, a)
+	}
+}
