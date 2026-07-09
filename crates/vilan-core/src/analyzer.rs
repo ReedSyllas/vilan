@@ -261,6 +261,22 @@ pub struct Parameter<'src> {
     pub convention: Convention,
 }
 
+/// One rule-4 violation, by invalidating event kind (view-invalidation.md):
+/// E1 a reassignment of the viewed root, E2 a mutating call on it (a call
+/// passing the root by `&mut` — as the receiver, or an explicit argument).
+enum InvalidationViolation<'src> {
+    Reassignment {
+        anchor: Id,
+        root: Id,
+    },
+    MutatingCall {
+        anchor: Id,
+        root: Id,
+        callee: &'src str,
+        receiver: bool,
+    },
+}
+
 #[derive(Debug)]
 pub struct Variable<'src> {
     pub id: Id,
@@ -2822,6 +2838,23 @@ impl<'src> Analyzer<'src> {
     /// local root and are omitted.
     fn compute_view_origins(&self) -> HashMap<Id, Id> {
         let mut origins: HashMap<Id, Id> = HashMap::new();
+        // `for e in &mut c` bindings have no initial — their origin is the
+        // iterated container's root.
+        for expr in self.expr_id_to_expr_map.values() {
+            let Expr::ForEach(iterable, Some(item), _) = expr else {
+                continue;
+            };
+            if !self.for_each_views.contains_key(item) {
+                continue;
+            }
+            let operand = match self.expr_id_to_expr_map.get(iterable) {
+                Some(Expr::Reference(operand, _)) => *operand,
+                _ => *iterable,
+            };
+            if let Some(root) = self.place_root(operand) {
+                origins.insert(*item, root);
+            }
+        }
         loop {
             let mut changed = false;
             for variable in self.variables.values() {
@@ -3143,10 +3176,16 @@ impl<'src> Analyzer<'src> {
         views
     }
 
-    /// Rule 4 (no invalidating mutation under a live view): a binding may not be
-    /// reassigned while a view into it is live. The live range is lexical — a
-    /// view is live from its declaration to the end of its block. (Resize / move
-    /// / drop invalidation, and index-into-container views, are deferred.)
+    /// Rule 4 (no invalidating mutation under a live view), per
+    /// `proposal/view-invalidation.md`: while a view is live (lexically — from
+    /// its declaration to the end of its block), its root must not meet an
+    /// INVALIDATING EVENT. Two of the proposal's three events live here:
+    /// E1, reassignment of the root; E2, a mutating call on the root — any
+    /// call passing the root (or a place rooted in it) by `&mut` convention,
+    /// which may move, drop, or (on native backends) reallocate the viewed
+    /// element. E3 (`await`) is the async pass's. Writes THROUGH the view and
+    /// `&self` calls are not events; index-into-container views root at the
+    /// container, so element granularity is the container (conservative).
     fn check_invalidation(&mut self) {
         let view_origins = self.compute_view_origins();
         if view_origins.is_empty() {
@@ -3159,7 +3198,7 @@ impl<'src> Analyzer<'src> {
             .map(|function| (function.body.0.clone(), function.body.1))
             .collect();
         let closure_returns: Vec<Id> = self.closures.values().map(|c| c.return_).collect();
-        let mut violations: Vec<(Id, Id)> = Vec::new();
+        let mut violations: Vec<InvalidationViolation<'src>> = Vec::new();
         for (statements, tail) in &bodies {
             let mut live = HashSet::new();
             self.scan_invalidation_block(
@@ -3174,17 +3213,31 @@ impl<'src> Analyzer<'src> {
             let mut live = HashSet::new();
             self.scan_invalidation_block(&[], return_id, &view_origins, &mut live, &mut violations);
         }
-        for (reassignment_id, root_id) in violations {
-            let name = self
-                .variables
-                .get(&root_id)
-                .map(|v| v.name)
-                .unwrap_or("value");
-            self.diagnostics.push(Error {
-                span: **self.span_map.get(&reassignment_id).unwrap_or(&&EMPTY_SPAN),
-                msg: format!(
+        for violation in violations {
+            let (anchor, root, detail) = match violation {
+                InvalidationViolation::Reassignment { anchor, root } => (anchor, root, None),
+                InvalidationViolation::MutatingCall {
+                    anchor,
+                    root,
+                    callee,
+                    receiver,
+                } => (anchor, root, Some((callee, receiver))),
+            };
+            let name = self.variables.get(&root).map(|v| v.name).unwrap_or("value");
+            let msg = match detail {
+                None => format!(
                     "cannot reassign '{name}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
                 ),
+                Some((callee, true)) => format!(
+                    "cannot mutate '{name}' with '.{callee}(..)' while a view into it is live (rule 4: no invalidating mutation under a live view)."
+                ),
+                Some((callee, false)) => format!(
+                    "cannot pass '&mut {name}' to '{callee}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
+                ),
+            };
+            self.diagnostics.push(Error {
+                span: **self.span_map.get(&anchor).unwrap_or(&&EMPTY_SPAN),
+                msg,
             });
         }
     }
@@ -3268,7 +3321,7 @@ impl<'src> Analyzer<'src> {
         tail: Id,
         view_origins: &HashMap<Id, Id>,
         live: &mut HashSet<Id>,
-        violations: &mut Vec<(Id, Id)>,
+        violations: &mut Vec<InvalidationViolation<'src>>,
     ) {
         let outer = live.clone();
         for statement in statements {
@@ -3283,7 +3336,7 @@ impl<'src> Analyzer<'src> {
         expr_id: Id,
         view_origins: &HashMap<Id, Id>,
         live: &mut HashSet<Id>,
-        violations: &mut Vec<(Id, Id)>,
+        violations: &mut Vec<InvalidationViolation<'src>>,
     ) {
         let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
             return;
@@ -3299,13 +3352,16 @@ impl<'src> Analyzer<'src> {
             }
             Expr::Assignment(target_id, value_id) => {
                 self.scan_invalidation(value_id, view_origins, live, violations);
-                // Reassigning a whole binding invalidates views into it.
+                // Reassigning a whole binding invalidates views into it (E1).
                 if let Some(Expr::Local(root_id)) = self.expr_id_to_expr_map.get(&target_id) {
                     if live
                         .iter()
                         .any(|view| view_origins.get(view) == Some(root_id))
                     {
-                        violations.push((target_id, *root_id));
+                        violations.push(InvalidationViolation::Reassignment {
+                            anchor: target_id,
+                            root: *root_id,
+                        });
                     }
                 }
                 self.scan_invalidation(target_id, view_origins, live, violations);
@@ -3319,9 +3375,16 @@ impl<'src> Analyzer<'src> {
                 }
                 self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
             }
-            Expr::ForEach(iterable, _, (statements, tail)) => {
+            Expr::ForEach(iterable, item, (statements, tail)) => {
                 self.scan_invalidation(iterable, view_origins, live, violations);
+                // A `for e in &mut c` binding is a view into `c` for the
+                // body's extent — live across every iteration.
+                let loop_view = item.filter(|item| view_origins.contains_key(item));
+                let newly_live = loop_view.is_some_and(|item| live.insert(item));
                 self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+                if newly_live && let Some(item) = loop_view {
+                    live.remove(&item);
+                }
             }
             Expr::If(branch) => self.scan_invalidation_if(&branch, view_origins, live, violations),
             Expr::Match(subject_id, legs) => {
@@ -3351,9 +3414,75 @@ impl<'src> Analyzer<'src> {
                 self.scan_invalidation(value, view_origins, live, violations)
             }
             Expr::Call(call_id) => {
-                if let Some(function_call) = self.function_calls.get(&call_id) {
-                    for argument in function_call.argument_ids.clone() {
-                        self.scan_invalidation(argument, view_origins, live, violations);
+                let Some(function_call) = self.function_calls.get(&call_id) else {
+                    return;
+                };
+                let argument_ids = function_call.argument_ids.clone();
+                let subject_id = function_call.subject_id;
+                for argument in &argument_ids {
+                    self.scan_invalidation(*argument, view_origins, live, violations);
+                }
+                // E2: a call passing a viewed root by `&mut` convention (the
+                // wired receiver or an explicit `&mut` argument) may move,
+                // drop, or reallocate the viewed element — an invalidating
+                // event, like reassignment. `&self` receivers and by-value
+                // arguments pass freely; so does writing through the view.
+                let Some(Expr::Local(callee_id)) = self.expr_id_to_expr_map.get(&subject_id) else {
+                    return;
+                };
+                let (parameter_ids, callee_name) =
+                    if let Some(function) = self.functions.get(callee_id) {
+                        (function.parameters.clone(), function.name)
+                    } else if let Some(external) = self.external_functions.get(callee_id) {
+                        (external.parameters.clone(), external.name)
+                    } else {
+                        return;
+                    };
+                for (parameter_id, argument_id) in parameter_ids.iter().zip(&argument_ids) {
+                    let Some(parameter) = self.parameters.get(parameter_id) else {
+                        continue;
+                    };
+                    if !matches!(parameter.convention, Convention::RefMut) {
+                        continue;
+                    }
+                    let root = match self.expr_id_to_expr_map.get(argument_id) {
+                        Some(Expr::Reference(operand, _)) => self.place_root(*operand),
+                        _ => self.place_root(*argument_id),
+                    };
+                    let Some(root) = root else {
+                        continue;
+                    };
+                    // A SCALAR root is exempt: its boxed cell has no geometry
+                    // — every possible callee action is a slot write, the
+                    // aliasing transparent references permit (and the corpus
+                    // demo exercises). Containers (element geometry) and
+                    // structs (detachable aggregate fields) stay flagged.
+                    let root_type = self
+                        .variables
+                        .get(&root)
+                        .map(|variable| variable.type_id)
+                        .or_else(|| {
+                            self.parameters
+                                .get(&root)
+                                .map(|parameter| parameter.type_id)
+                        })
+                        .map(|type_id| type_id.get_type(self));
+                    if matches!(
+                        root_type,
+                        Some(Type::Struct(id, _)) if self.is_scalar_primitive(id)
+                    ) {
+                        continue;
+                    }
+                    if live
+                        .iter()
+                        .any(|view| view_origins.get(view) == Some(&root))
+                    {
+                        violations.push(InvalidationViolation::MutatingCall {
+                            anchor: expr_id,
+                            root,
+                            callee: callee_name,
+                            receiver: parameter.name == "self",
+                        });
                     }
                 }
             }
@@ -3376,7 +3505,7 @@ impl<'src> Analyzer<'src> {
         branch: &ExprIfBranch,
         view_origins: &HashMap<Id, Id>,
         live: &mut HashSet<Id>,
-        violations: &mut Vec<(Id, Id)>,
+        violations: &mut Vec<InvalidationViolation<'src>>,
     ) {
         match branch {
             ExprIfBranch::If(condition, (statements, tail), else_branch) => {

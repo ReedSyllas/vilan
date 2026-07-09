@@ -117,7 +117,23 @@ analyzer already infers.
   root (`s.x = 1` while `&mut s.y` lives — field writes change contents,
   not geometry; no `(base, key)` pair is disturbed); calls on unrelated
   containers.
-- **Whole-root reassignment stays E1** (shipped, unchanged).
+- **Scalar roots are exempt** *(implementation finding, 2026-07-09 — the E2
+  gate tripped on the transparent-references corpus demo itself)*: a viewed
+  scalar local (`mut a: i32; let b = &mut a; add_ten(&mut a)`) cannot be
+  invalidated — its boxed cell has no geometry, so every possible callee
+  action is a slot write, which is precisely the aliasing transparent
+  references define and the corpus pins. E2 therefore applies to roots with
+  **detachable structure**: containers (element geometry) and structs (a
+  callee holding `&mut s` can reassign an aggregate field out from under a
+  held field view). Two recorded conservatisms: a *scalar-field* view under
+  a `&mut s` call is flagged though its `(base, key)` slot is actually
+  stable (distinguishing it needs chain analysis; take it if the pattern
+  appears in practice), and generic-typed roots are flagged (their
+  monomorphized geometry is unknown at the check).
+- **Whole-root reassignment stays E1** (shipped, unchanged — including for
+  scalar roots, where reassignment is treated as rebinding intent even
+  though the boxed cell would technically survive; the asymmetry is
+  deliberate).
 
 ### Diagnostic
 

@@ -7870,3 +7870,217 @@ fn a_generic_enum_variant_with_a_bounded_forward_compiles() {
         "#
     ));
 }
+
+// --- view-invalidation.md E2: a mutating call on the viewed root is an ---
+// --- invalidating event, like reassignment (rule 4).                   ---
+
+#[test]
+fn a_mutating_method_under_a_live_element_view_is_rejected() {
+    // The proposal's P3: pop() may drop the viewed element.
+    let source = r#"
+        fun main() {
+            mut a = [ 0 ];
+            let b = &mut a[0];
+            a.pop();
+            b = 99;
+        }
+        main();
+        "#;
+    assert_fails_spanning(
+        source,
+        "a.pop()",
+        "cannot mutate 'a' with '.pop(..)' while a view into it is live",
+    );
+}
+
+#[test]
+fn a_push_under_a_live_element_view_is_rejected() {
+    // push is included deliberately: harmless on JS, reallocates on native.
+    let source = r#"
+        fun main() {
+            mut a = [ 0 ];
+            let b = &mut a[0];
+            a.push(1);
+            b = 99;
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn passing_the_viewed_root_by_mut_ref_is_rejected() {
+    // The proposal's P4: the callee may resize the container.
+    let source = r#"
+        fun grow(list: &mut List<i32>) {
+            list.push(7);
+        }
+        fun main() {
+            mut a = [ 0 ];
+            let b = &mut a[0];
+            grow(&mut a);
+            b = 99;
+        }
+        main();
+        "#;
+    assert_fails_spanning(
+        source,
+        "grow(&mut a)",
+        "cannot pass '&mut a' to 'grow' while a view into it is live",
+    );
+}
+
+#[test]
+fn a_user_mut_self_method_under_a_live_view_is_rejected() {
+    let source = r#"
+        struct Basket { items: List<i32> }
+        impl Basket {
+            fun clear_items(&mut self) {
+                self.items = [];
+            }
+        }
+        fun main() {
+            mut basket = Basket { items = [ 1 ] };
+            let held = &mut basket.items;
+            basket.clear_items();
+            held.push(2);
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn a_read_only_method_under_a_live_view_compiles() {
+    // &self methods do not invalidate.
+    assert_compiles(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [ 5 ];
+            let b = &mut a[0];
+            print(a.len());
+            b = 99;
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn writing_through_the_view_itself_compiles() {
+    // The view's whole purpose; not an invalidating event.
+    assert_compiles(
+        r#"
+        fun main() {
+            mut a = [ 5 ];
+            let b = &mut a[0];
+            b = 99;
+            b = 100;
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn mutating_an_unrelated_container_compiles() {
+    assert_compiles(
+        r#"
+        fun main() {
+            mut a = [ 5 ];
+            mut other = [ 1 ];
+            let b = &mut a[0];
+            other.pop();
+            b = 99;
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn a_mutating_call_before_the_view_exists_compiles() {
+    // Scan order: the view is not yet live at the call.
+    assert_compiles(
+        r#"
+        fun main() {
+            mut a = [ 5 ];
+            a.pop();
+            a.push(6);
+            let b = &mut a[0];
+            b = 99;
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn a_mutating_call_in_a_nested_block_under_an_outer_view_is_rejected() {
+    // Lexical liveness carries into inner blocks.
+    let source = r#"
+        fun main() {
+            mut a = [ 0 ];
+            let b = &mut a[0];
+            {
+                a.pop();
+            }
+            b = 99;
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn mutating_the_container_inside_a_for_mut_loop_is_rejected() {
+    // The loop binding is a view into the container for the body's extent.
+    let source = r#"
+        fun main() {
+            mut a = [ 1, 2, 3 ];
+            for e in &mut a {
+                a.pop();
+            }
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn reassigning_the_container_inside_a_for_mut_loop_is_rejected() {
+    // The same loop-binding origin feeds the shipped E1 (reassignment) check.
+    let source = r#"
+        fun main() {
+            mut a = [ 1, 2, 3 ];
+            for e in &mut a {
+                a = [];
+            }
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn a_mut_call_on_a_viewed_scalar_root_compiles() {
+    // The transparent-references demo's shape: a scalar's boxed cell has no
+    // geometry — a callee can only write the slot, which is the aliasing the
+    // model permits. E2 exempts scalar roots.
+    assert_compiles(
+        r#"
+        import std::print;
+        fun add_ten(value: &mut i32) {
+            value += 10;
+        }
+        fun main() {
+            mut a: i32 = 10;
+            let b: &mut i32 = &mut a;
+            add_ten(&mut a);
+            print(b);
+        }
+        main();
+        "#,
+    );
+}
