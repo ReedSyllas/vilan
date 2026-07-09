@@ -53,6 +53,39 @@ have gaps.
    optimistic-write → `await` → reconcile lifecycle for handlers that span ticks. The async-turn
    half interacts with C3 (no-view-across-`await`).
 
+7. **Server-side rendering (SSR) + hydration vs resumability** (L–XL; recorded 2026-07-08;
+   proposal first) — render the initial UI as HTML on the server (first paint before any JS,
+   SEO), then make it live on the client. Vilan's model is unusually well placed: the UI is
+   fine-grained reactive (no VDOM — Solid's shape, where SSR is proven), the compiler already
+   builds client AND server bundles from one program (the full-stack split), and value
+   semantics make the state handoff mostly plain data (views are second-class and never
+   stored — nothing dangling to serialize; `Shared` identity is the one careful spot).
+   - **What server rendering needs regardless of strategy:** a render-only target for
+     `std::ui` — `View` over an HTML string-builder (or DOM shim) instead of `document`,
+     legal on `@process` where the platform gate today forbids the browser layer (a
+     `_sys`-style seam: same interface, an HTML impl on the server — the platform model's
+     §5 shape). Effects/subscriptions must NOT run server-side; server render is
+     create-serialize-discard (A5's boundary owners just never get disposal work).
+   - **Hydration** (the Solid/React lineage): the client re-runs the component tree, but a
+     hydrating DOM adapter CLAIMS existing server nodes instead of creating them —
+     `bind_text` adopts the server text rather than rewriting, listeners attach, signals
+     re-create from serialized initial values. Needs deterministic node addressing
+     (hydration markers) and a first-run-adopts discipline in the `bind_*` effects. The
+     well-trodden path; maps 1:1 onto `std::ui`'s ambient bindings.
+   - **Resumability** (the Qwik lineage): the server serializes enough that the client
+     resumes WITHOUT re-executing components — event handlers become addressable entry
+     points loaded on demand. JS frameworks contort to get this (every handler manually
+     `$`-split); **vilan owns closure conversion in the compiler**, so lowering each
+     handler to a top-level function + an explicit serialized environment record (Wire
+     already exists) is a compiler pass, not a user convention — the language is genuinely
+     better positioned than the JS ecosystem here. Still the research-grade option:
+     `Shared` graph serialization, lazy chunk loading, event delegation before JS loads.
+   - **Recommended shape:** v1 = server string-renderer + hydration (proven, incremental,
+     every piece reusable later); resumability recorded as the ambitious follow-on riding
+     the same render target and serialization format. Streaming SSR / suspense boundaries
+     are beyond-v1 (interact with A6's async turns and J1). Dependencies met: platform
+     model, P6 transport (data fetching), A5 boundary ownership.
+
 ---
 
 ## B. Type system & the type solver
