@@ -1,9 +1,14 @@
 # Views and invalidating events — rule 4 completed, `await` included (C3 + C2's static half)
 
-Status: **PROPOSED 2026-07-09.** Design settled in discussion; implementation
-not started. Every §1 behavior claim was verified against the compiler on
-2026-07-09 (probe programs `c3-p*.vl` / `c3-probe.vl`, session scratchpad);
-pin each as a test when implementation starts.
+Status: **SHIPPED 2026-07-09** — both phases, same day (E2 commit + E3
+commit; ~25 pins in `inference.rs`). Implementation findings folded back in:
+§2's scalar-root exemption (the E2 gate tripped on the
+transparent-references corpus demo — scalar cells have no geometry), and two
+E3 notes: `Shared.read()` returns a COPY by design so only `write()`'s view
+fences `await` (value semantics quietly made reads safe), and the signature
+rule anchors at the parameter NAME. The scan also gained wrapped-match-leg
+capture liveness and `for e in &mut` loop-binding origins (fixing a
+pre-existing E1 loop gap). C2's dynamic remainder stays open (§6).
 
 ## 0. The one-sentence model
 

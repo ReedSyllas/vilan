@@ -261,6 +261,13 @@ pub struct Parameter<'src> {
     pub convention: Convention,
 }
 
+/// The precomputed view sets the rule-4 scan matches against: origins for
+/// the root-keyed events (E1/E2), the full binding set for liveness and E3.
+struct InvalidationScan<'a> {
+    view_origins: &'a HashMap<Id, Id>,
+    view_bindings: &'a HashSet<Id>,
+}
+
 /// One rule-4 violation, by invalidating event kind (view-invalidation.md):
 /// E1 a reassignment of the viewed root, E2 a mutating call on it (a call
 /// passing the root by `&mut` — as the receiver, or an explicit argument).
@@ -274,6 +281,13 @@ enum InvalidationViolation<'src> {
         root: Id,
         callee: &'src str,
         receiver: bool,
+    },
+    /// E3: a suspension point while the view is live — the writer set during
+    /// an `await` is the whole program, and a local surviving a suspension is
+    /// a field of the continuation (a stored view).
+    AwaitCrossing {
+        anchor: Id,
+        view: Id,
     },
 }
 
@@ -3188,57 +3202,533 @@ impl<'src> Analyzer<'src> {
     /// container, so element granularity is the container (conservative).
     fn check_invalidation(&mut self) {
         let view_origins = self.compute_view_origins();
-        if view_origins.is_empty() {
-            return;
-        }
-        let bodies: Vec<(Vec<Id>, Id)> = self
+        // E1/E2 match by ORIGIN (which local root a view borrows); E3 needs
+        // every live view, origin or not — a `shared.read()` view has no
+        // local root but must still fence `await`.
+        let mut view_bindings = self.compute_view_bindings();
+        view_bindings.extend(view_origins.keys().copied());
+        // No early return on an empty set: the signature rule (below) must
+        // run even in a program with no view BINDINGS at all — an async
+        // function's `&mut` parameter is the violation by itself.
+        let scanner = InvalidationScan {
+            view_origins: &view_origins,
+            view_bindings: &view_bindings,
+        };
+        let bodies: Vec<(Id, Vec<Id>, Id)> = self
             .functions
-            .values()
-            .filter(|function| function.has_body)
-            .map(|function| (function.body.0.clone(), function.body.1))
+            .iter()
+            .filter(|(_, function)| function.has_body)
+            .map(|(id, function)| (*id, function.body.0.clone(), function.body.1))
             .collect();
         let closure_returns: Vec<Id> = self.closures.values().map(|c| c.return_).collect();
         let mut violations: Vec<InvalidationViolation<'src>> = Vec::new();
-        for (statements, tail) in &bodies {
+        for (function_id, statements, tail) in &bodies {
             let mut live = HashSet::new();
+            let mut saw_await = false;
             self.scan_invalidation_block(
                 statements,
                 *tail,
-                &view_origins,
+                &scanner,
                 &mut live,
                 &mut violations,
+                &mut saw_await,
             );
+            // The SIGNATURE rule: a function that suspends may not take view
+            // parameters — the caller's view would be held across the
+            // suspension one frame down. Sync functions (no await) pass
+            // views freely; that is what keeps the analysis local.
+            if saw_await && let Some(function) = self.functions.get(function_id) {
+                for parameter_id in &function.parameters {
+                    let Some(parameter) = self.parameters.get(parameter_id) else {
+                        continue;
+                    };
+                    if matches!(parameter.convention, Convention::Ref | Convention::RefMut) {
+                        let form = match parameter.convention {
+                            Convention::RefMut => "'&mut'",
+                            _ => "'&'",
+                        };
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(parameter_id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "an async function cannot take {form} parameters: the view would be held across its suspension points. Pass a value, or a Shared/handle."
+                            ),
+                        });
+                    }
+                }
+            }
         }
         for return_id in closure_returns {
             let mut live = HashSet::new();
-            self.scan_invalidation_block(&[], return_id, &view_origins, &mut live, &mut violations);
+            let mut saw_await = false;
+            self.scan_invalidation_block(
+                &[],
+                return_id,
+                &scanner,
+                &mut live,
+                &mut violations,
+                &mut saw_await,
+            );
         }
+        self.check_async_closure_captures(&view_bindings);
         for violation in violations {
-            let (anchor, root, detail) = match violation {
-                InvalidationViolation::Reassignment { anchor, root } => (anchor, root, None),
+            let (anchor, msg) = match violation {
+                InvalidationViolation::Reassignment { anchor, root } => {
+                    let name = self.variables.get(&root).map(|v| v.name).unwrap_or("value");
+                    (
+                        anchor,
+                        format!(
+                            "cannot reassign '{name}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
+                        ),
+                    )
+                }
                 InvalidationViolation::MutatingCall {
                     anchor,
                     root,
                     callee,
                     receiver,
-                } => (anchor, root, Some((callee, receiver))),
-            };
-            let name = self.variables.get(&root).map(|v| v.name).unwrap_or("value");
-            let msg = match detail {
-                None => format!(
-                    "cannot reassign '{name}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
-                ),
-                Some((callee, true)) => format!(
-                    "cannot mutate '{name}' with '.{callee}(..)' while a view into it is live (rule 4: no invalidating mutation under a live view)."
-                ),
-                Some((callee, false)) => format!(
-                    "cannot pass '&mut {name}' to '{callee}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
-                ),
+                } => {
+                    let name = self.variables.get(&root).map(|v| v.name).unwrap_or("value");
+                    let msg = if receiver {
+                        format!(
+                            "cannot mutate '{name}' with '.{callee}(..)' while a view into it is live (rule 4: no invalidating mutation under a live view)."
+                        )
+                    } else {
+                        format!(
+                            "cannot pass '&mut {name}' to '{callee}' while a view into it is live (rule 4: no invalidating mutation under a live view)."
+                        )
+                    };
+                    (anchor, msg)
+                }
+                InvalidationViolation::AwaitCrossing { anchor, view } => {
+                    let view_name = self
+                        .variables
+                        .get(&view)
+                        .map(|v| v.name)
+                        .or_else(|| self.parameters.get(&view).map(|p| p.name))
+                        .unwrap_or("the view");
+                    let msg = match view_origins
+                        .get(&view)
+                        .and_then(|root| self.variables.get(root))
+                        .map(|root| root.name)
+                    {
+                        Some(root_name) => format!(
+                            "cannot hold a view across 'await': '{view_name}' (a view into '{root_name}') is still live here. Re-acquire the view after the await — the awaited turn may change what it points at."
+                        ),
+                        None => format!(
+                            "cannot hold a view across 'await': '{view_name}' is still live here. Re-acquire the view after the await — the awaited turn may change what it points at."
+                        ),
+                    };
+                    (anchor, msg)
+                }
             };
             self.diagnostics.push(Error {
                 span: **self.span_map.get(&anchor).unwrap_or(&&EMPTY_SPAN),
                 msg,
             });
+        }
+    }
+
+    /// E3's closure half: an `async { .. }` (or any closure whose body
+    /// suspends) may not CAPTURE a view from an enclosing scope — the capture
+    /// is live across the closure's awaits. Views declared inside the closure
+    /// are the body scan's business; nested closures are walked too (a sync
+    /// closure inside the async one still holds the capture at its awaits).
+    fn check_async_closure_captures(&mut self, view_bindings: &HashSet<Id>) {
+        let closure_ids: Vec<Id> = self.closures.keys().copied().collect();
+        let mut errors: Vec<(Id, &'src str)> = Vec::new();
+        for closure_id in closure_ids {
+            let Some(closure) = self.closures.get(&closure_id) else {
+                continue;
+            };
+            let mut saw_await = false;
+            let mut declared_inside: HashSet<Id> = HashSet::new();
+            let mut captured: Vec<Id> = Vec::new();
+            let mut visited: HashSet<Id> = HashSet::new();
+            self.scan_closure_view_captures(
+                closure.return_,
+                view_bindings,
+                &mut saw_await,
+                &mut declared_inside,
+                &mut captured,
+                &mut visited,
+            );
+            if !saw_await {
+                continue;
+            }
+            for reference_id in captured {
+                let Some(Expr::Local(binding_id)) = self.expr_id_to_expr_map.get(&reference_id)
+                else {
+                    continue;
+                };
+                if declared_inside.contains(binding_id) {
+                    continue;
+                }
+                let name = self
+                    .variables
+                    .get(binding_id)
+                    .map(|v| v.name)
+                    .unwrap_or("the view");
+                errors.push((reference_id, name));
+            }
+        }
+        for (reference_id, name) in errors {
+            self.diagnostics.push(Error {
+                span: **self.span_map.get(&reference_id).unwrap_or(&&EMPTY_SPAN),
+                msg: format!(
+                    "an async closure cannot capture the view '{name}': the capture would be held across the closure's suspension points. Re-acquire the view inside, or pass a value/handle."
+                ),
+            });
+        }
+    }
+
+    /// Walks a closure body: records awaits, view-binding references, and
+    /// bindings declared inside (which are not captures). Recurses into
+    /// nested closures.
+    fn scan_closure_view_captures(
+        &self,
+        expr_id: Id,
+        view_bindings: &HashSet<Id>,
+        saw_await: &mut bool,
+        declared_inside: &mut HashSet<Id>,
+        captured: &mut Vec<Id>,
+        visited: &mut HashSet<Id>,
+    ) {
+        if !visited.insert(expr_id) {
+            return;
+        }
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        match expr {
+            Expr::Await(value) => {
+                *saw_await = true;
+                self.scan_closure_view_captures(
+                    value,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::Local(binding_id) => {
+                if view_bindings.contains(&binding_id) {
+                    captured.push(expr_id);
+                }
+            }
+            Expr::Variable(variable_id) => {
+                declared_inside.insert(variable_id);
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    self.scan_closure_view_captures(
+                        initial,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            Expr::Closure(inner_id) | Expr::Async(inner_id) => {
+                if let Some(inner) = self.closures.get(&inner_id) {
+                    self.scan_closure_view_captures(
+                        inner.return_,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            Expr::Block((statements, tail)) => {
+                for statement in statements {
+                    self.scan_closure_view_captures(
+                        statement,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_closure_view_captures(
+                    tail,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::Assignment(target, value) | Expr::Binary(_, target, value) => {
+                self.scan_closure_view_captures(
+                    target,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                self.scan_closure_view_captures(
+                    value,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::Reference(operand, _)
+            | Expr::Dereference(operand)
+            | Expr::Unary(_, operand)
+            | Expr::Field(operand, _, _)
+            | Expr::FunctionReturn(Some(operand)) => {
+                self.scan_closure_view_captures(
+                    operand,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::Index(subject, index) => {
+                self.scan_closure_view_captures(
+                    subject,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                self.scan_closure_view_captures(
+                    index,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::Call(call_id) => {
+                if let Some(function_call) = self.function_calls.get(&call_id) {
+                    for argument in function_call.argument_ids.clone() {
+                        self.scan_closure_view_captures(
+                            argument,
+                            view_bindings,
+                            saw_await,
+                            declared_inside,
+                            captured,
+                            visited,
+                        );
+                    }
+                }
+            }
+            Expr::List(ids) | Expr::Tuple(ids) => {
+                for id in ids {
+                    self.scan_closure_view_captures(
+                        id,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            Expr::StructInitializer(_, fields) => {
+                for value in fields.values() {
+                    self.scan_closure_view_captures(
+                        *value,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    self.scan_closure_view_captures(
+                        condition,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                for statement in statements {
+                    self.scan_closure_view_captures(
+                        statement,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_closure_view_captures(
+                    tail,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::ForEach(iterable, item, (statements, tail)) => {
+                if let Some(item) = item {
+                    declared_inside.insert(item);
+                }
+                self.scan_closure_view_captures(
+                    iterable,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                for statement in statements {
+                    self.scan_closure_view_captures(
+                        statement,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_closure_view_captures(
+                    tail,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::If(branch) => {
+                self.scan_closure_captures_if(
+                    &branch,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+            Expr::Match(subject, legs) => {
+                self.scan_closure_view_captures(
+                    subject,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                for leg in legs {
+                    if let ExprPattern::Variant(_, _, sub_patterns) = &leg.pattern {
+                        for sub_pattern in sub_patterns {
+                            if let ExprPattern::Binding(capture_id) = sub_pattern {
+                                declared_inside.insert(*capture_id);
+                            }
+                        }
+                    }
+                    if let Some(guard) = leg.guard {
+                        self.scan_closure_view_captures(
+                            guard,
+                            view_bindings,
+                            saw_await,
+                            declared_inside,
+                            captured,
+                            visited,
+                        );
+                    }
+                    self.scan_closure_view_captures(
+                        leg.body,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_closure_captures_if(
+        &self,
+        branch: &ExprIfBranch,
+        view_bindings: &HashSet<Id>,
+        saw_await: &mut bool,
+        declared_inside: &mut HashSet<Id>,
+        captured: &mut Vec<Id>,
+        visited: &mut HashSet<Id>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.scan_closure_view_captures(
+                    *condition,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                for statement in statements {
+                    self.scan_closure_view_captures(
+                        *statement,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_closure_view_captures(
+                    *tail,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                if let Some(else_branch) = else_branch {
+                    self.scan_closure_captures_if(
+                        else_branch,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                for statement in statements {
+                    self.scan_closure_view_captures(
+                        *statement,
+                        view_bindings,
+                        saw_await,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_closure_view_captures(
+                    *tail,
+                    view_bindings,
+                    saw_await,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
         }
     }
 
@@ -3319,24 +3809,26 @@ impl<'src> Analyzer<'src> {
         &self,
         statements: &[Id],
         tail: Id,
-        view_origins: &HashMap<Id, Id>,
+        scan: &InvalidationScan<'_>,
         live: &mut HashSet<Id>,
         violations: &mut Vec<InvalidationViolation<'src>>,
+        saw_await: &mut bool,
     ) {
         let outer = live.clone();
         for statement in statements {
-            self.scan_invalidation(*statement, view_origins, live, violations);
+            self.scan_invalidation(*statement, scan, live, violations, saw_await);
         }
-        self.scan_invalidation(tail, view_origins, live, violations);
+        self.scan_invalidation(tail, scan, live, violations, saw_await);
         live.retain(|view| outer.contains(view));
     }
 
     fn scan_invalidation(
         &self,
         expr_id: Id,
-        view_origins: &HashMap<Id, Id>,
+        scan: &InvalidationScan<'_>,
         live: &mut HashSet<Id>,
         violations: &mut Vec<InvalidationViolation<'src>>,
+        saw_await: &mut bool,
     ) {
         let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
             return;
@@ -3344,19 +3836,19 @@ impl<'src> Analyzer<'src> {
         match expr {
             Expr::Variable(variable_id) => {
                 if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
-                    self.scan_invalidation(initial, view_origins, live, violations);
+                    self.scan_invalidation(initial, scan, live, violations, saw_await);
                 }
-                if view_origins.contains_key(&variable_id) {
+                if scan.view_bindings.contains(&variable_id) {
                     live.insert(variable_id);
                 }
             }
             Expr::Assignment(target_id, value_id) => {
-                self.scan_invalidation(value_id, view_origins, live, violations);
+                self.scan_invalidation(value_id, scan, live, violations, saw_await);
                 // Reassigning a whole binding invalidates views into it (E1).
                 if let Some(Expr::Local(root_id)) = self.expr_id_to_expr_map.get(&target_id) {
                     if live
                         .iter()
-                        .any(|view| view_origins.get(view) == Some(root_id))
+                        .any(|view| scan.view_origins.get(view) == Some(root_id))
                     {
                         violations.push(InvalidationViolation::Reassignment {
                             anchor: target_id,
@@ -3364,54 +3856,89 @@ impl<'src> Analyzer<'src> {
                         });
                     }
                 }
-                self.scan_invalidation(target_id, view_origins, live, violations);
+                self.scan_invalidation(target_id, scan, live, violations, saw_await);
             }
             Expr::Block((statements, tail)) => {
-                self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+                self.scan_invalidation_block(&statements, tail, scan, live, violations, saw_await);
             }
             Expr::For(condition, (statements, tail)) => {
                 if let Some(condition) = condition {
-                    self.scan_invalidation(condition, view_origins, live, violations);
+                    self.scan_invalidation(condition, scan, live, violations, saw_await);
                 }
-                self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+                self.scan_invalidation_block(&statements, tail, scan, live, violations, saw_await);
             }
             Expr::ForEach(iterable, item, (statements, tail)) => {
-                self.scan_invalidation(iterable, view_origins, live, violations);
+                self.scan_invalidation(iterable, scan, live, violations, saw_await);
                 // A `for e in &mut c` binding is a view into `c` for the
                 // body's extent — live across every iteration.
-                let loop_view = item.filter(|item| view_origins.contains_key(item));
+                let loop_view = item.filter(|item| scan.view_bindings.contains(item));
                 let newly_live = loop_view.is_some_and(|item| live.insert(item));
-                self.scan_invalidation_block(&statements, tail, view_origins, live, violations);
+                self.scan_invalidation_block(&statements, tail, scan, live, violations, saw_await);
                 if newly_live && let Some(item) = loop_view {
                     live.remove(&item);
                 }
             }
-            Expr::If(branch) => self.scan_invalidation_if(&branch, view_origins, live, violations),
+            Expr::If(branch) => {
+                self.scan_invalidation_if(&branch, scan, live, violations, saw_await)
+            }
             Expr::Match(subject_id, legs) => {
-                self.scan_invalidation(subject_id, view_origins, live, violations);
+                self.scan_invalidation(subject_id, scan, live, violations, saw_await);
                 for leg in legs {
                     if let Some(guard) = leg.guard {
-                        self.scan_invalidation(guard, view_origins, live, violations);
+                        self.scan_invalidation(guard, scan, live, violations, saw_await);
                     }
-                    self.scan_invalidation_block(&[], leg.body, view_origins, live, violations);
+                    // A `Some(let v)` capture over a wrapped-view call is a
+                    // view for its leg's extent.
+                    let mut leg_views: Vec<Id> = Vec::new();
+                    if let ExprPattern::Variant(_, _, sub_patterns) = &leg.pattern {
+                        for sub_pattern in sub_patterns {
+                            if let ExprPattern::Binding(capture_id) = sub_pattern
+                                && scan.view_bindings.contains(capture_id)
+                            {
+                                leg_views.push(*capture_id);
+                            }
+                        }
+                    }
+                    let newly_live: Vec<Id> = leg_views
+                        .iter()
+                        .copied()
+                        .filter(|view| live.insert(*view))
+                        .collect();
+                    self.scan_invalidation_block(&[], leg.body, scan, live, violations, saw_await);
+                    for view in newly_live {
+                        live.remove(&view);
+                    }
                 }
             }
             Expr::Reference(operand, _) | Expr::Dereference(operand) | Expr::Unary(_, operand) => {
-                self.scan_invalidation(operand, view_origins, live, violations);
+                self.scan_invalidation(operand, scan, live, violations, saw_await);
             }
             Expr::Binary(_, lhs, rhs) => {
-                self.scan_invalidation(lhs, view_origins, live, violations);
-                self.scan_invalidation(rhs, view_origins, live, violations);
+                self.scan_invalidation(lhs, scan, live, violations, saw_await);
+                self.scan_invalidation(rhs, scan, live, violations, saw_await);
             }
             Expr::Field(subject, _, _) => {
-                self.scan_invalidation(subject, view_origins, live, violations)
+                self.scan_invalidation(subject, scan, live, violations, saw_await)
             }
             Expr::Index(subject, index) => {
-                self.scan_invalidation(subject, view_origins, live, violations);
-                self.scan_invalidation(index, view_origins, live, violations);
+                self.scan_invalidation(subject, scan, live, violations, saw_await);
+                self.scan_invalidation(index, scan, live, violations, saw_await);
             }
-            Expr::FunctionReturn(Some(value)) | Expr::Await(value) => {
-                self.scan_invalidation(value, view_origins, live, violations)
+            Expr::FunctionReturn(Some(value)) => {
+                self.scan_invalidation(value, scan, live, violations, saw_await)
+            }
+            Expr::Await(value) => {
+                self.scan_invalidation(value, scan, live, violations, saw_await);
+                *saw_await = true;
+                // E3: a suspension while any view is live — the writer set
+                // during an await is the whole program, and a local that
+                // survives a suspension is a field of the continuation.
+                for view in live.iter() {
+                    violations.push(InvalidationViolation::AwaitCrossing {
+                        anchor: expr_id,
+                        view: *view,
+                    });
+                }
             }
             Expr::Call(call_id) => {
                 let Some(function_call) = self.function_calls.get(&call_id) else {
@@ -3420,7 +3947,7 @@ impl<'src> Analyzer<'src> {
                 let argument_ids = function_call.argument_ids.clone();
                 let subject_id = function_call.subject_id;
                 for argument in &argument_ids {
-                    self.scan_invalidation(*argument, view_origins, live, violations);
+                    self.scan_invalidation(*argument, scan, live, violations, saw_await);
                 }
                 // E2: a call passing a viewed root by `&mut` convention (the
                 // wired receiver or an explicit `&mut` argument) may move,
@@ -3475,7 +4002,7 @@ impl<'src> Analyzer<'src> {
                     }
                     if live
                         .iter()
-                        .any(|view| view_origins.get(view) == Some(&root))
+                        .any(|view| scan.view_origins.get(view) == Some(&root))
                     {
                         violations.push(InvalidationViolation::MutatingCall {
                             anchor: expr_id,
@@ -3488,12 +4015,12 @@ impl<'src> Analyzer<'src> {
             }
             Expr::List(ids) | Expr::Tuple(ids) => {
                 for id in ids {
-                    self.scan_invalidation(id, view_origins, live, violations);
+                    self.scan_invalidation(id, scan, live, violations, saw_await);
                 }
             }
             Expr::StructInitializer(_, fields) => {
                 for value in fields.values() {
-                    self.scan_invalidation(*value, view_origins, live, violations);
+                    self.scan_invalidation(*value, scan, live, violations, saw_await);
                 }
             }
             _ => {}
@@ -3503,20 +4030,21 @@ impl<'src> Analyzer<'src> {
     fn scan_invalidation_if(
         &self,
         branch: &ExprIfBranch,
-        view_origins: &HashMap<Id, Id>,
+        scan: &InvalidationScan<'_>,
         live: &mut HashSet<Id>,
         violations: &mut Vec<InvalidationViolation<'src>>,
+        saw_await: &mut bool,
     ) {
         match branch {
             ExprIfBranch::If(condition, (statements, tail), else_branch) => {
-                self.scan_invalidation(*condition, view_origins, live, violations);
-                self.scan_invalidation_block(statements, *tail, view_origins, live, violations);
+                self.scan_invalidation(*condition, scan, live, violations, saw_await);
+                self.scan_invalidation_block(statements, *tail, scan, live, violations, saw_await);
                 if let Some(else_branch) = else_branch {
-                    self.scan_invalidation_if(else_branch, view_origins, live, violations);
+                    self.scan_invalidation_if(else_branch, scan, live, violations, saw_await);
                 }
             }
             ExprIfBranch::Else((statements, tail)) => {
-                self.scan_invalidation_block(statements, *tail, view_origins, live, violations);
+                self.scan_invalidation_block(statements, *tail, scan, live, violations, saw_await);
             }
         }
     }

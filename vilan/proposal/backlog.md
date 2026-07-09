@@ -202,14 +202,16 @@ have gaps.
    runtime-check territory (generation counters / poisoned views), to be sized only after
    E2/E3 have been in use.
 
-3. **No-view-across-`await`** (M; **proposal: `view-invalidation.md` §3, settled
-   2026-07-09**) — reject a view live across a suspension point, as event **E3** of the
-   unified invalidating-events model: one lexical-liveness scan, three events (E1
-   reassignment — shipped; E2 mutating call; E3 `await`). Includes the signature rule
-   (async fns take no `&`/`&mut` parameters), the async-closure capture rule, and the
-   sub-question ANSWERED: `Shared` is NOT exempt (the handle pins the cell — memory-safe —
-   but another turn's write still reseats elements under the view; re-acquire after the
-   await). Ground rule for A6, not blocked by it.
+3. ~~**No-view-across-`await`**~~ — **SHIPPED 2026-07-09** with E2, both as events of
+   `view-invalidation.md`'s unified model (one lexical-liveness scan, three events: E1
+   reassignment — previously shipped; E2 mutating call on the viewed root, scalar roots
+   exempt; E3 `await` while ANY view is live). Includes the signature rule (a
+   suspending function takes no `&`/`&mut` parameters — sync callees stay free, which
+   keeps the analysis local), the async-closure capture rule, wrapped-match-leg capture
+   liveness, and loop-binding origins (also fixing E1's `for e in &mut a { a = [] }`
+   gap). Sub-question answered: `Shared` is NOT exempt — though `read()` returning a
+   COPY means only `write()`'s view fences `await` (value semantics made reads safe by
+   construction). ~25 pins. A6's ground rule is in place.
 
 4. **Deterministic destruction** (L) — scope-end destructors / `Drop`-equivalent.
 

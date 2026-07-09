@@ -8084,3 +8084,231 @@ fn a_mut_call_on_a_viewed_scalar_root_compiles() {
         "#,
     );
 }
+
+// --- view-invalidation.md E3: a view may not live across `await` — the ---
+// --- writer set during a suspension is the whole program.              ---
+
+#[test]
+fn a_view_across_await_is_rejected() {
+    // The proposal's probe program (compiled silently before E3).
+    let source = r#"
+        struct Point { x: i32 }
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun mutate_across_await() {
+            mut point = Point { x = 1 };
+            let view = &mut point;
+            await tick();
+            view.x = 99;
+        }
+        fun main() {
+            mutate_across_await();
+        }
+        main();
+        "#;
+    assert_fails_spanning(source, "await tick()", "cannot hold a view across 'await'");
+}
+
+#[test]
+fn a_view_created_after_the_await_compiles() {
+    assert_compiles(
+        r#"
+        struct Point { x: i32 }
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun late_view() {
+            mut point = Point { x = 1 };
+            await tick();
+            let view = &mut point;
+            view.x = 99;
+        }
+        fun main() {
+            late_view();
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn an_await_in_one_branch_under_a_live_view_is_rejected() {
+    // Lexical liveness: an await on ANY path while the view is live counts.
+    let source = r#"
+        struct Point { x: i32 }
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun branchy(flag: bool) {
+            mut point = Point { x = 1 };
+            let view = &mut point;
+            if flag {
+                await tick();
+            }
+            view.x = 99;
+        }
+        fun main() {
+            branchy(true);
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn an_await_inside_a_for_mut_loop_is_rejected() {
+    // The loop binding is a view live across every iteration.
+    let source = r#"
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun stream() {
+            mut items = [ 1, 2, 3 ];
+            for e in &mut items {
+                await tick();
+            }
+        }
+        fun main() {
+            stream();
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn a_shared_write_view_across_await_is_rejected() {
+    // The settled sub-question: Shared is NOT exempt — the handle pins the
+    // cell (memory-safe), but another turn's write still reseats elements
+    // under the held view. Re-acquire after the await. (`read()` returns a
+    // COPY by design, so only `write()`'s view is at stake — see the guard
+    // below.)
+    let source = r#"
+        import std::shared::Shared;
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun stale_view() {
+            let shared = Shared::new([ 1, 2, 3 ]);
+            let list = shared.write();
+            await tick();
+            list.push(4);
+        }
+        fun main() {
+            stale_view();
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn a_shared_read_copy_across_await_compiles() {
+    // `read()` returns a copy (value semantics) — nothing to invalidate.
+    assert_compiles(
+        r#"
+        import std::shared::Shared;
+        import std::print;
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun fresh_copy() {
+            let shared = Shared::new([ 1, 2, 3 ]);
+            let list = shared.read();
+            await tick();
+            print(list.len());
+        }
+        fun main() {
+            fresh_copy();
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn an_async_function_with_a_view_parameter_is_rejected() {
+    // The signature rule: the caller's view would be held inside the
+    // suspended callee across its awaits.
+    let source = r#"
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun stash(value: &mut i32) {
+            await tick();
+            value += 1;
+        }
+        fun main() {
+            mut a = 5;
+            stash(&mut a);
+        }
+        main();
+        "#;
+    assert_fails_spanning(source, "value", "cannot take '&mut' parameters");
+}
+
+#[test]
+fn a_sync_function_with_view_parameters_called_from_async_compiles() {
+    // Sync callees cannot suspend — views pass freely.
+    assert_compiles(
+        r#"
+        async fun tick() {
+            let _beat = 1;
+        }
+        fun bump(value: &mut i32) {
+            value += 1;
+        }
+        async fun flow() {
+            mut a = 5;
+            bump(&mut a);
+            await tick();
+            bump(&mut a);
+        }
+        fun main() {
+            flow();
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn an_async_closure_capturing_a_view_is_rejected() {
+    let source = r#"
+        async fun tick() {
+            let _beat = 1;
+        }
+        fun main() {
+            mut a = 5;
+            let view = &mut a;
+            let task = async {
+                await tick();
+                view += 1;
+            };
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn an_await_with_no_live_views_compiles() {
+    assert_compiles(
+        r#"
+        async fun tick() {
+            let _beat = 1;
+        }
+        async fun clean() {
+            mut a = [ 1 ];
+            a.push(2);
+            await tick();
+            a.push(3);
+        }
+        fun main() {
+            clean();
+        }
+        main();
+        "#,
+    );
+}
