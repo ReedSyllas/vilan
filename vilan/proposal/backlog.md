@@ -150,14 +150,16 @@ have gaps.
     trait ARGUMENTS match (`Feed<str>` no longer satisfies `F: Feed<i32>`;
     required args ground through the call's substitution / the construction's
     own bindings / the conditional impl's binder bindings, and errors read
-    "does not implement trait 'Feed<i32>'"). Remaining leniencies, each
-    deliberate and pinned or noted: an impl reached via a SUBTRAIT keeps
-    trait-level argument matching; generic-value bound-to-bound flow stays
-    trait-level; and one `#[ignore]` — an UNBOUNDED generic filling a bounded
-    declared parameter isn't rejected (the initializer's type-argument
-    fallback publishes the constraint itself, so post-solve it is
-    indistinguishable from satisfied; root fix belongs in initializer
-    inference).
+    "does not implement trait 'Feed<i32>'"). The unbounded-forward gap got its
+    ROOT fix too (same day): the initializer's second-chance FIELD-first
+    reconcile binds a declared parameter from a generic field value (the main
+    loop reconciles value-first, which grounds a value's inference slots but
+    never binds the struct's parameter from a generic), and the enum checker
+    types identifier arguments via `infer_type` (an identifier's own expr id
+    carries no type entry) — both forwards now reject, pin un-ignored, enum
+    twins added. Remaining leniencies, each deliberate: an impl reached via a
+    SUBTRAIT keeps trait-level argument matching; generic-value
+    bound-to-bound flow stays trait-level.
 
 14. ~~**Context threading misses trait-default dispatch edges**~~ — **FIXED 2026-07-07**:
     the context pass adds trait-dispatch edges locally (coverage, backward needs

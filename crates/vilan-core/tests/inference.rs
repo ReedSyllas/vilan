@@ -7666,15 +7666,11 @@ fn a_generic_struct_literal_with_a_bounded_forward_compiles() {
     ));
 }
 
-// KNOWN GAP: an UNBOUNDED generic filling a bounded declared parameter
-// (`fun pack<U>(value: U) { Kennel2 { inner = value } }`) is not rejected —
-// the initializer's type-argument fallback publishes the parameter's own
-// constraint when the binding is unbound, so post-solve the argument is
-// indistinguishable from satisfied. The root fix is in initializer inference
-// (bind the declared parameter from a generic field value instead of falling
-// back), not in the checker. Un-ignore when that lands.
+// The unbounded-forward gap's root fix: the initializer's second-chance
+// FIELD-first reconcile binds a declared parameter from a generic field
+// value, so the argument reads as the caller's `U` (whose missing bound the
+// declared-bound check then rejects) instead of the constraint fallback.
 #[test]
-#[ignore]
 fn a_generic_struct_literal_with_an_unbounded_forward_is_rejected() {
     let source = format!(
         r#"{GREET_PRELUDE}
@@ -7831,4 +7827,46 @@ fn a_conditional_impl_binder_trait_argument_is_checked() {
         "#
     );
     assert_fails(&source);
+}
+
+#[test]
+fn a_generic_enum_variant_with_an_unbounded_forward_is_rejected() {
+    // The enum analogue of the struct forward: the checker derives the
+    // variant's bindings by reconciling payload types against argument
+    // types, so the caller's unbounded `U` surfaces and fails the bound.
+    let source = format!(
+        r#"{GREET_PRELUDE}
+        enum Slot<T: Greet> {{
+            Filled(T),
+            Empty,
+        }}
+        fun pack<U>(value: U) {{
+            let _slot = Slot::Filled(value);
+        }}
+        fun main() {{
+            pack(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    );
+    assert_fails(&source);
+}
+
+#[test]
+fn a_generic_enum_variant_with_a_bounded_forward_compiles() {
+    assert_compiles(&format!(
+        r#"{GREET_PRELUDE}
+        enum Slot<T: Greet> {{
+            Filled(T),
+            Empty,
+        }}
+        fun pack<U: Greet>(value: U) {{
+            let _slot = Slot::Filled(value);
+        }}
+        fun main() {{
+            pack(Dog {{ name = "rex" }});
+        }}
+        main();
+        "#
+    ));
 }

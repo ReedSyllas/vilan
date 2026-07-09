@@ -1536,9 +1536,14 @@ impl<'src> Analyzer<'src> {
             let mut bindings: SubstitutionContext = SubstitutionContext::new();
             for (payload_type_id, argument_id) in payload_type_ids.iter().zip(&argument_ids) {
                 let payload_type = payload_type_id.get_type(self);
-                let Some(argument_type) = self.type_of_expr(*argument_id) else {
+                // `infer_type`, not `type_of_expr`: an identifier argument's
+                // own expr id carries no type entry — the type lives on the
+                // binding it references.
+                let argument_type =
+                    self.infer_type(*argument_id, &payload_type, &SubstitutionContext::new());
+                if matches!(argument_type, Type::Unresolved | Type::Unknown) {
                     continue;
-                };
+                }
                 if let Some((_unified, pairs)) =
                     self.reconcile_type(&payload_type, &argument_type, &bindings)
                 {
@@ -9934,6 +9939,45 @@ impl<'src> Analyzer<'src> {
         // unresolved keeps the consumer deferred until the real type lands.
         if deferred {
             return Resolution::Deferred;
+        }
+        // Second chance for parameters the loop left unbound: the loop
+        // reconciles VALUE-first (that direction grounds a value's inference
+        // slots from the field type — `Box { value = [] }`), but value-first
+        // never binds the struct's parameter from a GENERIC value, so
+        // `Kennel2 { inner = value }` with `value: U` fell through to the
+        // constraint fallback below and read as `Kennel2<Greet>` — masking
+        // the declared-bound check (an unbounded `U` looked satisfied) and
+        // lying to any consumer. Reconcile FIELD-first here, adopting
+        // bindings only for declared parameters still unbound.
+        if generic_param_ids
+            .iter()
+            .any(|parameter| !substitution_context.contains_key(parameter))
+        {
+            for (field_name, field_value, _field_value_span) in &constraint.fields {
+                let Some(struct_field) = struct_fields
+                    .iter()
+                    .find(|field| *field.name == **field_name)
+                else {
+                    continue;
+                };
+                let field_type = struct_field.type_id.get_type(self);
+                let value_type = self.infer_type(*field_value, &field_type, &substitution_context);
+                if matches!(value_type, Type::Unresolved | Type::Unknown) {
+                    continue;
+                }
+                let Some((_unified, bindings)) =
+                    self.reconcile_type(&field_type, &value_type, &substitution_context)
+                else {
+                    continue;
+                };
+                for (constraint_id, type_id) in bindings {
+                    if generic_param_ids.contains(&constraint_id)
+                        && !substitution_context.contains_key(&constraint_id)
+                    {
+                        substitution_context.insert(constraint_id, type_id);
+                    }
+                }
+            }
         }
         // Fill the struct's type arguments from the bindings inferred above
         // (`Box { value = 5 }` -> `Box<i32>`), so methods called on the value
