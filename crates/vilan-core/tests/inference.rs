@@ -7456,3 +7456,124 @@ fn a_bound_satisfied_through_a_subtrait_impl_compiles() {
         "#,
     );
 }
+
+// --- B12 depth: a CONDITIONAL impl (`impl Box2<type X: Greet> with Greet`) ---
+// --- satisfies a bound only when its binder bounds hold at the argument.   ---
+
+const CONDITIONAL_PRELUDE: &str = r#"
+    trait Greet {
+        fun greet(self);
+    }
+    struct Dog { name: str }
+    struct Cat { name: str }
+    impl Dog with Greet {
+        fun greet(self) {
+            let _woof = self.name;
+        }
+    }
+    struct Box2<T> { inner: T }
+    impl Box2<type X: Greet> with Greet {
+        fun greet(self) {
+            self.inner.greet();
+        }
+    }
+    fun describe<T: Greet>(subject: T) {
+        subject.greet();
+    }
+"#;
+
+#[test]
+fn a_conditional_impl_with_a_satisfied_condition_compiles() {
+    assert_compiles(&format!(
+        r#"{CONDITIONAL_PRELUDE}
+        fun main() {{
+            describe(Box2 {{ inner = Dog {{ name = "rex" }} }});
+        }}
+        main();
+        "#
+    ));
+}
+
+#[test]
+fn a_conditional_impl_with_a_failed_condition_is_rejected() {
+    let source = format!(
+        r#"{CONDITIONAL_PRELUDE}
+        fun main() {{
+            describe(Box2 {{ inner = Cat {{ name = "tom" }} }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"describe(Box2 { inner = Cat { name = "tom" } })"#,
+        "does not implement trait 'Greet'",
+    );
+}
+
+#[test]
+fn a_conditional_impl_checks_recursively() {
+    // The condition applies at every level: a box of boxes of dogs greets,
+    // a box of boxes of cats does not.
+    assert_compiles(&format!(
+        r#"{CONDITIONAL_PRELUDE}
+        fun main() {{
+            describe(Box2 {{ inner = Box2 {{ inner = Dog {{ name = "rex" }} }} }});
+        }}
+        main();
+        "#
+    ));
+    let source = format!(
+        r#"{CONDITIONAL_PRELUDE}
+        fun main() {{
+            describe(Box2 {{ inner = Box2 {{ inner = Cat {{ name = "tom" }} }} }});
+        }}
+        main();
+        "#
+    );
+    assert_fails_spanning(
+        &source,
+        r#"describe(Box2 { inner = Box2 { inner = Cat { name = "tom" } } })"#,
+        "does not implement trait 'Greet'",
+    );
+}
+
+#[test]
+fn an_inherited_binder_bound_conditions_the_impl() {
+    // The impl binder declares no bound of its own, so it INHERITS the struct
+    // declaration's (`struct Kennel2<T: Greet>`); binding through the impl
+    // must still enforce it.
+    let source = r#"
+        trait Greet {
+            fun greet(self);
+        }
+        trait Show {
+            fun show(self);
+        }
+        struct Dog { name: str }
+        struct Cat { name: str }
+        impl Dog with Greet {
+            fun greet(self) {
+                let _woof = self.name;
+            }
+        }
+        struct Kennel2<T: Greet> { inner: T }
+        impl Kennel2<type T> with Show {
+            fun show(self) {
+                self.inner.greet();
+            }
+        }
+        fun display<T: Show>(subject: T) {
+            subject.show();
+        }
+        fun main() {
+            display(Kennel2 { inner = Cat { name = "tom" } });
+        }
+        main();
+        "#;
+    assert_fails_spanning(
+        source,
+        r#"display(Kennel2 { inner = Cat { name = "tom" } })"#,
+        "does not implement trait 'Show'",
+    );
+}

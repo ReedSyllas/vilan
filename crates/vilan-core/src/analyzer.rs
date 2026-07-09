@@ -1261,8 +1261,24 @@ impl<'src> Analyzer<'src> {
     /// subtrait of it (implementing `Ord` satisfies a `PartialEq` bound); a
     /// generic argument satisfies it when its OWN declared bounds carry the
     /// trait (bound-to-bound flow, `relay<U: Greet>` forwarding to
-    /// `describe<T: Greet>`).
-    fn satisfies_trait_bound(&self, value_type: &Type, required_trait_id: Id) -> bool {
+    /// `describe<T: Greet>`). A CONDITIONAL impl (`impl Box<type X: Greet>
+    /// with Greet`, or a binder bound inherited from the struct declaration)
+    /// applies only where its binder bounds hold at the bound arguments —
+    /// checked recursively, so `Box<Box<Dog>>` greets and `Box<Cat>` doesn't.
+    fn satisfies_trait_bound(
+        &mut self,
+        value_type: &Type,
+        required_trait_id: Id,
+        depth: u32,
+    ) -> bool {
+        // Conditional impls recurse through their arguments; a pathological
+        // impl graph could recurse forever, so cap like rustc's recursion
+        // limit. Past the cap the bound counts as satisfied — leniency keeps
+        // the cap itself from manufacturing errors.
+        const MAX_DEPTH: u32 = 32;
+        if depth > MAX_DEPTH {
+            return true;
+        }
         if let Type::Generic(inner_constraint_id) = value_type {
             return self
                 .generic_bound_trait_ids(*inner_constraint_id)
@@ -1272,16 +1288,49 @@ impl<'src> Analyzer<'src> {
                         .contains(&required_trait_id)
                 });
         }
-        self.implementations.iter().any(|implementation| {
-            implementation.trait_ids.iter().any(|implemented| {
-                self.trait_with_supertraits(*implemented)
-                    .contains(&required_trait_id)
-            }) && self.compare_type(
-                value_type,
-                &implementation.subject.get_type(self),
-                &HashMap::new(),
-            )
-        })
+        let candidate_subjects: Vec<TypeId> = self
+            .implementations
+            .iter()
+            .filter(|implementation| {
+                implementation.trait_ids.iter().any(|implemented| {
+                    self.trait_with_supertraits(*implemented)
+                        .contains(&required_trait_id)
+                })
+            })
+            .map(|implementation| implementation.subject)
+            .collect();
+        'candidates: for subject_id in candidate_subjects {
+            let subject_type = subject_id.get_type(self);
+            // Reconcile subject-first so the bindings key on the impl's
+            // binders (`impl Box2<type X>` against `Box2<Cat>` binds X = Cat).
+            let Some((_unified, bindings)) =
+                self.reconcile_type(&subject_type, value_type, &SubstitutionContext::new())
+            else {
+                continue;
+            };
+            for (binder_constraint_id, argument_type_id) in bindings {
+                let binder_traits = self.generic_bound_traits(binder_constraint_id);
+                if binder_traits.is_empty() {
+                    continue;
+                }
+                let argument_type = argument_type_id.get_type(self);
+                // An indeterminate argument doesn't disqualify the impl —
+                // consistent with the outer checker's skip.
+                if matches!(
+                    argument_type,
+                    Type::Any | Type::Unknown | Type::Unresolved | Type::Trait(..)
+                ) {
+                    continue;
+                }
+                for (binder_trait_id, _arguments) in binder_traits {
+                    if !self.satisfies_trait_bound(&argument_type, binder_trait_id, depth + 1) {
+                        continue 'candidates;
+                    }
+                }
+            }
+            return true;
+        }
+        false
     }
 
     /// B12: every recorded generic instantiation must SATISFY its parameter's
@@ -1296,8 +1345,17 @@ impl<'src> Analyzer<'src> {
     /// trait-parameter bindings).
     fn check_generic_bound_satisfaction(&mut self) {
         let mut errors: Vec<(Span, String)> = Vec::new();
-        for (call_id, substitution) in &self.method_call_substitution {
-            for (&constraint_id, &value_type_id) in substitution {
+        let recorded: Vec<(Id, TypeId, TypeId)> = self
+            .method_call_substitution
+            .iter()
+            .flat_map(|(call_id, substitution)| {
+                substitution.iter().map(|(&constraint_id, &value_type_id)| {
+                    (*call_id, constraint_id, value_type_id)
+                })
+            })
+            .collect();
+        for (call_id, constraint_id, value_type_id) in recorded {
+            {
                 let bound_traits = self.generic_bound_traits(constraint_id);
                 if bound_traits.is_empty() {
                     continue;
@@ -1313,7 +1371,7 @@ impl<'src> Analyzer<'src> {
                     continue;
                 }
                 for (required_trait_id, _trait_arguments) in &bound_traits {
-                    if self.satisfies_trait_bound(&value_type, *required_trait_id) {
+                    if self.satisfies_trait_bound(&value_type, *required_trait_id, 0) {
                         continue;
                     }
                     let Some(trait_name) = self.traits.get(required_trait_id).map(|t| t.name)
@@ -1335,7 +1393,7 @@ impl<'src> Analyzer<'src> {
                              required by a generic bound of this call"
                         )
                     };
-                    errors.push((**self.span_map.get(call_id).unwrap_or(&&EMPTY_SPAN), msg));
+                    errors.push((**self.span_map.get(&call_id).unwrap_or(&&EMPTY_SPAN), msg));
                 }
             }
         }

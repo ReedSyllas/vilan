@@ -137,10 +137,16 @@ have gaps.
     substitutions never cross an unchecked edge). Spanned at the full call.
     Eleven pins (free fn, method, multi-bound naming the missing trait, static
     channel, trait-default-without-impl, subtrait satisfaction, generic impl
-    subject, rebounded forward, under-bounded forward). Residual (recorded in the
-    analyzer-stabilization memory): conditional-impl DEPTH — `List<Cat>` satisfies
-    a bound via `impl List<type X> with T` without checking `Cat` against `X`'s
-    own bounds; the same recursive-syntactic gap as `[derive(Wire)]`'s check.
+    subject, rebounded forward, under-bounded forward). **Conditional-impl DEPTH
+    closed same day** (4 more pins): satisfaction reconciles the impl subject to
+    bind its binders and recursively requires each binder bound — explicit
+    (`impl Box2<type X: Greet> with Greet`) or inherited from the struct
+    declaration — to hold at the argument (`Box2<Box2<Dog>>` greets,
+    `Box2<Cat>` errors; depth-capped, lenient past the cap). Remaining smaller
+    residuals of the family: struct-LITERAL declared bounds are unchecked
+    (`Kennel2 { inner = cat }` with `struct Kennel2<T: Greet>` constructs
+    fine; only binding through an impl errors), and bound trait ARGUMENTS
+    match at trait level only (`Feed<str>` satisfies `T: Feed<i32>`).
 
 14. ~~**Context threading misses trait-default dispatch edges**~~ — **FIXED 2026-07-07**:
     the context pass adds trait-dispatch edges locally (coverage, backward needs
