@@ -7,6 +7,9 @@ function __clone(value) {
 function __list_get(list, index) {
 	return index >= 0 && index < list.length ? [ 0, __clone(list[index]) ] : [ 1 ];
 }
+function __list_pop(list) {
+	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
+}
 function __shared_new(value) {
 	return { v: value };
 }
@@ -26,6 +29,31 @@ function enqueue(turn, subscribers) {
 		if (!(seen)) {
 			turn[0].v.push(subscriber);
 		}
+	}
+	if (turn[2].v && !(turn[3].v) && !(turn[1].v)) {
+		turn[3].v = true;
+		queueMicrotask(() => {
+			turn[3].v = false;
+			drain(turn);
+			return;
+		});
+	}
+}
+function drain(turn) {
+	if (!(turn[1].v)) {
+		turn[1].v = true;
+		draining_turns.v.push(turn);
+		let budget = 100000;
+		while (!($p(turn[0].v)) && budget > 0) {
+			const wave = turn[0].v;
+			turn[0].v = [  ];
+			for (const subscriber of wave) {
+				subscriber[1]();
+				budget = budget - 1;
+			}
+		}
+		__list_pop(draining_turns.v);
+		turn[1].v = false;
 	}
 }
 function dispose(self, $i) {
@@ -68,6 +96,9 @@ function $f(self) {
 	return self[0].v;
 }
 function $p(self) {
+	return self.length === 0;
+}
+function $q(self) {
 	return __list_get(self, self.length - 1);
 }
 function $l(self, value, $m) {
@@ -78,22 +109,22 @@ function $l(self, value, $m) {
 		const turn = $n[1];
 		$o = enqueue(turn, self[1].v);
 	} else {
-		const $q = $p(draining_turns.v);
-		let $r = null;
-		if ($q[0] === 0) {
-			const draining = $q[1];
-			$r = enqueue(draining, self[1].v);
+		const $r = $q(draining_turns.v);
+		let $s = null;
+		if ($r[0] === 0) {
+			const draining = $r[1];
+			$s = enqueue(draining, self[1].v);
 		} else {
 			for (const subscriber of self[1].v) {
 				subscriber[1]();
 			}
-			$r = undefined;
+			$s = undefined;
 		}
-		$o = $r;
+		$o = $s;
 	}
 	return $o;
 }
-function $s(self, observer) {
+function $t(self, observer) {
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
 		observer($f(self));
@@ -102,7 +133,7 @@ function $s(self, observer) {
 	observer($f(self));
 	return [ self[1], id ];
 }
-function $t(self, observer) {
+function $u(self, observer) {
 	const id = fresh_id();
 	self[1].v.push([ id, () => {
 		observer($e(self));
@@ -114,7 +145,7 @@ function $t(self, observer) {
 function $c(self, $d) {
 	const derived = $a($f($e(self)));
 	const inner_subscription = __shared_new([ 1 ]);
-	$t(self, (inner) => {
+	$u(self, (inner) => {
 		const $g = inner_subscription.v;
 		let $h = null;
 		if ($g[0] === 1) {
@@ -123,7 +154,7 @@ function $c(self, $d) {
 			$h = [ 0, dispose($g[1], $d) ];
 		}
 		$h;
-		inner_subscription.v = [ 0, $s(inner, (value) => {
+		inner_subscription.v = [ 0, $t(inner, (value) => {
 			$l(derived, value, $d);
 			return;
 		}) ];
@@ -131,33 +162,33 @@ function $c(self, $d) {
 	});
 	return derived;
 }
-function $u(self, value, $m) {
+function $v(self, value, $m) {
 	self[0].v = value;
-	const $v = $m;
-	let $w = null;
-	if ($v[0] === 0) {
-		const turn = $v[1];
-		$w = enqueue(turn, self[1].v);
+	const $w = $m;
+	let $x = null;
+	if ($w[0] === 0) {
+		const turn = $w[1];
+		$x = enqueue(turn, self[1].v);
 	} else {
-		const $x = $p(draining_turns.v);
-		let $y = null;
-		if ($x[0] === 0) {
-			const draining = $x[1];
-			$y = enqueue(draining, self[1].v);
+		const $y = $q(draining_turns.v);
+		let $z = null;
+		if ($y[0] === 0) {
+			const draining = $y[1];
+			$z = enqueue(draining, self[1].v);
 		} else {
 			for (const subscriber of self[1].v) {
 				subscriber[1]();
 			}
-			$y = undefined;
+			$z = undefined;
 		}
-		$w = $y;
+		$x = $z;
 	}
-	return $w;
+	return $x;
 }
-function $z(self, transform, $A) {
+function $A(self, transform, $B) {
 	const derived = $a(transform($f(self)));
 	self[1].v.push([ fresh_id(), () => {
-		$l(derived, transform($f(self)), $A);
+		$l(derived, transform($f(self)), $B);
 		return;
 	} ]);
 	return derived;
@@ -173,13 +204,13 @@ const joined = $c(outer, [ 1 ]);
 console.log($f(joined));
 $l(first, 2, [ 1 ]);
 console.log($f(joined));
-$u(outer, second, [ 1 ]);
+$v(outer, second, [ 1 ]);
 console.log($f(joined));
 $l(first, 99, [ 1 ]);
 console.log($f(joined));
 $l(second, 11, [ 1 ]);
 console.log($f(joined));
-const doubled = $z(joined, (value) => {
+const doubled = $A(joined, (value) => {
 	return value * 2;
 }, [ 1 ]);
 $l(second, 21, [ 1 ]);

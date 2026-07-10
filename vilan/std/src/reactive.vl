@@ -38,25 +38,40 @@ fun fresh_id(): i32 {
 // while interleaved extents keep theirs.
 
 enum FlushPolicy {
-	// Settle once, when the turn's extent ends — the transactional cadence
+	// Settle when the turn's extent ends — the transactional cadence
 	// (server dispatch).
 	AtEnd,
-	// Settle at each suspension point and at the end — the optimistic-paint
-	// cadence (UI events). v1 behaves as `AtEnd`: the await-boundary
-	// auto-flush needs an async-lowering hook (recorded in
-	// `reactive-turns.md`); until it lands, a manual `flush()` before an
-	// `await` settles optimistically.
+	// The optimistic-paint cadence (UI events).
 	AtSuspension,
 }
+// v1 NOTE (reactive-turns.md): for an ASYNC extent the policies converge —
+// the sync part settles when `turn`'s body returns (its first suspension),
+// and each CONTINUATION segment settles on a microtask right after it runs
+// (see `enqueue`'s settled path), coalesced per segment. A true
+// held-across-await `AtEnd` needs a `turn` that can await its body
+// (recorded follow-on); the enum states intent and keeps the API stable.
+
+// The host's microtask queue — the continuation-settling primitive.
+[extern("queueMicrotask")]
+external fun queue_microtask(callback: || void);
 
 struct Turn {
 	pending: Shared<List<Subscriber>>,
 	draining: Shared<bool>,
+	// True once the extent's own settle ran; a LATE enqueue (an async
+	// continuation's write) then schedules its own segment-coalesced drain.
+	settled: Shared<bool>,
+	scheduled: Shared<bool>,
 }
 
 impl Turn {
 	fun new(): Turn {
-		Turn { pending = Shared::new([]), draining = Shared::new(false) }
+		Turn {
+			pending = Shared::new([]),
+			draining = Shared::new(false),
+			settled = Shared::new(false),
+			scheduled = Shared::new(false),
+		}
 	}
 }
 
@@ -91,6 +106,17 @@ fun enqueue(turn: Turn, subscribers: List<Subscriber>) {
 		if !seen {
 			turn.pending.write().push(subscriber);
 		}
+	}
+	// A write AFTER the extent settled — an async continuation's — must not
+	// sit forever (and must not settle per-set, which would glitch a
+	// multi-input observer): one microtask drains the whole segment's
+	// writes together, right after the segment runs.
+	if turn.settled.read() && !turn.scheduled.read() && !turn.draining.read() {
+		turn.scheduled.write() = true;
+		queue_microtask(|| {
+			turn.scheduled.write() = false;
+			drain(turn);
+		});
 	}
 }
 
@@ -130,11 +156,12 @@ fun flush() {
 // extent ends. The isolation primitive: `body`'s writes (and those of the
 // closures it creates — capture-at-creation) queue here and nowhere else.
 fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T {
-	// v1: both policies settle at the end (see `FlushPolicy::AtSuspension`).
+	// The policies converge for async extents in v1 — see `FlushPolicy`.
 	let _cadence = policy;
 	let fresh = Turn::new();
 	let result = turn_scope.run(fresh, body);
 	drain(fresh);
+	fresh.settled.write() = true;
 	result
 }
 
@@ -155,6 +182,7 @@ fun batch<T>(body: (|| T) context turn_scope): T {
 			let fresh = Turn::new();
 			let result = turn_scope.run(fresh, body);
 			drain(fresh);
+			fresh.settled.write() = true;
 			result
 		},
 	}

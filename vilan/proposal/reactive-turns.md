@@ -1,9 +1,17 @@
 # Reactive turns — flush is scoped, not global (A6 redesigned)
 
-Status: **CORE SHIPPED 2026-07-09** — `get_safe` (§5.1) and the Turn
-machinery + server boundary (§5.2–5.3) landed the same day; §5.5's
-optimistic-reconcile follow-on and the `AtSuspension` await-hook remain
-recorded. Three implementation findings amended the design:
+Status: **SHIPPED 2026-07-09** — `get_safe` (§5.1), the Turn machinery +
+server boundary (§5.2–5.3), the `std::ui` boundary, and CONTINUATION
+SETTLING all landed the same day; §5.5's optimistic-reconcile follow-on
+remains recorded. The `AtSuspension` "async-lowering hook" turned out
+unnecessary: for an async extent, `turn`'s own drain fires at the body's
+first suspension (the body returns its promise there), and a write landing
+AFTER the turn settled schedules one **microtask drain** — each continuation
+segment settles as one coalesced wave (per-set settling would have
+re-glitched multi-input observers), with no compiler insertion at all. The
+policies therefore CONVERGE for async extents in v1 (`FlushPolicy` states
+intent and keeps the API stable); a true held-across-await `AtEnd` needs a
+`turn` that can await its body — `turn_async`, the recorded follow-on. Three implementation findings amended the design:
 
 1. **Injected bodies, not captured** (`turn` AND `batch`): a batch body is a
    literal at the call site, created BEFORE the extent exists —

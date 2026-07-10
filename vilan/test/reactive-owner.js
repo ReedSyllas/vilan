@@ -7,6 +7,9 @@ function __clone(value) {
 function __list_get(list, index) {
 	return index >= 0 && index < list.length ? [ 0, __clone(list[index]) ] : [ 1 ];
 }
+function __list_pop(list) {
+	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
+}
 function __shared_new(value) {
 	return { v: value };
 }
@@ -26,6 +29,31 @@ function enqueue(turn, subscribers) {
 		if (!(seen)) {
 			turn[0].v.push(subscriber);
 		}
+	}
+	if (turn[2].v && !(turn[3].v) && !(turn[1].v)) {
+		turn[3].v = true;
+		queueMicrotask(() => {
+			turn[3].v = false;
+			drain(turn);
+			return;
+		});
+	}
+}
+function drain(turn) {
+	if (!(turn[1].v)) {
+		turn[1].v = true;
+		draining_turns.v.push(turn);
+		let budget = 100000;
+		while (!($r(turn[0].v)) && budget > 0) {
+			const wave = turn[0].v;
+			turn[0].v = [  ];
+			for (const subscriber of wave) {
+				subscriber[1]();
+				budget = budget - 1;
+			}
+		}
+		__list_pop(draining_turns.v);
+		turn[1].v = false;
 	}
 }
 function dispose(self, $k) {
@@ -92,6 +120,9 @@ function $c(self, observer, $d, $e) {
 	$i(get_owner($e), $g(self, observer), $d);
 }
 function $r(self) {
+	return self.length === 0;
+}
+function $s(self) {
 	return __list_get(self, self.length - 1);
 }
 function $n(self, value, $o) {
@@ -102,25 +133,25 @@ function $n(self, value, $o) {
 		const turn = $p[1];
 		$q = enqueue(turn, self[1].v);
 	} else {
-		const $s = $r(draining_turns.v);
-		let $t = null;
-		if ($s[0] === 0) {
-			const draining = $s[1];
-			$t = enqueue(draining, self[1].v);
+		const $t = $s(draining_turns.v);
+		let $u = null;
+		if ($t[0] === 0) {
+			const draining = $t[1];
+			$u = enqueue(draining, self[1].v);
 		} else {
 			for (const subscriber of self[1].v) {
 				subscriber[1]();
 			}
-			$t = undefined;
+			$u = undefined;
 		}
-		$q = $t;
+		$q = $u;
 	}
 	return $q;
 }
-function $x(owner2, body) {
+function $y(owner2, body) {
 	return body(owner2);
 }
-function $z(body) {
+function $A(body) {
 	const scope2 = new2();
 	const result = body(scope2);
 	return [ result, scope2 ];
@@ -143,16 +174,16 @@ $n(count, 3, [ 1 ]);
 console.log("done");
 const outer = new2();
 const inner = new2();
-(($u) => {
-	(($v) => {
+(($v) => {
+	(($w) => {
 		$c(count, (value) => {
 			return console.log("inner " + value);
-		}, [ 1 ], $v);
+		}, [ 1 ], $w);
 		return;
 	})(inner);
 	$c(count, (value) => {
 		return console.log("outer " + value);
-	}, [ 1 ], $u);
+	}, [ 1 ], $v);
 	return;
 })(outer);
 $n(count, 4, [ 1 ]);
@@ -162,24 +193,24 @@ dispose2(outer);
 $n(count, 6, [ 1 ]);
 console.log("end");
 const wrapped = new2();
-$x(wrapped, ($w) => {
+$y(wrapped, ($x) => {
 	$c(count, (value) => {
 		return console.log("wrapped " + value);
-	}, [ 1 ], $w);
+	}, [ 1 ], $x);
 	return;
 });
 $n(count, 7, [ 1 ]);
 dispose2(wrapped);
 $n(count, 8, [ 1 ]);
 console.log("fin");
-const $A = $z(($y) => {
+const $B = $A(($z) => {
 	$c(count, (value) => {
 		return console.log("comp " + value);
-	}, [ 1 ], $y);
+	}, [ 1 ], $z);
 	return "built";
 });
-const label = $A[0];
-const scope = $A[1];
+const label = $B[0];
+const scope = $B[1];
 console.log(label);
 $n(count, 9, [ 1 ]);
 dispose2(scope);

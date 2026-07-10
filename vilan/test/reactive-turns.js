@@ -19,7 +19,7 @@ function fresh_id() {
 	return id;
 }
 function new2() {
-	return [ __shared_new([  ]), __shared_new(false) ];
+	return [ __shared_new([  ]), __shared_new(false), __shared_new(false), __shared_new(false) ];
 }
 function enqueue(turn, subscribers) {
 	for (const subscriber of subscribers) {
@@ -33,13 +33,21 @@ function enqueue(turn, subscribers) {
 			turn[0].v.push(subscriber);
 		}
 	}
+	if (turn[2].v && !(turn[3].v) && !(turn[1].v)) {
+		turn[3].v = true;
+		queueMicrotask(() => {
+			turn[3].v = false;
+			drain(turn);
+			return;
+		});
+	}
 }
 function drain(turn) {
 	if (!(turn[1].v)) {
 		turn[1].v = true;
 		draining_turns.v.push(turn);
 		let budget = 100000;
-		while (!($p(turn[0].v)) && budget > 0) {
+		while (!($i(turn[0].v)) && budget > 0) {
 			const wave = turn[0].v;
 			turn[0].v = [  ];
 			for (const subscriber of wave) {
@@ -51,16 +59,16 @@ function drain(turn) {
 		turn[1].v = false;
 	}
 }
-function flush($m) {
-	const $n = $m;
-	let $o = null;
-	if ($n[0] === 0) {
-		const turn = $n[1];
-		$o = drain(turn);
+function flush($n) {
+	const $o = $n;
+	let $p = null;
+	if ($o[0] === 0) {
+		const turn = $o[1];
+		$p = drain(turn);
 	} else {
-		$o = undefined;
+		$p = undefined;
 	}
-	return $o;
+	return $p;
 }
 async function tick() {
 
@@ -82,6 +90,9 @@ function $b(self, observer) {
 	return [ self[1], id ];
 }
 function $i(self) {
+	return self.length === 0;
+}
+function $j(self) {
 	return __list_get(self, self.length - 1);
 }
 function $e(self, value, $f) {
@@ -92,28 +103,26 @@ function $e(self, value, $f) {
 		const turn = $g[1];
 		$h = enqueue(turn, self[1].v);
 	} else {
-		const $j = $i(draining_turns.v);
-		let $k = null;
-		if ($j[0] === 0) {
-			const draining = $j[1];
-			$k = enqueue(draining, self[1].v);
+		const $k = $j(draining_turns.v);
+		let $l = null;
+		if ($k[0] === 0) {
+			const draining = $k[1];
+			$l = enqueue(draining, self[1].v);
 		} else {
 			for (const subscriber of self[1].v) {
 				subscriber[1]();
 			}
-			$k = undefined;
+			$l = undefined;
 		}
-		$h = $k;
+		$h = $l;
 	}
 	return $h;
-}
-function $p(self) {
-	return self.length === 0;
 }
 function $s(policy, body) {
 	const fresh = new2();
 	const result = body(fresh);
 	drain(fresh);
+	fresh[2].v = true;
 	return result;
 }
 function $u(body, $v) {
@@ -126,6 +135,7 @@ function $u(body, $v) {
 		const fresh = new2();
 		const result = body(fresh);
 		drain(fresh);
+		fresh[2].v = true;
 		$x = result;
 	}
 	return $x;
@@ -148,9 +158,9 @@ const turn_b = new2();
 	$e(a, 1, [ 0, $d ]);
 	return;
 })(turn_a);
-(($l) => {
-	$e(b, 1, [ 0, $l ]);
-	flush([ 0, $l ]);
+(($m) => {
+	$e(b, 1, [ 0, $m ]);
+	flush([ 0, $m ]);
 	return;
 })(turn_b);
 console.log("mid");

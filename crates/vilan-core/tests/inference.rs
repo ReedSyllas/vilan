@@ -8864,3 +8864,102 @@ fn an_annotated_binding_with_a_non_literal_initializer_is_rejected() {
         "#;
     assert_fails(source);
 }
+
+// --- reactive-turns: the suspension hook. A turn's async continuations ---
+// --- must settle without manual flushes, and AtSuspension pre-flushes  ---
+// --- at each await (the optimistic-paint cadence).                     ---
+
+#[test]
+fn a_continuation_set_settles_without_a_manual_flush() {
+    // The silent-loss fix: after the extent's first suspension the turn is
+    // SETTLED; a late enqueue drains itself instead of waiting forever.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, FlushPolicy, turn, turn_scope };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let count = Signal::new(0);
+            let _watch = count.sub(|value| print(i"seen {value}"));
+            turn(FlushPolicy::AtEnd, || {
+                let task = async {
+                    await tick();
+                    count.set(7);
+                };
+            });
+            print("sync done");
+        }
+        main();
+        "#,
+        "seen 0\nsync done\nseen 7\n",
+    );
+}
+
+#[test]
+fn at_suspension_flushes_before_each_await() {
+    // The optimistic-paint cadence: writes made BEFORE an await are settled
+    // at the suspension point (compiler-inserted, policy-gated), so the
+    // first paint happens before the slow work.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, FlushPolicy, turn, turn_scope };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let status = Signal::new("idle");
+            let _watch = status.sub(|value| print(i"status {value}"));
+            turn(FlushPolicy::AtSuspension, || {
+                let task = async {
+                    status.set("saving");
+                    await tick();
+                    status.set("saved");
+                };
+            });
+            print("sync done");
+        }
+        main();
+        "#,
+        "status idle\nstatus saving\nsync done\nstatus saved\n",
+    );
+}
+
+#[test]
+fn at_end_holds_writes_across_the_await_inside_the_extent() {
+    // The transactional cadence: an AtEnd turn does NOT pre-flush at the
+    // suspension — the pre-await write settles with the extent (here, the
+    // sync drain at the body's first suspension boundary), not before it.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, FlushPolicy, turn, turn_scope };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let status = Signal::new("idle");
+            let _watch = status.sub(|value| print(i"status {value}"));
+            turn(FlushPolicy::AtEnd, || {
+                let task = async {
+                    status.set("working");
+                    await tick();
+                    status.set("done");
+                };
+                status.set("queued");
+            });
+            print("sync done");
+        }
+        main();
+        "#,
+        "status idle\nstatus queued\nsync done\nstatus done\n",
+    );
+}

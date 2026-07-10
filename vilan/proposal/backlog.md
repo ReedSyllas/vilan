@@ -59,9 +59,12 @@ have gaps.
    adapters), riding two B15 extensions: clauses on `let` annotations and clause
    ADOPTION (an unannotated closure-literal binding passed into a clause position
    adopts it — the idiomatic `let add = || ..; .on("click", add)` just works).
-   REMAINING, recorded in the proposal status: the `AtSuspension` await-boundary
-   auto-flush (async-lowering hook) and the optimistic-write → reconcile
-   follow-on. Original
+   Continuation settling shipped same-day too: a write landing after the turn
+   settled schedules ONE microtask drain (`queue_microtask` extern), so each
+   async continuation segment settles as a coalesced wave — no compiler
+   insertion needed, the policies converge for async extents (a true
+   held-across-await `AtEnd` = `turn_async`, recorded). REMAINING: the
+   optimistic-write → reconcile follow-on, and `turn_async`. Original
    design: **proposal: `reactive-turns.md`, 2026-07-09** — supersedes the original "auto-flush on the next
    microtask" sketch, which a review scenario killed: the scheduler's single global
    pending queue means one request's `flush` drains every interleaved request's
