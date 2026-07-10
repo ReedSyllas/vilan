@@ -5656,8 +5656,35 @@ impl<'src> Analyzer<'src> {
                     self.binding_annotation_view
                         .insert(id, matches!(&type_node.0, Node::Reference(_, _)));
                 }
-                let type_id = type_
-                    .as_ref()
+                // Peel a `context` clause on the annotation (reactive-turns
+                // ui-boundary follow-up; parameters shipped with B15): the
+                // BINDING becomes a named injected closure — its initializer
+                // literal defers, passing it matches same-clause parameters,
+                // and calling it is a read at the call site. Resolution is
+                // deferred past the import fixpoint, like parameters'.
+                let mut annotation: Option<&Spanned<Node>> = type_.as_deref();
+                if let Some((Node::TypeWithContexts(inner, names), clause_span)) =
+                    annotation.map(|node| (&node.0, node.1))
+                {
+                    let grouped = match &inner.0 {
+                        Node::Tuple(elements) if elements.len() == 1 => &elements[0].0,
+                        other => other,
+                    };
+                    if !matches!(grouped, Node::ClosureType(..)) {
+                        self.diagnostics.push(Error {
+                            span: clause_span,
+                            msg: "a `context` clause is only supported on a closure type"
+                                .to_string(),
+                        });
+                    }
+                    self.prepped_context_clauses.push((
+                        id,
+                        names.iter().map(|(name, span)| (*name, *span)).collect(),
+                        scope_id,
+                    ));
+                    annotation = Some(inner);
+                }
+                let type_id = annotation
                     .map(|x| self.walk_type_node(x, scope_id))
                     .unwrap_or(Type::Unknown.get_type_id(self));
                 // An annotated let EXPECTS its value at the annotation — the

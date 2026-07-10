@@ -8738,3 +8738,129 @@ fn a_turn_follows_its_extents_continuation_across_await() {
         "seen 0\nsync done\nseen 7\n",
     );
 }
+
+// --- reactive-turns §2: the UI event boundary mechanism — a host-invoked ---
+// --- plain ADAPTER wraps each dispatch in a fresh turn; the clause-typed ---
+// --- handler (a user literal, deferred) receives it at the call.        ---
+
+#[test]
+fn a_host_invoked_adapter_gives_each_dispatch_its_own_turn() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, FlushPolicy, turn, turn_scope };
+
+        fun simulate_events(handler: (|| void) context turn_scope) {
+            // The DOM stores only this plain closure; each invocation is a
+            // boundary dispatch.
+            let adapter = || turn(FlushPolicy::AtSuspension, || handler());
+            adapter();
+            adapter();
+        }
+
+        fun main() {
+            let count = Signal::new(0);
+            let _watch = count.sub(|value| print(i"seen {value}"));
+            simulate_events(|| {
+                count.set(count.get() + 1);
+                count.set(count.get() + 1);
+                print("handler done");
+            });
+        }
+        main();
+        "#,
+        "seen 0\nhandler done\nseen 2\nhandler done\nseen 4\n",
+    );
+}
+
+#[test]
+fn a_named_handler_binding_adopts_the_clause() {
+    // `let add = || ..; take(add)` — the unannotated closure binding passed
+    // into a clause position adopts it: the literal defers (receiving each
+    // dispatch's turn), and DIRECT calls of the binding thread like any
+    // injected call.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, FlushPolicy, turn, turn_scope };
+
+        fun dispatch(handler: (|| void) context turn_scope) {
+            turn(FlushPolicy::AtEnd, || handler());
+        }
+
+        fun main() {
+            let count = Signal::new(0);
+            let _watch = count.sub(|value| print(i"seen {value}"));
+            let add = || {
+                count.set(count.get() + 1);
+                count.set(count.get() + 1);
+            };
+            dispatch(add);
+            print("mid");
+            turn(FlushPolicy::AtEnd, || add());
+        }
+        main();
+        "#,
+        "seen 0\nseen 2\nmid\nseen 4\n",
+    );
+}
+
+#[test]
+fn an_annotated_clause_binding_defers_and_forwards() {
+    // The explicit spelling: a clause on the LET annotation. The binding
+    // forwards into same-clause parameters and works as `run`'s body.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        fun invoke(body: (|| void) context current) {
+            current.run(9, body);
+        }
+
+        fun main() {
+            let report: (|| void) context current = || print(current.get());
+            invoke(report);
+            current.run(5, report);
+        }
+        main();
+        "#,
+        "9\n5\n",
+    );
+}
+
+#[test]
+fn a_non_closure_binding_in_a_clause_position_is_rejected() {
+    let source = r#"
+        import std::reactive::{ FlushPolicy, turn, turn_scope };
+
+        fun dispatch(handler: (|| void) context turn_scope) {
+            turn(FlushPolicy::AtEnd, || handler());
+        }
+
+        fun main() {
+            let not_a_closure = 5;
+            dispatch(not_a_closure);
+        }
+        main();
+        "#;
+    assert_fails(source);
+}
+
+#[test]
+fn an_annotated_binding_with_a_non_literal_initializer_is_rejected() {
+    let source = r#"
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        fun main() {
+            let value = 5;
+            let bad: (|| void) context current = value;
+        }
+        main();
+        "#;
+    assert_fails(source);
+}

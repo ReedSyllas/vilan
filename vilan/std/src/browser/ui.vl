@@ -21,7 +21,7 @@
 // Only available when building for the browser (`vilan build --target browser`).
 
 import pkg::dom::{ Element, get_element_by_id, create_element };
-import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp };
+import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp, turn_scope, turn, FlushPolicy };
 import pkg::shared::Shared;
 import pkg::compare::PartialEq;
 import pkg::option::Option::{ self, Some, None };
@@ -56,10 +56,15 @@ impl View {
 		self
 	}
 
-	// An event listener (`"click"`, `"input"`, …). Handlers die with the DOM
+	// An event listener (`"click"`, `"input"`, …). A DOM event is a TURN
+	// boundary (proposal/reactive-turns.md §2): the host stores only the
+	// plain adapter below, and each dispatch runs the clause-typed handler
+	// inside a fresh turn — an event's signal writes settle as one wave.
+	// (`AtSuspension` behaves as `AtEnd` until the async hook lands.)
+	// Handlers die with the DOM
 	// node — no registration needed.
-	fun on(self, event: str, handler: || void): View {
-		self.element.on(event, handler);
+	fun on(self, event: str, handler: (|| void) context turn_scope): View {
+		self.element.on(event, || turn(FlushPolicy::AtSuspension, || handler()));
 		self
 	}
 
@@ -112,9 +117,11 @@ impl View {
 		signal.effect(|value| {
 			element.set_value(value);
 		});
-		element.on("input", || {
+		// The write-back is a boundary dispatch too: each input event's
+		// write settles in its own turn.
+		element.on("input", || turn(FlushPolicy::AtSuspension, || {
 			signal.set(element.value());
-		});
+		}));
 		self
 	}
 
@@ -254,7 +261,9 @@ fun mount(id: str, view: View) {
 // root boundary — every binding inside registers into it) and the view is
 // attached. Returns the root owner; most apps let it live forever.
 fun mount_root(id: str, body: (|| View) context owner_scope): Owner {
-	let (built, root) = comp(body);
+	// The initial build is a turn boundary too: bindings created during
+	// mount settle as one wave instead of notifying per-`set`.
+	let (built, root) = turn(FlushPolicy::AtSuspension, || comp(body));
 	mount(id, built);
 	root
 }

@@ -54,10 +54,14 @@ have gaps.
    cascades — the one runtime device; per-turn dedup + budget) + the server
    boundary (`[service]` routes wrap their bodies in per-dispatch `turn(AtEnd, ..)`;
    manual `dispatcher.on` handlers self-`batch`, as the coalescing benchmark now
-   spells). REMAINING, recorded in the proposal status: the `AtSuspension`
-   await-boundary auto-flush (async-lowering hook), the `std::ui` event boundary
-   (stored listeners capture at registration — wants storable injected closures,
-   a B15 extension), and the optimistic-write → reconcile follow-on. Original
+   spells). The `std::ui` boundary shipped same-day
+   (View.on/bind_value/mount_root wrap dispatches in turns via plain host-stored
+   adapters), riding two B15 extensions: clauses on `let` annotations and clause
+   ADOPTION (an unannotated closure-literal binding passed into a clause position
+   adopts it — the idiomatic `let add = || ..; .on("click", add)` just works).
+   REMAINING, recorded in the proposal status: the `AtSuspension` await-boundary
+   auto-flush (async-lowering hook) and the optimistic-write → reconcile
+   follow-on. Original
    design: **proposal: `reactive-turns.md`, 2026-07-09** — supersedes the original "auto-flush on the next
    microtask" sketch, which a review scenario killed: the scheduler's single global
    pending queue means one request's `flush` drains every interleaved request's

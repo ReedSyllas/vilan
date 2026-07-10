@@ -453,6 +453,12 @@ fn analyze(
     // a parameter with the SAME clause, or `run`'s body position.
     let mut deferred: HashMap<Id, HashSet<Id>> = HashMap::new(); // ctx -> closures
     let mut injected_calls: HashMap<Id, Vec<(Node, Id)>> = HashMap::new(); // ctx -> (caller, call)
+    // The working clause map: declared clauses (parameters AND `let`
+    // annotations) plus ADOPTED ones — an unannotated closure-literal binding
+    // passed into a clause position adopts that clause (`let add = || ..;`
+    // then `.on("click", add)`), exactly as if the literal were written
+    // inline: its literal defers, and its direct calls become injected calls.
+    let mut value_contexts: HashMap<Id, Vec<Id>> = program.parameter_contexts.clone();
     {
         // Validate each clause names actual contexts, and admit them to the
         // per-context loop (a clause context may have no direct get/run).
@@ -485,29 +491,54 @@ fn analyze(
             }
         }
 
-        // Calls THROUGH an annotated parameter.
-        for node in graph.nodes() {
-            for call in graph.calls_of(node.id()) {
-                let Some(function_call) = program.function_calls.get(&call.call_id) else {
-                    continue;
-                };
-                if let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id)
-                {
-                    if let Some(clause) = program.parameter_contexts.get(target) {
-                        for &context in clause {
-                            injected_calls
-                                .entry(context)
-                                .or_default()
-                                .push((*node, call.call_id));
-                        }
+        // Closure literals landing in annotated positions defer; annotated
+        // values may forward to a parameter with the SAME clause.
+        let mut allowed_forwards: HashSet<Id> = HashSet::new();
+
+        // Clause-typed LET bindings (the ui-boundary follow-up): the
+        // binding is a NAMED injected closure. Its initializer literal
+        // defers exactly like a literal in a clause parameter position; a
+        // same-clause value initializer is a forward; anything else is an
+        // escape the threading cannot follow.
+        for (&binding_id, clause) in &program.parameter_contexts {
+            let Some(variable) = program.variables.get(&binding_id) else {
+                // Parameters share the map but have no variable record.
+                continue;
+            };
+            let Some(initial) = variable.initial else {
+                continue;
+            };
+            match program.entity_map.get(&initial) {
+                Some(Expr::Closure(closure_id)) => {
+                    for &context in clause {
+                        deferred.entry(context).or_default().insert(*closure_id);
                     }
+                }
+                Some(Expr::Local(source))
+                    if program.parameter_contexts.get(source) == Some(clause) =>
+                {
+                    allowed_forwards.insert(initial);
+                }
+                _ => {
+                    errors.push(Error {
+                        span: span_of(program, initial),
+                        msg: "a `context`-typed binding takes a closure literal, or a value with the same `context` clause"
+                            .to_string(),
+                    });
                 }
             }
         }
 
-        // Closure literals landing in annotated positions defer; annotated
-        // values may forward to a parameter with the SAME clause.
-        let mut allowed_forwards: HashSet<Id> = HashSet::new();
+        // Adoption: an argument binding with NO clause of its own, whose
+        // initial is a closure literal, adopts the parameter's clause.
+        let adoptable = |source: Id| -> Option<Id> {
+            let variable = program.variables.get(&source)?;
+            let initial = variable.initial?;
+            match program.entity_map.get(&initial) {
+                Some(Expr::Closure(closure_id)) => Some(*closure_id),
+                _ => None,
+            }
+        };
         for (&call_id, function_call) in &program.function_calls {
             let Some(target) = call_target(program, call_id) else {
                 continue;
@@ -517,26 +548,56 @@ fn analyze(
             };
             for (argument, parameter) in function_call.argument_ids.iter().zip(&function.parameters)
             {
-                let Some(clause) = program.parameter_contexts.get(parameter) else {
+                let Some(clause) = value_contexts.get(parameter).cloned() else {
                     continue;
                 };
                 match program.entity_map.get(argument) {
                     Some(Expr::Closure(closure_id)) => {
-                        for &context in clause {
+                        for &context in &clause {
                             deferred.entry(context).or_default().insert(*closure_id);
                         }
                     }
+                    Some(Expr::Local(source)) if value_contexts.get(source) == Some(&clause) => {
+                        allowed_forwards.insert(*argument);
+                    }
                     Some(Expr::Local(source))
-                        if program.parameter_contexts.get(source) == Some(clause) =>
+                        if !value_contexts.contains_key(source) && adoptable(*source).is_some() =>
                     {
+                        let closure_id = adoptable(*source).expect("just matched");
+                        value_contexts.insert(*source, clause.clone());
+                        for &context in &clause {
+                            deferred.entry(context).or_default().insert(closure_id);
+                        }
                         allowed_forwards.insert(*argument);
                     }
                     _ => {
                         errors.push(Error {
                             span: span_of(program, *argument),
-                            msg: "a `context`-typed parameter takes a closure literal, or a forwarded parameter with the same `context` clause"
+                            msg: "a `context`-typed parameter takes a closure literal, a value with the same `context` clause, or a local closure binding (which adopts the clause)"
                                 .to_string(),
                         });
+                    }
+                }
+            }
+        }
+
+        // Calls THROUGH an annotated (or adopted) value — after adoption, so
+        // a named handler's direct calls demand and thread like any injected
+        // call.
+        for node in graph.nodes() {
+            for call in graph.calls_of(node.id()) {
+                let Some(function_call) = program.function_calls.get(&call.call_id) else {
+                    continue;
+                };
+                if let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id)
+                {
+                    if let Some(clause) = value_contexts.get(target) {
+                        for &context in clause {
+                            injected_calls
+                                .entry(context)
+                                .or_default()
+                                .push((*node, call.call_id));
+                        }
                     }
                 }
             }
@@ -550,7 +611,7 @@ fn analyze(
             let Expr::Local(target) = expr else {
                 continue;
             };
-            if !program.parameter_contexts.contains_key(target) {
+            if !value_contexts.contains_key(target) {
                 continue;
             }
             if call_subject_entities.contains(&entity)

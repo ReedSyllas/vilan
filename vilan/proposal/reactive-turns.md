@@ -24,9 +24,17 @@ recorded. Three implementation findings amended the design:
    their bodies in `turn(AtEnd, ..)` — the generated literal contains the
    direct call into the user's handler method, so the turn threads
    compile-time into real handler code. MANUAL `dispatcher.on(|req| ..)`
-   handlers self-`batch` (one line, documented); `std::ui` event listeners
-   have the same stored shape, so the UI boundary is RECORDED, not shipped —
-   it wants storable injected closures (a B15 extension) or the async hook.
+   handlers self-`batch` (one line, documented). **The `std::ui` boundary
+   SHIPPED the same way** (same-day follow-up): the host stores only a plain
+   ADAPTER — `View.on` takes a clause-typed handler and registers
+   `|| turn(AtSuspension, || handler())`, so each DOM dispatch (and each
+   `bind_value` write-back, and `mount_root`'s initial build) runs in its
+   own turn with zero user ceremony. Enabled by two B15 extensions shipped
+   with it: clauses on `let` annotations (a named injected closure —
+   forwards, `run`-body, and direct calls all work), and clause ADOPTION —
+   an unannotated closure-literal binding passed into a clause position
+   adopts the clause (`let add = || ..; .on("click", add)`, the idiomatic
+   pattern both example apps already used).
 
 Supersedes A6's original sketch ("auto-`flush` on the next microtask") — the
 microtask hook dissolves into boundary-established turns. Prerequisite
