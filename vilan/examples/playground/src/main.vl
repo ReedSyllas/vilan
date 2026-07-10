@@ -1,0 +1,11 @@
+import std::io::print;
+import std::reactive::{ Signal, FlushPolicy, turn };
+
+fun main() {
+	turn(FlushPolicy::AtEnd, || {
+		let count = Signal::new(0);
+		print(i"count is {count.get()}");
+		count.set_with(|x| x + 1);
+		print(i"count is {count.get()}");
+	});
+}
