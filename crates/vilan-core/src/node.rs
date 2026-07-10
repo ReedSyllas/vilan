@@ -330,6 +330,10 @@ pub enum Node<'src> {
     Number(&'src str, Option<&'src str>, Option<&'src str>),
     StaticAccessor(Box<Spanned<Self>>, &'src str),
     String(&'src str),
+    // A triple-quoted string's raw inner text; trimmed to its content by
+    // `util::trim_multiline_string` (validated in the analyzer, trimmed in the
+    // transformer).
+    MultilineString(&'src str),
     // A struct declaration. The `bool` marks an `external` (intrinsic) struct.
     // The body is `Some(fields)` for `{ .. }` and `None` for a bodyless `;`
     // declaration (only valid when `external`).
@@ -461,6 +465,7 @@ impl<'src> Node<'src> {
             | Node::Null
             | Node::Number(..)
             | Node::String(_)
+            | Node::MultilineString(_)
             | Node::Use(_)
             | Node::Void => {}
             Node::AccessorWithGenerics(_, arguments) => {

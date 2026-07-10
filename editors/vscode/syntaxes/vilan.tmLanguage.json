@@ -25,6 +25,18 @@
     "strings": {
       "patterns": [
         {
+          "comment": "Triple-quoted string `\"\"\"...\"\"\"` — RAW and multi-line: no escapes, no interpolation; content runs to the first `\"\"\"`. Must be tried before the plain rule, or `\"\"\"` reads as an empty string plus a quote.",
+          "name": "string.quoted.triple.vilan",
+          "begin": "(\"\"\")",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.string.begin.vilan" }
+          },
+          "end": "(\"\"\")",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.vilan" }
+          }
+        },
+        {
           "comment": "Interpolated string `i\"...{expr}...\"` — ONLY `i\"` strings have holes; a `{` in a plain string is literal. `\\b` keeps a trailing `i` of an identifier (`hi\"..\"`) from reading as the prefix.",
           "name": "string.quoted.double.vilan",
           "begin": "\\b(i)(\")",

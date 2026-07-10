@@ -149,6 +149,7 @@ where
         Token::Bool(x) => Node::Bool(x),
         Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix),
         Token::String(s) => Node::String(s),
+        Token::MultilineString(s) => Node::MultilineString(s),
         // `void` is the unit type AND its one value — the unit expression
         // (`Some(void)`, `Verdict::Bad(void)`). In expression position the
         // name is the literal; type position resolves it separately.
@@ -741,6 +742,7 @@ where
         // stay variant/keyword patterns, resolved against their enum.)
         let literal_pattern = select! {
             Token::String(s) => Node::String(s),
+            Token::MultilineString(s) => Node::MultilineString(s),
             Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix),
         }
         .map_with(|node, e| Pattern::Literal(Box::new((node, e.span()))));

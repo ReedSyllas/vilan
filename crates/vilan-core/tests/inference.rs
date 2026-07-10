@@ -9466,3 +9466,144 @@ fn an_ungrounded_element_type_gets_a_direct_message() {
         "element type is never determined",
     );
 }
+
+// --- H4: triple-quoted strings ------------------------------------------------
+// `"""` ... `"""` is a RAW multi-line string literal: the whitespace before
+// the closing delimiter is the indentation prefix stripped from every line,
+// the newlines adjoining the delimiters belong to the syntax, and no escape
+// processing happens at all (util::trim_multiline_string pins the rules at
+// unit level; these pin the pipeline).
+
+#[test]
+fn a_triple_quoted_string_trims_to_the_closing_indentation() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let text = """
+                    line 1
+                line 2
+
+                  line 3
+                    
+                """;
+            print(text);
+        }
+        main();
+        "#,
+        "    line 1\nline 2\n\n  line 3\n    \n",
+    );
+}
+
+#[test]
+fn a_triple_quoted_string_is_raw() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let text = """
+                escapes \n and \t stay raw, {braces} too
+                """;
+            print(text);
+        }
+        main();
+        "#,
+        "escapes \\n and \\t stay raw, {braces} too\n",
+    );
+}
+
+#[test]
+fn an_empty_triple_quoted_string_is_empty() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let text = """
+                """;
+            print(text);
+            print("after");
+        }
+        main();
+        "#,
+        "\nafter\n",
+    );
+}
+
+#[test]
+fn content_after_the_opening_quotes_is_an_error() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let x = """oops
+                """;
+        }
+        main();
+        "#,
+        "oops",
+        "nothing may follow the opening",
+    );
+}
+
+#[test]
+fn the_closing_quotes_must_be_alone_on_their_line() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let x = """
+                alpha
+                beta """;
+        }
+        main();
+        "#,
+        "                beta ",
+        "alone on its line",
+    );
+}
+
+#[test]
+fn insufficient_indentation_is_an_error_naming_the_line() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let x = """
+                properly_indented
+              shallow
+                """;
+        }
+        main();
+        "#,
+        "              shallow",
+        "line 2 of the triple-quoted string is not indented",
+    );
+}
+
+#[test]
+fn a_macro_emits_source_from_a_triple_quoted_string() {
+    // The worlds path: the macro interpreter receives the trimmed VALUE (the
+    // transformer trims before emission), so generated source needs no
+    // concatenation ceremony for its static skeleton.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun gen(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            source("""
+                fun answer(): i32 {
+                    42
+                }
+                """)
+        }
+
+        [gen]
+        struct Marker {}
+
+        fun main() {
+            print(answer());
+        }
+        main();
+        "#,
+        "42\n",
+    );
+}

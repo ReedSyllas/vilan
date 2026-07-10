@@ -882,6 +882,14 @@ impl<'src> Printer<'src> {
                 self.out.push_str(text);
                 self.out.push('"');
             }
+            // A triple-quoted string reprints VERBATIM: its inner whitespace is
+            // semantic (the closing delimiter's indentation is the trim prefix),
+            // so the formatter must never re-indent it.
+            Node::MultilineString(text) => {
+                self.out.push_str("\"\"\"");
+                self.out.push_str(text);
+                self.out.push_str("\"\"\"");
+            }
             Node::Bool(value) => self.out.push_str(if *value { "true" } else { "false" }),
             Node::Null => self.out.push_str("null"),
             Node::Void => {}

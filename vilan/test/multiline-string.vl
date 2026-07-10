@@ -1,0 +1,42 @@
+import std::print;
+
+// `"""` is a RAW multi-line string: the whitespace before the closing
+// delimiter is the indentation prefix stripped from every line, the newlines
+// adjoining the delimiters belong to the syntax, and escapes are not
+// processed (`\n` stays a backslash and an `n`), so embedded code pastes
+// verbatim. `get`-free: a bad literal is a compile error, never a bad value.
+
+fun main() {
+	// The motivating shape: relative indentation is kept, the prefix is not.
+	let text = """
+		    line 1
+		line 2
+
+		  line 3
+		""";
+	print(text);
+
+	// Raw: escapes and braces pass through untouched.
+	let raw = """
+		no \n escape, literal {braces}
+		""";
+	print(raw);
+
+	// An embedded code block keeps its own relative indentation.
+	let code = """
+		fun nested() {
+			body();
+		}
+		""";
+	print(code);
+
+	// A multiline literal is an ordinary `str`: it concatenates and matches.
+	let line = """
+		key: value
+		""" + "!";
+	match line {
+		"key: value!" => print("matched"),
+		_ => print("no match"),
+	}
+}
+main();

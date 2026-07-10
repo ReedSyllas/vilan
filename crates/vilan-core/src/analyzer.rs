@@ -122,6 +122,9 @@ pub enum Expr<'src> {
     Number(&'src str, Option<&'src str>, Option<&'src str>),
     Parameter(Id),
     String(&'src str),
+    // A triple-quoted string's raw inner text (already validated at the walk);
+    // the transformer trims it to the content value at emission.
+    MultilineString(&'src str),
     Struct(Id),
     StructInitializer(Id, IndexMap<usize, Id>),
     Trait(Id),
@@ -4947,6 +4950,23 @@ impl<'src> Analyzer<'src> {
             Node::Null => Some(Expr::Null),
             Node::Bool(x) => Some(Expr::Bool(*x)),
             Node::String(x) => Some(Expr::String(x)),
+            // Validate the trimming rules here, where the literal has its span;
+            // the transformer re-runs the (infallible after this) trim for the
+            // value. A bad literal degrades to `""` so its uses stay typed and
+            // the one diagnostic stands alone.
+            Node::MultilineString(x) => match crate::util::trim_multiline_string(x) {
+                Ok(_) => Some(Expr::MultilineString(x)),
+                Err((message, range)) => {
+                    // The range is relative to the raw inner text, which starts
+                    // 3 bytes into the literal (after the opening delimiter).
+                    let base = node.1.start + 3;
+                    self.diagnostics.push(Error {
+                        span: (base + range.start..base + range.end).into(),
+                        msg: message,
+                    });
+                    Some(Expr::String(""))
+                }
+            },
             Node::Number(whole, fraction, suffix) => {
                 self.prepped_number_literals.push(id);
                 Some(Expr::Number(whole, *fraction, *suffix))
@@ -7473,7 +7493,7 @@ impl<'src> Analyzer<'src> {
             Expr::Reference(operand_id, _) | Expr::Dereference(operand_id) => {
                 self.infer_type_inner(*operand_id, &constraint, substitution_context, exprs_seen)
             }
-            Expr::String(_) => self.primitive_struct_type("str"),
+            Expr::String(_) | Expr::MultilineString(_) => self.primitive_struct_type("str"),
             // A numeric literal's type comes from its suffix (`5u32`), then a
             // fractional part (`0.0` is a float), then the expected type
             // (`0` against an `f64` field), defaulting to `i32`.

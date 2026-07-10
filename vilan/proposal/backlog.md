@@ -222,6 +222,22 @@ have gaps.
     covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
     channel. Workaround: annotate (`|i: i32| ..`).
 
+16. **Methods on an ungrounded generic receiver typecheck nothing — silently** (M; found
+    2026-07-10 in `examples/playground`) — `mut a = []; a.push(10); a.push("some text");`
+    compiles with NO diagnostics and emits both pushes (a heterogeneous list at runtime —
+    the silent-type-hole shape). Probed: the calls also do not GROUND the receiver — after
+    `a.push(10)`, `a[0]` still reports "element type is never determined", so a method call
+    on a `List<?>` receiver neither informs the element typevar nor checks its arguments;
+    both pushes are unchecked no-ops to the solver. Two-part fix, in order of ambition:
+    (a) at minimum, a method call on a receiver whose generic arguments never ground must
+    be an ERROR (like the subscript arm shipped with I4), never a silent skip; (b) properly,
+    the call should participate in inference — `push(10)` grounds `T = i32`, making the
+    second push a normal argument mismatch (and `mut a = []; a.push(10)` legal, which today
+    it effectively isn't since nothing downstream can read `a`). Check `insert`/user
+    generics for the same class once the mechanism is found; the fix is per-mechanism, with
+    per-case pins (empty literal, `List::new()` unannotated, grounding via a later
+    annotated use).
+
 ---
 
 ## C. Memory model — Phase 6+ tail (deferred; see `memory-management-impl-plan.md`)
@@ -279,6 +295,18 @@ have gaps.
 ## E. LSP & tooling
 
 2. **LSP semantic highlighting** (M; roadmap #10) — semantic tokens, precision over TextMate.
+
+9. **Richer hover tooltips** (S–M per slice; user request 2026-07-10) — hover today is the
+   bare inferred-type label (`expr_types` + `type_label`). Candidate upgrades, roughly in
+   value order: (a) full declaration signatures on functions/methods — name, parameter
+   names AND types, return type, `context` clauses, `async` — not just the closure type;
+   (b) doc comments: surface a decl's leading `//` block in the hover (and decide whether
+   to bless a `///` doc convention while at it); (c) markdown formatting — code-fence the
+   signature, prose for docs (the LSP already returns markdown-capable `Hover`); (d) struct
+   /enum hovers show their fields/variants; (e) constants show their value. Scope each
+   slice with a look at what `Program` already carries (signatures largely reconstructable;
+   doc comments need trivia access — the lexer skips them today, so (b) likely needs a
+   trivia side-channel, which H6's handwritten-frontend trigger list also wants).
 
 3. **Fix per-analysis `Box::leak` + incremental analysis** (L; roadmap #12, caching Tier 2/3) —
    the leak grows each keystroke/compile; true incremental is blocked by global
@@ -493,16 +521,27 @@ have gaps.
 
 ---
 
-4. **Triple-quoted strings `\"\"\"text\"\"\"`** (S–M; user request 2026-07-06; H3 is retired —
-   a retracted finding) — a multi-line string form that auto-trims each line's indentation up
-   to the column of the opening `\"\"\"` (Java-text-block / Swift-multiline style), so embedded
-   code blocks nest naturally under their vilan surroundings. Design points to settle at
-   implementation: whether the newline after the opening `\"\"\"` is dropped; the interpolated
-   variant `i\"\"\"..\"\"\"` (the macro-authoring payoff — `source(i\"\"\"impl {name} { .. }\"\"\")`
-   with NO brace escapes, since plain braces could be literal in the triple form and only
-   `{expr}` holes interpolate... which needs its own escape story); how little escaping the
-   body needs (the raw-ish appeal is pasting code verbatim). Complements, not replaces, the
-   `\{`/`\}` escapes in ordinary i-strings.
+4. ~~**Triple-quoted strings `\"\"\"text\"\"\"`**~~ — **SHIPPED 2026-07-10** (semantics
+   settled by the user, = Swift's multiline rule): the whitespace before the CLOSING
+   `\"\"\"` is the indentation prefix, stripped from every content line (exact-character
+   match, so a tab never satisfies a space prefix; a whitespace-only line may fall short
+   and becomes empty); the newlines adjoining the delimiters belong to the syntax; the
+   opening `\"\"\"` takes nothing after it on its line and the closing sits alone on its —
+   both compile errors with PRECISE sub-literal spans (the offending text/line, not the
+   whole literal), as is insufficient indentation (named by line number). The closing
+   delimiter governs — not the opening's column as this item originally sketched — because
+   `let s = \"\"\"` puts the opener mid-line where its column is meaningless. The body is
+   RAW: no escape processing at all (`\n` stays two characters; braces literal) — the
+   paste-code-verbatim appeal; content runs to the FIRST `\"\"\"` (no way to embed one —
+   recorded limitation, plain strings still have `\"`). One trim/validate helper
+   (`util::trim_multiline_string`, 12 unit tests) is validated in the analyzer (a bad
+   literal degrades to `\"\"` so its uses stay typed under one diagnostic) and trimmed in
+   the transformer — the VALUE flows to JS emission and the macro interpreter alike, so
+   macros compose (`source(\"\"\"..\"\"\"`)` pinned), patterns match, i-string holes accept
+   them, and `vilan fmt` reprints them verbatim (inner whitespace is semantic). 7 pins +
+   corpus `multiline-string.vl` + TextMate rule. **The one recorded follow-up:** the
+   interpolated variant `i\"\"\"..\"\"\"` (the macro-authoring payoff) still needs its
+   escape story — raw braces vs `{expr}` holes conflict; settle it as its own small item.
 
 6. **Handwritten recursive-descent frontend — replace chumsky** (L; recorded 2026-07-08; take
    it when the combinator model gives trouble, not before) — after the 2026-07-08 perf arc

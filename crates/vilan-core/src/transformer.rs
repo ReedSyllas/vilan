@@ -930,6 +930,12 @@ impl<'src> Transformer<'src> {
                 js::Node::Number(whole, fraction.map(|x| x.to_string()))
             }
             Expr::String(x) => js::Node::String(unescape_string(x)),
+            // A triple-quoted string: RAW (no escape interpretation), trimmed
+            // to its content; the analyzer already validated, so an error here
+            // is unreachable and degrades to "".
+            Expr::MultilineString(x) => js::Node::String(std::borrow::Cow::Owned(
+                crate::util::trim_multiline_string(x).unwrap_or_default(),
+            )),
             Expr::Struct(_) => {
                 return None;
             }

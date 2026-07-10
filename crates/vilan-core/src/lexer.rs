@@ -51,6 +51,17 @@ where
         .then_ignore(just('"'))
         .map(Token::String);
 
+    // A triple-quoted string: RAW (a backslash is just a backslash — the appeal
+    // is pasting code verbatim) and multi-line; the whitespace before the
+    // closing delimiter is stripped from every line by
+    // `util::trim_multiline_string` (validated in the analyzer, trimmed in the
+    // transformer). Content runs to the FIRST `\"\"\"`. Must be tried before
+    // `string`, or `\"\"\"` lexes as an empty string plus a stray quote.
+    let multiline_string = just("\"\"\"")
+        .ignore_then(any().and_is(just("\"\"\"").not()).repeated().to_slice())
+        .then_ignore(just("\"\"\""))
+        .map(Token::MultilineString);
+
     // The match-leg arrow is its own token: `>` is a control character, so the
     // operator charset alone would split `=>` into `=` and `>`.
     let arrow = just("=>").to(Token::Op("=>"));
@@ -108,6 +119,7 @@ where
     let single = choice((
         hex.clone(),
         number.clone(),
+        multiline_string.clone(),
         string.clone(),
         arrow,
         op.clone(),
@@ -128,9 +140,17 @@ where
         // braces, which delimit the hole. (Strings are still lexed whole, so a
         // `}` inside a hole's string literal is not mistaken for the close.)
         let hole_ctrl = one_of("()[]<>;,.").map(Token::Ctrl);
-        let hole_token = choice((hex, number, string, op, hole_ctrl, identifier))
-            .map_with(|token, e| (token, e.span()))
-            .padded();
+        let hole_token = choice((
+            hex,
+            number,
+            multiline_string,
+            string,
+            op,
+            hole_ctrl,
+            identifier,
+        ))
+        .map_with(|token, e| (token, e.span()))
+        .padded();
         // The hole's tokens, wrapped in parentheses so the expression is parsed
         // as a single atom whatever its contents.
         let hole = hole_token

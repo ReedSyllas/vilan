@@ -31,6 +31,9 @@ pub enum Token<'src> {
     Borrows,
     Ret,
     String(&'src str),
+    // A triple-quoted string's raw inner text (between the `\"\"\"` delimiters),
+    // trimmed by `util::trim_multiline_string` past the parser.
+    MultilineString(&'src str),
     Struct,
     Trait,
     Type,
@@ -78,6 +81,7 @@ impl std::fmt::Display for Token<'_> {
             Token::Borrows => write!(f, "borrows"),
             Token::Ret => write!(f, "ret"),
             Token::String(s) => write!(f, "{s}"),
+            Token::MultilineString(s) => write!(f, "\"\"\"{s}\"\"\""),
             Token::Struct => write!(f, "struct"),
             Token::Trait => write!(f, "trait"),
             Token::Type => write!(f, "type"),
