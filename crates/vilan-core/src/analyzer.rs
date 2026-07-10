@@ -10870,6 +10870,20 @@ impl<'src> Analyzer<'src> {
                 self.resolved_types.insert(id, element_type);
                 Resolution::Resolved
             }
+            // A `List` with no element argument: the element type never
+            // grounded (an empty literal with nothing to infer from). The
+            // generic arm below would print the circular "cannot index List
+            // (only a `List` is indexable)" — say what is actually missing.
+            Type::Struct(struct_id, _) if Some(struct_id) == list_id => {
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                    msg: "cannot index this List: its element type is never determined \
+                          (give the list a type, e.g. `: List<i32>`)"
+                        .to_string(),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                Resolution::Failed
+            }
             subject_type => {
                 let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {

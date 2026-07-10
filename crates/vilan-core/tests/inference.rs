@@ -9240,3 +9240,229 @@ fn an_async_annotated_let_awaits_at_its_calls() {
         "11\n",
     );
 }
+
+// --- I4: subscript absence panics (checked subscripts) -----------------------
+// `a[i]` — read, write, or `&mut a[i]` view mint — requires `0 <= i < a.len()`;
+// a violation panics. Writes never create slots (growth is `push`); `get(i)`
+// stays the total `Option` form. The check happens at use / at mint; a deref
+// through an already-minted view is the dynamic rule-4 remainder (C2), not
+// this item.
+
+/// Compiles and runs `source`, asserting the run FAILS and its stderr mentions
+/// `expected_in_stderr` — the shape of a runtime panic. (A compile failure also
+/// arrives as `Err`, but its messages won't contain a panic string, so the
+/// substring assert distinguishes the two.)
+#[track_caller]
+fn assert_run_panics(source: &str, expected_in_stderr: &str) {
+    match compile_and_run(source) {
+        Ok(stdout) => panic!(
+            "expected a runtime panic mentioning {expected_in_stderr:?}, got a clean run: {stdout:?}"
+        ),
+        Err(errors) => {
+            let combined = errors.join("\n");
+            assert!(
+                combined.contains(expected_in_stderr),
+                "the failure does not mention {expected_in_stderr:?}:\n{combined}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_out_of_bounds_read_panics() {
+    assert_run_panics(
+        r#"
+        import std::print;
+        fun main() {
+            mut xs: List<i32> = List::new();
+            xs.push(10);
+            xs.push(20);
+            print(xs[5]);
+        }
+        main();
+        "#,
+        "index out of bounds: the length is 2 but the index is 5",
+    );
+}
+
+#[test]
+fn an_out_of_bounds_write_panics_rather_than_growing() {
+    assert_run_panics(
+        r#"
+        fun main() {
+            mut xs: List<i32> = List::new();
+            xs.push(10);
+            xs[3] = 9;
+        }
+        main();
+        "#,
+        "index out of bounds: the length is 1 but the index is 3",
+    );
+}
+
+#[test]
+fn a_negative_index_panics() {
+    assert_run_panics(
+        r#"
+        import std::print;
+        fun main() {
+            mut xs: List<i32> = List::new();
+            xs.push(10);
+            let i = 0 - 1;
+            print(xs[i]);
+        }
+        main();
+        "#,
+        "index out of bounds: the length is 1 but the index is -1",
+    );
+}
+
+#[test]
+fn an_out_of_bounds_view_mint_panics() {
+    // The view never comes to exist: the panic fires at `&mut xs[4]`, before
+    // `bump` is entered.
+    assert_run_panics(
+        r#"
+        fun bump(slot: &mut i32) {
+            slot = *slot + 1;
+        }
+        fun main() {
+            mut xs: List<i32> = List::new();
+            xs.push(10);
+            bump(&mut xs[4]);
+        }
+        main();
+        "#,
+        "index out of bounds: the length is 1 but the index is 4",
+    );
+}
+
+#[test]
+fn an_empty_list_subscript_panics() {
+    // view-invalidation.md §1's P1 case: the empty list, subscripted.
+    assert_run_panics(
+        r#"
+        import std::print;
+        fun main() {
+            mut xs: List<i32> = List::new();
+            print(xs[0]);
+        }
+        main();
+        "#,
+        "index out of bounds: the length is 0 but the index is 0",
+    );
+}
+
+#[test]
+fn in_bounds_subscripts_are_unchanged() {
+    // Read, in-place write, and a scalar element view — the subscript.vl
+    // shapes, asserted here so the checked emission can't regress them.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun bump(slot: &mut i32) {
+            slot = *slot + 100;
+        }
+        fun main() {
+            mut xs: List<i32> = List::new();
+            xs.push(10);
+            xs.push(20);
+            print(xs[0] + xs[1]);
+            xs[1] = 99;
+            print(xs[1]);
+            bump(&mut xs[0]);
+            print(xs[0]);
+        }
+        main();
+        "#,
+        "30\n99\n110\n",
+    );
+}
+
+#[test]
+fn an_unused_binding_with_an_indexing_initializer_still_panics() {
+    // An indexing expression is effectful (it can throw), so dropping the
+    // unused binding must not drop the check.
+    assert_run_panics(
+        r#"
+        import std::print;
+        fun main() {
+            mut xs: List<i32> = List::new();
+            let _probe = xs[0];
+            print("reached");
+        }
+        main();
+        "#,
+        "index out of bounds: the length is 0 but the index is 0",
+    );
+}
+
+#[test]
+fn list_get_stays_the_option_form() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut xs: List<i32> = List::new();
+            xs.push(10);
+            match xs.get(5) {
+                Some(let value) => print(value),
+                None => print("none"),
+            }
+            match xs.get(0) {
+                Some(let value) => print(value),
+                None => print("none"),
+            }
+        }
+        main();
+        "#,
+        "none\n10\n",
+    );
+}
+
+#[test]
+fn a_macro_time_out_of_bounds_subscript_fails_expansion() {
+    // The macro interpreter enforces the same bounds; OOB at expansion time is
+    // an expansion failure at the invocation, carrying the panic message.
+    assert_fails_spanning(
+        r#"
+        [probe]
+        struct Point {
+            x: i32,
+        }
+
+        macro fun probe(item: Item): Source {
+            import macro_std::source;
+            import macro_std::meta::{ Item, Source };
+            let xs = [1, 2];
+            let y = xs[5];
+            source("")
+        }
+
+        fun main() {}
+
+        main();
+        "#,
+        "probe",
+        "index out of bounds",
+    );
+}
+
+#[test]
+fn an_ungrounded_element_type_gets_a_direct_message() {
+    // `mut a = []; a[0]` — the element type never grounds. The old message was
+    // circular ("cannot index List (only a `List` is indexable)"); it must say
+    // what is actually missing.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a = [];
+            let x = a[0];
+        }
+        main();
+        "#,
+        "a[0]",
+        "element type is never determined",
+    );
+}

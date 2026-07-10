@@ -559,20 +559,26 @@ have gaps.
    onward as garbage — the *silent* failure mode. Wanted: decode reports an error (a `Result`, or
    at minimum a `panic` naming the field) when a field is absent or the wrong shape.
 
-4. **Subscript absence semantics** (S–M; surfaced 2026-07-09 by
-   `proposal/view-invalidation.md` §1's P1 case) — what `a[0]` means — read, write, or
-   `&mut a[0]` view — when the element does not exist (`mut a = []; let b = &mut a[0]`).
-   Today nothing consults bounds: a read is JS `undefined`, a write CREATES the slot (probed:
-   a stale view write RESURRECTS a popped element), and a subscript VIEW mints its
-   `(base, key)` pair regardless — all silent. (The empty-LITERAL spelling happens to error
-   today, but only because the element type never grounds, with a circular message —
-   "cannot index List (only a `List` is indexable)" — fix the message with the item.) Bounds, not
-   aliasing (deliberately out of the view-invalidation proposal's scope: it is the same
-   question with or without a view). Design space: panic (checked subscript, `get()` stays
-   the `Option` form), `undefined`-propagation (status quo, unacceptable long-term), or
-   making bare subscript reads a compile error in favor of `get()`. Interacts with I3's
-   silent-`undefined` theme and F3/F4 (a native backend cannot silently grow on
-   out-of-bounds write).
+4. ~~**Subscript absence semantics**~~ — **SHIPPED 2026-07-10**: panic, checked at use
+   and at mint. `a[i]` — read, write, or `&mut a[i]` — requires `0 <= i < a.len()`; a
+   violation panics with "index out of bounds: the length is L but the index is I".
+   Writes never create slots (growth is `push`); `get(i)` stays the total,
+   `Option`-returning form. Emission is three self-contained helpers
+   (`__at`/`__at_put`/`__at_view` — an assignment target can't be a call, so the write
+   has its own) throwing the same bare-string shape `panic` lowers to; the macro
+   interpreter enforces identical bounds as `Thrown`, so a macro-time violation fails
+   the expansion with the same message. An indexing expression now counts as effectful
+   in itself (it can throw), so unused-binding elision can't drop a check. A deref
+   through an already-minted stale view remains C2's dynamic-rule-4 remainder — the
+   mint check plus E2's static fence cover the lexical cases. The circular
+   empty-literal message now says what's missing ("its element type is never
+   determined"). F3/F4 alignment comes free: panic is exactly what a bounds-checked
+   native subscript must do. Corpus impact was 6 goldens (parity-verified); the rest
+   of the corpus iterates via `for`/methods and never raw-indexes. Original design
+   space, for the record: panic (taken) vs `undefined`-propagation (status quo,
+   rejected) vs bare reads as a compile error in favor of `get()` (rejected — hostile
+   to the common in-bounds case). Surfaced 2026-07-09 by
+   `proposal/view-invalidation.md` §1's P1 case.
 
 ---
 

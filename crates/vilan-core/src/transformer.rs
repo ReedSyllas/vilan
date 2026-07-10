@@ -225,6 +225,30 @@ fn helper_source(name: &str) -> &'static str {
         "__list_get" => {
             "function __list_get(list, index) {\n\treturn index >= 0 && index < list.length ? [ 0, __clone(list[index]) ] : [ 1 ];\n}"
         }
+        // `list[i]` — the checked subscript read: out of bounds panics (`get`
+        // is the total, Option-returning form above).
+        "__at" => {
+            "function __at(list, index) {\n\
+             \tif (index >= 0 && index < list.length) return list[index];\n\
+             \tthrow \"index out of bounds: the length is \" + list.length + \" but the index is \" + index;\n\
+             }"
+        }
+        // `list[i] = v` — the checked subscript write: writing never creates a
+        // slot (growth is `push`), so out of bounds panics.
+        "__at_put" => {
+            "function __at_put(list, index, value) {\n\
+             \tif (index >= 0 && index < list.length) return list[index] = value;\n\
+             \tthrow \"index out of bounds: the length is \" + list.length + \" but the index is \" + index;\n\
+             }"
+        }
+        // `&mut list[i]` — the checked view mint: the scalar `(base, key)` pair
+        // exists only for an in-bounds element.
+        "__at_view" => {
+            "function __at_view(list, index) {\n\
+             \tif (index >= 0 && index < list.length) return [ list, index ];\n\
+             \tthrow \"index out of bounds: the length is \" + list.length + \" but the index is \" + index;\n\
+             }"
+        }
         // `List.pop(): Option<T>` — removes and returns the last element (no clone:
         // the element leaves the list), or `None` when empty.
         "__list_pop" => {
@@ -675,9 +699,9 @@ impl<'src> Transformer<'src> {
             | Some(Expr::Reference(operand, _))
             | Some(Expr::Dereference(operand)) => self.expr_has_side_effects(*operand),
             Some(Expr::Field(subject, _, _)) => self.expr_has_side_effects(*subject),
-            Some(Expr::Index(subject, index)) => {
-                self.expr_has_side_effects(*subject) || self.expr_has_side_effects(*index)
-            }
+            // A checked subscript can panic, so an indexing expression is
+            // effectful in itself: dropping it would drop its bounds check.
+            Some(Expr::Index(_, _)) => true,
             Some(Expr::List(ids)) | Some(Expr::Tuple(ids)) => {
                 ids.iter().any(|id| self.expr_has_side_effects(*id))
             }
@@ -965,13 +989,18 @@ impl<'src> Transformer<'src> {
                     Box::new(js::Node::Number(field_index.to_string(), None)),
                 )
             }
-            // `list[i]` — a List is a JS array, so a subscript is a native index.
+            // `list[i]` — the checked read (`__at`): an out-of-bounds subscript
+            // panics; `get` is the total, Option-returning form.
             Expr::Index(subject_id, index_id) => {
                 let subject = self
                     .walk_entity(*subject_id, block)
                     .unwrap_or(js::Node::Void);
                 let index = self.walk_entity(*index_id, block).unwrap_or(js::Node::Void);
-                js::Node::PropertyIndex(Box::new(subject), Box::new(index))
+                self.used_helpers.insert("__at");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__at".to_string())),
+                    vec![subject, index],
+                )
             }
             Expr::Call(id) => {
                 let function_call = self.program.function_calls.get(id).unwrap().clone();
@@ -1504,11 +1533,19 @@ impl<'src> Transformer<'src> {
                             self.walk_entity(*subject, block).unwrap_or(js::Node::Void),
                             js::Node::Number(field_index.to_string(), None),
                         ),
-                        // `&mut list[i]` — base is the list, key is the index.
-                        Some(Expr::Index(subject, index)) => (
-                            self.walk_entity(*subject, block).unwrap_or(js::Node::Void),
-                            self.walk_entity(*index, block).unwrap_or(js::Node::Void),
-                        ),
+                        // `&mut list[i]` — the checked mint (`__at_view`): the
+                        // scalar `(base, key)` pair exists only for an in-bounds
+                        // element, so a view of an absent element panics at the
+                        // `&mut`, not at first use through it.
+                        Some(Expr::Index(subject, index)) => {
+                            let base = self.walk_entity(*subject, block).unwrap_or(js::Node::Void);
+                            let key = self.walk_entity(*index, block).unwrap_or(js::Node::Void);
+                            self.used_helpers.insert("__at_view");
+                            return Some(js::Node::Call(
+                                Box::new(js::Node::Local("__at_view".to_string())),
+                                vec![base, key],
+                            ));
+                        }
                         // A boxed scalar local: the cell itself (slot 0 holds the
                         // value), not the `[0]` read `walk_entity` would produce.
                         Some(Expr::Local(root)) => (
@@ -1618,6 +1655,23 @@ impl<'src> Transformer<'src> {
                             vec![base, value],
                         ));
                     }
+                }
+                // `list[i] = v` — the checked write (`__at_put`): writing never
+                // creates a slot (growth is `push`), so an out-of-bounds write
+                // panics. The read side is `__at`; an assignment target can't
+                // be a call, so the write gets its own helper.
+                if let Some(&Expr::Index(subject_id, index_id)) =
+                    self.program.entity_map.get(target_id)
+                {
+                    let subject = self
+                        .walk_entity(subject_id, block)
+                        .unwrap_or(js::Node::Void);
+                    let index = self.walk_entity(index_id, block).unwrap_or(js::Node::Void);
+                    self.used_helpers.insert("__at_put");
+                    return Some(js::Node::Call(
+                        Box::new(js::Node::Local("__at_put".to_string())),
+                        vec![subject, index, value],
+                    ));
                 }
                 let target = self
                     .walk_entity(*target_id, block)

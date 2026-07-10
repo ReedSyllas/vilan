@@ -1,3 +1,11 @@
+function __at(list, index) {
+	if (index >= 0 && index < list.length) return list[index];
+	throw "index out of bounds: the length is " + list.length + " but the index is " + index;
+}
+function __at_view(list, index) {
+	if (index >= 0 && index < list.length) return [ list, index ];
+	throw "index out of bounds: the length is " + list.length + " but the index is " + index;
+}
 function get_mut(self) {
 	return [ 0, [ self, 0 ] ];
 }
@@ -10,7 +18,7 @@ function inner_mut(self) {
 function item_mut(self, index) {
 	let $g = null;
 	if (index < self[1].length) {
-		$g = [ 0, [ self[1], index ] ];
+		$g = [ 0, __at_view(self[1], index) ];
 	} else {
 		$g = [ 1 ];
 	}
@@ -60,7 +68,7 @@ if ($h[0] === 0) {
 	$i = undefined;
 }
 $i;
-console.log(outer[1][1]);
+console.log(__at(outer[1], 1));
 const $j = item_mut(outer, 9);
 let $k = null;
 if ($j[0] === 0) {

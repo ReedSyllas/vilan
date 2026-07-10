@@ -821,6 +821,45 @@ impl Interpreter {
                     None => Ok(option_none()),
                 }
             }
+            // The checked subscripts, matching the emitted `__at*` helpers: an
+            // out-of-bounds index is a panic (`Thrown`), so a macro-time
+            // violation fails the expansion with the same message a runtime
+            // one prints.
+            "__at" => {
+                let list = expect_array(&take(0))?;
+                let index = expect_number(&take(1))?;
+                let list = list.borrow();
+                if index >= 0.0 && (index as usize) < list.len() && index.fract() == 0.0 {
+                    Ok(list[index as usize].clone())
+                } else {
+                    Err(index_out_of_bounds(list.len(), index))
+                }
+            }
+            "__at_put" => {
+                let list = expect_array(&take(0))?;
+                let index = expect_number(&take(1))?;
+                let value = take(2);
+                let mut list = list.borrow_mut();
+                if index >= 0.0 && (index as usize) < list.len() && index.fract() == 0.0 {
+                    list[index as usize] = value.clone();
+                    Ok(value)
+                } else {
+                    Err(index_out_of_bounds(list.len(), index))
+                }
+            }
+            "__at_view" => {
+                let list = expect_array(&take(0))?;
+                let index = expect_number(&take(1))?;
+                let length = list.borrow().len();
+                if index >= 0.0 && (index as usize) < length && index.fract() == 0.0 {
+                    Ok(Value::Array(Rc::new(RefCell::new(vec![
+                        Value::Array(list),
+                        Value::Number(index),
+                    ]))))
+                } else {
+                    Err(index_out_of_bounds(length, index))
+                }
+            }
             "__map_get" => {
                 let map = expect_map(&take(0))?;
                 let key = Key::of(&take(1))?;
@@ -1763,6 +1802,16 @@ fn expect_number(value: &Value) -> Result<f64, Failure> {
             "expected a number, got {}",
             type_name(other)
         ))),
+    }
+}
+
+/// The checked-subscript panic (`__at`/`__at_put`/`__at_view`), worded exactly
+/// as the emitted helpers throw it. `Thrown`, not `Internal`: an out-of-bounds
+/// subscript is the macro's own bug, like a `panic` in its body.
+fn index_out_of_bounds(length: usize, index: f64) -> Failure {
+    Failure {
+        kind: FailureKind::Thrown,
+        message: format!("index out of bounds: the length is {length} but the index is {index}"),
     }
 }
 

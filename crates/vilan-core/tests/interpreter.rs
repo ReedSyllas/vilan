@@ -25,7 +25,10 @@ fn std_spec() -> PackageSpec {
 const EXCLUDED: &[(&str, &str)] = &[
     ("async-await.vl", "async"),
     ("async-promise-all.vl", "async"),
-    ("reactive-turns.vl", "async (the turn-follows-continuation section)"),
+    (
+        "reactive-turns.vl",
+        "async (the turn-follows-continuation section)",
+    ),
     ("process-env.vl", "host environment (`__env`, `__args`)"),
 ];
 

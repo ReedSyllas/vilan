@@ -1,9 +1,11 @@
 import std::print;
 
 // `list[i]` indexes a List (read, in-place write, and `&mut list[i]` element
-// views via the (base, key) representation). A List is a JS array, so a scalar
-// subscript is a native index; an aggregate element read copies (value
-// semantics), and an aggregate element view aliases.
+// views via the (base, key) representation). Subscripts are CHECKED: read,
+// write, and view mint all require `0 <= i < len` and panic otherwise —
+// writing never creates a slot (growth is `push`), and `get(i)` is the total,
+// Option-returning form. An aggregate element read copies (value semantics),
+// and an aggregate element view aliases.
 struct Point { x: i32, y: i32 }
 
 fun bump(slot: &mut i32) {

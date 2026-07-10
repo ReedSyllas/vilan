@@ -1,3 +1,7 @@
+function __at(list, index) {
+	if (index >= 0 && index < list.length) return list[index];
+	throw "index out of bounds: the length is " + list.length + " but the index is " + index;
+}
 function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
@@ -24,8 +28,8 @@ function $b(self, value) {
 	let $d = null;
 	if ($c[0] === 0) {
 		const index = $c[1];
-		self[0][index][1] = [ 0, value ];
-		$d = [ index, self[0][index][0] ];
+		__at(self[0], index)[1] = [ 0, value ];
+		$d = [ index, __at(self[0], index)[0] ];
 	} else {
 		const index2 = self[0].length;
 		self[0].push([ 0, [ 0, value ] ]);
@@ -41,12 +45,12 @@ function $h(self) {
 	return $i[0] === 0;
 }
 function $g(self, handle) {
-	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $h(self[0][handle[0]][1]);
+	return handle[0] < self[0].length && __at(self[0], handle[0])[0] === handle[1] && $h(__at(self[0], handle[0])[1]);
 }
 function $f(self, handle) {
 	let $j = null;
 	if ($g(self, handle)) {
-		$j = self[0][handle[0]][1];
+		$j = __at(self[0], handle[0])[1];
 	} else {
 		$j = [ 1 ];
 	}
@@ -66,7 +70,7 @@ function $k(self, fallback) {
 function $n(self, handle, value) {
 	let $o = null;
 	if ($g(self, handle)) {
-		self[0][handle[0]][1] = [ 0, value ];
+		__at(self[0], handle[0])[1] = [ 0, value ];
 		$o = true;
 	} else {
 		$o = false;
@@ -76,9 +80,9 @@ function $n(self, handle, value) {
 function $p(self, handle) {
 	let $q = null;
 	if ($g(self, handle)) {
-		const removed = self[0][handle[0]][1];
-		self[0][handle[0]][0] = self[0][handle[0]][0] + 1;
-		self[0][handle[0]][1] = [ 1 ];
+		const removed = __at(self[0], handle[0])[1];
+		__at(self[0], handle[0])[0] = __at(self[0], handle[0])[0] + 1;
+		__at(self[0], handle[0])[1] = [ 1 ];
 		self[1].push(handle[0]);
 		$q = removed;
 	} else {
@@ -94,8 +98,8 @@ function $s(self, value) {
 	let $u = null;
 	if ($t[0] === 0) {
 		const index = $t[1];
-		self[0][index][1] = [ 0, value ];
-		$u = [ index, self[0][index][0] ];
+		__at(self[0], index)[1] = [ 0, value ];
+		$u = [ index, __at(self[0], index)[0] ];
 	} else {
 		const index2 = self[0].length;
 		self[0].push([ 0, [ 0, value ] ]);
@@ -108,12 +112,12 @@ function $x(self) {
 	return $y[0] === 0;
 }
 function $w(self, handle) {
-	return handle[0] < self[0].length && self[0][handle[0]][0] === handle[1] && $x(self[0][handle[0]][1]);
+	return handle[0] < self[0].length && __at(self[0], handle[0])[0] === handle[1] && $x(__at(self[0], handle[0])[1]);
 }
 function $v(self, handle) {
 	let $z = null;
 	if ($w(self, handle)) {
-		$z = self[0][handle[0]][1];
+		$z = __at(self[0], handle[0])[1];
 	} else {
 		$z = [ 1 ];
 	}

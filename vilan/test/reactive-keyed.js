@@ -1,3 +1,11 @@
+function __at(list, index) {
+	if (index >= 0 && index < list.length) return list[index];
+	throw "index out of bounds: the length is " + list.length + " but the index is " + index;
+}
+function __at_put(list, index, value) {
+	if (index >= 0 && index < list.length) return list[index] = value;
+	throw "index out of bounds: the length is " + list.length + " but the index is " + index;
+}
 function __shared_new(value) {
 	return { v: value };
 }
@@ -35,10 +43,10 @@ function $a(old_keys, old_items, items, key_of) {
 		let step = [ 2 ];
 		let index = 0;
 		while (index < old_keys.length) {
-			if (!(claimed[index]) && old_keys[index] === item_key) {
-				claimed[index] = true;
+			if (!(__at(claimed, index)) && __at(old_keys, index) === item_key) {
+				__at_put(claimed, index, true);
 				let $b = null;
-				if (old_items[index] === item) {
+				if (__at(old_items, index) === item) {
 					$b = [ 0, index ];
 				} else {
 					$b = [ 1, index ];
@@ -53,7 +61,7 @@ function $a(old_keys, old_items, items, key_of) {
 	let removed = [  ];
 	let index2 = 0;
 	while (index2 < old_keys.length) {
-		if (!(claimed[index2])) {
+		if (!(__at(claimed, index2))) {
 			removed.push(index2);
 		}
 		index2 = index2 + 1;
