@@ -140,10 +140,8 @@ function $u(body, $v) {
 	}
 	return $x;
 }
-const turn_scope = null;
 const next_subscriber_id = __shared_new(0);
 const draining_turns = __shared_new([  ]);
-const owner_scope = null;
 const a = $a(0);
 const b = $a(0);
 $b(a, (value) => {

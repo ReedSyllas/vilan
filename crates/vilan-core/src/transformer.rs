@@ -319,6 +319,10 @@ struct Transformer<'src> {
     // The active generic-parameter substitution while emitting a monomorphized
     // function body (constraint id -> concrete type id).
     current_substitution: HashMap<TypeId, TypeId>,
+    // Every entity emitted as a VALUE reference (the `Expr::Local` arm) —
+    // consulted at assembly to tree-shake module-level bindings (F6): a
+    // binding emits only if something reachable referenced it.
+    referenced_globals: HashSet<Id>,
     // Monomorphized function variants, keyed by (generic function, concrete
     // type arguments) so each distinct instantiation is emitted exactly once.
     instances: HashMap<(Id, Vec<String>), String>,
@@ -405,6 +409,7 @@ impl<'src> Transformer<'src> {
             required_functions: IndexMap::new(),
             emitting: HashSet::new(),
             current_substitution: HashMap::new(),
+            referenced_globals: HashSet::new(),
             instances: HashMap::new(),
             current_self_type: None,
             default_instances: HashMap::new(),
@@ -471,7 +476,18 @@ impl<'src> Transformer<'src> {
             })?;
         let main_is_async = self.program.async_functions.contains(&main_fn.id);
 
-        let t_global_variables = self.walk_list(&global_variables);
+        // Walk every module-level binding in ORDER, keeping each binding's
+        // nodes separate: inclusion is decided at assembly, after main and
+        // every required function have been walked (F6 — a binding emits only
+        // if something reachable references it). The stated semantics: a
+        // dropped binding's initializer does not run — module state exists
+        // only if something reaches it; top-level side effects are not a
+        // promise. (Known over-approximation: a reference made inside a
+        // DROPPED binding's own initializer still retains its target.)
+        let binding_nodes: Vec<(Id, Vec<js::Node<'src>>)> = global_variables
+            .iter()
+            .map(|&binding| (binding, self.walk_list(&vec![binding])))
+            .collect();
 
         let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
 
@@ -512,6 +528,14 @@ impl<'src> Transformer<'src> {
                 Vec::new(),
             )];
         }
+
+        // Assembly-time tree-shake: keep a binding's declaration only when
+        // something emitted referenced it.
+        let t_global_variables: Vec<js::Node<'src>> = binding_nodes
+            .into_iter()
+            .filter(|(binding, _)| self.referenced_globals.contains(binding))
+            .flat_map(|(_, nodes)| nodes)
+            .collect();
 
         let mut t_functions = self.required_functions.into_iter().collect::<Vec<_>>();
         t_functions.sort_by(|a, b| (a.0.0).cmp(&b.0.0));
@@ -911,6 +935,7 @@ impl<'src> Transformer<'src> {
                 self.variant_value(*enum_id, *variant_index, Vec::new())
             }
             Expr::Local(id) => {
+                self.referenced_globals.insert(*id);
                 // A capture from an `is` test aliases the subject's payload slot.
                 if let Some(accessor) = self.is_bindings.get(id) {
                     return Some(accessor.clone());

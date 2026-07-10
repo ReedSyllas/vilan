@@ -26,10 +26,10 @@ function lerp(self, to, t) {
 	return self + (to - self) * t;
 }
 function to_radians(self) {
-	return self * (3.141592653589793 / 180);
+	return self * (PI / 180);
 }
 function to_degrees(self) {
-	return self * (180 / 3.141592653589793);
+	return self * (180 / PI);
 }
 function rem3(self, m) {
 	return self - Math.trunc(self / m) * m;

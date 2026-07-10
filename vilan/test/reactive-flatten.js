@@ -194,9 +194,7 @@ function $A(self, transform, $B) {
 	return derived;
 }
 const next_subscriber_id = __shared_new(0);
-const turn_scope = null;
 const draining_turns = __shared_new([  ]);
-const owner_scope = null;
 const first = $a(1);
 const second = $a(10);
 const outer = $b(first);

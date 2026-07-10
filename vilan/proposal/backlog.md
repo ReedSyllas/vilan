@@ -342,7 +342,20 @@ have gaps.
    Remaining (recorded in the proposal §7): wrapping arithmetic + real widths on a
    non-JS backend, `f32` fround, Wire slots, parse family, numeric→`BigInt`.
 
-6. **Tree-shake module-level bindings** (S–M; found by K2, 2026-07-09) — module-level
+6. ~~**Tree-shake module-level bindings**~~ — **SHIPPED 2026-07-10**: module-level
+   bindings are walked per-binding (in order, names stable) and included at ASSEMBLY
+   only when something emitted referenced them (one chokepoint — the `Expr::Local`
+   value arm; declarations emit through a different arm, so a binding never retains
+   itself). The stated semantics landed: a dropped binding's initializer does not
+   run — module state exists only if something reaches it. The acceptance test:
+   `number.vl` now imports `std::math::PI` for `to_radians`/`to_degrees` (workaround
+   removed) and every non-math golden stays byte-identical; the reactive goldens
+   dropped their vestigial `const turn_scope = null` / `owner_scope = null` (already
+   rewritten away by the context pass). Known over-approximations, recorded: a
+   reference made inside a DROPPED binding's initializer still retains its target,
+   and a function required only by a dropped binding stays emitted. Worlds
+   (macro compiles) are untouched — cached, and correctness-first. Original:
+   module-level
    `let`s emit unconditionally whenever their module loads, unlike functions (which the
    transformer already emits reachability-only). Two observed consequences: `number.vl`
    cannot import `std::math::PI` — every program would gain a stray `const PI`, since

@@ -1,6 +1,7 @@
 import pkg::default::Default;
 import pkg::compare::{ PartialEq, Eq, PartialOrd, Ord, Ordering };
 import pkg::option::Option::{ self, Some, None };
+import pkg::math::PI;
 import pkg::operators::{ Add, Sub, Mul, Div, Shl, Shr, BitAnd, BitOr, BitXor };
 
 external struct u32;
@@ -156,16 +157,12 @@ impl f64 {
 		self + (to - self) * t
 	}
 
-	// The pi literal is inlined (it also lives in `std::math::PI`): importing
-	// `math` from HERE would emit its module-level constants into every
-	// program, since `number.vl` is always loaded and module `let`s are not
-	// tree-shaken.
 	fun to_radians(self): f64 {
-		self * (3.141592653589793 / 180f)
+		self * (PI / 180f)
 	}
 
 	fun to_degrees(self): f64 {
-		self * (180f / 3.141592653589793)
+		self * (180f / PI)
 	}
 
 	// Truncated remainder (sign follows the dividend, like the host `%`).

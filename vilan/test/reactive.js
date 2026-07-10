@@ -148,9 +148,7 @@ function $s(self, transform, $t) {
 	$e(self, transform($d(self)), $t);
 }
 const next_subscriber_id = __shared_new(0);
-const turn_scope = null;
 const draining_turns = __shared_new([  ]);
-const owner_scope = null;
 const owner = new2();
 const count = $a(0);
 const doubled = $b(count, (n) => {

@@ -156,9 +156,7 @@ function $A(body) {
 	const result = body(scope2);
 	return [ result, scope2 ];
 }
-const owner_scope = null;
 const next_subscriber_id = __shared_new(0);
-const turn_scope = null;
 const draining_turns = __shared_new([  ]);
 const count = $a(1);
 const owner = new2();
