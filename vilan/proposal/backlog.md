@@ -569,8 +569,23 @@ have gaps.
    value) landed and threads as a hidden parameter; the shared call-graph (Phase 0) is in
    `call_graph.rs`. The async/await execution-model phases remain.
 
-2. **Indirect calls are not async-inferred — no implicit await through closure values** (M;
-   found 2026-07-09 building `turn_async`) — async inference infects through DIRECT calls
+2. ~~**Indirect calls are not async-inferred — no implicit await through closure values**~~ —
+   **SHIPPED 2026-07-10**: `async || T` closure types. The marker is written at contract
+   positions and only there (parameters and `let` annotations — the same policy as types
+   generally: written at signatures, inferred at literals); it composes with the B15
+   clause (`(async || T) context turn_scope`). A call through an `async`-typed value is
+   an await point (async inference) and emits the implicit await (`maybe_await` covers
+   `async_values` — one side-channel set, the `parameter_contexts` pattern; the solver
+   never sees asyncness). The divergence check kills the bug class: an async closure
+   flowing into a PLAIN closure parameter with a non-void return errors, naming the fix —
+   while void-returning parameters stay legal as SPAWN semantics (fire-and-forget; the
+   turns machinery settles the continuations — UI handlers and turn bodies ride this,
+   pinned). `turn_async` and `optimistic` dropped the spawn-then-flatten workaround for
+   plain awaited calls. Six pins. REMAINING (recorded): the marker on struct fields and
+   return types; async adoption for unannotated bindings (mirroring B15 adoption); flow
+   tracking beyond literal-or-binding-initial arguments; and asyncness-polymorphic
+   higher-order functions (monomorphize-by-asyncness — the `map` question). Original
+   finding follows. — async inference infects through DIRECT calls
    (`f()` awaits when `f` is async), but a call THROUGH a closure value or parameter
    (`body()` where `body: || T`) has no static callee, so it is never inferred async: the
    call returns the host promise at runtime while typing as plain `T` — the static type

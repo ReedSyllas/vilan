@@ -172,14 +172,12 @@ fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T {
 // coalesce to their final value). This is the true held-across-await
 // `AtEnd`; `turn(..)` with a spawn-style body settles per segment instead.
 //
-// The body call is spawned then awaited: a call THROUGH a closure value is
-// not async-inferred (no implicit await — backlog J2), and the JS host
-// flattens promise-of-promise, so awaiting the spawn waits for the body's
-// whole chain.
-fun turn_async<T>(body: (|| T) context turn_scope): T {
+// The body is `async`-typed (J2), so the (rewritten) call through it is
+// implicitly awaited — the await covers the body's whole chain; a sync body
+// passes fine (awaiting a plain value just resolves).
+fun turn_async<T>(body: (async || T) context turn_scope): T {
 	let fresh = Turn::new();
-	let pending = async turn_scope.run(fresh, body);
-	let result = await pending;
+	let result = turn_scope.run(fresh, body);
 	drain(fresh);
 	fresh.settled.write() = true;
 	result
@@ -193,11 +191,10 @@ fun turn_async<T>(body: (|| T) context turn_scope): T {
 // extent ends (its first suspension); the reconcile settles as its own
 // continuation segment. Inside `turn_async` the whole lifecycle holds —
 // the transaction wins.
-fun optimistic<T, E>(signal: Signal<T>, value: T, commit: || Result<T, E>): Result<T, E> {
+fun optimistic<T, E>(signal: Signal<T>, value: T, commit: async || Result<T, E>): Result<T, E> {
 	let previous = signal.get();
 	signal.set(value);
-	let pending = async commit();
-	let outcome = await pending;
+	let outcome = commit();
 	match outcome {
 		Ok(let confirmed) => signal.set(confirmed),
 		Err(let _error) => signal.set(previous),

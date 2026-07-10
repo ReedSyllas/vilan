@@ -610,7 +610,11 @@ impl<'src> Transformer<'src> {
     /// Wraps a call in `await` when its target is async (the implicit await), so
     /// the value flows as the resolved `T` rather than a promise.
     fn maybe_await(&self, target_id: Id, node: js::Node<'src>) -> js::Node<'src> {
-        if self.program.async_functions.contains(&target_id) {
+        // `async_values`: a call through an `async || T`-typed parameter or
+        // binding awaits like a direct async call (J2).
+        if self.program.async_functions.contains(&target_id)
+            || self.program.async_values.contains(&target_id)
+        {
             js::Node::Await(Box::new(node))
         } else {
             node

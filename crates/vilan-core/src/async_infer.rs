@@ -82,10 +82,24 @@ pub fn infer(program: &mut Program) {
                 ) => dispatch_candidates(program, call.call_id)
                     .iter()
                     .any(|member| async_set.contains(member)),
-                // A call through a function/closure *value* (higher-order) stays
-                // conservative — the concrete target isn't recoverable here — as
-                // do variant constructors and immediately-applied closures.
-                _ => false,
+                // A call through an `async || T`-typed value IS an await
+                // point — asyncness rides the type (J2). Other higher-order
+                // calls stay conservative (the concrete target isn't
+                // recoverable), as do variant constructors and
+                // immediately-applied closures.
+                _ => {
+                    let subject_target =
+                        program
+                            .function_calls
+                            .get(&call.call_id)
+                            .and_then(|function_call| {
+                                match program.entity_map.get(&function_call.subject_id) {
+                                    Some(Expr::Local(target)) => Some(*target),
+                                    _ => None,
+                                }
+                            });
+                    subject_target.is_some_and(|target| program.async_values.contains(&target))
+                }
             });
             if calls_async {
                 async_set.insert(id);
@@ -95,6 +109,85 @@ pub fn infer(program: &mut Program) {
         if !changed {
             break;
         }
+    }
+
+    // --- The J2 divergence check: an async closure flowing into a PLAIN
+    // closure parameter with a non-void return would hand its caller a
+    // promise typed as `T`. Void-returning parameters stay legal — that is
+    // spawn semantics (fire-and-forget; the turns machinery settles the
+    // continuations), and no value is lied about.
+    let mut divergences: Vec<(crate::span::Span, String)> = Vec::new();
+    for function_call in program.function_calls.values() {
+        let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id) else {
+            continue;
+        };
+        let Some(function) = program.functions.get(target) else {
+            continue;
+        };
+        for (argument, parameter) in function_call.argument_ids.iter().zip(&function.parameters) {
+            if program.async_values.contains(parameter) {
+                continue;
+            }
+            let Some(parameter_record) = program.parameters.get(parameter) else {
+                continue;
+            };
+            let Some(Type::Closure(_, return_type)) = program
+                .type_id_to_type_map
+                .get(&parameter_record.type_id)
+                .cloned()
+            else {
+                continue;
+            };
+            let returns_void = matches!(
+                program.type_id_to_type_map.get(&return_type),
+                Some(Type::Void) | None
+            );
+            if returns_void {
+                continue;
+            }
+            // The argument's closure: a literal, or a binding holding one.
+            let argument_closure = match program.entity_map.get(argument) {
+                Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id)) => {
+                    Some(*closure_id)
+                }
+                Some(Expr::Local(source)) => program
+                    .variables
+                    .get(source)
+                    .and_then(|variable| variable.initial)
+                    .and_then(|initial| match program.entity_map.get(&initial) {
+                        Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id)) => {
+                            Some(*closure_id)
+                        }
+                        _ => None,
+                    }),
+                _ => None,
+            };
+            let Some(closure_id) = argument_closure else {
+                continue;
+            };
+            if !async_set.contains(&closure_id) {
+                continue;
+            }
+            let span = program
+                .span_map
+                .get(parameter)
+                .map(|span| **span)
+                .unwrap_or(crate::span::Span {
+                    start: 0,
+                    end: 0,
+                    context: (),
+                });
+            divergences.push((
+                span,
+                format!(
+                    "`{}` receives an async closure, but its type awaits nothing — declare it `async || T` (or return void for spawn semantics)",
+                    parameter_record.name
+                ),
+            ));
+        }
+    }
+    for (span, msg) in divergences {
+        program.diagnostics.push(crate::error::Error { span, msg });
     }
 
     program.async_functions = async_set;

@@ -12,9 +12,9 @@ re-glitched multi-input observers), with no compiler insertion at all. The
 policies therefore CONVERGE for async extents in v1 (`FlushPolicy` states
 intent and keeps the API stable). **`turn_async` + `optimistic` shipped
 same-day**, closing §5.5: `turn_async(body)` is the true held-across-await
-transaction — it spawns-then-awaits the body call (a call through a closure
-value is not async-inferred, backlog J2; the host's promise flattening makes
-the await cover the whole chain), holds every notification (the turn never
+transaction — its body is `async`-typed (J2 SHIPPED 2026-07-10: `async || T`
+closure types make calls through the value implicitly awaited; the original
+spawn-then-flatten workaround is gone), holds every notification (the turn never
 reaches `settled` mid-flight, so the continuation microtask never fires
 early), and settles once — same-signal writes coalesce to their final value.
 `optimistic(signal, value, commit)` is the reconcile lifecycle: paint now,

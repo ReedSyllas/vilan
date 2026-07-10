@@ -1490,6 +1490,15 @@ where
         })
         .labelled("closure type")
         .boxed();
+    // `async || T`: calls through the value are implicitly awaited (J2).
+    let closure_type = just(Token::Async)
+        .or_not()
+        .then(closure_type)
+        .map_with(|(asyncness, inner), e| match asyncness {
+            Some(_) => (Node::AsyncType(Box::new(inner)), e.span()),
+            None => inner,
+        })
+        .boxed();
 
     // A `type X` generic binder in type position, with optional `: A + B`
     // bounds. Only meaningful in an impl subject pattern (`impl Option<type T>`,

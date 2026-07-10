@@ -189,6 +189,10 @@ pub enum Node<'src> {
         Spanned<Vec<(Option<&'src str>, Box<Spanned<Node<'src>>>)>>,
         Option<Box<Spanned<Node<'src>>>>,
     ),
+    // `async || T` — a closure type whose calls suspend: calls through a
+    // value of this type are implicitly awaited, like direct calls to an
+    // async function (backlog J2). Wraps the closure type it marks.
+    AsyncType(Box<Spanned<Node<'src>>>),
     // `(|| void) context owner_scope` / `context (a, b)` — a closure type
     // carrying a context requirement (proposal/ambient-owner.md §5): the
     // closure defers those contexts' bindings to its CALL sites instead of
@@ -513,6 +517,7 @@ impl<'src> Node<'src> {
                     visit(return_type);
                 }
             }
+            Node::AsyncType(inner) => visit(inner),
             Node::MappedType {
                 source, template, ..
             } => {

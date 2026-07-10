@@ -994,6 +994,9 @@ pub struct Analyzer<'src> {
     // IMPORTED bindings, which only resolve after the import fixpoint —
     // walk-time lookup sees same-file names only.
     prepped_context_clauses: Vec<(Id, Vec<(&'src str, Span)>, Id)>,
+    // Parameters and `let` bindings whose declared closure type carries the
+    // `async` marker (J2): calls through them are implicitly awaited.
+    async_values: HashSet<Id>,
     // Method calls (by call id) on a generic impl whose generic parameters bind
     // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
@@ -1198,6 +1201,7 @@ impl<'src> Analyzer<'src> {
             prepped_number_literals: Vec::new(),
             parameter_contexts: HashMap::new(),
             prepped_context_clauses: Vec::new(),
+            async_values: HashSet::new(),
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
@@ -5684,6 +5688,20 @@ impl<'src> Analyzer<'src> {
                     ));
                     annotation = Some(inner);
                 }
+                // Peel the `async` marker (J2), like parameters.
+                match annotation.map(|node| &node.0) {
+                    Some(Node::AsyncType(inner)) => {
+                        self.async_values.insert(id);
+                        annotation = Some(inner);
+                    }
+                    Some(Node::Tuple(elements)) if elements.len() == 1 => {
+                        if let Node::AsyncType(inner) = &elements[0].0 {
+                            self.async_values.insert(id);
+                            annotation = Some(inner);
+                        }
+                    }
+                    _ => {}
+                }
                 let type_id = annotation
                     .map(|x| self.walk_type_node(x, scope_id))
                     .unwrap_or(Type::Unknown.get_type_id(self));
@@ -6271,6 +6289,14 @@ impl<'src> Analyzer<'src> {
                 });
                 Some(Expr::Error)
             }
+            Node::AsyncType(_) => {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "an `async` closure type is not valid here (expected an expression)"
+                        .to_string(),
+                });
+                Some(Expr::Error)
+            }
             Node::MappedType { .. } => {
                 self.diagnostics.push(Error {
                     span: node.1,
@@ -6360,7 +6386,7 @@ impl<'src> Analyzer<'src> {
                 Node::Tuple(elements) if elements.len() == 1 => &elements[0].0,
                 other => other,
             };
-            if !matches!(grouped, Node::ClosureType(..)) {
+            if !matches!(grouped, Node::ClosureType(..) | Node::AsyncType(..)) {
                 self.diagnostics.push(Error {
                     span: clause_span,
                     msg: "a `context` clause is only supported on a closure type".to_string(),
@@ -6375,6 +6401,21 @@ impl<'src> Analyzer<'src> {
                 type_scope_id,
             ));
             declared_type = Some(inner);
+        }
+        // Peel the `async` marker (J2): `async || T`, or `(async || T)` after
+        // the clause peel's grouping. The marked value's calls await.
+        match declared_type.map(|node| &node.0) {
+            Some(Node::AsyncType(inner)) => {
+                self.async_values.insert(parameter_id);
+                declared_type = Some(inner);
+            }
+            Some(Node::Tuple(elements)) if elements.len() == 1 => {
+                if let Node::AsyncType(inner) = &elements[0].0 {
+                    self.async_values.insert(parameter_id);
+                    declared_type = Some(inner);
+                }
+            }
+            _ => {}
         }
         let type_id = match (pattern, declared_type) {
             (_, Some(type_node)) => self.walk_type_node(type_node, type_scope_id),
@@ -6873,6 +6914,17 @@ impl<'src> Analyzer<'src> {
             // `walk_parameter` peels it off parameter types, the one position
             // v1 supports (proposal/ambient-owner.md §5). The inner type still
             // walks, so downstream inference stays coherent.
+            // A stray `async || T` in an unsupported type position: the type
+            // is the inner closure type; the marker is peeled (and recorded)
+            // only at parameters and `let` annotations (J2 v1).
+            Node::AsyncType(inner) => {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "an `async` closure type is only supported on parameters and `let` annotations"
+                        .to_string(),
+                });
+                return self.walk_type_node(inner, scope_id);
+            }
             Node::TypeWithContexts(inner, _) => {
                 self.diagnostics.push(Error {
                     span: node.1,
@@ -12496,6 +12548,9 @@ pub struct Program<'src> {
     // async inference pass; the transformer emits these as `async` and awaits
     // calls to them.
     pub async_functions: HashSet<Id>,
+    /// Parameters/bindings whose declared closure type is `async || T` (J2):
+    /// calls through them are implicitly awaited.
+    pub async_values: HashSet<Id>,
     // Rule 1 (value semantics): value expressions that the transformer wraps in
     // a deep copy because they bind/assign an aggregate place that would
     // otherwise alias its source. Filled by `compute_clone_sites`.
@@ -15183,6 +15238,7 @@ pub fn analyze<'src>(
         expr_type_ids,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
+        async_values: analyzer.async_values.clone(),
         clone_sites,
         boxed_locals,
         generic_referenced_roots,

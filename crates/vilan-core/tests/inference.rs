@@ -9081,3 +9081,162 @@ fn optimistic_rolls_back_on_failure() {
         "label saved v1\nlabel saving v2\nlabel saved v1\nfailed: offline\n",
     );
 }
+
+// --- backlog J2: `async || T` closure types — asyncness as a type-level ---
+// --- contract, so indirect calls await implicitly like direct ones.     ---
+
+#[test]
+fn a_call_through_an_async_typed_parameter_awaits() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun run_job(job: async || i32): i32 {
+            let value = job();
+            print(i"got {value}");
+            value
+        }
+
+        fun main() {
+            let result = run_job(|| {
+                tick();
+                7
+            });
+            print(i"result {result}");
+        }
+        main();
+        "#,
+        "got 7\nresult 7\n",
+    );
+}
+
+#[test]
+fn a_sync_closure_into_an_async_parameter_is_fine() {
+    // The safe direction: awaiting a plain value just resolves.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun run_job(job: async || i32): i32 {
+            job()
+        }
+
+        fun main() {
+            print(run_job(|| 5));
+        }
+        main();
+        "#,
+        "5\n",
+    );
+}
+
+#[test]
+fn an_async_closure_into_a_plain_void_parameter_is_spawn_semantics() {
+    // Fire-and-forget through a plain `|| void` parameter stays legal — the
+    // UI handler / turn-body shape (continuations settle via the turn
+    // machinery; no value is lied about).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun fire(callback: || void) {
+            callback();
+            print("fired");
+        }
+
+        fun main() {
+            fire(|| {
+                tick();
+                print("later");
+            });
+            print("sync end");
+        }
+        main();
+        "#,
+        "fired\nsync end\nlater\n",
+    );
+}
+
+#[test]
+fn an_async_closure_into_a_plain_valued_parameter_is_rejected() {
+    // The J2 divergence, killed: the result would be a promise typing as T.
+    let source = r#"
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun compute(producer: || i32): i32 {
+            producer()
+        }
+
+        fun main() {
+            let _x = compute(|| {
+                tick();
+                7
+            });
+        }
+        main();
+        "#;
+    assert_fails_spanning(source, "producer", "async closure");
+}
+
+#[test]
+fn an_async_closure_type_composes_with_a_context_clause() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::context::Context;
+
+        let current: Context<i32> = Context::new();
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun stage(body: (async || i32) context current): i32 {
+            current.run(3, body)
+        }
+
+        fun main() {
+            let doubled = stage(|| {
+                tick();
+                current.get() * 2
+            });
+            print(doubled);
+        }
+        main();
+        "#,
+        "6\n",
+    );
+}
+
+#[test]
+fn an_async_annotated_let_awaits_at_its_calls() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let job: async || i32 = || {
+                tick();
+                11
+            };
+            print(job());
+        }
+        main();
+        "#,
+        "11\n",
+    );
+}
