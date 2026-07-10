@@ -588,6 +588,10 @@ enum Constraint<'src> {
     /// Type-check a wired method call's arguments against the method's parameters,
     /// spawned once the call is wired (deferred until every argument resolves).
     MethodArgCheck {
+        // The method-call expression, for `method_call_substitution` — the
+        // receiver's generic bindings, without which a generic parameter
+        // reconciles with anything and the check is vacuous.
+        call_id: Id,
         member_id: Id,
         argument_ids: Vec<Id>,
         arguments_span: Span,
@@ -7539,9 +7543,28 @@ impl<'src> Analyzer<'src> {
             }
             Expr::List(item_ids) => {
                 // A list literal is the `List` struct parameterized by its
-                // unified element type (`[1, 2]` -> `List<i32>`); an empty list
-                // erases the element (matches any `List<T>`).
+                // unified element type (`[1, 2]` -> `List<i32>`). An EMPTY
+                // literal mints a stable inference slot (like `List::new()`),
+                // so a later `push` grounds it and method arguments check
+                // against the grounded element — a zero-argument `List` here
+                // once made every method call on it vacuous (B16).
                 let item_ids = item_ids.clone();
+                if item_ids.is_empty() {
+                    return match self.primitive_struct_ids.get("List").copied() {
+                        Some(list_id) => {
+                            let slot = match self.list_element_slots.get(&expr_id).copied() {
+                                Some(slot) => slot,
+                                None => {
+                                    let slot = Type::Unknown.get_type_id(self);
+                                    self.list_element_slots.insert(expr_id, slot);
+                                    slot
+                                }
+                            };
+                            Type::Struct(list_id, vec![slot])
+                        }
+                        None => Type::Unknown,
+                    };
+                }
                 let mut element_type = Type::Unknown;
                 for item_id in &item_ids {
                     let item_type = self.infer_type_inner(
@@ -8884,10 +8907,11 @@ impl<'src> Analyzer<'src> {
                 self.resolve_slot_unification(*slot, *argument_id)
             }
             Constraint::MethodArgCheck {
+                call_id,
                 member_id,
                 argument_ids,
                 arguments_span,
-            } => self.resolve_method_arg_check(*member_id, argument_ids, *arguments_span),
+            } => self.resolve_method_arg_check(*call_id, *member_id, argument_ids, *arguments_span),
             Constraint::ForEachItem {
                 item_id,
                 iterable_id,
@@ -9518,6 +9542,7 @@ impl<'src> Analyzer<'src> {
                     self.method_call_substitution.insert(id, substitution);
                 }
                 self.constraints.push(Constraint::MethodArgCheck {
+                    call_id: id,
                     member_id,
                     argument_ids: argument_ids.to_vec(),
                     arguments_span,
@@ -9585,16 +9610,32 @@ impl<'src> Analyzer<'src> {
         }
     }
 
-    /// Unify a container's element slot with a pushed value's type. A slot already
-    /// filled (by an earlier push) is a no-op; defers while the value is unresolved.
+    /// Unify a container's element slot with a pushed value's type: fill it when
+    /// still unknown, and CHECK against it when already filled (by an earlier
+    /// push or an annotation) — the fill-only version let `push("text")` follow
+    /// `push(10)` silently (B16); the receiver's `Unknown` slot records no
+    /// reconcile binding, so the generic argument check can't catch this one.
+    /// Defers while the value is unresolved.
     fn resolve_slot_unification(&mut self, slot: TypeId, argument_id: Id) -> Resolution {
-        if !matches!(slot.get_type(self), Type::Unknown) {
-            // Already unified by an earlier push.
-            return Resolution::Resolved;
-        }
         let argument_type = self.infer_type(argument_id, &Type::Unknown, &HashMap::new());
         if matches!(argument_type, Type::Unresolved) {
             return Resolution::Deferred;
+        }
+        let slot_type = slot.get_type(self);
+        if !matches!(slot_type, Type::Unknown) {
+            if self
+                .reconcile_type(&argument_type, &slot_type, &HashMap::new())
+                .is_none()
+            {
+                let expected = self.pretty_print_type(&slot_type, &HashMap::new());
+                let got = self.pretty_print_type(&argument_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&argument_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!("Expected {}, but got {} instead.", expected, got),
+                });
+                return Resolution::Failed;
+            }
+            return Resolution::Resolved;
         }
         if !matches!(argument_type, Type::Unknown) {
             self.type_id_to_type_map.insert(slot, argument_type);
@@ -9605,8 +9646,14 @@ impl<'src> Analyzer<'src> {
     /// Type-check a wired method call's arguments against the method's parameters
     /// (`self` is parameter 0, so arguments align at offset 1). Defers until every
     /// argument resolves, so errors aren't reported against partial types.
+    ///
+    /// Parameter types are checked AFTER applying the call's receiver
+    /// substitution (`List<i32>.push`'s `item: T` checks as `i32`) — against the
+    /// raw `Type::Generic` a mismatched argument reconciles vacuously, which is
+    /// how `push("text")` on a `List<i32>` once passed silently (B16).
     fn resolve_method_arg_check(
         &mut self,
+        call_id: Id,
         member_id: Id,
         argument_ids: &[Id],
         arguments_span: Span,
@@ -9614,6 +9661,11 @@ impl<'src> Analyzer<'src> {
         let Some((parameter_ids, _)) = self.method_signature(member_id) else {
             return Resolution::Resolved;
         };
+        let substitution = self
+            .method_call_substitution
+            .get(&call_id)
+            .cloned()
+            .unwrap_or_default();
         let expected = parameter_ids.len().saturating_sub(1);
         if argument_ids.len() != expected {
             self.diagnostics.push(Error {
@@ -9635,6 +9687,7 @@ impl<'src> Analyzer<'src> {
                 .get(argument_types.len() + 1)
                 .and_then(|parameter_id| self.parameters.get(parameter_id))
                 .map(|parameter| parameter.type_id.get_type(self))
+                .map(|parameter| self.substitute_type(&parameter, &substitution))
                 .unwrap_or(Type::Unknown);
             let argument_type = self.infer_type(*argument_id, &parameter_type, &HashMap::new());
             if matches!(argument_type, Type::Unresolved) {
@@ -9648,9 +9701,14 @@ impl<'src> Analyzer<'src> {
                 .get(index + 1)
                 .and_then(|parameter_id| self.parameters.get(parameter_id))
                 .map(|parameter| parameter.type_id.get_type(self))
+                .map(|parameter| self.substitute_type(&parameter, &substitution))
             else {
                 continue;
             };
+            // A substituted parameter still mid-inference: try again next pass.
+            if matches!(parameter_type, Type::Unresolved) {
+                return Resolution::Deferred;
+            }
             if self
                 .reconcile_type(&argument_type, &parameter_type, &HashMap::new())
                 .is_none()
@@ -10885,6 +10943,13 @@ impl<'src> Analyzer<'src> {
                 if Some(struct_id) == list_id && arguments.len() == 1 =>
             {
                 let element_type = arguments[0];
+                // A still-unknown element slot: wait for a `push` (or an
+                // annotation on the binding) to ground it. One left ungrounded
+                // at the end of the fixpoint gets the never-determined error
+                // in the leftover-constraint sweep.
+                if matches!(element_type.get_type(self), Type::Unknown) {
+                    return Resolution::Deferred;
+                }
                 self.expr_id_to_expr_map
                     .insert(id, Expr::Index(subject_id, index_id));
                 self.expr_id_to_type_id_map.insert(id, element_type);
@@ -11878,6 +11943,29 @@ impl<'src> Analyzer<'src> {
                     msg: "type of function call arguments could not be resolved".to_string(),
                 }),
                 _ => {}
+            }
+        }
+        // A subscript left deferred because its list's element slot never
+        // grounded (one that DID ground resolved during the fixpoint): the
+        // never-determined error, at the subscript. Other deferral causes (an
+        // unresolved subject) surface through their own diagnostics.
+        let unresolved_subscripts: Vec<(Id, Id)> = self
+            .constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                Constraint::Subscript { id, subject_id, .. } => Some((*id, *subject_id)),
+                _ => None,
+            })
+            .collect();
+        for (subscript_id, subject_id) in unresolved_subscripts {
+            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+            if self.list_element_slot(&subject_type).is_some() {
+                self.diagnostics.push(Error {
+                    span: **self.span_map.get(&subscript_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: "cannot index this List: its element type is never determined \
+                          (give the list a type, e.g. `: List<i32>`)"
+                        .to_string(),
+                });
             }
         }
         let unresolved_matches: Vec<(Id, Span)> = self

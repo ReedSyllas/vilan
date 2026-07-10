@@ -9747,3 +9747,206 @@ fn a_user_type_dispatches_through_the_rem_trait() {
         "2\n",
     );
 }
+
+// --- B16: methods on generic receivers actually check their arguments ---------
+// The hole: `resolve_method_arg_check` reconciled arguments against the RAW
+// parameter type — `Type::Generic(T)` reconciles with anything — never applying
+// the call's receiver substitution. And an empty `[]` literal erased its
+// element (zero-argument `List`), so pushes had no slot to ground. Every case
+// below pins one shape of the class.
+
+#[test]
+fn an_annotated_lists_push_checks_its_argument() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a: List<i32> = List::new();
+            a.push("text");
+        }
+        main();
+        "#,
+        "\"text\"",
+        "Expected i32, but got str instead.",
+    );
+}
+
+#[test]
+fn a_second_push_conflicting_with_the_first_is_an_error() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a = List::new();
+            a.push(10);
+            a.push("text");
+        }
+        main();
+        "#,
+        "\"text\"",
+        "Expected i32, but got str instead.",
+    );
+}
+
+#[test]
+fn an_empty_literal_pushed_two_incompatible_types_is_an_error() {
+    // The motivating repro (examples/playground).
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a = [];
+            a.push(10);
+            a.push("some text");
+        }
+        main();
+        "#,
+        "\"some text\"",
+        "Expected i32, but got str instead.",
+    );
+}
+
+#[test]
+fn an_empty_literals_element_grounds_from_a_push() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [];
+            a.push(10);
+            print(a[0] + 1);
+        }
+        main();
+        "#,
+        "11\n",
+    );
+}
+
+#[test]
+fn a_push_grounds_reads_earlier_in_the_source() {
+    // Inference is a fixpoint over the whole function, not a statement walk: a
+    // later push types an earlier subscript. (The early read sits behind a
+    // length guard — reading before pushing would be a correct I4 panic at
+    // runtime; this pins TYPING order-independence.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [];
+            if a.len() > 0 {
+                print(a[0] + 1);
+            }
+            a.push(10);
+            print(a[0] + 1);
+        }
+        main();
+        "#,
+        "11\n",
+    );
+}
+
+#[test]
+fn a_generic_structs_method_checks_its_argument() {
+    assert_fails_spanning(
+        r#"
+        struct Holder<T> {
+            item: T,
+        }
+
+        impl Holder<type T> {
+            fun replace(&mut self, value: T): void {
+                self.item = value;
+            }
+        }
+
+        fun main() {
+            mut h = Holder { item = 1 };
+            h.replace("text");
+        }
+        main();
+        "#,
+        "\"text\"",
+        "Expected i32, but got str instead.",
+    );
+}
+
+#[test]
+fn a_maps_insert_checks_its_value() {
+    assert_fails_spanning(
+        r#"
+        import std::map::Map;
+        fun main() {
+            mut m: Map<str, i32> = Map::new();
+            m.insert("k", "not an int");
+        }
+        main();
+        "#,
+        "\"not an int\"",
+        "Expected i32, but got str instead.",
+    );
+}
+
+#[test]
+fn a_never_grounded_list_new_subscript_errors() {
+    // Same rule as the empty literal (the I4 diagnostic): reading an element
+    // whose type never grounds is an error, not a silent `Unknown`.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a = List::new();
+            let first = a[0];
+        }
+        main();
+        "#,
+        "a[0]",
+        "element type is never determined",
+    );
+}
+
+#[test]
+fn a_never_pushed_lists_len_stays_legal() {
+    // The tolerance that must survive: methods that don't touch the element
+    // type work on a never-grounded list.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [];
+            print(a.len());
+        }
+        main();
+        "#,
+        "0\n",
+    );
+}
+
+#[test]
+fn a_for_loop_over_a_grounded_literal_types_its_item() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [];
+            a.push(10);
+            a.push(20);
+            for item in a {
+                print(item + 1);
+            }
+        }
+        main();
+        "#,
+        "11\n21\n",
+    );
+}
+
+#[test]
+fn a_nonempty_literals_push_checks_its_argument() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a = [1, 2];
+            a.push("text");
+        }
+        main();
+        "#,
+        "\"text\"",
+        "Expected i32, but got str instead.",
+    );
+}

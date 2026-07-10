@@ -222,21 +222,33 @@ have gaps.
     covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
     channel. Workaround: annotate (`|i: i32| ..`).
 
-16. **Methods on an ungrounded generic receiver typecheck nothing — silently** (M; found
-    2026-07-10 in `examples/playground`) — `mut a = []; a.push(10); a.push("some text");`
-    compiles with NO diagnostics and emits both pushes (a heterogeneous list at runtime —
-    the silent-type-hole shape). Probed: the calls also do not GROUND the receiver — after
-    `a.push(10)`, `a[0]` still reports "element type is never determined", so a method call
-    on a `List<?>` receiver neither informs the element typevar nor checks its arguments;
-    both pushes are unchecked no-ops to the solver. Two-part fix, in order of ambition:
-    (a) at minimum, a method call on a receiver whose generic arguments never ground must
-    be an ERROR (like the subscript arm shipped with I4), never a silent skip; (b) properly,
-    the call should participate in inference — `push(10)` grounds `T = i32`, making the
-    second push a normal argument mismatch (and `mut a = []; a.push(10)` legal, which today
-    it effectively isn't since nothing downstream can read `a`). Check `insert`/user
-    generics for the same class once the mechanism is found; the fix is per-mechanism, with
-    per-case pins (empty literal, `List::new()` unannotated, grounding via a later
-    annotated use).
+16. ~~**Methods on an ungrounded generic receiver typecheck nothing — silently**~~ —
+    **SHIPPED 2026-07-10** (the full (b) fix). The class was WIDER than the item: probing
+    showed even `mut a: List<i32> = List::new(); a.push("text")` passed, as did
+    `Holder<i32>.replace("text")` and `Map<str, i32>.insert("k", "not an int")` — the
+    method argument check (`resolve_method_arg_check`) reconciled against the RAW
+    parameter type, and `Type::Generic(T)` reconciles with anything, so EVERY
+    generic-typed method parameter was vacuously checked, grounded receiver or not.
+    Three coordinated fixes, one mechanism each: (1) `MethodArgCheck` now carries its
+    call id and applies `method_call_substitution` to parameter types before checking
+    (`List<i32>.push`'s `item: T` checks as `i32`) — fixes annotated receivers, user
+    generics, Map; (2) an empty `[]` literal mints a STABLE element inference slot
+    (`list_element_slots` keyed by the literal's expr id, exactly `List::new()`'s
+    mechanism) instead of erasing to zero-argument `List`, so pushes ground it and
+    `mut a = []; a.push(10); a[0] + 1` finally works; (3) `resolve_slot_unification`
+    now VERIFIES against an already-filled slot instead of no-opping (the receiver's
+    `Unknown` slot records no reconcile binding, so fix (1) can't see this case) —
+    first push wins, the second mismatched push errors at its argument. Subscripts on a
+    still-unknown slot DEFER, and the end-of-fixpoint sweep turns a never-grounded one
+    into I4's never-determined error (now also for unannotated `List::new()`, an
+    improvement); `len()`-style methods on never-grounded lists stay legal (pinned), and
+    typing is fixpoint-order-independent (a later push types an earlier guarded read —
+    pinned). 12 pins; all 84 corpus goldens BYTE-IDENTICAL (no emission change — the
+    world already type-checked cleanly under real checking); the playground repro now
+    errors at `"some text"`. Recorded remainders: an unannotated `Map::new()` stays
+    loose (Map is not a slot container — its K/V never ground from `insert`), and
+    grounding an empty literal from a LATER annotated use (`let b: List<str> = a`)
+    is not taken (pushes and annotations are the grounding channels).
 
 ---
 
