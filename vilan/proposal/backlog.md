@@ -120,6 +120,27 @@ have gaps.
      are beyond-v1 (interact with A6's async turns and J1). Dependencies met: platform
      model, P6 transport (data fetching), A5 boundary ownership.
 
+8. **UI styling — typed atomic styles, compiled** (L; `proposal/ui-styling.md`,
+   2026-07-10; **syntax refinement with the user is the next step**, then slice 1) —
+   the last big hole in the UI model. Styles are typed values (`style { padding =
+   space.4, hover = style { .. } }`) lowered at compile time to deduplicated atomic
+   CSS through a new general **asset channel** (`[asset("css")]` constants collected,
+   deduped, deterministically ordered, written beside the `.js` — the same channel A7
+   wants for critical CSS); merge is `+` with per-property last-wins (record
+   semantics — specificity fights structurally impossible; static merges fold,
+   dynamic ones are a map union, never string parsing); variants are plain
+   `match`/functions (CVA dissolves); tokens lower to **CSS custom properties** so
+   the macro needs identities not values — theming/dark-mode = swapping property
+   values, and signal-driven dynamic values ride the same `var()` channel. Proving
+   ground: the macro engine (`style` macro block in `std::ui::style`); promotion to
+   first-class syntax if DSL diagnostics demand it. Tailwind itself stays a
+   documented SIDECAR bridge (its scanner just reads `**/*.vl` text), not the
+   foundation. Small separable spin-off recorded below (A9).
+
+9. **`vilan.toml [build] run` hooks** (S; spun off A8) — run external commands
+   alongside `vilan build` / `--watch` (the Tailwind-bridge runner, asset pipelines,
+   codegen sidecars). Useful independent of styling.
+
 ---
 
 ## B. Type system & the type solver
