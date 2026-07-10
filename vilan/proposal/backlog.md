@@ -63,8 +63,14 @@ have gaps.
    settled schedules ONE microtask drain (`queue_microtask` extern), so each
    async continuation segment settles as a coalesced wave — no compiler
    insertion needed, the policies converge for async extents (a true
-   held-across-await `AtEnd` = `turn_async`, recorded). REMAINING: the
-   optimistic-write → reconcile follow-on, and `turn_async`. Original
+   held-across-await `AtEnd` = `turn_async`, recorded). `turn_async` +
+   `optimistic` shipped same-day, closing the follow-ons: `turn_async(body)` =
+   the TRUE transactional extent — every notification held until the body's
+   whole async chain completes, one coalesced settle (spawn-then-await over
+   the J2 gap); `optimistic(signal, value, commit)` = paint now, await the
+   commit, reconcile to the confirmed value or roll back, returning the
+   outcome. **A6 is COMPLETE**; the cadence split for directly-awaiting
+   `turn` bodies is the one recorded refinement. Original
    design: **proposal: `reactive-turns.md`, 2026-07-09** — supersedes the original "auto-flush on the next
    microtask" sketch, which a review scenario killed: the scheduler's single global
    pending queue means one request's `flush` drains every interleaved request's
@@ -562,6 +568,22 @@ have gaps.
 1. **Async/await remaining phases** (L; see the `context-async-plan` memory) — `context` (scoped
    value) landed and threads as a hidden parameter; the shared call-graph (Phase 0) is in
    `call_graph.rs`. The async/await execution-model phases remain.
+
+2. **Indirect calls are not async-inferred — no implicit await through closure values** (M;
+   found 2026-07-09 building `turn_async`) — async inference infects through DIRECT calls
+   (`f()` awaits when `f` is async), but a call THROUGH a closure value or parameter
+   (`body()` where `body: || T`) has no static callee, so it is never inferred async: the
+   call returns the host promise at runtime while typing as plain `T` — the static type
+   and the runtime value diverge until something awaits. Probed: `turn(policy, || {
+   status.set(..); tick(); .. })` published the pre-await write immediately because
+   `run`'s rewritten `body(value)` call was not awaited. Workaround (used by `turn_async`
+   and `optimistic`, documented at both): SPAWN the call then await it — `let pending =
+   async body(); await pending` — the host flattens promise-of-promise, so the await
+   covers the callee's whole chain, and it is harmless for sync callees. A real fix wants
+   closure TYPES to carry asyncness (an `async || T` closure type, inferred at the
+   literal and checked at the call) so indirect calls await implicitly like direct ones —
+   which interacts with B15 clauses (a clause-typed async closure) and the async-model
+   phases above.
 
 ---
 

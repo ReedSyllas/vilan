@@ -10,8 +10,17 @@ AFTER the turn settled schedules one **microtask drain** — each continuation
 segment settles as one coalesced wave (per-set settling would have
 re-glitched multi-input observers), with no compiler insertion at all. The
 policies therefore CONVERGE for async extents in v1 (`FlushPolicy` states
-intent and keeps the API stable); a true held-across-await `AtEnd` needs a
-`turn` that can await its body — `turn_async`, the recorded follow-on. Three implementation findings amended the design:
+intent and keeps the API stable). **`turn_async` + `optimistic` shipped
+same-day**, closing §5.5: `turn_async(body)` is the true held-across-await
+transaction — it spawns-then-awaits the body call (a call through a closure
+value is not async-inferred, backlog J2; the host's promise flattening makes
+the await cover the whole chain), holds every notification (the turn never
+reaches `settled` mid-flight, so the continuation microtask never fires
+early), and settles once — same-signal writes coalesce to their final value.
+`optimistic(signal, value, commit)` is the reconcile lifecycle: paint now,
+await the commit, then confirm or roll back, returning the outcome. **A6 is
+COMPLETE**; the cadence split for directly-awaiting `turn` bodies remains
+the one recorded refinement. Three implementation findings amended the design:
 
 1. **Injected bodies, not captured** (`turn` AND `batch`): a batch body is a
    literal at the call site, created BEFORE the extent exists —

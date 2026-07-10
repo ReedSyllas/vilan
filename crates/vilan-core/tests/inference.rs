@@ -8963,3 +8963,121 @@ fn at_end_holds_writes_across_the_await_inside_the_extent() {
         "status idle\nstatus queued\nsync done\nstatus done\n",
     );
 }
+
+// --- reactive-turns follow-ons: `turn_async` (the true held-across-await ---
+// --- transaction) and the optimistic-write → reconcile lifecycle.        ---
+
+#[test]
+fn turn_async_holds_writes_until_the_body_completes() {
+    // The transactional extent: NOTHING publishes during the body — not
+    // before the await, not in continuations — and the single settle
+    // coalesces same-signal writes to the final value ("working" never
+    // fires).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, turn_async, turn_scope };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let status = Signal::new("idle");
+            let _watch = status.sub(|value| print(i"status {value}"));
+            turn_async(|| {
+                status.set("working");
+                tick();
+                status.set("done");
+            });
+            print("after turn");
+        }
+        main();
+        "#,
+        "status idle\nstatus done\nafter turn\n",
+    );
+}
+
+#[test]
+fn turn_async_returns_the_body_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ turn_async, turn_scope };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let answer = turn_async(|| {
+                tick();
+                42
+            });
+            print(answer);
+        }
+        main();
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn optimistic_paints_then_reconciles_to_the_confirmed_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, optimistic };
+        import std::result::Result::{ self, Ok, Err };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let label = Signal::new("saved v1");
+            let _watch = label.sub(|value| print(i"label {value}"));
+            let outcome = optimistic(label, "saving v2", || {
+                tick();
+                Ok("saved v2")
+            });
+            match outcome {
+                Ok(let value) => print(i"ok {value}"),
+                Err(let _e) => print("failed"),
+            }
+        }
+        main();
+        "#,
+        "label saved v1\nlabel saving v2\nlabel saved v2\nok saved v2\n",
+    );
+}
+
+#[test]
+fn optimistic_rolls_back_on_failure() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, optimistic };
+        import std::result::Result::{ self, Ok, Err };
+
+        async fun tick() {
+            let _beat = 1;
+        }
+
+        fun main() {
+            let label = Signal::new("saved v1");
+            let _watch = label.sub(|value| print(i"label {value}"));
+            let outcome: Result<str, str> = optimistic(label, "saving v2", || {
+                tick();
+                Err("offline")
+            });
+            match outcome {
+                Ok(let _value) => print("ok"),
+                Err(let error) => print(i"failed: {error}"),
+            }
+        }
+        main();
+        "#,
+        "label saved v1\nlabel saving v2\nlabel saved v1\nfailed: offline\n",
+    );
+}

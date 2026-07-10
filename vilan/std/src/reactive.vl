@@ -1,6 +1,7 @@
 
 import pkg::shared::Shared;
 import pkg::option::Option::{ self, Some, None };
+import pkg::result::Result::{ self, Ok, Err };
 import pkg::compare::PartialEq;
 import pkg::context::Context;
 
@@ -163,6 +164,45 @@ fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T {
 	drain(fresh);
 	fresh.settled.write() = true;
 	result
+}
+
+// The TRANSACTIONAL async extent: establish a fresh turn and hold EVERY
+// notification — before the first suspension and in every continuation —
+// until the body has fully completed, then settle once (same-signal writes
+// coalesce to their final value). This is the true held-across-await
+// `AtEnd`; `turn(..)` with a spawn-style body settles per segment instead.
+//
+// The body call is spawned then awaited: a call THROUGH a closure value is
+// not async-inferred (no implicit await — backlog J2), and the JS host
+// flattens promise-of-promise, so awaiting the spawn waits for the body's
+// whole chain.
+fun turn_async<T>(body: (|| T) context turn_scope): T {
+	let fresh = Turn::new();
+	let pending = async turn_scope.run(fresh, body);
+	let result = await pending;
+	drain(fresh);
+	fresh.settled.write() = true;
+	result
+}
+
+// The optimistic-write → reconcile lifecycle (reactive-turns.md §5.5):
+// paint `value` into `signal` NOW, run `commit` (usually a server call),
+// then reconcile — the confirmed value on success, the previous value
+// rolled back on failure. Returns the outcome for the caller's error UX.
+// Under a UI turn the optimistic paint settles when the handler's sync
+// extent ends (its first suspension); the reconcile settles as its own
+// continuation segment. Inside `turn_async` the whole lifecycle holds —
+// the transaction wins.
+fun optimistic<T, E>(signal: Signal<T>, value: T, commit: || Result<T, E>): Result<T, E> {
+	let previous = signal.get();
+	signal.set(value);
+	let pending = async commit();
+	let outcome = await pending;
+	match outcome {
+		Ok(let confirmed) => signal.set(confirmed),
+		Err(let _error) => signal.set(previous),
+	}
+	outcome
 }
 
 // Run `body` with notifications deferred, settled once — joins the ambient
