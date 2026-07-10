@@ -1,6 +1,6 @@
 function fold_unsigned(value, modulus) {
 	const truncated = Math.trunc(value);
-	const wrapped = truncated - Math.trunc(truncated / modulus) * modulus;
+	const wrapped = truncated % modulus;
 	let $b = null;
 	if (wrapped < 0) {
 		$b = wrapped + modulus;

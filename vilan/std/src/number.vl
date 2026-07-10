@@ -165,9 +165,9 @@ impl f64 {
 		self * (180f / PI)
 	}
 
-	// Truncated remainder (sign follows the dividend, like the host `%`).
+	// Truncated remainder (sign follows the dividend), the method form of `%`.
 	fun rem(self, m: f64): f64 {
-		self - (self / m).trunc() * m
+		self % m
 	}
 
 	// --- Classification ---
@@ -800,11 +800,10 @@ external fun label_f32(value: f64): f32;
 [extern("Number")]
 external fun label_f64(value: f64): f64;
 
-// `value` truncated toward zero, folded into `0 ..= modulus - 1`. (Spelled
-// with a truncating quotient — vilan has no `%` operator yet.)
+// `value` truncated toward zero, folded into `0 ..= modulus - 1`.
 fun fold_unsigned(value: f64, modulus: f64): f64 {
 	let truncated = value.trunc();
-	let wrapped = truncated - (truncated / modulus).trunc() * modulus;
+	let wrapped = truncated % modulus;
 	if wrapped < 0f {
 		wrapped + modulus
 	} else {
@@ -1336,9 +1335,9 @@ impl f32 {
 	[extern("Math.max")]
 	external fun max(self, other: f32): f32;
 
-	// Truncated remainder (sign follows the dividend).
+	// Truncated remainder (sign follows the dividend), the method form of `%`.
 	fun rem(self, m: f32): f32 {
-		self - (self / m).trunc() * m
+		self % m
 	}
 
 	[extern("Number")]

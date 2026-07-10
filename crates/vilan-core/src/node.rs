@@ -703,6 +703,10 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    // Truncated remainder (the dividend's sign) — Rust's and JS's shared
+    // semantics. Exact for every integer type, so unlike `Div` it needs no
+    // trunc wrap in emission.
+    Rem,
     // Bitwise/shift operators (proposal/bits-and-bytes.md §2) — integer-typed,
     // overloadable via `std::operators` like the arithmetic four. Vilan
     // precedence (Rust's order, not C's): `<< >>` over `&` over `^` over `|`,

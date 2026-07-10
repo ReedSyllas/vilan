@@ -69,7 +69,7 @@ where
     // A parser for operators. `^` is bitwise-xor; `<`/`>` are control tokens
     // (generics), so the shifts have no token here — the parser reads two
     // adjacent `<`/`>` controls in expression position.
-    let op = one_of("-:!*/+=|&^?")
+    let op = one_of("-:!*/+=|&^?%")
         .repeated()
         .at_least(1)
         .to_slice()

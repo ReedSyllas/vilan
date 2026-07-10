@@ -500,10 +500,19 @@ have gaps.
    first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
    degrades to a clean parse error, documented at the parser site.
 
-5. **The `%` remainder operator** (S; found by F2) — vilan has no `%`; the numeric
-   conversions spell remainder as `x - (x / m).trunc() * m` (numeric-types.md §5). Add
-   the operator (lexer, `Rem` trait in `operators.vl`, native emission — exact for every
-   integer type under F2's truncating division; JS `%` is already truncated remainder).
+5. ~~**The `%` remainder operator**~~ — **SHIPPED 2026-07-10**: truncated remainder
+   (the dividend's sign — Rust's and JS's shared semantics) at every numeric type, plus
+   `%=`, binding with `*`/`/` (left-associative), overloadable through the new
+   `std::operators::Rem` trait (`impl T with Rem { fun rem(..) }`). Emission is the bare
+   JS `%` with NO wrap at any type — unlike `/`, an integer remainder is always
+   representable (magnitude < |divisor|, sign of the dividend), so i32/u32/i64 need no
+   `Math.trunc`/`>>> 0`; BigInt `%` is native (the macro interpreter mirrors with
+   `checked_rem` + the division-by-zero throw). The promised cleanup landed: `f64.rem`/
+   `f32.rem` bodies and `fold_unsigned` (the as_* conversion folding) now spell `%`
+   directly — their "vilan has no `%` operator yet" comment removed; only the
+   `math.js`/`numeric-types.js` goldens moved (one line each, parity-verified). 8 pins
+   (signs, floats, i64-exact, u32, BigInt, precedence, `%=`, trait dispatch) + corpus
+   `remainder.vl` + TextMate `%`/`%=`.
 
 2. ~~Block-scoped imports~~ — **shipped 2026-07-05** (kept as the design record; macro-engine
    §3 consumes it for `macro_std` resolution). `import`/`use` are statements, legal in any

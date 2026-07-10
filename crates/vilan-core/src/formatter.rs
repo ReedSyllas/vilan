@@ -782,7 +782,7 @@ impl<'src> Printer<'src> {
             BinaryOp::BitAnd => 6,
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => 7,
             BinaryOp::Add | BinaryOp::Sub => 8,
-            BinaryOp::Mul | BinaryOp::Div => 9,
+            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => 9,
         }
     }
 
@@ -1250,6 +1250,7 @@ fn binary_operator_symbol(operator: BinaryOp) -> &'static str {
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
         BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
         // JS-only (the transformer's unsigned right shift); never in a parsed

@@ -9607,3 +9607,143 @@ fn a_macro_emits_source_from_a_triple_quoted_string() {
         "42\n",
     );
 }
+
+// --- H5: the `%` remainder operator -------------------------------------------
+// Truncated remainder (the dividend's sign), like Rust and JS agree on. Exact
+// for every integer type (unlike `/`, `%` needs no trunc wrap: an integer
+// remainder is always representable); BigInt for i64/u64; overloadable through
+// `std::operators::Rem` like the arithmetic four.
+
+#[test]
+fn remainder_on_i32_follows_the_dividend_sign() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(7 % 3);
+            print((0 - 7) % 3);
+            print(7 % (0 - 3));
+        }
+        main();
+        "#,
+        "1\n-1\n1\n",
+    );
+}
+
+#[test]
+fn remainder_on_floats() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(7.5 % 2f);
+        }
+        main();
+        "#,
+        "1.5\n",
+    );
+}
+
+#[test]
+fn remainder_on_i64_is_exact() {
+    // i64 is f64-repped (F2 profiled trunc over BigInt); `%` of two in-range
+    // integers is exact with no wrap needed.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(9000000000000000i64 % 7i64);
+        }
+        main();
+        "#,
+        "5\n",
+    );
+}
+
+#[test]
+fn remainder_on_bigint_values() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(9007199254740993n % 4n);
+        }
+        main();
+        "#,
+        "1n\n",
+    );
+}
+
+#[test]
+fn u32_remainder_stays_unsigned() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(4000000000u32 % 7u32);
+        }
+        main();
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn remainder_binds_with_product() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            print(1 + 7 % 3);
+            print(2 * 7 % 3);
+            print(7 % 3 * 2);
+        }
+        main();
+        "#,
+        "2\n2\n2\n",
+    );
+}
+
+#[test]
+fn a_compound_remainder_assignment_works() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut x = 17;
+            x %= 5;
+            print(x);
+        }
+        main();
+        "#,
+        "2\n",
+    );
+}
+
+#[test]
+fn a_user_type_dispatches_through_the_rem_trait() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::operators::Rem;
+
+        struct Meters {
+            v: i32,
+        }
+
+        impl Meters with Rem {
+            fun rem(self, b: Self): Self {
+                Meters { v = self.v % b.v }
+            }
+        }
+
+        fun main() {
+            let left = Meters { v = 17 };
+            let right = Meters { v = 5 };
+            print((left % right).v);
+        }
+        main();
+        "#,
+        "2\n",
+    );
+}

@@ -622,6 +622,7 @@ where
             just(Token::Op("-=")).to(Some(BinaryOp::Sub)),
             just(Token::Op("*=")).to(Some(BinaryOp::Mul)),
             just(Token::Op("/=")).to(Some(BinaryOp::Div)),
+            just(Token::Op("%=")).to(Some(BinaryOp::Rem)),
         )))
         .then(expression.clone())
         .map_with(|((target, op), value), e| {
@@ -1790,7 +1791,8 @@ where
     // Product ops (multiply and divide) have equal precedence
     let op = just(Token::Op("*"))
         .to(BinaryOp::Mul)
-        .or(just(Token::Op("/")).to(BinaryOp::Div));
+        .or(just(Token::Op("/")).to(BinaryOp::Div))
+        .or(just(Token::Op("%")).to(BinaryOp::Rem));
     let product = unary
         .clone()
         .foldl_with(op.then(unary).repeated(), |a, (op, b), e| {

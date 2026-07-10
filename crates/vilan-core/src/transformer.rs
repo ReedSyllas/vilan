@@ -3285,7 +3285,7 @@ impl Formatter {
             BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq => 6,
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => 7,
             BinaryOp::Add | BinaryOp::Sub => 8,
-            BinaryOp::Mul | BinaryOp::Div => 9,
+            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => 9,
         }
     }
 
@@ -3404,6 +3404,7 @@ impl Formatter {
                     BinaryOp::Sub => "-",
                     BinaryOp::Mul => "*",
                     BinaryOp::Div => "/",
+                    BinaryOp::Rem => "%",
                     BinaryOp::Shl => "<<",
                     BinaryOp::Shr => ">>",
                     BinaryOp::UShr => ">>>",

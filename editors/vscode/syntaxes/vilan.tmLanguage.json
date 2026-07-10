@@ -235,7 +235,7 @@
         {
           "comment": "Multi-char operators first (`&mut`, `||`, `::`, `=>`, `?.`, compound assigns, comparisons), then single-char (incl. `^` bitwise-xor and postfix `?`/`!`).",
           "name": "keyword.operator.vilan",
-          "match": "&mut|\\|\\||&&|::|=>|==|!=|<=|>=|\\+=|-=|\\*=|/=|\\?\\.|[-+*/=<>!&|^?]"
+          "match": "&mut|\\|\\||&&|::|=>|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|\\?\\.|[-+*/=<>!&|^?%]"
         }
       ]
     }

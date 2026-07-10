@@ -52,6 +52,12 @@ trait Div<B = Self> {
 	}
 }
 
+trait Rem<B = Self> {
+	fun rem(self, b: B): Self {
+		panic("not implemented yet")
+	}
+}
+
 trait Shl<B = Self> {
 	fun shl(self, b: B): Self {
 		panic("not implemented yet")

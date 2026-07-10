@@ -1104,6 +1104,7 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
         BinaryOp::Sub => Some(("Sub", "sub")),
         BinaryOp::Mul => Some(("Mul", "mul")),
         BinaryOp::Div => Some(("Div", "div")),
+        BinaryOp::Rem => Some(("Rem", "rem")),
         BinaryOp::Shl => Some(("Shl", "shl")),
         BinaryOp::Shr => Some(("Shr", "shr")),
         BinaryOp::BitAnd => Some(("BitAnd", "bit_and")),

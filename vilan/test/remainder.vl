@@ -1,0 +1,47 @@
+import std::print;
+import std::operators::Rem;
+
+// `%` is truncated remainder (the dividend's sign) at every numeric type —
+// exact for integers (a remainder is always representable, so unlike `/` it
+// needs no trunc wrap in emission) — and overloadable through
+// `std::operators::Rem` like the arithmetic four.
+
+struct Meters {
+	v: i32,
+}
+
+impl Meters with Rem {
+	fun rem(self, b: Self): Self {
+		Meters { v = self.v % b.v }
+	}
+}
+
+fun main() {
+	// The dividend's sign, on i32.
+	print(7 % 3);
+	print((0 - 7) % 3);
+	print(7 % (0 - 3));
+
+	// Floats, i64 (f64-repped, exact), u32, and BigInt.
+	print(7.5 % 2f);
+	print(9000000000000000i64 % 7i64);
+	print(4000000000u32 % 7u32);
+	print(9007199254740993n % 4n);
+
+	// Binds with `*`/`/`; left-associative.
+	print(1 + 7 % 3);
+	print(7 % 3 * 2);
+
+	// Compound assignment.
+	mut x = 17;
+	x %= 5;
+	print(x);
+
+	// A user type dispatches through the trait. (A struct literal can't be an
+	// operator operand yet — backlog H1 — so bind first.)
+	let left = Meters { v = 17 };
+	let right = Meters { v = 5 };
+	let paced = left % right;
+	print(paced.v);
+}
+main();

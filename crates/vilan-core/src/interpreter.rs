@@ -1474,30 +1474,37 @@ impl Interpreter {
                     .ok_or_else(bigint_overflow),
                 _ => Err(mixed_types_error("+", &left, &right)),
             },
-            BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => match (&left, &right) {
-                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(match op {
-                    BinaryOp::Sub => a - b,
-                    BinaryOp::Mul => a * b,
-                    _ => a / b,
-                })),
-                (Value::BigInt(a), Value::BigInt(b)) => {
-                    let result = match op {
-                        BinaryOp::Sub => a.checked_sub(*b),
-                        BinaryOp::Mul => a.checked_mul(*b),
-                        _ => {
-                            if *b == 0 {
-                                return Err(Failure {
-                                    kind: FailureKind::Thrown,
-                                    message: "Division by zero".to_string(),
-                                });
+            BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+                match (&left, &right) {
+                    (Value::Number(a), Value::Number(b)) => Ok(Value::Number(match op {
+                        BinaryOp::Sub => a - b,
+                        BinaryOp::Mul => a * b,
+                        BinaryOp::Rem => a % b,
+                        _ => a / b,
+                    })),
+                    (Value::BigInt(a), Value::BigInt(b)) => {
+                        let result = match op {
+                            BinaryOp::Sub => a.checked_sub(*b),
+                            BinaryOp::Mul => a.checked_mul(*b),
+                            _ => {
+                                if *b == 0 {
+                                    return Err(Failure {
+                                        kind: FailureKind::Thrown,
+                                        message: "Division by zero".to_string(),
+                                    });
+                                }
+                                if matches!(op, BinaryOp::Rem) {
+                                    a.checked_rem(*b)
+                                } else {
+                                    a.checked_div(*b)
+                                }
                             }
-                            a.checked_div(*b)
-                        }
-                    };
-                    result.map(Value::BigInt).ok_or_else(bigint_overflow)
+                        };
+                        result.map(Value::BigInt).ok_or_else(bigint_overflow)
+                    }
+                    _ => Err(mixed_types_error(op_symbol(op), &left, &right)),
                 }
-                _ => Err(mixed_types_error(op_symbol(op), &left, &right)),
-            },
+            }
             BinaryOp::Shl
             | BinaryOp::Shr
             | BinaryOp::BitAnd
@@ -1866,6 +1873,7 @@ fn op_symbol(op: BinaryOp) -> &'static str {
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
         BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
         BinaryOp::UShr => ">>>",

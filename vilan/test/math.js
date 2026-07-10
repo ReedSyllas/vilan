@@ -32,7 +32,7 @@ function to_degrees(self) {
 	return self * (180 / PI);
 }
 function rem3(self, m) {
-	return self - Math.trunc(self / m) * m;
+	return self % m;
 }
 function is_nan(self) {
 	return self !== self;
