@@ -162,6 +162,32 @@ path leans on the existing debounce until Tier-2 caching lands.
 - Floating point: no divergence to manage — the interpreter's f64 *is* JS's
   f64 (same representation, equivalence-gated), stated for the record.
 
+### Recorded v2: inferred `const`
+
+`let a = 1 + 2;` folding without the keyword (backlog G3). No fundamental
+blocker; recorded here so v1's design doesn't foreclose it. The rules that
+keep it sound:
+
+- **Inference is transparent; `const` stays the contract.** The explicit form
+  ERRORS when evaluation fails; inference silently falls back to runtime on
+  ANY failure — capability, fuel, non-data result, or a **panic**. The panic
+  case is load-bearing: a dynamically-dead `if false { xs[5] }` evaluates to
+  a panic but runs fine — folding it would reject a working program.
+  Fallback preserves observable behavior exactly, panics included.
+- **Same eligibility as the explicit form**: const-known free variables
+  (which, with the plain-data rule, is also what makes internal mutation
+  non-escaping — external state is unreachable without referencing it), the
+  const capability world, plain-data results.
+- **Const-only functions never infer.** `asset::emit` requires an explicit
+  `const` root — otherwise whether a style compiles depends on optimizer
+  mood. Inference folds values; it never creates const contexts.
+- **Budgets are the v2-sized work**: an evaluation fuel cap (a missed fold
+  beats a hung compiler) and a serialized-size cap (a 10 KB table literal
+  replacing a 20-character call is a regression nobody asked for — explicit
+  `const` is the opt-in for big results). Heuristics with knobs.
+- **Debug ergonomics**: folded computation vanishes from stack traces; the
+  `[build]` presets fit naturally — debug skips inference, release infers.
+
 ## 6. Implementation sketch
 
 1. **Grammar**: `const` keyword as a weak-precedence expression prefix

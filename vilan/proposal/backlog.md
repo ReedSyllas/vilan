@@ -553,6 +553,20 @@ have gaps.
    lookup tables, precomputed scales, wire hashes (`contract_hash` de-magicked),
    parsed static config — all zero-cost at runtime.
 
+3. **Inferred `const` — automatic compile-time folding** (M; v2 of G2, recorded
+   2026-07-10; design constraints in `const-eval.md` §5's recorded-v2 note) —
+   `let a = 1 + 2;` folds without the keyword. No fundamental blocker. The
+   soundness rules, settled up front: inference falls back SILENTLY on any
+   evaluation failure, panics included (a dynamically-dead `xs[5]` must not become
+   a compile error — explicit `const` remains the erroring guarantee); eligibility
+   is the explicit form's (const-known free variables, the capability world,
+   plain-data result); const-only functions NEVER infer (an asset-emitting style
+   must not compile-or-not by optimizer mood — inference folds values, never
+   creates const contexts). The v2-sized work is budgets: evaluation fuel (a
+   missed fold beats a hung compiler) and serialized-size caps (don't inline a
+   10 KB table nobody asked for), plus the `[build]`-preset split (debug = no
+   inference for honest stack traces, release = infer).
+
 ---
 
 ## H. Parser & grammar
