@@ -10822,3 +10822,193 @@ fn identical_rules_deduplicate_across_styles() {
         "{css}"
     );
 }
+
+// --- K3: std::crypto / std::jwt / std::base64 (Kolt migration) ---------------
+// WebCrypto-backed auth primitives. HMAC/PBKDF2 run against the host
+// crypto.subtle (present in node), so these are assert_compiles_and_runs; the
+// vectors are RFC-checked (HMAC-SHA-512 = RFC 4231 #2). base64url and
+// constant-time compare are pure vilan.
+
+#[test]
+fn base64url_round_trips_every_tail_length() {
+    // 0, 1, 2 leftover bytes each exercise a distinct decode tail.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::base64::{ encode_url, decode_url };
+        import std::bytes::{ encode_utf8, decode_utf8 };
+        import std::option::Option::{ self, Some, None };
+        fun show(text: str) {
+            let encoded = encode_url(encode_utf8(text));
+            match decode_url(encoded) {
+                Some(let bytes) => print(decode_utf8(bytes)),
+                None => print("decode failed"),
+            }
+        }
+        fun main() {
+            show("abc");
+            show("ab");
+            show("a");
+            show("hello, world");
+        }
+        main();
+        "#,
+        "abc\nab\na\nhello, world\n",
+    );
+}
+
+#[test]
+fn hmac_sha512_matches_the_rfc_vector() {
+    // RFC 4231 test case 2: key "Jefe", data "what do ya want for nothing?".
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::crypto::hmac_sha512;
+        import std::bytes::encode_utf8;
+        async fun main() {
+            let mac = hmac_sha512(encode_utf8("Jefe"), encode_utf8("what do ya want for nothing?"));
+            print(mac.to_hex());
+        }
+        main();
+        "#,
+        "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737\n",
+    );
+}
+
+#[test]
+fn a_jwt_round_trips_signs_and_verifies() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::jwt::{ sign_hs512, verify_hs512 };
+        import std::bytes::encode_utf8;
+        import std::option::Option::{ self, Some, None };
+        import std::wire::Wire;
+
+        [derive(Wire)]
+        struct Claims {
+            sub: str,
+            admin: bool,
+        }
+
+        async fun main() {
+            let secret = encode_utf8("top-secret");
+            let token = sign_hs512(secret, Claims { sub = "user-42", admin = true });
+            print(token.split(".").len());
+            let ok: Option<Claims> = verify_hs512(secret, token);
+            match ok {
+                Some(let claims) => print(i"{claims.sub} {claims.admin}"),
+                None => print("verify failed"),
+            }
+        }
+        main();
+        "#,
+        "3\nuser-42 true\n",
+    );
+}
+
+#[test]
+fn a_tampered_or_wrong_key_jwt_is_rejected() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::jwt::{ sign_hs512, verify_hs512 };
+        import std::bytes::encode_utf8;
+        import std::option::Option::{ self, Some, None };
+        import std::wire::Wire;
+
+        [derive(Wire)]
+        struct Claims {
+            sub: str,
+        }
+
+        fun outcome(label: str, result: Option<Claims>) {
+            match result {
+                Some(let _c) => print(i"{label}: ACCEPTED"),
+                None => print(i"{label}: rejected"),
+            }
+        }
+
+        async fun main() {
+            let secret = encode_utf8("top-secret");
+            let token = sign_hs512(secret, Claims { sub = "user-42" });
+            let tampered: Option<Claims> = verify_hs512(secret, token + "x");
+            outcome("tampered", tampered);
+            let wrong: Option<Claims> = verify_hs512(encode_utf8("other-key"), token);
+            outcome("wrong-key", wrong);
+        }
+        main();
+        "#,
+        "tampered: rejected\nwrong-key: rejected\n",
+    );
+}
+
+#[test]
+fn constant_time_equality_is_correct() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::crypto::equals_constant_time;
+        import std::bytes::encode_utf8;
+        fun main() {
+            print(equals_constant_time(encode_utf8("abcd"), encode_utf8("abcd")));
+            print(equals_constant_time(encode_utf8("abcd"), encode_utf8("abce")));
+            print(equals_constant_time(encode_utf8("abcd"), encode_utf8("abc")));
+        }
+        main();
+        "#,
+        "true\nfalse\nfalse\n",
+    );
+}
+
+#[test]
+#[ignore = "async×monomorphization bug: a generic call after a branch-nested await emits the abstract trait body (Kolt-migration find; backlog B)"]
+fn a_generic_call_after_a_branch_nested_await_monomorphizes() {
+    // The exact shape jwt.vl had to be restructured around: `dec<C>` is called
+    // after an `await` that is itself nested in an `else` branch; the call
+    // resolves the `C: Wire` deserialize to the EMPTY abstract body, so the
+    // decode returns `undefined` (a silent miscompile — the run crashes on the
+    // undefined field access, or reads garbage). Un-ignore when fixed.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ encode_json, decode_json };
+        import std::crypto::hmac_sha512;
+        import std::bytes::{ Bytes, encode_utf8 };
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::wire::Wire;
+
+        [derive(Wire)]
+        struct P { v: str }
+
+        fun dec<C: Wire>(json: str): Option<C> {
+            let decoded: Result<C, str> = decode_json(json);
+            match decoded {
+                Ok(let c) => Some(c),
+                Err(let _e) => None,
+            }
+        }
+
+        async fun f<C: Wire>(secret: Bytes, json: str): Option<C> {
+            if json.len() == 0 {
+                None
+            } else {
+                let _mac = hmac_sha512(secret, encode_utf8(json));
+                if json.len() > 0 { dec(json) } else { None }
+            }
+        }
+
+        async fun main() {
+            let json = encode_json(P { v = "hi" });
+            let back: Option<P> = f(encode_utf8("k"), json);
+            match back {
+                Some(let c) => print(c.v),
+                None => print("none"),
+            }
+        }
+        main();
+        "#,
+        "hi\n",
+    );
+}

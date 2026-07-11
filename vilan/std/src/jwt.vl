@@ -1,0 +1,69 @@
+// Minimal JWTs, HS512 only (proposal/kolt-migration.md §2.1):
+// `base64url(header) . base64url(payload) . base64url(hmac)`. Claims are any
+// `Wire` type — `encode_json`/`decode_json` carry the payload, so the claim
+// struct is ordinary typed data ([derive(Wire)]), and a malformed or tampered
+// token decodes to `None`, never to garbage.
+
+import pkg::base64::{ encode_url, decode_url };
+import pkg::bytes::{ Bytes, encode_utf8, decode_utf8 };
+import pkg::crypto::{ hmac_sha512, equals_constant_time };
+import pkg::json::{ encode_json, decode_json };
+import pkg::option::Option::{ self, Some, None };
+import pkg::result::Result::{ self, Ok, Err };
+import pkg::wire::Wire;
+
+let header_segment = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9"; // {"alg":"HS512","typ":"JWT"}
+
+// Signs `claims` under `secret`, returning the compact token.
+async fun sign_hs512<C: Wire>(secret: Bytes, claims: C): str {
+	let payload = encode_url(encode_utf8(encode_json(claims)));
+	let signing_input = header_segment + "." + payload;
+	let signature = hmac_sha512(secret, encode_utf8(signing_input));
+	signing_input + "." + encode_url(signature)
+}
+
+// Verifies `token` under `secret`: the signature must match (constant-time)
+// and the payload must decode as `C`. Anything else is `None`. The crypto
+// gate is a SEPARATE non-generic async helper returning the verified payload
+// segment; the generic decode is then a flat match — the two are split both
+// for clarity and to keep the generic call out of the awaited branch nest
+// that triggers the async×monomorphization bug (backlog B-note).
+async fun verify_hs512<C: Wire>(secret: Bytes, token: str): Option<C> {
+	let segment = verified_segment(secret, token);
+	match segment {
+		Some(let payload) => decode_claims(payload),
+		None => None,
+	}
+}
+
+// The crypto half: `Some(payload_segment)` when `token`'s HS512 signature is
+// valid under `secret`, else `None`. Non-generic — all the awaiting lives here.
+async fun verified_segment(secret: Bytes, token: str): Option<str> {
+	let parts = token.split(".");
+	let shaped = parts.len() == 3 && parts[0] == header_segment;
+	let expected = hmac_sha512(secret, encode_utf8(parts[0] + "." + parts[1]));
+	match decode_url(parts[2]) {
+		Some(let given) => {
+			if shaped && equals_constant_time(expected, given) {
+				Some(parts[1])
+			} else {
+				None
+			}
+		},
+		None => None,
+	}
+}
+
+// The decode half: the payload segment (already signature-verified) as `C`.
+fun decode_claims<C: Wire>(segment: str): Option<C> {
+	match decode_url(segment) {
+		Some(let payload) => {
+			let decoded: Result<C, str> = decode_json(decode_utf8(payload));
+			match decoded {
+				Ok(let claims) => Some(claims),
+				Err(let _reason) => None,
+			}
+		},
+		None => None,
+	}
+}

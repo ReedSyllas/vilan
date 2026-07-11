@@ -226,6 +226,24 @@ fn helper_source(name: &str) -> &'static str {
         "__list_get" => {
             "function __list_get(list, index) {\n\treturn index >= 0 && index < list.length ? [ 0, __clone(list[index]) ] : [ 1 ];\n}"
         }
+        // WebCrypto glue (std::crypto): HMAC-SHA-512 over `crypto.subtle`.
+        "__hmac_sha512" => {
+            "async function __hmac_sha512(key, data) {\n\
+             \tconst imported = await crypto.subtle.importKey(\"raw\", key, { name: \"HMAC\", hash: \"SHA-512\" }, false, [ \"sign\" ]);\n\
+             \treturn new Uint8Array(await crypto.subtle.sign(\"HMAC\", imported, data));\n\
+             }"
+        }
+        // PBKDF2-HMAC-SHA-512 via `crypto.subtle.deriveBits`.
+        "__pbkdf2_sha512" => {
+            "async function __pbkdf2_sha512(password, salt, iterations, bits) {\n\
+             \tconst imported = await crypto.subtle.importKey(\"raw\", password, \"PBKDF2\", false, [ \"deriveBits\" ]);\n\
+             \treturn new Uint8Array(await crypto.subtle.deriveBits({ name: \"PBKDF2\", salt, iterations, hash: \"SHA-512\" }, imported, bits));\n\
+             }"
+        }
+        // Cryptographically random bytes.
+        "__random_bytes" => {
+            "function __random_bytes(length) {\n\treturn crypto.getRandomValues(new Uint8Array(length));\n}"
+        }
         // `list[i]` — the checked subscript read: out of bounds panics (`get`
         // is the total, Option-returning form above).
         "__at" => {
@@ -2284,6 +2302,22 @@ impl<'src> Transformer<'src> {
                         .entry(module.to_string())
                         .or_default()
                         .insert(symbol.to_string());
+                }
+                // A `__`-named free extern is a runtime helper whose source
+                // lives in the helper table (the WebCrypto glue —
+                // `crypto.subtle` wants option-object shapes vilan values
+                // can't express, so each operation is one helper).
+                match symbol {
+                    "__hmac_sha512" => {
+                        self.used_helpers.insert("__hmac_sha512");
+                    }
+                    "__pbkdf2_sha512" => {
+                        self.used_helpers.insert("__pbkdf2_sha512");
+                    }
+                    "__random_bytes" => {
+                        self.used_helpers.insert("__random_bytes");
+                    }
+                    _ => {}
                 }
                 js::Node::Call(Box::new(js::Node::Local(symbol.to_string())), args)
             }

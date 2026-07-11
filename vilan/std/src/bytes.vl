@@ -5,6 +5,8 @@
 
 // A byte buffer (the host `Uint8Array`). Fixed-length; build incrementally by
 // writing into an allocation, growing with `concat` when needed.
+import pkg::range::Range;
+
 external struct Bytes;
 
 impl Bytes {
@@ -24,6 +26,18 @@ impl Bytes {
 	// where the operand type selects the unsigned shift/wrap emission.
 	[extern(method, "at")]
 	external fun get_u32(self, index: i32): u32;
+
+	// Lowercase hex rendering of the whole buffer.
+	fun to_hex(self): str {
+		let digits = "0123456789abcdef";
+		mut out = "";
+		for index in Range::new(0, self.len()) {
+			let byte = self.get(index);
+			out = out + digits.substring(byte / 16, byte / 16 + 1)
+				+ digits.substring(byte % 16, byte % 16 + 1);
+		}
+		out
+	}
 
 	// Overwrite `from..to` (exclusive) with `value` — host semantics: the
 	// stored byte is `value & 0xFF`.

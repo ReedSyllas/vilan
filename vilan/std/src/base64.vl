@@ -1,0 +1,107 @@
+// Base64url (RFC 4648 §5, unpadded) over `Bytes` — pure vilan, so it is also
+// available at compile time. The alphabet's `-`/`_` and the absent padding are
+// what JWTs and URL-safe tokens expect.
+
+import pkg::bytes::Bytes;
+import pkg::option::Option::{ self, Some, None };
+import pkg::range::Range;
+
+let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fun char_at(value: i32): str {
+	alphabet.substring(value, value + 1)
+}
+
+fun encode_url(bytes: Bytes): str {
+	let total = bytes.len();
+	mut out = "";
+	for group in Range::new(0, total / 3) {
+		let base = group * 3;
+		let chunk = (bytes.get(base) << 16) | (bytes.get(base + 1) << 8) | bytes.get(base + 2);
+		out = out + char_at((chunk >> 18) & 63) + char_at((chunk >> 12) & 63)
+			+ char_at((chunk >> 6) & 63) + char_at(chunk & 63);
+	}
+	let rest = total % 3;
+	if rest == 1 {
+		let chunk = bytes.get(total - 1) << 16;
+		out = out + char_at((chunk >> 18) & 63) + char_at((chunk >> 12) & 63);
+	}
+	if rest == 2 {
+		let chunk = (bytes.get(total - 2) << 16) | (bytes.get(total - 1) << 8);
+		out = out + char_at((chunk >> 18) & 63) + char_at((chunk >> 12) & 63) + char_at((chunk >> 6) & 63);
+	}
+	out
+}
+
+// The 6-bit value of a base64url character, or -1 for anything else.
+fun digit(code: u32): i32 {
+	let c = code.as_i32();
+	if c >= 65 && c <= 90 {
+		ret c - 65;
+	}
+	if c >= 97 && c <= 122 {
+		ret c - 71;
+	}
+	if c >= 48 && c <= 57 {
+		ret c + 4;
+	}
+	if c == 45 {
+		ret 62;
+	}
+	if c == 95 {
+		ret 63;
+	}
+	0 - 1
+}
+
+fun decode_url(text: str): Option<Bytes> {
+	let length = text.len();
+	let rest = length % 4;
+	if rest == 1 {
+		// No base64 length is ≡ 1 (mod 4).
+		ret None;
+	}
+	let full = length / 4;
+	let tail_bytes = match rest {
+		2 => 1,
+		3 => 2,
+		_ => 0,
+	};
+	mut out = Bytes::alloc(full * 3 + tail_bytes);
+	mut write = 0;
+	for group in Range::new(0, full) {
+		let base = group * 4;
+		let a = digit(text.code_at(base));
+		let b = digit(text.code_at(base + 1));
+		let c = digit(text.code_at(base + 2));
+		let d = digit(text.code_at(base + 3));
+		if a < 0 || b < 0 || c < 0 || d < 0 {
+			ret None;
+		}
+		let chunk = (a << 18) | (b << 12) | (c << 6) | d;
+		out.set(write, (chunk >> 16) & 255);
+		out.set(write + 1, (chunk >> 8) & 255);
+		out.set(write + 2, chunk & 255);
+		write += 3;
+	}
+	if rest == 2 {
+		let a = digit(text.code_at(length - 2));
+		let b = digit(text.code_at(length - 1));
+		if a < 0 || b < 0 {
+			ret None;
+		}
+		out.set(write, ((a << 6) | b) >> 4 & 255);
+	}
+	if rest == 3 {
+		let a = digit(text.code_at(length - 3));
+		let b = digit(text.code_at(length - 2));
+		let c = digit(text.code_at(length - 1));
+		if a < 0 || b < 0 || c < 0 {
+			ret None;
+		}
+		let chunk = (a << 12) | (b << 6) | c;
+		out.set(write, (chunk >> 10) & 255);
+		out.set(write + 1, (chunk >> 2) & 255);
+	}
+	Some(out)
+}

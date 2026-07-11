@@ -1,0 +1,49 @@
+import std::print;
+import std::jwt::{ sign_hs512, verify_hs512 };
+import std::crypto::{ pbkdf2_sha512, random_bytes, equals_constant_time };
+import std::base64::{ encode_url, decode_url };
+import std::bytes::{ encode_utf8, decode_utf8 };
+import std::option::Option::{ self, Some, None };
+import std::wire::Wire;
+
+// WebCrypto-backed auth primitives (proposal/kolt-migration.md §2.1): base64url
+// over Bytes (pure vilan), HMAC-SHA-512 JWTs with any [derive(Wire)] claim, and
+// PBKDF2 password hashing. Excluded from the macro-interpreter gate — crypto.subtle
+// is a host capability, not a compile-time one.
+
+[derive(Wire)]
+struct Session {
+	user: str,
+	admin: bool,
+}
+
+async fun main() {
+	// base64url round-trips arbitrary bytes.
+	match decode_url(encode_url(encode_utf8("payload"))) {
+		Some(let bytes) => print(decode_utf8(bytes)),
+		None => print("decode failed"),
+	}
+
+	// A JWT signed and verified under the same secret yields its claims back.
+	let secret = encode_utf8("server-signing-key");
+	let token = sign_hs512(secret, Session { user = "reed", admin = true });
+	let verified: Option<Session> = verify_hs512(secret, token);
+	match verified {
+		Some(let session) => print(i"welcome {session.user} (admin={session.admin})"),
+		None => print("unauthorized"),
+	}
+
+	// A wrong key is rejected.
+	let forged: Option<Session> = verify_hs512(encode_utf8("attacker-key"), token);
+	match forged {
+		Some(let _s) => print("SECURITY BUG"),
+		None => print("forged token rejected"),
+	}
+
+	// Password hashing: the same password+salt derives the same key.
+	let salt = encode_utf8("per-user-salt");
+	let first = pbkdf2_sha512(encode_utf8("hunter2"), salt, 1000, 512);
+	let again = pbkdf2_sha512(encode_utf8("hunter2"), salt, 1000, 512);
+	print(equals_constant_time(first, again));
+}
+main();

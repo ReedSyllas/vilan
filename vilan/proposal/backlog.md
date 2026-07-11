@@ -267,6 +267,22 @@ have gaps.
     covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
     channel. Workaround: annotate (`|i: i32| ..`).
 
+17. **A generic call after a branch-nested `await` emits the abstract trait body**
+    (M; pinned `#[ignore]`d; found 2026-07-11 building `std::jwt` for the Kolt
+    migration) — in an async generic function, a call `dec<C>(..)` placed after an
+    `await` that is itself nested inside a conditional branch resolves `C`'s trait
+    method (`Wire::deserialize`) to the EMPTY abstract body — a silent miscompile
+    (the decode returns `undefined`; the run reads garbage or crashes). WORKS when
+    the await is top-level and the generic call is a shallow branch value; FAILS
+    when the await is branch-nested and the generic call is deeper (minimal repro
+    in the ignored pin `a_generic_call_after_a_branch_nested_await_monomorphizes`).
+    Async-inference await-point tracking drops the generic binding through the
+    branch nest before monomorphization; the codec-slice's "generic trait methods
+    NO-OP through bounds" class, in its async form. Load-bearing for the whole
+    Kolt codec/RPC surface — take it early. Workaround (used in `std::jwt`): split
+    the awaiting crypto into a NON-generic helper, keep the generic decode a flat
+    top-level match.
+
 16. ~~**Methods on an ungrounded generic receiver typecheck nothing — silently**~~ —
     **SHIPPED 2026-07-10** (the full (b) fix). The class was WIDER than the item: probing
     showed even `mut a: List<i32> = List::new(); a.push("text")` passed, as did
@@ -823,13 +839,17 @@ have gaps.
    Remaining tail (deliberately not taken): per-type `MIN`/`MAX` constants (want a
    static-member story or per-type modules — neither exists; revisit with F5/spec work).
 
-3. **`std::crypto` — auth primitives** (M; Kolt gap — `proposal/kolt-migration.md`
-   §2.1) — WebCrypto (`crypto.subtle`) extern bindings, node AND deno: HMAC
-   import/sign/verify (JWT HS512 = base64url header/payload + HMAC), PBKDF2 via
-   `deriveBits` for password hashing (v1 — bcrypt/argon2 need npm deps, recorded
-   beyond-v1), `randomUUID` + random bytes. Async externs throughout. Passkeys /
-   WebAuthn recorded beyond-v1 on the same module. First blocker of the pilot
-   slice.
+3. ~~**`std::crypto` — auth primitives**~~ — **SHIPPED 2026-07-11** (the pilot's
+   first blocker, cleared): `std::crypto` (`hmac_sha512`, `pbkdf2_sha512`,
+   `random_bytes`, `random_uuid`, constant-time compare — `crypto.subtle` glue as
+   three `__`-helpers), `std::base64` (pure-vilan base64url over `Bytes`, so it is
+   also const-evaluable), `std::jwt` (HS512 sign/verify over any `[derive(Wire)]`
+   claim — a tampered or wrong-key token is `None`, never garbage). Vectors are
+   RFC-checked: HMAC = RFC 4231 #2, PBKDF2 byte-exact against node. 5 live pins +
+   corpus `crypto.vl` (interpreter-excluded — host capability) + `Bytes::to_hex`.
+   Building it FOUND the async×monomorphization bug (B17); `std::jwt` is structured
+   around it (crypto in a non-generic async helper, decode a flat match). bcrypt/
+   argon2 and passkeys stay beyond-v1.
 
 4. **SQLite bindings** (M; Kolt gap — kolt-migration.md §2.2) — one vilan
    interface, platform-layered impls (deno `jsr:@db/sqlite`, node

@@ -1,0 +1,39 @@
+// Cryptographic primitives over the host WebCrypto (`crypto.subtle` — node,
+// deno, and browsers alike; proposal/kolt-migration.md §2.1). Async where the
+// host is. NOT available at compile time: a `const` reaching these fails with
+// a capability error, and the macro interpreter rejects them the same way.
+// bcrypt/argon2 (npm-dependent) and passkeys/WebAuthn are recorded beyond-v1.
+
+import pkg::bytes::Bytes;
+import pkg::range::Range;
+
+// HMAC-SHA-512 of `data` under `key`.
+[extern("__hmac_sha512")]
+async external fun hmac_sha512(key: Bytes, data: Bytes): Bytes;
+
+// PBKDF2-HMAC-SHA-512: `bits` derived from `password` and `salt` over
+// `iterations` rounds — the v1 password-hashing primitive. Store the salt
+// beside the derived hash; compare with `equals_constant_time`.
+[extern("__pbkdf2_sha512")]
+async external fun pbkdf2_sha512(password: Bytes, salt: Bytes, iterations: i32, bits: i32): Bytes;
+
+// `length` cryptographically random bytes.
+[extern("__random_bytes")]
+external fun random_bytes(length: i32): Bytes;
+
+// A random UUID string (host `crypto.randomUUID`).
+[extern("crypto.randomUUID")]
+external fun random_uuid(): str;
+
+// Byte equality whose timing is independent of WHERE a mismatch sits — the
+// discipline for comparing signatures and derived hashes.
+fun equals_constant_time(a: Bytes, b: Bytes): bool {
+	if a.len() != b.len() {
+		ret false;
+	}
+	mut acc = 0;
+	for index in Range::new(0, a.len()) {
+		acc = acc | (a.get(index) ^ b.get(index));
+	}
+	acc == 0
+}

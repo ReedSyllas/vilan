@@ -30,6 +30,7 @@ const EXCLUDED: &[(&str, &str)] = &[
         "async (the turn-follows-continuation section)",
     ),
     ("process-env.vl", "host environment (`__env`, `__args`)"),
+    ("crypto.vl", "async + host WebCrypto (`crypto.subtle`)"),
 ];
 
 /// Runs `source` through the pipeline once, then both execution paths.
