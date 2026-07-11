@@ -267,21 +267,22 @@ have gaps.
     covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
     channel. Workaround: annotate (`|i: i32| ..`).
 
-17. **A generic call after a branch-nested `await` emits the abstract trait body**
-    (M; pinned `#[ignore]`d; found 2026-07-11 building `std::jwt` for the Kolt
-    migration) — in an async generic function, a call `dec<C>(..)` placed after an
-    `await` that is itself nested inside a conditional branch resolves `C`'s trait
-    method (`Wire::deserialize`) to the EMPTY abstract body — a silent miscompile
-    (the decode returns `undefined`; the run reads garbage or crashes). WORKS when
-    the await is top-level and the generic call is a shallow branch value; FAILS
-    when the await is branch-nested and the generic call is deeper (minimal repro
-    in the ignored pin `a_generic_call_after_a_branch_nested_await_monomorphizes`).
-    Async-inference await-point tracking drops the generic binding through the
-    branch nest before monomorphization; the codec-slice's "generic trait methods
-    NO-OP through bounds" class, in its async form. Load-bearing for the whole
-    Kolt codec/RPC surface — take it early. Workaround (used in `std::jwt`): split
-    the awaiting crypto into a NON-generic helper, keep the generic decode a flat
-    top-level match.
+17. ~~**A generic call in an `else`/`match` branch loses its type argument**~~ —
+    **FIXED 2026-07-11** (found building `std::jwt` for the Kolt migration). The
+    discovering case looked async (a generic decode after a branch-nested await
+    emitting the EMPTY `Wire::deserialize` — a silent miscompile), but the root
+    cause was STRUCTURAL and sync: the `if` inference arm propagated the
+    expected-type constraint only into the `then` branch, so a generic call
+    reached only through an `else` never received its expected type and left its
+    type parameter unbound (dispatch then fell through to the trait's abstract
+    body). `match` had the twin gap — it reads its expectation from the
+    `expected_types` channel, which the `constraint` parameter alone doesn't feed.
+    Fix: the `if` arm now infers EVERY branch tail against the constraint and
+    unifies; a `seed_expectation` helper populates `expected_types` on branch/block
+    tails so `match`-leg propagation and generic-call binding see it. `std::jwt`'s
+    verify was reverted from its split workaround to the natural inline form (the
+    proof). Two pins (else-branch, match-arm) + the async-shape pin un-ignored;
+    85/86 goldens byte-identical (only crypto.js moved, from the jwt revert).
 
 16. ~~**Methods on an ungrounded generic receiver typecheck nothing — silently**~~ —
     **SHIPPED 2026-07-10** (the full (b) fix). The class was WIDER than the item: probing

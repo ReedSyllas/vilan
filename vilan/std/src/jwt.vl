@@ -23,38 +23,27 @@ async fun sign_hs512<C: Wire>(secret: Bytes, claims: C): str {
 }
 
 // Verifies `token` under `secret`: the signature must match (constant-time)
-// and the payload must decode as `C`. Anything else is `None`. The crypto
-// gate is a SEPARATE non-generic async helper returning the verified payload
-// segment; the generic decode is then a flat match — the two are split both
-// for clarity and to keep the generic call out of the awaited branch nest
-// that triggers the async×monomorphization bug (backlog B-note).
+// and the payload must decode as `C`. Anything else is `None`.
 async fun verify_hs512<C: Wire>(secret: Bytes, token: str): Option<C> {
-	let segment = verified_segment(secret, token);
-	match segment {
-		Some(let payload) => decode_claims(payload),
-		None => None,
-	}
-}
-
-// The crypto half: `Some(payload_segment)` when `token`'s HS512 signature is
-// valid under `secret`, else `None`. Non-generic — all the awaiting lives here.
-async fun verified_segment(secret: Bytes, token: str): Option<str> {
 	let parts = token.split(".");
-	let shaped = parts.len() == 3 && parts[0] == header_segment;
-	let expected = hmac_sha512(secret, encode_utf8(parts[0] + "." + parts[1]));
-	match decode_url(parts[2]) {
-		Some(let given) => {
-			if shaped && equals_constant_time(expected, given) {
-				Some(parts[1])
-			} else {
-				None
-			}
-		},
-		None => None,
+	if parts.len() != 3 || parts[0] != header_segment {
+		None
+	} else {
+		let expected = hmac_sha512(secret, encode_utf8(parts[0] + "." + parts[1]));
+		match decode_url(parts[2]) {
+			Some(let given) => {
+				if equals_constant_time(expected, given) {
+					decode_claims(parts[1])
+				} else {
+					None
+				}
+			},
+			None => None,
+		}
 	}
 }
 
-// The decode half: the payload segment (already signature-verified) as `C`.
+// The payload segment (already signature-verified) decoded as `C`.
 fun decode_claims<C: Wire>(segment: str): Option<C> {
 	match decode_url(segment) {
 		Some(let payload) => {

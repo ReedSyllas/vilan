@@ -7925,6 +7925,11 @@ impl<'src> Analyzer<'src> {
             // A block's type is the type of its trailing expression.
             Expr::Block((_, trailing_expr_id)) => {
                 let trailing_expr_id = *trailing_expr_id;
+                // A block's value is its tail's, at the block's expectation — so
+                // seed the tail's `expected_types` from the constraint, which is
+                // the channel `match`-leg propagation and generic-call binding
+                // read (the `constraint` parameter alone doesn't reach them).
+                self.seed_expectation(trailing_expr_id, &constraint);
                 self.infer_type_inner(
                     trailing_expr_id,
                     &constraint,
@@ -7933,9 +7938,13 @@ impl<'src> Analyzer<'src> {
                 )
             }
             // A value `if` (an `if`/`else` chain with a final `else`) has the
-            // type of its branches — take the first branch's trailing expression
-            // (the branches must agree). Without a final `else` it is a statement,
-            // so it is void.
+            // type of its branches. EVERY branch's trailing expression is
+            // inferred against the constraint — not just the first — so a
+            // generic call in an `else` (or deeper, reached only through an
+            // else) receives its expected type and binds its type argument;
+            // typing only the `then` branch silently dropped that binding and
+            // miscompiled the call to its trait's abstract body (B17). Without
+            // a final `else` the `if` is a statement, so it is void.
             Expr::If(branch) => {
                 fn has_final_else(branch: &ExprIfBranch) -> bool {
                     match branch {
@@ -7944,17 +7953,61 @@ impl<'src> Analyzer<'src> {
                         ExprIfBranch::Else(_) => true,
                     }
                 }
-                match branch {
-                    ExprIfBranch::If(_, (_, trailing), _) if has_final_else(branch) => {
-                        let trailing = *trailing;
-                        self.infer_type_inner(
+                // Every branch's trailing expression id, in source order.
+                fn trailing_ids(branch: &ExprIfBranch, out: &mut Vec<Id>) {
+                    match branch {
+                        ExprIfBranch::If(_, (_, trailing), next) => {
+                            out.push(*trailing);
+                            if let Some(next) = next {
+                                trailing_ids(next, out);
+                            }
+                        }
+                        ExprIfBranch::Else((_, trailing)) => out.push(*trailing),
+                    }
+                }
+                if has_final_else(branch) {
+                    let mut trailings = Vec::new();
+                    trailing_ids(branch, &mut trailings);
+                    // The `if`'s type is the unification of its branches; infer
+                    // each against the constraint so each branch's tail directs
+                    // its own inference (the branches must agree, checked
+                    // elsewhere). An unresolved branch defers the whole `if`.
+                    let mut result = Type::Unknown;
+                    for trailing in trailings {
+                        // Seed each branch tail's expectation (the `match`/call
+                        // binding channel), then infer it against the constraint.
+                        self.seed_expectation(trailing, &constraint);
+                        let branch_type = self.infer_type_inner(
                             trailing,
                             &constraint,
                             substitution_context,
                             exprs_seen,
-                        )
+                        );
+                        if matches!(branch_type, Type::Unresolved) {
+                            return Type::Unresolved;
+                        }
+                        result = match self.reconcile_type(
+                            &result,
+                            &branch_type,
+                            substitution_context,
+                        ) {
+                            Some((unified, _)) => unified,
+                            // Branches that don't unify (a real mismatch, or a
+                            // never-typed `panic` arm) keep the first concrete
+                            // type — diagnosis is the checker's job, not this
+                            // inference's.
+                            None => {
+                                if matches!(result, Type::Unknown) {
+                                    branch_type
+                                } else {
+                                    result
+                                }
+                            }
+                        };
                     }
-                    _ => Type::Void,
+                    result
+                } else {
+                    Type::Void
                 }
             }
             Expr::TupleComprehension(binder_id, source_id, body_id) => {
@@ -9923,6 +9976,22 @@ impl<'src> Analyzer<'src> {
     /// goal is to *flow* the expected type into the body so the call site records
     /// its return-type binding (analyzer.rs ~5519), exactly as `let v: R = ..`
     /// does.
+    /// Records `constraint` as `expr`'s expected type (if it is a concrete
+    /// expectation) so the expectation-readers — `match`-leg propagation and
+    /// generic-call type-argument binding — see it. Used when the constraint
+    /// flows into a branch or block tail during inference. Does not overwrite
+    /// an expectation already present (a nearer annotation wins).
+    fn seed_expectation(&mut self, expr: Id, constraint: &Type) {
+        if matches!(constraint, Type::Unknown | Type::Unresolved) {
+            return;
+        }
+        if self.expected_types.contains_key(&expr) {
+            return;
+        }
+        let type_id = constraint.clone().get_type_id(self);
+        self.expected_types.insert(expr, type_id);
+    }
+
     fn resolve_return_type(&mut self, body_id: Id, return_type_id: TypeId) -> Resolution {
         if !self.expr_id_to_expr_map.contains_key(&body_id) {
             return Resolution::Deferred;

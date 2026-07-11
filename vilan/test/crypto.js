@@ -78,104 +78,104 @@ function new3(root) {
 	return [ stack, __shared_new([ 1 ]) ];
 }
 function ok(self) {
-	const $J = self[1].v;
-	let $K = null;
-	if ($J[0] === 0) {
-		const _reason = $J[1];
-		$K = false;
+	const $H = self[1].v;
+	let $I = null;
+	if ($H[0] === 0) {
+		const _reason = $H[1];
+		$I = false;
 	} else {
-		$K = true;
+		$I = true;
 	}
-	return $K;
+	return $I;
 }
 function report(self, reason) {
-	const $G = self[1].v;
-	let $H = null;
-	if ($G[0] === 0) {
-		const _first = $G[1];
-		$H = undefined;
+	const $E = self[1].v;
+	let $F = null;
+	if ($E[0] === 0) {
+		const _first = $E[1];
+		$F = undefined;
 	} else {
 		self[1].v = [ 0, reason ];
-		$H = undefined;
+		$F = undefined;
 	}
-	return $H;
+	return $F;
 }
 function top(self) {
-	let $M = null;
-	if (!(ok(self)) || $L(self[0].v)) {
-		$M = JSON.parse("null");
+	let $K = null;
+	if (!(ok(self)) || $J(self[0].v)) {
+		$K = JSON.parse("null");
 	} else {
 		const values = self[0].v;
-		$M = __at(values, values.length - 1);
+		$K = __at(values, values.length - 1);
 	}
-	return $M;
+	return $K;
 }
 function take(self) {
 	if (!(ok(self))) {
 		return JSON.parse("null");
 	}
-	const $P = __list_pop(self[0].v);
-	let $Q = null;
-	if ($P[0] === 0) {
-		const value2 = $P[1];
-		$Q = value2;
+	const $N = __list_pop(self[0].v);
+	let $O = null;
+	if ($N[0] === 0) {
+		const value2 = $N[1];
+		$O = value2;
 	} else {
 		report(self, "unexpected end of document");
-		$Q = JSON.parse("null");
+		$O = JSON.parse("null");
 	}
-	return $Q;
+	return $O;
 }
 function begin_struct2(self) {
 
 }
 function field2(self, name) {
 	const subject = top(self);
-	let $N = null;
+	let $L = null;
 	if (ok(self)) {
 		if (Object.hasOwn(subject, name)) {
 			self[0].v.push(subject[name]);
 		} else {
 			report(self, "missing field \'" + name + "\'");
 		}
-		$N = undefined;
+		$L = undefined;
 	}
-	return $N;
+	return $L;
 }
 function end_struct2(self) {
 	take(self);
 }
 function str_value2(self) {
 	const value2 = take(self);
-	let $R = null;
+	let $P = null;
 	if (ok(self)) {
-		$R = String(value2);
+		$P = String(value2);
 	} else {
-		$R = "";
+		$P = "";
 	}
-	return $R;
+	return $P;
 }
 function bool_value2(self) {
 	const value2 = take(self);
-	let $T = null;
+	let $R = null;
 	if (ok(self)) {
-		$T = Boolean(value2);
+		$R = Boolean(value2);
 	} else {
-		$T = false;
+		$R = false;
 	}
-	return $T;
+	return $R;
 }
 function opened_reader(text) {
-	const $E = __try_parse_json(text);
-	let $F = null;
-	if ($E[0] === 0) {
-		const root = $E[1];
-		$F = new3(root);
+	const $C = __try_parse_json(text);
+	let $D = null;
+	if ($C[0] === 0) {
+		const root = $C[1];
+		$D = new3(root);
 	} else {
 		const reader = new3(JSON.parse("null"));
 		report(reader, "malformed JSON");
-		$F = reader;
+		$D = reader;
 	}
-	return $F;
+	return $D;
 }
 function set(self, index, value2) {
 	self.fill(value2, index, index + 1);
@@ -313,36 +313,16 @@ function equals_constant_time(a, b) {
 		return false;
 	}
 	let acc = 0;
-	const $v = new4(0, a.length);
+	const $w = new4(0, a.length);
 	while (true) {
-		const $w = next($v);
-		if ($w[0] !== 0) {
+		const $x = next($w);
+		if ($x[0] !== 0) {
 			break;
 		}
-		const index = $w[1];
+		const index = $x[1];
 		acc = acc | a.at(index) ^ b.at(index);
 	}
 	return acc === 0;
-}
-async function verified_segment(secret, token) {
-	const parts = token.split(".");
-	const shaped = parts.length === 3 && __at(parts, 0) === header_segment;
-	const expected = await (__hmac_sha512(secret, encode_utf8(__at(parts, 0) + "." + __at(parts, 1))));
-	const $t = decode_url(__at(parts, 2));
-	let $u = null;
-	if ($t[0] === 0) {
-		const given = $t[1];
-		let $x = null;
-		if (shaped && equals_constant_time(expected, given)) {
-			$x = [ 0, __at(parts, 1) ];
-		} else {
-			$x = [ 1 ];
-		}
-		$u = $x;
-	} else {
-		$u = [ 1 ];
-	}
-	return $u;
 }
 function fold_unsigned(value2, modulus) {
 	const truncated = Math.trunc(value2);
@@ -394,69 +374,82 @@ async function $l(secret, claims) {
 	const signature = await (__hmac_sha512(secret, encode_utf8(signing_input)));
 	return signing_input + "." + encode_url(signature);
 }
-function $L(self) {
+function $J(self) {
 	return self.length === 0;
 }
-function $O(deserializer) {
+function $M(deserializer) {
 	return str_value2(deserializer);
 }
-function $S(deserializer) {
+function $Q(deserializer) {
 	return bool_value2(deserializer);
 }
-function $I(deserializer) {
+function $G(deserializer) {
 	begin_struct2(deserializer);
 	field2(deserializer, "user");
-	const user = $O(deserializer);
+	const user = $M(deserializer);
 	field2(deserializer, "admin");
-	const admin = $S(deserializer);
+	const admin = $Q(deserializer);
 	end_struct2(deserializer);
 	return [ user, admin ];
 }
-function $D(text) {
+function $B(text) {
 	const reader = opened_reader(text);
-	const value2 = $I(reader);
-	const $U = reader[1].v;
-	let $V = null;
-	if ($U[0] === 1) {
-		$V = [ 0, value2 ];
+	const value2 = $G(reader);
+	const $S = reader[1].v;
+	let $T = null;
+	if ($S[0] === 1) {
+		$T = [ 0, value2 ];
 	} else {
-		const reason = $U[1];
-		$V = [ 1, reason ];
+		const reason = $S[1];
+		$T = [ 1, reason ];
 	}
-	return $V;
+	return $T;
 }
-function $A(segment) {
-	const $B = decode_url(segment);
-	let $C = null;
-	if ($B[0] === 0) {
-		const payload = $B[1];
-		const decoded = $D(decode_utf8(payload));
-		const $W = decoded;
-		let $X = null;
-		if ($W[0] === 0) {
-			const claims = $W[1];
-			$X = [ 0, claims ];
+function $y(segment) {
+	const $z = decode_url(segment);
+	let $A = null;
+	if ($z[0] === 0) {
+		const payload = $z[1];
+		const decoded = $B(decode_utf8(payload));
+		const $U = decoded;
+		let $V = null;
+		if ($U[0] === 0) {
+			const claims = $U[1];
+			$V = [ 0, claims ];
 		} else {
-			const _reason = $W[1];
-			$X = [ 1 ];
+			const _reason = $U[1];
+			$V = [ 1 ];
 		}
-		$C = $X;
+		$A = $V;
 	} else {
-		$C = [ 1 ];
+		$A = [ 1 ];
 	}
-	return $C;
+	return $A;
 }
 async function $s(secret, token) {
-	const segment = await (verified_segment(secret, token));
-	const $y = segment;
-	let $z = null;
-	if ($y[0] === 0) {
-		const payload = $y[1];
-		$z = $A(payload);
+	const parts = token.split(".");
+	let $t = null;
+	if (parts.length !== 3 || __at(parts, 0) !== header_segment) {
+		$t = [ 1 ];
 	} else {
-		$z = [ 1 ];
+		const expected = await (__hmac_sha512(secret, encode_utf8(__at(parts, 0) + "." + __at(parts, 1))));
+		const $u = decode_url(__at(parts, 2));
+		let $v = null;
+		if ($u[0] === 0) {
+			const given = $u[1];
+			let $W = null;
+			if (equals_constant_time(expected, given)) {
+				$W = $y(__at(parts, 1));
+			} else {
+				$W = [ 1 ];
+			}
+			$v = $W;
+		} else {
+			$v = [ 1 ];
+		}
+		$t = $v;
 	}
-	return $z;
+	return $t;
 }
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const header_segment = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9";
@@ -473,25 +466,25 @@ const header_segment = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9";
 	const secret = encode_utf8("server-signing-key");
 	const token = await ($l(secret, [ "reed", true ]));
 	const verified = await ($s(secret, token));
-	const $Y = verified;
-	let $Z = null;
-	if ($Y[0] === 0) {
-		const session = $Y[1];
-		$Z = console.log("welcome " + session[0] + " (admin=" + session[1] + ")");
+	const $X = verified;
+	let $Y = null;
+	if ($X[0] === 0) {
+		const session = $X[1];
+		$Y = console.log("welcome " + session[0] + " (admin=" + session[1] + ")");
 	} else {
-		$Z = console.log("unauthorized");
+		$Y = console.log("unauthorized");
 	}
-	$Z;
+	$Y;
 	const forged = await ($s(encode_utf8("attacker-key"), token));
-	const $aa = forged;
-	let $ab = null;
-	if ($aa[0] === 0) {
-		const _s = $aa[1];
-		$ab = console.log("SECURITY BUG");
+	const $Z = forged;
+	let $aa = null;
+	if ($Z[0] === 0) {
+		const _s = $Z[1];
+		$aa = console.log("SECURITY BUG");
 	} else {
-		$ab = console.log("forged token rejected");
+		$aa = console.log("forged token rejected");
 	}
-	$ab;
+	$aa;
 	const salt = encode_utf8("per-user-salt");
 	const first = await (__pbkdf2_sha512(encode_utf8("hunter2"), salt, 1000, 512));
 	const again = await (__pbkdf2_sha512(encode_utf8("hunter2"), salt, 1000, 512));

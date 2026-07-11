@@ -10962,13 +10962,111 @@ fn constant_time_equality_is_correct() {
 }
 
 #[test]
-#[ignore = "async×monomorphization bug: a generic call after a branch-nested await emits the abstract trait body (Kolt-migration find; backlog B)"]
+fn a_generic_call_in_an_else_branch_binds_its_type_argument() {
+    // B17 (FIXED): the root cause was structural, not async — the `if`
+    // inference arm propagated the expected-type constraint only into the
+    // `then` branch, so a generic call reached only through an `else`
+    // (here `dec<C>` in a nested-then inside the outer `else`) never received
+    // `Option<C>` and left `C` unbound, miscompiling the `Wire` deserialize
+    // to its abstract body. The await in the discovering case was incidental.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ encode_json, decode_json };
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::wire::Wire;
+
+        [derive(Wire)]
+        struct P { v: str }
+
+        fun dec<C: Wire>(json: str): Option<C> {
+            let decoded: Result<C, str> = decode_json(json);
+            match decoded {
+                Ok(let c) => Some(c),
+                Err(let _e) => None,
+            }
+        }
+
+        fun f<C: Wire>(json: str): Option<C> {
+            if json.len() == 0 {
+                None
+            } else {
+                if json.len() > 0 { dec(json) } else { None }
+            }
+        }
+
+        fun main() {
+            let json = encode_json(P { v = "hi" });
+            let back: Option<P> = f(json);
+            match back {
+                Some(let c) => print(c.v),
+                None => print("none"),
+            }
+        }
+        main();
+        "#,
+        "hi\n",
+    );
+}
+
+#[test]
+fn a_generic_call_in_a_match_arm_binds_its_type_argument() {
+    // The second half of B17: a `match` reads its expectation from the
+    // `expected_types` channel, which the constraint parameter alone doesn't
+    // feed — so a generic call in a match arm reached through a branch needs
+    // the expectation seeded there too. This is the exact std::jwt shape:
+    // if -> else -> match Some-arm -> if then -> generic decode.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::{ encode_json, decode_json };
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        import std::wire::Wire;
+
+        [derive(Wire)]
+        struct P { v: str }
+
+        fun dec<C: Wire>(json: str): Option<C> {
+            let decoded: Result<C, str> = decode_json(json);
+            match decoded {
+                Ok(let c) => Some(c),
+                Err(let _e) => None,
+            }
+        }
+
+        fun f<C: Wire>(json: str): Option<C> {
+            if json.len() == 0 {
+                None
+            } else {
+                match Some(json) {
+                    Some(let inner) => {
+                        if inner.len() > 0 { dec(inner) } else { None }
+                    },
+                    None => None,
+                }
+            }
+        }
+
+        fun main() {
+            let json = encode_json(P { v = "hi" });
+            let back: Option<P> = f(json);
+            match back {
+                Some(let c) => print(c.v),
+                None => print("none"),
+            }
+        }
+        main();
+        "#,
+        "hi\n",
+    );
+}
+
+#[test]
 fn a_generic_call_after_a_branch_nested_await_monomorphizes() {
-    // The exact shape jwt.vl had to be restructured around: `dec<C>` is called
-    // after an `await` that is itself nested in an `else` branch; the call
-    // resolves the `C: Wire` deserialize to the EMPTY abstract body, so the
-    // decode returns `undefined` (a silent miscompile — the run crashes on the
-    // undefined field access, or reads garbage). Un-ignore when fixed.
+    // The exact shape jwt.vl had to be restructured around (the async form of
+    // the same B17 else-branch bug).
     assert_compiles_and_runs(
         r#"
         import std::print;
