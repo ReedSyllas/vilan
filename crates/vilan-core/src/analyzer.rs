@@ -7155,26 +7155,31 @@ impl<'src> Analyzer<'src> {
     /// `T` already known (e.g. `bind_each`'s `|todo| ..`, where `T` is the element
     /// of `Source<List<T>>`); a second pass over all arguments then binds generics
     /// fixed by a closure's return (`derive<U>`'s `U`).
+    /// Returns whether a CLOSURE argument had to be skipped because its type is
+    /// still `Unresolved` (its body hasn't typed yet) — a generic fixed only by
+    /// that closure's return (`map<U>`'s `U`) cannot bind on this attempt, so
+    /// the caller must defer and retry (B19); resolving anyway would freeze the
+    /// call's substitution — and its return type — with the generic abstract.
     fn bind_method_own_generics(
         &mut self,
         member_id: Id,
         argument_ids: &[Id],
         skip_closures: bool,
         substitution: &mut SubstitutionContext,
-    ) {
+    ) -> bool {
+        let mut unresolved_closure_argument = false;
         let Some((parameter_ids, own_generics)) = self.method_signature(member_id) else {
-            return;
+            return unresolved_closure_argument;
         };
         if own_generics.is_empty() {
-            return;
+            return unresolved_closure_argument;
         }
         for (index, argument_id) in argument_ids.iter().enumerate() {
-            if skip_closures
-                && matches!(
-                    self.expr_id_to_expr_map.get(argument_id),
-                    Some(Expr::Closure(_))
-                )
-            {
+            let is_closure = matches!(
+                self.expr_id_to_expr_map.get(argument_id),
+                Some(Expr::Closure(_))
+            );
+            if skip_closures && is_closure {
                 continue;
             }
             // `+ 1` skips the method's `self` parameter.
@@ -7190,6 +7195,7 @@ impl<'src> Analyzer<'src> {
             };
             let argument_type = self.infer_type(*argument_id, &parameter_type, substitution);
             if matches!(argument_type, Type::Unresolved) {
+                unresolved_closure_argument |= is_closure;
                 continue;
             }
             if let Some((_, bindings)) =
@@ -7206,6 +7212,7 @@ impl<'src> Analyzer<'src> {
         // (`m<T, S: Source<T>>(source: S)`): recover `T` from the concrete `S`'s impl,
         // the same as the free-function path in `resolve_call_subject`.
         self.derive_generics_from_bounds(&own_generics, &own_generics, substitution);
+        unresolved_closure_argument
     }
 
     fn infer_closure_args_against_params(
@@ -9581,27 +9588,37 @@ impl<'src> Analyzer<'src> {
                 self.infer_closure_args_against_params(member_id, argument_ids, &substitution);
                 // Then bind generics fixed by a closure's return (`derive<U>`'s `U`),
                 // now that the closures are typed.
-                self.bind_method_own_generics(member_id, argument_ids, false, &mut substitution);
-                // If an own generic is still unbound because a (non-closure) argument is
+                let unresolved_closure_argument = self.bind_method_own_generics(
+                    member_id,
+                    argument_ids,
+                    false,
+                    &mut substitution,
+                );
+                // If an own generic is still unbound because an argument is
                 // unresolved, defer so the binding — and any bound-only generic derived
                 // from it (`m<T, S: Source<T>>` called with an *inferred* argument, whose
                 // type lands only later) — completes on a retry. The free-function path in
                 // `resolve_call_subject` defers the same way; without it the generic stays
-                // abstract and monomorphizes to the empty abstract method.
+                // abstract and monomorphizes to the empty abstract method. A closure
+                // argument counts too (B19): its body may not have typed on this attempt
+                // (the parameters it needed were only just supplied above), and a generic
+                // fixed only by the closure's RETURN (`map<U>`'s `U`) would otherwise
+                // freeze abstract in the call's substitution and return type.
                 if let Some((_, own_generics)) = self.method_signature(member_id) {
                     let some_unbound = own_generics
                         .iter()
                         .any(|generic| !substitution.contains_key(generic));
                     if some_unbound
-                        && argument_ids.iter().any(|argument_id| {
-                            !matches!(
-                                self.expr_id_to_expr_map.get(argument_id),
-                                Some(Expr::Closure(_))
-                            ) && matches!(
-                                self.infer_type(*argument_id, &Type::Unknown, &substitution),
-                                Type::Unresolved
-                            )
-                        })
+                        && (unresolved_closure_argument
+                            || argument_ids.iter().any(|argument_id| {
+                                !matches!(
+                                    self.expr_id_to_expr_map.get(argument_id),
+                                    Some(Expr::Closure(_))
+                                ) && matches!(
+                                    self.infer_type(*argument_id, &Type::Unknown, &substitution),
+                                    Type::Unresolved
+                                )
+                            }))
                     {
                         return Resolution::Deferred;
                     }

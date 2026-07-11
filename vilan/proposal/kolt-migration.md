@@ -72,10 +72,10 @@ migration deletes these subsystems rather than porting them:
    (`current_path`/`navigate`/`link` over `Routable`), `View.swap` (the
    general dynamic-subtree boundary), `View.on_event` + `std::dom::Event`.
    Runtime semantics pinned headless (`crates/vilan-cli/tests/router.rs`, a
-   DOM/history stub under node) + compile pins. Findings: B19 (a bound
-   checked against an unresolved chained generic — annotate the intermediate
-   binding), B20 (a named fn doesn't coerce to a closure parameter —
-   eta-expand).
+   DOM/history stub under node) + compile pins. Findings: B19 (a method
+   generic grounded only by a closure's return froze abstract — FIXED
+   2026-07-11, same day; `map(..)` chains into `swap` need no annotation),
+   B20 (a named fn doesn't coerce to a closure parameter — eta-expand).
 4. **A11 — web storage externs.** `localStorage` get/set/remove on the dom
    layer (the client-side JWT home), `sessionStorage` alongside.
 5. **K5 — `std::time`.** Minimal v1: epoch millis `now()` (impure host

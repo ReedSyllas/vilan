@@ -288,17 +288,29 @@ have gaps.
     (`let hook = self.hook.read(); hook(a, b)`) is pinned as the working shape.
     Small postfix-parser fix.
 
-19. **A bound is checked against a chained generic result before substitution
-    resolves it** (M; pinned `#[ignore]`d
-    `a_mapped_signal_meets_a_bound_without_annotation`; found 2026-07-11
-    building the A10 pins) — `current_path().map(|p| parse(p))` yields
-    `Signal<U = Route>`; passing it straight to `swap<T: PartialEq>` errors
-    "generic parameter 'U' is missing the bound ': PartialEq'" — the bound
-    check ran against `map`'s still-generic `U` instead of the resolved
-    `Route`. Annotating the intermediate binding
-    (`let route: Signal<Route> = ..`) works around it. Likely the check must
-    DEFER until the argument's type resolves — the B16 deferred-verification
-    shape, applied to trait bounds.
+19. ~~**A bound is checked against a chained generic result before substitution
+    resolves it**~~ — **FIXED 2026-07-11** (found the same day building the A10
+    pins). The symptom — `current_path().map(|p| parse(p))` into
+    `swap<T: PartialEq>` erroring "generic parameter 'U' is missing the bound"
+    — was NOT the bound check running early: the `map` call itself RESOLVED
+    with `U` unbound. A method's own generic fixed only by a closure
+    argument's RETURN binds on the second `bind_method_own_generics` pass,
+    but when the closure's body hadn't typed yet (its parameters were supplied
+    by that same resolution attempt) the pass read the closure as
+    `Unresolved`, silently skipped it, and the resolution completed — freezing
+    `Generic(U)` into the call's substitution and return type. Downstream,
+    the bound check correctly rejected the abstract `U` (and monomorphization
+    would have dispatched `==` abstractly — the check was guarding a real
+    B12-shape miscompile, so the diagnostic was right; the resolution was
+    wrong). Fix: the method resolution now DEFERS when an own generic is
+    unbound and a closure argument is still unresolved — exactly the retry
+    the non-closure arguments (and the free-function path, which never had
+    the bug) always had; the closure's type lands between retries and `U`
+    grounds. The receiver-form red herring: a literal receiver with `U == V`
+    masked it (the bug needs `U ≠ V`). Pins: the un-ignored browser pin +
+    runtime dispatch through a derived `PartialEq` (both outcomes), the
+    still-failing unmet-bound gate, chained maps (inside-out convergence),
+    and a method-bound consumer.
 
 20. **A named function doesn't coerce to a closure parameter** (M; found
     2026-07-11 building A10) — `signal.map(parse)` fails ("Expected |str| U,

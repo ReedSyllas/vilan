@@ -11310,9 +11310,7 @@ fn swap_renders_a_dynamic_subtree_per_route_value() {
         }
 
         fun main() {
-            // Annotated: the unannotated form trips the B19 bound-check-order
-            // bug (the ignored pin below).
-            let route: Signal<Route> = current_path().map(|path| parse(path));
+            let route = current_path().map(|path| parse(path));
             let _root = mount_root("app", || view("main")
                 .child(link("Home", Route::Home))
                 .child(view("button").on("click", || navigate(href(Route::Home))))
@@ -11326,11 +11324,13 @@ fn swap_renders_a_dynamic_subtree_per_route_value() {
 }
 
 #[test]
-#[ignore = "B19: a bound on a generic call's argument is checked against a chained generic result (map's U) before substitution resolves it — annotating the intermediate let works around it"]
 fn a_mapped_signal_meets_a_bound_without_annotation() {
-    // `current_path().map(..)` yields `Signal<U = Route>`; passing it to
-    // `swap<T: PartialEq>` without annotating the intermediate binding must
-    // check the bound against the RESOLVED `Route`, not demand `U: PartialEq`.
+    // B19 (FIXED): `current_path().map(..)` yields `Signal<U = Route>`;
+    // passing it to `swap<T: PartialEq>` without annotating the intermediate
+    // binding must check the bound against the RESOLVED `Route`, not demand
+    // `U: PartialEq`. The method resolution now DEFERS while a closure
+    // argument's body is untyped, so `U` binds from the closure's return on
+    // the retry instead of freezing abstract.
     assert_compiles_browser(
         r#"
         import std::ui::{ View, view, mount_root };
@@ -11495,5 +11495,189 @@ fn the_router_is_browser_only() {
         "#,
         "router",
         "is in another platform's layer",
+    );
+}
+
+// --- B19: closure-return-grounded method generics (backlog.md §B.19) ---------
+//
+// A method's own generic fixed ONLY by a closure argument's return
+// (`map<U>(self, transform: |V| U)`) used to freeze abstract when the call
+// resolved before the closure's body typed: the substitution — and the call's
+// return type — kept `Generic(U)`, so a later bounded call rejected 'U', and
+// monomorphization through the value dispatched abstractly. The resolution now
+// defers (the same retry the non-closure path always had) until the closure's
+// type lands. The browser-side shape is pinned above
+// (`a_mapped_signal_meets_a_bound_without_annotation`).
+
+#[test]
+fn a_closure_grounded_generic_dispatches_through_its_bound() {
+    // The runtime half: the grounded `U` must reach monomorphization, so the
+    // consumer's `==` dispatches to the REAL PartialEq — both outcomes, so an
+    // empty abstract method (undefined ~ falsy) cannot pass.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Wrap<V> {
+            value: V,
+        }
+
+        impl Wrap<type V> {
+            fun map<U>(self, transform: |V| U): Wrap<U> {
+                Wrap { value = transform(self.value) }
+            }
+        }
+
+        [derive(PartialEq)]
+        struct Label {
+            text: str,
+        }
+
+        fun same<T: PartialEq>(a: T, b: T): bool {
+            a == b
+        }
+
+        fun tag(n: i32): Label {
+            Label { text = i"tag-{n}" }
+        }
+
+        fun main() {
+            let a = Wrap { value = 3 }.map(|n| tag(n));
+            let b = Wrap { value = 3 }.map(|n| tag(n));
+            let c = Wrap { value = 4 }.map(|n| tag(n));
+            print(same(a.value, b.value));
+            print(same(a.value, c.value));
+        }
+        main();
+        "#,
+        "true\nfalse\n",
+    );
+}
+
+#[test]
+fn a_closure_grounded_generic_still_fails_an_unmet_bound() {
+    // The other direction: once `U` grounds to a type WITHOUT the impl, the
+    // bound check must reject it — deferral must not soften the gate.
+    assert_fails_spanning(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Wrap<V> {
+            value: V,
+        }
+
+        impl Wrap<type V> {
+            fun map<U>(self, transform: |V| U): Wrap<U> {
+                Wrap { value = transform(self.value) }
+            }
+        }
+
+        struct Opaque {
+            tag: str,
+        }
+
+        fun needs_eq<T: PartialEq>(wrapped: Wrap<T>): bool {
+            wrapped.value == wrapped.value
+        }
+
+        fun cloak(n: i32): Opaque {
+            Opaque { tag = i"{n}" }
+        }
+
+        fun main() {
+            let wrapped = Wrap { value = 3 }.map(|n| cloak(n));
+            print(needs_eq(wrapped));
+        }
+        "#,
+        "needs_eq(wrapped)",
+        "does not implement trait 'PartialEq'",
+    );
+}
+
+#[test]
+fn chained_maps_ground_each_link() {
+    // Two chained closure-grounded links: the outer receiver is itself a
+    // deferred call result, so the retries must converge inside-out.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Wrap<V> {
+            value: V,
+        }
+
+        impl Wrap<type V> {
+            fun map<U>(self, transform: |V| U): Wrap<U> {
+                Wrap { value = transform(self.value) }
+            }
+        }
+
+        fun same<T: PartialEq>(a: T, b: T): bool {
+            a == b
+        }
+
+        fun stringify(n: i32): str {
+            i"{n}"
+        }
+
+        fun measure(text: str): i32 {
+            text.len()
+        }
+
+        fun main() {
+            let wrapped = Wrap { value = 41 }.map(|n| stringify(n)).map(|text| measure(text));
+            print(same(wrapped.value, 2));
+            print(wrapped.value);
+        }
+        main();
+        "#,
+        "true\n2\n",
+    );
+}
+
+#[test]
+fn a_closure_grounded_generic_meets_a_method_bound() {
+    // The consumer as a METHOD with its own bounded generic (the `swap` shape)
+    // rather than a free function.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Wrap<V> {
+            value: V,
+        }
+
+        impl Wrap<type V> {
+            fun map<U>(self, transform: |V| U): Wrap<U> {
+                Wrap { value = transform(self.value) }
+            }
+        }
+
+        struct Gate {
+            open: bool,
+        }
+
+        impl Gate {
+            fun admits<T: PartialEq>(self, wrapped: Wrap<T>): bool {
+                self.open && wrapped.value == wrapped.value
+            }
+        }
+
+        fun parse(text: str): i32 {
+            text.len()
+        }
+
+        fun main() {
+            let gate = Gate { open = true };
+            let wrapped = Wrap { value = "hi" }.map(|text| parse(text));
+            print(gate.admits(wrapped));
+        }
+        main();
+        "#,
+        "true\n",
     );
 }
