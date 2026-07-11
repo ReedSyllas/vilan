@@ -147,6 +147,20 @@ migration in Kolt's own feature order (workspaces → tasks → filters/search
 ambitions (orgs, automations, passkeys) map onto the same items — nothing
 in it demands machinery beyond §2 plus recorded beyond-v1 notes.
 
+**The second screen — SHIPPED 2026-07-11** (kolt 2a717fb): the client is
+routed on the A10 model — `Route::{Home, Workspace(i32), NotFound}` +
+`parse`/`href` over `segments`, pages swapping on
+`current_path().map(parse)` (the B20 coercion in anger), rows as typed
+`link`s, a live workspace detail page reading the mirror (a deep link
+populates when the first sync lands), sign-out navigating home. The server
+needed NOTHING — the pilot's catch-all already was the history-API
+fallback. New permanent asset: `vilan/e2e/run.sh`, a headless CLIENT e2e
+(real bundle + real server under node; DOM/history/storage stubs + node's
+native WebSocket wrapped to resolve the relative URL) covering fresh-visit
+register→create→navigate→popstate and deep-link-reload→sign-out. The rpc
+probe passes untouched. Finding: none — the whole slice compiled first
+try; A10/B19/B20 landed exactly the shapes this screen needed.
+
 ## 5. What the migration tests about vilan itself
 
 Honest expectations: the pilot is the first REAL app pressure on the
