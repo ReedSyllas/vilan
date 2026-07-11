@@ -551,7 +551,13 @@ have gaps.
    generics, binding-form only, assets emitted regardless of F6 liveness
    (liveness-tied emission = dead-style elimination, recorded). General payoff:
    lookup tables, precomputed scales, wire hashes (`contract_hash` de-magicked),
-   parsed static config — all zero-cost at runtime.
+   parsed static config — all zero-cost at runtime. **LSP: skips evaluation
+   entirely** — sound because no downstream pass depends on const VALUES (types
+   are value-independent; the asymmetry with macros, which create items). Static
+   const errors (free-variable rule, const-only reachability, cycles) stay live
+   in the editor; evaluation-time failures (panics, fuel) surface on
+   `check`/`build` — `vilan check` DOES evaluate (check means "will it build").
+   Budgeted background LSP evaluation = recorded refinement on the Tier-2 arc.
 
 3. **Inferred `const` — automatic compile-time folding** (M; v2 of G2, recorded
    2026-07-10; design constraints in `const-eval.md` §5's recorded-v2 note) —

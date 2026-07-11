@@ -144,8 +144,24 @@ Const evaluation runs per expression at compile time; the interpreter's
 speed is corpus-proven (the equivalence suite runs whole programs), and the
 worlds cache precedent applies: memoize per expression on the
 dependency-closure source.
-v1 ships without incremental memoization (evaluate on each compile); the LSP
-path leans on the existing debounce until Tier-2 caching lands.
+v1 ships without incremental memoization (evaluate on each compile).
+
+**The LSP skips evaluation entirely** (settled with the user), and the design
+invariant that makes that sound is worth stating: **no downstream pass
+depends on const *values*** — the type of `const expr` is the type of
+`expr`, so hover/completion/navigation and the analyzer's diagnostics are
+value-independent. (The sharp asymmetry with macros: the LSP must expand
+those, because they create items and types. Const generics would break this
+invariant — a second reason they are out of scope, beyond v1 sizing.) Most
+const errors are STATIC and stay live in the editor regardless: the
+const-known free-variable rule, const-only reachability, cycles, and most
+non-data results (visible in types). What defers to a real compile is only
+the evaluation-time class — panics (`space(37)` blowing a scale's bounds)
+and fuel/depth exhaustion. `vilan check` still evaluates (check means "will
+it build"); the skip is an interactive-latency policy, not a semantic tier.
+Recorded refinement, riding the Tier-2 caching arc: the LSP regains the
+deferred class via a debounced, budgeted, cancellable background evaluation —
+never per keystroke, never able to hang the editor.
 
 ## 5. Out of scope (v1)
 
