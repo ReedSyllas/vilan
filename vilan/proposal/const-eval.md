@@ -146,22 +146,26 @@ worlds cache precedent applies: memoize per expression on the
 dependency-closure source.
 v1 ships without incremental memoization (evaluate on each compile).
 
-**The LSP skips evaluation entirely** (settled with the user), and the design
-invariant that makes that sound is worth stating: **no downstream pass
-depends on const *values*** — the type of `const expr` is the type of
-`expr`, so hover/completion/navigation and the analyzer's diagnostics are
-value-independent. (The sharp asymmetry with macros: the LSP must expand
-those, because they create items and types. Const generics would break this
-invariant — a second reason they are out of scope, beyond v1 sizing.) Most
-const errors are STATIC and stay live in the editor regardless: the
-const-known free-variable rule, const-only reachability, cycles, and most
-non-data results (visible in types). What defers to a real compile is only
-the evaluation-time class — panics (`space(37)` blowing a scale's bounds)
-and fuel/depth exhaustion. `vilan check` still evaluates (check means "will
-it build"); the skip is an interactive-latency policy, not a semantic tier.
-Recorded refinement, riding the Tier-2 caching arc: the LSP regains the
-deferred class via a debounced, budgeted, cancellable background evaluation —
-never per keystroke, never able to hang the editor.
+**Tooling split** (settled with the user): the LSP **evaluates explicit
+`const` expressions** — they are opt-in contracts, bounded in number by the
+user's own hand, and their diagnostics (`space(37)` blowing a scale's
+bounds) belong live in the editor — under the existing analysis debounce
+and the fuel cap (an editor must survive a `while true` const mid-edit; a
+capped miss reports "did not finish within the compile-time budget" like
+any other evaluation failure). What the LSP **never runs is G3's inference
+sweep**: inference is silent-fallback optimization by design, so it
+produces no diagnostics and nothing user-visible — there is nothing for an
+editor to surface; it is a build-time pass only (`vilan check` doesn't need
+it either: it cannot produce errors). A design invariant keeps the
+LSP-side evaluation cheap and deferrable: **no downstream pass depends on
+const *values*** — the type of `const expr` is the type of `expr`, so
+hover/completion/navigation never wait on evaluation, and the debounced
+pass can trail typing without blocking anything. (The sharp asymmetry with
+macros: the LSP must expand those, because they create items and types.
+Const generics would break this invariant — a second reason they are out
+of scope beyond v1 sizing.) `vilan check` evaluates explicit consts as
+`build` does — check means "will it build". Incremental memoization of the
+LSP-side evaluation rides the Tier-2 caching arc.
 
 ## 5. Out of scope (v1)
 
@@ -203,6 +207,9 @@ keep it sound:
   `const` is the opt-in for big results). Heuristics with knobs.
 - **Debug ergonomics**: folded computation vanishes from stack traces; the
   `[build]` presets fit naturally — debug skips inference, release infers.
+- **The LSP never runs inference** — silent fallback means there is nothing
+  to surface in an editor; the sweep is a build-time optimization pass only
+  (§4's tooling split).
 
 ## 6. Implementation sketch
 

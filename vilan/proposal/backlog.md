@@ -551,13 +551,14 @@ have gaps.
    generics, binding-form only, assets emitted regardless of F6 liveness
    (liveness-tied emission = dead-style elimination, recorded). General payoff:
    lookup tables, precomputed scales, wire hashes (`contract_hash` de-magicked),
-   parsed static config — all zero-cost at runtime. **LSP: skips evaluation
-   entirely** — sound because no downstream pass depends on const VALUES (types
-   are value-independent; the asymmetry with macros, which create items). Static
-   const errors (free-variable rule, const-only reachability, cycles) stay live
-   in the editor; evaluation-time failures (panics, fuel) surface on
-   `check`/`build` — `vilan check` DOES evaluate (check means "will it build").
-   Budgeted background LSP evaluation = recorded refinement on the Tier-2 arc.
+   parsed static config — all zero-cost at runtime. **Tooling: the LSP evaluates
+   EXPLICIT consts** (opt-in, bounded, debounced, fuel-capped — `space(37)`
+   squiggles live in the editor) **but never runs G3's inference sweep**
+   (silent-fallback optimization = nothing to surface; build-only). `vilan check`
+   evaluates as `build` does. The invariant that keeps LSP evaluation cheap and
+   deferrable: no downstream pass depends on const VALUES (types are
+   value-independent — the asymmetry with macros, which create items; also a
+   second strike against const generics).
 
 3. **Inferred `const` — automatic compile-time folding** (M; v2 of G2, recorded
    2026-07-10; design constraints in `const-eval.md` §5's recorded-v2 note) —
@@ -571,7 +572,8 @@ have gaps.
    creates const contexts). The v2-sized work is budgets: evaluation fuel (a
    missed fold beats a hung compiler) and serialized-size caps (don't inline a
    10 KB table nobody asked for), plus the `[build]`-preset split (debug = no
-   inference for honest stack traces, release = infer).
+   inference for honest stack traces, release = infer). The LSP never runs the
+   sweep — silent fallback means nothing to surface; build-only.
 
 ---
 
