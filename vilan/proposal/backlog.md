@@ -123,7 +123,7 @@ have gaps.
 8. **UI styling — typed atomic styles, compiled** (L; `proposal/ui-styling.md`,
    REVISED 2026-07-10 — **expression-flavored, rides `const` (G2); syntax settled**) —
    the last big hole in the UI model. Styles are typed values built by ordinary
-   const-evaluated property functions (`const CARD = display(Display::Flex) +
+   const-evaluated property functions (`let card = const display(Display::Flex) +
    padding(space(4)) + hover(background(gray(100)));`) lowered at compile time to
    deduplicated atomic CSS through the const-eval **asset channel**; merge is `+`
    (`impl Style with Add`) with per-property last-wins — record semantics, so
@@ -529,11 +529,17 @@ have gaps.
    on-disk caching, batched parsing), each recorded with its trigger, plus the
    derive-name registration decoupling (deferred to the first user derive needing it).
 
-2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10;
-   the styling system A8 is the forcing use case, independently motivated) — `const
-   NAME = expr;` evaluates the initializer at compile time with THE macro
-   interpreter (one evaluator, no second dialect) and serializes the resulting
-   plain-data value into the emitted JS. **No `const fn` coloring** — the
+2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10,
+   revised same day to the EXPRESSION form; the styling system A8 is the forcing use
+   case, independently motivated) — `const` is a weak-precedence expression keyword
+   (`let x = const 1 + 2;` — captures to the bracket/comma boundary; `let NAME =
+   const expr` IS the constant declaration, so bindings stay ordinary `let`/`mut`
+   with F6/clone-site machinery unchanged, and `mut cache = const initial()` works).
+   Evaluates with THE macro interpreter (one evaluator, no second dialect) and
+   serializes the plain-data result IN PLACE (never worse than the computation it
+   replaces; sharing = bind it). Free variables must be const-known (imports,
+   literals, immutable bindings whose initializers are const — chaining; `mut`
+   disqualifies); runtime captures error at the reference. **No `const fn` coloring** — the
    interpreter is total over the pure language (the Zig-shaped design; Rust's
    annotation burden avoided); reaching an unavailable capability, panicking, or
    producing non-data (closure/view/Shared) is a spanned static error at the

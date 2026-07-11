@@ -1,9 +1,9 @@
 # `const` — compile-time evaluation as a language feature
 
-Status: **PROPOSAL** (2026-07-10). The general feature the revised styling
-system (`proposal/ui-styling.md`) rides; independently motivated. Semantics
-here are the contract; the keyword and binding-form details are settled,
-smaller spellings (attribute forms, const blocks) are explicitly deferred.
+Status: **PROPOSAL** (2026-07-10; **REVISED same day — `const` is an
+expression keyword**, settled with the user, replacing the first draft's
+declaration form). The general feature the revised styling system
+(`proposal/ui-styling.md`) rides; independently motivated.
 
 ## 0. Motivation
 
@@ -15,8 +15,9 @@ reachable only by producing *source text*. `const` exposes it for producing
 **values**:
 
 ```vilan
-const TABLE = build_crc_table();          // computed once, at compile time
-const CARD = display(flex) + padding(space(4));   // the styling use case
+let TABLE = const build_crc_table();      // computed at compile time: a literal in the JS
+let CARD = const display(flex) + padding(space(4));   // the styling use case
+mut cache = const build_initial();        // compile-time initial value, runtime-mutable
 ```
 
 Payoffs beyond styling: lookup tables, precomputed scales, parsed static
@@ -27,16 +28,44 @@ the emitted JS contains the result literal, not the computation.
 
 ## 1. The model
 
+`const` is a **weak-precedence expression keyword**: it captures the largest
+expression to its right within the current bracket/comma context and
+evaluates it at compile time.
+
 ```vilan
-const NAME = expression;        // module scope and local scope
-const NAME: Type = expression;  // annotation as with `let`
+let result = const 1 + 2;            // the JS contains `3`
+let TABLE = const build_crc_table(); // module scope: the shared-constant idiom
+f(const heavy_default(), runtime);   // argument position; stops at the comma
+let narrowed = (const f()) + g();    // parenthesize to narrow the capture
 ```
 
-- **Evaluation**: the initializer is evaluated at compile time by the macro
-  interpreter (the worlds machinery — one evaluator, not a second dialect).
-  `let` stays runtime-by-default; `const` is the *guarantee* (and the
-  capability gate, §2) — an optimizer may fold `let` someday, but `const`
-  promises it and errors when it can't.
+- **One mechanism, no declaration form.** `let NAME = const expr` *is* the
+  constant declaration — bindings stay ordinary `let`/`mut` (tree-shaken by
+  F6, clone-sited like any binding), annotations sit on the binding as usual,
+  and `mut x = const initial()` expresses a compile-time initial value for
+  runtime-mutable state, which a `const` declaration could not. (`const NAME
+  = expr` as sugar is deliberately not shipped — one way to say it; recorded
+  as a later nicety if the corpus begs.) `const { .. }` needs no special
+  case: blocks are expressions, so multi-statement compile-time computation
+  falls out.
+- **Evaluation**: the captured expression is evaluated at compile time by the
+  macro interpreter (the worlds machinery — one evaluator, not a second
+  dialect). `let` alone stays runtime; `const` is the *guarantee* (and the
+  capability gate, §2) — an optimizer may fold plain initializers someday,
+  but `const` promises it and errors when it can't.
+- **Free variables must be const-known**: an import, a literal, or an
+  immutable binding whose own initializer is a `const` expression (chaining;
+  `mut` disqualifies). A parameter or runtime local errors at the reference —
+  "`n` is a runtime value; a `const` expression reads only
+  compile-time-known bindings". Calls are unrestricted (§2's no-coloring
+  rule): only free *variables* need the judgement.
+- **Serialization is in place**: the result literal replaces the expression
+  at its site. A `const` inside a loop re-materializes per iteration —
+  never worse than the computation it replaced (that call also produced a
+  fresh value per iteration; the computation is gone, the allocation
+  unchanged), and no aliasing questions arise against value semantics.
+  Sharing is spelled with an ordinary binding at whatever scope you mean;
+  hoisting-with-read-only-proof is a recorded optimization, not v1.
 - **No function coloring.** Any function reachable from a const initializer is
   const-callable — the interpreter is total over the pure language, so there
   is no `const fn` annotation and no ecosystem split (the Rust lesson,
@@ -46,20 +75,19 @@ const NAME: Type = expression;  // annotation as with `let`
   check.
 - **The result must be plain data**: numbers, strings, bools, lists, maps,
   tuples, structs, enum values — transitively. A closure, view, `Shared`
-  cell, or promise in the *result* is a static error at the binding (internal
-  use during evaluation is fine — the interpreter models all of it; only the
-  surviving value is constrained). Value semantics makes the snapshot natural.
-- **Serialization**: the transformer swaps the initializer for the result's
-  JS literal (`const TABLE = [ 0, 79764919, .. ];`). Module-level `const`
-  bindings tree-shake like any binding (F6).
+  cell, or promise in the *result* is a static error at the expression
+  (internal use during evaluation is fine — the interpreter models all of it;
+  only the surviving value is constrained). Value semantics makes the
+  snapshot natural.
 - **Failures are diagnostics**: a panic during evaluation (`Thrown` — e.g.
   the checked-subscript message), the depth cap (`Depth`), an unavailable
   capability (`Unsupported`), or a non-data result — all report at the
-  `const` binding with the failure message. Deep-span fidelity (pointing
+  `const` expression with the failure message. Deep-span fidelity (pointing
   inside the callee) is a recorded refinement shared with macro diagnostics.
-- **Dependencies**: a const initializer may read other consts (imported
-  included); evaluation follows the value dependency graph in deterministic
-  order (module topological order, then binding order); a cycle is an error.
+- **Dependencies**: const expressions form a value dependency graph through
+  the const-known bindings they read (imports included); evaluation follows
+  it in deterministic order (module topological order, then binding order,
+  then expression order within a body); a cycle is an error.
 
 ## 2. The capability model
 
@@ -68,12 +96,12 @@ The const world *is* the macro world: pure vilan plus the curated host table
 One new bit on top:
 
 **Const-only functions.** A few std internals are legal *only* on call paths
-rooted in a const initializer — the first being `std::asset::emit` (§3),
+rooted in a `const` expression — the first being `std::asset::emit` (§3),
 whose whole point is a compile-time effect. Enforcement is static
 reachability over the existing call graph (`src/call_graph.rs`): a call path
 from runtime code into a const-only function errors at the offending call
-site with what it means ("styles are compile-time values — bind this with
-`const`", worded per API). v1 keeps the bit **std-internal** (users cannot
+site with what it means ("styles are compile-time values — build them in a
+`const` expression", worded per API). v1 keeps the bit **std-internal** (users cannot
 declare const-only functions) and requires direct call chains — a const-only
 function passed indirectly (through a closure value) is conservatively
 rejected. This is one capability bit on a handful of internals, not function
@@ -112,9 +140,10 @@ the recorded refinement, mirroring F6's own recorded over-approximations.
 
 ## 4. Cost and caching
 
-Const evaluation runs per binding at compile time; the interpreter's speed is
-corpus-proven (the equivalence suite runs whole programs), and the worlds
-cache precedent applies: memoize per binding on the dependency-closure source.
+Const evaluation runs per expression at compile time; the interpreter's
+speed is corpus-proven (the equivalence suite runs whole programs), and the
+worlds cache precedent applies: memoize per expression on the
+dependency-closure source.
 v1 ships without incremental memoization (evaluate on each compile); the LSP
 path leans on the existing debounce until Tier-2 caching lands.
 
@@ -124,7 +153,9 @@ path leans on the existing debounce until Tier-2 caching lands.
   generic's type parameters. (A `const` inside a generic function body is
   legal only if its initializer is independent of the type parameters.)
 - User-declared const-only functions.
-- `const` in non-binding positions (const blocks, const arguments).
+- `const` *parameters* (a callee demanding compile-time arguments) — the
+  expression form makes call-site `f(const ..)` free, but parameter-side
+  requirements are const-generics territory, out with them.
 - Cross-crate/library const export beyond what value serialization already
   gives (a library's `const` re-evaluates in the consumer's compile — fine,
   deterministic).
@@ -133,23 +164,29 @@ path leans on the existing debounce until Tier-2 caching lands.
 
 ## 6. Implementation sketch
 
-1. **Grammar**: `const` keyword; binding form beside `let` (lexer keyword,
-   parser arm, formatter, TextMate).
-2. **Analyzer**: mark const bindings; type-check initializers normally (the
-   type system is unchanged — const-ness is a binding property, not a type);
-   build the const dependency order; run the capability reachability check.
-3. **Const pass**: post-analysis, evaluate initializers in dependency order
-   via the interpreter (transform the initializer expression through the
-   existing `transform_to_ast` path, as macros do); collect asset emissions;
-   convert failures to spanned diagnostics.
-4. **Serialization**: result value → `js::Node` literal (numbers, strings,
-   arrays, maps, the struct/enum runtime shapes the transformer already
-   defines); reject non-data results with the §1 error.
+1. **Grammar**: `const` keyword as a weak-precedence expression prefix
+   (captures to the end of the bracket/comma context; lexer keyword, parser
+   arm, formatter, TextMate). Parser nicety, specced here: statement-initial
+   `const IDENT =` gets the JS-refugee hint — "vilan has no const
+   declarations — write `let x = const ..`".
+2. **Analyzer**: mark const expressions; type-check them normally (the type
+   system is unchanged — const-ness is an expression property, not a type);
+   enforce the const-known free-variable rule; build the dependency order;
+   run the capability reachability check.
+3. **Const pass**: post-analysis, evaluate marked expressions in dependency
+   order via the interpreter (through the existing `transform_to_ast` path,
+   as macros do); collect asset emissions; convert failures to spanned
+   diagnostics.
+4. **Serialization**: result value → `js::Node` literal in place (numbers,
+   strings, arrays, maps, the struct/enum runtime shapes the transformer
+   already defines); reject non-data results with the §1 error.
 5. **Channel**: dedup/order/write per §3; `vilan build --watch` regenerates.
 6. **Pins**: value classes round-trip (incl. nested enums/maps); capability
-   failure spans; cycle detection; panic-at-const spans; determinism of the
-   channel across binding reorderings; a `const` used from both server and
-   client layers.
+   failure spans; the free-variable rule (runtime local, `mut`, and chained
+   const-known cases); weak-precedence shapes (`const a + b`, argument
+   position, parenthesized narrowing); cycle detection; panic-at-const spans;
+   in-place semantics in a loop; determinism of the channel across binding
+   reorderings; a `const` used from both server and client layers.
 
 ## 7. Alternatives rejected
 

@@ -37,21 +37,21 @@ CSS**; merge is value semantics, not cascade semantics.
 import std::ui::style::{ Style, display, padding, background, color, hover, md,
     space, gray, blue, white, Display };
 
-const CARD = display(Display::Flex)
+let card = const display(Display::Flex)
     + padding(space(4))
     + background(gray(50))
     + hover(background(gray(100)));
 
-const ACTIVE = padding(space(6));
+let active = const padding(space(6));
 
-view.class(CARD + ACTIVE);   // padding resolves to space(6) — LAST WINS, always
+view.class(card + active);   // padding resolves to space(6) — LAST WINS, always
 ```
 
 - **Property functions are the primitive.** `padding(space(4))` is an
   ordinary typed function returning a single-property `Style`; a style *is* a
   merge of single-property styles, so construction and composition are the
   same operation: `+` (`impl Style with Add`), per-property, right side wins.
-  Method sugar (`CARD.padding(..)` ≡ `CARD + padding(..)`) falls out of an
+  Method sugar (`card.padding(..)` ≡ `card + padding(..)`) falls out of an
   ordinary impl block if wanted — no new machinery either way.
 - **A `Style` value** is a map from property-slot → atomic class name. Each
   `(property, value, condition)` triple lowers to one CSS rule with a
@@ -63,18 +63,21 @@ view.class(CARD + ACTIVE);   // padding resolves to space(6) — LAST WINS, alwa
   fights are structurally impossible. Fully-const merges fold to a
   precomputed map; runtime merges of const styles are a small map union.
   String parsing never happens.
-- **Construction is `const`; selection and merging are runtime.** This is the
-  load-bearing rule (§3).
+- **Construction happens inside `const` expressions; selection and merging
+  are runtime.** This is the load-bearing rule (§3). (`const` is the
+  weak-precedence expression keyword of `const-eval.md` — `let card = const
+  ..` is the idiom, and ordinary `let` bindings mean no special naming or
+  mutability rules for styles.)
 - **Variants are just code** — CVA dissolves into the language:
 
   ```vilan
-  const PRIMARY = BASE + background(blue(600)) + color(white);
-  const DANGER = BASE + background(red(600)) + color(white);
+  let primary = const base + background(blue(600)) + color(white);
+  let danger = const base + background(red(600)) + color(white);
 
   fun button_style(kind: Kind): Style {
       match kind {
-          Kind::Primary => PRIMARY,
-          Kind::Danger => DANGER,
+          Kind::Primary => primary,
+          Kind::Danger => danger,
       }
   }
   ```
@@ -141,13 +144,14 @@ at build time, but a runtime `match` never evaluates its unchosen arms — a
 style constructed at runtime would have classes whose rules were never
 emitted. The rule that keeps the system sound:
 
-> **Styles construct in `const`; runtime code selects and merges.**
+> **Styles construct inside `const` expressions; runtime code selects and
+> merges.**
 
 Mechanically free: property functions bottom out in `std::asset::emit`
 (const-eval.md §3), which is **const-only** — so a runtime construction is a
 static error at the construction site ("styles are compile-time values —
-bind this with `const`"), enforced by call-graph reachability, not
-convention. Selection (`match` over const styles) and merging (`+` as map
+build them in a `const` expression"), enforced by call-graph reachability,
+not convention. Selection (`match` over const styles) and merging (`+` as map
 union over already-emitted rules) stay ordinary runtime code. This is the
 constraint StyleX arrived at from the other direction, here falling out of
 the capability model instead of a lint.
@@ -202,9 +206,8 @@ our compiler — the wrong home for someone else's database.
 - The v1 property-function list (write out the ~60 in slice 3's design note).
 - `Style` equality/hashing (memoized class strings suggest yes).
 - Whether method sugar ships in v1 or waits for demand.
-- Naming convention for style consts (`CARD` vs `card` — `const` bindings'
-  case convention is really const-eval.md's question; the examples here use
-  upper-case provisionally).
+- ~~Naming convention for style consts~~ — dissolved by the expression-form
+  `const`: styles are ordinary `let` bindings, no special convention needed.
 
 ## 8. Alternatives rejected
 
