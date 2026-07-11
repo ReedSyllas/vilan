@@ -8246,6 +8246,66 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// The signature a named function offers to closure-coercion (backlog B20,
+    /// proposal/fn-coercion.md): its parameter `TypeId`s and — when declared —
+    /// its return `TypeId`. `None` when the function is ineligible: external
+    /// (no `functions` entry), generic (no single value exists), `async` (a
+    /// call through a plain closure value is not awaited), or a method (`self`
+    /// receiver — value form would need receiver capture). An eligible
+    /// function with an UNDECLARED return yields `Some((params, None))`; the
+    /// caller supplies the body's type.
+    fn coercible_function_signature(
+        &self,
+        function_id: Id,
+    ) -> Option<(Vec<TypeId>, Option<TypeId>)> {
+        let function = self.functions.get(&function_id)?;
+        if !function.generic_parameter_constraint_ids.is_empty() || function.is_async {
+            return None;
+        }
+        let mut parameter_type_ids = Vec::with_capacity(function.parameters.len());
+        for parameter_id in &function.parameters {
+            let parameter = self.parameters.get(parameter_id)?;
+            if parameter.name == "self" {
+                return None;
+            }
+            parameter_type_ids.push(parameter.type_id);
+        }
+        Some((parameter_type_ids, function.return_type_id))
+    }
+
+    /// The closure type an eligible named function coerces to, inferring the
+    /// body's type when the return isn't declared (a void handler). `None`
+    /// when ineligible, or the body's type hasn't resolved yet.
+    fn function_closure_type(&mut self, function_id: Id) -> Option<Type> {
+        let (parameter_type_ids, return_type_id) =
+            self.coercible_function_signature(function_id)?;
+        let return_type_id = match return_type_id {
+            Some(declared) => declared,
+            None => {
+                let body_return_id = self.functions.get(&function_id)?.body.1;
+                let inferred = self.infer_type(body_return_id, &Type::Unknown, &HashMap::new());
+                if matches!(inferred, Type::Unresolved) {
+                    return None;
+                }
+                inferred.get_type_id(self)
+            }
+        };
+        Some(Type::Closure(parameter_type_ids, return_type_id))
+    }
+
+    /// `function_closure_type` for read-only paths (`compare_type`): an
+    /// undeclared return uses the body's RECORDED type, or fails the coercion
+    /// on this attempt.
+    fn function_closure_type_recorded(&self, function_id: Id) -> Option<Type> {
+        let (parameter_type_ids, return_type_id) =
+            self.coercible_function_signature(function_id)?;
+        let return_type_id = return_type_id.or_else(|| {
+            let body_return_id = self.functions.get(&function_id)?.body.1;
+            self.expr_id_to_type_id_map.get(&body_return_id).copied()
+        })?;
+        Some(Type::Closure(parameter_type_ids, return_type_id))
+    }
+
     fn reconcile_type(
         &mut self,
         a: &Type,
@@ -8456,6 +8516,27 @@ impl<'src> Analyzer<'src> {
                     all_bindings,
                 )
             }
+            // A named function coerces to a matching closure type (backlog
+            // B20, proposal/fn-coercion.md): the eligible function's signature
+            // converts and reconciles structurally — binding the closure
+            // side's generics (`|str| U` against `fn parse(str): Route` binds
+            // `U = Route`). An ineligible function (extern, generic, async, a
+            // method) doesn't convert and keeps the mismatch error. Symmetric
+            // because callers reconcile in both argument orders.
+            (Type::Function(function_id), Type::Closure(..)) => {
+                let function_id = *function_id;
+                let Some(function_type) = self.function_closure_type(function_id) else {
+                    return None;
+                };
+                return self.reconcile_type(&function_type, b, substitution_context);
+            }
+            (Type::Closure(..), Type::Function(function_id)) => {
+                let function_id = *function_id;
+                let Some(function_type) = self.function_closure_type(function_id) else {
+                    return None;
+                };
+                return self.reconcile_type(a, &function_type, substitution_context);
+            }
             (l, r) if l == r => (a.clone(), Vec::new()),
             _ => {
                 return None;
@@ -8561,6 +8642,18 @@ impl<'src> Analyzer<'src> {
                         self.compare_type(&l, &r, substitution_context)
                     }
             }
+            // A named function coerces to a matching closure type (backlog
+            // B20) — mirrors the `reconcile_type` arms, on recorded types.
+            (Type::Function(function_id), Type::Closure(..)) => self
+                .function_closure_type_recorded(*function_id)
+                .is_some_and(|function_type| {
+                    self.compare_type(&function_type, b, substitution_context)
+                }),
+            (Type::Closure(..), Type::Function(function_id)) => self
+                .function_closure_type_recorded(*function_id)
+                .is_some_and(|function_type| {
+                    self.compare_type(a, &function_type, substitution_context)
+                }),
             (a, b) if a == b => true,
             _ => false,
         }

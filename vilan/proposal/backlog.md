@@ -312,14 +312,26 @@ have gaps.
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
 
-20. **A named function doesn't coerce to a closure parameter** (M; found
-    2026-07-11 building A10) — `signal.map(parse)` fails ("Expected |str| U,
-    but got fn parse(str): Route instead") even though `parse` has exactly the
-    closure's shape; `.map(|path| parse(path))` is the eta-expanded
-    workaround. Function-to-closure coercion wants a short design pass first
-    (a GENERIC named function as a value raises monomorphization questions —
-    which instantiation does the value take?), so proposal-first when picked
-    up; the non-generic case is the payoff.
+20. ~~**A named function doesn't coerce to a closure parameter**~~ —
+    **SHIPPED 2026-07-11** (`proposal/fn-coercion.md`; found the same day
+    building A10). `signal.map(parse)` now works: a reference to a plain
+    vilan `fun` coerces to a matching closure type — eta-equivalent to the
+    wrapping closure, and on JS the function IS the value. Eligibility: not
+    `external` (dotted globals lose `this` detached), not generic (no single
+    value — which instantiation?), not a method (`self` capture = closure
+    creation, B18-adjacent), not `async` (a call through a plain closure
+    value isn't awaited — the J2 gap — so the value would leak a promise);
+    context-reading functions stay rejected by the context pass's value-use
+    rule. The return type is the declared one, else the body's inferred
+    type. Implementation: symmetric `Function`↔`Closure` arms in
+    `reconcile_type`/`compare_type` converting the signature and recursing
+    (binding the closure side's generics — `|str| U` binds `U = Route`), plus
+    the transformer's value-reference arm (`ensure_function_emitted` + the
+    emitted name, as a call subject would). Ineligible functions keep the
+    old mismatch error. 8 pins (arg/method-arg/let/field/return/Shared
+    round-trip/void-handler/cross-module import) + 4 guards (mismatch,
+    generic, async, context value-use); the router surfaces now use
+    `current_path().map(parse)`.
 
 17. ~~**A generic call in an `else`/`match` branch loses its type argument**~~ —
     **FIXED 2026-07-11** (found building `std::jwt` for the Kolt migration). The

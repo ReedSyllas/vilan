@@ -1055,6 +1055,15 @@ impl<'src> Transformer<'src> {
                 {
                     return Some(self.variant_value(*enum_id, *variant_index, Vec::new()));
                 }
+                // A reference to a named function as a VALUE (backlog B20,
+                // proposal/fn-coercion.md): the function object itself is the
+                // value — ensure it's emitted and name it, exactly as a call
+                // subject would.
+                if let Some(Expr::Function(function_id)) = self.program.entity_map.get(id) {
+                    let function_id = *function_id;
+                    self.ensure_function_emitted(function_id);
+                    return Some(js::Node::Local(self.ng.name_for(function_id)));
+                }
                 // A boxed scalar local reads through its cell's slot 0.
                 if self.local_is_boxed(*id) {
                     return Some(js::Node::PropertyIndex(

@@ -129,7 +129,7 @@ fun app(route: Signal<Route>): View {
 }
 
 fun main() {
-	let route = current_path().map(|path| parse(path));
+	let route = current_path().map(parse);
 	let _root = mount_root("app", || app(route));
 }
 "#;

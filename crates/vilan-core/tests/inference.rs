@@ -11310,7 +11310,7 @@ fn swap_renders_a_dynamic_subtree_per_route_value() {
         }
 
         fun main() {
-            let route = current_path().map(|path| parse(path));
+            let route = current_path().map(parse);
             let _root = mount_root("app", || view("main")
                 .child(link("Home", Route::Home))
                 .child(view("button").on("click", || navigate(href(Route::Home))))
@@ -11679,5 +11679,287 @@ fn a_closure_grounded_generic_meets_a_method_bound() {
         main();
         "#,
         "true\n",
+    );
+}
+
+// --- B20: named functions as closure values (proposal/fn-coercion.md) --------
+//
+// A reference to a plain (non-generic, non-method, non-async, non-extern)
+// named function coerces to a matching closure type — `map(parse)` instead of
+// `map(|path| parse(path))`. On JS the named function IS the value, so the
+// whole feature is type-layer.
+
+#[test]
+fn a_named_function_passes_as_a_method_closure_argument() {
+    // The motivating shape: a method's closure parameter whose return binds
+    // the method's own generic (`map<U>`'s `U = Route`) from the FUNCTION's
+    // declared return.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        struct Wrap<V> {
+            value: V,
+        }
+
+        impl Wrap<type V> {
+            fun map<U>(self, transform: |V| U): Wrap<U> {
+                Wrap { value = transform(self.value) }
+            }
+        }
+
+        fun measure(text: str): i32 {
+            text.len()
+        }
+
+        fun main() {
+            let wrapped = Wrap { value = "abcd" }.map(measure);
+            print(wrapped.value);
+        }
+        main();
+        "#,
+        "4\n",
+    );
+}
+
+#[test]
+fn a_named_function_passes_as_a_free_closure_argument() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun apply(seed: i32, transform: |i32| i32): i32 {
+            transform(seed)
+        }
+
+        fun double(n: i32): i32 {
+            n * 2
+        }
+
+        fun main() {
+            print(apply(21, double));
+        }
+        main();
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_named_function_binds_to_an_annotated_let_and_field() {
+    // The two storage positions: a closure-annotated binding, and a
+    // closure-typed struct field (the Kolt server-hook shape).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        struct Holder {
+            hook: |str| i32,
+        }
+
+        fun measure(text: str): i32 {
+            text.len()
+        }
+
+        fun main() {
+            let bound: |str| i32 = measure;
+            print(bound("abc"));
+            let holder = Holder { hook = measure };
+            let hook = holder.hook;
+            print(hook("abcde"));
+        }
+        main();
+        "#,
+        "3\n5\n",
+    );
+}
+
+#[test]
+fn a_named_function_returns_as_a_closure() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun double(n: i32): i32 {
+            n * 2
+        }
+
+        fun pick(): |i32| i32 {
+            double
+        }
+
+        fun main() {
+            let f = pick();
+            print(f(8));
+        }
+        main();
+        "#,
+        "16\n",
+    );
+}
+
+#[test]
+fn a_void_function_without_annotation_coerces() {
+    // An unannotated-return (void) function into a `|| void` slot — the
+    // handler shape; the return type comes from the body's inferred type.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun run_twice(action: || void) {
+            action();
+            action();
+        }
+
+        fun say_hi() {
+            print("hi");
+        }
+
+        fun main() {
+            run_twice(say_hi);
+        }
+        main();
+        "#,
+        "hi\nhi\n",
+    );
+}
+
+#[test]
+fn a_stored_function_value_survives_shared_storage() {
+    // Through `Shared<|str| i32>` — stored as a value, read back, called
+    // indirectly (the pilot's hook pattern, without the eta-expansion).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+
+        fun measure(text: str): i32 {
+            text.len()
+        }
+
+        fun main() {
+            let hook: Shared<|str| i32> = Shared::new(measure);
+            let stored = hook.read();
+            print(stored("abcd"));
+        }
+        main();
+        "#,
+        "4\n",
+    );
+}
+
+#[test]
+fn a_mismatched_function_still_fails_closure_positions() {
+    // Wrong parameter type: no coercion, the mismatch error stays.
+    assert_fails(
+        r#"
+        fun apply(seed: i32, transform: |i32| i32): i32 {
+            transform(seed)
+        }
+
+        fun shout(text: str): str {
+            text + "!"
+        }
+
+        fun main() {
+            apply(3, shout);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_generic_function_does_not_coerce() {
+    // Rule 2: no single value exists for a generic function (which
+    // instantiation?) — deferred, still the mismatch error.
+    assert_fails(
+        r#"
+        fun apply(seed: i32, transform: |i32| i32): i32 {
+            transform(seed)
+        }
+
+        fun identity<T>(value: T): T {
+            value
+        }
+
+        fun main() {
+            apply(3, identity);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn an_async_function_does_not_coerce() {
+    // Rule 4: a call through a plain closure value is not awaited, so the
+    // coerced value would leak a raw promise — rejected.
+    assert_fails(
+        r#"
+        fun apply(seed: i32, transform: |i32| i32): i32 {
+            transform(seed)
+        }
+
+        async fun slow_double(n: i32): i32 {
+            n * 2
+        }
+
+        fun main() {
+            apply(3, slow_double);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_context_reading_function_still_cannot_be_a_value() {
+    // Rule 5: coercion doesn't bypass the context pass — a needs-context
+    // function used as a value keeps its value-use rejection (its hidden
+    // parameter can't thread through an indirect call).
+    let source = r#"
+        import std::context::Context;
+
+        let scope: Context<i32> = Context::new();
+
+        fun reads_scope(): i32 {
+            scope.get()
+        }
+
+        fun apply(transform: || i32): i32 {
+            transform()
+        }
+
+        fun main() {
+            let result = scope.run(7, || apply(reads_scope));
+        }
+        main();
+        "#;
+    match compile(source) {
+        Ok(_) => panic!("expected the context value-use rejection, but it compiled"),
+        Err(errors) => assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("can't be used as a value")),
+            "no diagnostic mentions the value-use rule; got: {errors:#?}"
+        ),
+    }
+}
+
+#[test]
+fn an_imported_function_coerces_across_modules() {
+    // The reference resolves through an import binding (browser layer:
+    // `std::router::segments` is a plain vilan fn) — the coercion and the
+    // emitted value must both follow the alias to the defining function.
+    assert_compiles_browser(
+        r#"
+        import std::router::segments;
+
+        fun apply(path: str, transform: |str| List<str>): List<str> {
+            transform(path)
+        }
+
+        fun main() {
+            let parts = apply("/a/b", segments);
+        }
+        "#,
     );
 }
