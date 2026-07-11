@@ -155,6 +155,16 @@ have gaps.
    alongside `vilan build` / `--watch` (the Tailwind-bridge runner, asset pipelines,
    codegen sidecars). Useful independent of styling.
 
+10. **`std::ui` router** (M; Kolt gap — `proposal/kolt-migration.md` §2.3) —
+    history-API routing with params and NESTED layouts (Kolt's `layout_main` /
+    `layout_workspace` shapes; `/w/ORG/WS/*` scheme), a link component, and a
+    current-route signal composing with `show`/`bind_*`. Lands with the pilot's
+    second page, not before.
+
+11. **Web storage externs** (S; Kolt gap — kolt-migration.md §2.4) —
+    `localStorage`/`sessionStorage` get/set/remove on the dom layer; the
+    client-side JWT home for the pilot's auth handshake.
+
 ---
 
 ## B. Type system & the type solver
@@ -812,3 +822,28 @@ have gaps.
    roughly in demand order:
    Remaining tail (deliberately not taken): per-type `MIN`/`MAX` constants (want a
    static-member story or per-type modules — neither exists; revisit with F5/spec work).
+
+3. **`std::crypto` — auth primitives** (M; Kolt gap — `proposal/kolt-migration.md`
+   §2.1) — WebCrypto (`crypto.subtle`) extern bindings, node AND deno: HMAC
+   import/sign/verify (JWT HS512 = base64url header/payload + HMAC), PBKDF2 via
+   `deriveBits` for password hashing (v1 — bcrypt/argon2 need npm deps, recorded
+   beyond-v1), `randomUUID` + random bytes. Async externs throughout. Passkeys /
+   WebAuthn recorded beyond-v1 on the same module. First blocker of the pilot
+   slice.
+
+4. **SQLite bindings** (M; Kolt gap — kolt-migration.md §2.2) — one vilan
+   interface, platform-layered impls (deno `jsr:@db/sqlite`, node
+   `better-sqlite3` — the `_sys` seam); doubles as the proving ground for runtime
+   jsr/npm dependencies through extern module imports. Server-layer only — the
+   client physically cannot import it, which is Kolt's architecture principle
+   made structural. Minimal exec/query/prepare surface; no ORM ambitions.
+
+5. **`std::time`** (S–M; Kolt gap — kolt-migration.md §2.5) — minimal v1: epoch
+   millis `now()` (impure host capability — correctly not const-evaluable),
+   duration arithmetic, basic formatting. Not a luxon; grow the surface from
+   Kolt's real call sites.
+
+6. **Transport robustness — Railway parity** (M; Kolt gap — kolt-migration.md
+   §2.6; p6-followups territory) — `SocketTransport` reconnect with backoff,
+   request retry policy, and `RemoteSource` RE-SUBSCRIPTION after a drop (mirrors
+   must resync on reconnect).
