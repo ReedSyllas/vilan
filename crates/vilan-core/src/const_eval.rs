@@ -21,6 +21,12 @@ pub fn evaluate(
     program: &Program,
     options: &BuildOptions,
 ) -> (HashMap<Id, ConstValue>, Vec<(String, String)>, Vec<Error>) {
+    // A program that already failed analysis skips evaluation entirely: the
+    // transformer's entity lookups (used to build const mini-programs) assume
+    // a clean program, exactly as `transform` itself does.
+    if !program.diagnostics.is_empty() {
+        return (HashMap::new(), Vec::new(), Vec::new());
+    }
     let mut state = State {
         program,
         options,

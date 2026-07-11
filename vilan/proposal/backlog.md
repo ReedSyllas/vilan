@@ -121,7 +121,15 @@ have gaps.
      model, P6 transport (data fetching), A5 boundary ownership.
 
 8. **UI styling — typed atomic styles, compiled** (L; `proposal/ui-styling.md`,
-   REVISED 2026-07-10 — **expression-flavored, rides `const` (G2); syntax settled**) —
+   REVISED 2026-07-10 — expression-flavored, rides `const` (G2); **CORE SHIPPED
+   same day**: `std::style` (builder chain ~30 properties, Color/Length/space
+   tokens as `:root`-var-carrying values, pseudo/breakpoint/dark conditions,
+   `raw`, pure-vilan djb2 class hashing — cross-program-deterministic, proven by
+   the corpus and example minting identical names), `View.styled`/`style_var`,
+   12 pins, corpus `style.vl` with js AND css goldens, styled reactive-ui
+   counter emitting `app.css`. Remaining recorded in the proposal status:
+   bind_styled, dark×pseudo, html `<link>` scaffold, fmt chain splitting,
+   property long tail, A7 critical CSS, liveness dead-style elimination) —
    the last big hole in the UI model. Styles are typed values built by ordinary
    a const-evaluated builder chain (`let card = const style().display(Display::Flex)
    .padding(space(4)).hover(style().background(Color::gray(100)));` — one import,

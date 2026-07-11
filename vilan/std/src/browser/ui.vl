@@ -23,6 +23,7 @@
 import pkg::dom::{ Element, get_element_by_id, create_element };
 import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp, turn_scope, turn, FlushPolicy };
 import pkg::shared::Shared;
+import pkg::style::Style;
 import pkg::compare::PartialEq;
 import pkg::option::Option::{ self, Some, None };
 
@@ -47,6 +48,23 @@ impl View {
 	// Static CSS class.
 	fun class(self, name: str): View {
 		self.element.set_class(name);
+		self
+	}
+
+	// Classes from a compiled `Style` (proposal/ui-styling.md §4). Rendering
+	// is runtime-legal — the rules were emitted when the style was
+	// constructed, inside its `const` expression.
+	fun styled(self, style: Style): View {
+		self.element.set_class(style.class_list());
+		self
+	}
+
+	// A signal-driven CSS custom property: pairs with
+	// `width(Length::var("--w"))` in a style — dynamism through the variable,
+	// never through runtime rule construction.
+	fun style_var(self, name: str, source: Signal<str>): View {
+		let element = self.element;
+		let _sub = source.sub(|value| element.set_style_property(name, value));
 		self
 	}
 

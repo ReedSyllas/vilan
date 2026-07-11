@@ -895,8 +895,34 @@ impl Interpreter {
                 self.stdout.push('\n');
                 Ok(Value::Undefined)
             }
-            "new Set" => Ok(Value::Set(Rc::new(RefCell::new(IndexMap::new())))),
-            "new Map" => Ok(Value::Map(Rc::new(RefCell::new(IndexMap::new())))),
+            // Both constructors accept an optional entries/values array — the
+            // shape a serialized const result uses (`new Map([[k, v], ..])`).
+            "new Set" => {
+                let mut set = IndexMap::new();
+                if let Value::Array(items) = take(0) {
+                    for item in items.borrow().iter() {
+                        set.insert(Key::of(item)?, item.clone());
+                    }
+                }
+                Ok(Value::Set(Rc::new(RefCell::new(set))))
+            }
+            "new Map" => {
+                let mut map = IndexMap::new();
+                if let Value::Array(entries) = take(0) {
+                    for entry in entries.borrow().iter() {
+                        let Value::Array(pair) = entry else {
+                            return Err(Failure::internal(
+                                "a Map entry must be a [key, value] pair",
+                            ));
+                        };
+                        let pair = pair.borrow();
+                        let key = pair.first().cloned().unwrap_or(Value::Undefined);
+                        let value = pair.get(1).cloned().unwrap_or(Value::Undefined);
+                        map.insert(Key::of(&key)?, (key, value));
+                    }
+                }
+                Ok(Value::Map(Rc::new(RefCell::new(map))))
+            }
             "__clone" => Ok(deep_clone(&take(0))),
             "__shared_new" => {
                 let mut cell = IndexMap::new();

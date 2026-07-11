@@ -1,8 +1,28 @@
 # UI styling — typed atomic styles, compiled
 
-Status: **PROPOSAL, REVISED** (2026-07-10). The first draft proved styles
+Status: **CORE SHIPPED 2026-07-10** — `std::style` (same day as the whole
+prerequisite stack: `const`, the asset channel, this). Shipped: `Style` as a
+slot map (`media:pseudo:property` → class + declaration), the builder chain
+(~30 properties), `Color`/`Length`/`space` tokens with `:root` var emission
+(per-use lines, deduplicated — no theme-emission coordination needed),
+pseudo/breakpoint/dark conditions with one-level stacking, `raw`, pure-vilan
+djb2 class hashing (content-addressed; the corpus and the example produce the
+SAME class name for the same rule — cross-program determinism proven),
+`View.styled` + `View.style_var` + the `set_style_property` DOM extern, 12
+pins, corpus `style.vl` with **both `.js` and `.css` goldens**, and a styled
+`counter` in the reactive-ui example emitting `app.css`. Implementation
+findings: condition combinators re-emit the inner chain's declarations under
+their selector (the inner's base rules also emit — the recorded
+over-approximation); the interpreter's `new Map`/`new Set` host arms learned
+their entries argument (serialized const Maps arrive populated). Remaining,
+recorded: `bind_styled(Signal<Style>)` (compose via `bind_class(sig.map(..))`
+meanwhile), dark×pseudo stacking, the html `<link>` scaffold, `vilan fmt`
+chain splitting, the property-list long tail, and the first draft's items
+(critical CSS with A7, dead-style elimination via liveness).
+
+The first draft proved styles
 through a macro DSL; this revision — the syntax refinement, settled with the
-user — makes styling **expression-flavored**: an ordinary typed API riding
+user — made styling **expression-flavored**: an ordinary typed API riding
 the general `const` compile-time-evaluation feature
 (`proposal/const-eval.md`), which this system is the forcing use case for.
 The semantic layer (atomic lowering, last-wins merge, custom-property

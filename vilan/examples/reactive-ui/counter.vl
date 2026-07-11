@@ -8,13 +8,27 @@
 
 import std::ui::{ view, View };
 import std::reactive::Signal;
+import std::style::{ style, space, Style, Color, Display, FlexDirection };
+
+// Typed atomic styles (proposal/ui-styling.md): built inside `const`, so the
+// rules land in app.css at build time; `.styled(..)` just sets the classes.
+fun counter_card(): Style {
+	style()
+		.display(Display::Flex)
+		.flex_direction(FlexDirection::Column)
+		.gap(space(2))
+		.padding(space(4))
+		.background(Color::gray(50))
+		.radius(space(2))
+}
 
 // A component is just a function returning the `View` subtree it owns.
 fun counter(): View {
 	let count = Signal::new(0);
+	let card = const counter_card();
 
 	view("section")
-		.class("counter")
+		.styled(card)
 		.child(view("h2").text("Counter"))
 		// `bind_text` binds to a `Source<str>`; derive one from `count`. The
 		// i-string renders the number directly (host coercion) — see the README

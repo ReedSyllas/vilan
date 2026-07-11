@@ -10537,3 +10537,288 @@ fn reaching_functions_inside_const_are_fine() {
         "8\n",
     );
 }
+
+// --- A8: std::style — typed atomic styles, compiled ---------------------------
+// The styling system riding const evaluation and the asset channel
+// (proposal/ui-styling.md): builder-chain construction inside `const`, atomic
+// rules with content-hashed class names, per-property last-wins merge,
+// var-carried theme tokens, condition combinators.
+
+#[test]
+fn a_style_emits_atomic_rules_and_theme_vars() {
+    let assets = collected_assets(
+        r#"
+        import std::style::{ style, space, Style };
+        fun card(): Style {
+            style().padding(space(4))
+        }
+        let _card = const card();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        assets.contains(&(
+            "css".to_string(),
+            ".s1ufvr2{padding:var(--space-4)}".to_string()
+        )),
+        "{assets:?}"
+    );
+    assert!(
+        assets.contains(&("css".to_string(), ":root{--space-4:1rem}".to_string())),
+        "{assets:?}"
+    );
+}
+
+#[test]
+fn last_wins_within_a_chain() {
+    // Two paddings, one slot: the class list carries exactly one class — the
+    // later one's.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::style::{ style, space, Style };
+        fun padded(): Style {
+            style().padding(space(4)).padding(space(6))
+        }
+        fun main() {
+            let card = const padded();
+            let classes = card.class_list();
+            print(classes.contains(" "));
+            let six = const style().padding(space(6));
+            print(classes == six.class_list());
+        }
+        main();
+        "#,
+        "false\ntrue\n",
+    );
+}
+
+#[test]
+fn add_merges_per_property_right_wins() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::style::{ style, space, Style, Color };
+        fun base(): Style {
+            style().padding(space(4)).background(Color::gray(50))
+        }
+        fun accent(): Style {
+            style().padding(space(6))
+        }
+        fun main() {
+            let merged = const base() + accent();
+            let expected = const style().padding(space(6)).background(Color::gray(50));
+            print(merged.class_list().len() > 0);
+            print(merged.class_list() == expected.class_list());
+        }
+        main();
+        "#,
+        "true\ntrue\n",
+    );
+}
+
+#[test]
+fn extend_with_override_is_a_property_method_on_a_style() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::style::{ style, space, Style };
+        fun main() {
+            let base = const style().padding(space(4));
+            let bigger = const base.padding(space(6));
+            let six = const style().padding(space(6));
+            print(bigger.class_list() == six.class_list());
+        }
+        main();
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn hover_emits_a_pseudo_rule() {
+    let assets = collected_assets(
+        r#"
+        import std::style::{ style, Style, Color };
+        fun s(): Style {
+            style().hover(style().background(Color::gray(100)))
+        }
+        let _s = const s();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        assets
+            .iter()
+            .any(|(_, line)| line.contains(":hover{background-color:var(--gray-100)}")),
+        "{assets:?}"
+    );
+}
+
+#[test]
+fn breakpoints_wrap_media_and_stack_with_pseudo() {
+    let assets = collected_assets(
+        r#"
+        import std::style::{ style, space, Style };
+        fun s(): Style {
+            style().md(style().hover(style().padding(space(6))))
+        }
+        let _s = const s();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        assets
+            .iter()
+            .any(|(_, line)| line.starts_with("@media (min-width: 768px){.")
+                && line.contains(":hover{padding:var(--space-6)}")),
+        "{assets:?}"
+    );
+}
+
+#[test]
+fn dark_prefixes_the_theme_selector() {
+    let assets = collected_assets(
+        r#"
+        import std::style::{ style, Style, Color };
+        fun s(): Style {
+            style().dark(style().background(Color::gray(900)))
+        }
+        let _s = const s();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        assets
+            .iter()
+            .any(|(_, line)| line.starts_with(":root[data-theme=\"dark\"] .")),
+        "{assets:?}"
+    );
+}
+
+#[test]
+fn an_unknown_scale_step_fails_the_build() {
+    let diagnostics = failure_diagnostics(
+        r#"
+        import std::style::{ style, space, Style };
+        fun s(): Style {
+            style().padding(space(37))
+        }
+        let _s = const s();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("unknown spacing step 37")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn an_unknown_ramp_step_fails_the_build() {
+    let diagnostics = failure_diagnostics(
+        r#"
+        import std::style::{ style, Style, Color };
+        fun s(): Style {
+            style().background(Color::gray(55))
+        }
+        let _s = const s();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("unknown gray step 55")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn runtime_style_construction_is_rejected() {
+    let diagnostics = failure_diagnostics(
+        r#"
+        import std::style::{ style, space, Style };
+        fun main() {
+            let card = style().padding(space(4));
+        }
+        main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("compile-time-only")),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn length_units_render_their_css() {
+    let assets = collected_assets(
+        r#"
+        import std::style::{ style, Style, Length };
+        fun s(): Style {
+            style()
+                .width(Length::px(37))
+                .height(Length::pct(50))
+                .margin(Length::auto())
+                .max_width(Length::var("--w"))
+        }
+        let _s = const s();
+        fun main() {}
+        main();
+        "#,
+    );
+    let lines: Vec<&str> = assets.iter().map(|(_, line)| line.as_str()).collect();
+    assert!(
+        lines.iter().any(|l| l.contains("{width:37px}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("{height:50%}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("{margin:auto}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("{max-width:var(--w)}")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn identical_rules_deduplicate_across_styles() {
+    let assets = collected_assets(
+        r#"
+        import std::style::{ style, space, Style };
+        fun a(): Style {
+            style().padding(space(4))
+        }
+        fun b(): Style {
+            style().padding(space(4))
+        }
+        let _a = const a();
+        let _b = const b();
+        fun main() {}
+        main();
+        "#,
+    );
+    let assembled = vilan_core::const_eval::assemble_assets(&assets);
+    let css = assembled.get("css").expect("css");
+    assert_eq!(
+        css.matches(".s1ufvr2{padding:var(--space-4)}").count(),
+        1,
+        "{css}"
+    );
+}

@@ -1,0 +1,618 @@
+// Typed atomic styles, compiled (proposal/ui-styling.md). A `Style` maps
+// property SLOTS to `(class name, declaration)` pairs; each property method
+// merges one property in — LAST WINS, a record update, never a cascade — and
+// emits the atomic rule through the const-only asset channel, so styles
+// construct inside `const` expressions and the whole stylesheet exists at
+// build time. `+` combines named styles (right side wins per property).
+//
+// Slot keys encode conditions as `media:pseudo:property`; class names are
+// content hashes of `key|declaration` (deterministic across builds — the
+// channel dedups identical rules program-wide, which is what makes the
+// stylesheet plateau). Themeable tokens carry their value as a CSS custom
+// property (`var(--space-4)`) plus the `:root` line declaring it — re-theming
+// and dark mode swap property values with zero recompilation.
+
+import pkg::asset::emit;
+import pkg::io::panic;
+import pkg::map::Map;
+import pkg::operators::Add;
+import pkg::option::Option::{ self, Some, None };
+import pkg::range::Range;
+
+// --- values -------------------------------------------------------------------
+
+// A CSS length: a token's IDENTITY (`var(--space-4)`) or a literal unit.
+// `root` carries the token's `:root` declaration ("" when none).
+struct Length {
+	css: str,
+	root: str,
+}
+
+impl Length {
+	fun px(value: f64): Length {
+		Length { css = i"{value}px", root = "" }
+	}
+
+	fun rem(value: f64): Length {
+		Length { css = i"{value}rem", root = "" }
+	}
+
+	fun pct(value: f64): Length {
+		Length { css = i"{value}%", root = "" }
+	}
+
+	fun auto(): Length {
+		Length { css = "auto", root = "" }
+	}
+
+	// The typed end of the dynamic-value channel: pairs with
+	// `view.style_var(name, signal)` writing the custom property at runtime.
+	fun var(name: str): Length {
+		Length { css = i"var({name})", root = "" }
+	}
+}
+
+// The spacing scale (Tailwind's, rem-based). The scale is data; the
+// validation is const evaluation — an unknown step fails the build.
+fun space(step: i32): Length {
+	let value = match step {
+		0 => "0px",
+		1 => "0.25rem",
+		2 => "0.5rem",
+		3 => "0.75rem",
+		4 => "1rem",
+		5 => "1.25rem",
+		6 => "1.5rem",
+		8 => "2rem",
+		10 => "2.5rem",
+		12 => "3rem",
+		16 => "4rem",
+		20 => "5rem",
+		24 => "6rem",
+		_ => panic(i"unknown spacing step {step} (the scale has 0-6, 8, 10, 12, 16, 20, 24)"),
+	};
+	Length { css = i"var(--space-{step})", root = i":root\{--space-{step}:{value}\}" }
+}
+
+// A CSS color: a ramp token's identity (`var(--gray-50)`) or a literal.
+struct Color {
+	css: str,
+	root: str,
+}
+
+fun ramp(name: str, step: i32, value: str): Color {
+	Color { css = i"var(--{name}-{step})", root = i":root\{--{name}-{step}:{value}\}" }
+}
+
+impl Color {
+	fun white(): Color {
+		Color { css = "#ffffff", root = "" }
+	}
+
+	fun black(): Color {
+		Color { css = "#000000", root = "" }
+	}
+
+	fun transparent(): Color {
+		Color { css = "transparent", root = "" }
+	}
+
+	// The typed arbitrary-value escape.
+	fun hex(value: str): Color {
+		Color { css = value, root = "" }
+	}
+
+	fun gray(step: i32): Color {
+		ramp("gray", step, match step {
+			50 => "#f9fafb",
+			100 => "#f3f4f6",
+			200 => "#e5e7eb",
+			300 => "#d1d5db",
+			400 => "#9ca3af",
+			500 => "#6b7280",
+			600 => "#4b5563",
+			700 => "#374151",
+			800 => "#1f2937",
+			900 => "#111827",
+			_ => panic(i"unknown gray step {step} (ramps run 50, 100-900 by hundreds)"),
+		})
+	}
+
+	fun blue(step: i32): Color {
+		ramp("blue", step, match step {
+			50 => "#eff6ff",
+			100 => "#dbeafe",
+			200 => "#bfdbfe",
+			300 => "#93c5fd",
+			400 => "#60a5fa",
+			500 => "#3b82f6",
+			600 => "#2563eb",
+			700 => "#1d4ed8",
+			800 => "#1e40af",
+			900 => "#1e3a8a",
+			_ => panic(i"unknown blue step {step} (ramps run 50, 100-900 by hundreds)"),
+		})
+	}
+
+	fun red(step: i32): Color {
+		ramp("red", step, match step {
+			50 => "#fef2f2",
+			100 => "#fee2e2",
+			200 => "#fecaca",
+			300 => "#fca5a5",
+			400 => "#f87171",
+			500 => "#ef4444",
+			600 => "#dc2626",
+			700 => "#b91c1c",
+			800 => "#991b1b",
+			900 => "#7f1d1d",
+			_ => panic(i"unknown red step {step} (ramps run 50, 100-900 by hundreds)"),
+		})
+	}
+
+	fun green(step: i32): Color {
+		ramp("green", step, match step {
+			50 => "#f0fdf4",
+			100 => "#dcfce7",
+			200 => "#bbf7d0",
+			300 => "#86efac",
+			400 => "#4ade80",
+			500 => "#22c55e",
+			600 => "#16a34a",
+			700 => "#15803d",
+			800 => "#166534",
+			900 => "#14532d",
+			_ => panic(i"unknown green step {step} (ramps run 50, 100-900 by hundreds)"),
+		})
+	}
+}
+
+// --- keyword properties ---------------------------------------------------------
+
+enum Display {
+	Flex,
+	Grid,
+	Block,
+	Inline,
+	InlineBlock,
+	// `display:none` — named to stay clear of `Option::None` at use sites.
+	Hidden,
+}
+
+enum Position {
+	Static,
+	Relative,
+	Absolute,
+	Fixed,
+	Sticky,
+}
+
+enum FlexDirection {
+	Row,
+	Column,
+	RowReverse,
+	ColumnReverse,
+}
+
+enum AlignItems {
+	Start,
+	Center,
+	End,
+	Stretch,
+	Baseline,
+}
+
+enum JustifyContent {
+	Start,
+	Center,
+	End,
+	Between,
+	Around,
+	Evenly,
+}
+
+enum TextAlign {
+	Left,
+	Center,
+	Right,
+}
+
+enum Cursor {
+	Pointer,
+	Default,
+	Text,
+	NotAllowed,
+}
+
+enum Overflow {
+	Visible,
+	Hidden,
+	Auto,
+	Scroll,
+}
+
+// --- the class-name hash --------------------------------------------------------
+
+// djb2 over the slot key and declaration, base36, prefixed for CSS validity.
+// Content-addressed — never a counter — so builds, caching, and reordering
+// all agree on names (the determinism the asset channel's dedup relies on).
+fun class_hash(text: str): str {
+	mut hash = 5381u32;
+	for index in Range::new(0, text.len()) {
+		// hash * 33 + code, wrapped to 32 bits: the shift and mask are
+		// u32-wrapped; the additions stay exact in between.
+		hash = ((hash << 5u32) + hash + text.code_at(index)) & 0xFFFFFFFFu32;
+	}
+	"s" + encode36(hash)
+}
+
+fun encode36(value: u32): str {
+	let digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+	if value == 0u32 {
+		ret "0";
+	}
+	mut rest = value;
+	mut out = "";
+	// A u32 is at most 7 base36 digits.
+	for _step in Range::new(0, 7) {
+		if rest > 0u32 {
+			let digit = (rest % 36u32).as_i32();
+			out = digits.substring(digit, digit + 1) + out;
+			rest = rest / 36u32;
+		}
+	}
+	out
+}
+
+// --- Style ----------------------------------------------------------------------
+
+struct Style {
+	// Slot key `media:pseudo:property` -> (class name, declaration). The
+	// declaration is kept so condition combinators can re-emit it under
+	// their selector.
+	rules: Map<str, (str, str)>,
+}
+
+// Opens a builder chain. Property methods reach the const-only asset
+// channel, so construction belongs inside a `const` expression; selection
+// and merging (`+`, `class_list`) are ordinary runtime code.
+fun style(): Style {
+	Style { rules = Map::new() }
+}
+
+fun render_rule(media: str, pseudo: str, class: str, declaration: str): str {
+	mut selector = "." + class;
+	if pseudo == "dark" {
+		selector = ":root[data-theme=\"dark\"] " + selector;
+	} else if pseudo != "" {
+		selector = selector + ":" + pseudo;
+	}
+	mut rule = selector + "{" + declaration + "}";
+	if media != "" {
+		rule = "@media (min-width: " + media + "){" + rule + "}";
+	}
+	rule
+}
+
+impl Style {
+	// The one chokepoint: hash the slot, emit the atomic rule, insert last-wins.
+	fun rule(self, media: str, pseudo: str, property: str, declaration: str): Style {
+		let key = media + ":" + pseudo + ":" + property;
+		let class = class_hash(key + "|" + declaration);
+		emit("css", render_rule(media, pseudo, class, declaration));
+		mut rules = self.rules;
+		rules.insert(key, (class, declaration));
+		Style { rules = rules }
+	}
+
+	// The escape hatch: any property, any value, atomic like the rest.
+	fun raw(self, property: str, value: str): Style {
+		self.rule("", "", property, property + ":" + value)
+	}
+
+	fun with_length(self, property: str, value: Length): Style {
+		if value.root != "" {
+			emit("css", value.root);
+		}
+		self.rule("", "", property, property + ":" + value.css)
+	}
+
+	fun with_color(self, property: str, value: Color): Style {
+		if value.root != "" {
+			emit("css", value.root);
+		}
+		self.rule("", "", property, property + ":" + value.css)
+	}
+
+	// --- layout ---
+
+	fun display(self, value: Display): Style {
+		self.raw("display", match value {
+			Display::Flex => "flex",
+			Display::Grid => "grid",
+			Display::Block => "block",
+			Display::Inline => "inline",
+			Display::InlineBlock => "inline-block",
+			Display::Hidden => "none",
+		})
+	}
+
+	fun position(self, value: Position): Style {
+		self.raw("position", match value {
+			Position::Static => "static",
+			Position::Relative => "relative",
+			Position::Absolute => "absolute",
+			Position::Fixed => "fixed",
+			Position::Sticky => "sticky",
+		})
+	}
+
+	fun flex_direction(self, value: FlexDirection): Style {
+		self.raw("flex-direction", match value {
+			FlexDirection::Row => "row",
+			FlexDirection::Column => "column",
+			FlexDirection::RowReverse => "row-reverse",
+			FlexDirection::ColumnReverse => "column-reverse",
+		})
+	}
+
+	fun align_items(self, value: AlignItems): Style {
+		self.raw("align-items", match value {
+			AlignItems::Start => "flex-start",
+			AlignItems::Center => "center",
+			AlignItems::End => "flex-end",
+			AlignItems::Stretch => "stretch",
+			AlignItems::Baseline => "baseline",
+		})
+	}
+
+	fun justify_content(self, value: JustifyContent): Style {
+		self.raw("justify-content", match value {
+			JustifyContent::Start => "flex-start",
+			JustifyContent::Center => "center",
+			JustifyContent::End => "flex-end",
+			JustifyContent::Between => "space-between",
+			JustifyContent::Around => "space-around",
+			JustifyContent::Evenly => "space-evenly",
+		})
+	}
+
+	fun gap(self, value: Length): Style {
+		self.with_length("gap", value)
+	}
+
+	// --- box ---
+
+	fun padding(self, value: Length): Style {
+		self.with_length("padding", value)
+	}
+
+	fun padding_x(self, value: Length): Style {
+		self.with_length("padding-left", value).with_length("padding-right", value)
+	}
+
+	fun padding_y(self, value: Length): Style {
+		self.with_length("padding-top", value).with_length("padding-bottom", value)
+	}
+
+	fun margin(self, value: Length): Style {
+		self.with_length("margin", value)
+	}
+
+	fun margin_x(self, value: Length): Style {
+		self.with_length("margin-left", value).with_length("margin-right", value)
+	}
+
+	fun margin_y(self, value: Length): Style {
+		self.with_length("margin-top", value).with_length("margin-bottom", value)
+	}
+
+	fun width(self, value: Length): Style {
+		self.with_length("width", value)
+	}
+
+	fun height(self, value: Length): Style {
+		self.with_length("height", value)
+	}
+
+	fun max_width(self, value: Length): Style {
+		self.with_length("max-width", value)
+	}
+
+	fun min_height(self, value: Length): Style {
+		self.with_length("min-height", value)
+	}
+
+	fun radius(self, value: Length): Style {
+		self.with_length("border-radius", value)
+	}
+
+	fun border(self, width: Length, color: Color): Style {
+		if width.root != "" {
+			emit("css", width.root);
+		}
+		if color.root != "" {
+			emit("css", color.root);
+		}
+		self.rule("", "", "border", i"border:{width.css} solid {color.css}")
+	}
+
+	fun overflow(self, value: Overflow): Style {
+		self.raw("overflow", match value {
+			Overflow::Visible => "visible",
+			Overflow::Hidden => "hidden",
+			Overflow::Auto => "auto",
+			Overflow::Scroll => "scroll",
+		})
+	}
+
+	// --- color & text ---
+
+	fun background(self, value: Color): Style {
+		self.with_color("background-color", value)
+	}
+
+	fun color(self, value: Color): Style {
+		self.with_color("color", value)
+	}
+
+	fun font_size(self, value: Length): Style {
+		self.with_length("font-size", value)
+	}
+
+	fun font_weight(self, value: i32): Style {
+		self.raw("font-weight", i"{value}")
+	}
+
+	fun line_height(self, value: f64): Style {
+		self.raw("line-height", i"{value}")
+	}
+
+	fun text_align(self, value: TextAlign): Style {
+		self.raw("text-align", match value {
+			TextAlign::Left => "left",
+			TextAlign::Center => "center",
+			TextAlign::Right => "right",
+		})
+	}
+
+	fun cursor(self, value: Cursor): Style {
+		self.raw("cursor", match value {
+			Cursor::Pointer => "pointer",
+			Cursor::Default => "default",
+			Cursor::Text => "text",
+			Cursor::NotAllowed => "not-allowed",
+		})
+	}
+
+	fun opacity(self, value: f64): Style {
+		self.raw("opacity", i"{value}")
+	}
+
+	fun transition(self, value: str): Style {
+		self.raw("transition", value)
+	}
+
+	// --- conditions ---
+	// A condition takes a Style built by its own chain and re-emits each of
+	// its properties under the condition's selector. (The inner chain's base
+	// rules also emit — deduplicated, possibly unused: the recorded
+	// over-approximation, shared with unused styles generally.)
+
+	fun hover(self, inner: Style): Style {
+		self.pseudo("hover", inner)
+	}
+
+	fun focus(self, inner: Style): Style {
+		self.pseudo("focus", inner)
+	}
+
+	fun active(self, inner: Style): Style {
+		self.pseudo("active", inner)
+	}
+
+	fun disabled(self, inner: Style): Style {
+		self.pseudo("disabled", inner)
+	}
+
+	fun first(self, inner: Style): Style {
+		self.pseudo("first-child", inner)
+	}
+
+	fun last(self, inner: Style): Style {
+		self.pseudo("last-child", inner)
+	}
+
+	// Dark mode: explicit `:root[data-theme="dark"]` control (SSR-friendly);
+	// combining with pseudo/media in one slot is deferred.
+	fun dark(self, inner: Style): Style {
+		self.pseudo("dark", inner)
+	}
+
+	fun pseudo(self, name: str, inner: Style): Style {
+		mut out = self;
+		for key in inner.rules.keys() {
+			match inner.rules.get(key) {
+				Some(let entry) => {
+					let (_class, declaration) = entry;
+					let parts = key.split(":");
+					if parts[0] != "" {
+						panic(i"nest conditions as md(hover(..)) — {name} cannot wrap a media-conditioned style");
+					}
+					if parts[1] != "" {
+						panic(i"{name} cannot wrap an already pseudo-conditioned style");
+					}
+					out = out.rule("", name, parts[2], declaration);
+				}
+				None => {}
+			}
+		}
+		out
+	}
+
+	// Breakpoints (Tailwind's): min-width media queries. Media may wrap a
+	// pseudo-conditioned style (`md(hover(..))`), never another media.
+	fun sm(self, inner: Style): Style {
+		self.media("640px", inner)
+	}
+
+	fun md(self, inner: Style): Style {
+		self.media("768px", inner)
+	}
+
+	fun lg(self, inner: Style): Style {
+		self.media("1024px", inner)
+	}
+
+	fun xl(self, inner: Style): Style {
+		self.media("1280px", inner)
+	}
+
+	fun media(self, min_width: str, inner: Style): Style {
+		mut out = self;
+		for key in inner.rules.keys() {
+			match inner.rules.get(key) {
+				Some(let entry) => {
+					let (_class, declaration) = entry;
+					let parts = key.split(":");
+					if parts[0] != "" {
+						panic("a breakpoint cannot wrap another media-conditioned style");
+					}
+					out = out.rule(min_width, parts[1], parts[2], declaration);
+				}
+				None => {}
+			}
+		}
+		out
+	}
+
+	// The rendered class attribute: every slot's class, space-joined.
+	// Runtime-legal (no emission) — selection and merging stay ordinary code.
+	fun class_list(self): str {
+		mut out = "";
+		for entry in self.rules.values() {
+			let (class, _declaration) = entry;
+			if out == "" {
+				out = class;
+			} else {
+				out = out + " " + class;
+			}
+		}
+		out
+	}
+}
+
+// `+` combines NAMED styles: per-property, right side wins. Runtime-legal —
+// the rules were already emitted when each side was constructed.
+impl Style with Add {
+	fun add(self, b: Style): Style {
+		mut rules = self.rules;
+		for key in b.rules.keys() {
+			match b.rules.get(key) {
+				Some(let entry) => rules.insert(key, entry),
+				None => {}
+			}
+		}
+		Style { rules = rules }
+	}
+}

@@ -39,6 +39,12 @@ impl Element {
 	[extern(method, "setAttribute")]
 	external fun set_attribute(self, name: str, value: str): void;
 
+	// Sets a CSS custom property (`element.style.setProperty(name, value)`) —
+	// the DOM end of the styling system's dynamic-value channel
+	// (proposal/ui-styling.md §2.1).
+	[extern(method, "style.setProperty")]
+	external fun set_style_property(self, name: str, value: str): void;
+
 	// Appends `child` as the element's last child.
 	[extern(method, "appendChild")]
 	external fun append(self, child: Element): void;

@@ -1,0 +1,23 @@
+import std::print;
+import std::style::{ style, space, Style, Color, Length, Display };
+
+// Typed atomic styles (proposal/ui-styling.md): construction inside `const`
+// via the builder chain; atomic rules and theme vars flow through the asset
+// channel into the style.css golden beside this one. Selection and merging
+// (`+`, `class_list`) are ordinary runtime code over already-emitted rules.
+
+fun card_style(): Style {
+	style().display(Display::Flex).padding(space(4)).background(Color::gray(50)).hover(style().background(Color::gray(100)))
+}
+
+fun main() {
+	let card = const card_style();
+	let active = const style().padding(space(6));
+	print(card.class_list());
+	print((card + active).class_list());
+
+	// Arbitrary values mint their own atomic class — the escape, not the norm.
+	let wide = const style().width(Length::px(37));
+	print(wide.class_list());
+}
+main();
