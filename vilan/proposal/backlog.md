@@ -123,8 +123,9 @@ have gaps.
 8. **UI styling — typed atomic styles, compiled** (L; `proposal/ui-styling.md`,
    REVISED 2026-07-10 — **expression-flavored, rides `const` (G2); syntax settled**) —
    the last big hole in the UI model. Styles are typed values built by ordinary
-   const-evaluated property functions (`let card = const display(Display::Flex) +
-   padding(space(4)) + hover(background(gray(100)));`) lowered at compile time to
+   a const-evaluated builder chain (`let card = const style().display(Display::Flex)
+   .padding(space(4)).hover(style().background(gray(100)));` — one import,
+   `.`-completion over the property surface; `+` combines named styles) lowered to
    deduplicated atomic CSS through the const-eval **asset channel**; merge is `+`
    (`impl Style with Add`) with per-property last-wins — record semantics, so
    specificity fights are structurally impossible; const merges fold, runtime merges

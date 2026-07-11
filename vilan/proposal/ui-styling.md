@@ -34,25 +34,31 @@ CSS**; merge is value semantics, not cascade semantics.
 ## 1. The model
 
 ```vilan
-import std::ui::style::{ Style, display, padding, background, color, hover, md,
-    space, gray, blue, white, Display };
+import std::ui::style::{ style, space, gray, blue, white, Display };
 
-let card = const display(Display::Flex)
-    + padding(space(4))
-    + background(gray(50))
-    + hover(background(gray(100)));
+let card = const style()
+    .display(Display::Flex)
+    .padding(space(4))
+    .background(gray(50))
+    .hover(style().background(gray(100)));
 
-let active = const padding(space(6));
+let active = const style().padding(space(6));
 
 view.class(card + active);   // padding resolves to space(6) — LAST WINS, always
 ```
 
-- **Property functions are the primitive.** `padding(space(4))` is an
-  ordinary typed function returning a single-property `Style`; a style *is* a
-  merge of single-property styles, so construction and composition are the
-  same operation: `+` (`impl Style with Add`), per-property, right side wins.
-  Method sugar (`card.padding(..)` ≡ `card + padding(..)`) falls out of an
-  ordinary impl block if wanted — no new machinery either way.
+- **The builder chain is the construction surface** (settled with the user):
+  `style()` opens a chain; each property method merges one property in, last
+  wins — so the per-property map algebra is unchanged underneath, and calling
+  a property method on an EXISTING style is extend-with-override
+  (`base.background(blue(600))`). Chosen over free property functions for
+  vilan-specific reasons: one `style` import instead of a per-property list
+  that grows and collides (`color`, `display` as user locals), and `.`-
+  completion over the whole property surface — the discoverability the
+  expression-flavored pivot was for. `+` (`impl Style with Add`) remains the
+  combinator for NAMED styles (variants). Implementation note: `vilan fmt`
+  should split (or preserve) multiline chains — check when the std module
+  lands.
 - **A `Style` value** is a map from property-slot → atomic class name. Each
   `(property, value, condition)` triple lowers to one CSS rule with a
   **content-hashed class name** (never a counter — deterministic across
@@ -71,8 +77,8 @@ view.class(card + active);   // padding resolves to space(6) — LAST WINS, alwa
 - **Variants are just code** — CVA dissolves into the language:
 
   ```vilan
-  let primary = const base + background(blue(600)) + color(white);
-  let danger = const base + background(red(600)) + color(white);
+  let primary = const base.background(blue(600)).color(white);
+  let danger = const base.background(red(600)).color(white);
 
   fun button_style(kind: Kind): Style {
       match kind {
@@ -118,15 +124,16 @@ deferred.
 Condition combinators wrap a `Style`, lowering each wrapped property to an
 atomic rule with the condition baked in:
 
-- **Pseudo**: `hover(s)`, `focus(s)`, `active(s)`, `disabled(s)`, `first(s)`,
-  `last(s)` → `.hB7:hover { .. }`.
-- **Breakpoints**: `md(s)` → `@media (min-width: 768px) { .. }` (values from
-  §2.1's structural tokens).
-- **Dark mode**: `dark(s)` → `:root[data-theme="dark"] .dC9 { .. }` —
+- **Pseudo**: `.hover(s)`, `.focus(s)`, `.active(s)`, `.disabled(s)`,
+  `.first(s)`, `.last(s)` → `.hB7:hover { .. }`.
+- **Breakpoints**: `.md(s)` → `@media (min-width: 768px) { .. }` (values
+  from §2.1's structural tokens).
+- **Dark mode**: `.dark(s)` → `:root[data-theme="dark"] .dC9 { .. }` —
   explicit, SSR-friendly control; an auto `prefers-color-scheme` mode is a
   recorded refinement.
-- Composition: one pseudo + one media may stack (`md(hover(s))`); deeper
-  nesting deferred.
+- Condition methods take a `Style` built by its own chain
+  (`.hover(style().background(..))`); one pseudo + one media may stack;
+  deeper nesting deferred.
 
 ### 2.3 The escape hatch
 
@@ -205,7 +212,8 @@ our compiler — the wrong home for someone else's database.
 
 - The v1 property-function list (write out the ~60 in slice 3's design note).
 - `Style` equality/hashing (memoized class strings suggest yes).
-- Whether method sugar ships in v1 or waits for demand.
+- ~~Whether method sugar ships in v1~~ — settled: the builder chain IS the
+  surface; free property functions are not shipped.
 - ~~Naming convention for style consts~~ — dissolved by the expression-form
   `const`: styles are ordinary `let` bindings, no special convention needed.
 
