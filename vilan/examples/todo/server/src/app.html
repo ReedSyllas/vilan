@@ -3,63 +3,10 @@
 <head>
 	<meta charset="utf-8">
 	<title>Vilan todos</title>
-	<style>
-		body {
-			font: 16px/1.5 system-ui, sans-serif;
-			max-width: 32rem;
-			margin: 2rem auto;
-		}
-
-		section {
-			margin-block: 2rem;
-		}
-
-		button {
-			margin-right: 0.25rem;
-		}
-
-		.todos .row {
-			display: flex;
-			gap: 0.5rem;
-		}
-
-		.todos ul {
-			list-style: none;
-			padding: 0;
-		}
-
-		.todos li {
-			display: flex;
-			gap: 0.5rem;
-			align-items: center;
-		}
-
-		.todos li.done span {
-			text-decoration: line-through;
-			opacity: 0.5;
-		}
-
-		.todos .remove {
-			margin-left: auto;
-		}
-
-		.todos .filters .active {
-			font-weight: bold;
-		}
-
-		.todos .empty {
-			opacity: 0.6;
-		}
-
-		.hint {
-			opacity: 0.6;
-			font-size: 0.875rem;
-		}
-	</style>
-</head>
+	<link rel="stylesheet" href="/client.css"></head>
 <body>
 	<div id="app"></div>
-	<p class="hint">The list lives on the server — open this page in a second tab and watch them stay in sync.</p>
+	<p style="opacity:0.6;font-size:0.875rem">The list lives on the server — open this page in a second tab and watch them stay in sync.</p>
 	<script type="module" src="/client.js"></script>
 </body>
 </html>

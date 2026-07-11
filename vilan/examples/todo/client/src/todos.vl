@@ -13,7 +13,53 @@ import std::reactive::{ Signal, combine };
 import std::display::format;
 import std::result::Result::{ self, Ok, Err };
 import std::rpc::{ SocketTransport, RpcError };
+import std::style::{ style, space, Style, Color, Length, Display, AlignItems, Cursor };
 import common::{ Todo, TodoClient };
+
+// The styles (proposal/ui-styling.md): typed values built inside `const`, so
+// every rule below lands in `dist/client.css` at BUILD time — app.html's old
+// handwritten <style> block is gone. Atomic classes dedup across components;
+// `raw(..)` is the escape hatch for the long tail (font-family, list-style).
+
+let shell = const style()
+	.max_width(Length::rem(32))
+	.margin_x(Length::auto())
+	.padding_x(space(4))
+	.padding_y(space(8))
+	.font_size(Length::px(16))
+	.line_height(1.5)
+	.raw("font-family", "system-ui, sans-serif");
+
+let row = const style()
+	.display(Display::Flex)
+	.gap(space(2));
+
+let list = const style()
+	.padding(space(0))
+	.raw("list-style", "none");
+
+let item = const style()
+	.display(Display::Flex)
+	.gap(space(2))
+	.align_items(AlignItems::Center)
+	.padding_y(space(1));
+
+let done_label = const style()
+	.opacity(0.5)
+	.raw("text-decoration", "line-through");
+
+let button = const style()
+	.padding_x(space(2))
+	.padding_y(space(1))
+	.radius(space(1))
+	.border(Length::px(1), Color::gray(300))
+	.background(Color::gray(50))
+	.cursor(Cursor::Pointer)
+	.hover(style().background(Color::gray(100)));
+
+let remove_button = const button + style().raw("margin-left", "auto");
+
+let empty_note = const style().opacity(0.6);
 
 fun todos(client: TodoClient<SocketTransport>, items: Signal<List<Todo>>): View {
 	let draft = Signal::new("");
@@ -51,45 +97,52 @@ fun todos(client: TodoClient<SocketTransport>, items: Signal<List<Todo>>): View 
 	};
 
 	view("section")
-		.class("todos")
+		.styled(shell)
 		.child(view("h2").text("Todos"))
 		.child(
 			view("div")
-				.class("row")
+				.styled(row)
 				// `bind_value` is two-way: the input shows `draft` and writes it on input.
 				.child(view("input").attr("placeholder", "What needs doing?").bind_value(draft))
-				.child(view("button").text("Add").on("click", add))
+				.child(view("button").styled(button).text("Add").on("click", add))
 		)
 		.child(view("p").bind_text(remaining.map(|n| format(n) + " remaining")))
 		.child(
 			view("div")
-				.class("filters")
+				.styled(row)
 				.child(filter_button(filter, "all", "All"))
 				.child(filter_button(filter, "active", "Active"))
 				.child(filter_button(filter, "done", "Done"))
 		)
 		// `bind_each` renders one row per element and re-renders as `visible`
 		// changes — whether this tab caused the change or another one did.
-		.child(view("ul").bind_each(visible, |todo| todo.id, |todo| todo_row(client, todo)))
-		.child(view("p").class("empty").text("Nothing here 🎉").show(visible.map(|list| list.len() == 0)))
+		.child(view("ul").styled(list).bind_each(visible, |todo| todo.id, |todo| todo_row(client, todo)))
+		.child(view("p").styled(empty_note).text("Nothing here 🎉").show(visible.map(|list| list.len() == 0)))
 }
 
-// A filter button highlights itself when its value is the active filter.
+// A filter button highlights itself when its value is the active filter —
+// two const styles, selected at runtime: `bind_class` over their class lists
+// is the recorded composition for signal-driven style switching.
 fun filter_button(filter: Signal<str>, value: str, label: str): View {
+	let active = const button + style().font_weight(700).border(Length::px(1), Color::gray(700));
+	let base_classes = button.class_list();
+	let active_classes = active.class_list();
 	view("button")
 		.text(label)
-		.bind_class(filter.map(|current| if current == value { "active" } else { "" }))
+		.bind_class(filter.map(|current| if current == value { active_classes } else { base_classes }))
 		.on("click", || filter.set(value))
 }
 
 // One row — a snapshot from `bind_each`; any change to the list re-renders it.
 // The checkbox reflects `done` and its edits go through the client stub.
 fun todo_row(client: TodoClient<SocketTransport>, todo: Todo): View {
+	// The done state is a VARIANT: plain `if` over const styles (CVA-free).
+	let label = view("span").text(todo.label);
 	view("li")
-		.class(if todo.done { "done" } else { "" })
+		.styled(item)
 		.child(checkbox(client, todo))
-		.child(view("span").text(todo.label))
-		.child(view("button").class("remove").text("✕").on("click", || report(client.remove(todo.id))))
+		.child(if todo.done { label.styled(done_label) } else { label })
+		.child(view("button").styled(remove_button).text("✕").on("click", || report(client.remove(todo.id))))
 }
 
 fun checkbox(client: TodoClient<SocketTransport>, todo: Todo): View {
