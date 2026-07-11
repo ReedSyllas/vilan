@@ -121,21 +121,25 @@ have gaps.
      model, P6 transport (data fetching), A5 boundary ownership.
 
 8. **UI styling — typed atomic styles, compiled** (L; `proposal/ui-styling.md`,
-   2026-07-10; **syntax refinement with the user is the next step**, then slice 1) —
-   the last big hole in the UI model. Styles are typed values (`style { padding =
-   space.4, hover = style { .. } }`) lowered at compile time to deduplicated atomic
-   CSS through a new general **asset channel** (`[asset("css")]` constants collected,
-   deduped, deterministically ordered, written beside the `.js` — the same channel A7
-   wants for critical CSS); merge is `+` with per-property last-wins (record
-   semantics — specificity fights structurally impossible; static merges fold,
-   dynamic ones are a map union, never string parsing); variants are plain
-   `match`/functions (CVA dissolves); tokens lower to **CSS custom properties** so
-   the macro needs identities not values — theming/dark-mode = swapping property
-   values, and signal-driven dynamic values ride the same `var()` channel. Proving
-   ground: the macro engine (`style` macro block in `std::ui::style`); promotion to
-   first-class syntax if DSL diagnostics demand it. Tailwind itself stays a
-   documented SIDECAR bridge (its scanner just reads `**/*.vl` text), not the
-   foundation. Small separable spin-off recorded below (A9).
+   REVISED 2026-07-10 — **expression-flavored, rides `const` (G2); syntax settled**) —
+   the last big hole in the UI model. Styles are typed values built by ordinary
+   const-evaluated property functions (`const CARD = display(Display::Flex) +
+   padding(space(4)) + hover(background(gray(100)));`) lowered at compile time to
+   deduplicated atomic CSS through the const-eval **asset channel**; merge is `+`
+   (`impl Style with Add`) with per-property last-wins — record semantics, so
+   specificity fights are structurally impossible; const merges fold, runtime merges
+   are a map union, never string parsing. Variants are plain `match` over const
+   styles (CVA dissolves), governed by the load-bearing **construct-in-const rule**:
+   property functions bottom out in const-only `asset::emit`, so a runtime
+   construction is a STATIC error and every variant's CSS exists at build time.
+   Tokens: themeable ones (space/color/type) lower to CSS custom properties
+   (re-theming and dark mode = property swaps; signal-driven values ride `var()`);
+   structural ones (breakpoints) resolve to literals at const time — the first
+   draft's config knob dissolved. The macro-DSL first draft is superseded (git
+   history keeps it): the expression form gets hover/go-to-def/typed diagnostics
+   for free and composes with functions/impls natively. Tailwind stays a documented
+   SIDECAR bridge, not the foundation. Order: G2 slices 1–2, then std::ui::style
+   (slices 3–5), A7-entangled tail (critical CSS, dead-style elimination) later.
 
 9. **`vilan.toml [build] run` hooks** (S; spun off A8) — run external commands
    alongside `vilan build` / `--watch` (the Tailwind-bridge runner, asset pipelines,
@@ -524,6 +528,24 @@ have gaps.
    explicitly-beyond-v1 list (semantic queries, quasi-quotation, compiled host,
    on-disk caching, batched parsing), each recorded with its trigger, plus the
    derive-name registration decoupling (deferred to the first user derive needing it).
+
+2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10;
+   the styling system A8 is the forcing use case, independently motivated) — `const
+   NAME = expr;` evaluates the initializer at compile time with THE macro
+   interpreter (one evaluator, no second dialect) and serializes the resulting
+   plain-data value into the emitted JS. **No `const fn` coloring** — the
+   interpreter is total over the pure language (the Zig-shaped design; Rust's
+   annotation burden avoided); reaching an unavailable capability, panicking, or
+   producing non-data (closure/view/Shared) is a spanned static error at the
+   binding. One new capability bit: **const-only functions** (std-internal, v1),
+   enforced by call-graph reachability — the first is `std::asset::emit(kind,
+   line)`, the **asset channel**: compile-time-accumulated build outputs,
+   line-deduplicated, deterministically ordered, written beside the `.js` (CSS for
+   A8; critical CSS for A7; any codegen later). Recorded v1 bounds: no const
+   generics, binding-form only, assets emitted regardless of F6 liveness
+   (liveness-tied emission = dead-style elimination, recorded). General payoff:
+   lookup tables, precomputed scales, wire hashes (`contract_hash` de-magicked),
+   parsed static config — all zero-cost at runtime.
 
 ---
 
