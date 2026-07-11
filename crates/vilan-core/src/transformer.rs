@@ -141,6 +141,26 @@ fn unescape_string(raw: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+/// The `__`-named free externs whose implementations live in the helper table:
+/// a std module binds `[extern("__name")]`, and transforming a call through
+/// one marks its helper for emission. Returns the canonical `'static` name.
+fn extern_helper(symbol: &str) -> Option<&'static str> {
+    const EXTERN_HELPERS: &[&str] = &[
+        "__hmac_sha512",
+        "__pbkdf2_sha512",
+        "__random_bytes",
+        "__db_run",
+        "__db_all",
+        "__db_get",
+        "__db_column",
+        "__db_is_null",
+        "__local_get",
+        "__session_get",
+        "__router_path",
+    ];
+    EXTERN_HELPERS.iter().find(|name| **name == symbol).copied()
+}
+
 /// The JS source for a runtime helper an intrinsic call needs. `__scan` reads
 /// all of stdin once and hands out one line per call; `__parse_i32` returns the
 /// `Option<i32>` array form (`[0, n]` = `Some`, `[1]` = `None`).
@@ -247,6 +267,9 @@ fn helper_source(name: &str) -> &'static str {
         "__session_get" => {
             "function __session_get(key) {\n\treturn sessionStorage.getItem(key) ?? \"\";\n}"
         }
+        // Router glue (std::router): `location.pathname` is a global property,
+        // which the function-extern form can't address directly.
+        "__router_path" => "function __router_path() {\n\treturn location.pathname;\n}",
         // SQLite glue (std::db): parameter spreads and row/column reads the
         // extern binding forms can't express directly.
         "__db_run" => {
@@ -2332,41 +2355,11 @@ impl<'src> Transformer<'src> {
                         .insert(symbol.to_string());
                 }
                 // A `__`-named free extern is a runtime helper whose source
-                // lives in the helper table (the WebCrypto glue —
-                // `crypto.subtle` wants option-object shapes vilan values
-                // can't express, so each operation is one helper).
-                match symbol {
-                    "__hmac_sha512" => {
-                        self.used_helpers.insert("__hmac_sha512");
-                    }
-                    "__pbkdf2_sha512" => {
-                        self.used_helpers.insert("__pbkdf2_sha512");
-                    }
-                    "__random_bytes" => {
-                        self.used_helpers.insert("__random_bytes");
-                    }
-                    "__db_run" => {
-                        self.used_helpers.insert("__db_run");
-                    }
-                    "__db_all" => {
-                        self.used_helpers.insert("__db_all");
-                    }
-                    "__db_get" => {
-                        self.used_helpers.insert("__db_get");
-                    }
-                    "__db_column" => {
-                        self.used_helpers.insert("__db_column");
-                    }
-                    "__db_is_null" => {
-                        self.used_helpers.insert("__db_is_null");
-                    }
-                    "__local_get" => {
-                        self.used_helpers.insert("__local_get");
-                    }
-                    "__session_get" => {
-                        self.used_helpers.insert("__session_get");
-                    }
-                    _ => {}
+                // lives in the helper table (glue for shapes the extern binding
+                // forms can't express — option-object arguments, `??`
+                // flattening, global property reads).
+                if let Some(helper) = extern_helper(symbol) {
+                    self.used_helpers.insert(helper);
                 }
                 js::Node::Call(Box::new(js::Node::Local(symbol.to_string())), args)
             }

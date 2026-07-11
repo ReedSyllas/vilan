@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Vilan router</title>
+		<style>
+			body { font: 16px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; }
+			nav a { margin-right: 0.75rem; }
+			.path { color: #888; font-family: monospace; }
+		</style>
+	</head>
+	<body>
+		<div id="app"></div>
+		<!-- Build with `vilan build .`, then serve THIS DIRECTORY with a
+		     history-API fallback (every path returns index.html), e.g.:
+		         npx serve --single .
+		     A plain file server 404s on /items/2 after a reload — that part is
+		     the server's job, not the router's. -->
+		<script type="module" src="app.js"></script>
+	</body>
+</html>

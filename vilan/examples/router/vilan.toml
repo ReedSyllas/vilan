@@ -1,0 +1,8 @@
+# A client-side routed app on `std::router` (proposal/router.md). As a
+# `browser`-target package, `vilan build .` emits `app.js` next to the entry;
+# serve `index.html` from this directory.
+[package]
+name = "router_demo"
+root = "."
+entry = "app.vl"
+target = "browser"

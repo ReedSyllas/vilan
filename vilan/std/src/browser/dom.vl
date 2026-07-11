@@ -73,4 +73,43 @@ impl Element {
 	// Registers `handler` to run on `event` (e.g. `"click"`, `"input"`).
 	[extern(method, "addEventListener")]
 	external fun on(self, event: str, handler: || void): void;
+
+	// Like `on`, but the handler receives the `Event` — for `prevent_default`,
+	// modifier keys, and anything else on the event object. The same
+	// `addEventListener` binding; the host always passes the event, `on` just
+	// ignores it.
+	[extern(method, "addEventListener")]
+	external fun on_event(self, event: str, handler: |Event| void): void;
+}
+
+// A DOM event, as delivered to an `on_event` handler — an opaque handle like
+// `Element`.
+external struct Event;
+
+impl Event {
+	// Cancels the event's default action (`event.preventDefault()`) — e.g. stop
+	// an `<a>` from performing a full-page navigation.
+	[extern(method, "preventDefault")]
+	external fun prevent_default(self): void;
+
+	// The mouse button (`event.button`): 0 is the main button.
+	[extern(get, "button")]
+	external fun button(self): i32;
+
+	// Modifier-key state at dispatch time.
+	[extern(get, "metaKey")]
+	external fun meta_key(self): bool;
+
+	[extern(get, "ctrlKey")]
+	external fun ctrl_key(self): bool;
+
+	[extern(get, "shiftKey")]
+	external fun shift_key(self): bool;
+
+	[extern(get, "altKey")]
+	external fun alt_key(self): bool;
+
+	// The key for a keyboard event (`event.key`): `"Enter"`, `"Escape"`, `"a"`, ….
+	[extern(get, "key")]
+	external fun key(self): str;
 }

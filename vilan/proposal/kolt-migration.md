@@ -64,10 +64,18 @@ migration deletes these subsystems rather than porting them:
    Server-layer only, per the architecture principle — which vilan enforces.
    Kolt's persistence is young (`:memory:`, schema-in-code), so a minimal
    exec/query/prepare surface suffices; no ORM ambitions.
-3. **A10 — `std::ui` router.** History-API routing with params and nested
-   layouts (`layout_main` / `layout_workspace` are the target shapes;
-   `/w/ORG/WS/*` the target scheme), a link component, and a
-   current-route signal composing with `show`/`bind_*`.
+3. ~~**A10 — `std::ui` router.**~~ — **SHIPPED 2026-07-11**
+   (`proposal/router.md`): the enum-route model — routes are nested ENUMS
+   mirroring nested layouts (`layout_main`/`layout_workspace` become plain
+   functions matching them; `/w/{org}/{ws}/..` is a variant payload), with a
+   hand-written `parse`/`href` pair over `segments`. `std::router`
+   (`current_path`/`navigate`/`link` over `Routable`), `View.swap` (the
+   general dynamic-subtree boundary), `View.on_event` + `std::dom::Event`.
+   Runtime semantics pinned headless (`crates/vilan-cli/tests/router.rs`, a
+   DOM/history stub under node) + compile pins. Findings: B19 (a bound
+   checked against an unresolved chained generic — annotate the intermediate
+   binding), B20 (a named fn doesn't coerce to a closure parameter —
+   eta-expand).
 4. **A11 — web storage externs.** `localStorage` get/set/remove on the dom
    layer (the client-side JWT home), `sessionStorage` alongside.
 5. **K5 — `std::time`.** Minimal v1: epoch millis `now()` (impure host

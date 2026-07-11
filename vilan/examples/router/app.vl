@@ -1,0 +1,130 @@
+// A routed app (`std::router`, proposal/router.md): routes are ENUMS — the
+// URL is just a wire format for a typed value. Nested enums mirror nested
+// layouts, `parse`/`href` are an ordinary inverse pair, `link` takes a route
+// VALUE, and the page body swaps on the derived route signal.
+
+import std::ui::{ View, view, mount_root };
+import std::reactive::Signal;
+import std::router::{ current_path, segments, link, Routable };
+import std::option::Option::{ self, Some, None };
+import std::range::Range;
+
+// === The route space =========================================================
+
+[derive(PartialEq)]
+enum Route {
+	Home,              // /
+	Items(ItemsRoute), // /items/..  (a nested layout with its own route space)
+	NotFound,
+}
+
+[derive(PartialEq)]
+enum ItemsRoute {
+	List,        // /items
+	Detail(i32), // /items/{id} — the param is a typed payload, not a string
+}
+
+fun parse(path: str): Route {
+	let parts = segments(path);
+	match parts.len() {
+		0 => Route::Home,
+		_ => {
+			if parts[0] == "items" {
+				Route::Items(parse_items(parts))
+			} else {
+				Route::NotFound
+			}
+		},
+	}
+}
+
+fun parse_items(parts: List<str>): ItemsRoute {
+	if parts.len() == 1 {
+		ItemsRoute::List
+	} else {
+		match parts[1].parse_i32() {
+			Some(let id) => ItemsRoute::Detail(id),
+			None => ItemsRoute::List,
+		}
+	}
+}
+
+fun href(route: Route): str {
+	match route {
+		Route::Home => "/",
+		Route::Items(let inner) => match inner {
+			ItemsRoute::List => "/items",
+			ItemsRoute::Detail(let id) => i"/items/{id}",
+		},
+		Route::NotFound => "/404",
+	}
+}
+
+// `link` accepts any `Routable` — wire the enum to its printer once.
+impl Route with Routable {
+	fun to_path(self): str {
+		href(self)
+	}
+}
+
+// === Pages and layouts =======================================================
+
+fun home_page(): View {
+	view("section").child(view("p").text("Pick a section above."))
+}
+
+// The nested layout: its own chrome (heading + subnav), then a match on the
+// INNER route — exactly the outer shell's shape, one level down.
+fun items_layout(inner: ItemsRoute): View {
+	view("section")
+		.child(view("h2").text("Items"))
+		.child(match inner {
+			ItemsRoute::List => items_list(),
+			ItemsRoute::Detail(let id) => item_detail(id),
+		})
+}
+
+fun items_list(): View {
+	mut rows: List<View> = [];
+	for id in Range::new(1, 4) {
+		rows.push(view("li").child(link(i"Item {id}", Route::Items(ItemsRoute::Detail(id)))));
+	}
+	view("ul").children(rows)
+}
+
+// Params are values, so "adjacent" links are arithmetic, not string splicing.
+fun item_detail(id: i32): View {
+	view("article")
+		.child(view("h3").text(i"Item {id}"))
+		.child(view("nav")
+			.child(link("Previous", Route::Items(ItemsRoute::Detail(id - 1))))
+			.child(link("Next", Route::Items(ItemsRoute::Detail(id + 1))))
+			.child(link("All items", Route::Items(ItemsRoute::List))))
+}
+
+fun not_found_page(): View {
+	view("section").child(view("p").text("Nothing here."))
+}
+
+// === The shell ===============================================================
+
+fun app(route: Signal<Route>): View {
+	view("main")
+		.child(view("nav")
+			.child(link("Home", Route::Home))
+			.child(link("Items", Route::Items(ItemsRoute::List))))
+		// The address bar, live — the same signal the router drives.
+		.child(view("p").class("path").bind_text(current_path()))
+		// The page: swapped per route value; an unchanged route is a no-op,
+		// and a swapped-out page's bindings are disposed with it.
+		.swap(route, |current| match current {
+			Route::Home => home_page(),
+			Route::Items(let inner) => items_layout(inner),
+			Route::NotFound => not_found_page(),
+		})
+}
+
+fun main() {
+	let route: Signal<Route> = current_path().map(|path| parse(path));
+	let _root = mount_root("app", || app(route));
+}

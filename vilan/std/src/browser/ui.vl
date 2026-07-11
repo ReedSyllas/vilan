@@ -20,7 +20,7 @@
 //
 // Only available when building for the browser (`vilan build --target browser`).
 
-import pkg::dom::{ Element, get_element_by_id, create_element };
+import pkg::dom::{ Element, Event, get_element_by_id, create_element };
 import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp, turn_scope, turn, FlushPolicy };
 import pkg::shared::Shared;
 import pkg::style::Style;
@@ -83,6 +83,14 @@ impl View {
 	// node — no registration needed.
 	fun on(self, event: str, handler: (|| void) context turn_scope): View {
 		self.element.on(event, || turn(FlushPolicy::AtSuspension, || handler()));
+		self
+	}
+
+	// Like `on`, but the handler receives the DOM `Event` — for
+	// `prevent_default`, modifier keys, key names. The same turn discipline:
+	// each dispatch settles as one wave.
+	fun on_event(self, event: str, handler: (|Event| void) context turn_scope): View {
+		self.element.on_event(event, |dispatched| turn(FlushPolicy::AtSuspension, || handler(dispatched)));
 		self
 	}
 
@@ -253,6 +261,45 @@ impl View {
 					},
 					None => {},
 				}
+			}
+		});
+		self
+	}
+
+	// The dynamic-subtree SWAP (backlog A10) — `when`, generalized from a
+	// toggle to a VALUE: whenever `source` CHANGES, the previous subtree is
+	// disposed (owner and element) and `render` builds the new one under a
+	// fresh owner. `T: PartialEq` makes an equal value a no-op — navigating to
+	// the current route re-renders nothing. Each rendered subtree is a
+	// disposal boundary like a `bind_each` row; whichever is live when the
+	// enclosing boundary goes is disposed with it. Routing is the first
+	// customer (`std::router`): `swap(route, |current| match current { .. })`.
+	fun swap<T: PartialEq>(self, source: Signal<T>, render: (|T| View) context owner_scope): View {
+		let element = self.element;
+		let last_value: Shared<Option<T>> = Shared::new(None);
+		let live_view: Shared<Option<View>> = Shared::new(None);
+		let live_owner: Shared<Option<Owner>> = Shared::new(None);
+		// The live subtree dies with the enclosing boundary.
+		get_owner().defer(|| {
+			live_owner.read()?.dispose();
+		});
+		source.effect(|value: T| {
+			let unchanged = match last_value.read() {
+				Some(let previous) => previous == value,
+				None => false,
+			};
+			if !unchanged {
+				live_owner.read()?.dispose();
+				match live_view.read() {
+					Some(let built) => built.element.remove(),
+					None => {},
+				}
+				let owner = Owner::new();
+				let built = run_with_owner(owner, || render(value));
+				element.append(built.element);
+				last_value.write() = Some(value);
+				live_view.write() = Some(built);
+				live_owner.write() = Some(owner);
 			}
 		});
 		self

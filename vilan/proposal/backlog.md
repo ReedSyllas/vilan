@@ -155,11 +155,21 @@ have gaps.
    alongside `vilan build` / `--watch` (the Tailwind-bridge runner, asset pipelines,
    codegen sidecars). Useful independent of styling.
 
-10. **`std::ui` router** (M; Kolt gap — `proposal/kolt-migration.md` §2.3) —
-    history-API routing with params and NESTED layouts (Kolt's `layout_main` /
-    `layout_workspace` shapes; `/w/ORG/WS/*` scheme), a link component, and a
-    current-route signal composing with `show`/`bind_*`. Lands with the pilot's
-    second page, not before.
+10. ~~**`std::ui` router**~~ — **SHIPPED 2026-07-11** (`proposal/router.md`; Kolt
+    gap §2.3). The enum-route model: routes are (nested) ENUMS plus a
+    hand-written `parse`/`href` inverse pair — nested layouts are nested
+    functions, guards are `if`s, params are typed payloads, and pattern-string
+    routing never enters the language. `std::router` (browser layer):
+    `current_path()` (one signal driven by `pushState` AND `popstate`),
+    `navigate`, `segments`, and `link(label, route)` over a `Routable` trait —
+    a real `<a href>` intercepting only plain left-clicks. Plus the general
+    machinery routing rode in on: `View.swap<T: PartialEq>` (the
+    value-generalized `when` — dispose + re-render per changed value, equal
+    values a no-op) and `View.on_event` / `std::dom::Event` (typed DOM
+    events). Runtime semantics pinned HEADLESS in
+    `crates/vilan-cli/tests/router.rs` (a ~60-line DOM/history stub under
+    node: interception, dedupe, disposal, popstate); compile pins in
+    `inference.rs`. Building it found B19 and B20.
 
 11. ~~**Web storage externs**~~ — **SHIPPED 2026-07-11** as `std::storage`
     (browser layer): `get`/`set`/`remove` over `localStorage`, `session_*` over
@@ -277,6 +287,27 @@ have gaps.
     and invoking them (`self.hook.read()(a, b)`); the bind-first workaround
     (`let hook = self.hook.read(); hook(a, b)`) is pinned as the working shape.
     Small postfix-parser fix.
+
+19. **A bound is checked against a chained generic result before substitution
+    resolves it** (M; pinned `#[ignore]`d
+    `a_mapped_signal_meets_a_bound_without_annotation`; found 2026-07-11
+    building the A10 pins) — `current_path().map(|p| parse(p))` yields
+    `Signal<U = Route>`; passing it straight to `swap<T: PartialEq>` errors
+    "generic parameter 'U' is missing the bound ': PartialEq'" — the bound
+    check ran against `map`'s still-generic `U` instead of the resolved
+    `Route`. Annotating the intermediate binding
+    (`let route: Signal<Route> = ..`) works around it. Likely the check must
+    DEFER until the argument's type resolves — the B16 deferred-verification
+    shape, applied to trait bounds.
+
+20. **A named function doesn't coerce to a closure parameter** (M; found
+    2026-07-11 building A10) — `signal.map(parse)` fails ("Expected |str| U,
+    but got fn parse(str): Route instead") even though `parse` has exactly the
+    closure's shape; `.map(|path| parse(path))` is the eta-expanded
+    workaround. Function-to-closure coercion wants a short design pass first
+    (a GENERIC named function as a value raises monomorphization questions —
+    which instantiation does the value take?), so proposal-first when picked
+    up; the non-generic case is the payoff.
 
 17. ~~**A generic call in an `else`/`match` branch loses its type argument**~~ —
     **FIXED 2026-07-11** (found building `std::jwt` for the Kolt migration). The

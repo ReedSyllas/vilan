@@ -22,6 +22,17 @@ fn std_spec() -> PackageSpec {
 /// on a clean compile, or the diagnostics. A panic becomes an error rather than
 /// aborting the test process.
 fn compile(source: &str) -> Result<String, Vec<String>> {
+    compile_on(source, Platform::default())
+}
+
+/// `compile` for a browser build — the platform whose layer holds `std::ui` /
+/// `std::dom` / `std::router`, none of which the default (node) platform can
+/// import.
+fn compile_browser(source: &str) -> Result<String, Vec<String>> {
+    compile_on(source, Platform::Browser)
+}
+
+fn compile_on(source: &str, platform: Platform) -> Result<String, Vec<String>> {
     let source = source.to_string();
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
@@ -33,7 +44,7 @@ fn compile(source: &str) -> Result<String, Vec<String>> {
                     &std_spec(),
                     Path::new("."),
                     Path::new("test.vl"),
-                    Some(Platform::default()),
+                    Some(platform),
                     &Workspace::default(),
                 );
                 match program {
@@ -68,6 +79,25 @@ fn assert_fails(source: &str) {
         compile(source).is_err(),
         "expected a compile error, but it compiled cleanly"
     );
+}
+
+#[track_caller]
+fn assert_compiles_browser(source: &str) {
+    if let Err(errors) = compile_browser(source) {
+        panic!("expected a clean browser compile, got: {errors:#?}");
+    }
+}
+
+/// Asserts a browser compile fails with a diagnostic containing `message_part`.
+#[track_caller]
+fn assert_fails_browser_with(source: &str, message_part: &str) {
+    match compile_browser(source) {
+        Ok(_) => panic!("expected a browser compile error, but it compiled cleanly"),
+        Err(errors) => assert!(
+            errors.iter().any(|error| error.contains(message_part)),
+            "no browser diagnostic contains {message_part:?}; got: {errors:#?}"
+        ),
+    }
 }
 
 /// The analyzer's diagnostics as `(message, span range)` pairs — the E7 span
@@ -11218,5 +11248,252 @@ fn calling_a_method_call_result_directly_parses() {
             }
         }
         "#,
+    );
+}
+
+// --- A10: `std::router` + `View.swap` (proposal/router.md) -------------------
+//
+// The runtime semantics (interception, pushState/popstate, dedupe, disposal)
+// are pinned end-to-end in `crates/vilan-cli/tests/router.rs` under a DOM
+// stub; these pin the compile-level surface.
+
+#[test]
+fn swap_renders_a_dynamic_subtree_per_route_value() {
+    // The canonical router shape: nested route enums, a hand-written
+    // parse/href pair, `link` through the app's `Routable` impl, and a `swap`
+    // whose render closure matches the (unannotated) route value.
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::reactive::Signal;
+        import std::router::{ current_path, navigate, segments, link, Routable };
+
+        [derive(PartialEq)]
+        enum Route {
+            Home,
+            Workspace(str, WorkspaceRoute),
+        }
+
+        [derive(PartialEq)]
+        enum WorkspaceRoute {
+            Overview,
+            Task(i32),
+        }
+
+        fun parse(path: str): Route {
+            let parts = segments(path);
+            if parts.len() == 0 {
+                Route::Home
+            } else {
+                Route::Workspace(parts[0], WorkspaceRoute::Overview)
+            }
+        }
+
+        fun href(route: Route): str {
+            match route {
+                Route::Home => "/",
+                Route::Workspace(let org, let _inner) => i"/w/{org}",
+            }
+        }
+
+        impl Route with Routable {
+            fun to_path(self): str {
+                href(self)
+            }
+        }
+
+        fun workspace_layout(org: str, inner: WorkspaceRoute): View {
+            view("section").child(view("aside").text(org)).child(match inner {
+                WorkspaceRoute::Overview => view("div").text("overview"),
+                WorkspaceRoute::Task(let id) => view("div").text(i"task {id}"),
+            })
+        }
+
+        fun main() {
+            // Annotated: the unannotated form trips the B19 bound-check-order
+            // bug (the ignored pin below).
+            let route: Signal<Route> = current_path().map(|path| parse(path));
+            let _root = mount_root("app", || view("main")
+                .child(link("Home", Route::Home))
+                .child(view("button").on("click", || navigate(href(Route::Home))))
+                .swap(route, |current| match current {
+                    Route::Home => view("section").text("home"),
+                    Route::Workspace(let org, let inner) => workspace_layout(org, inner),
+                }));
+        }
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "B19: a bound on a generic call's argument is checked against a chained generic result (map's U) before substitution resolves it — annotating the intermediate let works around it"]
+fn a_mapped_signal_meets_a_bound_without_annotation() {
+    // `current_path().map(..)` yields `Signal<U = Route>`; passing it to
+    // `swap<T: PartialEq>` without annotating the intermediate binding must
+    // check the bound against the RESOLVED `Route`, not demand `U: PartialEq`.
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::reactive::Signal;
+        import std::router::{ current_path, segments };
+
+        [derive(PartialEq)]
+        enum Route {
+            Home,
+            Other,
+        }
+
+        fun parse(path: str): Route {
+            if segments(path).len() == 0 { Route::Home } else { Route::Other }
+        }
+
+        fun main() {
+            let route = current_path().map(|path| parse(path));
+            let _root = mount_root("app", || view("main")
+                .swap(route, |current| match current {
+                    Route::Home => view("section").text("home"),
+                    Route::Other => view("section").text("other"),
+                }));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn swap_requires_a_comparable_value() {
+    // `swap<T: PartialEq>` — the dedupe needs `==`, so a source over a struct
+    // without the impl is rejected at the call.
+    assert_fails_browser_with(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::reactive::Signal;
+
+        struct Opaque {
+            tag: str,
+        }
+
+        fun main() {
+            let source: Signal<Opaque> = Signal::new(Opaque { tag = "a" });
+            let _root = mount_root("app", || view("main")
+                .swap(source, |current| view("p").text(current.tag)));
+        }
+        "#,
+        "does not implement trait 'PartialEq'",
+    );
+}
+
+#[test]
+fn swap_boundaries_nest() {
+    // A swap inside another swap's render closure — each level is its own
+    // disposal boundary, and the inner render's owner registration must
+    // resolve under the outer's injected extent.
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::reactive::Signal;
+
+        fun main() {
+            let outer: Signal<i32> = Signal::new(0);
+            let inner: Signal<str> = Signal::new("a");
+            let _root = mount_root("app", || view("main")
+                .swap(outer, |level| view("section")
+                    .child(view("h1").text(i"level {level}"))
+                    .swap(inner, |name| view("p").text(name))));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn swap_composes_with_sibling_bindings() {
+    // `swap` alongside `bind_each` and `show` on one element tree — the mixed
+    // form: three boundary kinds registering into the same enclosing owner.
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::reactive::Signal;
+
+        fun main() {
+            let page: Signal<i32> = Signal::new(0);
+            let items: Signal<List<str>> = Signal::new(["a", "b"]);
+            let visible: Signal<bool> = Signal::new(true);
+            let _root = mount_root("app", || view("main")
+                .child(view("ul").bind_each(items, |item| item, |item| view("li").text(item)))
+                .child(view("aside").show(visible))
+                .swap(page, |current| view("section").text(i"page {current}")));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn on_event_hands_the_handler_the_dom_event() {
+    // `View.on_event` — the handler receives a typed `Event` and can consult
+    // modifier/key state and cancel the default action.
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::dom::Event;
+
+        fun main() {
+            let _root = mount_root("app", || view("input")
+                .on_event("keydown", |event| {
+                    if event.key() == "Enter" && !event.shift_key() && event.button() == 0 {
+                        event.prevent_default();
+                    }
+                }));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn link_accepts_any_routable_and_chains() {
+    // `link<R: Routable>` dispatches `to_path` through the bound, and the
+    // returned `View` chains like any other.
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ View, view, mount_root };
+        import std::router::{ link, Routable };
+
+        [derive(PartialEq)]
+        enum Route {
+            Home,
+            Item(i32),
+        }
+
+        impl Route with Routable {
+            fun to_path(self): str {
+                match self {
+                    Route::Home => "/",
+                    Route::Item(let id) => i"/item/{id}",
+                }
+            }
+        }
+
+        fun main() {
+            let _root = mount_root("app", || view("nav")
+                .child(link("Home", Route::Home).class("nav-item"))
+                .child(link("First", Route::Item(1))));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn the_router_is_browser_only() {
+    // `std::router` lives in the browser layer; a process-platform build
+    // importing it is the platform error the architecture wants (the
+    // server-side story is a future base-layer lift — proposal/router.md §4).
+    assert_fails_spanning(
+        r#"
+        import std::router::navigate;
+
+        fun main() {
+            navigate("/home");
+        }
+        "#,
+        "router",
+        "is in another platform's layer",
     );
 }
