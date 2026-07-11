@@ -34,13 +34,13 @@ CSS**; merge is value semantics, not cascade semantics.
 ## 1. The model
 
 ```vilan
-import std::ui::style::{ style, space, gray, blue, white, Display };
+import std::ui::style::{ style, space, Color, Display };
 
 let card = const style()
     .display(Display::Flex)
     .padding(space(4))
-    .background(gray(50))
-    .hover(style().background(gray(100)));
+    .background(Color::gray(50))
+    .hover(style().background(Color::gray(100)));
 
 let active = const style().padding(space(6));
 
@@ -77,8 +77,8 @@ view.class(card + active);   // padding resolves to space(6) — LAST WINS, alwa
 - **Variants are just code** — CVA dissolves into the language:
 
   ```vilan
-  let primary = const base.background(blue(600)).color(white);
-  let danger = const base.background(red(600)).color(white);
+  let primary = const base.background(Color::blue(600)).color(Color::white());
+  let danger = const base.background(Color::red(600)).color(Color::white());
 
   fun button_style(kind: Kind): Style {
       match kind {
@@ -114,10 +114,16 @@ distinguishes two token kinds:
   std constants a future theme layer can override like any value.
 
 v1 ships std defaults stolen wholesale from the market-tested scales
-(Tailwind's spacing scale, color ramps, type scale) as const token functions
-(`space(n)`, `gray(n)`, `blue(n)`, …). Theme *values* are overridable day one
-(custom properties are just CSS); theme *extension* (new ramps/namespaces) is
-deferred.
+(Tailwind's spacing scale, color ramps, type scale). **Color tokens are
+namespaced on the `Color` type** (settled with the user): the type must exist
+for property signatures anyway, associated functions are the established
+idiom (`List::new`, `FlushPolicy::AtEnd`), and one import covers every ramp —
+`Color::gray(50)`, `Color::blue(600)`, `Color::white()`, plus `Color::hex(..)`
+as the typed escape. The completion flow is the point: `.background(` → the
+parameter is `Color` → `Color::` lists the ramps. `space(n)` stays a bare
+function — one function is not clutter, and `padding(space(4))` keeps the
+familiar reading. Theme *values* are overridable day one (custom properties
+are just CSS); theme *extension* (new ramps/namespaces) is deferred.
 
 ### 2.2 Conditions
 

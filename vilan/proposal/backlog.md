@@ -124,8 +124,9 @@ have gaps.
    REVISED 2026-07-10 — **expression-flavored, rides `const` (G2); syntax settled**) —
    the last big hole in the UI model. Styles are typed values built by ordinary
    a const-evaluated builder chain (`let card = const style().display(Display::Flex)
-   .padding(space(4)).hover(style().background(gray(100)));` — one import,
-   `.`-completion over the property surface; `+` combines named styles) lowered to
+   .padding(space(4)).hover(style().background(Color::gray(100)));` — one import,
+   `.`-completion over the property surface, color tokens namespaced on the `Color`
+   type; `+` combines named styles) lowered to
    deduplicated atomic CSS through the const-eval **asset channel**; merge is `+`
    (`impl Style with Add`) with per-property last-wins — record semantics, so
    specificity fights are structurally impossible; const merges fold, runtime merges
