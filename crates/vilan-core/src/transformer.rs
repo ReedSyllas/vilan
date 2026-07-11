@@ -4,6 +4,7 @@ use crate::analyzer::{
 };
 use crate::error::Error;
 use crate::id::Id;
+use crate::interpreter::ConstValue;
 use crate::node::{BinaryOp, Convention, ExternBinding};
 use crate::options::BuildOptions;
 use crate::type_::{Type, TypeId};
@@ -886,6 +887,14 @@ impl<'src> Transformer<'src> {
     }
 
     fn walk_entity(&mut self, id: Id, block: &mut Vec<js::Node<'src>>) -> Option<js::Node<'src>> {
+        // A `const` expression's computed value replaces the whole subtree —
+        // in-place serialization (const-eval.md §1). The const mini-programs
+        // themselves are built by `transform_const_program` with the results
+        // map still empty for the expression being evaluated, so this arm
+        // never short-circuits an evaluation.
+        if let Some(value) = self.program.const_results.get(&id) {
+            return Some(const_value_to_js(value));
+        }
         let entity = self.program.entity_map.get(&id).unwrap();
 
         Some(match entity {
@@ -3576,6 +3585,194 @@ impl Formatter {
             }
         }
     }
+}
+
+/// Serializes a const result in place of its expression (const-eval.md §1),
+/// producing the same runtime shapes emitted code builds itself: structs and
+/// enums are already positional arrays at this level, so `ConstValue::Array`
+/// covers them.
+fn const_value_to_js<'src>(value: &ConstValue) -> js::Node<'src> {
+    match value {
+        ConstValue::Undefined => js::Node::Void,
+        ConstValue::Null => js::Node::Null,
+        ConstValue::Bool(value) => js::Node::Bool(*value),
+        ConstValue::Number(n) => {
+            if n.is_nan() {
+                js::Node::Local("NaN".to_string())
+            } else if n.is_infinite() {
+                js::Node::Local(if *n > 0.0 { "Infinity" } else { "-Infinity" }.to_string())
+            } else if *n == 0.0 && n.is_sign_negative() {
+                // `js_number_to_string` collapses -0 to "0" (string coercion
+                // semantics); the LITERAL must keep the sign.
+                js::Node::Number("-0".to_string(), None)
+            } else {
+                js::Node::Number(crate::interpreter::js_number_to_string(*n), None)
+            }
+        }
+        ConstValue::BigInt(n) => js::Node::Number(format!("{n}n"), None),
+        ConstValue::Str(s) => js::Node::String(Cow::Owned(s.clone())),
+        ConstValue::Array(items) => js::Node::Array(items.iter().map(const_value_to_js).collect()),
+        ConstValue::Set(items) => js::Node::Call(
+            Box::new(js::Node::Local("new Set".to_string())),
+            vec![js::Node::Array(
+                items.iter().map(const_value_to_js).collect(),
+            )],
+        ),
+        ConstValue::Map(entries) => js::Node::Call(
+            Box::new(js::Node::Local("new Map".to_string())),
+            vec![js::Node::Array(
+                entries
+                    .iter()
+                    .map(|(key, value)| {
+                        js::Node::Array(vec![const_value_to_js(key), const_value_to_js(value)])
+                    })
+                    .collect(),
+            )],
+        ),
+    }
+}
+
+/// Builds the mini-program that evaluates one `const` expression: the
+/// functions it (transitively) requires, declarations for the bindings it
+/// reads — already-computed const values as literals, literal initializers
+/// walked — and a final `const __const_result = <expr>;`. Returns the program
+/// plus any referenced bindings that are NOT compile-time-known; the caller
+/// turns those into diagnostics (free variables inside the expression itself
+/// are pre-checked with precise spans — this net catches what called
+/// functions reach). Skips `rename_for_scopes`: names stay as minted, and
+/// `__const_result` must survive for the evaluator to read.
+pub fn transform_const_program<'src>(
+    program: &'src Program<'src>,
+    options: &BuildOptions,
+    expr_id: Id,
+    external_bindings: &HashSet<Id>,
+    const_values: &HashMap<Id, crate::interpreter::ConstValue>,
+) -> (JsProgram<'src>, Vec<Id>) {
+    let mut transformer = Transformer::new(program, options);
+
+    // The bindings that may need a prelude declaration: the expression's own
+    // free locals (checked by the caller) and module-level bindings reached
+    // through called functions. Everything else referenced is declared inside
+    // the emitted code itself (function-body and block locals).
+    let global_scope = program.scopes.get(&program.global_scope_id).unwrap();
+    let mut module_bindings = transformer.find_global_variables(
+        &global_scope
+            .name_to_id_map
+            .iter()
+            .map(|(_, x)| *x)
+            .collect(),
+    );
+    module_bindings.extend(transformer.module_level_variables());
+    let external: HashSet<Id> = module_bindings
+        .into_iter()
+        .chain(external_bindings.iter().copied())
+        .collect();
+
+    let mut body = Vec::new();
+    let result = transformer
+        .walk_entity(expr_id, &mut body)
+        .unwrap_or(js::Node::Void);
+
+    // Emitting a binding's initializer can reference more bindings (and
+    // require more functions) — iterate to a fixpoint.
+    let mut declared: HashSet<Id> = HashSet::new();
+    let mut unresolved: Vec<Id> = Vec::new();
+    let mut prelude: Vec<js::Node<'src>> = Vec::new();
+    loop {
+        let pending: Vec<Id> = transformer
+            .referenced_globals
+            .iter()
+            .copied()
+            .filter(|id| external.contains(id) && !declared.contains(id))
+            .collect();
+        if pending.is_empty() {
+            break;
+        }
+        for binding in pending {
+            declared.insert(binding);
+            // Non-variable references (functions, struct names) emit through
+            // their own channels; only value bindings need declarations.
+            let Some(variable) = program.variables.get(&binding) else {
+                continue;
+            };
+            let name = transformer.ng.name_for(binding);
+            // A const-initialized binding's computed value, keyed by its
+            // INITIAL expression id (how `const_eval` stores results).
+            if let Some(value) = variable
+                .initial
+                .and_then(|initial| const_values.get(&initial))
+            {
+                prelude.push(js::Node::ConstVariable(js::Variable {
+                    name,
+                    value: Box::new(const_value_to_js(value)),
+                }));
+                continue;
+            }
+            let initial = variable.initial;
+            let literal_initial = initial
+                .and_then(|initial| program.entity_map.get(&initial))
+                .map(|entity| {
+                    matches!(
+                        entity,
+                        Expr::String(_)
+                            | Expr::MultilineString(_)
+                            | Expr::Number(..)
+                            | Expr::Bool(_)
+                            | Expr::Null
+                    )
+                })
+                .unwrap_or(false);
+            if literal_initial && !variable.mutable {
+                let value = transformer
+                    .walk_entity(initial.unwrap(), &mut prelude)
+                    .unwrap_or(js::Node::Void);
+                prelude.push(js::Node::ConstVariable(js::Variable {
+                    name,
+                    value: Box::new(value),
+                }));
+            } else {
+                unresolved.push(binding);
+            }
+        }
+    }
+
+    let mut t_functions: Vec<_> = transformer.required_functions.into_iter().collect();
+    t_functions.sort_by(|a, b| (a.0.0).cmp(&b.0.0));
+    let t_instances = transformer.monomorphized.into_iter();
+
+    let imports = transformer
+        .used_imports
+        .iter()
+        .map(|(module, symbols)| {
+            let names = symbols.iter().cloned().collect::<Vec<_>>().join(", ");
+            format!("import {{ {} }} from \"{}\";", names, module)
+        })
+        .collect::<Vec<_>>();
+    if !program.clone_sites.is_empty() {
+        transformer.used_helpers.insert("__clone");
+    }
+    let helpers = transformer.used_helpers.into_iter().collect::<Vec<_>>();
+
+    body.push(js::Node::ConstVariable(js::Variable {
+        name: "__const_result".to_string(),
+        value: Box::new(result),
+    }));
+    let nodes = t_functions
+        .into_iter()
+        .map(|x| x.1)
+        .chain(t_instances)
+        .chain(prelude)
+        .chain(body)
+        .collect::<Vec<_>>();
+
+    (
+        JsProgram {
+            imports,
+            helpers,
+            nodes,
+        },
+        unresolved,
+    )
 }
 
 pub mod js {

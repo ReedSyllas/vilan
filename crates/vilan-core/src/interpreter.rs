@@ -86,6 +86,90 @@ impl Failure {
     }
 }
 
+/// A compile-time evaluation result (proposal/const-eval.md): the plain-data
+/// subset of [`Value`], owned so it can live in `Program` across phases. The
+/// transformer serializes it in place of the `const` expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstValue {
+    Undefined,
+    Null,
+    Bool(bool),
+    Number(f64),
+    BigInt(i128),
+    Str(String),
+    Array(Vec<ConstValue>),
+    Set(Vec<ConstValue>),
+    Map(Vec<(ConstValue, ConstValue)>),
+}
+
+/// Converts an interpreter value to plain data, or names what blocks it.
+fn value_to_const(value: &Value) -> Result<ConstValue, &'static str> {
+    Ok(match value {
+        Value::Undefined => ConstValue::Undefined,
+        Value::Null => ConstValue::Null,
+        Value::Bool(b) => ConstValue::Bool(*b),
+        Value::Number(n) => ConstValue::Number(*n),
+        Value::BigInt(n) => ConstValue::BigInt(*n),
+        Value::Str(s) => ConstValue::Str(s.to_string()),
+        Value::Array(items) => ConstValue::Array(
+            items
+                .borrow()
+                .iter()
+                .map(value_to_const)
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Set(items) => ConstValue::Set(
+            items
+                .borrow()
+                .values()
+                .map(value_to_const)
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Map(entries) => ConstValue::Map(
+            entries
+                .borrow()
+                .values()
+                .map(|(key, value)| {
+                    Ok::<_, &'static str>((value_to_const(key)?, value_to_const(value)?))
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(_) => return Err("a `Shared` cell"),
+        Value::Closure(_) => return Err("a closure"),
+    })
+}
+
+/// Evaluates a const mini-program — the functions and bindings one `const`
+/// expression needs, ending in `const __const_result = <expr>;` — and returns
+/// the result as plain data (const-eval.md §1).
+pub fn eval_const<'a>(program: &'a JsProgram<'a>, limits: Limits) -> Result<ConstValue, Failure> {
+    check_capabilities(program)?;
+    let mut interpreter = Interpreter {
+        fuel: limits.fuel,
+        depth_left: limits.call_depth,
+        stdout: String::new(),
+        exited: None,
+    };
+    let globals = Scope::root();
+    match interpreter.exec_body(&program.nodes, &globals)? {
+        Flow::Normal => {}
+        _ => {
+            return Err(Failure::internal(
+                "control flow escaped the const expression",
+            ));
+        }
+    }
+    let Some(result) = lookup(&globals, "__const_result") else {
+        return Err(Failure::internal(
+            "the const result binding was not emitted",
+        ));
+    };
+    value_to_const(&result).map_err(|what| Failure {
+        kind: FailureKind::Unsupported,
+        message: format!("a `const` result must be plain data; this evaluates to {what}"),
+    })
+}
+
 pub struct RunOutput {
     /// Everything `console.log` printed, newline-terminated per call — the
     /// interpreter's analog of the compiled program's stdout.
@@ -1996,7 +2080,7 @@ fn to_number(value: &Value) -> Result<f64, Failure> {
 /// ECMA-262 `Number::toString(10)`: shortest round-trip digits, integer forms
 /// without a decimal point, exponential notation past the |n| ≥ 1e21 and
 /// |n| < 1e-6 thresholds.
-fn js_number_to_string(n: f64) -> String {
+pub(crate) fn js_number_to_string(n: f64) -> String {
     if n.is_nan() {
         return "NaN".to_string();
     }

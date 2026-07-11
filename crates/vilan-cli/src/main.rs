@@ -1097,6 +1097,16 @@ fn compile_to_js(
         // code generation).
         async_infer::infer(&mut program);
 
+        // Evaluate `const` expressions (proposal/const-eval.md); the results
+        // serialize in place at transform time, the failures are ordinary
+        // diagnostics.
+        let (const_results, const_errors) = vilan_core::const_eval::evaluate(
+            &program,
+            &vilan_core::options::BuildOptions::default(),
+        );
+        program.const_results = const_results;
+        program.diagnostics.extend(const_errors);
+
         for error in &program.diagnostics {
             errs.push(Rich::custom(error.span, error.msg.as_str()));
         }

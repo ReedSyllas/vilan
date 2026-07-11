@@ -1,9 +1,19 @@
 # `const` — compile-time evaluation as a language feature
 
-Status: **PROPOSAL** (2026-07-10; **REVISED same day — `const` is an
-expression keyword**, settled with the user, replacing the first draft's
-declaration form). The general feature the revised styling system
-(`proposal/ui-styling.md`) rides; independently motivated.
+Status: **CORE SHIPPED 2026-07-10** (§6 slices 1–4: the keyword, the
+analyzer's mark-and-forward + free-variable rule, the evaluation pass, and
+in-place serialization — 21 pins + corpus `const.vl`; same-day as the
+proposal, revised to the expression keyword before implementation). The
+asset channel and const-only capability bit (slice 5 and §2's bit — the
+styling prerequisite) are the remaining slices. Implementation notes that
+amended the design: the JS-refugee hint lives in the ANALYZER, not the
+parser — `const x = 3` parses fine (assignment is an expression, so it is
+`const (x = 3)`), and the forwarding arm catches the `Assign` shape with
+the idiom; the `const` marker forwards to its inner expression (no wrapper
+entity), so every downstream pass sees a plain subtree; and const
+mini-programs skip `rename_for_scopes` so the result binding survives.
+The general feature the revised styling system (`proposal/ui-styling.md`)
+rides; independently motivated.
 
 ## 0. Motivation
 

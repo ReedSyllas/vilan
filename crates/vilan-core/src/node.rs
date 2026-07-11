@@ -334,6 +334,10 @@ pub enum Node<'src> {
     // `util::trim_multiline_string` (validated in the analyzer, trimmed in the
     // transformer).
     MultilineString(&'src str),
+    // `const expr` — evaluate at compile time (proposal/const-eval.md). The
+    // analyzer marks the inner expression and FORWARDS to it (no wrapper
+    // entity), so downstream passes see a plain subtree.
+    Const(Box<Spanned<Node<'src>>>),
     // A struct declaration. The `bool` marks an `external` (intrinsic) struct.
     // The body is `Some(fields)` for `{ .. }` and `None` for a bodyless `;`
     // declaration (only valid when `external`).
@@ -523,6 +527,7 @@ impl<'src> Node<'src> {
                 }
             }
             Node::AsyncType(inner) => visit(inner),
+            Node::Const(inner) => visit(inner),
             Node::MappedType {
                 source, template, ..
             } => {

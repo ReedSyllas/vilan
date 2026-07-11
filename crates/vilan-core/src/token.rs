@@ -27,6 +27,8 @@ pub enum Token<'src> {
     // (`u32`, `f`, `n`, ...).
     Number(&'src str, Option<&'src str>, Option<&'src str>),
     Op(&'src str),
+    // `const expr` — compile-time evaluation (proposal/const-eval.md).
+    Const,
     Own,
     Borrows,
     Ret,
@@ -77,6 +79,7 @@ impl std::fmt::Display for Token<'_> {
                 suffix.unwrap_or("")
             ),
             Token::Op(s) => write!(f, "{s}"),
+            Token::Const => write!(f, "const"),
             Token::Own => write!(f, "own"),
             Token::Borrows => write!(f, "borrows"),
             Token::Ret => write!(f, "ret"),

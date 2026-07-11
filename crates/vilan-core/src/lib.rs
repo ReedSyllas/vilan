@@ -5,6 +5,7 @@
 pub mod analyzer;
 pub mod async_infer;
 pub mod call_graph;
+pub mod const_eval;
 pub mod context;
 pub mod error;
 pub mod formatter;
@@ -263,6 +264,14 @@ pub fn analyze_source(
         let mut program = analyze(root, source, std, pkg_root, entry_path, platform, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
+        // The const pass (proposal/const-eval.md): evaluate `const`-marked
+        // expressions in dependency order; results serialize in place at
+        // transform time, failures are ordinary diagnostics. Runs here so
+        // `check`, the LSP, and every build path agree.
+        let (const_results, const_errors) =
+            const_eval::evaluate(&program, &options::BuildOptions::default());
+        program.const_results = const_results;
+        program.diagnostics.extend(const_errors);
         program
     }));
     match analyzed {

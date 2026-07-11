@@ -9950,3 +9950,396 @@ fn a_nonempty_literals_push_checks_its_argument() {
         "Expected i32, but got str instead.",
     );
 }
+
+// --- G2: `const` — compile-time evaluation -------------------------------------
+// `const` is a weak-precedence expression prefix: it captures the largest
+// expression to its right within the bracket/comma context and evaluates it at
+// compile time with the macro interpreter, serializing the plain-data result
+// IN PLACE (proposal/const-eval.md). Free variables must be const-known;
+// failures are spanned diagnostics; the LSP evaluates explicit consts and
+// `vilan check` evaluates as `build` does.
+
+/// Compiles `source` and asserts the emitted JS contains `needle` — the
+/// serialized-literal check for const results.
+#[track_caller]
+fn assert_emits_containing(source: &str, needle: &str) {
+    match compile(source) {
+        Ok(js) => assert!(
+            js.contains(needle),
+            "emitted JS does not contain {needle:?}:\n{js}"
+        ),
+        Err(errors) => panic!("expected a clean compile, got: {errors:#?}"),
+    }
+}
+
+#[test]
+fn a_const_expression_folds_to_a_literal() {
+    let source = r#"
+        import std::print;
+        fun main() {
+            let a = const 1 + 2;
+            print(a);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "= 3;");
+    assert_compiles_and_runs(source, "3\n");
+}
+
+#[test]
+fn const_captures_weakly_to_the_expression_end() {
+    let source = r#"
+        import std::print;
+        fun main() {
+            let a = const 1 + 2 * 3;
+            print(a);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "= 7;");
+    assert_compiles_and_runs(source, "7\n");
+}
+
+#[test]
+fn parens_narrow_the_capture() {
+    let source = r#"
+        import std::print;
+        fun runtime_part(): i32 {
+            5
+        }
+        fun main() {
+            let a = (const 2 * 3) + runtime_part();
+            print(a);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "6 + ");
+    assert_compiles_and_runs(source, "11\n");
+}
+
+#[test]
+fn a_const_call_evaluates_through_functions() {
+    let source = r#"
+        import std::print;
+        fun square(n: i32): i32 {
+            n * n
+        }
+        fun main() {
+            let a = const square(7);
+            print(a);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "= 49;");
+    assert_compiles_and_runs(source, "49\n");
+}
+
+#[test]
+fn const_chains_through_const_known_bindings() {
+    let source = r#"
+        import std::print;
+        fun main() {
+            let x = const 5;
+            let y = const x * 2;
+            print(y);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "= 10;");
+    assert_compiles_and_runs(source, "10\n");
+}
+
+#[test]
+fn a_literal_initialized_binding_is_const_known() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let x = 5;
+            let y = const x + 1;
+            print(y);
+        }
+        main();
+        "#,
+        "6\n",
+    );
+}
+
+#[test]
+fn a_module_level_const_serves_functions() {
+    let source = r#"
+        import std::print;
+        fun doubled(): List<i32> {
+            mut result: List<i32> = List::new();
+            result.push(2);
+            result.push(4);
+            result
+        }
+        let TABLE = const doubled();
+        fun main() {
+            print(TABLE[0] + TABLE[1]);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "[ 2, 4 ]");
+    assert_compiles_and_runs(source, "6\n");
+}
+
+#[test]
+fn a_const_argument_stops_at_the_comma() {
+    let source = r#"
+        import std::print;
+        fun show(a: i32, b: i32) {
+            print(a + b);
+        }
+        fun main() {
+            show(const 3 * 4, 1);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "(12,");
+    assert_compiles_and_runs(source, "13\n");
+}
+
+#[test]
+fn a_const_block_runs_statements_at_compile_time() {
+    let source = r#"
+        import std::print;
+        fun main() {
+            let a = const {
+                let left = 2;
+                let right = 3;
+                left * right
+            };
+            print(a);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "= 6;");
+    assert_compiles_and_runs(source, "6\n");
+}
+
+#[test]
+fn mut_initialized_by_const_stays_runtime_mutable() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut cache = const 1 + 2;
+            cache = cache + 1;
+            print(cache);
+        }
+        main();
+        "#,
+        "4\n",
+    );
+}
+
+#[test]
+fn a_runtime_parameter_is_rejected_as_a_free_variable() {
+    // The diagnostic spans the REFERENCE itself (the last `w` — the first is
+    // the declaration).
+    let source = r#"
+        fun f(w: i32): i32 {
+            const w + 1
+        }
+        fun main() {
+            let _x = f(1);
+        }
+        main();
+        "#;
+    let reference = source.rfind('w').unwrap();
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, range)| message.contains("runtime value")
+                && *range == (reference..reference + 1)),
+        "no precise-span diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_mut_binding_is_not_const_known() {
+    let source = r#"
+        fun main() {
+            mut q = 5;
+            let y = const q + 1;
+        }
+        main();
+        "#;
+    let reference = source.rfind('q').unwrap();
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, range)| message.contains("runtime value")
+                && *range == (reference..reference + 1)),
+        "no precise-span diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_call_initialized_binding_is_not_const_known() {
+    let source = r#"
+        fun mk(): i32 {
+            5
+        }
+        fun main() {
+            let z = mk();
+            let y = const z + 1;
+        }
+        main();
+        "#;
+    let reference = source.rfind('z').unwrap();
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, range)| message.contains("runtime value")
+                && *range == (reference..reference + 1)),
+        "no precise-span diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_panic_at_const_time_is_a_compile_error() {
+    // The diagnostic spans the whole const expression (deep spans into the
+    // failing subexpression are the recorded refinement).
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun main() {
+            let a = const {
+                mut xs: List<i32> = List::new();
+                xs.push(1);
+                xs[5]
+            };
+        }
+        main();
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("const evaluation failed")
+                && message.contains("index out of bounds")),
+        "no const-panic diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_capability_is_rejected_at_const_time() {
+    assert_fails_spanning(
+        r#"
+        import std::random::range;
+        fun main() {
+            let a = const range(1, 6);
+        }
+        main();
+        "#,
+        "range(1, 6)",
+        "not available",
+    );
+}
+
+#[test]
+fn a_closure_result_is_not_plain_data() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let f = const || 1;
+        }
+        main();
+        "#,
+        "|| 1",
+        "plain data",
+    );
+}
+
+#[test]
+fn the_js_refugee_hint_names_the_idiom() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            const x = 3;
+        }
+        main();
+        "#,
+        "const x = 3",
+        "vilan has no const declarations",
+    );
+}
+
+#[test]
+fn bigint_and_float_results_serialize_faithfully() {
+    let source = r#"
+        import std::print;
+        fun main() {
+            let big = const 2n * 3n;
+            let precise = const 0.1 + 0.2;
+            print(big);
+            print(precise);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "6n");
+    assert_compiles_and_runs(source, "6n\n0.30000000000000004\n");
+}
+
+#[test]
+fn struct_and_enum_results_serialize() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        fun main() {
+            let p = const Point { x = 1, y = 2 };
+            print(p.x + p.y);
+            let o = const Some(5);
+            match o {
+                Some(let value) => print(value),
+                None => print("none"),
+            }
+        }
+        main();
+        "#,
+        "3\n5\n",
+    );
+}
+
+#[test]
+fn a_const_dependency_cycle_is_an_error() {
+    assert_fails(
+        r#"
+        let a: i32 = const b + 1;
+        let b: i32 = const a + 1;
+        fun main() {}
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn const_chains_through_computed_bindings() {
+    // The dependency is itself a COMPUTED const (not a literal): `y`'s
+    // mini-program declares `x` from the stored result, keyed by its
+    // initializer expression.
+    let source = r#"
+        import std::print;
+        fun square(n: i32): i32 {
+            n * n
+        }
+        fun main() {
+            let x = const square(3);
+            let y = const x + 1;
+            print(y);
+        }
+        main();
+        "#;
+    assert_emits_containing(source, "= 10;");
+    assert_compiles_and_runs(source, "10\n");
+}

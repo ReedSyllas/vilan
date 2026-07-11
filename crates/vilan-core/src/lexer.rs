@@ -84,6 +84,7 @@ where
     let identifier = text::ascii::ident().map(|ident: &str| match ident {
         "async" => Token::Async,
         "await" => Token::Await,
+        "const" => Token::Const,
         "else" => Token::Else,
         "enum" => Token::Enum,
         "export" => Token::Export,

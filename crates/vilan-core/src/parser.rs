@@ -1295,10 +1295,20 @@ where
         },
     );
 
+    // `const expr` — the weak-precedence compile-time-evaluation prefix
+    // (proposal/const-eval.md): it captures the largest expression to its
+    // right within the current bracket/comma context; parenthesize to narrow.
+    let const_expression = just(Token::Const)
+        .ignore_then(expression.clone())
+        .map_with(|inner, e| (Node::Const(Box::new(inner)), e.span()));
     expression.define(
-        choice((struct_initializer_expression, secondary_expression))
-            .labelled("expression")
-            .as_context(),
+        choice((
+            const_expression,
+            struct_initializer_expression,
+            secondary_expression,
+        ))
+        .labelled("expression")
+        .as_context(),
     );
 
     // `export <statement>` — re-export an import or expose a declaration.

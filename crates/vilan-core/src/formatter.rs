@@ -806,7 +806,8 @@ impl<'src> Printer<'src> {
             | Node::ForIn(_, _, _)
             | Node::Match(_, _)
             | Node::Jump(_)
-            | Node::FuncReturn(_) => 0,
+            | Node::FuncReturn(_)
+            | Node::Const(_) => 0,
             _ => 100,
         }
     }
@@ -989,6 +990,13 @@ impl<'src> Printer<'src> {
             Node::Async(operand) => {
                 self.out.push_str("async ");
                 self.print_expr(operand);
+            }
+            // Weak precedence: `const` captures everything to its right, so
+            // the inner expression never needs wrapping; as an OPERAND the
+            // whole `const ..` is parenthesized (precedence 0 above).
+            Node::Const(inner) => {
+                self.out.push_str("const ");
+                self.print_expr(inner);
             }
             Node::Let(name, declared_type, value, mutable) => {
                 self.out.push_str(if *mutable { "mut " } else { "let " });

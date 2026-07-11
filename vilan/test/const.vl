@@ -1,0 +1,55 @@
+import std::print;
+
+// `const expr` evaluates at compile time (proposal/const-eval.md): a
+// weak-precedence prefix capturing to the bracket/comma boundary; the
+// plain-data result is serialized IN PLACE, so the emitted JS carries the
+// literal, never the computation. Free variables must be compile-time-known
+// (imports, literals, immutable bindings whose initializers are const).
+
+fun square(n: i32): i32 {
+	n * n
+}
+
+fun scale(): List<i32> {
+	mut result: List<i32> = List::new();
+	result.push(1);
+	result.push(2);
+	result.push(4);
+	result
+}
+
+// Module scope: the shared-constant idiom; tree-shaken like any binding.
+let STEPS = const scale();
+
+fun main() {
+	// Weak capture: everything to the expression end folds.
+	let folded = const 1 + 2 * 3;
+	print(folded);
+
+	// Parenthesize to narrow: the second square runs at runtime.
+	let narrowed = (const square(4)) + square(2);
+	print(narrowed);
+
+	// Chaining through const-known bindings, including computed ones.
+	let base = const square(3);
+	let doubled = const base * 2;
+	print(doubled);
+
+	// A const block runs statements — loops included — at compile time.
+	let total = const {
+		mut sum = 0;
+		for step in scale() {
+			sum = sum + step;
+		}
+		sum
+	};
+	print(total);
+
+	print(STEPS[0] + STEPS[1] + STEPS[2]);
+
+	// A compile-time initial value for runtime-mutable state.
+	mut cache = const 10 * 10;
+	cache = cache + 1;
+	print(cache);
+}
+main();

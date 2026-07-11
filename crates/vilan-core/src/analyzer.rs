@@ -1067,6 +1067,9 @@ pub struct Analyzer<'src> {
     // The `std` `panic` intrinsic, if loaded. A call to it never returns, so it
     // types as `any` (unifying with any expected type) and lowers to a `throw`.
     panic_fn_id: Option<Id>,
+    // `const`-marked expression ids, in walk order (innermost-first for
+    // nesting) — the const pass's worklist.
+    const_exprs: Vec<Id>,
     // `!`'s std fast-path identities and the `Try` trait, resolved by name from
     // their std modules after loading (like `panic_fn_id`).
     option_enum_id: Option<Id>,
@@ -1234,6 +1237,7 @@ impl<'src> Analyzer<'src> {
             walking_trait_body: false,
             trait_body_scopes: HashSet::new(),
             panic_fn_id: None,
+            const_exprs: Vec::new(),
             option_enum_id: None,
             result_enum_id: None,
             try_trait_id: None,
@@ -4947,9 +4951,33 @@ impl<'src> Analyzer<'src> {
     }
 
     fn walk_expr_node(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) -> Id {
+        // `const expr` marks and FORWARDS: the inner expression is the entity
+        // (no wrapper), so every downstream pass sees a plain subtree; the
+        // const pass (const_eval.rs) evaluates the marked ids after analysis.
+        // Nested `const`s mark innermost-first — dependency order for free.
+        if let Node::Const(inner) = &node.0 {
+            // A JS refugee's `const x = 3;` parses as `const (x = 3)` —
+            // assignment is an expression — so the declaration shape is
+            // caught here, with the idiom.
+            if matches!(&inner.0, Node::Assign(..)) {
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "vilan has no const declarations — write `let x = const ..`".to_string(),
+                });
+                let id = self.new_entity_id();
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                return id;
+            }
+            let inner_id = self.walk_expr_node(inner, scope_id);
+            self.const_exprs.push(inner_id);
+            return inner_id;
+        }
         let id = self.new_entity_id();
 
         let entity = match &node.0 {
+            // Handled by the forwarding arm above; a `Const` node never
+            // reaches the entity match.
+            Node::Const(..) => unreachable!("`const` forwards to its inner expression"),
             Node::Error => Some(Expr::Error),
             Node::Void => Some(Expr::Void),
             Node::Null => Some(Expr::Null),
@@ -12613,6 +12641,11 @@ pub struct Program<'src> {
     pub list_push_fn_id: Option<Id>,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
+    /// `const`-marked expression ids in walk order (const-eval.md §1).
+    pub const_exprs: Vec<Id>,
+    /// Computed const results, filled by `const_eval::evaluate` post-analysis;
+    /// the transformer serializes these in place of the expressions.
+    pub const_results: HashMap<Id, crate::interpreter::ConstValue>,
     // The `std::context` `Context` intrinsics (if `context.vl` loaded): the
     // `new`/`run`/`get` method ids. The context threading pass keys off these to
     // find context bindings and their `run`/`get` sites; the transformer lowers
@@ -15337,6 +15370,8 @@ pub fn analyze<'src>(
         list_new_fn_id,
         list_push_fn_id,
         panic_fn_id: analyzer.panic_fn_id,
+        const_exprs: analyzer.const_exprs.clone(),
+        const_results: HashMap::new(),
         context_new_fn_id,
         context_run_fn_id,
         context_get_fn_id,

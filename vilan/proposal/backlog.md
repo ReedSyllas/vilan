@@ -530,7 +530,16 @@ have gaps.
    derive-name registration decoupling (deferred to the first user derive needing it).
 
 2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10,
-   revised same day to the EXPRESSION form; the styling system A8 is the forcing use
+   revised same day to the EXPRESSION form; **CORE SHIPPED same day** — slices 1–4:
+   keyword/weak-precedence grammar, mark-and-forward analysis + the const-known
+   free-variable rule with precise reference spans, the evaluation pass over const
+   mini-programs (functions + external bindings + `__const_result`, assembled per
+   expression, computed dependencies substituted by initializer id), and in-place
+   serialization (`const.vl`: a compile-time-only function VANISHES from the
+   emitted JS; 21 pins; 84/84 prior goldens byte-identical; refugee hint moved to
+   the analyzer since `const x = 3` parses as `const (x = 3)`). REMAINING: the
+   asset channel + const-only bit (the A8 prerequisite), budgeted-LSP memoization
+   (Tier-2), deep failure spans. The styling system A8 is the forcing use
    case, independently motivated) — `const` is a weak-precedence expression keyword
    (`let x = const 1 + 2;` — captures to the bracket/comma boundary; `let NAME =
    const expr` IS the constant declaration, so bindings stay ordinary `let`/`mut`
