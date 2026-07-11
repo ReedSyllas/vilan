@@ -11963,3 +11963,127 @@ fn an_imported_function_coerces_across_modules() {
         "#,
     );
 }
+
+// --- K5: `std::time` + i64 on the wire (kolt-migration.md §2.5) --------------
+//
+// The runtime surface (arithmetic, describe, ISO, codec round-trips, sleep) is
+// pinned by the corpus (`vilan/test/time.vl`, node-run; interpreter-excluded —
+// host clock). These pin the compile-level rules.
+
+#[test]
+fn the_clock_is_not_const_evaluable() {
+    // `now()` reads the host clock — an impure capability. A `const` forcing
+    // it must fail at compile time, not fold a build-machine timestamp into
+    // the program.
+    let source = r#"
+        import std::time::now;
+        import std::print;
+
+        fun main() {
+            let moment = const now();
+            print(moment.millis);
+        }
+        main();
+        "#;
+    match compile(source) {
+        Ok(_) => panic!("expected `const now()` to be rejected, but it compiled"),
+        Err(errors) => assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unknown host call `Date.now`")),
+            "no diagnostic rejects the host clock under const; got: {errors:#?}"
+        ),
+    }
+}
+
+#[test]
+fn time_is_platform_neutral() {
+    // `Date.now`/`Date`/`setTimeout` exist on every host, so the module lives
+    // in the base layer: the same program compiles for node AND browser.
+    let source = r#"
+        import std::time::{ now, sleep_for, Instant, Duration };
+
+        async fun main() {
+            let anchor = Instant { millis = 0i64 };
+            let age = now().since(anchor) + Duration::minutes(1);
+            let _rendered = age.describe();
+            let _shifted = now() - Duration::hours(1) + Duration::seconds(30);
+            sleep_for(Duration::millis(1i64));
+        }
+        "#;
+    assert_compiles(source);
+    assert_compiles_browser(source);
+}
+
+#[test]
+fn i64_fields_are_wire() {
+    // The K5 blocker, closed: `i64` is a Wire scalar (its own serializer
+    // channel), so timestamps and row ids ride derives directly — including
+    // nested through `Instant` and `List`/`Option`.
+    assert_compiles(
+        r#"
+        import std::time::Instant;
+        import std::option::Option;
+
+        [derive(Wire)]
+        struct Task {
+            id: i64,
+            created_at: Instant,
+            due: Option<i64>,
+            checkpoints: List<i64>,
+        }
+
+        fun main() {
+            let _task = Task {
+                id = 9007199254740991i64,
+                created_at = Instant { millis = 0i64 },
+                due = Option::None,
+                checkpoints = [1i64, 2i64],
+            };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn i64_signatures_are_rpc_legal() {
+    // The `[rpc]` Wire-signature rule shares the scalar set: i64 parameters
+    // and returns are legal.
+    assert_compiles(
+        r#"
+        import std::reactive::Signal;
+
+        [service(TickClient)]
+        struct Ticker {
+            [expose] latest: Signal<i64>,
+        }
+
+        impl Ticker {
+            [rpc]
+            fun record(self, at: i64): i64 {
+                at
+            }
+        }
+
+        fun main() {
+            let _ticker = Ticker { latest = Signal::new(0i64) };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn non_wire_fields_still_fail() {
+    // The gate holds around the new scalar: a closure-typed field is still
+    // rejected by the Wire boundary.
+    assert_fails_spanning(
+        r#"
+        [derive(Wire)]
+        struct Holder {
+            callback: |i64| i64,
+        }
+        "#,
+        "|i64| i64",
+        "which is not Wire",
+    );
+}

@@ -10,7 +10,7 @@ import std::binary::binary_codec;
 import std::wire::{ Serializer, Codec };
 import std::option::Option::{ Some, None };
 import std::result::Result::{ self, Ok, Err };
-import std::time::now;
+import std::time::now_millis;
 import std::rpc::{
 	local_rpc, Dispatcher, RpcError, RpcOutcome, RpcProtocol, HttpTransport, Transport,
 	connect_socket, call, arg, reply, decode_failed,
@@ -37,7 +37,7 @@ fun add_protocol(codec: Codec): RpcProtocol {
 
 // `calls` sequential round-trips over `transport`; returns elapsed ms.
 fun drive<T: Transport>(transport: T, codec: Codec, calls: i32): f64 {
-	let started = now();
+	let started = now_millis();
 	mut index = 0;
 	for index < calls {
 		let one = 1;
@@ -48,7 +48,7 @@ fun drive<T: Transport>(transport: T, codec: Codec, calls: i32): f64 {
 		}
 		index += 1;
 	}
-	now() - started
+	now_millis() - started
 }
 
 fun run(finished: || void) {

@@ -1,0 +1,69 @@
+// `std::time` (K5): instants, durations, unit arithmetic, `describe`, ISO
+// rendering, the wire-ability of both types (i64 rides both codecs), and
+// `sleep_for`. Everything printed is deterministic — the live clock is only
+// sanity-checked against a claim that holds for any working clock.
+
+import std::print;
+import std::time::{ now, sleep_for, Instant, Duration };
+import std::wire::{ encode, decode };
+import std::json::json_codec;
+import std::binary::binary_codec;
+import std::result::Result::{ self, Ok, Err };
+
+[derive(Wire, PartialEq)]
+struct Stamp {
+	at: i64,
+	label: str,
+}
+
+async fun main() {
+	// Instants: epoch-anchored arithmetic is deterministic.
+	let epoch = Instant { millis = 0i64 };
+	print(epoch.to_iso());
+	let later = epoch + Duration::hours(2) + Duration::minutes(5);
+	print(later.since(epoch).as_minutes());
+	print((later - Duration::minutes(5)).since(epoch).as_hours());
+	print(later.gt(epoch));
+	print(epoch.lt(later));
+	print((later - Duration::minutes(125)).eq(epoch));
+
+	// Durations: constructors, truncating accessors, describe.
+	let span = Duration::days(1) + Duration::hours(4) + Duration::seconds(30);
+	print(span.as_hours());
+	print(span.describe());
+	print(Duration::minutes(5).describe());
+	print((Duration::seconds(90) + Duration::millis(500)).describe());
+	print(Duration::millis(980).describe());
+	print(Duration::millis(0i64).describe());
+	print((Duration::seconds(0i64) - Duration::hours(3)).describe());
+	print(Duration::seconds(59).as_minutes());
+	print(Duration::hours(3).gt(Duration::minutes(179)));
+
+	// The live clock: a claim that is true for any working clock (the value
+	// itself is nondeterministic, so only the claim prints).
+	print(now().since(epoch).as_days() > 19000i64);
+
+	// i64 rides the wire — both codecs, round-tripped exactly.
+	let stamp = Stamp { at = 1720656000000i64, label = "k5" };
+	let json_back: Result<Stamp, str> = decode(json_codec(), encode(json_codec(), stamp));
+	match json_back {
+		Ok(let value) => print(value == stamp),
+		Err(let reason) => print(reason),
+	}
+	let binary_back: Result<Stamp, str> = decode(binary_codec(), encode(binary_codec(), stamp));
+	match binary_back {
+		Ok(let value) => print(i"{value.at == stamp.at} {value.label}"),
+		Err(let reason) => print(reason),
+	}
+
+	// An Instant is itself Wire (the K5 point: timestamps ride rpc payloads).
+	let sent: Result<Instant, str> = decode(json_codec(), encode(json_codec(), later));
+	match sent {
+		Ok(let value) => print(value.eq(later)),
+		Err(let reason) => print(reason),
+	}
+
+	sleep_for(Duration::millis(10i64));
+	print("slept");
+}
+main();

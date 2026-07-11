@@ -1754,13 +1754,14 @@ impl<'src> Analyzer<'src> {
         }
     }
 
-    /// A field type is Wire iff it is a Wire scalar (`str`/`i32`/`u32`/`f64`/`bool`),
-    /// a `List`/`Option` of Wire (recursing into the element), or a named
-    /// `[derive(Wire)]` type. Everything else is not Wire.
+    /// A field type is Wire iff it is a Wire scalar
+    /// (`str`/`i32`/`u32`/`i64`/`f64`/`bool`), a `List`/`Option` of Wire
+    /// (recursing into the element), or a named `[derive(Wire)]` type.
+    /// Everything else is not Wire.
     fn is_wire_type(&self, node: &Node) -> bool {
         match node {
             Node::Accessor(name) => {
-                matches!(*name, "str" | "i32" | "u32" | "f64" | "bool")
+                matches!(*name, "str" | "i32" | "u32" | "i64" | "f64" | "bool")
                     || self.wire_names.contains(*name)
             }
             Node::AccessorWithGenerics(name, arguments) => {

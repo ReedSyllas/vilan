@@ -256,6 +256,7 @@ impl JsonWriter {
 			str_value = |value| self.str_value(value),
 			i32_value = |value| self.i32_value(value),
 			u32_value = |value| self.u32_value(value),
+			i64_value = |value| self.i64_value(value),
 			f64_value = |value| self.f64_value(value),
 			bool_value = |value| self.bool_value(value),
 		}
@@ -335,6 +336,12 @@ impl JsonWriter with Serialize {
 	}
 
 	fun u32_value(self, value: u32) {
+		self.value(i"{value}");
+	}
+
+	// A JSON number; exact for the runtime's whole i64 range (integers to
+	// 2^53 — the f64 representation).
+	fun i64_value(self, value: i64) {
 		self.value(i"{value}");
 	}
 
@@ -424,6 +431,7 @@ impl JsonReader {
 			str_value = || self.str_value(),
 			i32_value = || self.i32_value(),
 			u32_value = || self.u32_value(),
+			i64_value = || self.i64_value(),
 			f64_value = || self.f64_value(),
 			bool_value = || self.bool_value(),
 			fail = |reason| self.fail(reason),
@@ -520,6 +528,11 @@ impl JsonReader with Deserialize {
 	fun u32_value(self): u32 {
 		let value = self.take();
 		if self.ok() { u32::from_json_value(value) } else { 0 }
+	}
+
+	fun i64_value(self): i64 {
+		let value = self.take();
+		if self.ok() { i64::from_json_value(value) } else { 0 }
 	}
 
 	fun f64_value(self): f64 {

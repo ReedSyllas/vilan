@@ -80,10 +80,23 @@ migration deletes these subsystems rather than porting them:
    idiom, no eta-expansion).
 4. **A11 — web storage externs.** `localStorage` get/set/remove on the dom
    layer (the client-side JWT home), `sessionStorage` alongside.
-5. **K5 — `std::time`.** Minimal v1: epoch millis `now()` (impure host
-   capability — correctly NOT const-evaluable), duration arithmetic, and
-   basic formatting. Explicitly not a luxon: Kolt's usage decides the
-   surface; grow from real call sites.
+5. ~~**K5 — `std::time`.**~~ — **SHIPPED 2026-07-11.** `Instant` (epoch
+   millis) + signed `Duration`, both `[derive(Wire, PartialEq)]` — a
+   timestamp is plain data and rides rpc payloads; `now()`, operators
+   (`instant ± duration`, `duration ± duration`; elapsed is the named
+   `later.since(earlier)` — the operator traits return `Self`), unit
+   constructors/truncating accessors, `describe()` ("1d 4h"), `to_iso()`
+   via host `Date`, `sleep`/`sleep_for` (the K6 backoff shape). Base layer
+   (every host has the clock), so it compiles for node AND browser; `const
+   now()` is rejected ("unknown host call `Date.now`") — the impure
+   capability stays runtime. **Unblocked by making `i64` a Wire scalar**
+   (found here: the derive rejected `millis: i64`): its own
+   serializer/deserializer channel, JSON as a number, binary as the f64 bit
+   pattern (the runtime's i64 IS an integral f64 — exact to 2^53, which
+   epoch millis and row ids fit). Note: Kolt today has NO live date call
+   sites (luxon is declared, unused) — the surface follows the immediate
+   needs (task timestamps, K6 backoff); grow from real call sites stands.
+   Corpus `time.vl` (node-run; interpreter-excluded — host clock) + 5 pins.
 6. **K6 — transport robustness.** Railway parity for `SocketTransport`:
    reconnect with backoff, request retry policy, and mirror
    RE-SUBSCRIPTION on reconnect (`RemoteSource` must resync after a drop).

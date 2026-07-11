@@ -5,7 +5,7 @@
 
 import std::print;
 import std::shared::Shared;
-import std::time::{ now, sleep };
+import std::time::{ now_millis, sleep };
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
 import std::json::{ Json, FromJson, json_codec };
@@ -115,7 +115,7 @@ fun drive(finished: || void) {
 	let driver = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
 
 	let mutations = 50;
-	let started = now();
+	let started = now_millis();
 	mut index = 0;
 	for index < mutations {
 		let one = 1;
@@ -134,7 +134,7 @@ fun drive(finished: || void) {
 		sleep(20);
 		waited += 20;
 	}
-	let settled = now() - started;
+	let settled = now_millis() - started;
 	print(i"per-session update frames: {alice.frames.read()} {bob.frames.read()} {carol.frames.read()} (subscribe + 1 per mutation)");
 	print(i"all sessions settled at {mutations} after {round(settled)} ms ({round(settled * 1000.0 / mutations)} us per mutation fan-out)");
 	finished();

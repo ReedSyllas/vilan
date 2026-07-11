@@ -32,6 +32,7 @@ trait Serialize {
 	fun str_value(self, value: str);
 	fun i32_value(self, value: i32);
 	fun u32_value(self, value: u32);
+	fun i64_value(self, value: i64);
 	fun f64_value(self, value: f64);
 	fun bool_value(self, value: bool);
 }
@@ -51,6 +52,7 @@ trait Deserialize {
 	fun str_value(self): str;
 	fun i32_value(self): i32;
 	fun u32_value(self): u32;
+	fun i64_value(self): i64;
 	fun f64_value(self): f64;
 	fun bool_value(self): bool;
 	fun fail(self, reason: str);
@@ -89,6 +91,10 @@ struct Serializer {
 	str_value: |str| void,
 	i32_value: |i32| void,
 	u32_value: |u32| void,
+	// i64 rides its own channel; on the JS runtime its values are exact
+	// integers to 2^53 (the representation), which epoch millis and row ids
+	// fit comfortably.
+	i64_value: |i64| void,
 	f64_value: |f64| void,
 	bool_value: |bool| void,
 }
@@ -117,6 +123,7 @@ struct Deserializer {
 	str_value: || str,
 	i32_value: || i32,
 	u32_value: || u32,
+	i64_value: || i64,
 	f64_value: || f64,
 	bool_value: || bool,
 	fail: |str| void,
@@ -174,6 +181,10 @@ impl Serializer with Serialize {
 
 	fun u32_value(self, value: u32) {
 		(self.u32_value)(value);
+	}
+
+	fun i64_value(self, value: i64) {
+		(self.i64_value)(value);
 	}
 
 	fun f64_value(self, value: f64) {
@@ -238,6 +249,10 @@ impl Deserializer with Deserialize {
 		(self.u32_value)()
 	}
 
+	fun i64_value(self): i64 {
+		(self.i64_value)()
+	}
+
 	fun f64_value(self): f64 {
 		(self.f64_value)()
 	}
@@ -284,6 +299,16 @@ impl u32 with Wire {
 
 	fun rebuild<D: Deserialize>(deserializer: D): u32 {
 		deserializer.u32_value()
+	}
+}
+
+impl i64 with Wire {
+	fun describe<S: Serialize>(self, serializer: S) {
+		serializer.i64_value(self);
+	}
+
+	fun rebuild<D: Deserialize>(deserializer: D): i64 {
+		deserializer.i64_value()
 	}
 }
 

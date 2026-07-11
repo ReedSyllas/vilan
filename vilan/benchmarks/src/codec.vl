@@ -5,7 +5,7 @@
 import std::print;
 import std::option::Option::{ Some, None };
 import std::result::Result::{ self, Ok, Err };
-import std::time::now;
+import std::time::now_millis;
 import std::json::{ Json, json_codec, encode_json, decode_json };
 import std::binary::{ binary_codec, encode_binary, decode_binary };
 import std::wire::{ Wire, Frame, Codec, encode, decode };
@@ -31,7 +31,7 @@ fun run() {
 }
 
 fun drive_direct_json(todos: List<BenchTodo>, rounds: i32): f64 {
-	let started = now();
+	let started = now_millis();
 	mut index = 0;
 	for index < rounds {
 		let decoded: Result<List<BenchTodo>, str> = decode_json(encode_json(todos));
@@ -41,11 +41,11 @@ fun drive_direct_json(todos: List<BenchTodo>, rounds: i32): f64 {
 		}
 		index += 1;
 	}
-	now() - started
+	now_millis() - started
 }
 
 fun drive_direct_binary(todos: List<BenchTodo>, rounds: i32): f64 {
-	let started = now();
+	let started = now_millis();
 	mut index = 0;
 	for index < rounds {
 		let decoded: Result<List<BenchTodo>, str> = decode_binary(encode_binary(todos));
@@ -55,11 +55,11 @@ fun drive_direct_binary(todos: List<BenchTodo>, rounds: i32): f64 {
 		}
 		index += 1;
 	}
-	now() - started
+	now_millis() - started
 }
 
 fun drive(codec: Codec, todos: List<BenchTodo>, rounds: i32): f64 {
-	let started = now();
+	let started = now_millis();
 	mut index = 0;
 	for index < rounds {
 		let decoded: Result<List<BenchTodo>, str> = decode(codec, encode(codec, todos));
@@ -69,5 +69,5 @@ fun drive(codec: Codec, todos: List<BenchTodo>, rounds: i32): f64 {
 		}
 		index += 1;
 	}
-	now() - started
+	now_millis() - started
 }

@@ -1,8 +1,180 @@
-import pkg::promise::Promise;
+// `std::time` (K5, proposal/kolt-migration.md §2.5) — instants, durations,
+// and sleeping, over the host clock. Deliberately minimal (not a luxon):
+// epoch-milli `Instant`s, signed `Duration` arithmetic, ISO rendering, and a
+// coarse `describe()`. Grows from real call sites.
+//
+// `now()` reads the host clock — an impure capability, so it is NOT
+// const-evaluable (a `const now()` is a compile error, correctly). Both
+// types are wire-able: a timestamp is plain data (one i64), so it can ride
+// rpc payloads and mirrors.
 
-// Milliseconds since the Unix epoch, read from the host clock (`Date.now`).
+import pkg::promise::Promise;
+import pkg::operators::{ Add, Sub };
+import pkg::compare::{ PartialEq, PartialOrd, Ordering };
+import pkg::option::Option::{ self, Some, None };
+
+// --- The clock ---------------------------------------------------------------
+
+// Milliseconds since the Unix epoch, read from the host clock (`Date.now`) —
+// the raw sample, for hot paths that just want float math (benchmarks).
 [extern("Date.now")]
-external fun now(): f64;
+external fun now_millis(): f64;
+
+// The current moment, typed.
+fun now(): Instant {
+	Instant { millis = now_millis().as_i64() }
+}
+
+// --- Instants and durations ---------------------------------------------------
+
+// A moment in time: milliseconds since the Unix epoch. Plain data — compare
+// it, ship it over the wire, subtract two for a `Duration`.
+[derive(Wire, PartialEq)]
+struct Instant {
+	millis: i64,
+}
+
+// A signed span of time in milliseconds (`later.since(earlier)` is negative
+// when `later` is actually earlier).
+[derive(Wire, PartialEq)]
+struct Duration {
+	millis: i64,
+}
+
+impl Instant {
+	// The span from `earlier` to `self`.
+	fun since(self, earlier: Instant): Duration {
+		Duration { millis = self.millis - earlier.millis }
+	}
+
+	// ISO-8601 in UTC (`1970-01-01T00:00:00.000Z`), via the host `Date`.
+	fun to_iso(self): str {
+		host_date(self.millis).to_iso_string()
+	}
+}
+
+// `instant + duration` / `instant - duration` shift a moment.
+impl Instant with Add<Duration> {
+	fun add(self, b: Duration): Instant {
+		Instant { millis = self.millis + b.millis }
+	}
+}
+
+impl Instant with Sub<Duration> {
+	fun sub(self, b: Duration): Instant {
+		Instant { millis = self.millis - b.millis }
+	}
+}
+
+impl Instant with PartialOrd {
+	fun partial_compare(self, b: Instant): Option<Ordering> {
+		self.millis.partial_compare(b.millis)
+	}
+}
+
+impl Duration {
+	fun millis(count: i64): Duration {
+		Duration { millis = count }
+	}
+
+	fun seconds(count: i64): Duration {
+		Duration { millis = count * 1000i64 }
+	}
+
+	fun minutes(count: i64): Duration {
+		Duration { millis = count * 60000i64 }
+	}
+
+	fun hours(count: i64): Duration {
+		Duration { millis = count * 3600000i64 }
+	}
+
+	fun days(count: i64): Duration {
+		Duration { millis = count * 86400000i64 }
+	}
+
+	// Whole units, truncated toward zero (i64 division).
+	fun as_seconds(self): i64 {
+		self.millis / 1000i64
+	}
+
+	fun as_minutes(self): i64 {
+		self.millis / 60000i64
+	}
+
+	fun as_hours(self): i64 {
+		self.millis / 3600000i64
+	}
+
+	fun as_days(self): i64 {
+		self.millis / 86400000i64
+	}
+
+	// A coarse human rendering: the two largest non-zero units — "2h 3m",
+	// "5m 30s", "980ms", "0ms" — with a leading "-" for a negative span.
+	fun describe(self): str {
+		let sign = if self.millis < 0i64 { "-" } else { "" };
+		let magnitude = if self.millis < 0i64 { 0i64 - self.millis } else { self.millis };
+		let parts = split_units(magnitude);
+		sign + parts
+	}
+}
+
+fun split_units(millis: i64): str {
+	let days = millis / 86400000i64;
+	let hours = (millis / 3600000i64) % 24i64;
+	let minutes = (millis / 60000i64) % 60i64;
+	let seconds = (millis / 1000i64) % 60i64;
+	if days > 0i64 {
+		join_units(i"{days}d", hours, "h")
+	} else if hours > 0i64 {
+		join_units(i"{hours}h", minutes, "m")
+	} else if minutes > 0i64 {
+		join_units(i"{minutes}m", seconds, "s")
+	} else if seconds > 0i64 {
+		i"{seconds}s"
+	} else {
+		i"{millis}ms"
+	}
+}
+
+fun join_units(head: str, count: i64, unit: str): str {
+	if count > 0i64 {
+		i"{head} {count}{unit}"
+	} else {
+		head
+	}
+}
+
+impl Duration with Add {
+	fun add(self, b: Duration): Duration {
+		Duration { millis = self.millis + b.millis }
+	}
+}
+
+impl Duration with Sub {
+	fun sub(self, b: Duration): Duration {
+		Duration { millis = self.millis - b.millis }
+	}
+}
+
+impl Duration with PartialOrd {
+	fun partial_compare(self, b: Duration): Option<Ordering> {
+		self.millis.partial_compare(b.millis)
+	}
+}
+
+// --- The host `Date` (rendering only) ------------------------------------------
+
+external struct HostDate;
+
+[extern(new, "Date")]
+external fun host_date(millis: i64): HostDate;
+
+impl HostDate {
+	[extern(method, "toISOString")]
+	external fun to_iso_string(self): str;
+}
 
 // --- Sleeping ------------------------------------------------------------------
 
@@ -20,4 +192,10 @@ fun sleep(ms: i32) {
 	let _ = await timer_promise(|resolve| {
 		set_timeout(resolve, ms);
 	});
+}
+
+// `sleep`, taking a `Duration` (the K6 backoff shape). Spans beyond i32
+// milliseconds (~24 days) are not supported by the host timer.
+fun sleep_for(duration: Duration) {
+	sleep(duration.millis.as_i32());
 }
