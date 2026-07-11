@@ -86,7 +86,26 @@ fuzzy search (fuse.js is a pure algorithm — port or bind when needed),
 animation (std::style transitions cover the basics; motionone parity is far
 future), automations/webhooks (plain server code once K4 lands).
 
-## 3. The pilot slice (the next arc)
+## 3. The pilot slice — COMPLETE (2026-07-11)
+
+Built as `~/code/kolt/vilan/` (a 4-package workspace: `common`, `server`,
+`client`, `probe`), verified end-to-end against a running server:
+**register → authenticated workspace create → forged-token rejected → the
+change lands live on a SECOND connection's mirror → persisted in SQLite and
+reloaded on restart.** Every §2 gap it touched is now shipped (K3 crypto/jwt,
+K4 db, A11 storage). The server keeps `common` platform-neutral by holding its
+DB logic in `Shared<|..| R>` HOOK closures the rpc methods call — so
+`std::db` never leaks past the `@process` layer. Findings fed back: B17
+(fixed before the pilot), B18 (method-call-result call parse gap — worked
+around), E10 (`pkg::`/`std::` module name collision — worked around by
+renaming), and confirmation that RPC stubs must be called from an async
+context (a sync helper matches an unresolved promise — a sharp edge worth an
+eventual diagnostic). What the pilot did NOT need yet: JWT itself (session
+tokens are a `session` table row — revocable, simpler than JWT for a
+single server; JWT waits for stateless multi-node), routing (one screen +
+a `show` toggle), K5 time, K6 robustness.
+
+## 3b. The original pilot sketch (kept for the record)
 
 A vertical slice, built as a fresh vilan workspace beside the TS app —
 `kolt/vilan/` — sharing nothing at runtime (no protocol compatibility
