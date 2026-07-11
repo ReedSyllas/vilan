@@ -11174,3 +11174,49 @@ fn null_columns_are_detectable() {
         "true\nfalse\n",
     );
 }
+
+// --- A11 / pilot: web storage + the method-call-result-call parse gap --------
+
+#[test]
+fn calling_a_method_call_result_binds_first() {
+    // The pilot's KoltStore stored server hooks as `Shared<|..| R>` and called
+    // them; `self.hook.read()(args)` — calling a METHOD-call result directly —
+    // does not parse (B-note), but binding the result first does. This pins the
+    // working shape; the direct form is the ignored pin below.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        struct Holder { hook: Shared<|str| i32> }
+        impl Holder {
+            fun call_it(self, a: str): i32 {
+                let hook = self.hook.read();
+                hook(a)
+            }
+        }
+        fun main() {
+            let h = Holder { hook = Shared::new(|a: str| a.len()) };
+            print(h.call_it("abcd"));
+        }
+        main();
+        "#,
+        "4\n",
+    );
+}
+
+#[test]
+#[ignore = "parser gap: calling a method-call result directly — x.method()(args) — doesn't parse (Kolt pilot find; backlog B)"]
+fn calling_a_method_call_result_directly_parses() {
+    // `func()(args)` parses; `x.method()(args)` does not. Un-ignore when fixed.
+    assert_compiles(
+        r#"
+        import std::shared::Shared;
+        struct Holder { hook: Shared<|str| i32> }
+        impl Holder {
+            fun call_it(self, a: str): i32 {
+                self.hook.read()(a)
+            }
+        }
+        "#,
+    );
+}

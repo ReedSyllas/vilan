@@ -13,4 +13,4 @@ name = "std"
 platform = ["@process"]    # fs, http, process
 
 [library.layer.browser]
-platform = ["browser"]     # dom, ui
+platform = ["browser"]     # dom, ui, storage

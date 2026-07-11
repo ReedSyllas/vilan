@@ -1,0 +1,24 @@
+// Web Storage (proposal/kolt-migration.md §2.4): `localStorage` /
+// `sessionStorage` on the browser layer. A missing key reads as "" (the host
+// returns null; the helper flattens it) — the client-side home for a session
+// token. Values are strings; encode structured data through a codec.
+
+// `localStorage.getItem(key)` — "" when absent.
+[extern("__local_get")]
+external fun get(key: str): str;
+
+[extern("localStorage.setItem")]
+external fun set(key: str, value: str): void;
+
+[extern("localStorage.removeItem")]
+external fun remove(key: str): void;
+
+// The tab-scoped variant (cleared when the tab closes).
+[extern("__session_get")]
+external fun session_get(key: str): str;
+
+[extern("sessionStorage.setItem")]
+external fun session_set(key: str, value: str): void;
+
+[extern("sessionStorage.removeItem")]
+external fun session_remove(key: str): void;

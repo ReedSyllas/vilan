@@ -161,9 +161,11 @@ have gaps.
     current-route signal composing with `show`/`bind_*`. Lands with the pilot's
     second page, not before.
 
-11. **Web storage externs** (S; Kolt gap — kolt-migration.md §2.4) —
-    `localStorage`/`sessionStorage` get/set/remove on the dom layer; the
-    client-side JWT home for the pilot's auth handshake.
+11. ~~**Web storage externs**~~ — **SHIPPED 2026-07-11** as `std::storage`
+    (browser layer): `get`/`set`/`remove` over `localStorage`, `session_*` over
+    `sessionStorage`; a missing key reads "" (the `__local_get`/`__session_get`
+    helpers flatten the host's null). The pilot's token home. Live-tested by the
+    pilot (the node harness can't build browser layers).
 
 ---
 
@@ -267,6 +269,15 @@ have gaps.
     covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
     channel. Workaround: annotate (`|i: i32| ..`).
 
+18. **Calling a method-call result directly doesn't parse** (S; pinned
+    `#[ignore]`d; found 2026-07-11 in the Kolt pilot) — `func()(args)` parses
+    (call-on-call-result), but `x.method()(args)` does not ("expected a method
+    name after `.`") — the postfix grammar accepts a call after a call, but not a
+    call after a METHOD call. Surfaced storing server hooks as `Shared<|..| R>`
+    and invoking them (`self.hook.read()(a, b)`); the bind-first workaround
+    (`let hook = self.hook.read(); hook(a, b)`) is pinned as the working shape.
+    Small postfix-parser fix.
+
 17. ~~**A generic call in an `else`/`match` branch loses its type argument**~~ —
     **FIXED 2026-07-11** (found building `std::jwt` for the Kolt migration). The
     discovering case looked async (a generic decode after a branch-nested await
@@ -369,6 +380,14 @@ have gaps.
 ## E. LSP & tooling
 
 2. **LSP semantic highlighting** (M; roadmap #10) — semantic tokens, precision over TextMate.
+
+10. **`pkg::<name>` collides with `std::<name>` for a local module** (S; found
+    2026-07-11 in the Kolt pilot) — a client module named `ui.vl` imported as
+    `pkg::ui::screen` failed to resolve ("cannot find in the imported path") while
+    `std::ui` was also imported; renaming the local module to `views` fixed it.
+    Local (`pkg::`) and std (`std::`) module namespaces should not shadow each
+    other — a package must be free to name a module `ui`/`json`/`db` without
+    colliding with std. Scope the resolution by the import root.
 
 9. **Richer hover tooltips** (S–M per slice; user request 2026-07-10) — hover today is the
    bare inferred-type label (`expr_types` + `type_label`). Candidate upgrades, roughly in

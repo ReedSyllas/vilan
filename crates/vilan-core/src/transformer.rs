@@ -240,6 +240,13 @@ fn helper_source(name: &str) -> &'static str {
              \treturn new Uint8Array(await crypto.subtle.deriveBits({ name: \"PBKDF2\", salt, iterations, hash: \"SHA-512\" }, imported, bits));\n\
              }"
         }
+        // Web Storage glue (std::storage): a missing key reads null; flatten to "".
+        "__local_get" => {
+            "function __local_get(key) {\n\treturn localStorage.getItem(key) ?? \"\";\n}"
+        }
+        "__session_get" => {
+            "function __session_get(key) {\n\treturn sessionStorage.getItem(key) ?? \"\";\n}"
+        }
         // SQLite glue (std::db): parameter spreads and row/column reads the
         // extern binding forms can't express directly.
         "__db_run" => {
@@ -2352,6 +2359,12 @@ impl<'src> Transformer<'src> {
                     }
                     "__db_is_null" => {
                         self.used_helpers.insert("__db_is_null");
+                    }
+                    "__local_get" => {
+                        self.used_helpers.insert("__local_get");
+                    }
+                    "__session_get" => {
+                        self.used_helpers.insert("__session_get");
                     }
                     _ => {}
                 }
