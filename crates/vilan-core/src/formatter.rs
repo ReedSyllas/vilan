@@ -648,8 +648,14 @@ impl<'src> Printer<'src> {
                 self.out.push_str(symbol);
                 self.out.push('"');
             }
-            ExternBinding::New { symbol } => {
-                self.out.push_str("new, \"");
+            ExternBinding::New { module, symbol } => {
+                self.out.push_str("new, ");
+                if let Some(module) = module {
+                    self.out.push('"');
+                    self.out.push_str(module);
+                    self.out.push_str("\", ");
+                }
+                self.out.push('"');
                 self.out.push_str(symbol);
                 self.out.push('"');
             }

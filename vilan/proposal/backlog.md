@@ -852,12 +852,18 @@ have gaps.
    around it (crypto in a non-generic async helper, decode a flat match). bcrypt/
    argon2 and passkeys stay beyond-v1.
 
-4. **SQLite bindings** (M; Kolt gap — kolt-migration.md §2.2) — one vilan
-   interface, platform-layered impls (deno `jsr:@db/sqlite`, node
-   `better-sqlite3` — the `_sys` seam); doubles as the proving ground for runtime
-   jsr/npm dependencies through extern module imports. Server-layer only — the
-   client physically cannot import it, which is Kolt's architecture principle
-   made structural. Minimal exec/query/prepare surface; no ORM ambitions.
+4. ~~**SQLite bindings**~~ — **SHIPPED 2026-07-11** as `std::db` over the host's
+   BUILT-IN `node:sqlite` (node 22.5+; deno 2 via node-compat) — zero package
+   dependency, so the jsr/npm proving-ground goal moves to whenever a dep is
+   truly unavoidable (recorded). One compiler addition: the module-qualified
+   constructor binding `[extern(new, "node:sqlite", "DatabaseSync")]` (New grew a
+   module field, imported like Function's). Surface: `Database::open/exec/prepare`,
+   `Statement::run` (returns the rowid) `/first/all` with positional `List<any>`
+   params via `__db_*` spread helpers, `Row::text/integer/real/is_null` (three
+   typed views over one column helper — trust the schema, guard nullables).
+   @process layer: the client physically cannot import it — Kolt's principle made
+   structural. 2 pins + corpus `db.vl` (interpreter-excluded). Recorded: i64
+   rowids, transactions, deno-native verification.
 
 5. **`std::time`** (S–M; Kolt gap — kolt-migration.md §2.5) — minimal v1: epoch
    millis `now()` (impure host capability — correctly not const-evaluable),

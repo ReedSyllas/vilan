@@ -58,8 +58,11 @@ pub enum ExternBinding<'src> {
         symbol: &'src str,
     },
     // `[extern(new, "TextDecoder")]` — `new symbol(args)`: construct a host class
-    // instance (host constructors reject a plain call).
+    // instance (host constructors reject a plain call). With a module
+    // (`[extern(new, "node:sqlite", "DatabaseSync")]`), the class is imported
+    // first, like `Function`'s module form.
     New {
+        module: Option<&'src str>,
         symbol: &'src str,
     },
 }

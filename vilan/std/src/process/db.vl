@@ -1,0 +1,96 @@
+// SQLite over the host's built-in `node:sqlite` (proposal/kolt-migration.md
+// §2.2): the server-only storage seam. Node 22.5+ ships it; Deno 2 serves it
+// through node-compat — no package-manager dependency at all. The client
+// physically cannot import this module (it lives in the @process platform
+// layer), which is Kolt's server-only-database principle made structural.
+//
+// Minimal by design: exec / prepare / run / first / all, with rows read
+// through typed column accessors. No ORM ambitions — grow from real call
+// sites.
+
+import pkg::option::Option::{ self, Some, None };
+
+// An open database handle (`node:sqlite`'s DatabaseSync — synchronous, the
+// right shape for a single-threaded server loop over local storage).
+external struct Database;
+
+// A prepared statement (reusable; parameters bind per call).
+external struct Statement;
+
+// A result row (a host object; read columns through the typed accessors).
+external struct Row;
+
+impl Database {
+	// Opens (creating if missing) the database at `path`; ":memory:" for an
+	// ephemeral in-process store.
+	[extern(new, "node:sqlite", "DatabaseSync")]
+	external fun open(path: str): Database;
+
+	// Runs `sql` directly — DDL, pragmas, one-off statements without results.
+	[extern(method)]
+	external fun exec(self, sql: str): void;
+
+	[extern(method)]
+	external fun prepare(self, sql: str): Statement;
+}
+
+// Parameter spreads and column reads need host glue (`stmt.run(...params)`,
+// `row[name]`) — the `__db_*` runtime helpers. The three column readers share
+// one helper; the vilan signature supplies the type (trust the schema, and
+// guard NULLABLE columns with `is_null`).
+[extern("__db_run")]
+external fun statement_run(statement: Statement, parameters: List<any>): i32;
+
+[extern("__db_all")]
+external fun statement_all(statement: Statement, parameters: List<any>): List<Row>;
+
+[extern("__db_get")]
+external fun statement_first(statement: Statement, parameters: List<any>): Option<Row>;
+
+[extern("__db_column")]
+external fun column_text(row: Row, name: str): str;
+
+[extern("__db_column")]
+external fun column_integer(row: Row, name: str): i32;
+
+[extern("__db_column")]
+external fun column_real(row: Row, name: str): f64;
+
+[extern("__db_is_null")]
+external fun column_is_null(row: Row, name: str): bool;
+
+impl Statement {
+	// Executes with `parameters` bound positionally; returns the inserted
+	// rowid (0 when the statement inserts nothing). Rowids exceed i32 only
+	// past 2^31 rows — revisit alongside real i64 needs.
+	fun run(self, parameters: List<any>): i32 {
+		statement_run(self, parameters)
+	}
+
+	fun all(self, parameters: List<any>): List<Row> {
+		statement_all(self, parameters)
+	}
+
+	// The first matching row, or `None` when the query matches nothing.
+	fun first(self, parameters: List<any>): Option<Row> {
+		statement_first(self, parameters)
+	}
+}
+
+impl Row {
+	fun text(self, name: str): str {
+		column_text(self, name)
+	}
+
+	fun integer(self, name: str): i32 {
+		column_integer(self, name)
+	}
+
+	fun real(self, name: str): f64 {
+		column_real(self, name)
+	}
+
+	fun is_null(self, name: str): bool {
+		column_is_null(self, name)
+	}
+}

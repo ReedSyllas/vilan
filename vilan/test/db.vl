@@ -1,0 +1,25 @@
+import std::print;
+import std::db::{ Database, Statement, Row };
+import std::option::Option::{ self, Some, None };
+
+// SQLite over the host's built-in node:sqlite (proposal/kolt-migration.md
+// §2.2): server-only storage, no package dependency. Excluded from the macro
+// interpreter gate — the database is a host capability.
+
+fun main() {
+	let db = Database::open(":memory:");
+	db.exec("CREATE TABLE task (id INTEGER PRIMARY KEY, title TEXT, done INTEGER)");
+	let insert = db.prepare("INSERT INTO task (title, done) VALUES (?, ?)");
+	insert.run(["write the pilot", 0]);
+	insert.run(["ship std::db", 1]);
+
+	let open_tasks = db.prepare("SELECT title FROM task WHERE done = ? ORDER BY id");
+	for row in open_tasks.all([0]) {
+		print(i"todo: {row.text("title")}");
+	}
+	match db.prepare("SELECT COUNT(*) AS n FROM task").first([]) {
+		Some(let row) => print(i"{row.integer("n")} tasks total"),
+		None => print("no rows"),
+	}
+}
+main();

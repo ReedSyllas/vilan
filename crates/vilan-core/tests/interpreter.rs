@@ -31,6 +31,7 @@ const EXCLUDED: &[(&str, &str)] = &[
     ),
     ("process-env.vl", "host environment (`__env`, `__args`)"),
     ("crypto.vl", "async + host WebCrypto (`crypto.subtle`)"),
+    ("db.vl", "host database (`node:sqlite`)"),
 ];
 
 /// Runs `source` through the pipeline once, then both execution paths.

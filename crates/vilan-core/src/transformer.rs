@@ -240,6 +240,27 @@ fn helper_source(name: &str) -> &'static str {
              \treturn new Uint8Array(await crypto.subtle.deriveBits({ name: \"PBKDF2\", salt, iterations, hash: \"SHA-512\" }, imported, bits));\n\
              }"
         }
+        // SQLite glue (std::db): parameter spreads and row/column reads the
+        // extern binding forms can't express directly.
+        "__db_run" => {
+            "function __db_run(statement, parameters) {\n\
+             \tconst result = statement.run(...parameters);\n\
+             \treturn Number(result.lastInsertRowid ?? 0);\n\
+             }"
+        }
+        "__db_all" => {
+            "function __db_all(statement, parameters) {\n\treturn statement.all(...parameters);\n}"
+        }
+        "__db_get" => {
+            "function __db_get(statement, parameters) {\n\
+             \tconst row = statement.get(...parameters);\n\
+             \treturn row === undefined ? [ 1 ] : [ 0, row ];\n\
+             }"
+        }
+        "__db_column" => "function __db_column(row, name) {\n\treturn row[name];\n}",
+        "__db_is_null" => {
+            "function __db_is_null(row, name) {\n\treturn row[name] === null || row[name] === undefined;\n}"
+        }
         // Cryptographically random bytes.
         "__random_bytes" => {
             "function __random_bytes(length) {\n\treturn crypto.getRandomValues(new Uint8Array(length));\n}"
@@ -2317,6 +2338,21 @@ impl<'src> Transformer<'src> {
                     "__random_bytes" => {
                         self.used_helpers.insert("__random_bytes");
                     }
+                    "__db_run" => {
+                        self.used_helpers.insert("__db_run");
+                    }
+                    "__db_all" => {
+                        self.used_helpers.insert("__db_all");
+                    }
+                    "__db_get" => {
+                        self.used_helpers.insert("__db_get");
+                    }
+                    "__db_column" => {
+                        self.used_helpers.insert("__db_column");
+                    }
+                    "__db_is_null" => {
+                        self.used_helpers.insert("__db_is_null");
+                    }
                     _ => {}
                 }
                 js::Node::Call(Box::new(js::Node::Local(symbol.to_string())), args)
@@ -2354,7 +2390,14 @@ impl<'src> Transformer<'src> {
             }
             // `new Symbol(args)` — the callee renders verbatim, and an extern is
             // only ever emitted as a direct call, so the textual form is exact.
-            ExternBinding::New { symbol } => {
+            // A module-qualified class imports first (the `Function` rule).
+            ExternBinding::New { module, symbol } => {
+                if let Some(module) = module {
+                    self.used_imports
+                        .entry(module.to_string())
+                        .or_default()
+                        .insert(symbol.to_string());
+                }
                 js::Node::Call(Box::new(js::Node::Local(format!("new {symbol}"))), args)
             }
         }

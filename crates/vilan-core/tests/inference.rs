@@ -11110,3 +11110,67 @@ fn a_generic_call_after_a_branch_nested_await_monomorphizes() {
         "hi\n",
     );
 }
+
+// --- K4: std::db — SQLite over node:sqlite (Kolt migration) ------------------
+// The server-only storage seam: `node:sqlite`'s DatabaseSync through the new
+// module-qualified `[extern(new, "module", "Class")]` binding form, with
+// `__db_*` helpers for parameter spreads and column reads. Runs against the
+// real host database (node ships it built in).
+
+#[test]
+fn a_database_round_trips_inserts_and_queries() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::db::{ Database, Statement, Row };
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let db = Database::open(":memory:");
+            db.exec("CREATE TABLE account (id INTEGER PRIMARY KEY, username TEXT, age INTEGER)");
+            let insert = db.prepare("INSERT INTO account (username, age) VALUES (?, ?)");
+            print(insert.run(["reed", 30]));
+            print(insert.run(["ada", 36]));
+            let by_name = db.prepare("SELECT id, username, age FROM account WHERE username = ?");
+            match by_name.first(["ada"]) {
+                Some(let row) => print(i"{row.text("username")} is {row.integer("age")}"),
+                None => print("not found"),
+            }
+            match by_name.first(["nobody"]) {
+                Some(let _row) => print("ghost"),
+                None => print("none"),
+            }
+            let names = db.prepare("SELECT username FROM account ORDER BY id").all([]);
+            for row in names {
+                print(row.text("username"));
+            }
+        }
+        main();
+        "#,
+        "1\n2\nada is 36\nnone\nreed\nada\n",
+    );
+}
+
+#[test]
+fn null_columns_are_detectable() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::db::{ Database, Row };
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let db = Database::open(":memory:");
+            db.exec("CREATE TABLE t (name TEXT, note TEXT)");
+            db.prepare("INSERT INTO t (name, note) VALUES (?, NULL)").run(["only-name"]);
+            match db.prepare("SELECT name, note FROM t").first([]) {
+                Some(let row) => {
+                    print(row.is_null("note"));
+                    print(row.is_null("name"));
+                },
+                None => print("empty"),
+            }
+        }
+        main();
+        "#,
+        "true\nfalse\n",
+    );
+}
