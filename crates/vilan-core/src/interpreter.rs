@@ -142,13 +142,19 @@ fn value_to_const(value: &Value) -> Result<ConstValue, &'static str> {
 /// Evaluates a const mini-program — the functions and bindings one `const`
 /// expression needs, ending in `const __const_result = <expr>;` — and returns
 /// the result as plain data (const-eval.md §1).
-pub fn eval_const<'a>(program: &'a JsProgram<'a>, limits: Limits) -> Result<ConstValue, Failure> {
+pub fn eval_const<'a>(
+    program: &'a JsProgram<'a>,
+    limits: Limits,
+) -> Result<(ConstValue, Vec<(String, String)>), Failure> {
     check_capabilities(program)?;
     let mut interpreter = Interpreter {
         fuel: limits.fuel,
         depth_left: limits.call_depth,
         stdout: String::new(),
         exited: None,
+        assets: Vec::new(),
+        // The one context where `asset::emit` is live (const-eval.md §3).
+        allow_assets: true,
     };
     let globals = Scope::root();
     match interpreter.exec_body(&program.nodes, &globals)? {
@@ -164,10 +170,11 @@ pub fn eval_const<'a>(program: &'a JsProgram<'a>, limits: Limits) -> Result<Cons
             "the const result binding was not emitted",
         ));
     };
-    value_to_const(&result).map_err(|what| Failure {
+    let value = value_to_const(&result).map_err(|what| Failure {
         kind: FailureKind::Unsupported,
         message: format!("a `const` result must be plain data; this evaluates to {what}"),
-    })
+    })?;
+    Ok((value, interpreter.assets))
 }
 
 pub struct RunOutput {
@@ -188,6 +195,8 @@ pub fn run_program<'a>(program: &'a JsProgram<'a>, limits: Limits) -> Result<Run
         depth_left: limits.call_depth,
         stdout: String::new(),
         exited: None,
+        assets: Vec::new(),
+        allow_assets: false,
     };
     let globals = Scope::root();
     let result = interpreter.exec_body(&program.nodes, &globals);
@@ -244,6 +253,8 @@ pub fn run_entry<'a>(
         depth_left: limits.call_depth,
         stdout: String::new(),
         exited: None,
+        assets: Vec::new(),
+        allow_assets: false,
     };
     let globals = Scope::root();
     match interpreter.exec_body(&program.nodes, &globals)? {
@@ -419,6 +430,11 @@ struct Interpreter {
     /// frame (node exits the whole process from anywhere); `run_program`
     /// checks this first and converts the unwind back into success.
     exited: Option<i32>,
+    /// `(kind, line)` pairs `asset::emit` accumulated (const-eval.md §3).
+    assets: Vec<(String, String)>,
+    /// `asset::emit` is live only under `eval_const`; anywhere else it is a
+    /// capability miss.
+    allow_assets: bool,
 }
 
 impl Interpreter {
@@ -904,6 +920,20 @@ impl Interpreter {
                     Some(value) => Ok(option_some(value)),
                     None => Ok(option_none()),
                 }
+            }
+            // `asset::emit` — the const-only compile-time effect: live only
+            // under `eval_const` (const-eval.md §3); anywhere else (macro
+            // expansion, the equivalence runner) it is a capability miss.
+            "__emit_asset" => {
+                if !self.allow_assets {
+                    return Err(Failure::unsupported(
+                        "`asset::emit` outside a `const` expression",
+                    ));
+                }
+                let kind = expect_str(&take(0))?;
+                let line = expect_str(&take(1))?;
+                self.assets.push((kind.to_string(), line.to_string()));
+                Ok(Value::Undefined)
             }
             // The checked subscripts, matching the emitted `__at*` helpers: an
             // out-of-bounds index is a panic (`Thrown`), so a macro-time

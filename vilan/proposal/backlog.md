@@ -532,7 +532,15 @@ have gaps.
    derive-name registration decoupling (deferred to the first user derive needing it).
 
 2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10,
-   revised same day to the EXPRESSION form; **CORE SHIPPED same day** — slices 1–4:
+   revised same day to the EXPRESSION form; **SHIPPED same day, v1 complete** —
+   slices 1–4 plus the asset channel + const-only bit (`std::asset::emit` live only
+   under `eval_const`; R-fixpoint over the call graph with roots-never-join, so the
+   error sits at the outermost runtime crossing while const-chained property
+   functions stay legal; channel dedups + lexically orders — sound for CSS, '.' <
+   '@' — and `vilan build` writes `<output>.<kind>`; 7 pins + an end-to-end CLI
+   test; A8's prerequisite is MET). Recorded: indirect-call conservative gap,
+   run/watch asset writes, liveness-tied emission, Tier-2 memoization, deep spans.
+   Slices 1–4 were:
    keyword/weak-precedence grammar, mark-and-forward analysis + the const-known
    free-variable rule with precise reference spans, the evaluation pass over const
    mini-programs (functions + external bindings + `__const_result`, assembled per

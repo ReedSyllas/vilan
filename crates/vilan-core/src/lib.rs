@@ -268,9 +268,10 @@ pub fn analyze_source(
         // expressions in dependency order; results serialize in place at
         // transform time, failures are ordinary diagnostics. Runs here so
         // `check`, the LSP, and every build path agree.
-        let (const_results, const_errors) =
+        let (const_results, const_assets, const_errors) =
             const_eval::evaluate(&program, &options::BuildOptions::default());
         program.const_results = const_results;
+        program.const_assets = const_assets;
         program.diagnostics.extend(const_errors);
         program
     }));

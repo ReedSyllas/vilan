@@ -1,0 +1,8 @@
+// Compile-time build outputs (proposal/const-eval.md §3): `emit(kind, line)`
+// appends a line to the build's `kind` asset. The channel deduplicates by
+// line, orders deterministically, and writes `<output>.<kind>` beside the
+// compiled JS. Compile-time-only: callable only from within a `const`
+// expression — a runtime call path is a compile error.
+
+[extern("__emit_asset")]
+external fun emit(kind: str, line: str): void;

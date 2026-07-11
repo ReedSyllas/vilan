@@ -1067,6 +1067,7 @@ pub struct Analyzer<'src> {
     // The `std` `panic` intrinsic, if loaded. A call to it never returns, so it
     // types as `any` (unifying with any expected type) and lowers to a `throw`.
     panic_fn_id: Option<Id>,
+    asset_emit_fn_id: Option<Id>,
     // `const`-marked expression ids, in walk order (innermost-first for
     // nesting) — the const pass's worklist.
     const_exprs: Vec<Id>,
@@ -1237,6 +1238,7 @@ impl<'src> Analyzer<'src> {
             walking_trait_body: false,
             trait_body_scopes: HashSet::new(),
             panic_fn_id: None,
+            asset_emit_fn_id: None,
             const_exprs: Vec::new(),
             option_enum_id: None,
             result_enum_id: None,
@@ -12641,11 +12643,16 @@ pub struct Program<'src> {
     pub list_push_fn_id: Option<Id>,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
+    /// `std::asset::emit` — the const-only compile-time effect (const-eval.md).
+    pub asset_emit_fn_id: Option<Id>,
     /// `const`-marked expression ids in walk order (const-eval.md §1).
     pub const_exprs: Vec<Id>,
     /// Computed const results, filled by `const_eval::evaluate` post-analysis;
     /// the transformer serializes these in place of the expressions.
     pub const_results: HashMap<Id, crate::interpreter::ConstValue>,
+    /// `(kind, line)` pairs `asset::emit` accumulated during const evaluation;
+    /// the build deduplicates, orders, and writes them beside the output.
+    pub const_assets: Vec<(String, String)>,
     // The `std::context` `Context` intrinsics (if `context.vl` loaded): the
     // `new`/`run`/`get` method ids. The context threading pass keys off these to
     // find context bindings and their `run`/`get` sites; the transformer lowers
@@ -14792,6 +14799,15 @@ pub fn analyze<'src>(
             .get(io_scope_id)
             .and_then(|scope| scope.name_to_id_map.get("panic").copied());
     }
+    // Remember `asset::emit` — the const-only compile-time effect
+    // (const-eval.md §2-3); the const pass enforces that no runtime call
+    // path reaches it.
+    if let Some(asset_scope_id) = module_scopes.get("asset") {
+        analyzer.asset_emit_fn_id = analyzer
+            .scopes
+            .get(asset_scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("emit").copied());
+    }
     // Remember the std `Option`/`Result` enums and the `Try` trait: `expr!`
     // dispatches the std pair by identity and user types through `Try`
     // (proposal/try-and-lift.md).
@@ -15370,8 +15386,10 @@ pub fn analyze<'src>(
         list_new_fn_id,
         list_push_fn_id,
         panic_fn_id: analyzer.panic_fn_id,
+        asset_emit_fn_id: analyzer.asset_emit_fn_id,
         const_exprs: analyzer.const_exprs.clone(),
         const_results: HashMap::new(),
+        const_assets: Vec::new(),
         context_new_fn_id,
         context_run_fn_id,
         context_get_fn_id,

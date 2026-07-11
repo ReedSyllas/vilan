@@ -354,7 +354,7 @@ fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> 
                 );
                 return None;
             }
-            let javascript = compile_unit(&unit, Platform::default(), false).ok()?;
+            let (javascript, _assets) = compile_unit(&unit, Platform::default(), false).ok()?;
             let script = env::temp_dir().join(format!("vilan-watch-{}.js", std::process::id()));
             if let Err(error) = fs::write(&script, javascript) {
                 eprintln!("error: cannot write {}: {error}", script.display());
@@ -755,7 +755,11 @@ fn resolve_workspace(unit: &Unit) -> Result<Workspace, String> {
 
 /// Resolves a unit's workspace and compiles its entry for `platform`, returning the
 /// emitted JavaScript (or a failure code after reporting).
-fn compile_unit(unit: &Unit, platform: Platform, emit_debug: bool) -> Result<String, ExitCode> {
+fn compile_unit(
+    unit: &Unit,
+    platform: Platform,
+    emit_debug: bool,
+) -> Result<(String, Vec<(String, String)>), ExitCode> {
     let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
         Err(message) => {
@@ -775,8 +779,8 @@ fn compile_unit(unit: &Unit, platform: Platform, emit_debug: bool) -> Result<Str
 
 /// Builds a lone package / bare file, writing `<entry>.js` (or printing to stdout).
 fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool) -> ExitCode {
-    let javascript = match compile_unit(unit, platform, emit_debug) {
-        Ok(javascript) => javascript,
+    let (javascript, assets) = match compile_unit(unit, platform, emit_debug) {
+        Ok(compiled) => compiled,
         Err(code) => return code,
     };
     if stdout {
@@ -784,6 +788,7 @@ fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool)
         return ExitCode::SUCCESS;
     }
     let output_path = unit.entry.with_extension("js");
+    write_assets(&output_path, &assets);
     match fs::write(&output_path, javascript) {
         Ok(()) => {
             println!(
@@ -813,8 +818,8 @@ fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
 
 /// Builds and runs a lone package's entry with Node, forwarding `args`.
 fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
-    let javascript = match compile_unit(unit, Platform::default(), false) {
-        Ok(javascript) => javascript,
+    let (javascript, _assets) = match compile_unit(unit, Platform::default(), false) {
+        Ok(compiled) => compiled,
         Err(code) => return code,
     };
     run_node_script(&javascript, args)
@@ -845,8 +850,9 @@ fn build_workspace_artifacts(
         if platform.is_none() {
             continue;
         }
-        let javascript = compile_unit(unit, *platform, debug)?;
+        let (javascript, assets) = compile_unit(unit, *platform, debug)?;
         let output = dist.join(format!("{}.js", unit.name));
+        write_assets(&output, &assets);
         if let Err(error) = fs::write(&output, javascript) {
             eprintln!("error: cannot write {}: {error}", output.display());
             return Err(ExitCode::FAILURE);
@@ -962,7 +968,7 @@ fn test(path: Option<PathBuf>) -> ExitCode {
 /// with the captured runtime output (empty for a compile error, which
 /// `compile_to_js` has already reported to stderr).
 fn run_test(file: &Path) -> Result<(), String> {
-    let javascript = compile_to_js(
+    let (javascript, _assets) = compile_to_js(
         file,
         &pkg_root_of(file),
         Platform::default(),
@@ -1033,6 +1039,20 @@ fn std_dir() -> PathBuf {
 /// Runs the full pipeline (lex -> parse -> analyze -> contexts -> async infer ->
 /// transform) over `file` and reports any diagnostics. Returns the JavaScript on
 /// success, or a failure exit code (after reporting) on any error.
+/// Writes the build's accumulated assets (const-eval.md §3) beside the
+/// compiled output: `<output>.css` for kind "css", deduplicated and
+/// deterministically ordered by `assemble_assets`.
+fn write_assets(output_js: &std::path::Path, assets: &[(String, String)]) {
+    for (kind, content) in vilan_core::const_eval::assemble_assets(assets) {
+        let path = output_js.with_extension(kind.as_str());
+        if let Err(error) = fs::write(&path, content) {
+            eprintln!("error: cannot write {}: {error}", path.display());
+        } else {
+            println!("Emitted  {}", path.display());
+        }
+    }
+}
+
 fn compile_to_js(
     file: &Path,
     pkg_root: &Path,
@@ -1040,7 +1060,7 @@ fn compile_to_js(
     options: &BuildOptions,
     workspace: &Workspace,
     emit_debug: bool,
-) -> Result<String, ExitCode> {
+) -> Result<(String, Vec<(String, String)>), ExitCode> {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(error) => {
@@ -1100,11 +1120,12 @@ fn compile_to_js(
         // Evaluate `const` expressions (proposal/const-eval.md); the results
         // serialize in place at transform time, the failures are ordinary
         // diagnostics.
-        let (const_results, const_errors) = vilan_core::const_eval::evaluate(
+        let (const_results, const_assets, const_errors) = vilan_core::const_eval::evaluate(
             &program,
             &vilan_core::options::BuildOptions::default(),
         );
         program.const_results = const_results;
+        program.const_assets = const_assets;
         program.diagnostics.extend(const_errors);
 
         for error in &program.diagnostics {
@@ -1124,7 +1145,7 @@ fn compile_to_js(
 
         if errs.is_empty() {
             match transform(&program, options) {
-                Ok(javascript) => output = Some(javascript),
+                Ok(javascript) => output = Some((javascript, program.const_assets.clone())),
                 Err(error) => errs.push(Rich::custom(error.span, error.msg)),
             }
         }
@@ -1134,7 +1155,7 @@ fn compile_to_js(
     report(&filename, &src, errs, parse_errs);
 
     match output {
-        Some(javascript) if clean => Ok(javascript),
+        Some(compiled) if clean => Ok(compiled),
         _ => Err(ExitCode::FAILURE),
     }
 }

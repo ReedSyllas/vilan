@@ -10343,3 +10343,197 @@ fn const_chains_through_computed_bindings() {
     assert_emits_containing(source, "= 10;");
     assert_compiles_and_runs(source, "10\n");
 }
+
+// --- G2 slice 5: the asset channel + the const-only bit -----------------------
+// `std::asset::emit(kind, line)` accumulates build assets during const
+// evaluation (const-eval.md §3); the channel dedups by line and orders
+// lexically. `emit` is const-ONLY (§2): a runtime call path errors at the
+// boundary call site — the crossing from runtime code into emit-reaching
+// territory.
+
+/// The `(kind, line)` assets a program's const evaluation emitted.
+fn collected_assets(source: &str) -> Vec<(String, String)> {
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let leaked: &'static str = Box::leak(source.into_boxed_str());
+            let (program, errors) = analyze_source(
+                leaked,
+                &std_spec(),
+                Path::new("."),
+                Path::new("test.vl"),
+                Some(Platform::default()),
+                &Workspace::default(),
+            );
+            assert!(errors.is_empty(), "expected a clean analysis: {errors:#?}");
+            program.map(|p| p.const_assets).unwrap_or_default()
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn a_const_emit_collects_assets() {
+    let assets = collected_assets(
+        r#"
+        import std::asset::emit;
+        fun rule(): i32 {
+            emit("css", ".a{color:red}");
+            emit("css", ".b{color:blue}");
+            1
+        }
+        let _style = const rule();
+        fun main() {}
+        main();
+        "#,
+    );
+    assert!(
+        assets.contains(&("css".to_string(), ".a{color:red}".to_string())),
+        "{assets:?}"
+    );
+    assert!(
+        assets.contains(&("css".to_string(), ".b{color:blue}".to_string())),
+        "{assets:?}"
+    );
+}
+
+#[test]
+fn assets_deduplicate_and_sort_lexically() {
+    // Two consts emit overlapping lines and a media block; the assembled file
+    // dedups and sorts — '.' < '@', so media rules take the LATER cascade
+    // position they need (the CSS-soundness argument in assemble_assets).
+    let assets = collected_assets(
+        r#"
+        import std::asset::emit;
+        fun base(): i32 {
+            emit("css", ".pA3{padding:1rem}");
+            emit("css", "@media (min-width: 768px){.mX{padding:2rem}}");
+            1
+        }
+        fun accent(): i32 {
+            emit("css", ".pA3{padding:1rem}");
+            emit("css", ".bC7{background:blue}");
+            2
+        }
+        let _a = const base();
+        let _b = const accent();
+        fun main() {}
+        main();
+        "#,
+    );
+    let assembled = vilan_core::const_eval::assemble_assets(&assets);
+    let css = assembled.get("css").expect("a css asset");
+    assert_eq!(
+        css,
+        ".bC7{background:blue}\n.pA3{padding:1rem}\n@media (min-width: 768px){.mX{padding:2rem}}\n"
+    );
+}
+
+#[test]
+fn asset_kinds_stay_separate() {
+    let assets = collected_assets(
+        r#"
+        import std::asset::emit;
+        fun both(): i32 {
+            emit("css", ".a{}");
+            emit("txt", "hello");
+            1
+        }
+        let _x = const both();
+        fun main() {}
+        main();
+        "#,
+    );
+    let assembled = vilan_core::const_eval::assemble_assets(&assets);
+    assert_eq!(assembled.get("css").map(String::as_str), Some(".a{}\n"));
+    assert_eq!(assembled.get("txt").map(String::as_str), Some("hello\n"));
+}
+
+#[test]
+fn a_runtime_emit_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        import std::asset::emit;
+        fun main() {
+            emit("css", ".a{}");
+        }
+        main();
+        "#,
+        r#"emit("css", ".a{}")"#,
+        "compile-time-only",
+    );
+}
+
+#[test]
+fn a_runtime_call_reaching_emit_is_rejected_at_the_boundary() {
+    // The error sits at main's CALL into emit-reaching territory — the
+    // outermost runtime crossing — not at the emit inside `rule`. (rfind:
+    // the declaration `fun rule():` also contains the snippet.)
+    let source = r#"
+        import std::asset::emit;
+        fun rule(): i32 {
+            emit("css", ".a{}");
+            1
+        }
+        fun main() {
+            let _x = rule();
+        }
+        main();
+        "#;
+    let call = source.rfind("rule()").unwrap();
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, range)| message.contains("compile-time-only")
+                && *range == (call..call + "rule()".len())),
+        "no boundary diagnostic at the call: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_top_level_runtime_call_reaching_emit_is_rejected() {
+    let source = r#"
+        import std::asset::emit;
+        fun rule(): i32 {
+            emit("css", ".a{}");
+            1
+        }
+        let _style = rule();
+        fun main() {}
+        main();
+        "#;
+    let call = source.rfind("rule()").unwrap();
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, range)| message.contains("compile-time-only")
+                && *range == (call..call + "rule()".len())),
+        "no top-level boundary diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn reaching_functions_inside_const_are_fine() {
+    // The styling shape: property functions bottom out in emit, called from
+    // const chains — legal, and the assets flow.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::asset::emit;
+        fun padding(): i32 {
+            emit("css", ".pA3{padding:1rem}");
+            4
+        }
+        fun main() {
+            let width = const padding() * 2;
+            print(width);
+        }
+        main();
+        "#,
+        "8\n",
+    );
+}

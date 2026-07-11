@@ -1,11 +1,23 @@
 # `const` — compile-time evaluation as a language feature
 
-Status: **CORE SHIPPED 2026-07-10** (§6 slices 1–4: the keyword, the
-analyzer's mark-and-forward + free-variable rule, the evaluation pass, and
-in-place serialization — 21 pins + corpus `const.vl`; same-day as the
-proposal, revised to the expression keyword before implementation). The
-asset channel and const-only capability bit (slice 5 and §2's bit — the
-styling prerequisite) are the remaining slices. Implementation notes that
+Status: **SHIPPED 2026-07-10** — the full v1, same-day as the proposal.
+Slices 1–4 (the keyword, mark-and-forward + the free-variable rule, the
+evaluation pass, in-place serialization — 21 pins + corpus `const.vl`), then
+the **asset channel + const-only bit** (§2–3, the styling prerequisite):
+`std::asset::emit` accumulates during `eval_const` only (a capability flag on
+the interpreter — macro expansion and the equivalence runner reject it), the
+channel dedups by line and orders lexically (SOUND for the styling system's
+CSS: `.class` < `@media`, so media blocks take the later cascade position —
+argued at `assemble_assets`), and `vilan build` writes `<output>.<kind>`
+beside the JS (7 pins + an end-to-end CLI test). The const-only check is the
+R-fixpoint over the shared call graph: functions reaching `emit` through
+non-const call sites join R, roots (`main`, top-level initializers) never
+join — a root's call into R errors AT THAT call site, the outermost runtime
+crossing, while `emit` inside R-functions called from `const` chains stays
+legal (the styling property-function shape, pinned). Recorded refinements:
+indirect/closure-value paths into `emit` are the conservative gap;
+`run`/`--watch` don't write assets yet; liveness-tied emission (dead-style
+elimination), Tier-2 LSP memoization, and deep failure spans as before. Implementation notes that
 amended the design: the JS-refugee hint lives in the ANALYZER, not the
 parser — `const x = 3` parses fine (assignment is an expression, so it is
 `const (x = 3)`), and the forwarding arm catches the `Assign` shape with
