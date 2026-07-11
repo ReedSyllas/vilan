@@ -122,7 +122,18 @@ idiom (`List::new`, `FlushPolicy::AtEnd`), and one import covers every ramp —
 as the typed escape. The completion flow is the point: `.background(` → the
 parameter is `Color` → `Color::` lists the ramps. `space(n)` stays a bare
 function — one function is not clutter, and `padding(space(4))` keeps the
-familiar reading. Theme *values* are overridable day one (custom properties
+familiar reading. **What `space(4)` computes to** (settled with the user): a
+`Length` carrying the token's IDENTITY — rendered CSS `var(--space-4)`; the
+theme's `:root` block supplies the magnitude, and const evaluation validates
+the scale step. **Units namespace on `Length`** (the parameter type, the
+Color rule again): `Length::px(37)`, `Length::rem(1.5)`, `Length::pct(50)`,
+`Length::auto()`, and `Length::var("--w")` — the typed end of the dynamic
+channel, pairing with `view.style_var("--w", signal)`. The representation
+stays OPAQUE (constructors may render to CSS text immediately; structure for
+`calc(..)`/unit arithmetic is deferred) — users never match on a `Length`,
+so public variants buy nothing. An arbitrary value mints one atomic class
+per distinct value, Tailwind-arbitrary style: the escape, not the norm,
+bounded by dedup. Theme *values* are overridable day one (custom properties
 are just CSS); theme *extension* (new ramps/namespaces) is deferred.
 
 ### 2.2 Conditions
