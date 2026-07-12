@@ -312,28 +312,26 @@ have gaps.
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
 
-21. **A dependency-package `[service]` consumer without a direct `std::rpc`
-    import mistypes the generated `connect`** (M–L; pinned `#[ignore]`d
-    `a_library_service_client_compiles_without_an_rpc_import` in
-    `crates/vilan-cli/tests/transport_robustness.rs`; found 2026-07-11
-    building K6) — the generated connect's `socket` types as
-    `connect_socket`'s raw `Result<SocketDuplex, str>` (cascading through
-    `.transport()`, `__attach`, the client construction), but ONLY when the
-    consuming unit gets `std::rpc` loaded solely through the dependency's
-    `contains_service` seed; ANY direct `import std::rpc::..` in the
-    consumer masks it. Four generated-code shapes (match+annotated-let + `!`,
-    `is`-guard + `unwrap`, std-side `dial_for_service` via match, via
-    `map_err`) failed IDENTICALLY, and hoisting the loader seed to the other
-    end of the queue changed nothing — so it is scope/order-sensitive
-    resolution of the expansion, not the expansion's text or the module load
-    position. Minimal repro: `[library]` common with one `[service]` + a node
-    app importing only the generated client. Consumers carrying the one-line
-    import workaround (commented B21): the kolt probe and the kolt client's
-    routes.vl. **Priority raised by the LSP** (2026-07-11): the language
-    server analyzes each open document as its own entry, so ANY file of a
-    service-consuming package that lacks its own `std::rpc` import shows the
-    phantom generated-code errors in the editor even when the CLI build is
-    clean — per-document entries multiply the trigger surface.
+21. ~~**A dependency-package `[service]` consumer without a direct `std::rpc`
+    import mistypes the generated `connect`**~~ — **FIXED 2026-07-11** (pin
+    un-ignored: `a_library_service_client_compiles_without_an_rpc_import`).
+    The true mechanism was NOT solver order-sensitivity (the earlier
+    characterization): the compiler carries a Rust FIXTURE generator for
+    `[service]` (for test stds with no rpc module), selected silently when
+    the `service` macro isn't in the expansion scope — and its baked
+    template had gone stale (it still produced the pre-K6 `connect`, whose
+    `socket.connection`/`.transport()` against the new
+    Result-returning `connect_socket` produced the exact error wall). The
+    macro was missing because the DEPENDENCY-SURFACE load path never scanned
+    for `[service]` — the third of three seed sites — so `std::rpc` wasn't
+    loaded when the once-only macro registry was built; a consumer-side
+    `std::rpc` import re-ordered the load and masked it. Fix: the dependency
+    surface now seeds the rpc load like the entry and the load loop, and a
+    REAL std reaching the fixture fallback errors loudly instead of silently
+    generating stale code. Debugging lesson for the record: four template
+    edits "failing identically" meant the edited template was never the one
+    running — when errors won't move with your changes, suspect a TWIN
+    (a fallback, a cache, a second generator), not the code you're editing.
 
 20. ~~**A named function doesn't coerce to a closure parameter**~~ —
     **SHIPPED 2026-07-11** (`proposal/fn-coercion.md`; found the same day

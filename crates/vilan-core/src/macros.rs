@@ -861,13 +861,31 @@ impl Expander<'_, '_> {
                         self.run_service(def, *client_name, item, siblings, text, depth);
                     }
                     None => {
-                        self.rust_any_service = true;
-                        self.rust_source
-                            .push_str(&crate::analyzer::service_impl_source(
-                                *client_name,
-                                item,
-                                siblings,
-                            ));
+                        // The Rust generator exists for FIXTURE stds that have
+                        // no rpc module at all. A real std reaching here means
+                        // `std::rpc` wasn't loaded before this expansion — the
+                        // B21 ordering class, whose symptom (a silently STALE
+                        // twin of the macro's template) is far worse than a
+                        // loud error. Every `[service]` site now seeds the rpc
+                        // load (entry, load loop, dependency surfaces), so
+                        // this firing again is a compiler bug to report.
+                        if self.std.base_root.join("rpc.vl").is_file() {
+                            self.diagnostics.push(Error {
+                                span: item.1,
+                                msg: "`[service]` expanded before std::rpc's `service` macro was \
+                                      loaded — a compiler load-ordering bug (B21's class); please \
+                                      report how this module is reached"
+                                    .to_string(),
+                            });
+                        } else {
+                            self.rust_any_service = true;
+                            self.rust_source
+                                .push_str(&crate::analyzer::service_impl_source(
+                                    *client_name,
+                                    item,
+                                    siblings,
+                                ));
+                        }
                     }
                 }
                 self.sweep_expressions(item, text, depth);

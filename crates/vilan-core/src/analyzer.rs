@@ -14499,6 +14499,16 @@ pub fn analyze<'src>(
                     .into_iter()
                     .map(|(module, _)| (Origin::Std, module)),
             );
+            // A `[service]` in the dependency's surface needs the std `service`
+            // macro (hosted in `std::rpc`) loaded BEFORE the expansion epilogue
+            // builds the once-only macro registry. The entry scan and the load
+            // loop both seed this; the dependency surface was the third site
+            // and the one B21 fell through: without the seed, the registry
+            // built without `service` and the `[service]` silently expanded
+            // through the stale Rust fallback generator.
+            if contains_service(&lib_ast.0) {
+                to_load.push((Origin::Std, "rpc"));
+            }
             for (name, dependency_index) in &spec.dependencies {
                 to_load.extend(
                     collect_module_refs(&lib_ast.0, name)

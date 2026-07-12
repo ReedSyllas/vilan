@@ -278,16 +278,16 @@ fn a_dropped_connection_reconnects_and_resyncs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// B21 (backlog): a unit that consumes a DEPENDENCY package's `[service]`
-/// without importing `std::rpc` itself mistypes the generated `connect` body
-/// (`socket` types as `connect_socket`'s raw `Result`, cascading through
-/// `transport()`/`__attach`). Any direct `import std::rpc::..` in the
-/// consumer masks it — so the bug is scope/order-sensitive resolution of the
-/// expansion, not the expansion's text (four template shapes failed
-/// identically). Un-ignore when fixed; the kolt probe carries the
-/// import workaround until then.
+/// B21 (FIXED): a unit consuming a DEPENDENCY package's `[service]` without
+/// its own `std::rpc` import used to mistype the generated `connect`. The
+/// mechanism: the dependency-surface load path never scanned for `[service]`,
+/// so `std::rpc` wasn't loaded when the once-only macro registry was built —
+/// and the expansion silently fell back to the Rust FIXTURE generator, whose
+/// template had gone stale (it still produced the pre-K6 `connect`). The
+/// dependency surface now seeds the rpc load like the other two scan sites,
+/// and a real std reaching the fallback errors loudly instead of silently
+/// generating stale code.
 #[test]
-#[ignore = "B21: dependency-package [service] consumer without a direct std::rpc import mistypes the generated connect"]
 fn a_library_service_client_compiles_without_an_rpc_import() {
     let dir = temp_project("b21");
     write(

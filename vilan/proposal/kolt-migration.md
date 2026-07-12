@@ -116,8 +116,9 @@ migration deletes these subsystems rather than porting them:
    catches a call in flight, SIGKILL drops the socket, a restarted server
    with DIFFERENT state resyncs the mirror and calls resume. Finding: B21
    (a dependency-`[service]` consumer without a direct `std::rpc` import
-   mistypes the generated connect — pinned; the probe carries the one-line
-   workaround).
+   mistyped the generated connect — FIXED 2026-07-11: a stale Rust fixture
+   generator behind a silent fallback, plus a missing `[service]` load seed
+   on the dependency-surface path; the workarounds are gone).
 
 **Non-blocking, recorded here rather than as items**: canvas 2D externs
 (whiteboards — a later dom-layer extension), SVG elements in `std::ui`
