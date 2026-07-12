@@ -335,6 +335,16 @@ have gaps.
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
 
+24. **Primitive comparisons skip operand-type checking** (M; pinned
+    `#[ignore]`d ×3; found writing the spec 2026-07-12, §5.7) — `true < 3`,
+    `1 == "a"`, and even `1i64 < 3` all COMPILE and emit raw JS comparisons
+    (coercion semantics at runtime), though the same `i64`/`i32` mix errors
+    under `+` and `bool` implements only `PartialEq`. Comparison operators
+    between primitives bypass the `PartialEq`/`PartialOrd` dispatch (a
+    primitive fast path); user-defined types are checked via the normal
+    bound machinery. Intent (spec §5.7): comparisons type like the traits
+    they dispatch through. Pins: bool-vs-int, int-vs-str, mixed-width.
+
 23. **An `effect` closure's unannotated parameter doesn't ground from a
     generic signal's payload** (M; pinned `#[ignore]`d
     `an_effect_closures_unannotated_parameter_grounds_from_the_signal`;

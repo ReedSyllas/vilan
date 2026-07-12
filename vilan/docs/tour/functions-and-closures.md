@@ -1,5 +1,7 @@
 # Functions & closures
 
+> Normative rules: spec [§3 Grammar](../spec/grammar.md), [§5.8 Coercions](../spec/types.md), [§7.4 Async closures](../spec/execution.md).
+
 ## Functions
 
 `fun` declares a function; the body's last expression is its value, `ret`

@@ -1,5 +1,7 @@
 # The memory model
 
+> Normative rules: spec [§6 The memory model](../spec/memory.md).
+
 vilan is **value-semantic**: an assignment, a function argument, a struct
 field, a signal payload — each is logically its own copy. Nothing aliases
 unless you reach for one of the explicit sharing tools, and each tool exists
@@ -23,9 +25,9 @@ struct Counter { value: i32 }
 
 fun main() {
 	mut original = Counter { value = 10 };
-	mut copy = original;
+	mut copy = original;   // copies
 	copy.value = 99;
-	print(original.value); // 10 — a binding copies
+	print(original.value); // 10 - the original value is unchanged
 }
 ```
 
@@ -44,12 +46,12 @@ import std::print;
 struct Counter { value: i32 }
 
 fun bump(&mut c: Counter) {
-	c.value = c.value + 10;
+	c.value += 10;
 }
 
 impl Counter {
 	fun increment(&mut self) {
-		self.value = self.value + 1;
+		self.value += 1;
 	}
 }
 
@@ -57,7 +59,7 @@ fun main() {
 	mut c = Counter { value = 10 };
 	c.increment();
 	bump(&mut c);
-	print(c.value); // 21 — both mutated the original through views
+	print(c.value); // 21 - both mutated the original through views
 }
 ```
 

@@ -1,5 +1,7 @@
 # Data and traits
 
+> Normative rules: spec [§5 The type system](../spec/types.md).
+
 ## Structs
 
 ```vilan

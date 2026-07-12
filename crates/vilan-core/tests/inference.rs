@@ -12522,3 +12522,48 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
         "a\n",
     );
 }
+
+// --- B24: primitive comparisons skip operand-type checking ------------------
+//
+// Found writing the spec (§5.7): comparison operators between PRIMITIVES
+// bypass the PartialEq/PartialOrd dispatch, so ill-typed mixes compile and
+// emit raw JS comparisons (with JS coercion semantics). User-defined types
+// DO get checked (the bound machinery), so the gap is the primitive fast
+// path. Intent (spec §5.7): comparisons type like the traits they dispatch
+// through — `bool` has no PartialOrd, and mixed widths don't unify.
+
+#[test]
+#[ignore = "B24: bool < i32 compiles and emits a coercing JS comparison"]
+fn a_bool_compared_to_an_integer_is_rejected() {
+    assert_fails(
+        r#"
+        fun main() {
+            let _x = true < 3;
+        }
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "B24: i32 == str compiles and emits a coercing JS comparison"]
+fn an_integer_compared_to_a_string_is_rejected() {
+    assert_fails(
+        r#"
+        fun main() {
+            let _x = 1 == "a";
+        }
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "B24: i64 < i32 compiles though the same mix errors under arithmetic"]
+fn mixed_width_integer_comparison_is_rejected() {
+    assert_fails(
+        r#"
+        fun main() {
+            let _x = 1i64 < 3;
+        }
+        "#,
+    );
+}

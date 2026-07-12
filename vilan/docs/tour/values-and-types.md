@@ -1,5 +1,7 @@
 # Values and types
 
+> Normative rules: spec [§2 Lexical structure](../spec/lexical.md) and [§5 The type system](../spec/types.md).
+
 ## Bindings
 
 `let` binds immutably; `mut` allows reassignment and mutation. Types are

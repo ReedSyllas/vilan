@@ -8,14 +8,16 @@ documents record how things were built; these record how to use them.)
 
 - **[Tour](tour/)** — the language, informally: syntax, types, closures,
   async, the memory model. Start here if you're new or need a syntax
-  reminder. (A formal specification is planned; the tour is its practical
-  companion.)
+  reminder — the [specification](spec/) is its normative counterpart.
 - **[Guides](guide/)** — the frameworks, task-oriented: reactive state,
   building UI, styling, routing, services & RPC. Each reads front to back
   and links into the reference for exact signatures.
 - **[std reference](std/)** — the standard library, signatures-first: one
   page per module group, each item with its signature, semantics, an
   example, and traps. Go here to answer "what were the parameters again?".
+- **[Specification](spec/)** — the normative definition: grammar (EBNF),
+  the type system's rules, the memory model, execution & async. Where the
+  tour teaches, the spec defines; where they disagree, the spec wins.
 - **[Appendix](appendix/)** — gotchas checklist and glossary.
 
 ## Conventions
@@ -73,3 +75,17 @@ documents record how things were built; these record how to use them.)
 | [browser](std/browser.md) | `std::dom`, `std::ui`, `std::router`, `std::storage` |
 | [process](std/process.md) | db, http, fs, process, rpc_server |
 | [misc](std/misc.md) | io, promise, context, crypto, jwt, asset |
+
+### Specification
+| Chapter | Defines |
+|---|---|
+| [§1 Introduction](spec/introduction.md) | conformance, notation, processing phases |
+| [§2 Lexical structure](spec/lexical.md) | tokens, keywords, literals, operators |
+| [§3 Grammar](spec/grammar.md) | the full EBNF, precedence, patterns, types |
+| [§4 Names & modules](spec/names.md) | scopes, resolution, imports, namespaces |
+| [§5 The type system](spec/types.md) | types, generics & inference, traits, coercions, `!`/`?.` |
+| [§6 The memory model](spec/memory.md) | the four rules, views, projections, the await rule |
+| [§7 Execution & async](spec/execution.md) | entrypoint, evaluation order, the async model |
+| [§A Appendix](spec/appendix.md) | precedence & keyword tables, lang items |
+
+*(Spec Phase B — contexts, const, macros, the platform model — pending.)*

@@ -1,5 +1,7 @@
 # Control flow
 
+> Normative rules: spec [§3 Grammar](../spec/grammar.md) and [§5.10 `!` and `?.`](../spec/types.md).
+
 ## `if` / `else`
 
 An expression — both branches yield the value:

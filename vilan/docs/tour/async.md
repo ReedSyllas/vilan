@@ -1,5 +1,7 @@
 # Async
 
+> Normative rules: spec [§7 Execution & async](../spec/execution.md).
+
 vilan's model is **await-by-default**: calling an async function just gives
 you the value — no keyword, no promise type in your signature. Asyncness is
 *inferred* (a function that awaits anything is async, and so are its
