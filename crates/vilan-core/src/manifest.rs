@@ -407,9 +407,27 @@ pub fn resolve_library(dir: &Path) -> PackageSpec {
 }
 
 /// Resolves the `std` library's spec — `std` is just a library, so this is
-/// [`resolve_library`] at the std package directory. Point `VILAN_STD` at that
-/// directory (not the bare `src`) to get the platform layers.
+/// [`resolve_library`] at the std package directory.
+///
+/// Forgives the common mis-configuration of pointing `VILAN_STD` /
+/// `vilan.stdPath` at the SOURCE root (`.../std/src`) instead of the package
+/// directory: when the given directory has no manifest but its parent is a
+/// `[library]`, the parent is resolved. Without this, the bare-source
+/// fallback has no platform layers, so every layered module (`std::ui`,
+/// `std::rpc_server`, ...) silently fails to resolve — a wall of import
+/// errors instead of one fixable mistake.
 pub fn resolve_std(std_dir: &Path) -> PackageSpec {
+    if !std_dir.join("vilan.toml").exists() {
+        if let Some(parent) = std_dir.parent() {
+            let is_library = std::fs::read_to_string(parent.join("vilan.toml"))
+                .ok()
+                .and_then(|contents| Manifest::parse(&contents).ok())
+                .is_some_and(|(manifest, _)| manifest.library.is_some());
+            if is_library {
+                return resolve_library(parent);
+            }
+        }
+    }
     resolve_library(std_dir)
 }
 
@@ -637,12 +655,15 @@ mod tests {
 
     #[test]
     fn resolve_std_without_manifest_is_base_only() {
-        // Pointing at a bare source root (no `vilan.toml`) yields a base-only library:
-        // its `src` is the base layer and there are no platform layers. A `VILAN_STD`
-        // at the src root still resolves the core modules, just not the overlays.
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src");
-        let std = resolve_std(&src);
-        assert_eq!(std.base_root, src);
+        // Pointing at a bare source root whose parent is NOT a library (a
+        // truly orphan directory) yields a base-only library: the directory
+        // is the base layer and there are no platform overlays. (A source
+        // root INSIDE a real library package is forgiven up to the package —
+        // see `resolve_std_forgives_a_source_root_path`.)
+        let orphan = std::env::temp_dir().join("vilan_manifest_orphan_std");
+        let _ = std::fs::create_dir_all(&orphan);
+        let std = resolve_std(&orphan);
+        assert_eq!(std.base_root, orphan);
         assert!(std.layers.is_empty());
     }
 
@@ -762,5 +783,19 @@ mod tests {
     fn unknown_top_level_key_warns() {
         let (_, warnings) = Manifest::parse("[package]\nname = \"x\"\n[wat]\nk = 1\n").unwrap();
         assert!(warnings.iter().any(|w| w.contains("wat")));
+    }
+
+    #[test]
+    fn resolve_std_forgives_a_source_root_path() {
+        // The mis-configuration that produced a wall of editor errors:
+        // `vilan.stdPath` pointed at `.../std/src` instead of the package
+        // directory. Both forms must yield the SAME spec — layers included
+        // (a bare-source fallback would drop every platform layer).
+        let std_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std");
+        let proper = super::resolve_std(&std_dir);
+        let forgiven = super::resolve_std(&std_dir.join("src"));
+        assert!(!proper.layers.is_empty(), "the real std declares layers");
+        assert_eq!(proper.base_root, forgiven.base_root);
+        assert_eq!(proper.layers.len(), forgiven.layers.len());
     }
 }
