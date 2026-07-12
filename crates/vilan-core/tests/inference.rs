@@ -12251,3 +12251,274 @@ fn return_type_only_inference_still_binds_a_static_generic() {
     );
 }
 
+// --- Draft<T>: local-first cells (std::reactive, kolt-migration §3) ----------
+//
+// `draft(initial, commit)` is a local-first cell: edits land in `local`
+// FIRST (`push` spawns the commit, never awaits it), `adopt` folds in remote
+// changes without fighting in-flight edits, and failure KEEPS the local value
+// (unlike `optimistic`'s rollback — right for one-shot actions, hostile
+// mid-typing). Conflicts are last-write-wins.
+
+#[test]
+fn draft_push_is_local_first_and_settles_synced() {
+    // `push` returns with `local` set and the state Dirty while the commit
+    // is still on the wire; the settle lands afterwards.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+        import std::shared::Shared;
+        import std::time::{ sleep_for, Duration };
+
+        fun main() {
+            let committed: Shared<List<str>> = Shared::new([]);
+            let name = draft("seed", |value: str| {
+                sleep_for(Duration::millis(5));
+                committed.write().push(value);
+                None
+            });
+            print(name.state.get() == DraftState::Synced);
+            name.push("edit");
+            print(name.local.get());
+            print(name.state.get() == DraftState::Dirty);
+            sleep_for(Duration::millis(20));
+            print(name.state.get() == DraftState::Synced);
+            print(committed.read().len());
+        }
+        main();
+        "#,
+        "true\nedit\ntrue\ntrue\n1\n",
+    );
+}
+
+#[test]
+fn draft_adopt_echo_is_a_no_op() {
+    // A pushed value reflected back by the remote (the mirror echo) changes
+    // nothing — state stays Synced, `local` untouched.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+        import std::time::{ sleep_for, Duration };
+
+        fun main() {
+            let name = draft("seed", |value: str| {
+                let _sent = value;
+                None
+            });
+            name.push("edit");
+            sleep_for(Duration::millis(10));
+            name.adopt("edit");
+            print(name.local.get());
+            print(name.state.get() == DraftState::Synced);
+        }
+        main();
+        "#,
+        "edit\ntrue\n",
+    );
+}
+
+#[test]
+fn draft_adopt_takes_remote_when_local_is_clean() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+            let name = draft("seed", |value: str| {
+                let _sent = value;
+                None
+            });
+            name.adopt("remote");
+            print(name.local.get());
+            print(name.synced.read());
+            print(name.state.get() == DraftState::Synced);
+        }
+        main();
+        "#,
+        "remote\nremote\ntrue\n",
+    );
+}
+
+#[test]
+fn draft_failure_keeps_the_local_value() {
+    // Unlike `optimistic`, no rollback: the user's text survives the failed
+    // commit, and the state carries the reason.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+        import std::time::{ sleep_for, Duration };
+
+        fun main() {
+            let sour = draft("base", |value: str| {
+                let _sent = value;
+                Some("boom")
+            });
+            sour.push("mine");
+            sleep_for(Duration::millis(10));
+            print(sour.state.get() == DraftState::Failed("boom"));
+            print(sour.local.get());
+            print(sour.synced.read());
+        }
+        main();
+        "#,
+        "true\nmine\nbase\n",
+    );
+}
+
+#[test]
+fn draft_dirty_local_survives_adoption() {
+    // Last-write-wins: a dirty local ignores the remote value in `local`
+    // (the user's text wins for now) while `synced` records it, so the
+    // eventual push knowingly overwrites.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+        import std::time::{ sleep_for, Duration };
+
+        fun main() {
+            let sour = draft("base", |value: str| {
+                let _sent = value;
+                Some("boom")
+            });
+            sour.push("mine");
+            sleep_for(Duration::millis(10));
+            sour.adopt("theirs");
+            print(sour.local.get());
+            print(sour.synced.read());
+        }
+        main();
+        "#,
+        "mine\ntheirs\n",
+    );
+}
+
+#[test]
+fn draft_generation_guard_discards_superseded_pushes() {
+    // Fast typing over a slow wire: the first push's commit lands LAST, but
+    // only the newest push settles the state — the stale completion is
+    // discarded.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+        import std::time::{ sleep_for, Duration };
+
+        fun main() {
+            let raced = draft("start", |value: str| {
+                if value == "slow" {
+                    sleep_for(Duration::millis(30));
+                } else {
+                    sleep_for(Duration::millis(5));
+                }
+                None
+            });
+            raced.push("slow");
+            raced.push("fast");
+            sleep_for(Duration::millis(60));
+            print(raced.local.get());
+            print(raced.synced.read());
+            print(raced.state.get() == DraftState::Synced);
+        }
+        main();
+        "#,
+        "fast\nfast\ntrue\n",
+    );
+}
+
+#[test]
+fn bind_draft_compiles_for_the_browser() {
+    // The ui seam: an input two-way bound to a draft (user input pushes;
+    // adoption writes `local` and bypasses the push path).
+    assert_compiles_browser(
+        r#"
+        import std::ui::{ view, View, mount_root };
+        import std::reactive::{ draft, Draft, DraftState };
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+            let name = draft("seed", |value: str| {
+                let _sent = value;
+                None
+            });
+            let _root = mount_root("app", || view("input").bind_draft(name));
+        }
+        main();
+        "#,
+    );
+}
+
+// --- B23: effect-closure parameter grounding (backlog.md §B.23) --------------
+
+#[test]
+#[ignore = "B23: the parameter types against the impl's abstract T, not the receiver's payload"]
+fn an_effect_closures_unannotated_parameter_grounds_from_the_signal() {
+    // `map` in the same shape grounds; `effect` should too.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner, run_with_owner };
+        import std::option::Option::{ self, Some, None };
+
+        struct Task {
+            name: str,
+        }
+
+        fun main() {
+            let entry: Signal<Option<Task>> = Signal::new(Some(Task { name = "a" }));
+            let owner = Owner::new();
+            run_with_owner(owner, || {
+                entry.effect(|current| {
+                    match current {
+                        Some(let task) => print(task.name),
+                        None => {},
+                    }
+                });
+            });
+        }
+        main();
+        "#,
+        "a\n",
+    );
+}
+
+#[test]
+fn an_annotated_effect_parameter_destructures_the_signals_payload() {
+    // The pinned workaround (and the kolt draft editor's shipped shape):
+    // annotating the parameter grounds everything downstream.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, Owner, run_with_owner };
+        import std::option::Option::{ self, Some, None };
+
+        struct Task {
+            name: str,
+        }
+
+        fun main() {
+            let entry: Signal<Option<Task>> = Signal::new(Some(Task { name = "a" }));
+            let owner = Owner::new();
+            run_with_owner(owner, || {
+                entry.effect(|current: Option<Task>| {
+                    match current {
+                        Some(let task) => print(task.name),
+                        None => {},
+                    }
+                });
+            });
+        }
+        main();
+        "#,
+        "a\n",
+    );
+}

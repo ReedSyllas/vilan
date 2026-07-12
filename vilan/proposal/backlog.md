@@ -177,6 +177,29 @@ have gaps.
     helpers flatten the host's null). The pilot's token home. Live-tested by the
     pilot (the node harness can't build browser layers).
 
+12. ~~**`Draft<T>` — local-first cells (optimistic-local editing)**~~ —
+    **SHIPPED 2026-07-12** (kolt-migration §4's crate-style refinement).
+    `draft(initial, commit)`: edits land in `local` FIRST (`push` sets the
+    signal + Dirty, then SPAWNS the commit via `async self.settle(..)` —
+    the input path never rides the wire), a generation counter discards
+    superseded completions (fast typing over a slow wire), and failure
+    KEEPS the local value (unlike `optimistic`'s rollback — right for
+    one-shot actions, hostile mid-typing; the next push retries).
+    `adopt(remote)` folds in mirror updates: an echo of our own push is a
+    no-op, a clean local takes the remote edit, a dirty local wins
+    (last-write-wins — `synced` still records the remote so the eventual
+    push knowingly overwrites). `ui.bind_draft` is the input seam: user
+    input pushes; adoption writes `local` and bypasses the push path; the
+    local-echo write is deduped (`element.value() != value`) so the caret
+    never moves. The commit parameter is `async |T| Option<str>` (J2's
+    channel — an rpc-calling closure flows in legally; a sync commit
+    passes fine), stored plain in the struct field (the marker doesn't
+    exist on fields yet) and re-marked at a `let` in `settle`. Seven pins
+    (six runtime semantics under node + the browser ui compile). Building
+    it found B22. **Deferred tail (recorded):** auto re-push of dirty
+    drafts on reconnect (today the next keystroke retries); a debounced
+    variant (today one commit per input event).
+
 ---
 
 ## B. Type system & the type solver
@@ -311,6 +334,50 @@ have gaps.
     runtime dispatch through a derived `PartialEq` (both outcomes), the
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
+
+23. **An `effect` closure's unannotated parameter doesn't ground from a
+    generic signal's payload** (M; pinned `#[ignore]`d
+    `an_effect_closures_unannotated_parameter_grounds_from_the_signal`;
+    surfaced building the kolt draft editor 2026-07-12) —
+    `entry: Signal<Option<Task>>; entry.effect(|current| match current {
+    Some(let task) => task.name, .. })` errors "cannot access field 'name'
+    on type T": the parameter types against the IMPL's abstract `T`
+    instead of the receiver's `Option<Task>`. A counterexample to item
+    13's "closures passed to methods work via reconciliation" — `map` in
+    the same shape DOES ground (the task-list pages ride it), so the gap
+    is specific to how `effect`'s parameter reconciles against the
+    receiver substitution when the body destructures and field-accesses
+    mid-resolution. Workaround (pinned passing): annotate
+    (`|current: Option<Task>|` — what the kolt editor ships with).
+
+22. ~~**Return-expectation generic inference re-bound the CALLER's
+    generics**~~ — **FIXED 2026-07-12** (found the same day building A12
+    `Draft<T>`; pins:
+    `a_bounded_caller_constructs_an_unbounded_struct_via_a_generic_static_new`
+    plus two-generic, nested-argument, and return-type-only-regression
+    variants). `fun draft<T: PartialEq>(initial: T): Draft<T> { Draft {
+    synced = Shared::new(initial), .. } }` errored "generic parameter 'T'
+    is missing the bound ': PartialEq' required by this call". The
+    return-type-only inference (the `let c: Cell<i32> = Cell::fresh()`
+    gap-filler) collected "the callee's generics still to infer" from the
+    SUBSTITUTED return type — but when an abstract argument has already
+    bound the callee's `T` to the caller's `T`, the substituted return
+    type's generics ARE the caller's; unifying those against the
+    expectation (here the struct field's RAW declared type) merged a
+    caller-keyed entry (`draft`'s bounded `T` → the `Draft` struct's
+    unbounded binder) into the call's substitution map, and the bound
+    check — which demands every keyed constraint's bounds of its value —
+    then required `PartialEq` of the raw struct binder. Fix: the filter
+    now collects generics from the DECLARED (unsubstituted) return type,
+    so only the callee's own binders ever merge; the expectation-driven
+    binding still lands for genuinely return-only generics (regression
+    pin). Only vilan-fn callees were affected (external fns return before
+    the merge — `Shared::new` alone never reproduced it; a vilan `new` in
+    the same shape did). Debugging lesson: the first trace interleaved the
+    MACRO-WORLD analyzers' output with the main build's (each world has
+    its own id/source-id space) and manufactured a phantom "type names
+    resolve to shifted declarations" theory — tag per-world output (or
+    dump each world's source table) before reading a cross-world trace.
 
 21. ~~**A dependency-package `[service]` consumer without a direct `std::rpc`
     import mistypes the generated `connect`**~~ — **FIXED 2026-07-11** (pin

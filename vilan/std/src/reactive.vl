@@ -539,3 +539,103 @@ fun reconcile<T: PartialEq, K: PartialEq>(
 	}
 	ReconcilePlan { steps = steps, removed = removed }
 }
+
+// === Local-first drafts (Kolt's `Crate`, typed) ==============================
+//
+// A `Draft<T>` is a local-first cell over a remote commit: edits land in
+// `local` FIRST (an input never waits on the wire), `push` commits them, and
+// `adopt` folds in remote changes without fighting in-flight edits. Failure
+// KEEPS the local value (unlike `optimistic`, which rolls back — right for
+// one-shot actions, hostile mid-typing); the next push retries naturally.
+// Conflicts are last-write-wins: a dirty local survives remote adoption, and
+// its eventual push overwrites the remote edit.
+
+// The sync status a UI can bind ("saved" / "unsaved" / the failure).
+[derive(PartialEq, Debug)]
+enum DraftState {
+	// `local` matches the last pushed/adopted value.
+	Synced,
+	// Local edits not yet confirmed (in-flight included).
+	Dirty,
+	// The last push errored; `local` is kept, not rolled back.
+	Failed(str),
+}
+
+struct Draft<T> {
+	// Bind inputs to this; read it like any signal.
+	local: Signal<T>,
+	state: Signal<DraftState>,
+	// The last value known to match the remote (pushed by us or adopted).
+	synced: Shared<T>,
+	// Discards stale completions when pushes overlap (fast typing over a
+	// slow wire): only the newest push settles the state.
+	generation: Shared<i32>,
+	// `None` = success, `Some(reason)` = failure. Stored plain (an `async`
+	// closure TYPE lives only at parameter/`let` seams); `push` re-marks it
+	// at a `let` so the call awaits.
+	commit: |T| Option<str>,
+}
+
+// A local-first cell seeded with `initial`, committing through `commit`.
+// The parameter is `async`-typed so an rpc-calling closure flows in legally
+// (J2's channel) — a sync commit passes fine too (awaiting a plain value
+// just resolves).
+fun draft<T: PartialEq>(initial: T, commit: async |T| Option<str>): Draft<T> {
+	Draft {
+		local = Signal::new(initial),
+		state = Signal::new(DraftState::Synced),
+		synced = Shared::new(initial),
+		generation = Shared::new(0),
+		commit,
+	}
+}
+
+impl Draft<type T: PartialEq> {
+	// Set locally and commit — the per-keystroke path. LOCAL-FIRST: the
+	// commit is spawned, never awaited, so `push` (and the input handler
+	// calling it) returns without riding the wire.
+	fun push(self, value: T) {
+		self.local.set(value);
+		self.state.set(DraftState::Dirty);
+		let mine = self.generation.read() + 1;
+		self.generation.write() = mine;
+		let _in_flight = async self.settle(value, mine);
+	}
+
+	// The in-flight half of a push: await the commit, then resolve the
+	// draft's state — unless a newer push superseded this one while it was
+	// on the wire (fast typing over a slow commit), in which case that
+	// push's completion owns the state.
+	fun settle(self, value: T, mine: i32) {
+		// Re-marked so the call awaits (J2's typed channel).
+		let commit: async |T| Option<str> = self.commit;
+		let outcome = commit(value);
+		if self.generation.read() == mine {
+			match outcome {
+				None => {
+					self.synced.write() = value;
+					self.state.set(DraftState::Synced);
+				},
+				Some(let reason) => self.state.set(DraftState::Failed(reason)),
+			}
+		}
+	}
+
+	// A remote value arrived (a mirror update). An echo of our own push is
+	// a no-op; a genuine remote change adopts into `local` — unless local
+	// has unpushed edits, which win until their push lands.
+	fun adopt(self, remote: T) {
+		if remote == self.synced.read() {
+			// Our own edit reflected back (or nothing changed).
+		} else if self.local.get() == self.synced.read() {
+			// Clean local: take the remote edit.
+			self.synced.write() = remote;
+			self.local.set(remote);
+			self.state.set(DraftState::Synced);
+		} else {
+			// Dirty local: the user's text wins for now; remember the
+			// remote so the eventual push knowingly overwrites it.
+			self.synced.write() = remote;
+		}
+	}
+}

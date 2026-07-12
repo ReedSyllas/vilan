@@ -213,6 +213,28 @@ register→create→navigate→popstate and deep-link-reload→sign-out. The rpc
 probe passes untouched. Finding: none — the whole slice compiled first
 try; A10/B19/B20 landed exactly the shapes this screen needed.
 
+**Optimistic-local editing — SHIPPED 2026-07-12** (the crate-style
+refinement the tasks slice recorded; backlog A12). `std::reactive` grew
+`Draft<T>` — a local-first cell (push = set local + spawn commit; adopt =
+echo no-op / clean adopts / dirty wins; failure keeps the text) — and
+`std::ui` grew `bind_draft` (input pushes; adoption bypasses; the echo
+write is deduped so the caret never moves). The task editor dropped its
+Save button: each field commits per keystroke through its OWN rpc —
+`update_task` split into `rename_task`/`describe_task` (one field's edit
+never re-sends the other, and per-field commits avoid the circular
+capture an all-fields commit would need). Verified: the e2e's editor leg
+(type into both fields → the rename rides the mirror onto the list → a
+REMOUNTED editor seeds both pushed values, proving the describe landed
+and the echo adopted cleanly) plus the probe's rename/describe
+round-trips; the draft semantics themselves are unit-pinned in
+`inference.rs` (six runtime pins). Building the slice found and fixed
+B22 (the return-expectation inference bug — `draft()`'s exact shape) and
+one ergonomic gap worth recording: an `effect` closure destructuring a
+generic signal's `Option` payload needed its parameter annotated
+(`|current: Option<Task>|`) — unannotated, the field access typed
+against the abstract `T`. What the slice deliberately defers (recorded
+in A12): re-push of dirty drafts on reconnect, and a debounced variant.
+
 ## 5. What the migration tests about vilan itself
 
 Honest expectations: the pilot is the first REAL app pressure on the

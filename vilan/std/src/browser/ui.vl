@@ -21,7 +21,7 @@
 // Only available when building for the browser (`vilan build --target browser`).
 
 import pkg::dom::{ Element, Event, get_element_by_id, create_element };
-import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp, turn_scope, turn, FlushPolicy };
+import pkg::reactive::{ Signal, Owner, Disposable, reconcile, RowStep, owner_scope, get_owner, run_with_owner, comp, turn_scope, turn, FlushPolicy, Draft };
 import pkg::shared::Shared;
 import pkg::style::Style;
 import pkg::compare::PartialEq;
@@ -147,6 +147,26 @@ impl View {
 		// write settles in its own turn.
 		element.on("input", || turn(FlushPolicy::AtSuspension, || {
 			signal.set(element.value());
+		}));
+		self
+	}
+
+	// A local-first editable field: the input shows the draft's local value,
+	// and USER input pushes (locally first, then the draft's commit). An
+	// `adopt`ed remote change writes `local` without passing through here,
+	// so it never re-pushes — and a DIRTY draft ignores adoption entirely,
+	// so an echo never touches a focused input's caret.
+	fun bind_draft(self, draft: Draft<str>): View {
+		let element = self.element;
+		draft.local.effect(|value| {
+			// Skip the no-op write (a push echoing through `local`): setting
+			// an input's value, even to itself, can move the caret.
+			if element.value() != value {
+				element.set_value(value);
+			}
+		});
+		element.on("input", || turn(FlushPolicy::AtSuspension, || {
+			draft.push(element.value());
 		}));
 		self
 	}
