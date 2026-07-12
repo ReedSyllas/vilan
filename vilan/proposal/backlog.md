@@ -327,8 +327,13 @@ have gaps.
     end of the queue changed nothing — so it is scope/order-sensitive
     resolution of the expansion, not the expansion's text or the module load
     position. Minimal repro: `[library]` common with one `[service]` + a node
-    app importing only the generated client. The kolt probe carries the
-    one-line import workaround (commented B21).
+    app importing only the generated client. Consumers carrying the one-line
+    import workaround (commented B21): the kolt probe and the kolt client's
+    routes.vl. **Priority raised by the LSP** (2026-07-11): the language
+    server analyzes each open document as its own entry, so ANY file of a
+    service-consuming package that lacks its own `std::rpc` import shows the
+    phantom generated-code errors in the editor even when the CLI build is
+    clean — per-document entries multiply the trigger surface.
 
 20. ~~**A named function doesn't coerce to a closure parameter**~~ —
     **SHIPPED 2026-07-11** (`proposal/fn-coercion.md`; found the same day

@@ -2241,9 +2241,17 @@ impl<'src> Analyzer<'src> {
     }
 
     /// The type of a built-in scalar primitive (`i32`, `str`, ...), which is
-    /// the `std` struct that now backs it.
+    /// the `std` struct that now backs it. Falls back to `Unresolved` while
+    /// that std module hasn't been captured yet, so the constraint solver
+    /// defers and retries once it loads (the `bool_type` pattern below). A
+    /// hard index here panicked the LSP: its per-document load order can
+    /// resolve a suffixed literal in an early std file (`1000i64` in
+    /// `time.vl`) before `number.vl` lands.
     fn primitive_struct_type(&self, name: &str) -> Type {
-        Type::Struct(self.primitive_struct_ids[name], Vec::new())
+        match self.primitive_struct_ids.get(name) {
+            Some(id) => Type::Struct(*id, Vec::new()),
+            None => Type::Unresolved,
+        }
     }
 
     /// The boolean type — the source-defined `enum bool`. Falls back to

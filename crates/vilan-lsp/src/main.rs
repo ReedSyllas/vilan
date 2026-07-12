@@ -109,7 +109,30 @@ fn discover_std_dir(start: &Path) -> PathBuf {
         }
         directory = current.parent();
     }
-    PathBuf::from("vilan/std")
+    // No ancestor carries a checkout — a project OUTSIDE the vilan repo (the
+    // kolt shape). Fall back to the std this server was built beside: the
+    // same compile-time-baked path the CLI uses, so both tools resolve the
+    // identical std from any directory. (`VILAN_STD` above remains the
+    // override when the checkout moves.)
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std")
+}
+
+#[cfg(test)]
+mod std_discovery_tests {
+    use super::discover_std_dir;
+    use std::path::Path;
+
+    #[test]
+    fn a_document_outside_any_checkout_falls_back_to_the_built_beside_std() {
+        // A kolt-shaped path: no ancestor contains `vilan/std`. The fallback
+        // must be the real std this server was built beside, not a relative
+        // guess against the server's working directory.
+        let discovered = discover_std_dir(Path::new("/tmp/definitely/not/a/checkout/main.vl"));
+        assert!(
+            discovered.is_absolute() && discovered.ends_with("vilan/std") && discovered.is_dir(),
+            "expected the baked std fallback, got {discovered:?}"
+        );
+    }
 }
 
 /// Analyze `text` as the document at `uri`, store the result, and publish its
