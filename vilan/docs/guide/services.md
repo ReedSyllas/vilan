@@ -52,7 +52,6 @@ fun main() {
 		Response::builder().body("app shell here").build()
 	}, || print("listening on :4000"));
 }
-main();
 ```
 
 And the client — the generated `NotesClient::connect` returns a connected

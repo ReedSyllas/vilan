@@ -20,7 +20,6 @@ fun main() {
 			.child(view("button").text("+1").on("click", || count.set_with(|n| n + 1)))
 	});
 }
-main();
 ```
 
 ## Views
@@ -59,7 +58,6 @@ fun main() {
 	let name = Signal::new("");
 	let _root = mount_root("app", || labelled_input("Name", name));
 }
-main();
 ```
 
 Any `effect`/binding created anywhere in the call tree registers with the
@@ -114,7 +112,6 @@ fun main() {
 			})))
 	});
 }
-main();
 ```
 
 ## Lists: `bind_each`
@@ -158,7 +155,6 @@ fun main() {
 		})
 	});
 }
-main();
 ```
 
 ## Conditionals: `show`, `when`, `swap`

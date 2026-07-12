@@ -125,5 +125,4 @@ fun main() {
 		storage::remove("token");
 	}
 }
-main();
 ```

@@ -83,7 +83,6 @@ fun main() {
 	let (_on, current) = both.get();
 	print(current);
 }
-main();
 ```
 
 (Bind the tuple before taking elements — chained access on a call result,

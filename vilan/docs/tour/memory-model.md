@@ -27,7 +27,6 @@ fun main() {
 	copy.value = 99;
 	print(original.value); // 10 — a binding copies
 }
-main();
 ```
 
 Passing to a function is the same: the callee gets its own value, and
@@ -60,7 +59,6 @@ fun main() {
 	bump(&mut c);
 	print(c.value); // 21 — both mutated the original through views
 }
-main();
 ```
 
 Views are deliberately **second-class**: they live as parameters and
@@ -82,7 +80,6 @@ fun main() {
 	}
 	print(xs[2]); // 30
 }
-main();
 ```
 
 A method may *return* a view projecting its receiver (`fun get(&mut self,
@@ -109,7 +106,6 @@ fun main() {
 	bump();
 	print(count.read()); // 2 — the closure and main share the cell
 }
-main();
 ```
 
 - `read()` returns a **copy** of the value.

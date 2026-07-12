@@ -85,7 +85,6 @@ fun main() {
 		})
 	});
 }
-main();
 ```
 
 That's the entire pattern. Piece by piece:

@@ -19,7 +19,6 @@ fun main() {
 	count.set(1);
 	count.set(2);
 }
-main();
 ```
 
 ## Signals
@@ -50,7 +49,6 @@ fun main() {
 	});
 	print(items.get().len());
 }
-main();
 ```
 
 ## Derived state: `map`, `combine`, `flatten`
@@ -79,7 +77,6 @@ fun main() {
 	first.set("Grace");
 	print(full.get());
 }
-main();
 ```
 
 A named function can stand in for a closure argument (`signal.map(parse)`) —
@@ -133,7 +130,6 @@ fun main() {
 	owner.dispose();
 	source.set(2); // not printed: the effect died with its owner
 }
-main();
 ```
 
 > **Annotate effect parameters.** Today an `effect` closure's unannotated
@@ -217,7 +213,6 @@ fun main() {
 	name.adopt("remote-edit"); // a genuine remote change: adopted (local is clean)
 	print(name.local.get());
 }
-main();
 ```
 
 In the UI, `bind_draft` wires an `<input>` to a draft — see

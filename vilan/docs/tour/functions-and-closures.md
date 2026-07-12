@@ -21,7 +21,6 @@ fun clamp(value: i32, low: i32, high: i32): i32 {
 fun main() {
 	print(clamp(15, 0, 10));
 }
-main();
 ```
 
 Generic functions take type parameters with optional bounds:
@@ -47,7 +46,6 @@ fun main() {
 	let label = |count: i32| i"{count} items";
 	print(label(3));
 }
-main();
 ```
 
 Closure **types** are written `|T| U` (and `|| U` for no parameters,
@@ -76,7 +74,6 @@ fun main() {
 	let loud = words.map(exclaim);   // instead of .map(|w| exclaim(w))
 	print(loud.get());
 }
-main();
 ```
 
 Eligible: plain vilan `fun`s. Not eligible (write the wrapping closure):

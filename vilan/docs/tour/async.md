@@ -17,7 +17,6 @@ fun fetch_label(): str {
 fun main() {
 	print(fetch_label());   // implicitly awaited; main becomes async too
 }
-main();
 ```
 
 The declared return type stays the plain value (`str`, not a promise) —
@@ -44,7 +43,6 @@ fun main() {
 	print(step("first"));                     // awaited inline
 	print(await pending);                     // now collect the spawned one
 }
-main();
 ```
 
 Fire-and-forget is spawn with the promise dropped: `let _done = async

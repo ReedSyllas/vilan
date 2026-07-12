@@ -23,7 +23,6 @@ fun main() {
 		view("div").styled(card).child(view("p").text("hello"))
 	});
 }
-main();
 ```
 
 ## The model
@@ -106,7 +105,6 @@ fun main() {
 		view("div").styled(bar).style_var("--progress", progress)
 	});
 }
-main();
 ```
 
 The rule is emitted once at compile time; only the variable's value changes
