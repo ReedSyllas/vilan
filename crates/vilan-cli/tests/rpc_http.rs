@@ -526,11 +526,12 @@ import std::process::exit;
 import std::time::sleep;
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
+import std::io::panic;
 import std::json::{ Json, FromJson, json_codec };
 import std::wire::Serializer;
 import std::reactive::Signal;
 import std::rpc::{
-	HttpTransport, connect_socket, bridge,
+	HttpTransport, connect_socket, bridge, SocketDuplex,
 	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
 };
 import std::rpc_server::{ serve_connected, ws_accept_key };
@@ -584,10 +585,13 @@ fun main() {
 }
 
 fun watch(name: str, base: str): Client<HttpTransport> {
-	let socket = connect_socket("ws://localhost:9291");
+	let socket: SocketDuplex = match connect_socket("ws://localhost:9291") {
+		Ok(let opened) => opened,
+		Err(let reason) => panic(reason),
+	};
 	let reactive = ReactiveClient::new(bridge(socket), json_codec());
 	let client = Client { transport = HttpTransport { url = i"{base}/rpc" }, codec = json_codec() };
-	match client.attach(socket.connection) {
+	match client.attach(socket.connection.read()) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let watching = mirror.sub(|n| {
@@ -650,10 +654,11 @@ import std::process::exit;
 import std::time::sleep;
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
+import std::io::panic;
 import std::json::{ Json, FromJson, json_codec };
 import std::reactive::Signal;
 import std::rpc::{
-	connect_socket, bridge, SocketTransport,
+	connect_socket, bridge, SocketTransport, SocketDuplex,
 	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
 };
 import std::rpc_server::serve_connected;
@@ -705,10 +710,13 @@ fun main() {
 // EVERYTHING rides the one socket: RPC via the transport() view, updates via
 // the duplex — no HTTP requests at all after the upgrade.
 fun watch(name: str): Client<SocketTransport> {
-	let socket = connect_socket("ws://localhost:9293");
+	let socket: SocketDuplex = match connect_socket("ws://localhost:9293") {
+		Ok(let opened) => opened,
+		Err(let reason) => panic(reason),
+	};
 	let client = Client { transport = socket.transport(), codec = json_codec() };
 	let reactive = ReactiveClient::new(bridge(socket), json_codec());
-	match client.attach(socket.connection) {
+	match client.attach(socket.connection.read()) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let watching = mirror.sub(|n| {
@@ -786,11 +794,12 @@ import std::process::exit;
 import std::time::sleep;
 import std::option::Option::{ self, Some, None };
 import std::result::Result::{ self, Ok, Err };
+import std::io::panic;
 import std::json::{ Json, FromJson };
 import std::binary::binary_codec;
 import std::reactive::Signal;
 import std::rpc::{
-	connect_socket, bridge, SocketTransport,
+	connect_socket, bridge, SocketTransport, SocketDuplex,
 	ReactiveServer, ReactiveClient, RemoteSource, DuplexEnd,
 };
 import std::rpc_server::serve_connected;
@@ -840,10 +849,13 @@ fun main() {
 }
 
 fun watch(name: str): Client<SocketTransport> {
-	let socket = connect_socket("ws://localhost:9294");
+	let socket: SocketDuplex = match connect_socket("ws://localhost:9294") {
+		Ok(let opened) => opened,
+		Err(let reason) => panic(reason),
+	};
 	let client = Client { transport = socket.transport(), codec = binary_codec() };
 	let reactive = ReactiveClient::new(bridge(socket), binary_codec());
-	match client.attach(socket.connection) {
+	match client.attach(socket.connection.read()) {
 		Ok(let channel) => {
 			let mirror: RemoteSource<i32> = reactive.source(channel);
 			let watching = mirror.sub(|n| {

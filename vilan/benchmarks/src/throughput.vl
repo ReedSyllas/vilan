@@ -10,10 +10,11 @@ import std::binary::binary_codec;
 import std::wire::{ Serializer, Codec };
 import std::option::Option::{ Some, None };
 import std::result::Result::{ self, Ok, Err };
+import std::io::panic;
 import std::time::now_millis;
 import std::rpc::{
 	local_rpc, Dispatcher, RpcError, RpcOutcome, RpcProtocol, HttpTransport, Transport,
-	connect_socket, call, arg, reply, decode_failed,
+	connect_socket, SocketDuplex, call, arg, reply, decode_failed,
 };
 import std::rpc_server::{ serve_rpc, serve_connected };
 import std::http::Response;
@@ -86,7 +87,10 @@ fun run(finished: || void) {
 					|id| {},
 					|request| Response::builder().code(404).body("benchmark").build(),
 					|| {
-						let socket = connect_socket("ws://localhost:48234");
+						let socket: SocketDuplex = match connect_socket("ws://localhost:48234") {
+							Ok(let opened) => opened,
+							Err(let reason) => panic(reason),
+						};
 						let ws_elapsed = drive(socket.transport(), json_codec(), http_calls);
 						let ws_average_us = round(ws_elapsed * 1000.0 / http_calls);
 						print(i"ws multiplex json: {http_calls} calls in {round(ws_elapsed)} ms -> {rate(http_calls, ws_elapsed)} calls/sec ({ws_average_us} us avg)");

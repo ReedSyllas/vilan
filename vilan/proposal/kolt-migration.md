@@ -97,10 +97,27 @@ migration deletes these subsystems rather than porting them:
    sites (luxon is declared, unused) — the surface follows the immediate
    needs (task timestamps, K6 backoff); grow from real call sites stands.
    Corpus `time.vl` (node-run; interpreter-excluded — host clock) + 5 pins.
-6. **K6 — transport robustness.** Railway parity for `SocketTransport`:
-   reconnect with backoff, request retry policy, and mirror
-   RE-SUBSCRIPTION on reconnect (`RemoteSource` must resync after a drop).
-   Rides the p6-followups territory.
+6. ~~**K6 — transport robustness.**~~ — **SHIPPED 2026-07-11**
+   (`proposal/transport-robustness.md`). Railway parity, typed:
+   `ConnectionState` as a SIGNAL (`Connected`/`Reconnecting`/`Closed` —
+   Kolt's client binds a "reconnecting…" banner to it), reconnect with
+   doubling backoff (250ms→4s cap, 10 attempts, budget resets on success;
+   initial connect dials the same way instead of hanging on a dead server),
+   `Transport.call` returns `Result` (in-flight calls REJECT with
+   `RpcError::Transport("connection lost")` — the Railway dangle, fixed;
+   calls while down fail fast with "not connected"; requests are never
+   blind-retried — `create_workspace` is not idempotent, the app owns
+   retry), and mirror re-subscription: the duplex survives (Shared cells
+   swap inside), the generated `connect` registers a reconnect hook that
+   re-verifies the contract (drift closes for good), re-`__attach`es under
+   the fresh connection id, and rebinds every `RemoteSource` positionally —
+   the server's current-value Update resyncs each watched mirror. Verified
+   end-to-end (`crates/vilan-cli/tests/transport_robustness.rs`): SIGSTOP
+   catches a call in flight, SIGKILL drops the socket, a restarted server
+   with DIFFERENT state resyncs the mirror and calls resume. Finding: B21
+   (a dependency-`[service]` consumer without a direct `std::rpc` import
+   mistypes the generated connect — pinned; the probe carries the one-line
+   workaround).
 
 **Non-blocking, recorded here rather than as items**: canvas 2D externs
 (whiteboards — a later dom-layer extension), SVG elements in `std::ui`

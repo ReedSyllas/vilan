@@ -312,6 +312,24 @@ have gaps.
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
 
+21. **A dependency-package `[service]` consumer without a direct `std::rpc`
+    import mistypes the generated `connect`** (M–L; pinned `#[ignore]`d
+    `a_library_service_client_compiles_without_an_rpc_import` in
+    `crates/vilan-cli/tests/transport_robustness.rs`; found 2026-07-11
+    building K6) — the generated connect's `socket` types as
+    `connect_socket`'s raw `Result<SocketDuplex, str>` (cascading through
+    `.transport()`, `__attach`, the client construction), but ONLY when the
+    consuming unit gets `std::rpc` loaded solely through the dependency's
+    `contains_service` seed; ANY direct `import std::rpc::..` in the
+    consumer masks it. Four generated-code shapes (match+annotated-let + `!`,
+    `is`-guard + `unwrap`, std-side `dial_for_service` via match, via
+    `map_err`) failed IDENTICALLY, and hoisting the loader seed to the other
+    end of the queue changed nothing — so it is scope/order-sensitive
+    resolution of the expansion, not the expansion's text or the module load
+    position. Minimal repro: `[library]` common with one `[service]` + a node
+    app importing only the generated client. The kolt probe carries the
+    one-line import workaround (commented B21).
+
 20. ~~**A named function doesn't coerce to a closure parameter**~~ —
     **SHIPPED 2026-07-11** (`proposal/fn-coercion.md`; found the same day
     building A10). `signal.map(parse)` now works: a reference to a plain
