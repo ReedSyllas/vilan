@@ -54,6 +54,9 @@ external fun column_text(row: Row, name: str): str;
 external fun column_integer(row: Row, name: str): i32;
 
 [extern("__db_column")]
+external fun column_big_integer(row: Row, name: str): i64;
+
+[extern("__db_column")]
 external fun column_real(row: Row, name: str): f64;
 
 [extern("__db_is_null")]
@@ -84,6 +87,13 @@ impl Row {
 
 	fun integer(self, name: str): i32 {
 		column_integer(self, name)
+	}
+
+	// An INTEGER column at i64 width — timestamps (epoch millis), large ids.
+	// Exact for values to 2^53 (the i64 representation); a column beyond that
+	// arrives from `node:sqlite` as a BigInt and is out of v1's reach.
+	fun big_integer(self, name: str): i64 {
+		column_big_integer(self, name)
 	}
 
 	fun real(self, name: str): f64 {

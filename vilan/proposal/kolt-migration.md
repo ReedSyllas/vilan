@@ -177,6 +177,27 @@ migration in Kolt's own feature order (workspaces → tasks → filters/search
 ambitions (orgs, automations, passkeys) map onto the same items — nothing
 in it demands machinery beyond §2 plus recorded beyond-v1 notes.
 
+**Tasks — SHIPPED 2026-07-11** (the first §4 component slice; kolt repo):
+`Task { id, workspace_id, name, desc, created_at: Instant }` — a K5
+timestamp riding the wire in production shape — with an exposed tasks
+mirror (one list, per-workspace views derived client-side; per-entity
+channels recorded as a later refinement) and create/update/delete rpcs
+through the platform-neutral hook pattern. The routes grew the NESTED
+enum the router proposal designed for exactly this
+(`Route::Workspace(i32, WorkspaceRoute)` — `/w/{id}` task list,
+`/w/{id}/task/{tid}` editor). The editor is Kolt's `page_task` shape
+(summary + description) as edit-then-save v1; the per-keystroke
+optimistic push is recorded as the crate-style refinement. `std::db` grew
+`Row.big_integer` for the i64-wide column (epoch millis outgrow
+`integer`'s i32; pinned in corpus `db.vl`). Verified: the client e2e's
+tasks phase (create → typed nested link → age via `std::time` → editor
+seeded from the mirror → save → the rename echoes back onto the list →
+delete → deep-link lands on the task list) and the probe (task create
+lands on a second connection's mirror; update/delete round-trip; count
+restored). One operational lesson: a LEAKED old server on the port
+answered with its stale contract hash — the Contract check caught the
+drift exactly as designed.
+
 **The second screen — SHIPPED 2026-07-11** (kolt 2a717fb): the client is
 routed on the A10 model — `Route::{Home, Workspace(i32), NotFound}` +
 `parse`/`href` over `segments`, pages swapping on

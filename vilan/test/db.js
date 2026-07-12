@@ -28,6 +28,9 @@ function text(self, name) {
 function integer(self, name) {
 	return __db_column(self, name);
 }
+function big_integer(self, name) {
+	return __db_column(self, name);
+}
 const db = new DatabaseSync(":memory:");
 db.exec("CREATE TABLE task (id INTEGER PRIMARY KEY, title TEXT, done INTEGER)");
 const insert = db.prepare("INSERT INTO task (title, done) VALUES (?, ?)");
@@ -45,4 +48,15 @@ if ($a[0] === 0) {
 } else {
 	$b = console.log("no rows");
 }
-process.exit($b);
+$b;
+db.exec("CREATE TABLE stamp (id INTEGER PRIMARY KEY, at INTEGER)");
+run(db.prepare("INSERT INTO stamp (at) VALUES (?)"), [ 1720656000000 ]);
+const $c = first(db.prepare("SELECT at FROM stamp"), [  ]);
+let $d = null;
+if ($c[0] === 0) {
+	const row3 = $c[1];
+	$d = console.log("stamp at " + big_integer(row3, "at"));
+} else {
+	$d = console.log("no stamp");
+}
+process.exit($d);
