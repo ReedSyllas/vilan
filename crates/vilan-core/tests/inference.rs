@@ -12087,3 +12087,167 @@ fn non_wire_fields_still_fail() {
         "which is not Wire",
     );
 }
+
+// --- B22: return-expectation inference bound to the caller's generics --------
+//
+// A call's return-type-only generic inference (the `let n: Cell<i32> =
+// Cell::fresh()` gap-filler) must bind only the CALLEE's own generics. When an
+// abstract argument already bound the callee's `T` to the caller's `T`, the
+// substituted return type's generics are the caller's — unifying THOSE against
+// the expectation wrote a caller-keyed entry into the call's substitution map,
+// and the bound check then demanded the caller generic's bounds of whatever it
+// unified with (a raw unbounded struct binder), rejecting valid code.
+
+#[test]
+fn a_bounded_caller_constructs_an_unbounded_struct_via_a_generic_static_new() {
+    // The motivating shape (std::reactive's `draft()`): `fun draft<T:
+    // PartialEq>` building a struct whose field is made by an UNBOUNDED
+    // generic container's static `new`. The field expectation mentions the
+    // struct's raw binder; the call's return mentions the caller's `T` — the
+    // poison unification paired the two and demanded `PartialEq` of the
+    // struct binder.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Cell<T> {
+            value: T,
+        }
+
+        impl Cell<type T> {
+            fun new(value: T): Cell<T> {
+                Cell { value }
+            }
+        }
+
+        struct Box<T> {
+            inner: Cell<T>,
+        }
+
+        fun boxed<T: PartialEq>(initial: T): Box<T> {
+            Box {
+                inner = Cell::new(initial),
+            }
+        }
+
+        fun main() {
+            let held = boxed(3);
+            print(held.inner.value);
+        }
+        main();
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn two_bounded_generics_construct_two_unbounded_fields() {
+    // Multi-parameter form: each field's constructor call must stay keyed to
+    // its own binding — before the fix BOTH `A` and `B` were rejected.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Cell<T> {
+            value: T,
+        }
+
+        impl Cell<type T> {
+            fun new(value: T): Cell<T> {
+                Cell { value }
+            }
+        }
+
+        struct Duo<A, B> {
+            left: Cell<A>,
+            right: Cell<B>,
+        }
+
+        fun paired<A: PartialEq, B: PartialEq>(first: A, second: B): Duo<A, B> {
+            Duo {
+                left = Cell::new(first),
+                right = Cell::new(second),
+            }
+        }
+
+        fun main() {
+            let held = paired(1, "two");
+            print(held.left.value);
+            print(held.right.value);
+        }
+        main();
+        "#,
+        "1\ntwo\n",
+    );
+}
+
+#[test]
+fn a_nested_generic_argument_still_binds_through_the_expectation() {
+    // Nested form: the caller's `T` sits INSIDE the callee's binding
+    // (`Cell::new([initial])` binds the callee's `T` to `List<T_caller>`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialEq;
+
+        struct Cell<T> {
+            value: T,
+        }
+
+        impl Cell<type T> {
+            fun new(value: T): Cell<T> {
+                Cell { value }
+            }
+        }
+
+        struct Box<T> {
+            inner: Cell<List<T>>,
+        }
+
+        fun boxed<T: PartialEq>(initial: T): Box<T> {
+            Box {
+                inner = Cell::new([initial]),
+            }
+        }
+
+        fun main() {
+            let held = boxed(7);
+            print(held.inner.value[0]);
+        }
+        main();
+        "#,
+        "7\n",
+    );
+}
+
+#[test]
+fn return_type_only_inference_still_binds_a_static_generic() {
+    // The feature the merge exists for keeps working: no argument mentions
+    // `T`, so the expectation is the only thing that can bind it — the
+    // callee's own return-type generic must still be inferred.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        struct Cell<T> {
+            value: List<T>,
+        }
+
+        impl Cell<type T> {
+            fun fresh(): Cell<T> {
+                Cell { value = [] }
+            }
+        }
+
+        fun main() {
+            let cell: Cell<i32> = Cell::fresh();
+            print(cell.value.len());
+        }
+        main();
+        "#,
+        "0\n",
+    );
+}
+
