@@ -35,12 +35,15 @@ documents record how things were built; these record how to use them.)
 ### Tour
 | Chapter | Covers |
 |---|---|
+| [Hello vilan](tour/hello-vilan.md) | the CLI, `vilan.toml`, packages & workspaces, imports |
+| [Values & types](tour/values-and-types.md) | bindings, primitives & numeric widths, strings & interpolation, tuples, collections |
 | [Functions & closures](tour/functions-and-closures.md) | `fun`, closure types, named-fn coercion, async closures and their seams, context clauses |
+| [Data & traits](tour/data-and-traits.md) | structs, enums, `impl`, generics & bounds, traits, derives |
+| [Control flow](tour/control-flow.md) | `match`/`is`, loops, `ret`, Option/Result idioms, `!` and `?.` |
 | [The memory model](tour/memory-model.md) | value semantics, views, `mut`/`own`, `Shared`, `Arena`/`Handle` |
 | [Async](tour/async.md) | implicit await, `async expr` spawn, promises, timers |
-
-*(Chapters on getting started, values & types, data & traits, control flow,
-macros & const, and platforms arrive with Phase 2.)*
+| [Macros & const](tour/macros-and-const.md) | `const` evaluation, derive macros, `macro { … }` blocks |
+| [Platforms](tour/platforms.md) | std layers, full-stack packages, externs, assets |
 
 ### Guides
 | Chapter | Covers |
@@ -50,13 +53,23 @@ macros & const, and platforms arrive with Phase 2.)*
 | [Styling](guide/styling.md) | `const` typed styles, lengths/colors, dynamic values |
 | [Routing](guide/routing.md) | enum routes, `parse`/`href`, `link`, `swap`, navigation |
 | [Services & RPC](guide/services.md) | `[service]`/`[rpc]`/`[expose]`, Wire, mirrors, reconnection, the server side |
+| [Persistence & the server](guide/persistence.md) | `std::db` (SQLite), the http server, files, the process |
 
 ### std reference
 | Page | Modules |
 |---|---|
+| [collections](std/collections.md) | List, Map, Set, Range, Iterator |
+| [option & result](std/option-result.md) | Option, Result and their method sets |
+| [strings](std/strings.md) | str, Display, Debug, Into |
+| [numbers](std/numbers.md) | the sized numerics, math, random |
+| [traits](std/traits.md) | compare, default, the operator traits, Try/Lift |
+| [cells](std/cells.md) | Shared, Arena/Handle |
+| [time](std/time.md) | Instant, Duration, timers |
+| [encoding](std/encoding.md) | json, wire, binary, bytes, base64 |
+| [net](std/net.md) | fetch, ws |
 | [reactive](std/reactive.md) | the full `std::reactive` API |
 | [style](std/style.md) | the full `std::style` API |
 | [rpc](std/rpc.md) | `std::rpc` — transports, clients, frames |
 | [browser](std/browser.md) | `std::dom`, `std::ui`, `std::router`, `std::storage` |
-
-*(The remaining module pages arrive with Phase 2.)*
+| [process](std/process.md) | db, http, fs, process, rpc_server |
+| [misc](std/misc.md) | io, promise, context, crypto, jwt, asset |
