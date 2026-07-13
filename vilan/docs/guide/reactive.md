@@ -165,7 +165,22 @@ before your first line of UI code ran.
 If an event handler sets five signals, you want watchers to see the
 final state once, not five intermediate states. vilan batches writes
 into **turns**. Inside a turn, `set` just records. When the turn
-settles, each affected watcher runs once with the final values.
+settles, each affected watcher runs once with the final values:
+
+```text
+click ──▶ the handler runs inside a fresh turn
+          │
+          │  count.set(1)    ┐
+          │  items.set(…)    │   writes are recorded, not delivered
+          │  count.set(2)    ┘
+          │
+          └─ the handler's sync part ends → the turn SETTLES
+                 │
+                 ├─▶ the count watcher runs once   (sees 2 — never 1)
+                 └─▶ the items watcher runs once
+
+one turn  =  one consistent wave, no matter how many writes
+```
 
 You mostly never manage turns, because the framework opens them at its
 boundaries: every UI event handler runs in one, every `mount_root` build
@@ -181,13 +196,24 @@ batch(|| …)              // join the current turn, or create one
 flush()                  // drain the ambient turn early
 ```
 
-> **Going deeper.** A plain `turn` settles when the body's synchronous
-> part ends, so an async handler publishes a wave at its first await and
-> further waves per continuation. `turn_async` instead holds every
-> notification until the whole async body completes — a transaction.
-> Writes that land after a turn settled (from spawned work) are grouped
-> per continuation segment and drained in a microtask, so you never
-> observe half a wave.
+> **Going deeper.** Suspension is where the two turn flavors differ. A
+> plain turn settles at the end of each synchronous stretch, so an async
+> handler publishes one wave per segment; `turn_async` holds everything
+> until the whole body finishes:
+>
+> ```text
+> handler:      |── writes ──|─── await ───|── writes ──|
+>
+> turn:                    settle ▲              settle ▲
+>                          (wave 1)              (wave 2)
+>
+> turn_async:                                    settle ▲
+>                                              (one wave)
+> ```
+>
+> Writes that land after a turn already settled (from spawned work) are
+> grouped per continuation segment and drained in a microtask, so you
+> never observe half a wave.
 
 ## Optimistic writes and local-first drafts
 
@@ -218,6 +244,22 @@ draft.adopt(remote) // fold in a remote change
 
 The commit closure returns `None` on success or `Some(reason)` on
 failure, so an rpc-calling closure drops straight in.
+
+The whole lifecycle in one picture — note that the input never waits on
+the wire, and every remote change funnels through `adopt`'s three rules:
+
+```text
+you type ──▶ local (Signal) ──▶ the input shows it INSTANTLY
+                │
+                └─ push: spawn the commit ──▶ rpc ──▶ server
+                                                        │
+                          the mirror broadcasts  ◀──────┘
+                                │
+                             adopt(remote):
+                    ├─ same as last synced?  an ECHO — do nothing
+                    ├─ local has no edits?   take the remote value
+                    └─ local is DIRTY?       your text wins for now
+```
 
 ```vilan
 import std::print;

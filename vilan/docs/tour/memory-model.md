@@ -82,6 +82,22 @@ A view aliases the original instead of copying it. `&mut` views can
 write; `&` views can only read. The `&mut self` receiver is the same
 idea for methods: "this method changes the actual object".
 
+The two behaviors side by side:
+
+```text
+mut b = a          — a COPY               let v = &mut a    — a VIEW
+
+a ──▶ ┌─────────┐                         a ──▶ ┌─────────┐
+      │ x=1 y=2 │                               │ x=1 y=2 │
+      └─────────┘                          v ──▶└─────────┘
+b ──▶ ┌─────────┐
+      │ x=1 y=2 │                          two names, ONE box:
+      └─────────┘                          writing through v changes a
+
+two boxes: b.x = 9
+never touches a
+```
+
 Views come with a deliberate restriction: **they don't outlive the
 moment.** A view can be a parameter or a short-lived local. It cannot be
 stored in a struct field, put in a list, returned into long-lived state,

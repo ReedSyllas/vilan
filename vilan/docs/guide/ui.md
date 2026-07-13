@@ -194,6 +194,36 @@ everything inside cleans up when the content goes away. `swap` re-renders
 only when the value actually *changes* (`T: PartialEq`), so navigating
 to the page you're already on does nothing.
 
+## The ownership picture
+
+Here is the whole cleanup model in one picture. Owners exist at the
+places marked `◆` — the boundaries where a subtree can die. Every
+binding registers with the *nearest* boundary above it, no matter how
+many plain function calls sit in between:
+
+```text
+◆ mount_root("app", …)                the root owner — lives forever
+│
+├── view("header")                     static: no boundary of its own
+│     └─ .bind_text(title)             → registers with the ROOT
+│
+├── ◆ .swap(route, |page| …)           one owner PER PAGE shown
+│     └─ home_page()
+│           └─ .bind_text(…)           → registers with the PAGE
+│
+└── ◆ .bind_each(todos, key, |t| …)    one owner PER ROW
+      ├─ row(id = 1)
+      │     └─ .bind_class(…)          → registers with ROW 1
+      └─ row(id = 2)
+            └─ .on("click", …)         → dies with ROW 2's DOM node
+```
+
+Navigate away, and the page's owner is disposed — every binding the page
+created dies with it. Delete row 2, and only row 2's bindings die. This
+is why there is no unsubscribe code anywhere in a vilan app: the tree of
+boundaries *is* the cleanup logic, and the framework already placed
+them where subtrees end.
+
 ## Escaping to the DOM
 
 `View` is a thin wrapper over `std::dom::Element` (it's right there as
