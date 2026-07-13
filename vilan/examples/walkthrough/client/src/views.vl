@@ -1,0 +1,239 @@
+// The UI: a sign-in gate, then the routed app — the note list at "/",
+// one note's editor at "/note/{id}". Lists render live off the mirror;
+// the editor commits per keystroke through drafts.
+
+import std::print;
+import std::ui::{ view, View };
+import std::reactive::{ Signal, draft, Draft, DraftState };
+import std::result::Result::{ self, Ok, Err };
+import std::rpc::{ SocketTransport, RpcError, ConnectionState };
+import std::router::{ link, navigate };
+import std::storage;
+import std::option::Option::{ self, Some, None };
+import std::style::{ style, space, Style, Color, Length, Display, FlexDirection, AlignItems, Cursor };
+import common::{ Note, AuthOutcome, NotesClient };
+import pkg::routes::{ Route, href };
+
+// --- styles (compiled at build time; see the styling guide) ---
+
+let shell = const style()
+	.max_width(Length::rem(30))
+	.margin_x(Length::auto())
+	.padding(space(6))
+	.display(Display::Flex)
+	.flex_direction(FlexDirection::Column)
+	.gap(space(3))
+	.raw("font-family", "system-ui, sans-serif");
+
+let row = const style()
+	.display(Display::Flex)
+	.gap(space(2))
+	.align_items(AlignItems::Center);
+
+let field = const style()
+	.padding(space(2))
+	.radius(space(1))
+	.border(Length::px(1), Color::gray(300));
+
+let button = const style()
+	.padding_x(space(3))
+	.padding_y(space(2))
+	.radius(space(1))
+	.background(Color::blue(600))
+	.color(Color::white())
+	.raw("border", "none")
+	.cursor(Cursor::Pointer);
+
+let muted = const style().color(Color::gray(500));
+
+// --- the screen ---
+
+// The app shell: a connection banner, the sign-in gate, and the routed
+// app. The gate and the app toggle on whether a token exists.
+fun screen(client: NotesClient<SocketTransport>, notes: Signal<List<Note>>, token: Signal<str>, route: Signal<Route>): View {
+	view("div")
+		.styled(shell)
+		.child(connection_banner(client))
+		.child(sign_in_panel(client, token))
+		.child(authed_panel(client, notes, token, route))
+}
+
+// Visible only while reconnecting: the transport exposes its state as a
+// signal, so a banner is one `show`.
+fun connection_banner(client: NotesClient<SocketTransport>): View {
+	let state = client.transport.connection_state();
+	view("p")
+		.styled(muted)
+		.text("reconnecting…")
+		.show(state.map(|current| current == ConnectionState::Reconnecting))
+}
+
+// Username + password + one button. Register-or-login keeps the surface
+// to a single rpc.
+fun sign_in_panel(client: NotesClient<SocketTransport>, token: Signal<str>): View {
+	let username = Signal::new("");
+	let password = Signal::new("");
+	let status = Signal::new("");
+
+	let submit = || {
+		match client.sign_in(username.get(), password.get()) {
+			Ok(let outcome) => {
+				if outcome.ok {
+					storage::set("notes-token", outcome.token);
+					token.set(outcome.token);
+				} else {
+					status.set(outcome.reason);
+				}
+			},
+			Err(let error) => status.set(i"rpc error: {error.debug()}"),
+		}
+	};
+
+	view("div")
+		.styled(shell)
+		.child(view("h2").text("Notes"))
+		.child(view("input").styled(field).attr("placeholder", "username").bind_value(username))
+		.child(view("input").styled(field).attr("placeholder", "password").attr("type", "password").bind_value(password))
+		.child(view("button").styled(button).text("Sign in").on("click", submit))
+		.child(view("p").styled(muted).bind_text(status))
+		.show(token.map(|current| current == ""))
+}
+
+// The routed app, visible once signed in. Pages swap on the route.
+fun authed_panel(client: NotesClient<SocketTransport>, notes: Signal<List<Note>>, token: Signal<str>, route: Signal<Route>): View {
+	view("div")
+		.styled(shell)
+		.swap(route, |current| match current {
+			Route::Home => home_page(client, notes, token),
+			Route::Note(let id) => note_page(client, id, notes, token),
+			Route::NotFound => not_found_page(),
+		})
+		.show(token.map(|current| current != ""))
+}
+
+// "/" — the live list plus an add form. Rows are keyed by note id.
+fun home_page(client: NotesClient<SocketTransport>, notes: Signal<List<Note>>, token: Signal<str>): View {
+	let composing = Signal::new("");
+	let add = || {
+		let title = composing.get();
+		if title != "" {
+			report(client.add_note(token.get(), title));
+			composing.set("");
+		}
+	};
+
+	let sign_out = || {
+		storage::remove("notes-token");
+		token.set("");
+		navigate(href(Route::Home));
+	};
+
+	view("div")
+		.styled(shell)
+		.child(
+			view("div")
+				.styled(row)
+				.child(view("h2").text("Notes"))
+				.child(view("button").styled(button).text("Sign out").on("click", sign_out))
+		)
+		.child(
+			view("div")
+				.styled(row)
+				.child(view("input").styled(field).attr("placeholder", "New note").bind_value(composing))
+				.child(view("button").styled(button).text("Add").on("click", add))
+		)
+		.child(view("ul").bind_each(notes, |note| note.id, |note| note_row(client, note, token)))
+}
+
+fun note_row(client: NotesClient<SocketTransport>, note: Note, token: Signal<str>): View {
+	view("li")
+		.styled(row)
+		.child(link(note.title, Route::Note(note.id)))
+		.child(view("button").styled(button).text("Delete").on("click", || report(client.delete_note(token.get(), note.id))))
+}
+
+// "/note/{id}" — the editor. It mounts under `when` so a deep link waits
+// for the first mirror sync before rendering.
+fun note_page(client: NotesClient<SocketTransport>, note_id: i32, notes: Signal<List<Note>>, token: Signal<str>): View {
+	let entry = notes.map(|list| {
+		mut found: Option<Note> = None;
+		for note in list {
+			if note.id == note_id {
+				found = Some(note);
+			}
+		}
+		found
+	});
+	let present = entry.map(|current| current is Some(let _note));
+
+	view("div")
+		.styled(shell)
+		.child(view("p").child(link("← All notes", Route::Home)))
+		.child(view("p").styled(muted).text("loading…").show(present.map(|has| !has)))
+		.when(present, || note_editor(client, note_id, entry, token))
+}
+
+// LOCAL-FIRST: each field commits through its own rpc as the user types.
+// Typing never waits on the wire; a failed commit keeps the text; mirror
+// updates adopt in without fighting in-flight edits.
+fun note_editor(client: NotesClient<SocketTransport>, note_id: i32, entry: Signal<Option<Note>>, token: Signal<str>): View {
+	let (seed_title, seed_body) = match entry.get() {
+		Some(let note) => (note.title, note.body),
+		None => ("", ""),
+	};
+	let title = draft(seed_title, |value: str| commit_outcome(client.retitle_note(token.get(), note_id, value), note_id));
+	let body = draft(seed_body, |value: str| commit_outcome(client.rewrite_note(token.get(), note_id, value), note_id));
+
+	// Remote edits (another session's typing — or our own echo) fold in.
+	entry.effect(|current: Option<Note>| {
+		match current {
+			Some(let note) => {
+				title.adopt(note.title);
+				body.adopt(note.body);
+			},
+			None => {},
+		}
+	});
+
+	view("div")
+		.styled(shell)
+		.child(view("input").styled(field).attr("placeholder", "Title…").bind_draft(title))
+		.child(view("span").styled(muted).bind_text(title.state.map(state_text)))
+		.child(view("textarea").styled(field).attr("placeholder", "Write…").attr("rows", "8").bind_draft(body))
+		.child(view("span").styled(muted).bind_text(body.state.map(state_text)))
+}
+
+fun not_found_page(): View {
+	view("div")
+		.child(view("h2").text("Nothing here"))
+		.child(view("p").child(link("← All notes", Route::Home)))
+}
+
+// An rpc save outcome as a draft commit outcome (`None` = success).
+fun commit_outcome(outcome: Result<i32, RpcError>, note_id: i32): Option<str> {
+	match outcome {
+		Ok(let id) => {
+			if id == note_id {
+				None
+			} else {
+				Some("save rejected")
+			}
+		},
+		Err(let error) => Some(i"rpc error: {error.debug()}"),
+	}
+}
+
+fun state_text(state: DraftState): str {
+	match state {
+		DraftState::Synced => "",
+		DraftState::Dirty => "saving…",
+		DraftState::Failed(let reason) => i"failed: {reason}",
+	}
+}
+
+fun report(outcome: Result<i32, RpcError>) {
+	match outcome {
+		Ok(let _value) => {},
+		Err(let error) => print(i"rpc error: {error.debug()}"),
+	}
+}

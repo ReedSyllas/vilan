@@ -1,0 +1,175 @@
+// The server: SQLite persistence, the auth hooks, and the http/rpc host.
+// Boot order matters — persist first, then update the signal, so a crash
+// can never broadcast state that was never stored.
+
+import std::print;
+import std::reactive::Signal;
+import std::shared::Shared;
+import std::json::json_codec;
+import std::fs;
+import std::db::{ Database, Statement, Row };
+import std::http::Response;
+import std::rpc_server::serve_service;
+import std::option::Option::{ self, Some, None };
+import common::{ Note, AuthOutcome, NotesStore };
+
+// --- node:crypto bindings for password hashing (sync, fits the dispatch
+// path). A candidate for std promotion once proven.
+
+external struct HashBuffer;
+
+impl HashBuffer {
+	[extern(method, "toString")]
+	external fun to_string_encoded(self, encoding: str): str;
+}
+
+[extern("node:crypto", "pbkdf2Sync")]
+external fun pbkdf2_sync(password: str, salt: str, iterations: i32, key_length: i32, digest: str): HashBuffer;
+
+[extern("node:crypto", "randomBytes")]
+external fun random_bytes_sync(length: i32): HashBuffer;
+
+fun hash_password(password: str, salt: str): str {
+	pbkdf2_sync(password, salt, 100000, 64, "sha512").to_string_encoded("hex")
+}
+
+fun fresh_token(): str {
+	random_bytes_sync(32).to_string_encoded("hex")
+}
+
+// --- the server ---
+
+async fun main() {
+	let client_js = fs::read_file_to_str("dist/client.js");
+	let client_css = fs::read_file_to_str("dist/client.css");
+	let app_html = fs::read_file_to_str("server/src/app.html");
+
+	let db = Database::open("notes.db");
+	db.exec("CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, username TEXT UNIQUE, salt TEXT, password_hash TEXT)");
+	db.exec("CREATE TABLE IF NOT EXISTS session (token TEXT PRIMARY KEY, username TEXT)");
+	db.exec("CREATE TABLE IF NOT EXISTS note (id INTEGER PRIMARY KEY, title TEXT, body TEXT)");
+
+	// The mirror: load once at boot, then every write goes SQL-first.
+	let notes: Signal<List<Note>> = Signal::new(load_notes(db));
+
+	// Register-or-login: a new username creates the account.
+	let sign_in = |username: str, password: str| {
+		if username.len() < 2 || password.len() < 8 {
+			ret AuthOutcome { ok = false, token = "", reason = "username or password too short" };
+		}
+		match db.prepare("SELECT salt, password_hash FROM account WHERE username = ?").first([username]) {
+			Some(let row) => {
+				if row.text("password_hash") == hash_password(password, row.text("salt")) {
+					open_session(db, username)
+				} else {
+					AuthOutcome { ok = false, token = "", reason = "wrong password" }
+				}
+			},
+			None => {
+				let salt = fresh_token();
+				db.prepare("INSERT INTO account (username, salt, password_hash) VALUES (?, ?, ?)")
+					.run([username, salt, hash_password(password, salt)]);
+				open_session(db, username)
+			},
+		}
+	};
+
+	let add = |token: str, title: str| {
+		match session_user(db, token) {
+			Some(let _user) => {
+				let id = db.prepare("INSERT INTO note (title, body) VALUES (?, ?)").run([title, ""]);
+				notes.set_with(|list| {
+					mut updated = list;
+					updated.push(Note { id = id, title = title, body = "" });
+					updated
+				});
+				id
+			},
+			None => 0 - 1,
+		}
+	};
+
+	let retitle = |token: str, note_id: i32, title: str| {
+		match session_user(db, token) {
+			Some(let _user) => {
+				db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
+				notes.set_with(|list| list.map(|note| {
+					if note.id == note_id {
+						Note { id = note.id, title = title, body = note.body }
+					} else {
+						note
+					}
+				}));
+				note_id
+			},
+			None => 0 - 1,
+		}
+	};
+
+	let rewrite = |token: str, note_id: i32, body: str| {
+		match session_user(db, token) {
+			Some(let _user) => {
+				db.prepare("UPDATE note SET body = ? WHERE id = ?").run([body, note_id]);
+				notes.set_with(|list| list.map(|note| {
+					if note.id == note_id {
+						Note { id = note.id, title = note.title, body = body }
+					} else {
+						note
+					}
+				}));
+				note_id
+			},
+			None => 0 - 1,
+		}
+	};
+
+	let delete = |token: str, note_id: i32| {
+		match session_user(db, token) {
+			Some(let _user) => {
+				db.prepare("DELETE FROM note WHERE id = ?").run([note_id]);
+				notes.set_with(|list| list.filter(|note| note.id != note_id));
+				note_id
+			},
+			None => 0 - 1,
+		}
+	};
+
+	let store = NotesStore {
+		notes = notes,
+		sign_in_hook = Shared::new(sign_in),
+		add_hook = Shared::new(add),
+		retitle_hook = Shared::new(retitle),
+		rewrite_hook = Shared::new(rewrite),
+		delete_hook = Shared::new(delete),
+	};
+
+	serve_service(4600, store.dispatcher().into_protocol(json_codec()), |request| {
+		match request.path() {
+			"/client.js" => Response::builder().set_header("Content-Type", "text/javascript").body(client_js).build(),
+			"/client.css" => Response::builder().set_header("Content-Type", "text/css").body(client_css).build(),
+			_ => Response::builder().set_header("Content-Type", "text/html").body(app_html).build(),
+		}
+	}, || print("notes server listening on http://localhost:4600"));
+}
+
+// The session table is the auth boundary: a token row names its user.
+fun session_user(db: Database, token: str): Option<str> {
+	match db.prepare("SELECT username FROM session WHERE token = ?").first([token]) {
+		Some(let row) => Some(row.text("username")),
+		None => None,
+	}
+}
+
+fun open_session(db: Database, username: str): AuthOutcome {
+	let token = fresh_token();
+	db.prepare("INSERT INTO session (token, username) VALUES (?, ?)").run([token, username]);
+	AuthOutcome { ok = true, token = token, reason = "" }
+}
+
+fun load_notes(db: Database): List<Note> {
+	mut list: List<Note> = [];
+	for row in db.prepare("SELECT id, title, body FROM note ORDER BY id").all([]) {
+		list.push(Note { id = row.integer("id"), title = row.text("title"), body = row.text("body") });
+	}
+	list
+}

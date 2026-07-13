@@ -1,0 +1,5 @@
+[package]
+name = "server"
+
+[package.dependencies]
+common = { path = "../common" }

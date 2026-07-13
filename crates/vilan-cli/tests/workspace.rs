@@ -418,3 +418,19 @@ fn standalone_library_check_flags_a_body_scoped_violation() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The docs walkthrough app (docs/guide/walkthrough.md quotes its files) must
+/// keep building — it is the book's capstone example.
+#[test]
+fn the_walkthrough_example_builds() {
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/examples/walkthrough");
+    let output = vilan(&["build", example.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "walkthrough build failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(example.join("dist/client.js").is_file());
+    assert!(example.join("dist/client.css").is_file());
+    assert!(example.join("dist/server.js").is_file());
+}

@@ -11426,10 +11426,18 @@ impl<'src> Analyzer<'src> {
                     self.type_id_to_type_map.insert(type_id, subject_type);
                 }
                 None => {
-                    self.diagnostics.push(Error {
-                        span,
-                        msg: format!("cannot find type '{}'", name),
-                    });
+                    // `std::math::min(1, 2)` inline: the namespace root is not
+                    // a binding — qualified paths resolve through an IMPORTED
+                    // module name (`import std::math; … math::min(1, 2)`).
+                    let message = if matches!(name, "std" | "pkg") {
+                        format!(
+                            "`{name}` is a namespace, not a value — import the module first \
+                             (`import {name}::…;`) and qualify through its name"
+                        )
+                    } else {
+                        format!("cannot find type '{}'", name)
+                    };
+                    self.diagnostics.push(Error { span, msg: message });
                     self.type_id_to_type_map.insert(type_id, Type::Unknown);
                 }
             }
@@ -11461,7 +11469,24 @@ impl<'src> Analyzer<'src> {
                         }
                     }
                 }
-                _ => {}
+                // A non-module path head. `Unknown` means the head already
+                // failed to resolve (and was diagnosed there); anything else
+                // is a real "this isn't a namespace" error. Either way the
+                // id MUST resolve to something — an unmapped type id panics
+                // the first downstream `get_type` (the `std::math::min(..)`
+                // crash).
+                subject_type => {
+                    if !matches!(subject_type, Type::Unknown | Type::Unresolved) {
+                        let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!(
+                                "cannot resolve `{member_name}` here: {subject_str} is not a module"
+                            ),
+                        });
+                    }
+                    self.type_id_to_type_map.insert(type_id, Type::Unknown);
+                }
             }
         }
 

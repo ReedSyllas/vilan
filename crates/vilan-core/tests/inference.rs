@@ -12642,3 +12642,53 @@ fn i53_suffixed_literals_compile_and_run() {
         "9007199254740992\n3\n5\n",
     );
 }
+
+// --- Bare-namespace paths in expression position (found by the walkthrough) --
+//
+// `std::math::min(1, 2)` inline used to PANIC the compiler: the failed
+// resolution of the path head left its type id unmapped, and the static-
+// accessor pass crashed on the first `get_type`. The namespace root is not
+// a binding by design — qualified access goes through an imported module
+// name — so the shape is a clean, guiding error now.
+
+#[test]
+fn a_bare_std_function_path_errors_cleanly() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _x = std::math::min(1, 2);
+        }
+        "#,
+        "std",
+        "`std` is a namespace, not a value",
+    );
+}
+
+#[test]
+fn a_bare_std_variant_path_errors_cleanly() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _x = std::compare::Ordering::Less;
+        }
+        "#,
+        "std",
+        "`std` is a namespace, not a value",
+    );
+}
+
+#[test]
+fn an_imported_module_alias_qualifies_statics() {
+    // The supported spelling: import the module, qualify through its name.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::math;
+
+        fun main() {
+            print(math::min(1, 2));
+        }
+        "#,
+        "1\n",
+    );
+}

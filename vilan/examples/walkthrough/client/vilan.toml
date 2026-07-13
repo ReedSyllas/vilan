@@ -1,0 +1,6 @@
+[package]
+name = "client"
+target = "browser"
+
+[package.dependencies]
+common = { path = "../common" }

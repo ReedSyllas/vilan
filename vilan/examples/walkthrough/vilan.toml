@@ -1,0 +1,7 @@
+# The docs walkthrough app (docs/guide/walkthrough.md): a tiny team notes
+# app — sign-in, a live-synced note list, routing, and a local-first editor.
+#
+#   vilan build .           compiles client + server into dist/
+#   node dist/server.js     serves the app at http://localhost:4600
+[project]
+packages = ["common", "client", "server"]

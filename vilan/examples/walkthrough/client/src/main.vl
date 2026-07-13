@@ -1,0 +1,27 @@
+// The client entry: connect, feed the mirror into a local signal, restore
+// the stored token, derive the route, and mount the screen.
+
+import std::print;
+import std::reactive::Signal;
+import std::json::json_codec;
+import std::result::Result::{ self, Ok, Err };
+import std::ui::mount_root;
+import std::router::current_path;
+import std::storage;
+import common::{ Note, NotesClient };
+import pkg::routes::{ Route, parse };
+import pkg::views::screen;
+
+async fun main() {
+	let notes: Signal<List<Note>> = Signal::new([]);
+	let token = Signal::new(storage::get("notes-token"));
+	let route = current_path().map(parse);
+
+	match NotesClient::connect("/", json_codec()) {
+		Ok(let client) => {
+			let _sync = client.notes.sub(|list| notes.set(list));
+			let _root = mount_root("app", || screen(client, notes, token, route));
+		},
+		Err(let error) => print(i"connect failed: {error.debug()}"),
+	}
+}

@@ -335,6 +335,21 @@ have gaps.
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
 
+25. ~~**A bare `std::…` path in expression position panicked the
+    compiler**~~ — **FIXED 2026-07-12** (found building the docs
+    walkthrough app; pins: bare fn path, bare variant path, alias-qualified
+    positive). `std::math::min(1, 2)` inline crashed: the namespace root
+    isn't a binding, the failed head resolution left the path's type id
+    UNMAPPED (the type-static-accessor loop's `_ => {}` arm inserted
+    nothing), and the first downstream `get_type` unwrap-panicked. Fix:
+    every walked type id now resolves (Unknown on failure), a non-module
+    path head gets a real diagnostic, and `std`/`pkg` heads get a guiding
+    one ("`std` is a namespace, not a value — import the module first").
+    Bare-namespace expression paths remain UNSUPPORTED by design (qualified
+    access goes through an imported module alias: `import std::math;
+    math::min(…)`); supporting them directly is a possible H-series
+    follow-up.
+
 24. **Primitive comparisons skip operand-type checking** (M; pinned
     `#[ignore]`d ×3; found writing the spec 2026-07-12, §5.7) — `true < 3`,
     `1 == "a"`, and even `1i64 < 3` all COMPILE and emit raw JS comparisons

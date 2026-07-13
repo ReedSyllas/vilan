@@ -192,6 +192,9 @@ useful:
 - **Phase 2 — the std sweep + the rest of the tour.** Remaining Part III
   pages; tour 1–2, 4–5, 8–9; guide 15.
 - **Phase 3 — the walkthrough + appendices.** Guide 16, gotchas, glossary.
+  *(Shipped: gotchas with Phase 1; glossary 2026-07-12; the walkthrough
+  2026-07-12 — backed by the real `examples/walkthrough` app, built by the
+  test suite.)*
 
 Phase 1 is the bulk of the value; 2 and 3 are steady-state fill.
 

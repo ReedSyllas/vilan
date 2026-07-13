@@ -1,0 +1,81 @@
+// The shared package: the types that cross the wire and the service both
+// sides compile against. Everything here is base-layer std only, because
+// both the browser client and the node server import it.
+
+import std::reactive::Signal;
+import std::shared::Shared;
+
+// A note. Wire so it can travel, PartialEq so mirrors and the UI can
+// compare values, Debug for error paths.
+[derive(Wire, PartialEq, Debug)]
+struct Note {
+	id: i32,
+	title: str,
+	body: str,
+}
+
+// What sign_in returns: a session token on success, a reason on failure.
+[derive(Wire, PartialEq, Debug)]
+struct AuthOutcome {
+	ok: bool,
+	token: str,
+	reason: str,
+}
+
+// The service. `[service(NotesClient)]` generates the typed client;
+// `[expose]` mirrors the note list to every connected client; each
+// `[rpc]` method is callable remotely.
+//
+// The hooks pattern: the service holds closures the server wires up at
+// boot. That keeps `common` free of SQL and platform code — it only
+// describes the surface.
+[service(NotesClient)]
+struct NotesStore {
+	[expose] notes: Signal<List<Note>>,
+	sign_in_hook: Shared<|str, str| AuthOutcome>,
+	add_hook: Shared<|str, str| i32>,
+	retitle_hook: Shared<|str, i32, str| i32>,
+	rewrite_hook: Shared<|str, i32, str| i32>,
+	delete_hook: Shared<|str, i32| i32>,
+}
+
+impl NotesStore {
+	// Register-or-login in one call: a new username creates the account,
+	// a known one checks the password. Returns a session token.
+	// (`let hook = …; hook(…)` because calling a method-call result
+	// directly doesn't parse yet — see the gotchas page.)
+	[rpc]
+	fun sign_in(self, username: str, password: str): AuthOutcome {
+		let hook = self.sign_in_hook.read();
+		hook(username, password)
+	}
+
+	// Creates a note; returns the new id, or -1 when the token is bad.
+	[rpc]
+	fun add_note(self, token: str, title: str): i32 {
+		let hook = self.add_hook.read();
+		hook(token, title)
+	}
+
+	// Renames a note. Title and body commit separately so the editor's
+	// per-field drafts never re-send each other's text.
+	[rpc]
+	fun retitle_note(self, token: str, note_id: i32, title: str): i32 {
+		let hook = self.retitle_hook.read();
+		hook(token, note_id, title)
+	}
+
+	// Replaces a note's body.
+	[rpc]
+	fun rewrite_note(self, token: str, note_id: i32, body: str): i32 {
+		let hook = self.rewrite_hook.read();
+		hook(token, note_id, body)
+	}
+
+	// Deletes a note; returns the id, or -1.
+	[rpc]
+	fun delete_note(self, token: str, note_id: i32): i32 {
+		let hook = self.delete_hook.read();
+		hook(token, note_id)
+	}
+}

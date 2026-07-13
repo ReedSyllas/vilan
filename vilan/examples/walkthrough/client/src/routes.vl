@@ -1,0 +1,40 @@
+// The route model: one enum, and parse/href as an inverse pair.
+// "/" is the note list; "/note/7" edits note 7.
+
+import std::router::{ segments, Routable };
+import std::option::Option::{ self, Some, None };
+
+[derive(PartialEq)]
+enum Route {
+	Home,
+	Note(i32),
+	NotFound,
+}
+
+fun parse(path: str): Route {
+	let parts = segments(path);
+	if parts.len() == 0 {
+		ret Route::Home;
+	}
+	if parts[0] == "note" && parts.len() == 2 {
+		match parts[1].parse_i32() {
+			Some(let id) => ret Route::Note(id),
+			None => {},
+		}
+	}
+	Route::NotFound
+}
+
+fun href(route: Route): str {
+	match route {
+		Route::Home => "/",
+		Route::Note(let id) => i"/note/{id}",
+		Route::NotFound => "/",
+	}
+}
+
+impl Route with Routable {
+	fun to_path(self): str {
+		href(self)
+	}
+}

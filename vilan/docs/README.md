@@ -58,6 +58,7 @@ is about *using* vilan. Design history and rationale live in
 | [Routing](guide/routing.md) | enum routes, `parse`/`href`, `link`, `swap`, navigation |
 | [Services & RPC](guide/services.md) | `[service]`/`[rpc]`/`[expose]`, Wire, mirrors, reconnection, the server side |
 | [Persistence & the server](guide/persistence.md) | `std::db` (SQLite), the http server, files, the process |
+| [A full-stack walkthrough](guide/walkthrough.md) | the Notes app end to end — every layer meeting, quoted from a real, tested example |
 
 ### std reference
 | Page | Modules |
