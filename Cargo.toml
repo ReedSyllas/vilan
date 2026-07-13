@@ -7,8 +7,14 @@ members = [
     "crates/vilan-embedded-std",
 ]
 
+# Distributed binaries carry no symbol tables (smaller, and fewer places for
+# build-machine paths to hide — release CI also remaps, and checks).
+[profile.release]
+strip = true
+
 # Release performance with debug symbols, for profilers (perf, callgrind):
 # `cargo build --profile profiling`.
 [profile.profiling]
 inherits = "release"
 debug = true
+strip = false

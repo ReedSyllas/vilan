@@ -1,0 +1,135 @@
+# The release pipeline (proposal/releases.md §7): push a `v*` tag and this
+# gates on the full suite + a changelog section, builds every platform with
+# build paths remapped away, packages tarballs + the VS Code .vsix + the
+# install script, and publishes the GitHub Release with the changelog section
+# as its notes. Cutting a release is: bump, changelog, commit, tag, push.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The changelog names this release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^## v$VERSION " CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## v$VERSION — <date>' section — write the notes before tagging."
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The suite is green
+        run: cargo test
+
+  build:
+    needs: gate
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl linker
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build (build paths remapped away)
+        # The CC_/LINKER variables point cc-rs (psm, via chumsky's stacker)
+        # and the linker at musl-gcc; they are unused on the mac targets.
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=/vilan"
+          cargo build --release --target ${{ matrix.target }} -p vilan-cli -p vilan-lsp
+      - name: No build-machine paths in the binaries
+        run: |
+          for binary in vilan vilan-lsp; do
+            if grep -q "$HOME" "target/${{ matrix.target }}/release/$binary"; then
+              echo "$binary embeds the build home directory — remap failed"
+              exit 1
+            fi
+          done
+      - name: Package
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/vilan" \
+             "target/${{ matrix.target }}/release/vilan-lsp" \
+             LICENSE-MIT LICENSE-APACHE dist/
+          tar -czf "vilan-${{ matrix.target }}.tar.gz" -C dist \
+              vilan vilan-lsp LICENSE-MIT LICENSE-APACHE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: vilan-*.tar.gz
+          if-no-files-found: error
+
+  vsix:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Package the extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npx --yes @vscode/vsce package --out ../../vilan-vscode.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-vsix
+          path: vilan-vscode.vsix
+          if-no-files-found: error
+
+  publish:
+    needs: [build, vsix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+      - name: Checksums + the install script
+        run: |
+          cp scripts/install.sh assets/
+          cd assets && sha256sum * > sha256sums.txt
+      - name: Release notes from the changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v heading="^## v$VERSION " \
+            '$0 ~ heading {inside=1; next} /^## / && inside {exit} inside' \
+            CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "vilan ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md

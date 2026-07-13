@@ -109,9 +109,15 @@ extension, and std move together, because they are coupled in fact
 **Phase 1 (this proposal):**
 
 - **GitHub Releases** — the canonical artifact store. Per release:
-  - `vilan-<version>-<target>.tar.gz` (`.zip` on Windows), each
-    containing `vilan` + `vilan-lsp`.
-  - `vilan-vscode-<version>.vsix` — the extension, prebuilt.
+  - `vilan-<target>.tar.gz`, each containing `vilan` + `vilan-lsp` and
+    the two license files. Asset names are deliberately **versionless**:
+    `releases/latest/download/<asset>` then resolves directly, so the
+    install script (and later `vilan upgrade`) needs no API round-trip
+    to discover the newest version's file names. The version lives in
+    the tag, the release title, and `vilan --version`; older artifacts
+    stay addressable through their tags' own download URLs.
+  - `vilan-vscode.vsix` — the extension, prebuilt (versionless for the
+    same reason; the manifest inside carries the version).
   - `sha256sums.txt`.
 - **The install script** —
   `curl -fsSL https://github.com/ReedSyllas/vilan/releases/latest/download/install.sh | sh`:
