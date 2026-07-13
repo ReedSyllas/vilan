@@ -4,9 +4,10 @@
 //! that must live in the tree should be relative (and everything that needs
 //! an absolute path derives it at runtime or via CARGO_MANIFEST_DIR).
 //!
-//! This check is deliberately generic (any `/home/…`, `/Users/…`,
-//! `C:\Users\…`) so it is safe to publish and independent of any particular
-//! machine or username.
+//! The check is deliberately generic — any absolute path under the Linux,
+//! macOS, or Windows user-profile roots — so it is safe to publish and
+//! independent of any particular machine or username. (The needles are
+//! assembled at runtime so this file doesn't trip itself.)
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,7 +23,11 @@ fn no_tracked_file_contains_an_absolute_home_path() {
     assert!(listing.status.success(), "git ls-files failed");
     let names = String::from_utf8_lossy(&listing.stdout);
 
-    let needles = ["/home/", "/Users/", "C:\\Users\\"];
+    let needles = [
+        format!("/{}/", "home"),
+        format!("/{}/", "Users"),
+        format!("C:\\{}\\", "Users"),
+    ];
     let mut offenders = Vec::new();
     for name in names.split('\0').filter(|name| !name.is_empty()) {
         let path = repo_root.join(name);
@@ -34,7 +39,7 @@ fn no_tracked_file_contains_an_absolute_home_path() {
             continue;
         };
         for (index, line) in text.lines().enumerate() {
-            if needles.iter().any(|needle| line.contains(needle)) {
+            if needles.iter().any(|needle| line.contains(needle.as_str())) {
                 offenders.push(format!("{name}:{}: {}", index + 1, line.trim()));
             }
         }
