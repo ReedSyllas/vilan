@@ -56,14 +56,35 @@ Resolution order becomes:
 3. **The embedded copy** — replaces today's baked repo path as the
    final fallback. This is what every installed binary uses.
 
-Implementation sketch: a `build.rs` in `vilan-core` walks `vilan/std/src`
-and `vilan/macro_std/src` into a generated static map (path → source).
-`resolve_std`/the module loader grow an embedded mode — the loader's
-file-read seam dispatches to the map instead of the filesystem. The LSP
-gets the same fallback, which permanently fixes its baked-path fragility
-(the kolt-window `stdPath` workaround stops being necessary for installed
-binaries). Estimated as the one substantial engineering item in this
-proposal; everything else is CI and scripts.
+Implementation (refined after reading the loader): the std pipeline is
+filesystem-shaped end to end — layer probing, `read_dir` module listing,
+`macro_std` resolved as a sibling directory of `std`, manifests read
+from disk. Teaching all of that a virtual filesystem would touch the
+most battle-tested code in the compiler for no user-visible gain. So the
+binary **embeds the two package trees and materializes them on first
+use**: a `build.rs` in `vilan-core` embeds every `.vl` + `vilan.toml`
+under `vilan/std` and `vilan/macro_std` (with a content hash), and the
+fallback writes them once to `~/.vilan/std-cache/<hash>/` (atomic
+tmp-dir + rename; temp-dir fallback if home is unavailable) and returns
+that real path. The loader is untouched. LSP go-to-definition into std
+keeps landing on real files. The content-hash key means a rebuilt dev
+binary never sees a stale cache, and `vilan upgrade` swaps versions
+without any sync step. The LSP replaces its baked-path fallback with the
+same call (fixing the kolt-shape fragility for installed binaries).
+
+**Pre-compiled std: measured, deferred.** Embedding *parsed* std (the
+caching plan's deferred tier) was considered here. Measured on the
+release binary: `check` on a hello is ~100ms end to end and a full
+walkthrough build (client + server + macro worlds) is ~500ms — and the
+in-process parse cache already amortizes std for watch mode, the LSP,
+and multi-target builds, so pre-parsing could save only a few tens of
+milliseconds on cold CLI runs. Against that: serializing an AST built
+on borrowed `&'static str`, a build-script bootstrap on the compiler's
+own parser, and a stale-artifact bug class. Not worth it at today's
+numbers. If std parse cost ever shows up, the right shape is a
+runtime-written warm cache beside the materialized std (generated on
+first use by the binary's own parser, content-hash keyed) — no
+build-time serialization, no staleness.
 
 ## 4. Versioning
 

@@ -93,8 +93,9 @@ struct Backend {
     line_indices: Arc<DashMap<PathBuf, Arc<LineIndex>>>,
 }
 
-/// Locate the `std` library directory: `$VILAN_STD`, else the nearest ancestor of
-/// the document containing `vilan/std`. `resolve_std` reads its `[library]`
+/// Locate the `std` package directory: `$VILAN_STD`, else the nearest ancestor
+/// of the document containing `vilan/std/vilan.toml` (a checkout — documents in
+/// this repo resolve the working tree). `resolve_std` reads its `[library]`
 /// manifest (or falls back to the layer convention if the path is a bare source
 /// root).
 fn discover_std_dir(start: &Path) -> PathBuf {
@@ -104,17 +105,19 @@ fn discover_std_dir(start: &Path) -> PathBuf {
     let mut directory = start.parent();
     while let Some(current) = directory {
         let candidate = current.join("vilan").join("std");
-        if candidate.is_dir() {
+        if candidate.join("vilan.toml").is_file() {
             return candidate;
         }
         directory = current.parent();
     }
     // No ancestor carries a checkout — a project OUTSIDE the vilan repo (the
-    // kolt shape). Fall back to the std this server was built beside: the
-    // same compile-time-baked path the CLI uses, so both tools resolve the
-    // identical std from any directory. (`VILAN_STD` above remains the
-    // override when the checkout moves.)
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std")
+    // kolt shape, and every installed binary). Materialize the server's own
+    // embedded std (real files, so definitions into std keep resolving); the
+    // CLI does the same, so both tools see the identical std from any
+    // directory. On a materialization failure (no writable home OR temp dir)
+    // the path is left nonexistent and imports diagnose it.
+    vilan_embedded_std::materialize()
+        .unwrap_or_else(|_| PathBuf::from("<the embedded std could not be materialized>"))
 }
 
 #[cfg(test)]
@@ -123,14 +126,17 @@ mod std_discovery_tests {
     use std::path::Path;
 
     #[test]
-    fn a_document_outside_any_checkout_falls_back_to_the_built_beside_std() {
+    fn a_document_outside_any_checkout_falls_back_to_the_embedded_std() {
         // A kolt-shaped path: no ancestor contains `vilan/std`. The fallback
-        // must be the real std this server was built beside, not a relative
-        // guess against the server's working directory.
+        // must be the server's own materialized std — a real, complete package
+        // directory that resolves from anywhere — not a compile-time path into
+        // the machine the server happened to be built on.
         let discovered = discover_std_dir(Path::new("/tmp/definitely/not/a/checkout/main.vl"));
         assert!(
-            discovered.is_absolute() && discovered.ends_with("vilan/std") && discovered.is_dir(),
-            "expected the baked std fallback, got {discovered:?}"
+            discovered.is_absolute()
+                && discovered.join("vilan.toml").is_file()
+                && discovered.join("src/lib.vl").is_file(),
+            "expected the materialized embedded std, got {discovered:?}"
         );
     }
 }

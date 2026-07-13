@@ -23,7 +23,11 @@ use vilan_core::{Backend, BuildOptions, Manifest, Platform, Workspace};
 
 /// The vilan language toolchain.
 #[derive(clap::Parser)]
-#[command(name = "vilan", version, about)]
+#[command(
+    name = "vilan",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VILAN_BUILD_SHA"), ")"),
+    about
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -1024,16 +1028,37 @@ fn discover_tests(path: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
     Ok(tests)
 }
 
-/// The `std` library directory: `$VILAN_STD` if set, else the in-repo `vilan/std`
-/// relative to this crate. `resolve_std` reads its `[library]` manifest (or, if
-/// `$VILAN_STD` points at a bare source root with no manifest, uses it as the base
-/// layer).
-fn std_dir() -> PathBuf {
-    env::var_os("VILAN_STD")
-        .map(PathBuf::from)
-        // `CARGO_MANIFEST_DIR` is `crates/vilan-cli`; std lives at the workspace
-        // root under `vilan/std`.
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std"))
+/// The `std` package directory, resolved in order (proposal/releases.md §3):
+/// `$VILAN_STD`; the nearest ancestor of the entry file (then of the working
+/// directory) containing `vilan/std/vilan.toml` — a checkout, so a `vilan`
+/// built from this repo compiles against the working tree; else the binary's
+/// own embedded std, materialized once to `~/.vilan/std-cache/<hash>/` — what
+/// an installed binary uses, from any directory, with no checkout.
+/// `resolve_std` reads the resulting package's `[library]` manifest (or, if
+/// `$VILAN_STD` points at a bare source root with no manifest, uses it as the
+/// base layer).
+fn std_dir(entry: &Path) -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("VILAN_STD") {
+        return Ok(PathBuf::from(path));
+    }
+    let starts = [
+        entry
+            .canonicalize()
+            .ok()
+            .and_then(|file| file.parent().map(Path::to_path_buf)),
+        env::current_dir().ok(),
+    ];
+    for start in starts.iter().flatten() {
+        let mut directory = Some(start.as_path());
+        while let Some(current) = directory {
+            let candidate = current.join("vilan").join("std");
+            if candidate.join("vilan.toml").is_file() {
+                return Ok(candidate);
+            }
+            directory = current.parent();
+        }
+    }
+    vilan_embedded_std::materialize()
 }
 
 /// Runs the full pipeline (lex -> parse -> analyze -> contexts -> async infer ->
@@ -1069,7 +1094,13 @@ fn compile_to_js(
         }
     };
     let filename = file.to_string_lossy().into_owned();
-    let std = vilan_core::manifest::resolve_std(&std_dir());
+    let std = match std_dir(file) {
+        Ok(directory) => vilan_core::manifest::resolve_std(&directory),
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
     let mut output = None;
 
     // Fast path: a clean entry file lexes and parses once with zero-size

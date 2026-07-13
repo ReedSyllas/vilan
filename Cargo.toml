@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/vilan-core", "crates/vilan-cli", "crates/vilan-lsp"]
+members = [
+    "crates/vilan-core",
+    "crates/vilan-cli",
+    "crates/vilan-lsp",
+    "crates/vilan-embedded-std",
+]
 
 # Release performance with debug symbols, for profilers (perf, callgrind):
 # `cargo build --profile profiling`.
