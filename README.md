@@ -91,7 +91,8 @@ curl -fsSL https://github.com/ReedSyllas/vilan/releases/latest/download/install.
 ```
 
 That puts `vilan` and `vilan-lsp` in `~/.vilan/bin` and prints the PATH
-line to add. Each [release](https://github.com/ReedSyllas/vilan/releases)
+line to add. Update any time with `vilan upgrade` (it only touches the
+network when you run it). Each [release](https://github.com/ReedSyllas/vilan/releases)
 also carries `vilan-vscode.vsix` — the VS Code extension (highlighting,
 diagnostics, hover, go-to-definition, rename), installed via
 "Extensions: Install from VSIX". Or build from source (Rust required):

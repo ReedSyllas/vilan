@@ -6,6 +6,29 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.3.0 — 2026-07-13
+
+**The toolchain updates itself.** `vilan upgrade` finds the newest
+release, verifies its checksum, proves the downloaded binary runs, and
+swaps `vilan` and `vilan-lsp` in place; `vilan upgrade --check` only
+reports. This is the CLI's one network touchpoint, and it runs only
+when you ask. (v0.2.0 installs predate the command — re-run the install
+script once to pick it up; it updates in place.)
+
+**Rpc handlers can await.** An `[rpc]` method body can now call
+`sleep_for`, another service, or any async API. The reply is sent when
+the body finishes, and the wire turn holds across the awaits — signal
+writes before and after a suspension still reach every client as one
+coalesced update beside the reply.
+
+Also fixed and improved:
+
+- No-argument `[rpc]` methods previously ran outside the wire turn, so
+  each of their signal writes was broadcast as its own update. They now
+  batch exactly like argument-taking methods.
+- The VS Code extension finds the language server in `~/.vilan/bin`, so
+  a `vilan upgrade` reaches the editor with no extra step.
+
 ## v0.2.0 — 2026-07-13
 
 The first public release.
