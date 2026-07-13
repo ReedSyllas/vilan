@@ -83,7 +83,18 @@ test suite builds it on every run.
 
 ## Getting started
 
-Build the toolchain from source (Rust required):
+Install the toolchain (Linux, macOS, or Windows via WSL; you'll also
+need [node](https://nodejs.org) to run what you build):
+
+```sh
+curl -fsSL https://github.com/ReedSyllas/vilan/releases/latest/download/install.sh | sh
+```
+
+That puts `vilan` and `vilan-lsp` in `~/.vilan/bin` and prints the PATH
+line to add. Each [release](https://github.com/ReedSyllas/vilan/releases)
+also carries `vilan-vscode.vsix` — the VS Code extension (highlighting,
+diagnostics, hover, go-to-definition, rename), installed via
+"Extensions: Install from VSIX". Or build from source (Rust required):
 
 ```sh
 git clone https://github.com/ReedSyllas/vilan
