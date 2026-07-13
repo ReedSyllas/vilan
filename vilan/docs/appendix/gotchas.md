@@ -3,6 +3,9 @@
 A checklist of idioms that trip people up — each with the working shape.
 Grown as findings land (the backlog's "idiom traps", promoted here).
 
+Arriving with an error message in hand? The [error index](errors.md) is
+organized by message instead of by topic.
+
 ## Language
 
 - **Calling a method-call result doesn't parse.**

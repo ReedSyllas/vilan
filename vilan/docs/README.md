@@ -19,7 +19,7 @@ is about *using* vilan. Design history and rationale live in
 - **[Specification](spec/)** — the formal definition: grammar, type
   rules, the memory model, execution. This is the advanced tier. The tour
   teaches; the spec defines; where they disagree, the spec wins.
-- **[Appendix](appendix/)** — the [gotchas checklist](appendix/gotchas.md) and the [glossary](appendix/glossary.md).
+- **[Appendix](appendix/)** — the [error index](appendix/errors.md) ("you saw this message, go here"), the [gotchas checklist](appendix/gotchas.md), and the [glossary](appendix/glossary.md).
 
 ## Conventions
 
