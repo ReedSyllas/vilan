@@ -149,6 +149,11 @@ fn every_doc_example_compiles() {
         "no markdown files under {} — docs missing?",
         docs_root().display()
     );
+    // The repo-root README carries examples too; hold it to the same gate.
+    let readme = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+    if readme.is_file() {
+        files.push(readme);
+    }
     let mut failures = Vec::new();
     let mut compiled = 0;
     for file in &files {
