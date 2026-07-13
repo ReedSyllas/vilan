@@ -1,10 +1,20 @@
 # Reactive state
 
-`std::reactive` is vilan's state layer: **signals** hold values, **effects**
-react to them, **owners** decide when reactions die, and **turns** decide when
-changes become visible. The UI layer (`std::ui`), the RPC mirrors, and the
-router are all built on it — understand this chapter and the rest of the
-framework follows.
+`std::reactive` is vilan's state layer. If you've used signals in Solid or
+Preact, you'll be at home immediately. If you're coming from React, think
+of a signal as a piece of state that components subscribe to directly —
+there is no re-render, no dependency array, no memoization dance. When a
+signal changes, exactly the code that watches it runs.
+
+Four ideas make up the layer, and this chapter takes them in order:
+
+- **Signals** hold values.
+- **Effects** run code when signals change.
+- **Owners** decide when effects die.
+- **Turns** decide when changes become visible.
+
+The UI layer, the rpc mirrors, and the router are all built on these, so
+this chapter pays for itself quickly.
 
 ```vilan
 import std::print;
@@ -32,9 +42,9 @@ signal.set(value: T)                   // write + notify subscribers
 signal.set_with(transform: |T| T)      // read-modify-write in one step
 ```
 
-Signals hold **values** (vilan is value-semantic — see the
-[memory model](../tour/memory-model.md)): `get` hands you a copy, and the only
-way to change what subscribers see is `set`/`set_with`.
+Signals hold **values**. vilan copies, so `get` hands you a copy, and the
+only way to change what subscribers see is `set` or `set_with`. To update
+a list inside a signal, transform it:
 
 ```vilan
 import std::print;
@@ -51,16 +61,19 @@ fun main() {
 }
 ```
 
+(If you tried `items.get().push("first")`, you'd be mutating a copy. The
+[memory model](../tour/memory-model.md) chapter explains why that's a
+feature.)
+
 ## Derived state: `map`, `combine`, `flatten`
 
-Derived signals recompute when their sources change — build state as a graph,
-not as manual copying.
+Build state as a graph and let it recompute itself:
 
-- `signal.map(transform)` — a signal of the transformed value.
-- `combine((a, b, …))` — a signal of the **tuple** of several signals'
-  values; fires when any of them changes. Takes 2+ signals.
-- `nested.flatten()` — on a `Signal<Signal<U>>`: follows the *current* inner
-  signal, detaching from a replaced one.
+- `signal.map(transform)` gives a signal of the transformed value.
+- `combine((a, b, …))` gives a signal of the **tuple** of several
+  signals' values. It fires when any of them changes. Takes two or more.
+- `nested.flatten()` on a `Signal<Signal<U>>` follows whichever inner
+  signal is current, and detaches from a replaced one.
 
 ```vilan
 import std::print;
@@ -79,42 +92,45 @@ fun main() {
 }
 ```
 
-A named function can stand in for a closure argument (`signal.map(parse)`) —
+A named function can stand in for the closure (`signal.map(parse)`) —
 see [functions & closures](../tour/functions-and-closures.md).
 
-## Reacting: `sub` and `effect`
+## Reacting: `effect` and `sub`
 
-Two ways to run code on change:
+Two ways to run code on change. **Use `effect` by default.**
 
-- `signal.sub(observer): Subscription` — **explicit** lifetime: you keep the
-  `Subscription` and `dispose()` it yourself.
-- `signal.effect(observer)` — **ambient** lifetime: runs the observer now
-  with the current value, re-runs on every change, and registers its
-  subscription with the nearest enclosing **owner** (below). This is what UI
-  code uses; there is nothing to remember to clean up.
+- `signal.effect(observer)` runs the observer now with the current
+  value, re-runs it on every change, and cleans itself up automatically
+  when its surrounding UI (or other owner) goes away. Nothing to
+  remember.
+- `signal.sub(observer): Subscription` is the manual version. It fires
+  only on *later* changes, and you keep the `Subscription` and call
+  `dispose()` on it yourself.
 
-`effect` also fires immediately with the current value; `sub` only fires on
-subsequent changes.
+One current sharp edge: annotate an effect's parameter when the body
+takes it apart. Write `|current: Option<Task>| …`, not `|current| …`.
+The compiler sometimes fails to infer it (a tracked bug, B23), and the
+error it produces ("cannot access field on type T") isn't obvious.
 
-## Ownership and disposal
+## Ownership: who cleans up
 
-Subscriptions must die when the thing that created them becomes garbage. The
-ambient-owner model makes that automatic:
+Every effect is a subscription, and subscriptions must die when the
+thing that created them goes away — otherwise a page you navigated off
+keeps reacting forever. That's a memory leak in any reactive system.
+vilan's answer is **owners**, and the good news is that in normal app
+code you never manage them: the UI layer creates owners exactly where
+subtrees can die (a mounted root, a list row, a conditional block), and
+every `effect` you create automatically registers with the nearest one.
 
-- An `Owner` is a bag of disposables. `owner.dispose()` disposes everything
-  it collected (and runs `owner.defer(cleanup)` callbacks).
-- `run_with_owner(owner, || …)` runs a block with that owner **ambient**:
-  every `effect` inside registers into it, through any depth of function
-  calls.
-- `get_owner()` reads the ambient owner (e.g. to `defer` custom teardown).
-- `comp(|| …)` runs a block under a **fresh** owner and returns
-  `(result, owner)` — the building block for component roots.
+For tests, or when you're building your own machinery:
 
-Building reactive state *outside* any owner is a **compile error** (the
-context coverage check): every entry point must establish an owner, so no
-subscription can leak. In UI code you never do this by hand — `mount_root`,
-`bind_each` rows, `when`/`swap` bodies each establish owners at exactly the
-points where subtrees can die (see [Building UI](ui.md)).
+- `Owner::new()` makes an owner; `owner.dispose()` disposes everything
+  registered with it.
+- `run_with_owner(owner, || …)` runs a block with that owner ambient.
+  Every `effect` inside — however deep in function calls — registers
+  into it.
+- `get_owner()` reads the ambient owner, e.g. to attach custom cleanup
+  with `owner.defer(…)`.
 
 ```vilan
 import std::print;
@@ -132,26 +148,31 @@ fun main() {
 }
 ```
 
-> **Annotate effect parameters.** Today an `effect` closure's unannotated
-> parameter can fail to take the signal's payload type when the body
-> destructures it (backlog B23) — write `|current: Option<Task>| …`, not
-> `|current| …`.
+Creating reactive state *outside* any owner is a compile error. That
+sounds strict, but it's the property that makes leaks impossible by
+construction, and in practice `mount_root` already gave you an owner
+before your first line of UI code ran.
+
+> **Going deeper.** Ownership flows through the `context` mechanism
+> ([functions & closures](../tour/functions-and-closures.md)): the
+> `owner_scope` context carries the current owner, and closure
+> parameters marked `context owner_scope` receive it invisibly. `comp`
+> runs a block under a fresh owner and returns `(result, owner)` — it's
+> the primitive under `mount_root`.
 
 ## Turns: when changes become visible
 
-A **turn** batches signal writes: inside a turn, `set` records; when the turn
-*settles*, each subscriber runs **once** with final values — ten writes to one
-signal coalesce, and a wave of related writes is observed atomically.
+If an event handler sets five signals, you want watchers to see the
+final state once, not five intermediate states. vilan batches writes
+into **turns**. Inside a turn, `set` just records. When the turn
+settles, each affected watcher runs once with the final values.
 
-You mostly don't manage turns yourself — the framework establishes them at
-its boundaries:
+You mostly never manage turns, because the framework opens them at its
+boundaries: every UI event handler runs in one, every `mount_root` build
+runs in one, and every rpc handler on the server runs in one. This is
+like React's automatic batching, generalized.
 
-- every UI event handler and `mount_root` build runs in a turn
-  (`FlushPolicy::AtSuspension` — settles when the handler's synchronous part
-  ends);
-- every `[service]` RPC handler runs in a turn (`AtEnd` — transactional).
-
-When you do need one explicitly:
+For the rare explicit cases:
 
 ```vilan,fragment
 turn(policy, || …)       // run a block in a fresh turn
@@ -160,22 +181,29 @@ batch(|| …)              // join the current turn, or create one
 flush()                  // drain the ambient turn early
 ```
 
-Writes from spawned async work that land *after* a turn settled are grouped
-per continuation segment and drained in a microtask — you never observe a
-half-applied wave.
+> **Going deeper.** A plain `turn` settles when the body's synchronous
+> part ends, so an async handler publishes a wave at its first await and
+> further waves per continuation. `turn_async` instead holds every
+> notification until the whole async body completes — a transaction.
+> Writes that land after a turn settled (from spawned work) are grouped
+> per continuation segment and drained in a microtask, so you never
+> observe half a wave.
 
 ## Optimistic writes and local-first drafts
 
-Two lifecycles for "change locally, confirm remotely", with opposite failure
-behavior:
+Two ready-made lifecycles for "update the UI now, confirm with the
+server after". They differ in what happens on failure, and the
+difference is the point:
 
-**`optimistic(signal, value, commit)`** — paint `value` now, run the async
-`commit`, then **confirm or roll back**. Right for one-shot actions (a
-delete button): on failure the UI snaps back.
+**`optimistic(signal, value, commit)`** paints the value immediately,
+runs your async commit, and on failure **rolls back**. Use it for
+one-shot actions like a delete button — if the delete failed, the row
+should come back.
 
-**`draft(initial, commit)` → `Draft<T>`** — a local-first cell for *editing*.
-Failure **keeps** the local value (rolling back mid-typing would eat the
-user's text); the next push retries.
+**`draft(initial, commit)`** is for *editing*. It keeps the user's text
+on failure (rolling back mid-typing would eat their input) and retries
+naturally on the next push. Bind an input to a draft and every keystroke
+can safely commit through an rpc:
 
 ```vilan,fragment
 struct Draft<T> {
@@ -188,12 +216,8 @@ draft.push(value)   // set local + spawn the commit (never waits on the wire)
 draft.adopt(remote) // fold in a remote change
 ```
 
-The commit closure returns `None` for success or `Some(reason)` for failure —
-an RPC-calling closure flows straight in. `push` is safe to call
-per-keystroke: a generation counter discards superseded completions (fast
-typing over a slow wire), and `adopt` follows three rules — an **echo** of
-your own push is a no-op, a **clean** local adopts the remote edit, a
-**dirty** local wins (last-write-wins; the eventual push overwrites).
+The commit closure returns `None` on success or `Some(reason)` on
+failure, so an rpc-calling closure drops straight in.
 
 ```vilan
 import std::print;
@@ -215,24 +239,30 @@ fun main() {
 }
 ```
 
-In the UI, `bind_draft` wires an `<input>` to a draft — see
-[Building UI](ui.md). For the full API including `DraftState`, see the
-[reactive reference](../std/reactive.md).
+> **Going deeper.** `push` is per-keystroke safe: a generation counter
+> means a slow older commit that lands late is discarded rather than
+> clobbering a newer one. `adopt` follows three rules — an **echo** of
+> your own push changes nothing, a **clean** local adopts the remote
+> edit, and a **dirty** local wins (last-write-wins: the remote value is
+> remembered so your eventual push knowingly overwrites it). The
+> [reactive reference](../std/reactive.md) states all of it precisely,
+> and `bind_draft` in [Building UI](ui.md) is the input-side wiring.
 
 ## Keyed reconciliation
 
-`reconcile(old_keys, old_items, new_items, key)` computes a minimal update
-plan (`RowStep::Keep`/`Refresh`/`Fresh` + removals) for keyed lists. It is the
-pure engine under `ui`'s `bind_each`; use it directly only if you're building
-your own list-rendering primitive.
+`reconcile(old_keys, old_items, new_items, key)` computes a minimal
+update plan for keyed lists (keep this row, refresh that one, these are
+gone). It's the pure engine underneath `ui`'s `bind_each`. You'd only
+call it directly to build your own list-rendering primitive.
 
 ## Traps
 
-- `sub` returns a `Subscription` you must dispose (or `owner.take(sub)`);
-  prefer `effect` and let the owner handle it.
-- Disposal guarantees no *later* deliveries — a subscriber already queued in
-  the currently-draining turn may fire once more.
-- `map`/`combine` subscriptions are unowned by design (they live as long as
-  their sources); derived signals built inside a disposed subtree don't leak
-  observers into it.
-- An effect's unannotated parameter may need a type annotation (B23, above).
+- `sub` gives you a `Subscription` to dispose manually. Prefer `effect`
+  and let the owner handle it.
+- Disposal stops *future* deliveries. A watcher already queued in the
+  currently-settling turn may fire one final time.
+- Annotate effect parameters that get destructured
+  (`|current: Option<Task>|`) — the B23 workaround from above.
+- Derived signals (`map`/`combine`) live as long as their sources, by
+  design. They don't need owners, and they don't leak into disposed
+  subtrees.

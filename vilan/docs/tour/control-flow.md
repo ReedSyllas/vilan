@@ -4,7 +4,8 @@
 
 ## `if` / `else`
 
-An expression — both branches yield the value:
+`if` is an expression. Both branches produce a value, and the whole thing
+has that value:
 
 ```vilan
 import std::print;
@@ -16,10 +17,13 @@ fun main() {
 }
 ```
 
+There is no ternary operator because `if` already is one.
+
 ## `match`
 
-The workhorse. Arms are `pattern => expression` (or a block); payloads bind
-with `let`; `_` is the catch-all. Exhaustiveness is checked:
+`match` is the workhorse, a `switch` that can take values apart and that
+the compiler checks for completeness. Arms are `pattern => expression`.
+Payloads bind with `let`, and `_` catches everything else:
 
 ```vilan
 import std::print;
@@ -38,20 +42,27 @@ fun main() {
 }
 ```
 
-`is` tests a pattern as a boolean expression — handy for deriving flags:
+If you forget a variant, the compiler tells you. That's most of the
+reason enums plus `match` replace flag fields and `null` checks.
+
+When you only need a yes/no answer instead of a full match, `is` tests a
+pattern as a boolean:
 
 ```vilan,fragment
 let present = entry.map(|current| current is Some(let _task));
 ```
 
-**Traps**: `match` can't sit directly as an operator operand — bind it to a
-local first. A `ret` inside an arm doesn't make the arm divergent for type
-unification, and `panic(…)` types as `Any` — annotate the binding a mixed
-match flows into.
+A few edges to know, all with easy workarounds:
+
+- A `match` can't sit directly inside a larger operator expression. Bind
+  it to a local first.
+- If one arm returns early with `ret` and others produce values, or one
+  arm calls `panic`, annotate the binding the match flows into. The
+  compiler doesn't treat those arms as "no value" yet.
 
 ## Loops
 
-`for` has two forms — iteration and a while-style condition:
+`for` covers every loop. It has three forms:
 
 ```vilan
 import std::print;
@@ -62,21 +73,25 @@ fun main() {
 		print(item);
 	}
 
-	for i in Range::new(0, 3) {   // 0, 1, 2 — end-exclusive
+	for i in Range::new(0, 3) {   // 0, 1, 2 — the end is exclusive
 		print(i);
 	}
 
 	mut count = 0;
-	for count < 3 {               // while-style: loop while the condition holds
+	for count < 3 {               // a while loop: runs while the condition holds
 		count += 1;
 	}
 	print(count);
 }
 ```
 
-`jump break` and `jump continue` control the enclosing loop; `for _ in …`
-iterates without binding. Iterating a container by view (`for e in &mut
-list`) mutates elements in place — see [the memory model](memory-model.md).
+There is also a bare `for { … }` for an infinite loop. Loop control is
+spelled `jump break` and `jump continue`. Iterating with `for _ in …`
+skips the binding.
+
+One more form matters once you care about performance:
+`for e in &mut list` iterates *views* of the elements so you can mutate
+them in place. That's a [memory model](memory-model.md) topic.
 
 ## Early return: `ret`
 
@@ -85,20 +100,26 @@ fun parse(path: str): Route {
 	if parts.len() == 0 {
 		ret Route::Home;      // early exit
 	}
-	Route::NotFound           // final expression = the value
+	Route::NotFound           // the final expression is the return value
 }
 ```
 
 ## Option and Result
 
-Absence is `Option<T>`; fallibility is `Result<T, E>`. Both are plain enums
-with method conveniences (`unwrap_or`, `map`, `is_some`, …) — the full set
-is in the option/result reference. The two operators that make them
-pleasant:
+vilan has no `null` and no exceptions. Instead:
 
-**`!` — unwrap or propagate.** Unwraps the good half; on the bad half,
-returns it from the enclosing function (which must have a compatible return
-type):
+- A value that might be absent is an `Option<T>` — either `Some(value)`
+  or `None`.
+- An operation that might fail is a `Result<T, E>` — either `Ok(value)`
+  or `Err(error)`.
+
+Both are plain enums with a rich set of helper methods (`unwrap_or`,
+`map`, `is_some`, and friends — the
+[full list](../std/option-result.md)). You can always just `match` on
+them. Two operators make the common patterns short.
+
+**`!` unwraps, or propagates the failure.** Think of it as "give me the
+value, and if there isn't one, return the failure from this function":
 
 ```vilan
 import std::print;
@@ -113,7 +134,7 @@ fun to_number(text: str): Result<i32, str> {
 }
 
 fun sum(a: str, b: str): Result<i32, str> {
-	let left = to_number(a)!;    // Err returns early, carrying the error
+	let left = to_number(a)!;    // an Err returns early, carrying the error
 	let right = to_number(b)!;
 	Ok(left + right)
 }
@@ -126,10 +147,12 @@ fun main() {
 }
 ```
 
-**`?.` — lift a continuation into the container.** `option?.field`,
-`option?.method()` apply inside the `Some`/`Ok`, yielding `None`/the `Err`
-untouched otherwise. A continuation that itself yields the container
-flattens (no nesting):
+This is what `try`/`catch` becomes: failures travel up through return
+types, visibly, and the caller decides what to do.
+
+**`?.` reaches inside the container.** It looks like optional chaining
+from JS, and on `Option` it plays the same role — with the compiler
+checking it:
 
 ```vilan
 import std::print;
@@ -153,11 +176,21 @@ fun main() {
 }
 ```
 
-`!` and `?.` dispatch through the `Try`/`Lift` traits (`std::operators`), so
-your own two-outcome types can join in by implementing them.
+`find("hit")?.title` means: if the option holds a book, take its title
+and wrap it back up; if it's `None`, stay `None`. It works on `Result`
+too, passing an `Err` through untouched.
+
+> **Going deeper.** Both operators are trait-driven, not hard-coded to
+> `Option` and `Result`. `!` dispatches through `Try`, and `?.` through
+> `Try` plus the `Lift` marker (`std::operators`). Your own
+> two-outcome type can implement them and join in. A `?.` continuation
+> that itself produces the container flattens instead of nesting, so
+> `find(key)?.shelf()` on an `Option`-returning method stays a single
+> `Option`.
 
 ## Panics and asserts
 
-`panic(message)` aborts with a message — for unreachable states, not
-expected failures (those are `Result`). `assert(condition, message)` panics
-when the condition is false; it's also the `vilan test` failure mechanism.
+`panic(message)` stops the program with a message. Use it for states
+that should be impossible, not for expected failures — those are
+`Result`s. `assert(condition, message)` panics when the condition is
+false, and it's how `vilan test` decides a test failed.

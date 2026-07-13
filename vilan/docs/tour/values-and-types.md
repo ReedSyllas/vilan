@@ -4,8 +4,8 @@
 
 ## Bindings
 
-`let` binds immutably; `mut` allows reassignment and mutation. Types are
-inferred; annotate when you want to pin one:
+`let` declares a binding you won't change. `mut` declares one you will.
+Types are inferred, and you can annotate when you want to pin one down:
 
 ```vilan
 import std::print;
@@ -19,65 +19,85 @@ fun main() {
 }
 ```
 
-Everything is a **value** — a binding of an existing value is a copy (see
-[the memory model](memory-model.md)).
+One thing to know up front: everything in vilan is a **value**. Assigning
+a value to a new binding gives you a copy, not a second name for the same
+thing. If that sounds strange coming from JavaScript, start with
+[Coming from JavaScript](coming-from-javascript.md), then read
+[the memory model](memory-model.md) when you're ready for the full story.
 
 ## Primitives
 
-- `bool` — `true` / `false`.
+- `bool` — `true` and `false`.
 - `str` — immutable strings.
-- Sized integers: `i8 i16 i32 i53 u8 u16 u32 u53`. A bare integer literal
-  is `i32`; other widths take a suffix (`0xFFu8`, `60000u16`,
-  `9007199254740992i53`). Literals are range-checked at compile time.
-  The wide types are named `i53`/`u53` — not `i64` — because they are
-  f64-backed and exact over ±2^53 (JavaScript's safe integers); for more,
-  use `BigInt`.
-- Floats: `f64` (bare `2.5`, or suffix `f`) and `f32` (`2.5f32`).
-- `BigInt` — arbitrary precision, `n` suffix (`7n`).
+- Signed integers `i8 i16 i32 i53` and unsigned `u8 u16 u32 u53`. A bare
+  literal like `42` is `i32`. Other widths take a suffix: `0xFFu8`,
+  `60000u16`, `9007199254740992i53`.
+- Floats: `f64` (a bare `2.5`, or the `f` suffix) and `f32` (`2.5f32`).
+- `BigInt` — arbitrary precision, with the `n` suffix (`7n`).
 
-Integer division **truncates toward zero** (`7 / 2 == 3`, `-7 / 2 == -3`);
-float and BigInt division don't. Mixed-width arithmetic doesn't coerce —
-convert explicitly with the `as_*` methods (Rust-`as` semantics: truncate,
-fold into the target width):
+Why `i53` and not `i64`? Because vilan runs on JavaScript, and JavaScript
+numbers are 64-bit floats. Every integer up to ±2^53 is exact in a float.
+Beyond that, precision silently disappears. Rather than offer an `i64`
+that quietly isn't one, vilan names the type for what it actually
+delivers. If you need more than 53 bits, use `BigInt`.
+
+The compiler checks every literal against its type's range, so an
+out-of-range literal is a compile error rather than a wrong value.
 
 ```vilan
 import std::print;
 
 fun main() {
-	print(7 / 2);           // 3
-	print((3.9).as_i32());  // 3
-	print((300).as_u8());   // 44 — folded into u8
+	print(7 / 2);           // 3 — integer division truncates
+	print((3.9).as_i32());  // 3 — conversions are explicit, via as_*
+	print((300).as_u8());   // 44 — narrowing folds into the target width
 	let byte = 0xFFu8;
 	print(byte.as_f64() + 0.25);
 }
 ```
 
-**Trap**: an `i53` in a binary operation needs a suffixed literal on the
-other side — `stamp + 1000i53`, not `stamp + 1000` (the bare literal is
-`i32`).
+Two rules that differ from JS:
+
+- **Integer division truncates toward zero.** `7 / 2` is `3`, and
+  `-7 / 2` is `-3`. Float division works the way you expect.
+- **There are no implicit conversions between numeric types.** Mixing an
+  `i53` and an `i32` in one expression is a compile error. Convert
+  explicitly with the `as_*` methods, or suffix the literal.
+
+That second rule has one trap worth memorizing. If `stamp` is an `i53`,
+write `stamp + 1000i53`, not `stamp + 1000`. The bare `1000` is an `i32`,
+and the mix won't compile.
+
+> **Going deeper.** The `as_*` conversions use Rust's `as` semantics:
+> floats truncate toward zero, and integers fold two's-complement into
+> the target width, so `(-1).as_u8()` is `255`. Conversions on literals
+> fold at compile time. Arithmetic that overflows a type's range is
+> undefined behavior — the compiler checks literals, not runtime math.
+> Details in spec [§7.2a](../spec/execution.md).
 
 ## Strings and interpolation
 
-`"…"` is a plain string. The `i` prefix interpolates `{expr}`; escape
-literal braces as `\{`/`\}`:
+`"…"` is a plain string, and vilan does **not** interpret `{}` inside it.
+To interpolate, prefix the string with `i`:
 
 ```vilan
 import std::print;
 
 fun main() {
 	let name = "John";
-	print("Hello, {name}!");    // Hello, {name}!  — plain string, no magic
+	print("Hello, {name}!");    // Hello, {name}!  — a plain string
 	print(i"Hello, {name}!");   // Hello, John!
 	print(i"literal \{braces\}");
 }
 ```
 
-Concatenation is `+`. The full method set (split, len, contains, …): the
-strings reference *(Phase 2 pages)*.
+Concatenation is `+`. The full method list (split, trim, contains, and so
+on) is in the [strings reference](../std/strings.md).
 
 ## Tuples
 
-`(a, b)` groups values; destructure with `let (x, y) = pair;`:
+`(a, b)` groups a few values without declaring a struct. Take them apart
+with a destructuring `let`:
 
 ```vilan
 import std::print;
@@ -89,14 +109,15 @@ fun main() {
 }
 ```
 
-Tuple types are written `(i32, str)`. Elements are also reachable as
-`.0`/`.1` — but not chained directly on a call result (bind first; see
-[gotchas](../appendix/gotchas.md)).
+Tuple types are written the same way: `(i32, str)`. You can also reach
+elements as `.0` and `.1`, with one caveat: not directly chained onto a
+call. `pair().1` doesn't type yet, so bind the result first and then
+access it (see [gotchas](../appendix/gotchas.md)).
 
 ## Collections
 
-`List<T>` is built in with literal syntax; `Map<K, V>` and `Set<T>` are
-imported and construct with `::new()`:
+`List<T>` is built in and has literal syntax. `Map<K, V>` and `Set<T>`
+come from std:
 
 ```vilan
 import std::print;
@@ -118,13 +139,25 @@ fun main() {
 }
 ```
 
-An empty literal usually needs an annotation (`let xs: List<str> = [];`) —
-there's nothing to infer the element type from. Collections are values like
-everything else: `let copy = items;` copies (`Map`/`Set` key semantics for
-struct keys are a recorded gap — keys are best kept scalar for now).
+An empty literal usually needs a type annotation, like
+`let xs: List<str> = [];`. There is nothing inside it to infer the
+element type from.
 
-## `null` is not part of the model
+Collections are values like everything else, so `let copy = items;`
+really copies. If you're used to passing an array around and mutating it
+from several places, that's the habit to unlearn. The
+[memory model](memory-model.md) chapter shows what to do instead.
 
-Absence is `Option<T>` (`Some(value)` / `None`) — see
-[Control flow](control-flow.md) for the idioms. The `null` type exists only
-at host boundaries (externs that can return JS null).
+> **Going deeper.** `Map` and `Set` sit on the host's `Map`/`Set`, which
+> key by identity. Scalar keys (`i32`, `str`) behave the way you expect.
+> Struct keys don't yet — two equal struct values are two different keys
+> — so key by an id for now. This is a recorded gap.
+
+## Where's `null`?
+
+There isn't one. A value that might be absent is an `Option<T>`, and the
+compiler makes you handle the `None` case before you can use the value.
+This is one of the big shifts from JavaScript, and
+[Control flow](control-flow.md) shows how natural it becomes. (`null`
+technically exists at the host boundary, for externs that can return JS
+null, but ordinary vilan code never sees it.)

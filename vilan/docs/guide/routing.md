@@ -1,17 +1,20 @@
 # Routing
 
-vilan's router has no pattern-string DSL: **routes are enums**, and you write
-`parse`/`href` as an ordinary inverse pair of functions. The type system then
-guarantees what a DSL can't — every `link` targets a route that exists, every
-page receives exactly its parameters, and adding a variant makes the compiler
-point at every `match` that must handle it.
+Routers you've used probably match URL pattern strings: `"/w/:id/task/:tid"`.
+vilan's router doesn't. **Routes are enums.** You describe your app's pages
+as an enum, write one function that parses a path into it and one that
+prints it back, and the type system takes it from there. Every link targets
+a page that exists. Every page receives exactly the parameters it declares.
+When you add a page, the compiler points at every `match` that now needs to
+handle it. A pattern-string router can't promise any of that.
 
-`std::router` supplies the primitives: the live path signal, navigation, the
-`<a>`-rendering `link`, and `segments` for parsing.
+`std::router` supplies the primitives: the live path signal, `navigate`,
+the `link` helper, and `segments` for parsing.
 
 ## The route model
 
-One enum per layout level; parameters are payloads; child layouts nest:
+Here's a small two-level app: a home page, and workspace pages that have
+their own sub-pages.
 
 ```vilan,browser
 import std::ui::{ view, View, mount_root };
@@ -87,56 +90,64 @@ fun main() {
 }
 ```
 
-That's the entire pattern. Piece by piece:
+That's the whole pattern. Yes, `parse` is more code than a pattern
+string. In exchange it's ordinary code: type-checked, debuggable, and
+free to do things pattern strings can't (validation, aliases, redirects).
+Now the pieces one at a time.
 
-## The live path → the route signal
+## The live path becomes a route signal
 
-`current_path()` is a singleton `Signal<str>` of `location.pathname`, kept
-live across `navigate` and the browser's back/forward. Derive your typed
-route from it once:
+`current_path()` is a `Signal<str>` of `location.pathname`. It stays
+current across `navigate` calls and the browser's back/forward buttons.
+Derive your typed route from it once:
 
 ```vilan,fragment
 let route = current_path().map(parse);
 ```
 
-(`map(parse)` — a named function coerces to the closure argument; see the
-[tour](../tour/functions-and-closures.md).)
+(Passing `parse` by name instead of `|p| parse(p)` is the named-function
+coercion from [the tour](../tour/functions-and-closures.md).)
 
 ## Pages swap on the route
 
-`View.swap(route, render)` disposes the previous page's subtree and builds
-the new one whenever the route **changes** — an equal route (navigating to
-where you already are) re-renders nothing, which is why route enums derive
-`PartialEq`. Nest the same pattern for child layouts: the workspace page can
-`swap` on its own `WorkspaceRoute` while the outer swap only rebuilds when
-the workspace id changes.
+`View.swap(route, render)` is the page container. When the route
+changes, it tears down the old page (disposing all its bindings) and
+builds the new one. When the route *doesn't* change — say the user
+clicks a link to the page they're on — nothing happens at all. That's
+why route enums derive `PartialEq`.
+
+Nesting works the way you'd hope: the workspace page can `swap` on its
+own `WorkspaceRoute` while the outer swap only rebuilds when the
+workspace id changes.
 
 ## Links and navigation
 
-`link(label, route)` renders a real `<a href=…>` — middle-click, ctrl-click,
-and copy-link-address all behave natively — and intercepts only a plain
-left click (`prevent_default` + `navigate`). It takes any `Routable`, so a
-link can only ever point at a value of your route enum:
+`link(label, route)` renders a real `<a href=…>`. Middle-click,
+ctrl-click, and copy-link-address all behave like a normal link. Only a
+plain left click is intercepted and turned into an in-app navigation.
+And because it takes your route enum rather than a string, a dead link
+is a compile error:
 
 ```vilan,fragment
 link("← All workspaces", Route::Home)
 link(task.name, Route::Workspace(workspace_id, WorkspaceRoute::Task(task.id)))
 ```
 
-Programmatic navigation (after a sign-out, a successful create):
+For programmatic navigation (after a sign-out, after creating a thing):
 
 ```vilan,fragment
 navigate(href(Route::Home));
 ```
 
-`navigate` joins the caller's ambient turn, so a handler's writes and the
-route change settle as one wave.
+`navigate` joins the caller's current turn, so a handler's state changes
+and the page change land together as one update.
 
 ## Deep links and the server
 
-A full-page load of `/w/3/task/7` asks the *server* for that path. Serve the
-app shell for every non-asset path (the history-API fallback) — a catch-all
-route in the http server does it:
+When someone loads `/w/3/task/7` fresh, the request goes to your
+*server*, which has to answer with the app shell no matter the path.
+That's the standard history-API fallback, and the catch-all in your http
+handler does it:
 
 ```vilan,fragment
 serve_service(4000, protocol, |request| {
@@ -148,16 +159,17 @@ serve_service(4000, protocol, |request| {
 })
 ```
 
-On the client, deep-linked pages that need synced data mount under
-`when(present)` so they wait for the first mirror sync — see
-[Services & RPC](services.md).
+On the client side, a deep-linked page usually needs data that hasn't
+synced yet. Mount it under `when(present)` so it appears when the data
+does — see [Services & RPC](services.md).
 
 ## Traps
 
-- Keep `parse` and `href` adjacent and test them as a pair — they are the
-  one place the type system can't check the correspondence (a `parse` that
-  drops a segment silently 404s the deep link).
-- `segments` forgives trailing/duplicate slashes (they produce no segment) —
-  don't special-case them in `parse`.
-- Query strings and hash fragments are not modelled yet (deliberately
-  deferred); `segments` sees only the pathname.
+- Keep `parse` and `href` next to each other and test them as a pair.
+  Their agreement is the one thing the type system can't check for you.
+  A `parse` that drops a segment silently turns a working deep link into
+  a NotFound.
+- `segments` already forgives trailing and duplicate slashes (they
+  produce no segment). Don't special-case them in `parse`.
+- Query strings and hash fragments aren't modelled yet (a deliberate
+  deferral). `segments` sees only the pathname.

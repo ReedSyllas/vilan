@@ -1,24 +1,25 @@
 # The vilan documentation
 
-How to use the vilan language, its standard library, and the frameworks built
-on top of it. (Design history and rationale live in `vilan/proposal/` — those
-documents record how things were built; these record how to use them.)
+How to use the vilan language, its standard library, and the frameworks
+built on top of it. If you're wondering where something lives: this book
+is about *using* vilan. Design history and rationale live in
+`vilan/proposal/`.
 
 ## Parts
 
-- **[Tour](tour/)** — the language, informally: syntax, types, closures,
-  async, the memory model. Start here if you're new or need a syntax
-  reminder — the [specification](spec/) is its normative counterpart.
-- **[Guides](guide/)** — the frameworks, task-oriented: reactive state,
-  building UI, styling, routing, services & RPC. Each reads front to back
-  and links into the reference for exact signatures.
-- **[std reference](std/)** — the standard library, signatures-first: one
-  page per module group, each item with its signature, semantics, an
-  example, and traps. Go here to answer "what were the parameters again?".
-- **[Specification](spec/)** — the normative definition: grammar (EBNF),
-  the type system's rules, the memory model, execution & async. Where the
-  tour teaches, the spec defines; where they disagree, the spec wins.
-- **[Appendix](appendix/)** — gotchas checklist and glossary.
+- **[Tour](tour/)** — the language itself, taught informally. Start with
+  [Coming from JavaScript](tour/coming-from-javascript.md) if that's your
+  background, then read in order. Come back any time you need a syntax
+  reminder.
+- **[Guides](guide/)** — the frameworks, task by task: reactive state,
+  building UI, styling, routing, talking to a server. Each guide reads
+  front to back and links into the reference for exact signatures.
+- **[std reference](std/)** — the standard library, signatures first.
+  Go here to answer "what were the parameters again?".
+- **[Specification](spec/)** — the formal definition: grammar, type
+  rules, the memory model, execution. This is the advanced tier. The tour
+  teaches; the spec defines; where they disagree, the spec wins.
+- **[Appendix](appendix/)** — the gotchas checklist.
 
 ## Conventions
 
@@ -37,6 +38,7 @@ documents record how things were built; these record how to use them.)
 ### Tour
 | Chapter | Covers |
 |---|---|
+| [Coming from JavaScript](tour/coming-from-javascript.md) | the three big shifts, a JS→vilan phrasebook |
 | [Hello vilan](tour/hello-vilan.md) | the CLI, `vilan.toml`, packages & workspaces, imports |
 | [Values & types](tour/values-and-types.md) | bindings, primitives & numeric widths, strings & interpolation, tuples, collections |
 | [Functions & closures](tour/functions-and-closures.md) | `fun`, closure types, named-fn coercion, async closures and their seams, context clauses |

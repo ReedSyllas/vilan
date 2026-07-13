@@ -1,32 +1,30 @@
 # Platforms
 
-One language, several runtimes: a package builds for **node** (default),
-**deno**, **bun**, or the **browser** (`target` in `vilan.toml`, or
-`--platform` on the CLI). The std library is layered so each build sees only
-what its platform can actually do — a mismatch is a compile error at the
-`import`, not a runtime surprise.
+One language, several runtimes. A package builds for **node** (the
+default), **deno**, **bun**, or the **browser** — set `target` in
+`vilan.toml`, or pass `--platform` on the CLI.
+
+The standard library is layered so each build only sees what its platform
+can actually do. Import a server module in a browser build and you get a
+clear compile error at the import, not a runtime crash. That's the whole
+idea of this chapter.
 
 ## The std layers
 
-- **Base** — platform-neutral, always available: collections, option/result,
-  strings, numbers, `reactive`, `shared`, `time`, `json`/`wire`/`binary`,
-  `rpc` (the client machinery), `style`, `fetch`, `crypto`, …
-- **Browser layer** — `std::dom`, `std::ui`, `std::router`, `std::storage`.
-  Importing these in a node build: compile error.
+- **Base** — platform-neutral, available everywhere: collections,
+  `Option`/`Result`, strings, numbers, `reactive`, `shared`, `time`,
+  json/wire/binary, the rpc client machinery, `style`, `fetch`,
+  `crypto`, and friends.
+- **Browser layer** — `std::dom`, `std::ui`, `std::router`,
+  `std::storage`. Browser builds only.
 - **Process layer** (node/deno/bun) — `std::db`, `std::http`, `std::fs`,
-  `std::process`, `std::rpc_server`. Importing these in a browser build:
-  compile error.
-
-The error points at your import and names the platform, e.g. building
-`import std::ui` for node fails with a cross-target diagnostic.
+  `std::process`, `std::rpc_server`. Server builds only.
 
 ## Full-stack packages
 
-A client/server app is a `[project]` workspace: a shared `[library]` package
-holding the `[service]` struct and payload types (base-layer code only), a
-browser `[package]` for the client, a node `[package]` for the server. Each
-package compiles for its own platform against the same shared library — the
-compiler checks that the shared code stays platform-neutral.
+A client + server app is a workspace of three packages. The shared
+`common` library holds the service definition and the payload types, and
+because both sides import it, it may only use base-layer std:
 
 ```
 app/
@@ -36,28 +34,23 @@ app/
   server/          [package] (node)
 ```
 
-`vilan build .` at the root builds every package (the client bundle typically
-lands where the server can serve it).
-
-## Libraries can be layered too
-
-A `[library]` may declare platform overlays — a base root plus per-platform
-roots (`[library.layer]` entries with `platform = […]`) — so a dependency
-can ship a browser implementation and a node implementation of the same
-module behind one import. Most libraries don't need this; std itself is the
-main user.
+`vilan build .` at the root builds every package. The compiler checks
+each one against its own platform, including that `common` stays
+platform-neutral.
 
 ## Externs — talking to the host
 
-Std's own platform bindings are ordinary vilan declarations, and apps can
-write them too:
+You'll mostly consume host bindings through std. But when you need a
+node API or browser API that std doesn't wrap yet, you can bind it
+yourself with an extern declaration. This is exactly how std's own
+bindings are written:
 
 ```vilan,fragment
-// A host global / module import (node:crypto), bound as a function:
+// A function from a host module (node:crypto):
 [extern("node:crypto", "randomBytes")]
 external fun random_bytes_sync(length: i32): HashBuffer;
 
-// An opaque host object with methods/properties:
+// An opaque host object, with methods bound one by one:
 external struct HashBuffer;
 impl HashBuffer {
 	[extern(method, "toString")]
@@ -69,16 +62,28 @@ impl HashBuffer {
 async external fun sleep(ms: i32): void;
 ```
 
-Extern forms: `[extern("module", "name")]` (a module import),
-`[extern("global.path")]` (a dotted global like `history.pushState`),
-`[extern(method, "name")]` / `[extern(get, "prop")]` / `[extern(set, "prop")]`
-on impl members. Externs are per-platform by nature — keep them in
-platform-specific packages (or std's layers), and prefer promoting a proven
-binding into std over copying it between apps.
+The four binding forms:
+
+| Form | Binds |
+|---|---|
+| `[extern("module", "name")]` | an import from a host module |
+| `[extern("global.path")]` | a dotted global, like `history.pushState` |
+| `[extern(method, "name")]` | a method on a host object |
+| `[extern(get, "prop")]` / `[extern(set, "prop")]` | a property read / write |
+
+Keep externs in platform-specific packages (they are host-specific by
+nature). When a binding proves itself, consider promoting it into std
+rather than copying it between apps.
 
 ## Assets
 
-`std::asset::emit(kind, content)` writes a build asset from `const` code —
-it's how `style()` emits CSS. Browser builds produce `<entry>.js` (+
-`<entry>.css` when styles emitted); serve them plus an HTML shell from your
-server (the [services guide](../guide/services.md) shows the fallback shape).
+Browser builds produce `<entry>.js`, plus `<entry>.css` when styles were
+emitted. Your server serves those two files and an HTML shell — the
+[services guide](../guide/services.md) shows the standard fallback shape.
+
+> **Going deeper.** Build assets come from `std::asset::emit(kind,
+> content)`, callable only during `const` evaluation. The styling
+> system's `const style()` chains call it to write CSS rules. Libraries
+> can also declare platform overlays of their own (a base root plus
+> per-platform roots in `[library.layer]`), which is how std itself is
+> layered — most libraries never need this.

@@ -1,7 +1,7 @@
 # Misc — reference
 
-The small modules: `std::io`, `std::promise`, `std::context`,
-`std::crypto`, `std::jwt`, `std::asset`.
+The small modules that don't need a page of their own: `std::io`,
+`std::promise`, `std::context`, `std::crypto`, `std::jwt`, `std::asset`.
 
 ## std::io
 

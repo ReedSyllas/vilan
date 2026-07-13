@@ -1,13 +1,21 @@
 # Services & RPC
 
-A **service** is a struct on the server whose methods clients call over a
-WebSocket and whose exposed signals clients **mirror** live. You write the
-struct; the `[service]` macro generates the typed client, the dispatch table,
-and the sync plumbing. One definition, three attributes:
+This is the chapter where vilan's full-stack story comes together. The
+short version: you write one ordinary struct on the server, mark a few
+things on it, and you get a typed client, live data sync, and reconnect
+handling without writing any protocol code.
 
-- `[service(ClientName)]` on the struct — names the generated client type.
-- `[rpc]` on a method — callable remotely.
-- `[expose]` on a `Signal<T>` field — mirrored to every connected client.
+A **service** is that struct. Three attributes do the work:
+
+- `[service(ClientName)]` on the struct names the generated client type.
+- `[rpc]` on a method makes it callable from the client.
+- `[expose]` on a `Signal<T>` field **mirrors** it: every connected
+  client gets a live copy that updates when the server writes it.
+
+No REST endpoints, no fetch calls, no JSON shapes to keep in sync by
+hand. The compiler knows both sides.
+
+Here's a complete little server:
 
 ```vilan,norun
 import std::print;
@@ -54,9 +62,9 @@ fun main() {
 }
 ```
 
-And the client — the generated `NotesClient::connect` returns a connected
-client whose exposed fields are live local signals and whose rpc methods are
-async, `Result`-returning calls:
+And a client. `NotesClient::connect` gives you an object whose exposed
+fields are live local signals and whose rpc methods are ordinary calls
+that return `Result`:
 
 ```vilan,browser
 import std::print;
@@ -102,69 +110,76 @@ async fun main() {
 }
 ```
 
-In a real app the service definition lives in a shared `[library]` package
-(`common`) imported by both the server and the client — see the layout in
-[the full-stack walkthrough] *(Phase 3)*.
+In a real app the service definition lives in a shared `[library]`
+package (usually called `common`) that both the client and server
+import. [Hello vilan](../tour/hello-vilan.md) shows that workspace
+layout.
 
 ## What can cross the wire: `Wire`
 
-Every rpc parameter, return type, and exposed-signal payload must be
-**Wire** — serializable. Scalars (`bool`, the sized ints including `i53`,
-floats, `str`), `List`/`Option` of Wire types, and structs/enums that derive
-it:
+Everything that travels — rpc parameters, return types, mirrored
+payloads — must be serializable, which vilan calls **Wire**. The scalars
+are Wire (`bool`, the integers including `i53`, floats, `str`). `List`
+and `Option` of Wire types are Wire. And your own types opt in with a
+derive:
 
 ```vilan,fragment
 [derive(Wire, PartialEq, Debug)]
 struct Note { id: i32, text: str }
 ```
 
-`derive(Wire)` requires every field to be Wire, recursively — a closure or a
-`Signal` field is a compile error at the derive site. `PartialEq` is wanted
-by mirrors and UI reconciliation; `Debug` by error paths — deriving all
-three is the standard shape for payload types.
+That triple is the standard shape for payload types: `Wire` to travel,
+`PartialEq` because mirrors and UI reconciliation compare values, and
+`Debug` for error paths.
 
-Codecs: `json_codec()` (`std::json`) for a readable wire, `binary_codec()`
-(`std::binary`) for a compact one. Client and server must agree.
+`derive(Wire)` checks every field recursively. A closure or a `Signal`
+hiding inside a payload type is a compile error at the derive, which is
+exactly where you want to find out.
 
-## RPC semantics
+The codec is chosen at connect time: `json_codec()` for a readable wire,
+`binary_codec()` for a compact one. Client and server must use the same
+one.
 
-- Client rpc methods return `Result<T, RpcError>` and are implicitly awaited
-  (call them from an async context).
-- `RpcError` distinguishes `Transport` (couldn't reach the server),
-  `Decode`, and remote failure — handle or surface, they're values.
-- **Contract check**: at connect, client and server compare a hash of the
-  service's shape; drift (an old client against a redeployed server) fails
-  the connect rather than corrupting calls.
-- Handlers run inside a **turn** (`AtEnd`): all signal writes an rpc handler
-  makes settle as one wave — mirrors broadcast a consistent snapshot.
+## What rpc calls do
+
+- On the client they return `Result<T, RpcError>` and are implicitly
+  awaited, like any async call.
+- `RpcError` tells you what went wrong: `Transport` (couldn't reach the
+  server), `Decode`, or `Remote` (the handler failed). Errors are
+  values. Look at them and decide.
+- At connect time, both sides compare a hash of the service's shape. If
+  a stale client meets a redeployed server, the connect fails cleanly
+  instead of calls corrupting halfway. This is the **contract check**.
+- On the server, each handler runs inside a turn, so all the signal
+  writes one rpc makes are broadcast as a single consistent update.
 
 ## Mirrors
 
-An `[expose] field: Signal<List<T>>` on the service becomes a live
-`Signal<List<T>>` on every connected client. The server writes it like any
-signal (from rpc handlers, timers, anywhere); every client's copy updates.
+The `[expose]` mirror is the piece that replaces most "fetch on mount,
+refetch on focus, invalidate on mutation" client code. The server writes
+its signal whenever and however it likes. Every connected client's copy
+updates. That's it.
 
-Patterns that follow:
+Three patterns follow from it:
 
-- **Derive client views locally.** One `tasks` mirror; each page maps it
-  (`tasks.map(|list| …filter…)`) — don't add per-view rpcs.
-- **Mutate via rpc, observe via mirror.** A create/update/delete rpc writes
-  the server signal; the confirmation you see is your own change arriving
-  through the mirror (the echo).
-- **Local-first editing**: bind inputs to [drafts](reactive.md) whose commit
-  is the rpc; `adopt` mirror updates into them (see the reactive guide's
-  draft rules — echoes are no-ops, dirty fields win).
+- **Derive views locally.** Expose one `tasks` list and let each page
+  `map` it down (filter by workspace, sort by date). Don't add an rpc
+  per view.
+- **Mutate via rpc, observe via mirror.** Your create/delete handlers
+  write the server signal. The confirmation the user sees is their own
+  change arriving back through the mirror.
+- **Edit through drafts.** Bind text inputs to
+  [drafts](reactive.md#optimistic-writes-and-local-first-drafts) whose
+  commit is the rpc, and `adopt` mirror updates into them. Typing stays
+  instant, remote edits fold in, and your own echoes are no-ops.
 
 ## Connection state and reconnection
 
-The transport survives drops: on disconnect it reconnects with backoff
-(250 ms doubling, 4 s cap, 10 attempts), re-verifies the contract, and
-re-attaches every mirror — state resyncs by itself.
+Connections drop. The transport handles it: it reconnects with backoff,
+re-verifies the contract, and re-attaches every mirror, so state resyncs
+on its own. Your code sees two things.
 
-What your code sees:
-
-- `client.transport.connection_state(): Signal<ConnectionState>` —
-  `Connected` / `Reconnecting` / `Closed`. Bind a banner to it:
+First, a signal you can bind a banner to:
 
 ```vilan,fragment
 let state = client.transport.connection_state();
@@ -172,20 +187,35 @@ view("p").text("reconnecting…")
 	.show(state.map(|current| current == ConnectionState::Reconnecting))
 ```
 
-- Calls **in flight** when the connection drops reject with a transport
-  error ("connection lost"); calls made **while down** fail fast ("not
-  connected"). Nothing is silently retried — an rpc might not be idempotent,
-  so retrying is the app's decision (a draft's next push, a user's retry).
-- Mirrors need nothing: they rebind on reconnect and deliver the fresh
-  state.
+Second, honest call failures. A call in flight when the connection drops
+rejects with "connection lost". A call made while down fails immediately
+with "not connected". Nothing is silently retried, because an rpc might
+not be safe to repeat. Retrying is the app's decision — a draft's next
+push, or the user pressing the button again.
+
+> **Going deeper.** The backoff dials at 250 ms doubling to a 4 s cap,
+> ten attempts before giving up (`Closed`). Mirrors rebind by
+> re-running the contract check and re-attaching each subscription; you
+> never re-subscribe manually. The full state machine is in the
+> [rpc reference](../std/rpc.md).
 
 ## Authentication
 
-The standard shape (the kolt pilot): an `[rpc] login(…): AuthOutcome` issues
-a token; subsequent rpcs take the token as their first parameter and the
-server validates per call. Session identity via `std::context` (an ambient
-value the dispatch layer establishes per connection) is the recorded
-refinement for when token-per-call gets noisy.
+The straightforward shape, proven in the kolt pilot: a `login` rpc
+returns a token, later rpcs take the token as their first parameter, and
+the server validates it per call.
+
+```vilan,fragment
+[rpc]
+fun login(self, username: str, password: str): AuthOutcome { … }
+
+[rpc]
+fun create_task(self, token: str, workspace_id: i32, name: str): i32 { … }
+```
+
+When token-per-call gets noisy, the recorded refinement is
+connection-scoped identity via `std::context`. It isn't built into the
+generated dispatch yet.
 
 ## The server side
 
@@ -193,24 +223,25 @@ refinement for when token-per-call gets noisy.
 serve_service(
 	port,
 	service.dispatcher().into_protocol(json_codec()),
-	|request| …,       // http fallback: serve assets + the app shell (history-API fallback)
+	|request| …,       // http fallback: serve assets + the app shell
 	|| …,              // on_ready
 )
 ```
 
-`dispatcher()` is generated by `[service]`. The fallback handles every plain
-http request — serve the client bundle and return the app shell for unknown
-paths so deep links load (see [Routing](routing.md)). For custom
-per-connection state (an app-written attach, connection-scoped auth), drop
-down to `serve_connected` — see the [rpc reference](../std/rpc.md).
+`dispatcher()` is generated by `[service]`. The fallback answers every
+plain http request — serve `client.js` and `client.css`, and return the
+app shell for anything else so deep links work (see
+[Routing](routing.md)). For custom per-connection state, drop down to
+`serve_connected` — see the [rpc reference](../std/rpc.md).
 
 ## Traps
 
-- Changing a service's shape while an old server process is still holding
-  the port looks like mysterious contract-mismatch failures — check for a
-  leaked server first (`ss -tlnp | grep <port>`).
-- The wire is value-semantic: a mirrored list is a *copy* per update; mutate
-  through rpcs, never by writing the client's mirror signal.
-- rpc handlers are synchronous with respect to the dispatch (the reply is
-  the return value) — long work belongs in spawned tasks that write signals
-  when done.
+- Mysterious contract-mismatch failures while developing usually mean an
+  *old server process* is still holding the port. Check with
+  `ss -tlnp | grep <port>` and kill it by pid.
+- The wire is value-semantic. A mirrored list is a fresh copy per
+  update. Mutate through rpcs, never by writing the client's mirror
+  signal.
+- An rpc handler's reply is its return value, so the handler runs to
+  completion before the client hears back. Long work belongs in spawned
+  tasks that write signals when done.

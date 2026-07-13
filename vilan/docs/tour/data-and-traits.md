@@ -4,6 +4,8 @@
 
 ## Structs
 
+A struct is a named record type:
+
 ```vilan
 import std::print;
 
@@ -18,13 +20,19 @@ fun main() {
 }
 ```
 
-Literal fields use `=`. A field whose value is a binding of the same name
-can be written once (`Task { id, name }`). There are no field defaults —
-`derive(Default)` (below) covers the all-defaults case.
+Literal fields use `=`, not `:`. When a field's value is a binding with
+the same name, you can write it once: `Task { id, name }`. There are no
+field defaults — `derive(Default)` (below) covers the all-defaults case.
+
+If you're coming from TypeScript: a struct is like an interface plus an
+object literal in one, except it's a real nominal type. Two structs with
+identical fields are still different types.
 
 ## Enums
 
-Variants may carry payloads; `match` consumes them:
+An enum is a type with a fixed set of variants, and variants can carry
+data. If you've used discriminated unions in TypeScript, this is that
+idea with language support:
 
 ```vilan
 import std::print;
@@ -48,10 +56,15 @@ fun main() {
 }
 ```
 
-`Option` and `Result` are ordinary enums from std — same syntax, no special
-cases.
+`match` takes the value apart, and the compiler checks that you handled
+every variant. Add a variant later and every `match` that misses it
+becomes a compile error — that's the feature.
+
+`Option` and `Result` are ordinary enums from std. No special cases.
 
 ## impl — methods and statics
+
+Methods live in `impl` blocks, separate from the data:
 
 ```vilan
 import std::print;
@@ -83,10 +96,14 @@ fun main() {
 }
 ```
 
+The `&mut self` on `bump` matters: it means "mutate the actual receiver,
+not a copy". Plain `self` receives a copy, like every other value in
+vilan. The [memory model](memory-model.md) chapter makes this precise.
+
 ## Generics and bounds
 
-Type parameters go on functions, structs, enums, and impls; bounds constrain
-what the body may do:
+Type parameters work on functions, structs, enums, and impls. A bound
+constrains what the code may do with the parameter:
 
 ```vilan
 import std::print;
@@ -113,15 +130,20 @@ fun main() {
 }
 ```
 
-Note the impl-side binder syntax: `impl Pair<type T: PartialOrd>` declares
-the parameter (`type T`) and its bound at the impl. Generics monomorphize —
-each concrete instantiation gets its own compiled code, so generic dispatch
-has no runtime cost.
+Note the impl-side syntax: `impl Pair<type T: PartialOrd>`. The `type T`
+declares the parameter at the impl, and the bound says these methods
+exist only when `T` can be compared.
+
+> **Going deeper.** Generics are monomorphized: each concrete use of a
+> generic function or impl compiles to its own specialized code, so
+> generic dispatch has no runtime cost. This is unlike TypeScript, where
+> generics are erased. It also means the compiler checks bounds at each
+> call site, not at the declaration alone.
 
 ## Traits
 
-A trait declares a capability; `impl Type with Trait` provides it. Trait
-methods can have default bodies:
+A trait declares a capability. `impl Type with Trait` provides it. Trait
+methods can have default bodies written in terms of the required ones:
 
 ```vilan
 import std::print;
@@ -150,26 +172,29 @@ fun main() {
 }
 ```
 
-Traits appear as **bounds** (`T: Greet`) — vilan has no trait *objects* yet
-(`let x: Greet = …` is a compile error), so dynamic dispatch goes through
-enums or closures instead.
+Traits are like interfaces, with two differences worth knowing. They're
+implemented explicitly (`impl Robot with Greet`), never structurally.
+And they appear as *bounds* on generics (`T: Greet`) rather than as
+standalone types — `let x: Greet = …` is a compile error. When you want
+"one of several things at runtime", use an enum.
 
-Operator traits from `std::operators` overload the operators: `Add`
-(`+`), `Sub`, `Mul`, `Div`, `Rem`, the bit ops, and `PartialEq`/`PartialOrd`
-from `std::compare` for `==`/`<`. `std::time`'s `Instant + Duration` is std
-code doing exactly this.
+Operators are traits too. `+` dispatches through `Add`, `==` through
+`PartialEq`, `<` through `PartialOrd`, and so on. Implement the trait and
+your type gets the operator. `std::time` does exactly this so that
+`instant + duration` works.
 
 ## Derives
 
-`[derive(…)]` generates impls from the shape of a struct/enum:
+`[derive(…)]` generates trait impls from a type's shape, so you don't
+write the boilerplate:
 
-| Derive | Gives |
+| Derive | Gives you |
 |---|---|
 | `PartialEq` | structural `==` |
 | `Debug` | `.debug()` — a developer-facing rendering |
-| `Default` | `Default::default()` from the fields' defaults |
+| `Default` | `Default::default()` built from the fields' defaults |
 | `Json` | JSON encode/decode (`std::json`) |
-| `Wire` | wire serialization for rpc payloads (`std::wire`) |
+| `Wire` | serialization for rpc payloads (`std::wire`) |
 
 ```vilan
 import std::print;
@@ -189,6 +214,10 @@ fun main() {
 }
 ```
 
-Derives are ordinary macros (user-definable — see
-[Macros & const](macros-and-const.md)); `Wire`/`Json` require every field to
-be wire/json-able recursively, checked at the derive site.
+The standard shape for a type that crosses the wire is
+`[derive(Wire, PartialEq, Debug)]`.
+
+> **Going deeper.** Derives are ordinary macros, and you can write your
+> own — see [Macros & const](macros-and-const.md). `Wire` and `Json`
+> check that every field is itself serializable, recursively, and report
+> at the derive site when one isn't.

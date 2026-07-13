@@ -1,9 +1,11 @@
 # Option & Result — reference
 
-`std::option::Option<T>` models absence; `std::result::Result<T, E>` models
-fallibility. Both are plain enums; both power the `!` and `?.` operators
-(via `Try`/`Lift` from `std::operators` — see
-[Control flow](../tour/control-flow.md)).
+`Option<T>` is how vilan says "maybe a value" (there is no `null`), and
+`Result<T, E>` is how it says "this can fail" (there are no exceptions).
+Both are plain enums with a large helper-method surface, listed here. For
+how they replace `null` checks and `try`/`catch` in practice — including
+the `!` and `?.` operators — read [Control flow](../tour/control-flow.md)
+first.
 
 ```vilan,fragment
 import std::option::Option::{ self, Some, None };

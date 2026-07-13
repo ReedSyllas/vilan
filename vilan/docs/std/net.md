@@ -5,8 +5,8 @@ transports that ride these: the [rpc reference](rpc.md).
 
 ## std::fetch
 
-A builder over the host `fetch`. `send`, `text`, and friends are async —
-callers implicitly await:
+A small builder over the host `fetch`. `send`, `text`, and friends are
+async, so callers implicitly await them:
 
 ```vilan,fragment
 fun get(url: str): Request

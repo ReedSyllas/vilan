@@ -1,12 +1,17 @@
 # Macros & const
 
-Two compile-time tools: `const` folds *values*; macros generate *code*. Both
-run in the compiler — the emitted JS carries only results.
+vilan has two tools that run at compile time. `const` computes *values*
+ahead of time. Macros generate *code*. In both cases the emitted
+JavaScript carries only the results, never the computation.
 
-## `const` — compile-time evaluation
+Most days you'll use these indirectly: `[derive(…)]` is a macro, and
+`const style()` is how the styling system works. Writing your own comes
+up rarely, so treat the second half of this chapter as reference.
 
-`const expr` evaluates the expression at compile time and serializes the
-plain-data result in place:
+## `const` — compute it at compile time
+
+Put `const` in front of an expression and the compiler evaluates it
+during the build, then writes the *result* into the output as a literal:
 
 ```vilan
 import std::print;
@@ -28,21 +33,24 @@ fun main() {
 }
 ```
 
-- `const` captures **weakly** — everything to the expression's end folds;
-  parenthesize to narrow: `(const square(4)) + square(2)` runs the second
-  call at runtime.
-- Free variables must be compile-time-known: imports, literals, immutable
-  bindings whose initializers are themselves const.
-- Only host-independent code can fold — `const now()` is an error ("unknown
-  host call").
+Three rules to know:
 
-The styling system is `const`'s flagship customer: `const style()…` chains
-evaluate at compile time and emit CSS (see [Styling](../guide/styling.md)).
+- `const` captures **greedily**: everything to the end of the expression
+  folds. Parenthesize to narrow it — in
+  `(const square(4)) + square(2)`, the second call runs at runtime.
+- The expression can only use things the compiler can know: literals,
+  imports, and immutable bindings whose own initializers are const.
+- No host calls. `const now()` is an error, because the answer wouldn't
+  be a constant.
 
-## Attribute macros and derives
+The flagship user is styling: `const style()…` chains evaluate at build
+time and emit CSS. See the [styling guide](../guide/styling.md).
 
-A macro is a vilan function that runs at expansion time and returns source
-text to splice. `[derive(…)]` and `[service(…)]` are this mechanism; you can
+## Derive macros — impls from a type's shape
+
+You've already seen `[derive(PartialEq, Debug)]`. A derive is a macro: a
+function that runs at compile time, receives the type it annotates as
+*data*, and returns source code to splice into the program. You can
 write your own:
 
 ```vilan
@@ -88,21 +96,23 @@ fun main() {
 }
 ```
 
-The mechanics:
+How to read that:
 
-- A `macro fun` body is **hermetic**: it compiles against `macro_std` (the
-  macro-world std: `source`, `meta` with `Item`/`StructItem`/…, and the
-  basics), not your program — its imports are its own.
-- It receives the annotated item as data (`item.as_struct()`, fields with
-  names) and returns `Source` — text built with interpolation. Literal
-  braces in generated code are escaped `\{` `\}`.
-- The returned source splices before analysis: generated code is
-  type-checked like anything you wrote.
+- `macro fun` declares the macro. Its body is ordinary vilan, but it
+  compiles against `macro_std` — a small compile-time standard library
+  with `source`, the `meta` types (`Item`, `StructItem`, …), and the
+  basics. Its imports are its own; it can't reach into your program.
+- The macro receives the annotated item as data. `item.as_struct()`
+  gives the struct's name and fields.
+- It returns `Source`: text, usually built with interpolation. Literal
+  braces in generated code are escaped as `\{` and `\}`.
+- The returned source is spliced in *before* type checking, so generated
+  code is checked exactly like code you wrote by hand.
 
 ## `macro { … }` blocks
 
-An anonymous macro, expanded immediately — in **item** position it stamps
-out items; in **expression** position it folds to a value:
+An anonymous macro that expands on the spot. In item position it stamps
+out a family of items; in expression position it folds to a value:
 
 ```vilan
 import std::print;
@@ -126,19 +136,22 @@ fun main() {
 }
 ```
 
-Use item-position blocks for families of near-identical items; use `const`
-(not an expression-position macro) when you're just folding a value.
+For plain value folding, prefer `const` — reach for an expression-position
+macro block only when you're generating *code*, not computing a value.
 
-## When to reach for which
+## Choosing the right tool
 
-| Need | Tool |
+| You need | Reach for |
 |---|---|
-| a computed constant / lookup table | `const` |
-| CSS, assets, anything emitted at build time | `const` calling std emitters |
+| a computed constant or lookup table | `const` |
+| CSS or other build-time assets | `const` calling std's emitters |
 | an impl derived from a type's shape | a derive macro |
-| a family of similar items | `macro { … }` in item position |
-| transforming a whole item (a `[service]`-like) | an attribute macro |
+| a family of near-identical items | `macro { … }` in item position |
+| transforming a whole item (like `[service]` does) | an attribute macro |
 
-Limits worth knowing: macro expansion is fueled (a runaway macro is a
-compile error, tunable via `[macro] fuel`/`depth` in `vilan.toml`), and
-macros see one item at a time — there is no whole-program reflection.
+> **Going deeper.** Macro expansion is fueled: a runaway macro is a
+> compile error rather than a hung build, and the limits are tunable via
+> `[macro] fuel` / `depth` in `vilan.toml`. Macros see one item at a
+> time — there is no whole-program reflection. The `[service]`,
+> `[rpc]`, and `[derive(Wire)]` attributes you meet in the guides are
+> this same mechanism, shipped in std.

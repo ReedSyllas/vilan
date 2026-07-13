@@ -1,11 +1,11 @@
 # Strings — reference
 
-`str` (built in, immutable), plus the text-facing traits `Display`, `Debug`,
-and `Into`.
+The string type `str` (built in, immutable), plus the text-facing traits
+`Display`, `Debug`, and `Into`.
 
 ## str
 
-Concatenate with `+`; interpolate with `i"…{expr}…"` (see
+Concatenate with `+`. Interpolate with `i"…{expr}…"` (see
 [Values and types](../tour/values-and-types.md)).
 
 ```vilan,fragment

@@ -1,11 +1,12 @@
 # Building UI
 
-`std::ui` is a declarative, fine-grained reactive view layer: a `View`
-describes a DOM element, methods chain to build it, and `bind_*` methods keep
-individual DOM properties in sync with signals — when a signal changes, only
-that property updates. There is no virtual DOM and no re-render.
+`std::ui` is a declarative view layer with no virtual DOM. A `View`
+describes a DOM element. Methods chain to build it. Where React re-runs
+components and diffs the result, vilan binds individual DOM properties to
+signals — when a signal changes, exactly that text node or attribute
+updates and nothing else runs.
 
-Available for browser builds (`target = "browser"` in `vilan.toml`, or
+Available in browser builds (`target = "browser"` in `vilan.toml`, or
 `vilan build --target browser`).
 
 ```vilan,browser
@@ -22,27 +23,30 @@ fun main() {
 }
 ```
 
+Read that top to bottom: make a `div`, give it a paragraph whose text
+follows the counter, give it a button that bumps the counter. That's the
+whole mental model.
+
 ## Views
 
-`view(tag)` makes a fresh element; methods chain and return the view:
+`view(tag)` makes a fresh element. Methods chain, and each returns the
+view so you can keep going:
 
-- **Static content**: `.text(content)`, `.class(name)`, `.attr(name, value)`,
-  `.styled(style)` (see [Styling](styling.md)).
+- **Static content**: `.text(content)`, `.class(name)`,
+  `.attr(name, value)`, `.styled(style)` (see [Styling](styling.md)).
 - **Structure**: `.child(view)`, `.children(views)`.
-- **Events**: `.on(event, handler)`, `.on_event(event, |dispatched| …)` when
-  you need the DOM `Event` (`prevent_default`, `key()`, modifier keys).
+- **Events**: `.on(event, handler)`, or `.on_event(event, |e| …)` when
+  you need the DOM event itself (`prevent_default`, `key()`, modifiers).
 - **Reactive bindings**: `.bind_text(signal)`, `.bind_class(signal)`,
   `.bind_attr(name, signal)`, `.style_var(name, signal)`.
 
-Every `bind_*` is an effect: it sets the property now and re-sets it on each
-signal change. Nothing else on the page is touched.
+Every `bind_*` sets the property now and re-sets it whenever the signal
+changes. There is no render loop to trigger.
 
-## Mounting and component functions
+## Components are just functions
 
-`mount_root(id, body)` builds the body under a fresh **owner** (the root
-disposal boundary) and attaches the view to the page element with that id. A
-"component" is just a function returning a `View` — no registration, no
-special type:
+A "component" is a function that returns a `View`. No registration, no
+special types, no props system — parameters are the props:
 
 ```vilan,browser
 import std::ui::{ view, View, mount_root };
@@ -60,17 +64,22 @@ fun main() {
 }
 ```
 
-Any `effect`/binding created anywhere in the call tree registers with the
-nearest enclosing boundary automatically (the ambient owner — see
-[Reactive state](reactive.md)). Building UI outside every boundary is a
-compile error, so subscriptions can't leak by construction.
+`mount_root(id, body)` builds the body and attaches it to the page
+element with that id. It also establishes the root **owner**, which is
+why you never think about cleanup: every binding you create, at any
+depth of function calls, registers with the nearest owner automatically
+(the [reactive guide](reactive.md) explains owners).
 
-## Events are turn boundaries
+If you build UI outside any root you'll get a compile error mentioning
+`owner_scope`. It means "wrap this in `mount_root`" (or
+`run_with_owner` in a test).
 
-Each event dispatch runs your handler inside a fresh **turn**: all the signal
-writes a click causes settle as one wave (see the
-[reactive guide](reactive.md)). Handlers die with their DOM node — no
-unsubscribe needed.
+## Events run in turns
+
+Each event dispatch runs your handler inside a fresh **turn**: all the
+signal writes one click causes are batched, and watchers see the final
+state once. Handlers die with their DOM node, so there is nothing to
+unsubscribe.
 
 ```vilan,fragment
 .on("click", || count.set_with(|n| n + 1))
@@ -79,18 +88,20 @@ unsubscribe needed.
 })
 ```
 
-## Inputs: `bind_value` and `bind_draft`
+## Inputs
 
-`bind_value(signal)` two-way binds an `<input>`: the input shows the signal,
-typing writes it back. Use it for local-only state (a search box, a
-new-item field).
+Two ways to wire an `<input>`, for two different situations:
 
-`bind_draft(draft)` binds an input to a **local-first draft** (see
-[Reactive state](reactive.md#optimistic-writes-and-local-first-drafts)): user
-input pushes (locally first, then the draft's commit — typically an RPC), a
-remote adoption updates the input without re-pushing, and a dirty draft
-ignores adoption so an echo never moves a focused caret. Use it for fields
-that edit *server* state as you type.
+**`bind_value(signal)`** is the simple two-way bind: the input shows the
+signal, typing writes it back. Use it for local state — a search box, a
+"new item" field.
+
+**`bind_draft(draft)`** binds the input to a local-first
+[draft](reactive.md#optimistic-writes-and-local-first-drafts) whose
+commit is typically an rpc. Typing updates the input instantly and
+commits in the background. A remote update folds in without re-sending.
+An echo of your own edit never moves the caret. Use it for fields that
+edit *server* state as you type:
 
 ```vilan,browser
 import std::ui::{ view, View, mount_root };
@@ -116,24 +127,16 @@ fun main() {
 
 ## Lists: `bind_each`
 
-`bind_each(source, key, render)` renders one child view per element of a
-`Signal<List<T>>`, reconciled **by key** on every change:
+`bind_each(source, key, render)` renders one row per element of a
+`Signal<List<T>>`. Rows are **keyed**, like React's `key` prop, and the
+key does real work here:
 
-```vilan,fragment
-fun bind_each<T: PartialEq, K: PartialEq>(
-	self,
-	source: Signal<List<T>>,
-	key: |T| K,
-	render: (|T| View) context owner_scope,
-): View
-```
-
-- A row whose key survives is **reused** — its element moves into the new
-  order, its subscriptions stay intact.
-- A surviving key whose *value* changed re-renders just that row
-  (`T: PartialEq` decides).
-- Each row is a disposal boundary: `render` runs under the row's own owner,
-  so a row's bindings die with the row.
+- A row whose key survives a change is **reused**. Its element moves to
+  the new position with its state and subscriptions intact.
+- A row whose key survives but whose *value* changed re-renders just
+  that row (that's why `T: PartialEq`).
+- Removed rows are disposed properly — each row is its own owner, so a
+  row's bindings die with the row.
 
 ```vilan,browser
 import std::ui::{ view, View, mount_root };
@@ -157,20 +160,25 @@ fun main() {
 }
 ```
 
+```vilan,fragment
+fun bind_each<T: PartialEq, K: PartialEq>(
+	self,
+	source: Signal<List<T>>,
+	key: |T| K,
+	render: (|T| View) context owner_scope,
+): View
+```
+
 ## Conditionals: `show`, `when`, `swap`
 
-Three primitives, differing in what happens to the hidden content:
+Three primitives. Pick by what should happen to the content while it's
+not visible:
 
 | | Content while off | State | Use for |
 |---|---|---|---|
 | `.show(condition)` | mounted, hidden | **preserved** | tabs, collapsibles — anything that should keep its input text |
 | `.when(condition, body)` | unmounted, disposed | dropped | content that shouldn't exist while off (an editor for a missing record) |
 | `.swap(source, render)` | previous subtree disposed on change | per-value | pages on a route signal, any value-driven subtree |
-
-`when` and `swap` bodies build under a fresh owner per instantiation — a
-disposal boundary, like a `bind_each` row. `swap` re-renders only when the
-value actually *changes* (`T: PartialEq`); navigating to the current route is
-a no-op.
 
 ```vilan,fragment
 .show(open)                             // Signal<bool>
@@ -181,22 +189,27 @@ a no-op.
 })
 ```
 
+`when` and `swap` build their content under a fresh owner each time, so
+everything inside cleans up when the content goes away. `swap` re-renders
+only when the value actually *changes* (`T: PartialEq`), so navigating
+to the page you're already on does nothing.
+
 ## Escaping to the DOM
 
-`View` is a thin handle over `std::dom::Element` (`view.element`). For
-anything the chain doesn't cover, use `std::dom` directly:
-`get_element_by_id`, `query_selector`, `element.set_attribute`, etc. — see
-the [browser reference](../std/browser.md).
+`View` is a thin wrapper over `std::dom::Element` (it's right there as
+`view.element`). For anything the chain doesn't cover, use `std::dom`
+directly: `get_element_by_id`, `query_selector`,
+`element.set_attribute`, and so on. See the
+[browser reference](../std/browser.md).
 
 ## Traps
 
-- One boundary per *dynamic* subtree is the model — don't create owners per
-  element or per component function; static content shares its boundary's
-  lifetime.
-- `show` keeps bindings live (they keep firing while hidden); if the hidden
-  content is expensive, prefer `when`.
-- `bind_value` fights remote updates (each keystroke overwrites) — for
-  server-backed fields use `bind_draft`.
-- Building views outside `mount_root`/a row/a `when`/`swap` body is the
-  "context owner_scope is read here" compile error: wrap the entry point in
-  `mount_root` (or `run_with_owner` in tests).
+- `show` keeps bindings live while hidden — they keep firing. If the
+  hidden content is expensive, use `when`.
+- `bind_value` fights remote updates (every keystroke overwrites). For
+  server-backed fields, use `bind_draft`.
+- The `owner_scope` compile error means you built UI outside every
+  boundary. Wrap the entry point in `mount_root`.
+- Don't create owners per element or per component function. Boundaries
+  belong where subtrees can *die*: roots, rows, conditionals. The
+  framework already puts them there.

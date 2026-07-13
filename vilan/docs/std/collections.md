@@ -1,12 +1,12 @@
 # Collections — reference
 
-`List` (built in), `std::map::Map`, `std::set::Set`, `std::range::Range`,
-`std::iterator`.
+The container types: `List` (built in), `std::map::Map`, `std::set::Set`,
+`std::range::Range`, and the `std::iterator` protocol underneath `for`.
 
 ## List<T>
 
-Built in, with literal syntax (`[1, 2, 3]`; empty literals need a type
-annotation).
+Built in, with literal syntax: `[1, 2, 3]`. An empty literal needs a type
+annotation (`let xs: List<str> = [];`).
 
 ```vilan,fragment
 impl List<type T> {

@@ -1,10 +1,13 @@
 # Styling
 
-`std::style` is typed, atomic CSS built at **compile time**: you construct a
-`Style` value inside a `const` expression, the compiler evaluates it and
-emits the CSS rules into the build's stylesheet, and at runtime the style is
-just a set of class names to put on elements. No runtime rule construction,
-no style recalculation — dynamism goes through CSS custom properties.
+`std::style` gives you typed, checked CSS without writing a stylesheet.
+You build a `Style` value in code, the compiler evaluates it during the
+build and writes real CSS rules into your bundle's `.css` file, and at
+runtime the style is nothing but a set of class names on an element.
+
+If you've used Tailwind, the feel is similar — small composable pieces, a
+spacing scale, color ramps — except the pieces are typed function calls,
+so a typo is a compile error instead of a silently-ignored class.
 
 ```vilan,browser
 import std::ui::{ view, View, mount_root };
@@ -27,17 +30,19 @@ fun main() {
 
 ## The model
 
-- `style()` starts an empty style; every method returns a new style with one
-  more **property slot** filled.
-- Each slot becomes one atomic CSS rule (one class, one declaration),
-  deduplicated across the whole build — two styles sharing
-  `padding(space(4))` share the class.
-- `view.styled(card)` sets the element's classes (`card.class_list()`).
-- Construction must happen in a `const` — that's when rules are emitted. At
-  runtime you may still **select and merge** already-constructed styles
-  (`a + b`, picking one of two styles in an `if`): the rules already exist.
+- `style()` starts an empty style. Every method fills one property and
+  returns the new style, so you chain.
+- Styles are built inside `const` — that's the compile-time evaluation
+  prefix (see [Macros & const](../tour/macros-and-const.md)). The rules
+  are emitted during the build.
+- `view.styled(card)` puts the style's classes on the element.
 
-`+` combines named styles per property, right side wins:
+At runtime you can still *select and combine* styles you already built.
+`a + b` merges two styles (per property, the right side wins), and
+picking one of two styles in an `if` is fine. What you can't do is
+construct new rules at runtime — a bare `style()` chain outside `const`
+is a compile error. That restriction is what keeps the CSS static and
+the bundle predictable.
 
 ```vilan,fragment
 let button = const style().padding_x(space(3)).radius(space(1));
@@ -46,18 +51,20 @@ let primary = const button + style().background(Color::blue(600)).color(Color::w
 
 ## Values
 
-- **`Length`** — `Length::px(1.0)`, `Length::rem(1.5)`, `Length::pct(50.0)`,
-  `Length::auto()`, and `Length::var("--w")` (a custom-property reference —
-  see dynamic values below).
-- **`space(step)`** — the spacing scale (`space(1)` = 0.25rem, Tailwind-like
-  steps); the usual argument to `padding`/`gap`/`margin`/`radius`.
-- **`Color`** — `Color::white()/black()/transparent()`, `Color::hex("#663399")`,
-  and stepped ramps: `Color::gray(300)`, `Color::blue(600)`,
-  `Color::red(500)`, `Color::green(500)`.
-- Enums for keyword properties: `Display`, `Position`, `FlexDirection`,
+- **`space(step)`** is the spacing scale: `space(1)` is 0.25rem, and the
+  steps grow like Tailwind's. It's the usual argument to `padding`,
+  `gap`, `margin`, and `radius`.
+- **`Length`** covers everything else: `Length::px(1.0)`,
+  `Length::rem(1.5)`, `Length::pct(50.0)`, `Length::auto()`, and
+  `Length::var("--w")` for a CSS variable (see dynamic values below).
+- **`Color`** has `Color::white()`, `Color::black()`,
+  `Color::transparent()`, `Color::hex("#663399")`, and stepped ramps
+  like `Color::gray(300)`, `Color::blue(600)`, `Color::red(500)`,
+  `Color::green(500)`.
+- Keyword properties use enums: `Display`, `Position`, `FlexDirection`,
   `AlignItems`, `JustifyContent`, `TextAlign`, `Cursor`, `Overflow`.
 
-Anything not covered has an escape hatch:
+For anything the typed surface doesn't cover, escape hatches:
 
 ```vilan,fragment
 .raw("font-family", "system-ui, sans-serif")
@@ -67,7 +74,8 @@ Anything not covered has an escape hatch:
 
 ## States and breakpoints
 
-Pseudo-class variants take an **inner** style and condition all of its slots:
+Hover, focus, and friends take an **inner** style. Everything in the
+inner style applies under that condition:
 
 ```vilan,fragment
 let button = const style()
@@ -77,17 +85,17 @@ let button = const style()
 	.disabled(style().opacity(0.5));
 ```
 
-Available: `.hover`, `.focus`, `.active`, `.disabled`, `.first`, `.last`,
-`.dark` (the `prefers-color-scheme` variant), and `.pseudo(name, inner)` for
-anything else. Breakpoints the same way: `.sm(inner)`, `.md(inner)`,
-`.lg(inner)`, `.xl(inner)`, or `.media(min_width, inner)`. A breakpoint
-cannot wrap another media-conditioned style (compile-time panic).
+Available: `.hover`, `.focus`, `.active`, `.disabled`, `.first`,
+`.last`, `.dark` (dark mode via `prefers-color-scheme`), and
+`.pseudo(name, inner)` for anything else. Breakpoints work the same way:
+`.sm(inner)`, `.md(inner)`, `.lg(inner)`, `.xl(inner)`, or
+`.media(min_width, inner)`.
 
 ## Dynamic values
 
-Runtime-varying styling goes through **CSS custom properties**: the style
-declares `Length::var("--w")`, and the element binds the variable to a
-signal with `style_var`:
+Styles are static, so how does a progress bar grow? Through CSS custom
+properties. The style declares a variable, and the element binds the
+variable to a signal with `style_var`:
 
 ```vilan,browser
 import std::ui::{ view, View, mount_root };
@@ -107,18 +115,27 @@ fun main() {
 }
 ```
 
-The rule is emitted once at compile time; only the variable's value changes
-at runtime. This is the entire dynamic channel — there is deliberately no
-way to construct new rules at runtime.
+The rule is compiled once. Only the variable's value changes at runtime.
+This one channel covers most "dynamic styling" needs; for the rest,
+`bind_class` swaps between prebuilt styles.
+
+> **Going deeper.** Each property-under-a-condition becomes one atomic
+> CSS rule with a generated class name, deduplicated across the whole
+> build — two styles that both say `padding(space(4))` share one class.
+> `styled` sets `class_list()`, the space-joined class names. A
+> breakpoint can't wrap another media-conditioned style (you'll get a
+> compile-time panic saying so).
 
 ## Traps
 
-- `style()` chains **outside** a `const` fail to compile ("emission outside
-  const") — construct in a `const`, select/merge at runtime.
-- `+` is per-property override, not CSS specificity — the right operand's
-  slot replaces the left's for the same property/condition.
-- The class attribute is whatever `styled` set — combining `.class(name)`
-  and `.styled(style)` on one view overwrites; put custom classes in the
-  style via `raw` or use one mechanism per element.
+- A `style()` chain outside `const` fails with an "emission outside
+  const" error. Build styles in `const`, select and merge them at
+  runtime.
+- `+` is a per-property override, not CSS specificity. The right
+  operand's value replaces the left's for the same property and
+  condition.
+- `.class(name)` and `.styled(style)` both set the class attribute, so
+  the later call wins. Use one mechanism per element (custom classes can
+  ride along via `.raw`).
 
 Full method table: the [style reference](../std/style.md).

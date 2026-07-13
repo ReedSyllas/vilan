@@ -2,10 +2,12 @@
 
 > Normative rules: spec [§7 Execution & async](../spec/execution.md).
 
-vilan's model is **await-by-default**: calling an async function just gives
-you the value — no keyword, no promise type in your signature. Asyncness is
-*inferred* (a function that awaits anything is async, and so are its
-callers), and you reach for the explicit forms only to opt *out* of waiting.
+If you know async/await in JavaScript, here is the whole model in one
+line: vilan keeps the machinery and deletes the keywords. Calling an
+async function just gives you the value. You don't write `await`, you
+don't mark functions `async`, and you never see `Promise<T>` in a return
+type. The compiler figures out which functions suspend and awaits the
+calls for you.
 
 ```vilan
 import std::print;
@@ -21,15 +23,19 @@ fun main() {
 }
 ```
 
-The declared return type stays the plain value (`str`, not a promise) —
-inference carries the asyncness, signatures carry the meaning.
+`fetch_label` sleeps, so it's async. `main` calls it, so `main` is async
+too. The return type stays the honest `str`. Asyncness spreads through
+the call graph on its own, the way it always wanted to.
 
-## The explicit forms: `async` and `await`
+## Opting out of waiting: `async` and `await`
 
-- `async expr` — **spawn**: start the work, don't wait. Types as
-  `Promise<T>`.
-- `async { … }` — spawn a block.
-- `await promise` — unwrap a promise you're holding.
+The explicit keywords exist for the one thing implicit awaiting can't
+express: *not* waiting.
+
+- `async expr` **spawns**: start the work, don't wait for it. It gives
+  you a `Promise<T>`.
+- `async { … }` spawns a block.
+- `await promise` collects a promise you spawned earlier.
 
 ```vilan
 import std::print;
@@ -47,18 +53,20 @@ fun main() {
 }
 ```
 
-Fire-and-forget is spawn with the promise dropped: `let _done = async
-save(entry);`. `Promise::all(promises)` (in `std::promise`) awaits a list.
+So in JS you mark the async case and waiting is explicit. In vilan you
+mark the *concurrent* case and waiting is the default. Fire-and-forget
+is just spawning and dropping the promise: `let _done = async
+save(entry);`. To wait on many at once, `Promise::all(promises)` from
+`std::promise`.
 
 ## Async closures
 
-Calls through a **closure value** aren't statically known, so asyncness
-can't infect through them — instead the closure *type* carries the marker:
-`async |T| U`. Calls through an async-typed closure value are implicitly
-awaited like direct calls.
+This section matters once you store async callbacks. Until then, skim.
 
-The marker lives at parameters and `let` bindings only (not struct fields or
-return types yet), giving two working patterns:
+A call through a closure *value* can't be seen by the compiler's
+asyncness inference (there's no fixed callee to look at). So for closure
+values, the type carries the information: `async |T| U`. Calls through
+an `async`-typed closure are awaited implicitly, like direct calls.
 
 ```vilan,fragment
 // 1. An async-friendly callback parameter — sync closures pass fine too
@@ -70,36 +78,45 @@ let hook: async || void = self.stored_hook;
 hook();   // awaited
 ```
 
-An async closure flowing into a **plain** closure parameter is allowed only
-when the parameter returns `void` — that's **spawn semantics** (the call
-fires and nobody waits), and it's why UI event handlers can await freely.
-With a non-void return it's a compile error: the caller would receive a
-promise disguised as a `T`.
+The marker lives at parameters and `let` bindings only, which is why
+pattern 2 exists: struct fields store the plain type, and you re-mark at
+a `let` before calling. [Functions & closures](functions-and-closures.md)
+covers the same seams from the closure side.
+
+One rule protects you here. An async closure passed where a plain
+closure is expected is a compile error if that closure returns a value,
+because the caller would receive a promise disguised as the value. If it
+returns `void`, it's allowed — the call just becomes fire-and-forget.
+That's why UI event handlers can await freely with no ceremony.
 
 ## Timers
 
-`std::time`: `sleep_for(duration)` / `sleep(millis)` suspend;
-`Duration::millis/seconds/minutes/hours/days` construct durations;
-`now(): Instant` reads the clock. See the time reference *(Phase 2)*.
+From `std::time`: `sleep_for(duration)` and `sleep(millis)` suspend.
+`Duration::millis/seconds/minutes/hours/days` build durations. `now()`
+reads the clock. Details in the [time reference](../std/time.md).
 
 ## What async does NOT do
 
-- **No callback coloring in signatures** — you never write `Promise<T>` as
-  a return type; promises appear only where you spawned and kept one.
-- **No implicit concurrency** — everything is awaited in order unless you
-  spawn. One suspension at a time per call chain, same as JS.
-- **No view across a suspension** — a `&`/`&mut` view held across an await
-  is rejected; re-derive after (see [the memory model](memory-model.md)).
+- **No promise-colored signatures.** Return types are the plain values.
+  Promises appear only where you spawned and kept one.
+- **No hidden concurrency.** Everything waits, in order, unless you
+  spawn. Same single-threaded event loop as JS underneath.
+- **No views across a suspension.** A `&`/`&mut` view held across an
+  await is rejected. Re-derive after — see
+  [the memory model](memory-model.md).
 
 ## Traps
 
-- On node, a **completed `main` ends the process** — a long-lived client
-  (holding a socket, waiting for events) must keep `main` open
-  (`sleep_for` a long duration, or await something that ends with the app).
-- Turns interact with suspension: a UI turn settles at the handler's first
-  suspension (`AtSuspension`) — writes before and after an await land in
-  separate waves unless you use `turn_async` (see the
-  [reactive guide](../guide/reactive.md)).
-- Spawned work's signal writes drain per continuation segment — coalesced,
-  but after the originating turn. Don't expect a spawned write to be
-  visible synchronously after the spawn.
+- On node, **the process exits when `main` finishes** — even if spawned
+  work is still pending. A long-lived client (holding a socket, waiting
+  for pushes) must keep `main` open: await something that ends with the
+  app, or `sleep_for` a long duration.
+- Don't expect a spawned write to be visible immediately after the
+  spawn. Spawned work interleaves with yours per the event loop, like
+  any promise.
+
+> **Going deeper.** The reactive layer batches signal writes into
+> "turns", and turns interact with suspension: a UI turn settles at the
+> handler's first await, and writes after it land in later waves unless
+> you use `turn_async`. That's a [reactive guide](../guide/reactive.md)
+> topic, not a language rule.

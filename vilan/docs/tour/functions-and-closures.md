@@ -4,8 +4,8 @@
 
 ## Functions
 
-`fun` declares a function; the body's last expression is its value, `ret`
-returns early:
+`fun` declares a function. The last expression in the body is the return
+value, and `ret` returns early:
 
 ```vilan
 import std::print;
@@ -25,7 +25,12 @@ fun main() {
 }
 ```
 
-Generic functions take type parameters with optional bounds:
+Notice there is no `return` on the last line. A bare expression at the
+end of a block is the block's value. You'll see this everywhere in vilan.
+`if`, `match`, and plain blocks all work the same way.
+
+Generic functions take type parameters. Bounds say what the body is
+allowed to do with them:
 
 ```vilan,fragment
 fun largest<T: PartialOrd>(a: T, b: T): T { … }
@@ -33,8 +38,9 @@ fun largest<T: PartialOrd>(a: T, b: T): T { … }
 
 ## Closures
 
-`|params| body` — the parameter types come from context when the closure
-flows into a typed position, or from annotations:
+A closure is an inline function value. Where JavaScript writes
+`x => x * 2`, vilan writes `|x| x * 2`. Parameter types are usually
+inferred from where the closure is used. Annotate them when they aren't:
 
 ```vilan
 import std::print;
@@ -50,18 +56,19 @@ fun main() {
 }
 ```
 
-Closure **types** are written `|T| U` (and `|| U` for no parameters,
-`|| void` for no result). They appear as parameter types, `let` annotations,
-and struct fields.
+Closure **types** are written `|T| U`. A closure with no parameters is
+`|| U`, and one that returns nothing is `|| void`. These appear as
+parameter types, in `let` annotations, and as struct fields.
 
-Closures capture their environment by value at creation (vilan is
-value-semantic — see [the memory model](memory-model.md)); captured `Shared`
-cells are how a closure shares mutable state with its creator.
+Closures capture their surroundings **by value** at the moment they are
+created. vilan copies, remember. When a closure needs to share mutable
+state with its creator, they hold a `Shared` cell together. The
+[memory model](memory-model.md) explains that pattern.
 
 ## Named functions as closures
 
-A reference to a plain function coerces to a matching closure type — no
-wrapping lambda:
+When a function already does what your closure would do, pass the
+function itself:
 
 ```vilan
 import std::print;
@@ -78,64 +85,76 @@ fun main() {
 }
 ```
 
-Eligible: plain vilan `fun`s. Not eligible (write the wrapping closure):
-generic functions, methods, `async` functions, and externs (a dotted host
-global would lose its `this`).
+This works for plain vilan functions. It does not work for generic
+functions, methods, `async` functions, or externs. For those, write the
+small wrapping closure — the compiler will tell you when you hit one.
 
 ## Async closures
 
-An `async` closure **type** — `async |T| U` — marks a closure value whose
-calls are implicitly awaited. The marker lives at two seams only: parameter
-types and `let` annotations. It does not exist on struct fields or return
-types yet, which produces a standard pattern — **store plain, re-mark at a
-`let`**:
+You can skip this section until you start storing callbacks that do
+async work.
+
+A closure type can carry an `async` marker: `async |T| U`. Calls through
+a value of that type are awaited automatically, the same way direct
+calls to async functions are (see [Async](async.md)). The marker is
+allowed in exactly two places: parameter types and `let` annotations.
 
 ```vilan,fragment
 struct Draft<T> {
-	commit: |T| Option<str>,          // stored plain
+	commit: |T| Option<str>,          // struct fields store the plain type
 }
 …
-let commit: async |T| Option<str> = self.commit;   // re-marked: calls now await
-let outcome = commit(value);
+let commit: async |T| Option<str> = self.commit;   // re-mark at a let
+let outcome = commit(value);                        // this call awaits
 ```
 
-The flip side: an async closure flowing into a plain closure parameter is an
-error when the parameter returns a value (the caller would receive a promise
-typed as `T`) — but legal when it returns `void`: that is **spawn
-semantics**, fire-and-forget, and it's what lets UI event handlers and turn
-bodies be async without ceremony. See [Async](async.md).
+That "store plain, re-mark at a `let`" dance is the standard pattern for
+async callbacks kept in struct fields, because the marker doesn't exist
+on field types yet.
+
+There is one more rule, and it works in your favor. Passing an async
+closure where a plain closure is expected is an error if the plain type
+returns a value — you would receive a promise pretending to be the
+value. But if the plain type returns `void`, it is allowed, and the call
+becomes fire-and-forget. This is why UI event handlers can await things
+freely without any ceremony.
 
 ## Context clauses
 
-A parameter's closure type can name ambient **contexts** the closure body
-reads — written after the type:
+You will *use* this feature constantly without writing it. It is how the
+UI framework passes things like "the current owner" invisibly. You only
+write it yourself when building framework-level helpers, so feel free to
+skim this on a first read.
+
+A parameter's closure type can declare that the closure reads an ambient
+**context**:
 
 ```vilan,fragment
 fun mount_root(id: str, body: (|| View) context owner_scope): Owner
 fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T
 ```
 
-Passing a closure literal into such a position makes it an **injected**
-closure: the ambient value (the current `Owner`, the current `Turn`) threads
-to it at the call site, through any depth of plain function calls. This is
-the machinery behind "every `effect` registers with the nearest boundary" —
-your component functions never mention owners, yet ownership flows.
+When you pass a closure literal into such a parameter, the ambient value
+(the current `Owner`, the current `Turn`) is threaded to it at the call
+site, through any depth of ordinary function calls in between. This is
+the machinery behind "every `effect` registers with the nearest
+boundary" in the UI layer. Your component functions never mention
+owners, and ownership still flows to the right place.
 
-Two consequences worth knowing:
-
-- Closures capture their contexts **at creation**. A closure created outside
-  a `run` and called inside it sees nothing — the compiler rejects the shape
-  rather than let it misbehave.
-- A function that *reads* a context can't be passed around as a plain value
-  (the context channel would be severed); the compiler tells you.
+> **Going deeper.** Two rules keep contexts sound. First, closures
+> capture their contexts when they are *created*. A closure created
+> outside a scope and called inside it would see nothing, so the
+> compiler rejects that shape outright. Second, a function that reads a
+> context can't be passed around as a plain value, because the context
+> channel would be severed. Both produce clear errors when you hit them.
 
 ## Traps
 
-- Calling a method-call result directly doesn't parse yet:
-  `self.hook.read()(a, b)` — bind first: `let hook = self.hook.read();
-  hook(a, b)`.
+- Calling a method-call result directly doesn't parse yet. Instead of
+  `self.hook.read()(a, b)`, bind first:
+  `let hook = self.hook.read(); hook(a, b)`.
 - A closure bound to a local and then called directly
-  (`let f = |i| …; f(3)`) doesn't infer its parameter type from the call —
-  annotate the parameter.
+  (`let f = |i| …; f(3)`) doesn't infer its parameter type from the
+  call. Annotate the parameter.
 - Chained element access on a call result (`pair().1`, `read()[i]`) can
-  lose the element type — bind, then access.
+  lose the element type. Bind, then access.
