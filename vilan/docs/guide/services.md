@@ -152,6 +152,10 @@ one.
   instead of calls corrupting halfway. This is the **contract check**.
 - On the server, each handler runs inside a turn, so all the signal
   writes one rpc makes are broadcast as a single consistent update.
+- Handler bodies can await — call another service, `sleep_for`, wait on
+  I/O. The reply is sent when the body finishes, and the turn holds
+  across the awaits: writes before and after a suspension still
+  coalesce into that same single update.
 
 ## Mirrors
 

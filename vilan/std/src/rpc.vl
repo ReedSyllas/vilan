@@ -22,7 +22,7 @@ import pkg::shared::Shared;
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::json::JsonValue;
-import pkg::reactive::{ batch, Source, Signal, Subscription, Disposable };
+import pkg::reactive::{ batch, turn_async, Source, Signal, Subscription, Disposable };
 import pkg::wire::{ Wire, Serializer, Deserializer, Codec, Frame };
 import pkg::bytes::{ Bytes, ByteBuffer, bytes_of_buffer, new_text_decoder };
 import pkg::fetch::{ get, post, post_bytes };
@@ -44,13 +44,16 @@ trait Transport {
 // The in-process request/response transport: runs a handler in the same process, wrapped
 // as a resolved Promise. `handler` is a protocol's frame handler (an `RpcProtocol`).
 struct LocalTransport {
+	// Stored plain (an `async` closure TYPE lives only at parameter/`let`
+	// seams — J2 v1); `call` re-marks it at a `let` so the call awaits.
 	handler: |Frame| Frame,
 }
 
 impl LocalTransport with Transport {
 	fun call(self, request: Frame): Promise<Result<Frame, str>> {
 		async {
-			Ok((self.handler)(request))
+			let handler: async |Frame| Frame = self.handler;
+			Ok(handler(request))
 		}
 	}
 }
@@ -792,28 +795,34 @@ fun encode_reply(codec: Codec, outcome: RpcOutcome): Frame {
 // `Dispatcher` below is the hand-written form.
 struct RpcProtocol {
 	codec: Codec,
+	// Stored plain; `respond` re-marks it at a `let` (J2 v1, as `Draft`).
 	dispatch: |RpcRequest| RpcOutcome,
 }
 
 impl RpcProtocol {
 	fun respond(self, frame: Frame): Frame {
 		let request = open_request(self.codec, frame);
+		// Re-marked so the dispatch is awaited — an async handler's reply
+		// frame is encoded from its settled outcome (a sync one just resolves).
+		let dispatch: async |RpcRequest| RpcOutcome = self.dispatch;
 		let outcome = match (request.deserializer.failed)() {
 			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
-			None => (self.dispatch)(request),
+			None => dispatch(request),
 		};
 		encode_reply(self.codec, outcome)
 	}
 }
 
 // A `LocalTransport` that routes every request through an `RpcProtocol` — the in-process
-// wiring of a client stub to its server dispatcher. The handler runs in a `batch` — the
-// **wire turn** (proposal/reactive-batching.md): signal writes made while dispatching are
-// deferred to the turn's flush, so a method that mutates subscribed state produces ONE
-// coalesced `Update` per source alongside its reply, not one per write.
+// wiring of a client stub to its server dispatcher. The handler runs in a
+// `turn_async` — the **wire turn** (proposal/reactive-batching.md), held across
+// any awaits in the handler: signal writes made while dispatching are deferred
+// to the turn's flush, so a method that mutates subscribed state produces ONE
+// coalesced `Update` per source alongside its reply, not one per write — even
+// when the method suspends partway.
 fun local_rpc(protocol: RpcProtocol): LocalTransport {
 	LocalTransport {
-		handler = |frame| batch(|| protocol.respond(frame)),
+		handler = |frame| turn_async(|| protocol.respond(frame)),
 	}
 }
 
@@ -890,6 +899,7 @@ fun reply<T: Wire>(value: T): RpcOutcome {
 // and produces an outcome.
 struct Route {
 	method: str,
+	// Stored plain; `handle` re-marks it at a `let` (J2 v1, as `Draft`).
 	handler: |RpcRequest| RpcOutcome,
 }
 
@@ -905,7 +915,7 @@ impl Dispatcher {
 	}
 
 	// Register a handler for a method name, returning `self` so registrations chain.
-	fun on(self, method: str, handler: |RpcRequest| RpcOutcome): Dispatcher {
+	fun on(self, method: str, handler: async |RpcRequest| RpcOutcome): Dispatcher {
 		self.routes.write().push(Route { method, handler });
 		self
 	}
@@ -913,7 +923,10 @@ impl Dispatcher {
 	// Route a request to its handler, or fail with `unknown method`.
 	fun handle(self, request: RpcRequest): RpcOutcome {
 		match self.routes.read().filter(|route| route.method == request.method).first() {
-			Some(let route) => (route.handler)(request),
+			Some(let route) => {
+				let handler: async |RpcRequest| RpcOutcome = route.handler;
+				handler(request)
+			},
 			None => RpcOutcome::Failure(RpcError::Remote("unknown method: " + request.method)),
 		}
 	}
@@ -1373,7 +1386,7 @@ macro fun route_block(name: str, statements: List<str>): str {
 	// real handler code, and one request's signal writes settle as one wave.
 	let label = quote(name);
 	mut closure = i".on({label}, |request| \{\n";
-	closure = closure + indent("turn(FlushPolicy::AtEnd, || {", 1) + "\n";
+	closure = closure + indent("turn_async(|| {", 1) + "\n";
 	for statement in statements {
 		closure = closure + indent(statement, 2) + "\n";
 	}
@@ -1449,17 +1462,20 @@ macro fun service(item: Item): Source {
 			arguments.push(parameter.name);
 			arity = arity + 1;
 		}
-		let label = quote(method.name);
+		// Every method route goes through `route_block`, so every handler runs
+		// inside the wire turn — a no-arg method's signal writes coalesce
+		// exactly like an arg-taking one's (a bare `.on(...)` fast path here
+		// once skipped the turn, leaking one update per write).
 		if arity == 0 {
-			routes.push(i".on({label}, |_| reply(self.{method.name}()))");
+			statements.push(i"reply(self.{method.name}())");
 		} else {
 			let argument_list = join(arguments, ", ");
 			statements.push(match_of("decode_failed(request)")
 				.arm("Option::Some(let reason)", "RpcOutcome::Failure(RpcError::Decode(reason))")
 				.arm("Option::None", i"reply(self.{method.name}({argument_list}))")
 				.render());
-			routes.push(route_block(method.name, statements));
 		}
+		routes.push(route_block(method.name, statements));
 	}
 	routes.push(".on(" + quote("__contract") + ", |_| reply(self.contract_hash()))");
 	mut exposures: List<str> = [];
@@ -1579,6 +1595,6 @@ macro fun service(item: Item): Source {
 		+ "import std::wire::{ Codec, Serializer, Frame };\n"
 		+ "import std::result::Result;\n"
 		+ "import std::option::Option;\n"
-		+ "import std::reactive::{ turn, FlushPolicy };\n";
+		+ "import std::reactive::{ turn_async };\n";
 	source(imports + service_impl + client_struct.render() + client_impl.render() + connect_impl)
 }

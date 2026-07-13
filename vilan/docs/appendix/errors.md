@@ -116,7 +116,9 @@ with `let`; assigning through it (`v = …`) already writes the target.
 You passed a closure that suspends into a parameter typed as a plain,
 value-returning closure. Either the parameter should be `async |…| T`,
 or — if fire-and-forget is fine — the parameter's return type should be
-`void`.
+`void`. One common case: a `batch(|| …)` whose body awaits — use
+`turn_async(|| …)` instead, the async-extent flavor that holds the turn
+across the suspension.
 → [Async](../tour/async.md), [Functions & closures](../tour/functions-and-closures.md)
 
 **"`!` requires the nearest enclosing function to declare an `Option`/`Result`-compatible return type …"**

@@ -8,7 +8,16 @@ load-bearing across `std::rpc`/`std::rpc_server` (every inbound frame runs in a 
 the coalescing claims are CI-pinned as exact counts (`vilan/benchmarks` + its CLI test: 100
 batched sets → 1 update frame; an RPC handler's 3 writes → 1 frame beside the reply). Still
 future, as noted below: the ambient microtask flush and async turns/actions (§Future). The
-document stands as the design record. A batching layer for `std::reactive`:
+document stands as the design record.
+
+**2026-07-13 update — async handlers.** The "async turns" future arrived: rpc **dispatch**
+now runs under `turn_async` (rpc mounts and `local_rpc`; the mirror `d:` lanes still
+`batch`), so an `[rpc]` handler may await and the wire turn HOLDS across its suspensions —
+writes before and after an await still coalesce into one update beside the reply. The
+dispatch seams (`Route.handler`, `RpcProtocol.dispatch`, `LocalTransport.handler`,
+http's `request_handler`) store closures plain and re-mark `async |…|` at a `let` (J2 v1).
+Also fixed on the way: no-arg `[rpc]` routes once skipped the turn entirely (a bare-`.on`
+fast path), leaking one update per write. A batching layer for `std::reactive`:
 `Signal::set` keeps committing its value immediately but **defers subscriber notification** to a
 flush boundary, and a new `batch(body)` groups a set of writes so their observers fire **once**,
 glitch-free. The motivating consumer is the transport/RPC turn (`proposal/transport-rpc.md`): the

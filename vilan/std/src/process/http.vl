@@ -195,7 +195,8 @@ impl Server {
 	}
 
 	fun start(self) {
-		let request_handler = self.request_handler;
+		// Re-marked (J2 v1): an async handler's response is awaited before writing.
+		let request_handler: async |Request| Response = self.request_handler;
 		let on_start = self.on_start;
 		let server = self;
 		let port = self.port;
@@ -221,7 +222,7 @@ impl ServerBuilder {
 		self
 	}
 
-	fun on_request(own self, handler: |Request| Response): ServerBuilder {
+	fun on_request(own self, handler: async |Request| Response): ServerBuilder {
 		self.request_handler = handler;
 		self
 	}

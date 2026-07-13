@@ -2767,6 +2767,234 @@ fn service_contract_verify_matches_and_catches_drift() {
     );
 }
 
+// === Async rpc handlers (the dispatch spine awaits — J2 through the wire) =========
+
+#[test]
+fn an_async_rpc_method_replies_after_its_await() {
+    // The user-shaped case: a `[rpc]` method that awaits (here `sleep_for`)
+    // compiles, and its reply carries the value computed AFTER the suspension.
+    // The `[service]` macro wraps each route in `turn_async`, and every seam
+    // of the spine (`Dispatcher.handle` → `RpcProtocol.respond` →
+    // `LocalTransport.call`) awaits through a re-marked `let` (J2 v1).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, json_codec };
+        import std::rpc::{ local_rpc };
+        import std::time::{ sleep_for, Duration };
+
+        [service(SlowClient)]
+        struct Slow { calls: Shared<i32> }
+
+        impl Slow {
+            [rpc]
+            fun slow_double(self, by: i32): i32 {
+                self.calls.write() = self.calls.read() + 1;
+                sleep_for(Duration::millis(10));
+                by * 2
+            }
+        }
+
+        fun main() {
+            let service = Slow { calls = Shared::new(0) };
+            let transport = local_rpc(service.dispatcher().into_protocol(json_codec()));
+            let client = SlowClient { transport, codec = json_codec() };
+            match client.slow_double(7) {
+                Ok(let n) => print(i"slow_double -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            print(i"calls = {service.calls.read()}");
+        }
+        "#,
+        "slow_double -> 14\ncalls = 1\n",
+    );
+}
+
+#[test]
+fn sync_and_async_rpc_methods_coexist_on_one_service() {
+    // J2 in both directions through the retyped spine: the sync method rides
+    // the same `async |..|`-seamed dispatch (awaiting a plain value just
+    // resolves), the async one settles before its reply encodes.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, json_codec };
+        import std::rpc::{ local_rpc };
+        import std::time::{ sleep_for, Duration };
+
+        [service(MixedClient)]
+        struct Mixed { count: Shared<i32> }
+
+        impl Mixed {
+            [rpc]
+            fun quick(self): i32 { 1 }
+
+            [rpc]
+            fun slow(self): i32 {
+                sleep_for(Duration::millis(5));
+                2
+            }
+        }
+
+        fun main() {
+            let transport = local_rpc(
+                Mixed { count = Shared::new(0) }.dispatcher().into_protocol(json_codec()),
+            );
+            let client = MixedClient { transport, codec = json_codec() };
+            match client.quick() {
+                Ok(let n) => print(i"quick -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            match client.slow() {
+                Ok(let n) => print(i"slow -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+        }
+        "#,
+        "quick -> 1\nslow -> 2\n",
+    );
+}
+
+#[test]
+fn an_async_rpc_methods_writes_settle_as_one_wave_with_its_reply() {
+    // The wire turn HOLDS across the handler's await (`turn_async`, the true
+    // at-end cadence): a write before and a write after the suspension
+    // coalesce, so the mirror sees ONE update — the final value — alongside
+    // the reply. (Per-segment settling would leak "working" as its own
+    // update before the reply.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        import std::reactive::Signal;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, FromJson };
+        import std::json::json_codec;
+        import std::rpc::{ local_rpc, duplex_pair, ReactiveServer, ReactiveClient, RemoteSource };
+        import std::time::{ sleep_for, Duration };
+
+        [service(JobClient)]
+        struct Job {
+            [expose] status: Signal<str>,
+        }
+
+        impl Job {
+            [rpc]
+            fun run(self): i32 {
+                self.status.set("working");
+                sleep_for(Duration::millis(10));
+                self.status.set("done");
+                7
+            }
+        }
+
+        fun main() {
+            let job = Job { status = Signal::new("idle") };
+            let transport = local_rpc(job.dispatcher().into_protocol(json_codec()));
+            let (client_end, server_end) = duplex_pair();
+            let channel = ReactiveServer::new(server_end, json_codec()).expose(job.status);
+            let mirror: RemoteSource<str> = ReactiveClient::new(client_end, json_codec()).source(channel);
+            let client = JobClient { transport, codec = json_codec(), status = mirror };
+            let watching = client.status.sub(|s| {
+                print(i"status = {s}");
+            });
+            match client.run() {
+                Ok(let n) => print(i"run -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            watching.dispose();
+        }
+        "#,
+        "status = idle\nstatus = done\nrun -> 7\n",
+    );
+}
+
+#[test]
+fn a_no_arg_rpc_methods_writes_coalesce_in_the_wire_turn() {
+    // The hole the wave pin uncovered, pinned on its own (no async involved):
+    // no-arg methods once took a bare `.on(..)` fast path that skipped the
+    // wire turn entirely, so each write leaked as its own update. Every
+    // method route now goes through `route_block`'s turn — two writes in a
+    // sync no-arg method arrive at the mirror as ONE update, the final value.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::Signal;
+        import std::result::Result::{ self, Ok, Err };
+        import std::json::{ Json, FromJson };
+        import std::json::json_codec;
+        import std::rpc::{ local_rpc, duplex_pair, ReactiveServer, ReactiveClient, RemoteSource };
+
+        [service(FlipClient)]
+        struct Flip {
+            [expose] state: Signal<str>,
+        }
+
+        impl Flip {
+            [rpc]
+            fun flip(self): i32 {
+                self.state.set("mid");
+                self.state.set("final");
+                1
+            }
+        }
+
+        fun main() {
+            let flip = Flip { state = Signal::new("start") };
+            let transport = local_rpc(flip.dispatcher().into_protocol(json_codec()));
+            let (client_end, server_end) = duplex_pair();
+            let channel = ReactiveServer::new(server_end, json_codec()).expose(flip.state);
+            let mirror: RemoteSource<str> = ReactiveClient::new(client_end, json_codec()).source(channel);
+            let client = FlipClient { transport, codec = json_codec(), state = mirror };
+            let watching = client.state.sub(|s| {
+                print(i"state = {s}");
+            });
+            match client.flip() {
+                Ok(let n) => print(i"flip -> {n}"),
+                Err(let error) => print(i"err {error.to_json()}"),
+            }
+            watching.dispose();
+        }
+        "#,
+        "state = start\nstate = final\nflip -> 1\n",
+    );
+}
+
+#[test]
+fn a_hand_written_async_route_dispatches_through_respond() {
+    // The foundation API without the macro: an async handler registered with
+    // `Dispatcher.on` (its `async |..|` parameter), driven through `respond`
+    // directly — the reply envelope encodes the settled outcome.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::json_codec;
+        import std::wire::Frame;
+        import std::rpc::{ Dispatcher, reply, encode_request, RpcOutcome };
+        import std::time::{ sleep_for, Duration };
+
+        fun main() {
+            let protocol = Dispatcher::new()
+                .on("slow", |request| {
+                    sleep_for(Duration::millis(5));
+                    reply(21)
+                })
+                .into_protocol(json_codec());
+            let answer = protocol.respond(encode_request(json_codec(), "slow", []));
+            match answer {
+                Frame::Text(let envelope) => print(i"answer: {envelope}"),
+                Frame::Binary(let bytes) => print("answer: unexpected binary"),
+            }
+        }
+        "#,
+        "answer: {\"Success\":21}\n",
+    );
+}
+
 #[test]
 fn rpc_rejects_a_missing_return() {
     // A void `[rpc]` method has no reply payload to encode — the return must be a
