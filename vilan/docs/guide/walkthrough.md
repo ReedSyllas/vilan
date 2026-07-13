@@ -5,7 +5,7 @@ you can see the layers meet: **Notes** — sign in, a note list that syncs
 live between browser windows, and an editor that saves as you type.
 
 The finished app lives in the repo at
-[`vilan/examples/walkthrough/`](../../examples/walkthrough/), about 500
+[`vilan/examples/walkthrough/`](https://github.com/ReedSyllas/vilan/tree/main/vilan/examples/walkthrough/), about 500
 lines across three packages. Every snippet below is quoted from those
 files, and the test suite builds the app on every run, so this chapter
 can't quietly rot. To run it:
@@ -94,7 +94,7 @@ fun retitle_note(self, token: str, note_id: i32, title: str): i32 {
 
 ## The server: SQL first, then the signal
 
-The server ([`server/src/main.vl`](../../examples/walkthrough/server/src/main.vl))
+The server ([`server/src/main.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/server/src/main.vl))
 opens SQLite, loads the mirror once, and wires each hook. Every write
 hook has the same rhythm — check the session, write SQL, then update the
 signal:
@@ -146,7 +146,7 @@ deep links like `/note/7` load ([Routing](routing.md#deep-links-and-the-server))
 
 ## The client entry: four signals and a mount
 
-[`client/src/main.vl`](../../examples/walkthrough/client/src/main.vl) is
+[`client/src/main.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/client/src/main.vl) is
 the whole wiring diagram:
 
 ```vilan,fragment
@@ -171,7 +171,7 @@ after this line is just views reading those signals.
 
 ## Routes
 
-[`client/src/routes.vl`](../../examples/walkthrough/client/src/routes.vl)
+[`client/src/routes.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/client/src/routes.vl)
 is the enum-router pattern from [Routing](routing.md), at its smallest:
 
 ```vilan,fragment
@@ -188,7 +188,7 @@ plus `parse` and `href` as the inverse pair, and pages that `swap` on
 
 ## The views
 
-[`client/src/views.vl`](../../examples/walkthrough/client/src/views.vl)
+[`client/src/views.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/client/src/views.vl)
 has three layers, each one guide's idea:
 
 **The gate.** The sign-in panel `show`s while the token is empty; the

@@ -4,7 +4,7 @@ The two sharing tools: `std::shared::Shared` (one shared mutable cell) and
 `std::arena::Arena` (stable identities for graphs). When to reach for
 which: [the memory model](../tour/memory-model.md).
 
-## Shared<T>
+## `Shared<T>`
 
 A heap cell two places can hold at once — the escape hatch from
 value-semantics copying.
@@ -40,7 +40,7 @@ fun main() {
 - Copying the `Shared` value itself copies the *handle* — both handles see
   one cell. That's the point.
 
-## Arena<T> + Handle<T>
+## `Arena<T>` + `Handle<T>`
 
 A **generational arena**: insert values, get back small copyable
 `Handle<T>` keys. Handles are plain values — storable in struct fields and

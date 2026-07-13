@@ -1,0 +1,16 @@
+# The rendered docs site (proposal/docs-site.md). `mdbook serve vilan/docs`
+# for live-reload writing; `mdbook build vilan/docs` for the static output
+# in book/ (gitignored). The markdown stays the source of truth — this file
+# only adds navigation, search, and highlighting on top.
+[book]
+title = "The vilan documentation"
+language = "en"
+src = "."
+
+[build]
+build-dir = "book"
+
+[output.html]
+additional-js = ["theme/vilan.js"]
+default-theme = "light"
+preferred-dark-theme = "navy"

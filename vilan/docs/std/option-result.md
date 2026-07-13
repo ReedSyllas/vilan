@@ -15,7 +15,7 @@ import std::result::Result::{ self, Ok, Err };
 (The `{ self, … }` form imports the type *and* its variants, so `Some(x)`
 works unqualified.)
 
-## Option<T>
+## `Option<T>`
 
 ```vilan,fragment
 enum Option<T> { Some(T), None }
@@ -58,7 +58,7 @@ impl Option<(type T, type U)> { fun unzip(self): (Option<T>, Option<U>) }
 
 `str.parse_i32(): Option<i32>` (declared here) is the string→number path.
 
-## Result<T, E>
+## `Result<T, E>`
 
 ```vilan,fragment
 enum Result<T, E> { Ok(T), Err(E) }

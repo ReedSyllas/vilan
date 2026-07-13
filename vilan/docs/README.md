@@ -21,6 +21,14 @@ is about *using* vilan. Design history and rationale live in
   teaches; the spec defines; where they disagree, the spec wins.
 - **[Appendix](appendix/)** — the [error index](appendix/errors.md) ("you saw this message, go here"), the [gotchas checklist](appendix/gotchas.md), and the [glossary](appendix/glossary.md).
 
+## Reading this as a website
+
+The book renders with [mdBook](https://rust-lang.github.io/mdBook/):
+`mdbook serve vilan/docs` gives a local live-reloading site with search
+and a sidebar (`cargo install mdbook` once). Pushes to `main` publish it
+to GitHub Pages automatically. Everything also reads fine as plain files
+— the site adds navigation, it doesn't replace the markdown.
+
 ## Conventions
 
 - Examples are complete programs unless explicitly labelled a fragment —

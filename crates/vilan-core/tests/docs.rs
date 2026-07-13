@@ -44,6 +44,10 @@ fn collect_markdown_files(dir: &Path, into: &mut Vec<PathBuf>) {
     entries.sort();
     for path in entries {
         if path.is_dir() {
+            // The rendered-site build output is not content.
+            if path.file_name().is_some_and(|name| name == "book") {
+                continue;
+            }
             collect_markdown_files(&path, into);
         } else if path.extension().is_some_and(|extension| extension == "md") {
             into.push(path);
@@ -170,4 +174,50 @@ fn every_doc_example_compiles() {
     );
     // The gate is only meaningful while examples exist.
     assert!(compiled > 0, "no compilable examples found in docs/");
+}
+
+/// The rendered site's sidebar (proposal/docs-site.md §5): every docs page
+/// appears in SUMMARY.md, and every SUMMARY.md entry points at a real file —
+/// a page added without nav wiring, or moved without fixing it, fails here.
+#[test]
+fn the_sidebar_covers_every_page() {
+    let root = docs_root();
+    let summary_path = root.join("SUMMARY.md");
+    let summary = std::fs::read_to_string(&summary_path).expect("read SUMMARY.md");
+
+    let mut listed = std::collections::BTreeSet::new();
+    for capture in summary.split("](").skip(1) {
+        let Some(target) = capture.split(')').next() else {
+            continue;
+        };
+        if target.ends_with(".md") {
+            listed.insert(target.to_string());
+        }
+    }
+
+    let mut files = Vec::new();
+    collect_markdown_files(&root, &mut files);
+    let mut missing_from_summary = Vec::new();
+    for file in &files {
+        let relative = file
+            .strip_prefix(&root)
+            .expect("docs file under docs root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        // The build output and the sidebar itself are not pages.
+        if relative.starts_with("book/") || relative == "SUMMARY.md" {
+            continue;
+        }
+        if !listed.remove(&relative) {
+            missing_from_summary.push(relative);
+        }
+    }
+    assert!(
+        missing_from_summary.is_empty(),
+        "pages missing from SUMMARY.md (add them to the sidebar): {missing_from_summary:?}"
+    );
+    assert!(
+        listed.is_empty(),
+        "SUMMARY.md entries with no file behind them: {listed:?}"
+    );
 }

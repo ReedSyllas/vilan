@@ -8,3 +8,4 @@ vilan/examples/**/dist/
 
 # The benchmark bundle (`vilan run vilan/benchmarks` writes it beside the source).
 vilan/benchmarks/src/main.js
+vilan/docs/book/

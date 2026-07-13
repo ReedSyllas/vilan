@@ -3,7 +3,7 @@
 The container types: `List` (built in), `std::map::Map`, `std::set::Set`,
 `std::range::Range`, and the `std::iterator` protocol underneath `for`.
 
-## List<T>
+## `List<T>`
 
 Built in, with literal syntax: `[1, 2, 3]`. An empty literal needs a type
 annotation (`let xs: List<str> = [];`).
@@ -39,7 +39,7 @@ fun main() {
 }
 ```
 
-## Map<K, V>
+## `Map<K, V>`
 
 ```vilan,fragment
 impl Map<type K, type V> {
@@ -59,7 +59,7 @@ Keys compare by host semantics (a JS `Map` underneath) — scalar keys
 (`i32`, `str`) behave as expected; **struct keys are a recorded gap** (two
 equal struct values are two different keys). Key by an id instead.
 
-## Set<T>
+## `Set<T>`
 
 ```vilan,fragment
 impl Set<type T> {
