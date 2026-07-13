@@ -51,21 +51,22 @@ for the explicit keywords when you *don't* want to wait. The
 
 ## A quick phrasebook
 
-| You write in JS/TS | You write in vilan |
-|---|---|
-| `function f(x) { … }` | `fun f(x: i32): i32 { … }` |
-| `const x = …` / `let x = …` | `let x = …` / `mut x = …` |
-| `x === y` | `x == y` (type-checked equality) |
-| `` `Hello ${name}` `` | `i"Hello {name}"` |
-| `[1, 2, 3]` | `[1, 2, 3]` (a `List<i32>`) |
-| `{ x: 1, y: 2 }` | a `struct` value: `Point { x = 1, y = 2 }` |
-| `switch` / discriminated unions | `enum` + `match` |
-| `x?.field` | `x?.field` (on `Option`, and it's type-checked) |
-| `null` / `undefined` | `Option<T>` (`Some(v)` / `None`) |
-| `throw` / `try` / `catch` | `Result<T, E>` + `!` to propagate |
-| `await fetchThing()` | `fetch_thing()` (awaiting is implicit) |
-| `class` with methods | `struct` + `impl` block |
-| interfaces / duck typing | `trait`s, checked at compile time |
+| You write in JS/TS              | You write in vilan                              |
+| ------------------------------- | ----------------------------------------------- |
+| `function f(x) { … }`           | `fun f(x: i32): i32 { … }`                      |
+| `const x = …` / `let x = …`     | `let x = …` / `mut x = …`                       |
+| `x === y`                       | `x == y` (type-checked equality)                |
+| `` `Hello ${name}` ``           | `i"Hello {name}"`                               |
+| `[1, 2, 3]`                     | `[1, 2, 3]` (a `List<i32>`)                     |
+| `{ x: 1, y: 2 }`                | a `struct` value: `Point { x = 1, y = 2 }`      |
+| `(x, y) => x + y`               | `\|x, y\| x + y`                                |
+| `switch` / discriminated unions | `enum` + `match`                                |
+| `x?.field`                      | `x?.field` (on `Option`, and it's type-checked) |
+| `null` / `undefined`            | `Option<T>` (`Some(v)` / `None`)                |
+| `throw` / `try` / `catch`       | `Result<T, E>` + `!` to propagate               |
+| `await fetchThing()`            | `fetch_thing()` (awaiting is implicit)          |
+| `class` with methods            | `struct` + `impl` block                         |
+| interfaces / duck typing        | `trait`s, checked at compile time               |
 
 ## Things that look the same and mostly are
 
