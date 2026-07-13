@@ -48,11 +48,11 @@ fun main() {
 	print((0i8 - 5i8).abs());
 	print(3i16.pow(2i16));
 	print(200u16.min(90u16));
-	print(7u64.max(9u64));
+	print(7u53.max(9u53));
 	print(7.rem(3));
 	print((0 - 7).rem(3));
 	print(250u8.rem(7u8));
-	print(9i64.rem(4i64));
+	print(9i53.rem(4i53));
 	print(3000000000u32.rem(7u32));
 
 	// f32 family.

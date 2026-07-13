@@ -60,8 +60,8 @@ value.is_null(): bool
 The codec-agnostic serialization protocol under `derive(Wire)` and rpc:
 
 - `trait Serialize` / `trait Deserialize` — visitor-style value
-  description (`begin_struct`/`field`/`str_value`/`i64_value`/…). The
-  wire scalars: `str`, `bool`, `i32`, `u32`, `i64`, `f64` (+ lists,
+  description (`begin_struct`/`field`/`str_value`/`i53_value`/…). The
+  wire scalars: `str`, `bool`, `i32`, `u32`, `i53`, `f64` (+ lists,
   options, structs, enum variants).
 - `Frame` — one encoded message.
 - `Codec` — a matched writer/reader pair: `json_codec()` (`std::json`,
@@ -107,7 +107,7 @@ fun decode_binary<T: Wire>(bytes: Bytes): T
 struct BinaryWriter { … }   // write_byte / write_i32 / write_str / finish(): Bytes
 ```
 
-Same model as JSON, compact layout. `i64` values ride as f64 bit patterns —
+Same model as JSON, compact layout. `i53` values ride as f64 bit patterns —
 exact to 2^53.
 
 ## Base64 (`std::base64`)

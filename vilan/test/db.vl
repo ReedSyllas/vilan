@@ -22,9 +22,9 @@ fun main() {
 		None => print("no rows"),
 	}
 
-	// An i64-wide INTEGER column (epoch millis outgrow i32 — `big_integer`).
+	// An i53-wide INTEGER column (epoch millis outgrow i32 — `big_integer`).
 	db.exec("CREATE TABLE stamp (id INTEGER PRIMARY KEY, at INTEGER)");
-	db.prepare("INSERT INTO stamp (at) VALUES (?)").run([1720656000000i64]);
+	db.prepare("INSERT INTO stamp (at) VALUES (?)").run([1720656000000i53]);
 	match db.prepare("SELECT at FROM stamp").first([]) {
 		Some(let row) => print(i"stamp at {row.big_integer("at")}"),
 		None => print("no stamp"),

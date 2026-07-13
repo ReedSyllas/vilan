@@ -24,7 +24,7 @@ fun main() {
 	)");
 
 	let id = db.prepare("INSERT INTO task (name, created_at) VALUES (?, ?)")
-		.run(["write docs", 1720656000000i64]);
+		.run(["write docs", 1720656000000i53]);
 	print(id);
 
 	match db.prepare("SELECT * FROM task WHERE id = ?").first([id]) {
@@ -48,7 +48,7 @@ The surface:
   an INSERT) / change info.
 - `statement.all(params): List<Row>`, `statement.first(params): Option<Row>`.
 - Row accessors by column name: `text`, `integer` (i32), `big_integer`
-  (i64 — use for epoch-millis timestamps; they outgrow i32), `real` (f64),
+  (i53 — use for epoch-millis timestamps; they outgrow i32), `real` (f64),
   `is_null`.
 - `:memory:` as the path gives an in-memory database — handy in tests.
 

@@ -5,7 +5,7 @@
 //
 // `now()` reads the host clock — an impure capability, so it is NOT
 // const-evaluable (a `const now()` is a compile error, correctly). Both
-// types are wire-able: a timestamp is plain data (one i64), so it can ride
+// types are wire-able: a timestamp is plain data (one i53), so it can ride
 // rpc payloads and mirrors.
 
 import pkg::promise::Promise;
@@ -22,7 +22,7 @@ external fun now_millis(): f64;
 
 // The current moment, typed.
 fun now(): Instant {
-	Instant { millis = now_millis().as_i64() }
+	Instant { millis = now_millis().as_i53() }
 }
 
 // --- Instants and durations ---------------------------------------------------
@@ -31,14 +31,14 @@ fun now(): Instant {
 // it, ship it over the wire, subtract two for a `Duration`.
 [derive(Wire, PartialEq)]
 struct Instant {
-	millis: i64,
+	millis: i53,
 }
 
 // A signed span of time in milliseconds (`later.since(earlier)` is negative
 // when `later` is actually earlier).
 [derive(Wire, PartialEq)]
 struct Duration {
-	millis: i64,
+	millis: i53,
 }
 
 impl Instant {
@@ -73,73 +73,73 @@ impl Instant with PartialOrd {
 }
 
 impl Duration {
-	fun millis(count: i64): Duration {
+	fun millis(count: i53): Duration {
 		Duration { millis = count }
 	}
 
-	fun seconds(count: i64): Duration {
-		Duration { millis = count * 1000i64 }
+	fun seconds(count: i53): Duration {
+		Duration { millis = count * 1000i53 }
 	}
 
-	fun minutes(count: i64): Duration {
-		Duration { millis = count * 60000i64 }
+	fun minutes(count: i53): Duration {
+		Duration { millis = count * 60000i53 }
 	}
 
-	fun hours(count: i64): Duration {
-		Duration { millis = count * 3600000i64 }
+	fun hours(count: i53): Duration {
+		Duration { millis = count * 3600000i53 }
 	}
 
-	fun days(count: i64): Duration {
-		Duration { millis = count * 86400000i64 }
+	fun days(count: i53): Duration {
+		Duration { millis = count * 86400000i53 }
 	}
 
-	// Whole units, truncated toward zero (i64 division).
-	fun as_seconds(self): i64 {
-		self.millis / 1000i64
+	// Whole units, truncated toward zero (i53 division).
+	fun as_seconds(self): i53 {
+		self.millis / 1000i53
 	}
 
-	fun as_minutes(self): i64 {
-		self.millis / 60000i64
+	fun as_minutes(self): i53 {
+		self.millis / 60000i53
 	}
 
-	fun as_hours(self): i64 {
-		self.millis / 3600000i64
+	fun as_hours(self): i53 {
+		self.millis / 3600000i53
 	}
 
-	fun as_days(self): i64 {
-		self.millis / 86400000i64
+	fun as_days(self): i53 {
+		self.millis / 86400000i53
 	}
 
 	// A coarse human rendering: the two largest non-zero units — "2h 3m",
 	// "5m 30s", "980ms", "0ms" — with a leading "-" for a negative span.
 	fun describe(self): str {
-		let sign = if self.millis < 0i64 { "-" } else { "" };
-		let magnitude = if self.millis < 0i64 { 0i64 - self.millis } else { self.millis };
+		let sign = if self.millis < 0i53 { "-" } else { "" };
+		let magnitude = if self.millis < 0i53 { 0i53 - self.millis } else { self.millis };
 		let parts = split_units(magnitude);
 		sign + parts
 	}
 }
 
-fun split_units(millis: i64): str {
-	let days = millis / 86400000i64;
-	let hours = (millis / 3600000i64) % 24i64;
-	let minutes = (millis / 60000i64) % 60i64;
-	let seconds = (millis / 1000i64) % 60i64;
-	if days > 0i64 {
+fun split_units(millis: i53): str {
+	let days = millis / 86400000i53;
+	let hours = (millis / 3600000i53) % 24i53;
+	let minutes = (millis / 60000i53) % 60i53;
+	let seconds = (millis / 1000i53) % 60i53;
+	if days > 0i53 {
 		join_units(i"{days}d", hours, "h")
-	} else if hours > 0i64 {
+	} else if hours > 0i53 {
 		join_units(i"{hours}h", minutes, "m")
-	} else if minutes > 0i64 {
+	} else if minutes > 0i53 {
 		join_units(i"{minutes}m", seconds, "s")
-	} else if seconds > 0i64 {
+	} else if seconds > 0i53 {
 		i"{seconds}s"
 	} else {
 		i"{millis}ms"
 	}
 }
 
-fun join_units(head: str, count: i64, unit: str): str {
-	if count > 0i64 {
+fun join_units(head: str, count: i53, unit: str): str {
+	if count > 0i53 {
 		i"{head} {count}{unit}"
 	} else {
 		head
@@ -169,7 +169,7 @@ impl Duration with PartialOrd {
 external struct HostDate;
 
 [extern(new, "Date")]
-external fun host_date(millis: i64): HostDate;
+external fun host_date(millis: i53): HostDate;
 
 impl HostDate {
 	[extern(method, "toISOString")]

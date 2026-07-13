@@ -74,7 +74,7 @@ function serializer(self) {
 	}, (value2) => {
 		return u32_value(self, value2);
 	}, (value2) => {
-		return i64_value(self, value2);
+		return i53_value(self, value2);
 	}, (value2) => {
 		return f64_value(self, value2);
 	}, (value2) => {
@@ -148,7 +148,7 @@ function i32_value(self, value2) {
 function u32_value(self, value2) {
 	value(self, "" + value2);
 }
-function i64_value(self, value2) {
+function i53_value(self, value2) {
 	value(self, "" + value2);
 }
 function f64_value(self, value2) {
@@ -238,7 +238,7 @@ function deserializer(self) {
 	}, () => {
 		return u32_value2(self);
 	}, () => {
-		return i64_value2(self);
+		return i53_value2(self);
 	}, () => {
 		return f64_value2(self);
 	}, () => {
@@ -362,7 +362,7 @@ function u32_value2(self) {
 	}
 	return $L;
 }
-function i64_value2(self) {
+function i53_value2(self) {
 	const value2 = take(self);
 	let $M = null;
 	if (ok(self)) {
@@ -442,7 +442,7 @@ function end_struct3(self) {
 function str_value3(self, value2) {
 	self[9](value2);
 }
-function i64_value3(self, value2) {
+function i53_value3(self, value2) {
 	self[12](value2);
 }
 function begin_struct4(self) {
@@ -457,7 +457,7 @@ function end_struct4(self) {
 function str_value4(self) {
 	return self[10]();
 }
-function i64_value4(self) {
+function i53_value4(self) {
 	return self[13]();
 }
 function set(self, index, value2) {
@@ -552,7 +552,7 @@ function serializer2(self) {
 	}, (value2) => {
 		return u32_value3(self, value2);
 	}, (value2) => {
-		return i64_value5(self, value2);
+		return i53_value5(self, value2);
 	}, (value2) => {
 		return f64_value3(self, value2);
 	}, (value2) => {
@@ -595,7 +595,7 @@ function i32_value3(self, value2) {
 function u32_value3(self, value2) {
 	write_u32(self, value2);
 }
-function i64_value5(self, value2) {
+function i53_value5(self, value2) {
 	write_f64(self, Number(value2));
 }
 function f64_value3(self, value2) {
@@ -727,7 +727,7 @@ function deserializer2(self) {
 	}, () => {
 		return u32_value4(self);
 	}, () => {
-		return i64_value6(self);
+		return i53_value6(self);
 	}, () => {
 		return f64_value4(self);
 	}, () => {
@@ -787,8 +787,8 @@ function i32_value4(self) {
 function u32_value4(self) {
 	return read_u32(self);
 }
-function i64_value6(self) {
-	return as_i64(read_f64(self));
+function i53_value6(self) {
+	return as_i53(read_f64(self));
 }
 function f64_value4(self) {
 	return read_f64(self);
@@ -824,7 +824,7 @@ function binary_codec() {
 	} ];
 }
 function now() {
-	return [ as_i64(Date.now()) ];
+	return [ as_i53(Date.now()) ];
 }
 function since(self, earlier) {
 	return [ self[0] - earlier[0] ];
@@ -972,7 +972,7 @@ function as_i32(self) {
 	const widened = Number(self);
 	return Number(fold_signed(widened, 4294967296, 2147483648));
 }
-function as_i64(self) {
+function as_i53(self) {
 	const widened = self;
 	return Number(Math.trunc(widened));
 }
@@ -995,7 +995,7 @@ function $z(self) {
 	return self.length === 0;
 }
 function $S(self, serializer3) {
-	i64_value3(serializer3, self);
+	i53_value3(serializer3, self);
 }
 function $T(self, serializer3) {
 	str_value3(serializer3, self);
@@ -1016,7 +1016,7 @@ function $P(codec, value2) {
 	return finish2();
 }
 function $W(deserializer3) {
-	return i64_value4(deserializer3);
+	return i53_value4(deserializer3);
 }
 function $X(deserializer3) {
 	return str_value4(deserializer3);

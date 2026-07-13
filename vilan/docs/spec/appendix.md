@@ -26,7 +26,7 @@ top-tier-only forms: `const expr` and struct initializers (§3.8).
 ## A.2 Reserved words
 
 ```text
-async  await  borrows  const  else    enum   export  external
+async  await  borrows  const else    enum   export  external
 for    fun    if       impl  import  in     is      jump
 let    macro  match    mod   mut     null   own     ret
 struct trait  type     use   with    true   false
@@ -39,7 +39,8 @@ Contextual (identifier everywhere else): `context`, `void`, `self`,
 
 ## A.3 Literal suffixes
 
-`i8 i16 i32 i64 u8 u16 u32 u64 f f32 f64 n` — §2.3. Unsuffixed: integer
+`i8 i16 i32 i53 u8 u16 u32 u53 f f32 f64 n` — §2.3 (unknown suffixes
+error; `i64`/`u64` were renamed to `i53`/`u53`). Unsuffixed: integer
 → `i32`, fractional → `f64`.
 
 ## A.4 Lang items

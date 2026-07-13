@@ -54,7 +54,7 @@ external fun column_text(row: Row, name: str): str;
 external fun column_integer(row: Row, name: str): i32;
 
 [extern("__db_column")]
-external fun column_big_integer(row: Row, name: str): i64;
+external fun column_big_integer(row: Row, name: str): i53;
 
 [extern("__db_column")]
 external fun column_real(row: Row, name: str): f64;
@@ -65,7 +65,7 @@ external fun column_is_null(row: Row, name: str): bool;
 impl Statement {
 	// Executes with `parameters` bound positionally; returns the inserted
 	// rowid (0 when the statement inserts nothing). Rowids exceed i32 only
-	// past 2^31 rows — revisit alongside real i64 needs.
+	// past 2^31 rows — revisit alongside real i53 needs.
 	fun run(self, parameters: List<any>): i32 {
 		statement_run(self, parameters)
 	}
@@ -89,10 +89,10 @@ impl Row {
 		column_integer(self, name)
 	}
 
-	// An INTEGER column at i64 width — timestamps (epoch millis), large ids.
-	// Exact for values to 2^53 (the i64 representation); a column beyond that
+	// An INTEGER column at i53 width — timestamps (epoch millis), large ids.
+	// Exact for values to 2^53 (the i53 representation); a column beyond that
 	// arrives from `node:sqlite` as a BigInt and is out of v1's reach.
-	fun big_integer(self, name: str): i64 {
+	fun big_integer(self, name: str): i53 {
 		column_big_integer(self, name)
 	}
 

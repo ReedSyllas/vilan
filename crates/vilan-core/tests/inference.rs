@@ -6363,8 +6363,8 @@ fn sized_numeric_literals_type_and_run() {
             let b = 200u8;
             let c = 5i16;
             let d = 60000u16;
-            let e = 5i64;
-            let f = 5u64;
+            let e = 5i53;
+            let f = 5u53;
             let g = 2.5f32;
             let allowed = 128i8;
             let expected: u8 = 7;
@@ -6373,7 +6373,7 @@ fn sized_numeric_literals_type_and_run() {
             print(b);
             print(c + c);
             print(d);
-            print(e + f.as_i64());
+            print(e + f.as_i53());
             print(g);
             print(allowed);
             print(expected);
@@ -6441,10 +6441,10 @@ fn an_i32_literal_out_of_range_errors() {
 }
 
 #[test]
-fn an_i64_literal_beyond_the_f64_window_errors() {
+fn an_i53_literal_beyond_the_f64_window_errors() {
     assert_fails_spanning(
-        "fun main() { let x = 9007199254740993i64; }\nmain();\n",
-        "9007199254740993i64",
+        "fun main() { let x = 9007199254740993i53; }\nmain();\n",
+        "9007199254740993i53",
         "use `BigInt` for larger values",
     );
 }
@@ -6488,7 +6488,7 @@ fn integer_division_truncates_toward_zero() {
             print(-7 / 2);
             print(7u32 / 2u32);
             print(100u8 / 3u8);
-            print(100i64 / 8i64);
+            print(100i53 / 8i53);
             mut compound = 9;
             compound /= 2;
             print(compound);
@@ -6519,8 +6519,8 @@ fn numeric_conversions_fold_into_the_target_width() {
             print((3.9).as_i32());
             print((-3.9).as_i32());
             print((200u8).as_f64() + 0.5);
-            print((2.5f32).as_i64());
-            print((5i64).as_u64());
+            print((2.5f32).as_i53());
+            print((5i53).as_u53());
         }
 
         main();
@@ -8401,7 +8401,7 @@ fn rem_is_truncated_remainder_across_the_families() {
             print((0 - 7).rem(3));
             print(7.5f.rem(2f));
             print(250u8.rem(7u8));
-            print(9i64.rem(4i64));
+            print(9i53.rem(4i53));
         }
         main();
         "#,
@@ -8419,7 +8419,7 @@ fn sized_types_carry_the_applicable_math_family() {
             print((0i8 - 5i8).abs());
             print(3i16.pow(2i16));
             print(200u16.min(90u16));
-            print(7u64.max(9u64));
+            print(7u53.max(9u53));
             print(2f32.pow(3f32));
             print(2.25f32.sqrt());
         }
@@ -9641,7 +9641,7 @@ fn a_macro_emits_source_from_a_triple_quoted_string() {
 // --- H5: the `%` remainder operator -------------------------------------------
 // Truncated remainder (the dividend's sign), like Rust and JS agree on. Exact
 // for every integer type (unlike `/`, `%` needs no trunc wrap: an integer
-// remainder is always representable); BigInt for i64/u64; overloadable through
+// remainder is always representable); BigInt for i53/u53; overloadable through
 // `std::operators::Rem` like the arithmetic four.
 
 #[test]
@@ -9675,14 +9675,14 @@ fn remainder_on_floats() {
 }
 
 #[test]
-fn remainder_on_i64_is_exact() {
-    // i64 is f64-repped (F2 profiled trunc over BigInt); `%` of two in-range
+fn remainder_on_i53_is_exact() {
+    // i53 is f64-repped (F2 profiled trunc over BigInt); `%` of two in-range
     // integers is exact with no wrap needed.
     assert_compiles_and_runs(
         r#"
         import std::print;
         fun main() {
-            print(9000000000000000i64 % 7i64);
+            print(9000000000000000i53 % 7i53);
         }
         main();
         "#,
@@ -11964,7 +11964,7 @@ fn an_imported_function_coerces_across_modules() {
     );
 }
 
-// --- K5: `std::time` + i64 on the wire (kolt-migration.md §2.5) --------------
+// --- K5: `std::time` + i53 on the wire (kolt-migration.md §2.5) --------------
 //
 // The runtime surface (arithmetic, describe, ISO, codec round-trips, sleep) is
 // pinned by the corpus (`vilan/test/time.vl`, node-run; interpreter-excluded —
@@ -12004,11 +12004,11 @@ fn time_is_platform_neutral() {
         import std::time::{ now, sleep_for, Instant, Duration };
 
         async fun main() {
-            let anchor = Instant { millis = 0i64 };
+            let anchor = Instant { millis = 0i53 };
             let age = now().since(anchor) + Duration::minutes(1);
             let _rendered = age.describe();
             let _shifted = now() - Duration::hours(1) + Duration::seconds(30);
-            sleep_for(Duration::millis(1i64));
+            sleep_for(Duration::millis(1i53));
         }
         "#;
     assert_compiles(source);
@@ -12016,8 +12016,8 @@ fn time_is_platform_neutral() {
 }
 
 #[test]
-fn i64_fields_are_wire() {
-    // The K5 blocker, closed: `i64` is a Wire scalar (its own serializer
+fn i53_fields_are_wire() {
+    // The K5 blocker, closed: `i53` is a Wire scalar (its own serializer
     // channel), so timestamps and row ids ride derives directly — including
     // nested through `Instant` and `List`/`Option`.
     assert_compiles(
@@ -12027,18 +12027,18 @@ fn i64_fields_are_wire() {
 
         [derive(Wire)]
         struct Task {
-            id: i64,
+            id: i53,
             created_at: Instant,
-            due: Option<i64>,
-            checkpoints: List<i64>,
+            due: Option<i53>,
+            checkpoints: List<i53>,
         }
 
         fun main() {
             let _task = Task {
-                id = 9007199254740991i64,
-                created_at = Instant { millis = 0i64 },
+                id = 9007199254740991i53,
+                created_at = Instant { millis = 0i53 },
                 due = Option::None,
-                checkpoints = [1i64, 2i64],
+                checkpoints = [1i53, 2i53],
             };
         }
         "#,
@@ -12046,8 +12046,8 @@ fn i64_fields_are_wire() {
 }
 
 #[test]
-fn i64_signatures_are_rpc_legal() {
-    // The `[rpc]` Wire-signature rule shares the scalar set: i64 parameters
+fn i53_signatures_are_rpc_legal() {
+    // The `[rpc]` Wire-signature rule shares the scalar set: i53 parameters
     // and returns are legal.
     assert_compiles(
         r#"
@@ -12055,18 +12055,18 @@ fn i64_signatures_are_rpc_legal() {
 
         [service(TickClient)]
         struct Ticker {
-            [expose] latest: Signal<i64>,
+            [expose] latest: Signal<i53>,
         }
 
         impl Ticker {
             [rpc]
-            fun record(self, at: i64): i64 {
+            fun record(self, at: i53): i53 {
                 at
             }
         }
 
         fun main() {
-            let _ticker = Ticker { latest = Signal::new(0i64) };
+            let _ticker = Ticker { latest = Signal::new(0i53) };
         }
         "#,
     );
@@ -12080,10 +12080,10 @@ fn non_wire_fields_still_fail() {
         r#"
         [derive(Wire)]
         struct Holder {
-            callback: |i64| i64,
+            callback: |i53| i53,
         }
         "#,
-        "|i64| i64",
+        "|i53| i53",
         "which is not Wire",
     );
 }
@@ -12557,13 +12557,88 @@ fn an_integer_compared_to_a_string_is_rejected() {
 }
 
 #[test]
-#[ignore = "B24: i64 < i32 compiles though the same mix errors under arithmetic"]
+#[ignore = "B24: i53 < i32 compiles though the same mix errors under arithmetic"]
 fn mixed_width_integer_comparison_is_rejected() {
     assert_fails(
         r#"
         fun main() {
-            let _x = 1i64 < 3;
+            let _x = 1i53 < 3;
         }
         "#,
+    );
+}
+
+// --- The i53/u53 rename (numeric-types.md §8) --------------------------------
+//
+// The f64-backed wide integers are named for the precision they deliver
+// (±2^53), and unknown numeric suffixes are ERRORS rather than silently
+// typing as unsuffixed (`5q` once compiled as an i32).
+
+#[test]
+fn an_unknown_numeric_suffix_errors() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _x = 5q;
+        }
+        "#,
+        "5q",
+        "unknown numeric suffix `q`",
+    );
+}
+
+#[test]
+fn a_fractional_literal_with_an_unknown_suffix_errors() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _x = 2.5q;
+        }
+        "#,
+        "2.5q",
+        "unknown numeric suffix `q`",
+    );
+}
+
+#[test]
+fn the_old_i64_suffix_errors_with_a_rename_hint() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _stamp = 1000i64;
+        }
+        "#,
+        "1000i64",
+        "`i64` was renamed to `i53`",
+    );
+}
+
+#[test]
+fn the_old_u64_suffix_errors_with_a_rename_hint() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _wide = 1000u64;
+        }
+        "#,
+        "1000u64",
+        "`u64` was renamed to `u53`",
+    );
+}
+
+#[test]
+fn i53_suffixed_literals_compile_and_run() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let wide = 9007199254740992i53;
+            print(wide);
+            print((3.9).as_i53());
+            print((5i53).as_u53());
+        }
+        "#,
+        "9007199254740992\n3\n5\n",
     );
 }

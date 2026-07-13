@@ -12,7 +12,7 @@ import std::operators::Div;
 struct Packet {
 	kind: u8,
 	sequence: u16,
-	stamp: i64,
+	stamp: i53,
 }
 
 // Generic dispatch reaches a sized type's operator impls (the trait bodies
@@ -26,7 +26,7 @@ fun main() {
 	// Literals across the family, hex included.
 	let byte = 0xFFu8;
 	let short = 60000u16;
-	let wide = 9007199254740992i64;
+	let wide = 9007199254740992i53;
 	let ratio = 2.5f32;
 	print(byte);
 	print(short);
@@ -55,17 +55,17 @@ fun main() {
 	print((70000).as_u16());
 	print(byte.as_f64() + 0.25);
 	print(wide.as_i32());
-	print((2.5f32).as_i64());
+	print((2.5f32).as_i53());
 
 	// Same-width arithmetic and comparison stay native.
 	let doubled = 100u8 + 100u8;
 	print(doubled);
-	print(100i64 * 3i64);
+	print(100i53 * 3i53);
 	print(5u16 < 6u16);
 
 	// The family carries Debug and Json like every scalar.
 	print(200u8.debug());
-	let packet = Packet { kind = 7u8, sequence = 300u16, stamp = 5i64 };
+	let packet = Packet { kind = 7u8, sequence = 300u16, stamp = 5i53 };
 	print(packet.to_json());
 }
 

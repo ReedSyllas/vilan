@@ -1,5 +1,5 @@
 // `std::time` (K5): instants, durations, unit arithmetic, `describe`, ISO
-// rendering, the wire-ability of both types (i64 rides both codecs), and
+// rendering, the wire-ability of both types (i53 rides both codecs), and
 // `sleep_for`. Everything printed is deterministic — the live clock is only
 // sanity-checked against a claim that holds for any working clock.
 
@@ -12,13 +12,13 @@ import std::result::Result::{ self, Ok, Err };
 
 [derive(Wire, PartialEq)]
 struct Stamp {
-	at: i64,
+	at: i53,
 	label: str,
 }
 
 async fun main() {
 	// Instants: epoch-anchored arithmetic is deterministic.
-	let epoch = Instant { millis = 0i64 };
+	let epoch = Instant { millis = 0i53 };
 	print(epoch.to_iso());
 	let later = epoch + Duration::hours(2) + Duration::minutes(5);
 	print(later.since(epoch).as_minutes());
@@ -34,17 +34,17 @@ async fun main() {
 	print(Duration::minutes(5).describe());
 	print((Duration::seconds(90) + Duration::millis(500)).describe());
 	print(Duration::millis(980).describe());
-	print(Duration::millis(0i64).describe());
-	print((Duration::seconds(0i64) - Duration::hours(3)).describe());
+	print(Duration::millis(0i53).describe());
+	print((Duration::seconds(0i53) - Duration::hours(3)).describe());
 	print(Duration::seconds(59).as_minutes());
 	print(Duration::hours(3).gt(Duration::minutes(179)));
 
 	// The live clock: a claim that is true for any working clock (the value
 	// itself is nondeterministic, so only the claim prints).
-	print(now().since(epoch).as_days() > 19000i64);
+	print(now().since(epoch).as_days() > 19000i53);
 
-	// i64 rides the wire — both codecs, round-tripped exactly.
-	let stamp = Stamp { at = 1720656000000i64, label = "k5" };
+	// i53 rides the wire — both codecs, round-tripped exactly.
+	let stamp = Stamp { at = 1720656000000i53, label = "k5" };
 	let json_back: Result<Stamp, str> = decode(json_codec(), encode(json_codec(), stamp));
 	match json_back {
 		Ok(let value) => print(value == stamp),
@@ -63,7 +63,7 @@ async fun main() {
 		Err(let reason) => print(reason),
 	}
 
-	sleep_for(Duration::millis(10i64));
+	sleep_for(Duration::millis(10i53));
 	print("slept");
 }
 main();

@@ -14,7 +14,7 @@ fun main() {
 	let name = "Ada";
 	mut count = 0;
 	count += 1;
-	let wide: i64 = 1000i64;
+	let wide: i53 = 1000i53;
 	print(i"{name} {count} {wide}");
 }
 ```
@@ -26,9 +26,12 @@ Everything is a **value** — a binding of an existing value is a copy (see
 
 - `bool` — `true` / `false`.
 - `str` — immutable strings.
-- Sized integers: `i8 i16 i32 i64 u8 u16 u32 u64`. A bare integer literal
+- Sized integers: `i8 i16 i32 i53 u8 u16 u32 u53`. A bare integer literal
   is `i32`; other widths take a suffix (`0xFFu8`, `60000u16`,
-  `9007199254740992i64`). Literals are range-checked at compile time.
+  `9007199254740992i53`). Literals are range-checked at compile time.
+  The wide types are named `i53`/`u53` — not `i64` — because they are
+  f64-backed and exact over ±2^53 (JavaScript's safe integers); for more,
+  use `BigInt`.
 - Floats: `f64` (bare `2.5`, or suffix `f`) and `f32` (`2.5f32`).
 - `BigInt` — arbitrary precision, `n` suffix (`7n`).
 
@@ -49,8 +52,8 @@ fun main() {
 }
 ```
 
-**Trap**: an `i64` in a binary operation needs a suffixed literal on the
-other side — `stamp + 1000i64`, not `stamp + 1000` (the bare literal is
+**Trap**: an `i53` in a binary operation needs a suffixed literal on the
+other side — `stamp + 1000i53`, not `stamp + 1000` (the bare literal is
 `i32`).
 
 ## Strings and interpolation

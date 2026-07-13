@@ -8,7 +8,7 @@ The type forms (grammar §3.9) denote:
   (`Task`, `Option<i32>`, `Map<str, List<i32>>`). Two nominal types are
   equal iff they name the same declaration and their arguments are equal
   — there is no structural typing of nominals.
-- **Primitives** — `bool`, `str`, `i8 i16 i32 i64 u8 u16 u32 u64`,
+- **Primitives** — `bool`, `str`, `i8 i16 i32 i53 u8 u16 u32 u53`,
   `f32 f64`, `BigInt`. Declared in std as external structs; nominally
   distinct (no implicit numeric conversions, §5.8).
 - **Tuples** — `(T, U, …)`; structural: equal iff element-wise equal.
@@ -202,7 +202,7 @@ Normative rejection cases (each is a compile error):
 - A `match` whose legs' types don't unify (a leg ending in `ret` is not
   divergent for unification, and a `panic` leg types `any` — annotate
   the surrounding binding when mixing).
-- An `i64`/`i32` operand mix (no implicit widening — suffix the
+- An `i53`/`i32` operand mix (no implicit widening — suffix the
   literal).
 
 *Implementation note (tracked gaps): a closure bound to a local and

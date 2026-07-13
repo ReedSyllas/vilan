@@ -168,3 +168,39 @@ conversion folds are spelled with a truncating quotient
 - **`vilan/outdated/` pruned** with this slice (F2's note): every sketch
   there predates shipped features (numbers.vl → this proposal; context,
   signals, lifetime, http-server, ui-framework → shipped subsystems).
+
+## 8. Addendum (2026-07-12): `i64`/`u64` renamed to `i53`/`u53`
+
+**Decision** (user, 2026-07-12): the f64-backed wide integers are named for
+the precision they deliver, not the width they don't. `i64`/`u64` →
+`i53`/`u53`; `as_i64`/`as_u64` → `as_i53`/`as_u53`; the wire scalar channel
+`i64_value` → `i53_value` (a contract-hash change — correct, pre-1.0).
+
+Rationale:
+
+- **The name was the last lie.** The literal range check already enforced
+  ±2^53 (with a message saying so), the wire encoding is f64 bits (exact
+  exactly over ±2^53), and arithmetic past 2^53 silently loses precision on
+  the f64 backing (§1's measured decision). The enforced contract WAS a
+  53-bit type; only the name claimed 64.
+- **53 over the pedantic 54.** The enforced range is the symmetric ±2^53
+  (sign-magnitude f64), not a two's-complement window; by the strict `iN`
+  convention that is closer to "i54". The names still say 53: to anyone near
+  JavaScript, 53 is *the* safe-integer number (`Number.MAX_SAFE_INTEGER` =
+  2^53−1). The spec defines `i53`'s range explicitly (spec §2.3, §A.3);
+  `u53` = [0, 2^53].
+- **`i64`/`u64` stay reserved** for a backend that can honor them (native
+  F4, or a checked BigInt-backed variant) — platform-gated like everything
+  else, instead of quietly meaning different things per backend. `BigInt`
+  (`n`) remains the answer for arbitrary precision today.
+- **Overflow is UB** (settled with the rename): arithmetic that exceeds a
+  sized integer's range is undefined behavior in vilan — on JS it manifests
+  as f64 artifacts (precision loss, out-of-range values). Literals are
+  range-checked; runtime ops are not. A future opt-in checked family
+  (`add_safe`, …) may pay the cost per call site; the blanket-checked
+  alternative was measured and rejected (§1). Recorded normatively in spec
+  §7.
+- **No aliases.** A clean break: unknown numeric suffixes are now a compile
+  error (they were silently ignored — `5q` typed as `i32`), and the
+  `i64`/`u64` suffixes specifically get a rename hint. Found while planning
+  this slice; the diagnostic is what makes the rename mechanically safe.

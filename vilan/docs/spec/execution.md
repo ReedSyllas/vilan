@@ -29,6 +29,17 @@ taken branch; a `match` evaluates its subject once, then tests legs top
 to bottom (first matching leg wins; its guard is evaluated only when the
 pattern matches).
 
+## 7.2a Integer overflow
+
+Arithmetic whose mathematical result exceeds the operand type's range is
+**undefined behavior**: a conforming program does not overflow, and an
+implementation may produce any value for one that does (the JS backend
+yields f64 artifacts — precision loss for the wide types, out-of-range
+magnitudes for the narrow ones — without trapping). Literals are
+range-checked at compile time (§2.3); runtime operations are not. An
+opt-in checked family (`add_safe`, …) is recorded future work; `BigInt`
+is the answer where the range itself is the problem.
+
 ## 7.3 The async model
 
 vilan is **await-by-default**. Asyncness is a property of *functions*,
@@ -125,8 +136,8 @@ these primitives, not part of the language.
 A conforming implementation targeting JavaScript guarantees: the
 entrypoint contract of §7.1; `print` writing one line per call to the
 host console; panics rejecting/aborting with the given message;
-left-to-right evaluation per §7.2; integer arithmetic with the declared
-widths (including truncating integer division and two's-complement
-`as_*` folds); and `i64` exactness over the wire within ±2⁵³. Everything
+left-to-right evaluation per §7.2; truncating integer division and
+two's-complement `as_*` folds (overflow excepted — §7.2a); and `i53`
+exactness over the wire across its whole range. Everything
 else about the emitted code — names, formatting, module layout, the
 `[build]` knobs — is implementation-defined.

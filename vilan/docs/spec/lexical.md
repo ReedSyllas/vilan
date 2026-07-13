@@ -47,11 +47,20 @@ hex     = "0x" , hexdigit , { hexdigit } , [ SUFFIX ] ;
 SUFFIX  = IDENT   (* immediately adjacent, no space *)
 ```
 
-The suffix names the literal's type: `i8 i16 i32 i64 u8 u16 u32 u64` (that
-width), `f` (`f64`), `f32`, `f64`, `n` (`BigInt`). An unknown suffix is a
-compile error at type checking. An unsuffixed integer literal is `i32`; an
-unsuffixed fractional literal is `f64`. Every integer literal is
-**range-checked** against its type at compile time.
+The suffix names the literal's type: `i8 i16 i32 u8 u16 u32` (that
+two's-complement width), `i53`/`u53` (the wide integers — see below),
+`f` (`f64`), `f32`, `f64`, `n` (`BigInt`). An **unknown suffix is a
+compile error** (the retired `i64`/`u64` suffixes get a rename hint). An
+unsuffixed integer literal is `i32`; an unsuffixed fractional literal is
+`f64`. Every integer literal is **range-checked** against its type at
+compile time.
+
+`i53` spans the symmetric range ±2^53 and `u53` spans [0, 2^53] — the
+window in which every integer is exactly representable in an IEEE-754
+double (the backing representation). The names deliberately follow
+JavaScript's safe-integer convention (53 bits of integer precision)
+rather than the two's-complement `iN` convention; there is no `i64` —
+integers beyond the window take `BigInt`.
 
 In a hex literal the digit run is maximal, so a suffix must begin with a
 non-hex letter: `0xFFu8` is valid; `0xFFf` is a single hex number `0xFFF`,

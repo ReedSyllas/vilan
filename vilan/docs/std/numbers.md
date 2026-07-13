@@ -8,14 +8,24 @@ and random values (`std::random`). Literal syntax and conversion semantics:
 
 | Type | Width | Literal |
 |---|---|---|
-| `i8 i16 i32 i64` | signed | bare = `i32`; others suffixed (`100i64`) |
-| `u8 u16 u32 u64` | unsigned | suffixed (`0xFFu8`) |
+| `i8 i16 i32 i53` | signed | bare = `i32`; others suffixed (`100i53`) |
+| `u8 u16 u32 u53` | unsigned | suffixed (`0xFFu8`) |
 | `f64` | float | `2.5` or `10f` |
 | `f32` | float | `2.5f32` |
 | `BigInt` | arbitrary | `7n` |
 
-Literals are range-checked at compile time. Integer division truncates
-toward zero. No implicit width coercion — convert with `as_*`.
+`i53`/`u53` are the **wide** integers, named for the precision they
+actually deliver: they are f64-backed on the JS backend, and every value
+in ±2^53 (JavaScript's safe-integer window) is exact. There is no `i64` —
+a type that silently loses precision past 2^53 would be lying about its
+width; for genuinely bigger integers use `BigInt`.
+
+Literals are range-checked at compile time (an out-of-range `i53` literal
+is a compile error, not a rounded value). Integer division truncates
+toward zero. No implicit width coercion — convert with `as_*`. Arithmetic
+that overflows a type's range is **undefined behavior** (spec §7.2) — on
+JS it manifests as f64 artifacts; a checked `add_safe` family is recorded
+future work.
 
 ## Methods
 
@@ -64,7 +74,7 @@ fun main() {
 	print((3.9).as_i32());    // 3
 	print((-1).as_u8());      // 255 — folded
 	print((300).as_u8());     // 44
-	let wide = 9007199254740992i64;
+	let wide = 9007199254740992i53;
 	print(wide.as_i32());
 	print((255u8).as_f64() / 2.0);
 }

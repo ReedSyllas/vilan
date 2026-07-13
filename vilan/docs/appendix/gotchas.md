@@ -20,8 +20,8 @@ Grown as findings land (the backlog's "idiom traps", promoted here).
   returns and values.
 - **`panic(…)` types as `Any`** and absorbs match unification — annotate
   the surrounding binding when a leg panics.
-- **i64 literals in binary operations need suffixes.**
-  `stamp + 1000` on an `i64` → `stamp + 1000i64` (the bare literal is
+- **i53 literals in binary operations need suffixes.**
+  `stamp + 1000` on an `i53` → `stamp + 1000i53` (the bare literal is
   `i32`; the mismatch report is currently spanless).
 
 ## Reactive & UI

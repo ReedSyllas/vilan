@@ -22,9 +22,9 @@ fun main() {
 	print((0 - 7) % 3);
 	print(7 % (0 - 3));
 
-	// Floats, i64 (f64-repped, exact), u32, and BigInt.
+	// Floats, i53 (f64-repped, exact), u32, and BigInt.
 	print(7.5 % 2f);
-	print(9000000000000000i64 % 7i64);
+	print(9000000000000000i53 % 7i53);
 	print(4000000000u32 % 7u32);
 	print(9007199254740993n % 4n);
 

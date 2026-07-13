@@ -608,11 +608,11 @@ fun dial_with_backoff(
 ): Result<(WebSocket, i32), str> {
 	mut outcome: Result<(WebSocket, i32), str> = Err(i"could not reach {url}");
 	mut attempt = 0;
-	mut delay = 250i64;
+	mut delay = 250i53;
 	for attempt < 10 {
 		if attempt > 0 {
 			sleep_for(Duration::millis(delay));
-			delay = if delay * 2i64 > 4000i64 { 4000i64 } else { delay * 2i64 };
+			delay = if delay * 2i53 > 4000i53 { 4000i53 } else { delay * 2i53 };
 		}
 		outcome = dial(url, settle, dispatch);
 		if outcome is Ok(let _opened) {

@@ -1761,7 +1761,7 @@ impl<'src> Analyzer<'src> {
     fn is_wire_type(&self, node: &Node) -> bool {
         match node {
             Node::Accessor(name) => {
-                matches!(*name, "str" | "i32" | "u32" | "i64" | "f64" | "bool")
+                matches!(*name, "str" | "i32" | "u32" | "i53" | "f64" | "bool")
                     || self.wire_names.contains(*name)
             }
             Node::AccessorWithGenerics(name, arguments) => {
@@ -2011,7 +2011,7 @@ impl<'src> Analyzer<'src> {
     fn is_native_operator_type(&self, type_: &Type) -> bool {
         match type_ {
             Type::Struct(id, _) => [
-                "i32", "u32", "f64", "BigInt", "str", "i8", "u8", "i16", "u16", "i64", "u64", "f32",
+                "i32", "u32", "f64", "BigInt", "str", "i8", "u8", "i16", "u16", "i53", "u53", "f32",
             ]
             .iter()
             .any(|name| self.primitive_struct_ids.get(*name).copied() == Some(*id)),
@@ -2270,7 +2270,7 @@ impl<'src> Analyzer<'src> {
     /// arrays and do.
     fn is_scalar_primitive(&self, id: Id) -> bool {
         [
-            "str", "i32", "u32", "f64", "BigInt", "null", "i8", "u8", "i16", "u16", "i64", "u64",
+            "str", "i32", "u32", "f64", "BigInt", "null", "i8", "u8", "i16", "u16", "i53", "u53",
             "f32",
         ]
         .iter()
@@ -7550,7 +7550,7 @@ impl<'src> Analyzer<'src> {
             // (`0` against an `f64` field), defaulting to `i32`.
             Expr::Number(_, fraction, suffix) => {
                 const NUMERIC_PRIMITIVES: &[&str] = &[
-                    "f64", "u32", "i32", "BigInt", "i8", "u8", "i16", "u16", "i64", "u64", "f32",
+                    "f64", "u32", "i32", "BigInt", "i8", "u8", "i16", "u16", "i53", "u53", "f32",
                 ];
                 let name = match *suffix {
                     Some("u32") => "u32",
@@ -7562,8 +7562,8 @@ impl<'src> Analyzer<'src> {
                     Some("u8") => "u8",
                     Some("i16") => "i16",
                     Some("u16") => "u16",
-                    Some("i64") => "i64",
-                    Some("u64") => "u64",
+                    Some("i53") => "i53",
+                    Some("u53") => "u53",
                     _ => {
                         // Unsuffixed: a fractional literal is a float (`f32`
                         // only by expectation); an integer takes the expected
@@ -11951,7 +11951,7 @@ impl<'src> Analyzer<'src> {
             if matches!(op, BinaryOp::Div) {
                 match &lhs_type {
                     Type::Struct(id, _)
-                        if ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"]
+                        if ["i8", "u8", "i16", "u16", "i32", "u32", "i53", "u53"]
                             .iter()
                             .any(|name| self.primitive_struct_ids.get(*name) == Some(id)) =>
                     {
@@ -12075,6 +12075,42 @@ impl<'src> Analyzer<'src> {
                 }
                 _ => continue,
             };
+            // An unknown suffix is an ERROR, not silently unsuffixed (`5q`
+            // once typed as `i32`). The renamed wide types get a hint.
+            if let Some(suffix) = suffix
+                && !matches!(
+                    suffix,
+                    "i8" | "u8"
+                        | "i16"
+                        | "u16"
+                        | "i32"
+                        | "u32"
+                        | "i53"
+                        | "u53"
+                        | "f"
+                        | "f32"
+                        | "f64"
+                        | "n"
+                )
+            {
+                if let Some(span) = self.span_map.get(&literal_id) {
+                    let span = **span;
+                    let hint = match suffix {
+                        "i64" => {
+                            " — `i64` was renamed to `i53` (exact integers span ±2^53 on the JS backend; use `BigInt` for more)"
+                        }
+                        "u64" => {
+                            " — `u64` was renamed to `u53` (exact integers span ±2^53 on the JS backend; use `BigInt` for more)"
+                        }
+                        _ => "",
+                    };
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!("unknown numeric suffix `{suffix}`{hint}"),
+                    });
+                }
+                continue;
+            }
             if has_fraction {
                 continue;
             }
@@ -12107,8 +12143,8 @@ impl<'src> Analyzer<'src> {
                 ("i16", 32_768, true),
                 ("u32", 4_294_967_295, false),
                 ("i32", 2_147_483_648, true),
-                ("u64", 9_007_199_254_740_992, false),
-                ("i64", 9_007_199_254_740_992, true),
+                ("u53", 9_007_199_254_740_992, false),
+                ("i53", 9_007_199_254_740_992, true),
             ];
             let Some((name, bound, signed)) = BOUNDS
                 .iter()
@@ -12124,7 +12160,7 @@ impl<'src> Analyzer<'src> {
             if value.map(|value| value <= bound).unwrap_or(false) {
                 continue;
             }
-            let range = if matches!(name, "i64" | "u64") {
+            let range = if matches!(name, "i53" | "u53") {
                 "exact integers span ±2^53 on the JS backend — use `BigInt` for larger values"
                     .to_string()
             } else if signed {
@@ -15060,8 +15096,8 @@ pub fn analyze<'src>(
         ("u8", "number"),
         ("i16", "number"),
         ("u16", "number"),
-        ("i64", "number"),
-        ("u64", "number"),
+        ("i53", "number"),
+        ("u53", "number"),
         ("f32", "number"),
     ] {
         let id = module_scopes

@@ -35,7 +35,7 @@ function as_i32(self) {
 	const widened = Number(self);
 	return Number(fold_signed(widened, 4294967296, 2147483648));
 }
-function as_i64(self) {
+function as_i53(self) {
 	const widened = Number(self);
 	return Number(Math.trunc(widened));
 }
@@ -78,7 +78,7 @@ console.log(as_i322(-(3.9)));
 console.log(as_u16(70000));
 console.log(Number(byte) + 0.25);
 console.log(as_i32(wide));
-console.log(as_i64(2.5));
+console.log(as_i53(2.5));
 const doubled = 100 + 100;
 console.log(doubled);
 console.log(100 * 3);

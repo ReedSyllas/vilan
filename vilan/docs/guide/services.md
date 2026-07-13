@@ -109,7 +109,7 @@ In a real app the service definition lives in a shared `[library]` package
 ## What can cross the wire: `Wire`
 
 Every rpc parameter, return type, and exposed-signal payload must be
-**Wire** — serializable. Scalars (`bool`, the sized ints including `i64`,
+**Wire** — serializable. Scalars (`bool`, the sized ints including `i53`,
 floats, `str`), `List`/`Option` of Wire types, and structs/enums that derive
 it:
 

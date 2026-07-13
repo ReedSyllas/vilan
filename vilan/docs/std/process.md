@@ -20,7 +20,7 @@ impl Statement {
 impl Row {
 	fun text(self, name: str): str
 	fun integer(self, name: str): i32
-	fun big_integer(self, name: str): i64   // i64-wide INTEGER (epoch millis)
+	fun big_integer(self, name: str): i53   // i53-wide INTEGER (epoch millis)
 	fun real(self, name: str): f64
 	fun is_null(self, name: str): bool
 }

@@ -118,12 +118,12 @@ impl u16 with Debug {
 	external fun debug(self): str;
 }
 
-impl i64 with Debug {
+impl i53 with Debug {
 	[extern("JSON.stringify")]
 	external fun debug(self): str;
 }
 
-impl u64 with Debug {
+impl u53 with Debug {
 	[extern("JSON.stringify")]
 	external fun debug(self): str;
 }
