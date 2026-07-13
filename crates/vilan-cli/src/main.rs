@@ -11,6 +11,8 @@ use chumsky::prelude::*;
 // `clap::Parser` collides with `chumsky`'s `Parser` trait (glob-imported above),
 // so bring it in anonymously — enough for `Cli::parse()` — and derive by path.
 use clap::{Parser as _, Subcommand};
+mod upgrade;
+
 use vilan_core::analyzer::{analyze, check_library_contract};
 use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
@@ -108,6 +110,13 @@ enum Command {
         #[arg(long)]
         watch: bool,
     },
+    /// Update this binary (and `vilan-lsp` beside it) to the newest release.
+    /// This is the only command that touches the network.
+    Upgrade {
+        /// Report whether a newer release exists without changing anything.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -172,6 +181,7 @@ fn run_cli() -> ExitCode {
             run_or_watch(roots, move || test(path.clone()))
         }
         Command::Fmt { paths, check } => fmt(&paths, check),
+        Command::Upgrade { check } => upgrade::upgrade(check),
     }
 }
 

@@ -641,6 +641,23 @@ have gaps.
    the narrowest expression that identifies the problem (call-argument mismatches are the
    model).
 
+8. **Boundary-crossing diagnostics — anchor at the user's code** (M; motivated 2026-07-13 by
+   the async-rpc arc) — when the offending code is macro-generated or lives in `std`, the
+   diagnostic points there and speaks internal vocabulary. The motivating case: an `[rpc]`
+   method that awaited (before 2f08699 made the dispatch spine async) produced "`body`
+   receives an async closure, but its type awaits nothing" — `body` being a `std` turn
+   parameter three layers below anything the user wrote, with no span in their file and no
+   mention of which of their methods caused it. The standard to build toward: a diagnostic
+   whose primary anchor lands in std/expansion output from a user-caused condition should
+   walk back to the nearest **user-code** anchor — the macro attribute/item that generated
+   the code, or the user construct whose inferred property (async-ness, a type) infected the
+   plumbing — and lead with that ("the route generated for `[rpc] fun add` is async because
+   `add` awaits `sleep_for`; …"), demoting the internal frame to a secondary note.
+   Ingredients that already exist: expansions know their originating item (the macro engine's
+   provenance), `async_infer` knows *why* a closure is async (the infecting call chain), and
+   `SourceId`s distinguish user files from `std`. Audit trigger: any diagnostic observed
+   pointing into `std/src/*` or generated source for conditions the user created.
+
 ---
 
 8. **LSP + editor support for the macro engine** (M) — **core shipped 2026-07-07**: the

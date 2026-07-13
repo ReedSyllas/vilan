@@ -41,6 +41,12 @@ fn main() {
         None => "unknown".to_string(),
     };
     println!("cargo:rustc-env=VILAN_BUILD_SHA={stamp}");
+    // The compile target, so `vilan upgrade` downloads its own platform's
+    // asset (`vilan-<target>.tar.gz`).
+    println!(
+        "cargo:rustc-env=VILAN_TARGET={}",
+        std::env::var("TARGET").unwrap()
+    );
 }
 
 fn git(repo_root: &Path, arguments: &[&str]) -> Option<String> {
