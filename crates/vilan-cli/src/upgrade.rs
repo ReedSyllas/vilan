@@ -135,6 +135,21 @@ fn download_verify_swap(
         .trim()
         .to_string();
     println!("installed {installed} to {}", install_dir.display());
+
+    // Housekeeping while we own ~/.vilan: drop std-cache entries no current
+    // binary can use (each build materializes under its own content hash and
+    // nothing deletes the old ones). The week-long age guard keeps any entry
+    // a running binary might still be reading.
+    let pruned = vilan_embedded_std::prune_stale(
+        &vilan_embedded_std::default_cache_root(),
+        std::time::Duration::from_secs(7 * 24 * 60 * 60),
+    );
+    if pruned > 0 {
+        println!(
+            "pruned {pruned} stale std cache entr{}",
+            if pruned == 1 { "y" } else { "ies" }
+        );
+    }
     Ok(())
 }
 

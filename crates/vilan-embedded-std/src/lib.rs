@@ -25,10 +25,50 @@ include!(concat!(env!("OUT_DIR"), "/embedded_std.rs"));
 /// value `resolve_std` expects. Cheap after the first call: an existing cache
 /// entry is returned without touching its contents.
 pub fn materialize() -> Result<PathBuf, String> {
-    let cache_root = home_dir()
+    materialize_into(&default_cache_root())
+}
+
+/// The default materialization cache root: `~/.vilan/std-cache`, or the system
+/// temp directory when no home is available. Shared by [`materialize`] and the
+/// upgrade command's cache pruning.
+pub fn default_cache_root() -> PathBuf {
+    home_dir()
         .map(|home| home.join(".vilan").join("std-cache"))
-        .unwrap_or_else(|| std::env::temp_dir().join("vilan-std-cache"));
-    materialize_into(&cache_root)
+        .unwrap_or_else(|| std::env::temp_dir().join("vilan-std-cache"))
+}
+
+/// Remove cache entries (content-hash trees and crashed `.staging-*`
+/// leftovers) whose directory mtime — their creation time; entries are never
+/// touched after the atomic rename — is older than `max_age`. Returns how many
+/// were removed; a missing root or an unremovable entry is not an error.
+///
+/// The age guard is the concurrency story: an entry younger than `max_age` may
+/// belong to a running binary (std files are read lazily during compilation),
+/// so it is left alone. In the rare race — a long-running old binary whose
+/// entry ages past the guard while an upgrade prunes — the next resolution
+/// simply re-materializes: [`materialize_into`] is idempotent and atomic.
+pub fn prune_stale(cache_root: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if stale && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// [`materialize`] into an explicit cache root (the seam tests use).

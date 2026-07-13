@@ -105,6 +105,52 @@ fn materialization_is_complete_and_idempotent() {
     let _ = fs::remove_dir_all(&cache_root);
 }
 
+#[test]
+fn pruning_removes_only_entries_older_than_the_guard() {
+    use vilan_embedded_std::prune_stale;
+
+    let cache_root =
+        std::env::temp_dir().join(format!("vilan-embedded-std-prune-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&cache_root);
+    for entry in [
+        "fresh-entry",
+        "stale-entry",
+        ".staging-stale",
+        ".staging-fresh",
+    ] {
+        fs::create_dir_all(cache_root.join(entry).join("std")).expect("create entry");
+    }
+    for stale in ["stale-entry", ".staging-stale"] {
+        let backdate = std::process::Command::new("touch")
+            .args(["-d", "2020-01-01"])
+            .arg(cache_root.join(stale))
+            .status()
+            .expect("touch");
+        assert!(backdate.success());
+    }
+
+    let one_day = std::time::Duration::from_secs(24 * 60 * 60);
+    assert_eq!(
+        prune_stale(&cache_root, one_day),
+        2,
+        "both backdated dirs go"
+    );
+    assert!(
+        cache_root.join("fresh-entry").is_dir(),
+        "young entries stay"
+    );
+    assert!(
+        cache_root.join(".staging-fresh").is_dir(),
+        "a staging dir inside the guard may be a materialization in flight"
+    );
+    assert!(!cache_root.join("stale-entry").exists());
+    assert!(!cache_root.join(".staging-stale").exists());
+
+    // A missing root is a quiet no-op, not an error.
+    let _ = fs::remove_dir_all(&cache_root);
+    assert_eq!(prune_stale(&cache_root, one_day), 0);
+}
+
 /// The build script's collection rule, restated independently: every `.vl` and
 /// `vilan.toml` under the package directory.
 fn walk(directory: &Path, prefix: &Path, files: &mut Vec<String>) {

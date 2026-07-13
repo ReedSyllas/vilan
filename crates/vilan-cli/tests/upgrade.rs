@@ -14,6 +14,7 @@ use std::process::{Command, Output};
 struct Fixture {
     root: PathBuf,
     bin: PathBuf,
+    home: PathBuf,
     base_url: String,
 }
 
@@ -56,12 +57,30 @@ impl Fixture {
         );
         fs::write(assets.join("sha256sums.txt"), sums.stdout).expect("write sums");
 
+        // A scratch HOME with a pre-seeded std cache: one entry backdated past
+        // the prune guard, one fresh — a successful upgrade prunes exactly the
+        // stale one.
+        let home = root.join("home");
+        let cache = home.join(".vilan/std-cache");
+        fs::create_dir_all(cache.join("fresh-entry/std")).expect("seed fresh cache entry");
+        fs::create_dir_all(cache.join("stale-entry/std")).expect("seed stale cache entry");
+        run_ok(
+            Command::new("touch")
+                .args(["-d", "2020-01-01"])
+                .arg(cache.join("stale-entry")),
+        );
+
         let base_url = format!("file://{}", root.display());
         Fixture {
             root,
             bin,
+            home,
             base_url,
         }
+    }
+
+    fn cache_entry(&self, name: &str) -> PathBuf {
+        self.home.join(".vilan/std-cache").join(name)
     }
 
     fn upgrade(&self, arguments: &[&str], latest: &str) -> Output {
@@ -69,6 +88,7 @@ impl Fixture {
             Command::new(self.bin.join("vilan"))
                 .arg("upgrade")
                 .args(arguments)
+                .env("HOME", &self.home)
                 .env("VILAN_UPGRADE_BASE", &self.base_url)
                 .env("VILAN_UPGRADE_LATEST", latest),
         )
@@ -109,6 +129,14 @@ fn upgrade_swaps_both_binaries_and_reports_the_new_version() {
 
     // The running binary's path now holds the new release, lsp beside it.
     assert_eq!(fixture.installed_banner(), "vilan 9.9.9 (fake)");
+    // And ~/.vilan housekeeping ran: the stale cache entry is gone, the
+    // fresh one (a running binary could be reading it) stays.
+    assert!(
+        stdout.contains("pruned 1 stale std cache entry"),
+        "{stdout}"
+    );
+    assert!(!fixture.cache_entry("stale-entry").exists());
+    assert!(fixture.cache_entry("fresh-entry").is_dir());
     let lsp = run_retrying(&mut Command::new(fixture.bin.join("vilan-lsp")));
     assert_eq!(
         String::from_utf8_lossy(&lsp.stdout).trim(),
@@ -126,13 +154,15 @@ fn upgrade_check_reports_and_changes_nothing() {
         stdout.contains("9.9.9 available") && stdout.contains("vilan upgrade"),
         "points at the command: {stdout}"
     );
-    // Still the real binary, and no lsp appeared.
+    // Still the real binary, no lsp appeared, and the cache is untouched —
+    // `--check` changes nothing.
     assert!(
         fixture
             .installed_banner()
             .starts_with(&format!("vilan {}", env!("CARGO_PKG_VERSION")))
     );
     assert!(!fixture.bin.join("vilan-lsp").exists());
+    assert!(fixture.cache_entry("stale-entry").is_dir());
 }
 
 #[test]
