@@ -109,10 +109,9 @@ fun main() {
 }
 ```
 
-Tuple types are written the same way: `(i32, str)`. You can also reach
-elements as `.0` and `.1`, with one caveat: not directly chained onto a
-call. `pair().1` doesn't type yet, so bind the result first and then
-access it (see [gotchas](../appendix/gotchas.md)).
+Tuple types are written the same way: `(i32, str)`. Destructuring is
+the way to take tuples apart — positional access (`pair.0`) isn't
+implemented yet (see [gotchas](../appendix/gotchas.md)).
 
 ## Collections
 

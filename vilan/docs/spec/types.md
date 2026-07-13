@@ -22,8 +22,13 @@ The type forms (grammar §3.9) denote:
   types appear in parameter and return positions and in short-lived
   locals only.
 - **`void`** — the unit: one value, also written `void`.
-- **`any`** — the dynamic top type, produced only at host boundaries and
-  by diverging expressions (`panic`); it unifies with every type.
+- **`any`** — the dynamic top type, produced at host boundaries; it
+  unifies with every type (absorbing).
+- **`Never`** — the type of diverging expressions (`panic(..)`, `ret ..`,
+  `jump break`/`continue`). Never unifies by *yielding*: a diverging
+  match leg or if branch doesn't constrain the construct's type, and a
+  `Never` value satisfies any expected type. Internal — not written in
+  source.
 - **Generics** — a bound type parameter in scope (`T`) is a type; it is
   abstract within its binder's body.
 
@@ -199,9 +204,8 @@ Normative rejection cases (each is a compile error):
 - Using a trait as a type (`let x: Display = …`).
 - An unsatisfied bound at a call (`generic parameter 'T' is missing the
   bound …`).
-- A `match` whose legs' types don't unify (a leg ending in `ret` is not
-  divergent for unification, and a `panic` leg types `any` — annotate
-  the surrounding binding when mixing).
+- A `match` whose VALUE legs' types don't unify. Diverging legs
+  (`ret`, `panic`, `jump`) are `Never` and don't participate (§5.1).
 - An `i53`/`i32` operand mix (no implicit widening — suffix the
   literal).
 

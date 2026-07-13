@@ -192,10 +192,14 @@ path    = ( IDENT generic-args ␣"::"  (* generic static head *)
           | atom )
           { "::" IDENT } ;
 call-suffix = [ generic-args ] "(" [ expression { "," expression } [ "," ] ] ")" ;
-postfix = "." IDENT [ call-suffix ]      (* member / method *)
+member  = NUMBER                          (* tuple index: .0 *)
+        | IDENT [ call-suffix ] ;         (* field / ONE fused method call *)
+postfix = "." member
         | "[" expression "]"             (* index *)
         | "!"                            (* try-assert, §5.10 *)
-        | "?." IDENT [ call-suffix ] ;   (* lift link, §5.10 *)
+        | "(" [ expression { "," expression } [ "," ] ] ")"
+                                          (* direct call on the chain result *)
+        | "?." member ;                  (* lift link, §5.10 *)
 
 atom    = literal | IDENT | IDENT generic-args
         | "(" expression ")" | tuple | list
@@ -206,10 +210,13 @@ tuple-comprehension = "(" IDENT "in" secondary-expr "=>" expression ")" ;
 ```
 
 `Name<Args>` is read as a generic path head only when `::` immediately
-follows (`List<str>::new()`); otherwise `<` is a comparison. A `?.` link's
-**continuation** extends through the following plain postfixes up to the
-next `?.` or `!` — `a?.b.c()!` lifts `b.c()` into the container, then
-try-asserts the result (§5.10).
+follows (`List<str>::new()`); otherwise `<` is a comparison. A member
+fuses at most ONE call; a further `(args)` is a **direct call** on the
+chain's result, calling a closure-typed value
+(`self.hook.read()(a, b)`). A `?.` link's **continuation** extends
+through the following plain postfixes up to the next `?.` or `!` —
+`a?.b.c()!` lifts `b.c()` into the container, then try-asserts the
+result (§5.10).
 
 ## 3.7 Operator precedence
 

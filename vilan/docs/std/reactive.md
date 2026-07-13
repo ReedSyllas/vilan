@@ -59,10 +59,6 @@ impl Signal<Signal<type U>> {
 - `sub` does **not** fire immediately, and its `Subscription` is yours to
   dispose (or hand to `owner.take`).
 
-Trap (backlog B23): an `effect` closure's unannotated parameter may not take
-the payload type when the body destructures it — annotate
-(`|current: Option<Task>| …`).
-
 ## combine
 
 ```vilan,fragment

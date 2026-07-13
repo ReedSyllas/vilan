@@ -295,14 +295,27 @@ have gaps.
     shipped on it. Also fixed: unused `Context::new()` emitted a dangling call.
     Deferred: clauses on `let`/return types; superset-clause forwarding.
 
-13. **A direct call on a closure-typed local doesn't type its unannotated parameter** (M;
-    pinned `#[ignore]`d; surfaced writing macro `unroll` callbacks 2026-07-06) — `let f = |i|
-    accumulate(i); f(3)` never feeds `i` from the call site (zero-param and annotated forms
-    work; closures passed to methods work via reconciliation). The C′-family stabilization
-    covered deferred call SUBJECTS; the binding-then-direct-call shape needs the same
-    channel. Workaround: annotate (`|i: i32| ..`).
+13. ~~**A direct call on a closure-typed local doesn't type its unannotated
+    parameter**~~ — **FIXED 2026-07-12** (the gotchas sweep; pin un-ignored +
+    multi-param and mixed-annotation pins). Two fills: the call-subject
+    Closure arm writes an Unknown parameter's shared type slot from the
+    argument (in place, so deferred body constraints retry against it), and
+    an unknown closure parameter used as a call ARGUMENT adopts the callee's
+    declared parameter type when it is concrete (breaking the
+    body-waits-for-param-waits-for-body deadlock; a generic declared type
+    still defers to the closure's owning call, preserving the
+    `count.derive(|n| format(n))` channel). Residual (recorded): the first
+    call site wins; later conflicting calls diagnose against it.
 
-18. **Calling a method-call result directly doesn't parse** (S; pinned
+18. ~~**Calling a method-call result directly doesn't parse**~~ — **FIXED
+    2026-07-12** (the gotchas sweep). A member now fuses at most ONE call;
+    a further `(args)` is a direct-call POSTFIX on the chain result
+    (`self.hook.read()(a, b)`, `handlers[0](x)`), analyzer-side support
+    already existed (closure-typed call subjects). Corpus byte-identical;
+    5 pins incl. the un-ignored original; the walkthrough and kolt dropped
+    their bind-first workarounds. Found while pinning: tuple member access
+    (`.0`) is UNIMPLEMENTED entirely — recorded as item 19 below. Original
+    entry follows. — (S; pinned
     `#[ignore]`d; found 2026-07-11 in the Kolt pilot) — `func()(args)` parses
     (call-on-call-result), but `x.method()(args)` does not ("expected a method
     name after `.`") — the postfix grammar accepts a call after a call, but not a
@@ -335,6 +348,25 @@ have gaps.
     still-failing unmet-bound gate, chained maps (inside-out convergence),
     and a method-bound consumer.
 
+26. ~~**Diverging match legs and if branches poisoned or mismatched the
+    construct's type**~~ — **FIXED 2026-07-12** (the gotchas sweep; 5
+    pins). `Type::Never` added (internal): `panic(..)`, `ret ..`, and
+    `jump break/continue` now type as Never, which YIELDS in
+    reconciliation and satisfies any expectation in comparison — a
+    `None => panic("missing")` leg no longer absorbs the match into
+    `any`, and a `ret` leg no longer mismatches. The transformer emits
+    diverging leg/branch results as statements (`return e`, never
+    `x = return e`). Spec §5.1/§5.11 updated.
+
+19. **Tuple member access (`.0`/`.1`) is unimplemented** (M; pinned
+    `#[ignore]`d `tuple_member_access_grounds`; discovered 2026-07-12
+    pinning item 18) — `.N` parses (a Number member) but the analyzer's
+    field path handles only struct subjects: even an ANNOTATED
+    `pair: (i32, i32)` errors "cannot access field '0'". Needs a Tuple
+    arm in the field-accessor resolution + a lowering (tuples are JS
+    arrays; `subject[N]`). Destructuring is the working form; docs say
+    so (values-and-types, gotchas).
+
 25. ~~**A bare `std::…` path in expression position panicked the
     compiler**~~ — **FIXED 2026-07-12** (found building the docs
     walkthrough app; pins: bare fn path, bare variant path, alias-qualified
@@ -360,10 +392,17 @@ have gaps.
     bound machinery. Intent (spec §5.7): comparisons type like the traits
     they dispatch through. Pins: bool-vs-int, int-vs-str, mixed-width.
 
-23. **An `effect` closure's unannotated parameter doesn't ground from a
-    generic signal's payload** (M; pinned `#[ignore]`d
-    `an_effect_closures_unannotated_parameter_grounds_from_the_signal`;
-    surfaced building the kolt draft editor 2026-07-12) —
+23. ~~**An `effect` closure's unannotated parameter doesn't ground from a
+    generic signal's payload**~~ — **FIXED 2026-07-12** (the gotchas
+    sweep; pin un-ignored; kolt + walkthrough dropped the annotations).
+    TWO root causes: the inherited-trait-default method path recorded NO
+    receiver substitution (the direct-impl path did), so a default's
+    `|T| void` parameter typed abstractly — it now binds the impl's
+    generics from the receiver and the trait's parameters through the
+    impl's written trait arguments; and `resolve_match` didn't defer on a
+    not-yet-filled closure parameter, binding pattern captures against
+    the enum's RAW declaration (the C′-family deferral now covers match
+    subjects). Original entry follows. —
     `entry: Signal<Option<Task>>; entry.effect(|current| match current {
     Some(let task) => task.name, .. })` errors "cannot access field 'name'
     on type T": the parameter types against the IMPL's abstract `T`

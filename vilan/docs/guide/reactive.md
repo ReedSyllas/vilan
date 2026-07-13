@@ -107,11 +107,6 @@ Two ways to run code on change. **Use `effect` by default.**
   only on *later* changes, and you keep the `Subscription` and call
   `dispose()` on it yourself.
 
-One current sharp edge: annotate an effect's parameter when the body
-takes it apart. Write `|current: Option<Task>| …`, not `|current| …`.
-The compiler sometimes fails to infer it (a tracked bug, B23), and the
-error it produces ("cannot access field on type T") isn't obvious.
-
 ## Ownership: who cleans up
 
 Every effect is a subscription, and subscriptions must die when the
@@ -303,8 +298,6 @@ call it directly to build your own list-rendering primitive.
   and let the owner handle it.
 - Disposal stops *future* deliveries. A watcher already queued in the
   currently-settling turn may fire one final time.
-- Annotate effect parameters that get destructured
-  (`|current: Option<Task>|`) — the B23 workaround from above.
 - Derived signals (`map`/`combine`) live as long as their sources, by
   design. They don't need owners, and they don't leak into disposed
   subtrees.

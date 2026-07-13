@@ -11,10 +11,9 @@ fun panic(message: str)                     // abort with a message
 fun assert(condition: bool, message: str)   // panic when false
 ```
 
-`panic` is for unreachable states (expected failures are `Result`). Note
-`panic`'s value types as `Any` — annotate a binding whose match arms mix a
-panic with values ([gotchas](../appendix/gotchas.md)). `assert` is the
-`vilan test` failure mechanism.
+`panic` is for unreachable states (expected failures are `Result`). A
+`panic` arm in a `match` diverges — the other arms decide the match's
+type. `assert` is the `vilan test` failure mechanism.
 
 ## std::promise
 

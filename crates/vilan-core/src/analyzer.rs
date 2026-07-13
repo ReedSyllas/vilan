@@ -2103,11 +2103,16 @@ impl<'src> Analyzer<'src> {
     /// itself declare but a (super)trait provides with a body (Gap E). A
     /// non-default requirement is never inherited (conformance forces the impl
     /// to declare it, so `method_member_in_impls` finds it first).
+    /// Returns the inherited default member plus its dispatch context: the
+    /// providing impl's subject and the trait's written arguments there —
+    /// what the caller needs to bind the TRAIT's generics from the receiver
+    /// (a default's parameters mention the trait's `T`; without the binding
+    /// a closure argument's parameter typed abstractly — B23).
     fn method_member_in_inherited_defaults(
         &self,
         subject_type: &Type,
         member_name: &str,
-    ) -> Option<Id> {
+    ) -> Option<(Id, TypeId, Id, Vec<TypeId>)> {
         self.implementations
             .iter()
             .filter(|implementation| {
@@ -2117,14 +2122,27 @@ impl<'src> Analyzer<'src> {
                     &HashMap::new(),
                 )
             })
-            .flat_map(|implementation| implementation.trait_ids.iter().copied())
-            .find_map(|trait_id| {
+            .flat_map(|implementation| {
+                implementation
+                    .trait_ids
+                    .iter()
+                    .map(move |trait_id| (implementation, *trait_id))
+            })
+            .find_map(|(implementation, trait_id)| {
                 let member_id = self.method_member_in_trait(trait_id, member_name)?;
                 // A `[trait_only]` default method is likewise not inherited onto
                 // the concrete surface — only reachable through a bound (§3.2).
                 (self.member_has_default_body(member_id)
                     && !self.declaration_is_trait_only(member_id))
-                .then_some(member_id)
+                .then(|| {
+                    let trait_arguments = implementation
+                        .trait_args
+                        .iter()
+                        .find(|(id, _)| *id == trait_id)
+                        .map(|(_, arguments)| arguments.clone())
+                        .unwrap_or_default();
+                    (member_id, implementation.subject, trait_id, trait_arguments)
+                })
             })
     }
 
@@ -7277,6 +7295,28 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// Fill an unannotated closure parameter's shared type slot in place
+    /// (B13's channel): the slot id is shared with the closure literal's
+    /// type, so every deferred use of the parameter retypes on retry.
+    fn fill_unknown_closure_parameter(&mut self, expr_id: Id, filled: &Type) {
+        let mut id = expr_id;
+        loop {
+            match self.expr_id_to_expr_map.get(&id) {
+                Some(Expr::Local(target_id)) => id = *target_id,
+                Some(Expr::Parameter(parameter_id)) => {
+                    if let Some(parameter) = self.parameters.get(parameter_id)
+                        && matches!(parameter.type_id.get_type(self), Type::Unknown)
+                    {
+                        self.type_id_to_type_map
+                            .insert(parameter.type_id, filled.clone());
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+    }
+
     /// Whether an expression refers to a comprehension binder whose element type
     /// isn't set yet — following `Local`/`Variable` indirections to the binder.
     fn is_untyped_comprehension_binder(&self, expr_id: Id) -> bool {
@@ -7742,7 +7782,7 @@ impl<'src> Analyzer<'src> {
                         // which unifies with any expected type (e.g. it can be
                         // the sole body of a function with any return type).
                         if Some(function_id) == self.panic_fn_id {
-                            return Type::Any;
+                            return Type::Never;
                         }
                         let function = self.functions.get(&function_id).map(|f| {
                             (
@@ -8127,6 +8167,9 @@ impl<'src> Analyzer<'src> {
                     _ => Type::Closure(parameter_type_ids, return_type.get_type_id(self)),
                 }
             }
+            // `ret`/`jump` never produce a value where they stand — a match
+            // leg or if-branch ending in one doesn't constrain the type.
+            Expr::FunctionReturn(_) | Expr::Jump(_) => Type::Never,
             _ => Type::Void,
         };
 
@@ -8351,6 +8394,10 @@ impl<'src> Analyzer<'src> {
             b
         };
         Some(match (a, b) {
+            // Divergence yields: a `panic`/`ret` leg doesn't constrain the
+            // other side's type (unlike `Any`, which absorbs).
+            (Type::Never, _) => (b.clone(), Vec::new()),
+            (_, Type::Never) => (a.clone(), Vec::new()),
             (Type::Any, _) | (_, Type::Unknown) => (a.clone(), Vec::new()),
             (_, Type::Any) | (Type::Unknown, _) => (b.clone(), Vec::new()),
             (Type::Unresolved, _) | (_, Type::Unresolved) => {
@@ -8599,6 +8646,9 @@ impl<'src> Analyzer<'src> {
     fn compare_type(&self, a: &Type, b: &Type, substitution_context: &SubstitutionContext) -> bool {
         match (a, b) {
             (Type::Unknown, _) | (_, Type::Unknown) | (Type::Any, _) | (_, Type::Any) => true,
+            // A diverging expression fits any expected type (it never
+            // produces a value to disagree).
+            (Type::Never, _) | (_, Type::Never) => true,
             (Type::Unresolved, _) | (_, Type::Unresolved) => false,
             (Type::Generic(constraint_id), _) => {
                 let l = substitution_context
@@ -9219,6 +9269,18 @@ impl<'src> Analyzer<'src> {
                 if matches!(argument_type, Type::Unresolved) {
                     return Resolution::Deferred;
                 }
+                // An UNANNOTATED parameter of a let-bound closure takes the
+                // call site's argument type (B13): the parameter's type slot
+                // is shared with the closure literal, so filling it in place
+                // types the body's uses too (deferred body constraints retry
+                // against it). The first call site wins; later ones compare.
+                if matches!(parameter_type, Type::Unknown)
+                    && !matches!(argument_type, Type::Unknown)
+                {
+                    self.type_id_to_type_map
+                        .insert(*parameter_type_id, argument_type.clone());
+                    continue;
+                }
                 if self
                     .reconcile_type(&argument_type, &parameter_type, &substitution_context)
                     .is_none()
@@ -9351,13 +9413,30 @@ impl<'src> Analyzer<'src> {
                         let argument_id = *argument_ids.get(index).unwrap();
                         let argument_type =
                             self.infer_type(argument_id, &parameter_type, &substitution_context);
-                        // Defer while an argument is unresolved, or is a closure
-                        // parameter still awaiting its type (`count.derive(|n|
-                        // format(n))` — `n` is typed only once `derive` resolves).
-                        if matches!(argument_type, Type::Unresolved)
-                            || self.is_unknown_closure_parameter(argument_id)
-                        {
+                        if matches!(argument_type, Type::Unresolved) {
                             return Resolution::Deferred;
+                        }
+                        // A closure parameter still awaiting its type. When this
+                        // call's declared parameter is CONCRETE, adopt it (B13):
+                        // a let-bound closure's parameter is typed by nothing
+                        // else, and deferring here deadlocked the whole chain
+                        // (body waits for the parameter; the parameter waited
+                        // for the binding's call site; the call site waited for
+                        // the body). A generic declared type still defers —
+                        // the closure's OWNING call resolves it (`count.derive(
+                        // |n| format(n))` — `derive` types `n`).
+                        if self.is_unknown_closure_parameter(argument_id) {
+                            let declared =
+                                self.substitute_type(&parameter_type, &substitution_context);
+                            let mut generics = Vec::new();
+                            self.collect_generics(&declared, 0, &mut generics);
+                            if generics.is_empty()
+                                && !matches!(declared, Type::Unknown | Type::Unresolved)
+                            {
+                                self.fill_unknown_closure_parameter(argument_id, &declared);
+                            } else {
+                                return Resolution::Deferred;
+                            }
                         }
                         // Reconcile parameter-first so the bindings key on the
                         // *callee's* generics (passing a `T`-typed value to
@@ -9569,12 +9648,38 @@ impl<'src> Analyzer<'src> {
                     // to this concrete type at codegen.
                     None => {
                         match self.method_member_in_inherited_defaults(&subject_type, member_name) {
-                            Some(member_id) => {
+                            Some((member_id, impl_subject_id, trait_id, trait_arguments)) => {
                                 let receiver_type_id = subject_type.clone().get_type_id(self);
                                 self.generic_dispatch.insert(
                                     id,
                                     GenericDispatch::OnType(Some(receiver_type_id), member_name),
                                 );
+                                // Bind the providing impl's generics from the
+                                // receiver, then the TRAIT's parameters through
+                                // the impl's written trait arguments — so the
+                                // default's signature (`observer: |T| void`)
+                                // types concretely and a closure argument's
+                                // parameter grounds (B23).
+                                let impl_subject = impl_subject_id.get_type(self);
+                                let mut bindings: SubstitutionContext = self
+                                    .reconcile_type(&impl_subject, &subject_type, &HashMap::new())
+                                    .map(|(_, bindings)| bindings.into_iter().collect())
+                                    .unwrap_or_default();
+                                let trait_parameter_ids = self
+                                    .traits
+                                    .get(&trait_id)
+                                    .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
+                                    .unwrap_or_default();
+                                for (parameter_id, argument_id) in
+                                    trait_parameter_ids.iter().zip(trait_arguments)
+                                {
+                                    let resolved = self
+                                        .substitute_type(&argument_id.get_type(self), &bindings);
+                                    bindings.insert(*parameter_id, resolved.get_type_id(self));
+                                }
+                                if !bindings.is_empty() {
+                                    self.method_call_substitution.insert(id, bindings);
+                                }
                                 MethodLookup::Found(member_id)
                             }
                             None => MethodLookup::NoMethod,
@@ -10696,6 +10801,17 @@ impl<'src> Analyzer<'src> {
         if matches!(subject_type, Type::Unresolved) {
             return Resolution::Deferred;
         }
+        // Matching an unannotated closure parameter (`|current| match current`)
+        // must wait for bidirectional inference to fill the parameter — the
+        // same rule the call-subject/receiver paths apply (C′'s family, B23).
+        // Resolving now would bind pattern captures against the ENUM's raw
+        // declaration (`Some(let task)` typing `task` as Option's abstract
+        // payload) and never revisit them.
+        if matches!(subject_type, Type::Unknown)
+            && self.is_unknown_closure_parameter(prepped.subject_id)
+        {
+            return Resolution::Deferred;
+        }
         let subject_type_id = subject_type.clone().get_type_id(self);
 
         // Resolve each leg's patterns (an or-pattern has several) and its
@@ -10778,7 +10894,7 @@ impl<'src> Analyzer<'src> {
             // A non-enum subject (e.g. a `str` matched with literals) has an
             // unbounded domain, so it needs an explicit catch-all. Tuples and
             // not-yet-known types are exempt.
-            Type::Tuple(_) | Type::Unknown | Type::Any | Type::Generic(_) => {}
+            Type::Tuple(_) | Type::Unknown | Type::Any | Type::Never | Type::Generic(_) => {}
             _ if !has_catch_all => {
                 self.diagnostics.push(Error {
                     span: prepped.span,
@@ -12417,6 +12533,7 @@ impl<'src> Analyzer<'src> {
             // i32`; `Option<i32>`, not `enum Option<type i32>`. A diagnostic that
             // needs the word "type" adds it in its own message.
             Type::Any => buf.push_str("any"),
+            Type::Never => buf.push_str("never"),
             Type::Unknown => buf.push_str("unknown"),
             Type::Unresolved => buf.push_str("unresolved"),
             Type::Void => buf.push_str("void"),

@@ -83,9 +83,7 @@ those were renamed to `i53`/`u53`.
 **"type of … could not be resolved"**
 Inference gave up somewhere upstream — this error is usually the *echo*
 of another one, so fix the first error in the list. When it appears
-alone, an annotation at the binding usually grounds it. Known spots that
-need one: a closure bound to a local and called directly, and an
-`effect` parameter the body destructures.
+alone, an annotation at the binding usually grounds it.
 → [gotchas](gotchas.md)
 
 ## Memory and mutation
@@ -188,11 +186,6 @@ output (a closure, a host object). Fold values, not behavior.
 → [Macros & const](../tour/macros-and-const.md)
 
 ## Syntax
-
-**"expected a method name after `.`"** with a call like `read()(…)`
-Calling a method-call's result directly doesn't parse yet. Bind first:
-`let hook = self.hook.read(); hook(a, b)`.
-→ [gotchas](gotchas.md)
 
 **"found '{' expected …" pointing at a struct literal in a condition or operand**
 Struct literals live at the top expression level only — `Point { … } ==

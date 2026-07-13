@@ -706,6 +706,25 @@ impl<'src> Transformer<'src> {
         variables
     }
 
+    /// Push an expression-position result into `body`: normally an
+    /// assignment into `result_name`, but a DIVERGING value (`return`,
+    /// `break`, `continue` — a `Never`-typed match leg or if branch) is a
+    /// statement of its own; `x = return e` is not JavaScript.
+    fn push_result_or_divergence(
+        &mut self,
+        result_name: &str,
+        value: js::Node<'src>,
+        body: &mut Vec<js::Node<'src>>,
+    ) {
+        match value {
+            js::Node::Return(_) | js::Node::Break | js::Node::Continue => body.push(value),
+            value => body.push(js::Node::Assignment(
+                Box::new(js::Node::Local(result_name.to_string())),
+                Box::new(value),
+            )),
+        }
+    }
+
     fn walk_list(&mut self, list: &Vec<Id>) -> Vec<js::Node<'src>> {
         let mut block = Vec::new();
         self.walk_entities(list, &mut block);
@@ -1953,10 +1972,9 @@ impl<'src> Transformer<'src> {
                                     let t_block_expr = t.walk_entity(body.1, &mut t_body);
                                     let variable_name =
                                         expr_variable_name.get_or_insert_with(|| t.ng.next_name());
-                                    t_body.push(js::Node::Assignment(
-                                        Box::new(js::Node::Local(variable_name.clone())),
-                                        Box::new(t_block_expr.unwrap_or(js::Node::Null)),
-                                    ));
+                                    let value = t_block_expr.unwrap_or(js::Node::Null);
+                                    let variable_name = variable_name.clone();
+                                    t.push_result_or_divergence(&variable_name, value, &mut t_body);
                                 }
                             }
                             js::IfBranch::If(
@@ -1977,10 +1995,9 @@ impl<'src> Transformer<'src> {
                                     let t_block_expr = t.walk_entity(body.1, &mut t_body);
                                     let variable_name =
                                         expr_variable_name.get_or_insert_with(|| t.ng.next_name());
-                                    t_body.push(js::Node::Assignment(
-                                        Box::new(js::Node::Local(variable_name.clone())),
-                                        Box::new(t_block_expr.unwrap_or(js::Node::Null)),
-                                    ));
+                                    let value = t_block_expr.unwrap_or(js::Node::Null);
+                                    let variable_name = variable_name.clone();
+                                    t.push_result_or_divergence(&variable_name, value, &mut t_body);
                                 }
                             }
                             js::IfBranch::Else(t_body)
@@ -2099,10 +2116,8 @@ impl<'src> Transformer<'src> {
                             js::Node::Binary(BinaryOp::And, Box::new(a), Box::new(b))
                         });
                         let value = self.walk_entity(leg.body, &mut leg_body);
-                        leg_body.push(js::Node::Assignment(
-                            Box::new(js::Node::Local(result_name.clone())),
-                            Box::new(value.unwrap_or(js::Node::Null)),
-                        ));
+                        let value = value.unwrap_or(js::Node::Null);
+                        self.push_result_or_divergence(&result_name, value, &mut leg_body);
                         for capture in captures {
                             self.is_bindings.remove(&capture);
                         }
@@ -2114,10 +2129,8 @@ impl<'src> Transformer<'src> {
                         continue;
                     };
                     let value = self.walk_entity(leg.body, &mut leg_body);
-                    leg_body.push(js::Node::Assignment(
-                        Box::new(js::Node::Local(result_name.clone())),
-                        Box::new(value.unwrap_or(js::Node::Null)),
-                    ));
+                    let value = value.unwrap_or(js::Node::Null);
+                    self.push_result_or_divergence(&result_name, value, &mut leg_body);
                     let is_catch_all = condition.is_none();
                     compiled_legs.push((condition, leg_body));
                     if is_catch_all {

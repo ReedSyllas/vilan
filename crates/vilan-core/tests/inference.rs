@@ -5937,12 +5937,10 @@ fn an_expression_macro_must_generate_one_expression() {
     );
 }
 
-// A closure bound to a local and called directly doesn't type its unannotated
-// parameter (backlog B13) — the call-site reconciliation channel covers method
-// calls and deferred call subjects, but a direct call on a closure-typed local
-// never feeds the parameter back. Surfaced writing `macro unroll(..)` callbacks.
+// B13, FIXED: a direct call on a let-bound closure now fills an unannotated
+// parameter's shared type slot from the argument, so the body's uses type.
+// (The first call site wins; later calls compare against it.)
 #[test]
-#[ignore]
 fn a_direct_call_types_an_unannotated_closure_parameter() {
     assert_compiles_and_runs(
         r#"
@@ -11235,9 +11233,9 @@ fn calling_a_method_call_result_binds_first() {
 }
 
 #[test]
-#[ignore = "parser gap: calling a method-call result directly — x.method()(args) — doesn't parse (Kolt pilot find; backlog B)"]
 fn calling_a_method_call_result_directly_parses() {
-    // `func()(args)` parses; `x.method()(args)` does not. Un-ignore when fixed.
+    // Fixed with the direct-call postfix (backlog §H.18): a member fuses at
+    // most one call, so a second `(args)` calls the RESULT.
     assert_compiles(
         r#"
         import std::shared::Shared;
@@ -11246,6 +11244,10 @@ fn calling_a_method_call_result_directly_parses() {
             fun call_it(self, a: str): i32 {
                 self.hook.read()(a)
             }
+        }
+        fun main() {
+            let holder = Holder { hook = Shared::new(|text: str| text.len()) };
+            let _n = holder.call_it("hi");
         }
         "#,
     );
@@ -12460,9 +12462,11 @@ fn bind_draft_compiles_for_the_browser() {
 // --- B23: effect-closure parameter grounding (backlog.md §B.23) --------------
 
 #[test]
-#[ignore = "B23: the parameter types against the impl's abstract T, not the receiver's payload"]
 fn an_effect_closures_unannotated_parameter_grounds_from_the_signal() {
-    // `map` in the same shape grounds; `effect` should too.
+    // B23, FIXED: the inherited-trait-default path now records the trait's
+    // receiver bindings (so `effect`'s `|T| void` types concretely), and
+    // `resolve_match` defers on a not-yet-filled closure parameter instead
+    // of binding pattern captures against the enum's raw declaration.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -12690,5 +12694,239 @@ fn an_imported_module_alias_qualifies_statics() {
         }
         "#,
         "1\n",
+    );
+}
+
+// --- Direct calls on postfix results (backlog §H.18, fixed) ------------------
+//
+// `self.hook.read()(a, b)` used to fail to parse ("expected a method name
+// after `.`"): the member grammar greedily folded the second `(args)` into
+// the member. A member now fuses at most ONE call; further `(args)` are
+// direct-call postfixes on the chain (calling a closure-typed value).
+
+#[test]
+fn a_method_call_result_is_directly_callable() {
+    // The service-hook shape that carried the bind-first workaround.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+
+        struct Holder {
+            hook: Shared<|i32, i32| i32>,
+        }
+
+        fun main() {
+            let holder = Holder { hook = Shared::new(|a: i32, b: i32| a + b) };
+            print(holder.hook.read()(20, 22));
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn an_index_result_is_directly_callable() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let handlers: List<|i32| i32> = [|n: i32| n * 2, |n: i32| n + 1];
+            print(handlers[0](21));
+            print(handlers[1](41));
+        }
+        "#,
+        "42\n42\n",
+    );
+}
+
+#[test]
+fn a_direct_call_chains_into_further_postfixes() {
+    // The direct call's result re-enters the chain (here: indexed).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+
+        struct Factory {
+            make: Shared<|i32| List<i32>>,
+        }
+
+        fun main() {
+            let factory = Factory { make = Shared::new(|seed: i32| [seed, seed * 2]) };
+            print(factory.make.read()(21)[1]);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+#[ignore = "tuple member access (.0/.1) is unimplemented: the field path has no Tuple arm"]
+fn tuple_member_access_grounds() {
+    // Discovered pinning §H.18: `.0` parses (a Number member) but the
+    // analyzer's field path only handles struct subjects — even an
+    // ANNOTATED tuple errors "cannot access field '0' on type (i32, i32)".
+    // Destructuring is the working form until this lands.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let pair: (i32, i32) = (41, 1);
+            print(pair.0 + pair.1);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+// --- Never-typed divergence (two gotchas closed) ------------------------------
+//
+// `panic(..)`, `ret ..`, and `jump break/continue` now type as `Never`,
+// which YIELDS in unification: a diverging match leg or if branch no longer
+// constrains (panic's old `Any` absorbed the whole match; `ret` legs typed
+// void and mismatched). The transformer emits diverging leg results as
+// statements (`return e`, not `x = return e`).
+
+#[test]
+fn a_ret_leg_no_longer_poisons_the_match_type() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+
+        fun first_or_bail(items: List<i32>): i32 {
+            mut copy = items;
+            let head = match copy.pop() {
+                Some(let value) => value,
+                None => ret 0 - 1,
+            };
+            head * 2
+        }
+
+        fun main() {
+            print(first_or_bail([21]));
+            let empty: List<i32> = [];
+            print(first_or_bail(empty));
+        }
+        "#,
+        "42\n-1\n",
+    );
+}
+
+#[test]
+fn a_panic_leg_no_longer_absorbs_the_match_type() {
+    // The binding is UNANNOTATED — the value leg's type wins.
+    assert_compiles_and_runs(
+        r#"
+        import std::{ print, panic };
+        import std::option::Option::{ self, Some, None };
+
+        fun unwrap_or_panic(slot: Option<str>): str {
+            let value = match slot {
+                Some(let text) => text,
+                None => panic("missing"),
+            };
+            value + "!"
+        }
+
+        fun main() {
+            print(unwrap_or_panic(Some("hi")));
+        }
+        "#,
+        "hi!\n",
+    );
+}
+
+#[test]
+fn a_panicking_if_branch_yields_to_the_other() {
+    assert_compiles_and_runs(
+        r#"
+        import std::{ print, panic };
+
+        fun main() {
+            let flag = true;
+            let picked = if flag { 42 } else { panic("no") };
+            print(picked);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_jump_leg_diverges_inside_a_loop() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            mut total = 0;
+            for step in [1, 0, 2, 0, 3] {
+                let value = match step {
+                    0 => jump continue,
+                    let n => n,
+                };
+                total += value;
+            }
+            print(total);
+        }
+        "#,
+        "6\n",
+    );
+}
+
+#[test]
+fn all_diverging_legs_still_satisfy_an_annotation() {
+    // Never fits any expected type; nothing runs past the match.
+    assert_compiles(
+        r#"
+        import std::panic;
+
+        fun choose(flag: bool): i32 {
+            let value: i32 = match flag {
+                true => panic("a"),
+                false => ret 0,
+            };
+            value
+        }
+
+        fun main() {
+            let _n = choose(false);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_direct_call_types_several_unannotated_parameters() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let add = |a, b| a + b;
+            print(add(20, 22));
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_direct_call_respects_annotated_parameters() {
+    // Mixed: the annotation stays authoritative; only the Unknown fills.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let scale = |a: i32, b| a * b;
+            print(scale(6, 7));
+        }
+        "#,
+        "42\n",
     );
 }

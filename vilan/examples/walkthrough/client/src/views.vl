@@ -185,7 +185,7 @@ fun note_editor(client: NotesClient<SocketTransport>, note_id: i32, entry: Signa
 	let body = draft(seed_body, |value: str| commit_outcome(client.rewrite_note(token.get(), note_id, value), note_id));
 
 	// Remote edits (another session's typing — or our own echo) fold in.
-	entry.effect(|current: Option<Note>| {
+	entry.effect(|current| {
 		match current {
 			Some(let note) => {
 				title.adopt(note.title);

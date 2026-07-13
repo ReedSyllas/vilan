@@ -1611,6 +1611,10 @@ where
     E: ParserExtra<'tokens, I> + 'tokens,
     E::Error: LabelError<'tokens, I, &'static str> + CustomParseError<'tokens, I>,
 {
+    // Clones for the member grammar below — `call` consumes the originals.
+    let member_generic_arguments = generic_arguments.clone();
+    let member_argument_list = expression_list.clone();
+
     // `Name<Args>` is the head of a `::` path only when a `::` actually
     // follows (e.g. `List<str>::new()`); the trailing `::` is matched with a
     // lookahead so a generic *call* like `default<Id>()` is left untouched.
@@ -1662,6 +1666,12 @@ where
         Index(Spanned<Node<'src>>),
         TryAssert,
         LiftMember(Spanned<Node<'src>>),
+        // `subject(args)` where the subject is itself a postfix result — a
+        // method-call result, an index (`handlers[0](x)`), a lifted member.
+        // The `call` level below the postfixes only folds suffixes onto the
+        // chain HEAD, so without this arm `self.hook.read()(a)` failed to
+        // parse (backlog §H.18, now fixed).
+        DirectCall(Spanned<NodeList<'src>>),
     }
     // Apply one plain postfix to a subject, spanning from the chain's start.
     fn apply_postfix<'src>(
@@ -1692,8 +1702,41 @@ where
                 ),
                 span,
             ),
+            Postfix::DirectCall(arguments) => {
+                (Node::Call(Box::new(subject), None, arguments), span)
+            }
         }
     }
+    // A member after `.`/`?.`: a tuple index (`.0`), or a name with at most
+    // ONE fused call (`.method(args)`, optionally `.method<T>(args)`). The
+    // full `call` combinator would greedily fold FURTHER `(args)` suffixes
+    // into the member (`.read()(a)` became a nested call the analyzer
+    // rejected); one fused call leaves the rest to the DirectCall postfix.
+    let member_call = choice((
+        select! { Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix) }
+            .map_with(|node, e| (node, e.span())),
+        identifier
+            .map_with(|name, e| (Node::Accessor(name), e.span()))
+            .then(
+                member_generic_arguments
+                    .or_not()
+                    .then(
+                        member_argument_list
+                            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                            .map_with(|args, e| (args, e.span())),
+                    )
+                    .or_not(),
+            )
+            .map_with(|(accessor, invocation), e| match invocation {
+                Some((generic_arguments, args)) => (
+                    Node::Call(Box::new(accessor), generic_arguments, args),
+                    e.span(),
+                ),
+                None => accessor,
+            }),
+    ))
+    .boxed();
+
     let member_accessor = call
         .clone()
         .then(
@@ -1705,7 +1748,7 @@ where
                 // path, so valid programs parse identically.
                 just(Token::Ctrl('.'))
                     .map_with(|_, e| e.span())
-                    .then(call.clone().or_not())
+                    .then(member_call.clone().or_not())
                     .map(|(dot_span, member)| {
                         Postfix::Member(member.unwrap_or((Node::Error, dot_span)))
                     }),
@@ -1717,12 +1760,20 @@ where
                 // `expr!` — assert-or-return. `!=` lexes as one token, so this
                 // arm never consumes the `!` of a comparison.
                 just(Token::Op("!")).map(|_| Postfix::TryAssert),
+                // `(args)` on a postfix result — calling a closure-typed value.
+                expression
+                    .clone()
+                    .separated_by(just(Token::Ctrl(',')))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+                    .map_with(|args, e| Postfix::DirectCall((args, e.span()))),
                 // `?.member` — a lifted link (with the same mid-edit recovery
                 // as `.member`, for completion after `a?.`).
                 just(Token::Op("?"))
                     .ignore_then(just(Token::Ctrl('.')))
                     .map_with(|_, e| e.span())
-                    .then(call.or_not())
+                    .then(member_call.or_not())
                     .map(|(dot_span, member)| {
                         Postfix::LiftMember(member.unwrap_or((Node::Error, dot_span)))
                     }),
@@ -1751,7 +1802,10 @@ where
                         let mut lift_end = postfix_span.end;
                         while matches!(
                             items.peek(),
-                            Some((Postfix::Member(_) | Postfix::Index(_), _))
+                            Some((
+                                Postfix::Member(_) | Postfix::Index(_) | Postfix::DirectCall(_),
+                                _
+                            ))
                         ) {
                             let (step, step_span) = items.next().unwrap();
                             lift_end = step_span.end;

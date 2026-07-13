@@ -5,6 +5,11 @@ use crate::id::Id;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Any,
+    // The type of expressions that never produce a value: `panic(..)`,
+    // `ret ..`, `jump break`/`continue`. Never unifies by YIELDING to the
+    // other side (a diverging match leg doesn't constrain the match's
+    // type), unlike `Any`, which absorbs. Internal — not written in source.
+    Never,
     Closure(Vec<TypeId>, TypeId),
     // A nominal enum/struct and its type arguments (`Option<i32>` ->
     // `Enum(option_id, [i32])`, `List<str>` -> `Struct(list_id, [str])`). The

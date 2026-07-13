@@ -423,7 +423,8 @@ fn standalone_library_check_flags_a_body_scoped_violation() {
 /// keep building — it is the book's capstone example.
 #[test]
 fn the_walkthrough_example_builds() {
-    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/examples/walkthrough");
+    let example =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/examples/walkthrough");
     let output = vilan(&["build", example.to_str().unwrap()]);
     assert!(
         output.status.success(),

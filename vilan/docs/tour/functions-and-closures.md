@@ -150,11 +150,6 @@ owners, and ownership still flows to the right place.
 
 ## Traps
 
-- Calling a method-call result directly doesn't parse yet. Instead of
-  `self.hook.read()(a, b)`, bind first:
-  `let hook = self.hook.read(); hook(a, b)`.
-- A closure bound to a local and then called directly
-  (`let f = |i| …; f(3)`) doesn't infer its parameter type from the
-  call. Annotate the parameter.
-- Chained element access on a call result (`pair().1`, `read()[i]`) can
-  lose the element type. Bind, then access.
+- Chained element access on a call result (`read()[i]`) can lose the
+  element type. Bind, then index. (Tuple `.0`/`.1` access isn't
+  implemented at all yet — destructure tuples instead.)

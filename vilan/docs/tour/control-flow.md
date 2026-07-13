@@ -52,13 +52,19 @@ pattern as a boolean:
 let present = entry.map(|current| current is Some(let _task));
 ```
 
-A few edges to know, all with easy workarounds:
+One edge to know: a `match` can't sit directly inside a larger operator
+expression. Bind it to a local first.
 
-- A `match` can't sit directly inside a larger operator expression. Bind
-  it to a local first.
-- If one arm returns early with `ret` and others produce values, or one
-  arm calls `panic`, annotate the binding the match flows into. The
-  compiler doesn't treat those arms as "no value" yet.
+Arms that never produce a value — a `ret`, a `panic`, a
+`jump break`/`continue` — simply don't participate in the match's type.
+The other arms decide it:
+
+```vilan,fragment
+let value = match slot {
+	Some(let text) => text,     // the match is a str
+	None => panic("missing"),   // this arm diverges; no annotation needed
+};
+```
 
 ## Loops
 
