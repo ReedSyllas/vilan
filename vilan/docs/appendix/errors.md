@@ -225,8 +225,9 @@ output (a closure, a host object). Fold values, not behavior.
 
 ## Syntax
 
-**"found '{' expected …" pointing at a struct literal in a condition or operand**
-Struct literals live at the top expression level only — `Point { … } ==
-q` and `if Foo { … }` are parse errors by design. Bind the literal to a
-local first.
+**A struct literal in a condition parses as the block**
+Struct literals are ordinary operator operands (`Point { … } == q`
+compares), but condition positions exclude them — after `if Foo` or a
+`match` subject, the `{` is the block/arms, by design. Parenthesize the
+literal there: `if p == (Point { x = 1 }) { … }`.
 → [spec §3.8](../spec/grammar.md)

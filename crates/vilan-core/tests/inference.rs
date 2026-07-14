@@ -14867,3 +14867,252 @@ fn a_direct_call_respects_annotated_parameters() {
         "42\n",
     );
 }
+
+// --- H.1: struct literals as operator operands ----------------------------------
+// The operator/postfix chain admits struct literals as operands in ordinary
+// expression positions; condition positions (`if`/`for` conditions, `for .. in`
+// iterables, `match` subjects) exclude them so `if Foo { .. }` keeps the brace
+// for the block. Parenthesize a literal to use it in a condition.
+
+#[test]
+fn a_struct_literal_is_a_left_operand() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            let p = Point { x = 1, y = 2 };
+            print(Point { x = 1, y = 2 } == p);
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn a_struct_literal_is_a_right_operand() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            let p = Point { x = 1, y = 2 };
+            print(p != Point { x = 3, y = 4 });
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn a_struct_literal_folds_a_field_access() {
+    // The old dedicated literal member-fold, now the general postfix chain.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            print(Point { x = 3, y = 4 }.x);
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn a_struct_literal_folds_a_method_call() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        impl Point {
+            fun sum(self): i32 {
+                self.x + self.y
+            }
+        }
+
+        fun main() {
+            print(Point { x = 3, y = 4 }.sum());
+        }
+        "#,
+        "7\n",
+    );
+}
+
+#[test]
+fn a_struct_literal_operand_composes_with_logical_operators() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            let p = Point { x = 1, y = 2 };
+            print(Point { x = 1, y = 2 } == p && 1 < 2);
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn a_generic_struct_literal_is_an_operand() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Holder<T> {
+            value: T,
+        }
+
+        fun main() {
+            let h = Holder { value = 3 };
+            print(Holder<i32> { value = 3 } == h);
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn a_parenthesized_struct_literal_serves_in_a_condition() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            let p = Point { x = 1, y = 2 };
+            if p == (Point { x = 1, y = 2 }) {
+                print("equal");
+            }
+        }
+        "#,
+        "equal\n",
+    );
+}
+
+#[test]
+fn a_bare_struct_literal_statement_still_parses() {
+    assert_compiles(
+        r#"
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            Point { x = 1 };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_match_subject_does_not_take_a_struct_literal() {
+    // Condition positions stay struct-free: the `{` after the subject is the
+    // arms block, so a literal there is a parse error (parenthesize instead).
+    assert_fails(
+        r#"
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            match Point { x = 1 } {
+                _ => 0,
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_for_iterable_does_not_take_a_struct_literal() {
+    assert_fails(
+        r#"
+        struct Wrapper {
+            items: i32,
+        }
+
+        fun main() {
+            for e in Wrapper { items = 1 } { }
+        }
+        "#,
+    );
+}
+
+// A bare type name in VALUE position is accepted today (`let q = Point;`
+// compiles), which is what lets `if p == Point { x = 1 } { .. }` silently
+// misparse into a condition against the type object plus two blocks and then
+// trap at runtime. The analyzer should reject a type name used as a value;
+// both pins un-ignore when it does (backlog §B.27).
+#[test]
+#[ignore]
+fn a_bare_type_name_is_not_a_value() {
+    assert_fails(
+        r#"
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            let q = Point;
+        }
+        "#,
+    );
+}
+
+#[test]
+#[ignore]
+fn an_unparenthesized_struct_literal_condition_is_rejected_not_misparsed() {
+    assert_fails(
+        r#"
+        import std::print;
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            let p = Point { x = 1 };
+            if p == Point { x = 1 } {
+                print("y");
+            }
+        }
+        "#,
+    );
+}

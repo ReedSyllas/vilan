@@ -119,6 +119,13 @@ where
 
     let mut secondary_expression = Recursive::declare();
 
+    // The expression grammar for condition positions (`if`/`for` conditions, a
+    // `for .. in` iterable, a `match` subject): identical to
+    // `secondary_expression` except that struct literals are not operator
+    // operands there, so the `{` after `if Foo` is the block, not a literal
+    // (§H.1; parenthesize the literal to use one in a condition).
+    let mut condition_expression = Recursive::declare();
+
     // A comma-delimited list of expressions.
     let expression_list = expression
         .clone()
@@ -545,7 +552,7 @@ where
     if_.define(
         recursive(|if_| {
             just(Token::If)
-                .ignore_then(secondary_expression.clone().labelled("condition"))
+                .ignore_then(condition_expression.clone().labelled("condition"))
                 .then(block.clone())
                 .then(
                     just(Token::Else)
@@ -659,7 +666,7 @@ where
         .ignore_then(identifier.labelled("loop variable"))
         .then_ignore(just(Token::In))
         .then(
-            secondary_expression
+            condition_expression
                 .clone()
                 .labelled("iterable")
                 .map(Box::new),
@@ -672,7 +679,7 @@ where
     let for_loop = just(Token::For)
         .ignore_then(choice((
             block.clone().map(|body| (None, body)),
-            secondary_expression
+            condition_expression
                 .clone()
                 .labelled("loop condition")
                 .then(block.clone())
@@ -801,7 +808,7 @@ where
         .map(|((patterns, guard), body)| (patterns, guard.map(Box::new), body));
 
     let match_ = just(Token::Match)
-        .ignore_then(secondary_expression.clone().labelled("match subject"))
+        .ignore_then(condition_expression.clone().labelled("match subject"))
         .then(
             // Each arm may be followed by a comma; it's optional, so the idiomatic
             // no-comma-after-a-`{ }`-block style (`Some(x) => { .. } None => 0`)
@@ -1227,8 +1234,21 @@ where
         .boxed();
 
     // The operator-precedence expression (calls, member/static access,
-    // arithmetic, comparison), then the `is` pattern test, then `&&`.
-    let chained = chain_expr_parser(
+    // arithmetic, comparison), built over two operand grammars (§H.1):
+    //
+    // - Ordinary expression positions admit a struct literal as an operand, so
+    //   `Point { x = 1 } == p` compares and `Rect { .. }.area()` folds the
+    //   member chain like any postfix (subsuming the old dedicated fold).
+    // - Condition positions (`if`/`for` conditions, a `for .. in` iterable, a
+    //   `match` subject) exclude struct literals, so the `{` after `if Foo` is
+    //   the block, not a literal — parenthesize to use one there. The
+    //   struct-free chain is also the assignment-place grammar (a literal is
+    //   not a place).
+    //
+    // The literal is tried before `atom` (whose bare-identifier alternative
+    // would otherwise win without ever seeing the `{`) and backtracks to it
+    // when no brace follows.
+    let condition_chained = chain_expr_parser(
         identifier,
         generic_arguments.clone(),
         expression_list.clone(),
@@ -1238,48 +1258,40 @@ where
             .clone()
             .map(|(x, span)| (Node::Block((x, span)), span)),
     );
+    let expression_chained = chain_expr_parser(
+        identifier,
+        generic_arguments.clone(),
+        expression_list.clone(),
+        expression.clone(),
+        struct_initializer.clone().or(atom.clone()),
+        block
+            .clone()
+            .map(|(x, span)| (Node::Block((x, span)), span)),
+    );
     // The `*` assignment-target operand is the postfix/precedence expression, so a
     // view-returning call (`*node.slot() = 10`) is recognized; a bare name or
     // `.field` chain still produces the same `Accessor`/`MemberAccessor` nodes as
     // the non-deref place (`local` is `Accessor`), keeping codegen byte-identical.
-    place_operand.define(chained.clone());
-    let is_expression = chained
-        .then(just(Token::Is).ignore_then(pattern.clone()).or_not())
-        .map_with(|(subject, matched), e| match matched {
-            Some(matched) => (Node::Is(Box::new(subject), Box::new(matched)), e.span()),
-            None => subject,
-        })
-        .boxed();
-    let logical_and = is_expression
-        .clone()
-        .foldl_with(
-            just(Token::Op("&&")).ignore_then(is_expression).repeated(),
-            |a, b, e| {
-                (
-                    Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)),
-                    e.span(),
-                )
-            },
-        )
-        .boxed();
-
-    // `||` binds looser than `&&`. A `||`-led empty closure (`|| body`) is parsed
-    // by the `closure` alternative below, tried before this in the choice, so it's
-    // never mistaken for a logical-or operator (which always has a left operand).
-    let logical_or = logical_and
-        .clone()
-        .foldl_with(
-            just(Token::Op("||")).ignore_then(logical_and).repeated(),
-            |a, b, e| {
-                (
-                    Node::Binary(BinaryOp::Or, Box::new(a), Box::new(b)),
-                    e.span(),
-                )
-            },
-        )
-        .boxed();
+    place_operand.define(condition_chained.clone());
+    let expression_operators = operator_tower(expression_chained, pattern.clone());
+    let condition_operators = operator_tower(condition_chained, pattern.clone());
 
     secondary_expression.define(choice((
+        closure.clone(),
+        block
+            .clone()
+            .map(|(x, span)| (Node::Block((x, span)), span)),
+        if_.clone(),
+        for_.clone(),
+        match_.clone(),
+        jump.clone(),
+        let_.clone(),
+        return_.clone(),
+        assignment.clone(),
+        expression_operators,
+    )));
+
+    condition_expression.define(choice((
         closure,
         block
             .clone()
@@ -1291,43 +1303,8 @@ where
         let_,
         return_,
         assignment,
-        logical_or,
+        condition_operators,
     )));
-
-    // A struct literal may be the subject of a `.field` access or `.method()`
-    // call (`Point { x = 1, y = 2 }.length()`). Struct literals are parsed only
-    // at the top expression level (conditions use `secondary_expression`, so
-    // `if Foo { .. }` stays unambiguous); this folds any trailing member chain
-    // onto the literal there. Each member is a field name or a call, mirroring
-    // the postfix shape `MemberAccessor` resolves.
-    //
-    // Consequence: a struct literal can't be an operator operand
-    // (`Point { .. } == x`) — bind it to a variable first. Lifting that needs a
-    // `no-struct-literal` expression mode for condition positions (as in Rust),
-    // i.e. a second binary/operator chain that excludes struct literals — a larger
-    // change, deferred.
-    let struct_member = identifier
-        .map_with(|name, e| (Node::Accessor(name), e.span()))
-        .then(
-            expression_list
-                .clone()
-                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-                .map_with(|args, e| (args, e.span()))
-                .or_not(),
-        )
-        .map_with(|(accessor, args), e| match args {
-            Some(args) => (Node::Call(Box::new(accessor), None, args), e.span()),
-            None => accessor,
-        });
-    let struct_initializer_expression = struct_initializer.clone().foldl_with(
-        just(Token::Ctrl('.')).ignore_then(struct_member).repeated(),
-        |subject, member, e| {
-            (
-                Node::MemberAccessor(Box::new(subject), Box::new(member)),
-                e.span(),
-            )
-        },
-    );
 
     // `const expr` — the weak-precedence compile-time-evaluation prefix
     // (proposal/const-eval.md): it captures the largest expression to its
@@ -1336,13 +1313,9 @@ where
         .ignore_then(expression.clone())
         .map_with(|inner, e| (Node::Const(Box::new(inner)), e.span()));
     expression.define(
-        choice((
-            const_expression,
-            struct_initializer_expression,
-            secondary_expression,
-        ))
-        .labelled("expression")
-        .as_context(),
+        choice((const_expression, secondary_expression))
+            .labelled("expression")
+            .as_context(),
     );
 
     // `export <statement>` — re-export an import or expose a declaration.
@@ -1621,6 +1594,56 @@ where
         .repeated()
         .collect::<Vec<_>>()
         .map_with(|children, e| (children, e.span()))
+}
+
+/// The operator tower above the postfix/precedence chain: the `is` pattern
+/// test, then `&&`, then `||` (each binding looser than the last). Built twice
+/// (§H.1): over the struct-literal-admitting chain for ordinary expression
+/// positions, and over the struct-free chain for condition positions.
+///
+/// A `||`-led empty closure (`|| body`) is parsed by the `closure` alternative
+/// tried before this tower in the expression choices, so it's never mistaken
+/// for a logical-or operator (which always has a left operand).
+fn operator_tower<'tokens, 'src: 'tokens, I, E>(
+    chained: impl Parser<'tokens, I, Spanned<Node<'src>>, E> + Clone + 'tokens,
+    pattern: impl Parser<'tokens, I, Spanned<Pattern<'src>>, E> + Clone + 'tokens,
+) -> impl Parser<'tokens, I, Spanned<Node<'src>>, E> + Clone
+where
+    I: ValueInput<'tokens, Token = Token<'src>, Span = Span>,
+    E: ParserExtra<'tokens, I> + 'tokens,
+    E::Error: LabelError<'tokens, I, &'static str> + CustomParseError<'tokens, I>,
+{
+    let is_expression = chained
+        .then(just(Token::Is).ignore_then(pattern).or_not())
+        .map_with(|(subject, matched), e| match matched {
+            Some(matched) => (Node::Is(Box::new(subject), Box::new(matched)), e.span()),
+            None => subject,
+        })
+        .boxed();
+    let logical_and = is_expression
+        .clone()
+        .foldl_with(
+            just(Token::Op("&&")).ignore_then(is_expression).repeated(),
+            |a, b, e| {
+                (
+                    Node::Binary(BinaryOp::And, Box::new(a), Box::new(b)),
+                    e.span(),
+                )
+            },
+        )
+        .boxed();
+    logical_and
+        .clone()
+        .foldl_with(
+            just(Token::Op("||")).ignore_then(logical_and).repeated(),
+            |a, b, e| {
+                (
+                    Node::Binary(BinaryOp::Or, Box::new(a), Box::new(b)),
+                    e.span(),
+                )
+            },
+        )
+        .boxed()
 }
 
 fn chain_expr_parser<'tokens, 'src: 'tokens, I, E>(

@@ -244,11 +244,11 @@ Bitwise operators bind tighter than comparisons (`a & b == c` is
 
 ```text
 expression     = "const" expression        (* weak prefix: captures to the end *)
-               | struct-init { "." struct-member }
                | secondary-expr ;
 secondary-expr = closure | block | if-expr | for-expr | match-expr
                | jump | let | ret | assignment
                | operator-expr ;           (* §3.7 levels 1–12 *)
+condition-expr = secondary-expr ;          (* struct-init excluded from operands *)
 
 struct-init   = IDENT [ generic-args ]
                 "{" [ init-field { "," init-field } [ "," ] ] "}" ;
@@ -260,10 +260,13 @@ closure-param = binder [ ":" type ] ;
 
 Two consequences of the tier split are normative:
 
-- A **struct initializer** appears only at the top expression tier. It may
-  head a member chain (`Point { x = 1, y = 2 }.length()`), but it cannot
-  be an operator operand (`Point { … } == q` is a parse error — bind it
-  first) and cannot appear in condition/subject positions.
+- A **struct initializer** is an operand of the operator/postfix chain
+  (`Point { … } == q` compares; `Point { x = 1, y = 2 }.length()` folds
+  the member chain) — except in **condition positions**: an `if`/`for`
+  condition, a `for … in` iterable, and a `match` subject parse
+  `condition-expr`, whose operands exclude struct initializers, so the
+  `{` after `if Foo` is the block. Parenthesize a literal to use it in a
+  condition (`if p == (Point { x = 1 }) { … }`).
 - `const` captures **weakly**: everything to the end of the expression
   (up to the enclosing bracket or comma) folds; parenthesize to narrow
   (§9, Phase B).

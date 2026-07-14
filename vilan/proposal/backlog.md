@@ -419,6 +419,18 @@ have gaps.
     WITH the operators — dispatching a native into one recurses; found
     live). 6 pins; `started < deadline` restored in `docs/std/time.md`.
 
+27. **A bare type name is accepted in value position** (S; found 2026-07-14
+    while pinning §H.1's condition negatives) — `let q = Point;` compiles
+    clean, and the emitted JS binds the constructor object. Consequence: the
+    condition-position misparse trap — `if p == Point { x = 1 } { .. }`
+    parses as `p == Point` (against the type object), an `{ x = 1 }`
+    then-block, and a trailing bare block, compiling silently and trapping
+    at runtime. The analyzer should reject a type name used as a value
+    (there are no unit structs to except); with that, the misparse becomes
+    a clear compile error. 2 `#[ignore]`d pins in `inference.rs`
+    (`a_bare_type_name_is_not_a_value`,
+    `an_unparenthesized_struct_literal_condition_is_rejected_not_misparsed`).
+
 23. ~~**An `effect` closure's unannotated parameter doesn't ground from a
     generic signal's payload**~~ — **FIXED 2026-07-12** (the gotchas
     sweep; pin un-ignored; kolt + walkthrough dropped the annotations).
@@ -910,9 +922,18 @@ have gaps.
 
 ## H. Parser & grammar
 
-1. **Struct literal as an operator operand** (S) — `Point { .. } == x` fails (bind to a variable
-   first); needs a `no-struct-literal` expression mode for conditions (à la Rust). Currently
-   degrades to a clean parse error, documented at the parser site.
+1. **Struct literal as an operator operand** (S) — **SHIPPED 2026-07-14**. The
+   operator/postfix chain is built over two operand grammars (`operator_tower` +
+   `chain_expr_parser` parameterized by operand): ordinary expression positions
+   admit struct literals (`Point { .. } == x`, both sides, inside `&&`/`||`,
+   generic literals too), and the general postfix chain subsumes the old
+   dedicated literal member-fold (`Point { .. }.sum()` — the special case is
+   deleted). Condition positions (`if`/`for` conditions, `for .. in` iterables,
+   `match` subjects) use the struct-free chain via the new
+   `condition_expression`, so `if Foo { .. }` keeps the brace for the block —
+   parenthesize a literal to use it in a condition (à la Rust). Corpus
+   byte-identical; 10 live pins + formatter reformat pin. Found §B.27 while
+   pinning the condition negatives (2 `#[ignore]`d pins ride with it).
 
 5. ~~**The `%` remainder operator**~~ — **SHIPPED 2026-07-10**: truncated remainder
    (the dividend's sign — Rust's and JS's shared semantics) at every numeric type, plus

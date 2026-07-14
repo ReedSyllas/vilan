@@ -1338,6 +1338,16 @@ mod reformats {
     }
 
     #[test]
+    fn a_struct_literal_operand_reformats() {
+        // §H.1: a struct literal as an operator operand round-trips through
+        // the formatter (parse → print → parse must hold).
+        assert_formats(
+            "fun f(p: Point): bool {\n\tPoint{x=1}==p\n}\n",
+            "fun f(p: Point): bool {\n\tPoint { x = 1 } == p\n}\n",
+        );
+    }
+
+    #[test]
     fn generic_and_reference_field_types() {
         assert_formats(
             "struct Boxed { item :  List<i32> , next : &mut Node }\n",
