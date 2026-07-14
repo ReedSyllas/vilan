@@ -8,17 +8,16 @@ organized by message instead of by topic.
 
 ## Language
 
-- **Tuple member access (`.0`, `.1`) is not implemented yet.**
-  Even `let pair: (i32, i32) = …; pair.0` errors — destructure instead:
-  `let (a, b) = pair;`. (Tracked; pinned.)
 - **Chained element access on a call result loses the element type.**
   `shared.read()[i]` → bind, then index: `let list = shared.read();
   list[i]`.
 - **`match` can't be an operator operand.**
   `(match x { … }) + 1` → bind the match to a local first.
-- **i53 literals in binary operations need suffixes.**
-  `stamp + 1000` on an `i53` → `stamp + 1000i53` (the bare literal is
-  `i32`; the mismatch report is currently spanless).
+- **A bare integer literal adapts to its peer; two typed variables
+  don't.** `stamp + 1000` and `stamp < 1000` are fine on an `i53` (the
+  literal takes the peer's type), but mixing two differently-typed
+  *variables* in a comparison is an error — there are no implicit
+  conversions; convert with `as_*` or unify the declarations.
 
 ## Reactive & UI
 

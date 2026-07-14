@@ -129,6 +129,13 @@ pub enum Expr<'src> {
     StructInitializer(Id, IndexMap<usize, Id>),
     Trait(Id),
     Tuple(Vec<Id>),
+    // Positional access into a tuple value: `pair.0` — the subject, the
+    // element's FLAT offset, and its FLAT width (spec §5.9). Tuples store
+    // flat (a tuple-typed element splices its slots in), so a width-1
+    // element reads `subject[offset]` and a multi-slot one reslices
+    // `subject.slice(offset, offset + width)` — the same layout the
+    // destructuring patterns use.
+    TupleIndex(Id, usize, usize),
     // A unary prefix operator and its operand. Only `!` (logical not) exists.
     Unary(char, Id),
     // `&x` / `&mut x` — a view of a place (the operand). The bool is whether the
@@ -921,7 +928,6 @@ pub struct Analyzer<'src> {
     // from the type, so this records it for the R1 check that a view annotation
     // binds a view and a value annotation binds a value. Absent ⇒ no annotation.
     binding_annotation_view: HashMap<Id, bool>,
-    prepped_field_accessors: Vec<(Id, Id, &'src str)>,
     prepped_imports: Vec<(Vec<(&'src str, Span)>, &'src str, Id, Span, Span, SourceId)>,
     // Macro invocations (macro-engine.md §2), keyed by the invocation NODE's
     // address (stable: all walked ASTs are leaked or outlive the analysis).
@@ -1103,6 +1109,43 @@ fn is_overloadable_operator(op: BinaryOp) -> bool {
     operator_trait_method(op).is_some()
 }
 
+/// What went wrong resolving a tuple member.
+enum TupleAccessProblem {
+    /// The member isn't a position at all (`pair.first`).
+    NotAPosition,
+    /// The position is past the tuple's arity, which is carried here.
+    OutOfRange(usize),
+}
+
+/// Resolves `member_name` against a tuple's elements: `.0`, `.1`, … index by
+/// position (spec §5.9).
+fn tuple_element(
+    element_type_ids: &[TypeId],
+    member_name: &str,
+) -> Result<usize, TupleAccessProblem> {
+    let index = member_name
+        .parse::<usize>()
+        .map_err(|_| TupleAccessProblem::NotAPosition)?;
+    if index < element_type_ids.len() {
+        Ok(index)
+    } else {
+        Err(TupleAccessProblem::OutOfRange(element_type_ids.len()))
+    }
+}
+
+/// The diagnostic for a failed tuple member access.
+fn tuple_access_error(tuple_label: &str, member_name: &str, problem: TupleAccessProblem) -> String {
+    match problem {
+        TupleAccessProblem::NotAPosition => format!(
+            "a tuple's members are its positions — `{tuple_label}` has no member \
+             '{member_name}'; use `.0`, `.1`, … (or destructure with `let (a, b) = …`)"
+        ),
+        TupleAccessProblem::OutOfRange(arity) => {
+            format!("`{tuple_label}` has no element {member_name} — its arity is {arity}")
+        }
+    }
+}
+
 /// Ordering comparisons — dispatched through `PartialOrd` in the model
 /// (spec §5.7); not overloadable yet, but their operands are checked (B24).
 fn is_ordering_operator(op: BinaryOp) -> bool {
@@ -1225,7 +1268,6 @@ impl<'src> Analyzer<'src> {
             prepped_assignments: Vec::new(),
             compound_reread_ids: HashSet::new(),
             binding_annotation_view: HashMap::new(),
-            prepped_field_accessors: Vec::new(),
             prepped_imports: Vec::new(),
             macro_item_invocations: HashSet::new(),
             macro_signatures: HashMap::new(),
@@ -2378,7 +2420,10 @@ impl<'src> Analyzer<'src> {
     fn is_place_expr(&self, expr_id: Id) -> bool {
         matches!(
             self.expr_id_to_expr_map.get(&expr_id),
-            Some(Expr::Local(_)) | Some(Expr::Field(_, _, _)) | Some(Expr::Index(_, _))
+            Some(Expr::Local(_))
+                | Some(Expr::Field(_, _, _))
+                | Some(Expr::TupleIndex(_, _, _))
+                | Some(Expr::Index(_, _))
         )
     }
 
@@ -2389,7 +2434,9 @@ impl<'src> Analyzer<'src> {
     /// (the position-default-convention flip).
     fn readonly_root(&self, expr_id: Id) -> Option<(&'src str, &'static str)> {
         match self.expr_id_to_expr_map.get(&expr_id)? {
-            Expr::Field(subject_id, _, _) => self.readonly_root(*subject_id),
+            Expr::Field(subject_id, _, _) | Expr::TupleIndex(subject_id, _, _) => {
+                self.readonly_root(*subject_id)
+            }
             Expr::Index(subject_id, _) => self.readonly_root(*subject_id),
             Expr::Dereference(operand_id) => self.readonly_root(*operand_id),
             Expr::Local(binding_id) => {
@@ -2826,7 +2873,9 @@ impl<'src> Analyzer<'src> {
                 self.scan_view_param_ref(target, captured, visited);
                 self.scan_view_param_ref(value, captured, visited);
             }
-            Expr::Field(subject, _, _) => self.scan_view_param_ref(subject, captured, visited),
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => {
+                self.scan_view_param_ref(subject, captured, visited)
+            }
             Expr::Index(subject, index) => {
                 self.scan_view_param_ref(subject, captured, visited);
                 self.scan_view_param_ref(index, captured, visited);
@@ -2918,7 +2967,9 @@ impl<'src> Analyzer<'src> {
     fn place_root(&self, expr_id: Id) -> Option<Id> {
         match self.expr_id_to_expr_map.get(&expr_id)? {
             Expr::Local(binding_id) => Some(*binding_id),
-            Expr::Field(subject_id, _, _) => self.place_root(*subject_id),
+            Expr::Field(subject_id, _, _) | Expr::TupleIndex(subject_id, _, _) => {
+                self.place_root(*subject_id)
+            }
             Expr::Index(subject_id, _) => self.place_root(*subject_id),
             Expr::Dereference(operand_id) => self.place_root(*operand_id),
             _ => None,
@@ -3562,6 +3613,7 @@ impl<'src> Analyzer<'src> {
             | Expr::Dereference(operand)
             | Expr::Unary(_, operand)
             | Expr::Field(operand, _, _)
+            | Expr::TupleIndex(operand, _, _)
             | Expr::FunctionReturn(Some(operand)) => {
                 self.scan_closure_view_captures(
                     operand,
@@ -3996,7 +4048,7 @@ impl<'src> Analyzer<'src> {
                 self.scan_invalidation(lhs, scan, live, violations, saw_await);
                 self.scan_invalidation(rhs, scan, live, violations, saw_await);
             }
-            Expr::Field(subject, _, _) => {
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => {
                 self.scan_invalidation(subject, scan, live, violations, saw_await)
             }
             Expr::Index(subject, index) => {
@@ -4574,7 +4626,7 @@ impl<'src> Analyzer<'src> {
                     self.mark_repeatable(closure.return_, depth + 1, interior, visited);
                 }
             }
-            Expr::Field(subject_id, _, _) => {
+            Expr::Field(subject_id, _, _) | Expr::TupleIndex(subject_id, _, _) => {
                 self.mark_repeatable(*subject_id, depth, interior, visited)
             }
             Expr::Index(subject_id, index_id) => {
@@ -5099,8 +5151,49 @@ impl<'src> Analyzer<'src> {
                                 member_name: name,
                             }));
                     }
-                    Node::Number(name, _, _) => {
-                        self.prepped_field_accessors.push((id, subject_id, *name));
+                    // A number member (`pair.0`) is a tuple's positional
+                    // accessor — the SAME constraint as a named member, so it
+                    // defers with the subject's inference instead of the old
+                    // one-shot pre-solve pass that errored on anything not yet
+                    // resolved. A FRACTIONAL member is the lexer reading
+                    // `pair.0.1` as the float `0.1`: two chained accesses,
+                    // split here (`(pair.0).1`), the inner one on a fresh
+                    // entity. A suffix (`pair.0i32`) is meaningless on a
+                    // position.
+                    Node::Number(name, fraction, suffix) => {
+                        if suffix.is_some() {
+                            self.diagnostics.push(Error {
+                                span: member.1,
+                                msg: "a tuple position is a bare number (`.0`, `.1`) — drop the \
+                                      suffix"
+                                    .to_string(),
+                            });
+                        }
+                        self.member_name_spans.insert(id, member.1);
+                        let (final_subject, final_member) = match fraction {
+                            Some(fraction_part) => {
+                                let inner_id = self.new_entity_id();
+                                if let Some(span) = self.span_map.get(&id).copied() {
+                                    self.span_map.insert(inner_id, span);
+                                }
+                                self.expr_id_to_scope_id_map.insert(inner_id, scope_id);
+                                self.constraints.push(Constraint::FieldAccessor(
+                                    FieldAccessorConstraint {
+                                        id: inner_id,
+                                        subject_id,
+                                        member_name: name,
+                                    },
+                                ));
+                                (inner_id, *fraction_part)
+                            }
+                            None => (subject_id, *name),
+                        };
+                        self.constraints
+                            .push(Constraint::FieldAccessor(FieldAccessorConstraint {
+                                id,
+                                subject_id: final_subject,
+                                member_name: final_member,
+                            }));
                     }
                     Node::Call(call_subject, call_generic_arguments, call_arguments) => {
                         match &call_subject.0 {
@@ -11210,6 +11303,53 @@ impl<'src> Analyzer<'src> {
         let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
         match subject_type {
             Type::Unresolved => Resolution::Deferred,
+            // `pair.0`: a tuple's members are its positions (spec §5.9).
+            Type::Tuple(element_type_ids) => {
+                match tuple_element(&element_type_ids, member_name) {
+                    Ok(index) => {
+                        // Flat storage: the element lives at the sum of the
+                        // widths before it (its own width decides read shape).
+                        let offset: usize = element_type_ids[..index]
+                            .iter()
+                            .map(|element| self.tuple_flat_width(*element))
+                            .sum();
+                        let width = self.tuple_flat_width(element_type_ids[index]);
+                        // A chained access (`deep.0.1`) FOLDS: the subject is
+                        // itself a positional access, so compose the offsets
+                        // and index the ROOT directly — one slot read, and
+                        // (crucially) writes hit the true storage instead of
+                        // a resliced copy. Inner accesses fold recursively,
+                        // so one level of composition reaches any depth.
+                        let (root_subject, base_offset) = match self
+                            .expr_id_to_expr_map
+                            .get(&subject_id)
+                        {
+                            Some(Expr::TupleIndex(root, root_offset, _)) => (*root, *root_offset),
+                            _ => (subject_id, 0),
+                        };
+                        self.expr_id_to_expr_map.insert(
+                            id,
+                            Expr::TupleIndex(root_subject, base_offset + offset, width),
+                        );
+                        let element_type = element_type_ids[index];
+                        self.expr_id_to_type_id_map.insert(id, element_type);
+                        self.resolved_types.insert(id, element_type);
+                        Resolution::Resolved
+                    }
+                    Err(problem) => {
+                        let label = self.pretty_print_type(
+                            &Type::Tuple(element_type_ids.clone()),
+                            &HashMap::new(),
+                        );
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                            msg: tuple_access_error(&label, member_name, problem),
+                        });
+                        self.expr_id_to_expr_map.insert(id, Expr::Error);
+                        Resolution::Failed
+                    }
+                }
+            }
             Type::Struct(struct_id, arguments) => {
                 let struct_ = match self.structs.get(&struct_id) {
                     Some(struct_) => struct_,
@@ -11641,48 +11781,6 @@ impl<'src> Analyzer<'src> {
                         });
                     }
                     self.type_id_to_type_map.insert(type_id, Type::Unknown);
-                }
-            }
-        }
-
-        for (id, subject_id, member_name) in self.prepped_field_accessors.clone() {
-            let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
-            match subject_type {
-                Type::Struct(struct_id, _) => {
-                    let struct_ = self.structs.get(&struct_id).unwrap();
-                    let struct_name = struct_.name;
-                    let field_index = struct_
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .find_map(|(i, x)| (x.name == member_name).then_some(i));
-                    match field_index {
-                        Some(field_index) => {
-                            self.expr_id_to_expr_map
-                                .insert(id, Expr::Field(subject_id, struct_id, field_index));
-                        }
-                        None => {
-                            self.diagnostics.push(Error {
-                                span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                                msg: format!(
-                                    "struct '{}' has no field '{}'",
-                                    struct_name, member_name
-                                ),
-                            });
-                            self.expr_id_to_expr_map.insert(id, Expr::Error);
-                        }
-                    }
-                }
-                subject_type => {
-                    let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
-                    self.diagnostics.push(Error {
-                        span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                        msg: format!(
-                            "cannot access field '{}' on type {}",
-                            member_name, subject_str
-                        ),
-                    });
-                    self.expr_id_to_expr_map.insert(id, Expr::Error);
                 }
             }
         }

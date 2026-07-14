@@ -96,8 +96,8 @@ on) is in the [strings reference](../std/strings.md).
 
 ## Tuples
 
-`(a, b)` groups a few values without declaring a struct. Take them apart
-with a destructuring `let`:
+`(a, b)` groups a few values without declaring a struct. Take them
+apart with a destructuring `let`, or reach one element by position:
 
 ```vilan
 import std::print;
@@ -106,12 +106,13 @@ fun main() {
 	let pair = (1, "one");
 	let (number, word) = pair;
 	print(i"{number} = {word}");
+	print(pair.1);
 }
 ```
 
-Tuple types are written the same way: `(i32, str)`. Destructuring is
-the way to take tuples apart — positional access (`pair.0`) isn't
-implemented yet (see [gotchas](../appendix/gotchas.md)).
+Tuple types are written the same way: `(i32, str)`. Positional access
+(`pair.0`, `pair.1`, chains like `nested.0.1`) types as that element;
+through a `mut` binding you can also assign one (`pair.0 = 5`).
 
 ## Collections
 

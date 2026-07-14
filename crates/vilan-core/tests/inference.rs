@@ -13926,12 +13926,10 @@ fn a_direct_call_chains_into_further_postfixes() {
 }
 
 #[test]
-#[ignore = "tuple member access (.0/.1) is unimplemented: the field path has no Tuple arm"]
 fn tuple_member_access_grounds() {
-    // Discovered pinning §H.18: `.0` parses (a Number member) but the
-    // analyzer's field path only handles struct subjects — even an
-    // ANNOTATED tuple errors "cannot access field '0' on type (i32, i32)".
-    // Destructuring is the working form until this lands.
+    // §I.19, fixed: `.0` resolves positionally against the tuple's elements
+    // (spec §5.9) — the field path grew its Tuple arm. Destructuring remains
+    // the multi-element form; `.0` is the point access.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -13942,6 +13940,162 @@ fn tuple_member_access_grounds() {
         }
         "#,
         "42\n",
+    );
+}
+
+#[test]
+fn tuple_member_access_infers_without_an_annotation() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let pair = (40, 2);
+            print(pair.0 + pair.1);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn tuple_elements_carry_their_own_types() {
+    // `.1` on `(i32, str)` is a str — methods dispatch on the element type.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let entry = (7, "vilan");
+            print(entry.1.len());
+        }
+        "#,
+        "5\n",
+    );
+}
+
+#[test]
+fn nested_tuple_access_chains() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let nested = ((1, 2), 3);
+            print(nested.0.1);
+        }
+        "#,
+        "2\n",
+    );
+}
+
+#[test]
+fn a_tuple_typed_element_reads_as_a_value() {
+    // Flat storage: `.0` on a nested tuple reslices its region, and the
+    // result behaves as a full tuple value (destructure, re-access).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let nested = ((1, 2), 3);
+            let inner = nested.0;
+            let (x, y) = inner;
+            print(inner.1 + x + y);
+        }
+        "#,
+        "5\n",
+    );
+}
+
+#[test]
+fn a_tuple_typed_element_assignment_writes_its_region() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            mut nested = ((1, 2), 3);
+            nested.0 = (40, 2);
+            print(nested.0.0 + nested.0.1 + nested.1);
+        }
+        "#,
+        "45\n",
+    );
+}
+
+#[test]
+fn a_nested_tuple_write_hits_the_storage_not_a_copy() {
+    // Chained positional accesses FOLD to one flat offset on the root, so a
+    // write through a nested path mutates the tuple — never a resliced copy.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            mut deep = ((1, 2), 3);
+            deep.0.1 = 41;
+            print(deep.0.1 + deep.0.0);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_tuple_element_out_of_range_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let pair = (41, 1);
+            let _x = pair.2;
+        }
+        "#,
+        "pair.2",
+        "has no element 2 — its arity is 2",
+    );
+}
+
+#[test]
+fn a_named_member_on_a_tuple_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let pair = (41, 1);
+            let _x = pair.first;
+        }
+        "#,
+        "pair.first",
+        "a tuple's members are its positions",
+    );
+}
+
+#[test]
+fn a_tuple_element_assigns_through_a_mut_binding() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            mut pair: (i32, i32) = (41, 1);
+            pair.0 = 40;
+            pair.1 = 2;
+            print(pair.0 + pair.1);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_tuple_element_assignment_needs_a_mut_binding() {
+    assert_fails(
+        r#"
+        fun main() {
+            let pair: (i32, i32) = (41, 1);
+            pair.0 = 5;
+        }
+        "#,
     );
 }
 

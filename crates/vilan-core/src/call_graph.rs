@@ -542,7 +542,9 @@ impl<'a, 'src> Collector<'a, 'src> {
                     self.function_references.push((id, *binding));
                 }
             }
-            Expr::Field(subject_id, _, _) => self.walk(*subject_id),
+            Expr::Field(subject_id, _, _) | Expr::TupleIndex(subject_id, _, _) => {
+                self.walk(*subject_id)
+            }
             Expr::Index(subject_id, index_id) => {
                 self.walk(*subject_id);
                 self.walk(*index_id);

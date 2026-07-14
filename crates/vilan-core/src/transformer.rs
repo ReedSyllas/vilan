@@ -743,7 +743,9 @@ impl<'src> Transformer<'src> {
             Some(Expr::Unary(_, operand))
             | Some(Expr::Reference(operand, _))
             | Some(Expr::Dereference(operand)) => self.expr_has_side_effects(*operand),
-            Some(Expr::Field(subject, _, _)) => self.expr_has_side_effects(*subject),
+            Some(Expr::Field(subject, _, _)) | Some(Expr::TupleIndex(subject, _, _)) => {
+                self.expr_has_side_effects(*subject)
+            }
             // A checked subscript can panic, so an indexing expression is
             // effectful in itself: dropping it would drop its bounds check.
             Some(Expr::Index(_, _)) => true,
@@ -903,7 +905,9 @@ impl<'src> Transformer<'src> {
     fn place_root_local(&self, expr_id: Id) -> Option<Id> {
         match self.program.entity_map.get(&expr_id)? {
             Expr::Local(binding) => Some(*binding),
-            Expr::Field(subject, _, _) => self.place_root_local(*subject),
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => {
+                self.place_root_local(*subject)
+            }
             Expr::Index(subject, _) => self.place_root_local(*subject),
             Expr::Dereference(operand) => self.place_root_local(*operand),
             _ => None,
@@ -1056,6 +1060,27 @@ impl<'src> Transformer<'src> {
                     Box::new(subject),
                     Box::new(js::Node::Number(field_index.to_string(), None)),
                 )
+            }
+            // `pair.0` — tuples store flat: a width-1 element reads its slot,
+            // a tuple-typed element reslices its region (like destructuring).
+            Expr::TupleIndex(subject_id, offset, width) => {
+                let subject = self
+                    .walk_entity(*subject_id, block)
+                    .unwrap_or(js::Node::Void);
+                if *width == 1 {
+                    js::Node::PropertyIndex(
+                        Box::new(subject),
+                        Box::new(js::Node::Number(offset.to_string(), None)),
+                    )
+                } else {
+                    js::Node::Call(
+                        Box::new(js::Node::Property(Box::new(subject), "slice".to_string())),
+                        vec![
+                            js::Node::Number(offset.to_string(), None),
+                            js::Node::Number((offset + width).to_string(), None),
+                        ],
+                    )
+                }
             }
             // `list[i]` — the checked read (`__at`): an out-of-bounds subscript
             // panics; `get` is the total, Option-returning form.
@@ -1722,6 +1747,37 @@ impl<'src> Transformer<'src> {
                             Box::new(js::Node::Local("Object.assign".to_string())),
                             vec![base, value],
                         ));
+                    }
+                }
+                // `pair.0 = v` on a multi-slot (tuple-typed) element: write
+                // each slot of the region from the value (evaluated once).
+                // Statically-known width keeps this plain slot assignments —
+                // the const-eval interpreter runs them like any other write.
+                if let Some(&Expr::TupleIndex(subject_id, offset, width)) =
+                    self.program.entity_map.get(target_id)
+                {
+                    if width > 1 {
+                        let subject = self
+                            .walk_entity(subject_id, block)
+                            .unwrap_or(js::Node::Void);
+                        let value_name = self.ng.next_name();
+                        block.push(js::Node::ConstVariable(js::Variable {
+                            name: value_name.clone(),
+                            value: Box::new(value),
+                        }));
+                        for slot in 0..width {
+                            block.push(js::Node::Assignment(
+                                Box::new(js::Node::PropertyIndex(
+                                    Box::new(subject.clone()),
+                                    Box::new(js::Node::Number((offset + slot).to_string(), None)),
+                                )),
+                                Box::new(js::Node::PropertyIndex(
+                                    Box::new(js::Node::Local(value_name.clone())),
+                                    Box::new(js::Node::Number(slot.to_string(), None)),
+                                )),
+                            ));
+                        }
+                        return None;
                     }
                 }
                 // `list[i] = v` — the checked write (`__at_put`): writing never

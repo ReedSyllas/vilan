@@ -1,0 +1,29 @@
+import std::print;
+
+// Positional tuple access (spec §5.9): `.0`/`.1` read elements, chains
+// traverse nested tuples over the FLAT storage (a tuple-typed element is a
+// reslice), and `mut` bindings assign — scalar slots in place, tuple-typed
+// elements by splicing their region.
+
+fun main() {
+	let pair: (i32, str) = (7, "vilan");
+	print(pair.0);
+	print(pair.1.len());
+
+	let nested = ((1, 2), 3);
+	print(nested.0.1);
+	let inner = nested.0;
+	print(inner.0 + inner.1 + nested.1);
+
+	mut counter = (0, 100);
+	counter.0 = counter.0 + 1;
+	counter.1 = counter.1 - 1;
+	print(counter.0 + counter.1);
+
+	mut deep = ((1, 2), 3);
+	deep.0 = (40, 2);
+	print(deep.0.0 + deep.0.1 + deep.1);
+
+	deep.0.1 = 7;
+	print(deep.0.1);
+}

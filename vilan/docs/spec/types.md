@@ -168,6 +168,11 @@ form. *Implementation note: arity and per-element bounds are parsed but
 not yet enforced (tracked); `keyof` and spread parameters are recorded
 future work.*
 
+**Positional access** `t.0`, `t.1` (chaining as `t.0.1`) types as that
+element and, through a `mut` binding, assigns it. Tuples store flat: a
+tuple-typed element occupies its elements' slots, so accessing one
+yields its region as a value (destructuring reads the same layout).
+
 ## 5.10 `!` and `?.`
 
 Both dispatch through lang-item traits and desugar per expression:
