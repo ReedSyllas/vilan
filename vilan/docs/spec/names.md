@@ -20,8 +20,12 @@ A path's first segment selects a namespace:
   `depname` in the package manifest.
 
 Within std itself, sibling modules are referenced as `pkg::…` (std is its
-own package). A module name that resolves both as `name.vl` and
-`name/lib.vl` is an **ambiguity error**.
+own package). The namespaces are disjoint: resolution is scoped by the
+root segment, so a package is free to name a module `ui` or `json` even
+though std has one — `pkg::ui` is always the package's own module,
+`std::ui` always std's, and neither shadows the other. (Conversely,
+`pkg::` never reaches a std module.) A module name that resolves both as
+`name.vl` and `name/lib.vl` is an **ambiguity error**.
 
 ## 4.3 Imports
 
@@ -39,9 +43,10 @@ importing module's scope:
 loading (variants, statics). `export statement` re-exports: importers of
 this module see the exported names as if declared here.
 
-Platform gating is checked at the import: importing a module outside the
-current platform's std layers (e.g. `std::ui` in a node build) is a
-compile error naming the platform (§11).
+Platform gating is not checked at the import: a module outside the
+current platform's layers (e.g. `std::ui` in a node build) still loads,
+so its items type-check. The error is reported where platform-colored
+code becomes **reachable** from the build's entry (§11).
 
 ## 4.4 Scopes and shadowing
 

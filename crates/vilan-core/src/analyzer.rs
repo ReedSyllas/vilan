@@ -894,13 +894,13 @@ pub struct Analyzer<'src> {
     implementations: Vec<Implementation<'src>>,
     module_id_by_name: HashMap<&'src str, Id>,
     // Multi-package namespace isolation (P2). `packages[i]` is a loaded package —
-    // the entry (index 0, when there are dependencies) plus each dependency — with
-    // its own `pkg` self-namespace and its dependency edges. `package_of_source`
-    // maps each loaded module's source to its package, so an `import pkg::..` /
-    // `import <dep>::..` resolves *relative to the importing package* rather than a
-    // single global namespace. Empty for a dependency-free program (the entry +
-    // `std` then use the legacy global `module_id_by_name`), keeping that path
-    // byte-for-byte unchanged.
+    // the entry (index 0, when there are dependencies), each dependency, and `std`
+    // (always, pushed last; E.10) — with its own `pkg` self-namespace and its
+    // dependency edges. `package_of_source` maps each loaded module's source to its
+    // package, so an `import pkg::..` / `import <dep>::..` resolves *relative to
+    // the importing package* rather than a single global namespace. A
+    // dependency-free entry has no mapping and falls to the legacy global
+    // `module_id_by_name`, whose `pkg` namespace is then the entry's alone.
     packages: Vec<LoadedPackage>,
     package_of_source: HashMap<SourceId, usize>,
     modules: IndexMap<Id, Module<'src>>,
@@ -14978,12 +14978,13 @@ pub fn analyze<'src>(
     // module has its `to_json`/`from_json`/... like one defined in the entry.
     let mut loaded: Vec<(&str, &Spanned<NodeList>, &str, Id, SourceId, Origin)> = Vec::new();
     // A module's package: `Std` modules resolve under the `std` library's layered
-    // roots and are addressable as both `std::name` and `pkg::name`; `Pkg` modules —
-    // the entry program's own multi-file siblings — resolve under `pkg_root` (the
-    // entry's directory) and are addressable only as `pkg::name`; `Dep(i)` modules —
-    // a dependency library (P2) — resolve under its layered roots into its own
-    // isolated namespace, reachable from a dependent as `<import-name>::name` and
-    // from within the dependency as `pkg::name`.
+    // roots into the `std` namespace (addressable as `std::name` everywhere, and as
+    // `pkg::name` from std's own sources); `Pkg` modules — the entry program's own
+    // multi-file siblings — resolve under `pkg_root` (the entry's directory) and
+    // are addressable only as `pkg::name`; `Dep(i)` modules — a dependency library
+    // (P2) — resolve under its layered roots into its own isolated namespace,
+    // reachable from a dependent as `<import-name>::name` and from within the
+    // dependency as `pkg::name`.
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum Origin {
         Std,
@@ -15224,6 +15225,28 @@ pub fn analyze<'src>(
         }
     }
 
+    // `std` is itself a package (E.10): its modules register under the `std`
+    // namespace only, and every std source maps here so std's *internal* `pkg::`
+    // imports resolve within std — never through the entry's `pkg`, where a
+    // same-named local module would collide (a local `ui.vl` vs `std::ui`).
+    // Pushed after the dependency packages so the entry-at-0 / deps-at-1.. index
+    // convention above is undisturbed.
+    let std_package_index = analyzer.packages.len();
+    analyzer.packages.push(LoadedPackage {
+        namespace_id: std_module_id,
+        namespace_scope_id: std_scope_id,
+        dependencies: HashMap::new(),
+    });
+    analyzer
+        .package_of_source
+        .insert(lib_source_id, std_package_index);
+    if compiling_std {
+        // The entry buffer IS a std file; its `pkg::` siblings are std's.
+        analyzer
+            .package_of_source
+            .insert(SourceId(0), std_package_index);
+    }
+
     // Set when the entry file is itself a std module (a std file opened directly
     // in an editor): it is then analyzed *as* that module from the editor's
     // buffer rather than loaded a second time from disk, which would create
@@ -15328,34 +15351,37 @@ pub fn analyze<'src>(
             analyzer
                 .expr_id_to_expr_map
                 .insert(module_id, Expr::Module(module_id));
-            // Register the module under its package's namespace: `std`/entry modules
-            // in `pkg` (and `std` modules also under `std` for external `std::name`
-            // access); a dependency's modules only in that dependency's namespace, so
-            // they neither collide with nor shadow another package's modules.
+            // Register the module under its package's namespace: entry modules in
+            // `pkg`, `std` modules in `std`, a dependency's in its own — so no
+            // package's modules collide with or shadow another's (E.10: a local
+            // `ui.vl` and `std::ui` coexist, each reachable through its root).
             let namespace_scope_id = match origin {
-                Origin::Std | Origin::Pkg => pkg_scope_id,
+                Origin::Std => std_scope_id,
+                Origin::Pkg => pkg_scope_id,
                 Origin::Dep(index) => analyzer.packages[1 + index].namespace_scope_id,
             };
             analyzer
                 .mut_scope_for_scope_id(namespace_scope_id)
                 .name_to_id_map
                 .insert(name, module_id);
+            // `module_scopes` indexes std modules by name for the primitive and
+            // `panic` captures below; other packages' modules must not enter it (a
+            // user or dependency module named `string`/`io`/`json`/... would shadow
+            // the real one and break those captures).
             if origin == Origin::Std {
-                analyzer
-                    .mut_scope_for_scope_id(std_scope_id)
-                    .name_to_id_map
-                    .insert(name, module_id);
-            }
-            // `module_scopes` indexes std/entry modules by name for the primitive and
-            // `panic` lookups below; a dependency's modules must not enter it (a `dep`
-            // module named `string`/`number`/... would shadow the real primitive).
-            if !matches!(origin, Origin::Dep(_)) {
                 module_scopes.insert(name, module_scope_id);
             }
             // Record which package this module's source belongs to, so its imports
-            // resolve `pkg::`/`<dep>::` relative to that package (only when the program
-            // has dependencies; otherwise the legacy global resolution applies).
+            // resolve `pkg::`/`<dep>::` relative to that package. Std sources always
+            // map (their `pkg::` siblings are std's); entry sources only when the
+            // program has dependencies (otherwise the legacy global resolution
+            // applies, and the global `pkg` namespace is theirs alone).
             match origin {
+                Origin::Std => {
+                    analyzer
+                        .package_of_source
+                        .insert(module_source_id, std_package_index);
+                }
                 Origin::Dep(index) => {
                     analyzer
                         .package_of_source
@@ -15364,7 +15390,7 @@ pub fn analyze<'src>(
                 Origin::Pkg if has_dependencies => {
                     analyzer.package_of_source.insert(module_source_id, 0);
                 }
-                _ => {}
+                Origin::Pkg => {}
             }
             // A module's `pkg::` siblings inherit its package; a user/dependency
             // module's `std::` imports are std, and its `<dep>::` references seed that

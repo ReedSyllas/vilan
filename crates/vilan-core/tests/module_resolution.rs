@@ -145,6 +145,16 @@ struct Dep {
 /// returns the diagnostics. Dependencies are not interdependent here (the loader's
 /// transitive edges are exercised through `lib.vl` seeding within a dep).
 fn analyze_workspace(entry: &str, deps: &[Dep], platform: Platform) -> Vec<String> {
+    analyze_workspace_files(&[("main.vl", entry)], deps, platform)
+}
+
+/// As [`analyze_workspace`], but the entry package may have sibling module files
+/// (relative path → contents); `main.vl` among them is the entry.
+fn analyze_workspace_files(
+    entry_files: &[(&str, &str)],
+    deps: &[Dep],
+    platform: Platform,
+) -> Vec<String> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("vilan_ws_{}_{unique}", std::process::id()));
@@ -152,8 +162,12 @@ fn analyze_workspace(entry: &str, deps: &[Dep], platform: Platform) -> Vec<Strin
 
     let app_dir = root.join("app");
     std::fs::create_dir_all(&app_dir).unwrap();
+    for (relative, contents) in entry_files {
+        let path = app_dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+    }
     let entry_path = app_dir.join("main.vl");
-    std::fs::write(&entry_path, entry).unwrap();
 
     let mut packages = Vec::new();
     let mut entry_dependencies = Vec::new();
@@ -938,4 +952,151 @@ fn module_parse_errors_attribute_to_the_broken_module() {
         .find(|(msg, _)| msg.contains("parse error in"))
         .expect("the module parse error should be reported");
     assert_eq!(parse_error.1, "util.vl", "{attributed:?}");
+}
+
+// --- E.10: resolution is scoped by the import root -----------------------------
+// A local module may share a std module's name: `pkg::` resolves only the entry
+// package's modules and `std::` only std's, so the two never collide. (Before the
+// fix, std and entry modules registered into one shared `pkg` namespace — last
+// writer won, and the loser's items became unreachable.)
+
+#[test]
+fn local_module_sharing_a_std_name_resolves_for_both_roots() {
+    // `json` is one of std's always-loaded core modules — the strongest collision:
+    // std's `json` registers whether or not the program imports it.
+    let entry = "import std::print;\nimport std::json::encode_json;\nimport pkg::json::stamp;\n\
+                 \nfun main() { print(stamp()); print(encode_json(7)); }\n";
+    let errors = analyze_package(
+        &[
+            ("main.vl", entry),
+            ("json.vl", "fun stamp(): str { \"local\" }\n"),
+        ],
+        "main.vl",
+        Platform::default(),
+    );
+    assert!(
+        errors.is_empty(),
+        "expected a clean compile, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn local_module_sharing_a_layered_std_name_resolves_for_both_roots() {
+    // The original E.10 report: a local `ui.vl` alongside `std::ui` (which lives
+    // in std's browser layer), both imported by the same program.
+    let entry = "import std::ui::view;\nimport pkg::ui::screen;\n\nfun main() { screen(); }\n";
+    let errors = analyze_package(
+        &[
+            ("main.vl", entry),
+            ("ui.vl", "fun screen(): str { \"local\" }\n"),
+        ],
+        "main.vl",
+        Platform::Browser,
+    );
+    assert!(
+        errors.is_empty(),
+        "expected a clean compile, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn local_module_sharing_a_primitive_hosts_name_keeps_the_captures() {
+    // `string.vl` hosts the `str` primitive. A local module of the same name must
+    // not displace it in the analyzer's capture map — `"abc".len()` still types.
+    let entry = "import std::print;\nimport pkg::string::shout;\n\
+                 \nfun main() { print(shout()); print(\"abc\".len()); }\n";
+    let errors = analyze_package(
+        &[
+            ("main.vl", entry),
+            ("string.vl", "fun shout(): str { \"loud\" }\n"),
+        ],
+        "main.vl",
+        Platform::default(),
+    );
+    assert!(
+        errors.is_empty(),
+        "expected a clean compile, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn local_io_module_does_not_displace_std_io() {
+    // `io.vl` hosts `print`/`panic`; the entry's own `io.vl` must not shadow it.
+    let entry = "import std::print;\nimport pkg::io::log_line;\n\
+                 \nfun main() { print(log_line(\"x\")); }\n";
+    let errors = analyze_package(
+        &[
+            ("main.vl", entry),
+            ("io.vl", "fun log_line(message: str): str { message }\n"),
+        ],
+        "main.vl",
+        Platform::default(),
+    );
+    assert!(
+        errors.is_empty(),
+        "expected a clean compile, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn pkg_root_does_not_alias_std_modules() {
+    // The flip side of root-scoped resolution: `pkg::` reaches only the entry
+    // package's own modules. A std module with no local counterpart is not
+    // addressable through it (it used to be, as an accident of the shared map).
+    let entry = "import pkg::time::now;\n\nfun main() { }\n";
+    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::default());
+    assert!(
+        errors
+            .iter()
+            .any(|msg| msg == "cannot find 'time' in the imported path"),
+        "expected the root-scoped miss, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn workspace_entry_local_module_sharing_a_std_name_resolves() {
+    // The with-dependencies path: the entry is `packages[0]`, std is a later
+    // package — the collision must resolve identically, alongside a dep import.
+    let entry = "import std::print;\nimport std::json::encode_json;\n\
+                 import pkg::json::stamp;\nimport common::greeting;\n\
+                 \nfun main() { print(stamp()); print(encode_json(7)); print(greeting()); }\n";
+    let common = Dep {
+        import_name: "common",
+        files: &[("lib.vl", "fun greeting(): str { \"hi\" }\n")],
+    };
+    let errors = analyze_workspace_files(
+        &[
+            ("main.vl", entry),
+            ("json.vl", "fun stamp(): str { \"local\" }\n"),
+        ],
+        &[common],
+        Platform::default(),
+    );
+    assert!(
+        errors.is_empty(),
+        "expected a clean compile, got: {errors:#?}"
+    );
+}
+
+#[test]
+fn compiling_a_std_file_directly_resolves_its_pkg_imports() {
+    // A std file opened as the entry (`compiling_std`, e.g. from an editor): its
+    // `pkg::` imports are std's own siblings and must resolve within the std
+    // namespace — the entry source maps to the std package.
+    let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vilan/std/src");
+    let entry_path = std_root.join("time.vl");
+    let source = std::fs::read_to_string(&entry_path).unwrap();
+    let leaked: &'static str = Box::leak(source.into_boxed_str());
+    let (_program, errors) = analyze_source(
+        leaked,
+        &std_spec(),
+        &std_root,
+        &entry_path,
+        Some(Platform::default()),
+        &Workspace::default(),
+    );
+    assert!(
+        errors.is_empty(),
+        "expected a clean std-self compile, got: {errors:#?}"
+    );
 }

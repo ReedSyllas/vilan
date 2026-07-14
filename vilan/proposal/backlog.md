@@ -616,12 +616,19 @@ have gaps.
 2. **LSP semantic highlighting** (M; roadmap #10) — semantic tokens, precision over TextMate.
 
 10. **`pkg::<name>` collides with `std::<name>` for a local module** (S; found
-    2026-07-11 in the Kolt pilot) — a client module named `ui.vl` imported as
-    `pkg::ui::screen` failed to resolve ("cannot find in the imported path") while
-    `std::ui` was also imported; renaming the local module to `views` fixed it.
-    Local (`pkg::`) and std (`std::`) module namespaces should not shadow each
-    other — a package must be free to name a module `ui`/`json`/`db` without
-    colliding with std. Scope the resolution by the import root.
+    2026-07-11 in the Kolt pilot) — **FIXED 2026-07-14**. A client module named
+    `ui.vl` imported as `pkg::ui::screen` failed to resolve ("cannot find in the
+    imported path") while `std::ui` was also imported. Root cause: std modules and
+    the entry's own modules registered into one shared `pkg` namespace map — last
+    writer won. Fix: std is itself a package (its modules register under `std`
+    only; every std source maps to it, so std's internal `pkg::` imports resolve
+    within std), `pkg` holds only the entry's modules, and the primitive/`panic`
+    capture map (`module_scopes`) is std-fed only — so a local `string.vl`/`io.vl`
+    can't displace the real one either. Deliberate behavior change: `pkg::` no
+    longer *accidentally* aliases std modules (`import pkg::time::now` without a
+    local `time.vl` now errors). 7 pins in `module_resolution.rs` (core-module
+    collision, layered `std::ui` collision, primitive-host and `io` names, the
+    negative alias case, with-dependencies variant, std-file-as-entry).
 
 9. **Richer hover tooltips** (user request 2026-07-10) — **(a)–(d) SHIPPED
    2026-07-14**: `Program.declaration_labels` pre-renders full signatures
