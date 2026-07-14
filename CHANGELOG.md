@@ -6,6 +6,75 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.4.0 — 2026-07-14
+
+**Platform checking moved from imports to reach.** A build may import
+any module; what's checked is what your entry can actually *run into*.
+Every function — and now every module-level `let` — carries an inferred
+platform requirement, and a browser build that reaches `std::fs` fails
+with the whole call chain (`main → boot → load → exists (std::fs)`),
+anchored at your call site. Since imports stopped being the boundary, a
+service can live next to its resources — the database, the filesystem —
+and the client imports the generated stub from that very module; the
+injected-closure ceremony is gone. The editor shows all of it live:
+violations as you type, and hover tells you what a function requires
+and via which path it got there.
+
+**One package, many entries.** A client + server app no longer needs
+three packages. Declare two entries in one `[package]` —
+
+```toml
+[entry.client]
+target = "browser"
+
+[entry.server]
+```
+
+— and `vilan build` compiles each for its own target into
+`dist/<name>.js` (browser bundles first, so a serving entry finds them
+fresh), `vilan run` starts the node entry, and `vilan check` checks
+them all. Packages can also depend on each other by path, so the
+multi-package shape still scales when you want it. The legacy
+`[server]`/`[client]` manifest form is retired; the error names the
+replacement. The docs walkthrough app is rewritten in the
+single-package shape — its service holds its database directly.
+
+**Module initializers are honest.** A top-level `let` runs iff
+something reachable references it — the same rule emission uses — so a
+dropped binding's callees (and their `import … from "node:…"` lines,
+which previously leaked into every browser bundle and broke it at
+module parse) never emit. And an initializer that calls an async
+function is now a clean compile error instead of a value that is
+secretly a promise.
+
+**Comparisons type-check.** `true < 3`, `1 == "a"`, and mixed-width
+typed operands used to compile into coercing JS comparisons; they are
+errors now. A bare integer literal still adapts to its peer
+(`stamp < 1000` stays fine on an `i53`). Ordering a user-defined type
+errors honestly — `PartialOrd`'s operator dispatch isn't wired yet, so
+the compiler steers you to its `lt`/`le`/`gt`/`ge` methods rather than
+emitting a JS object comparison that is always `false`.
+
+**Tuples have positional access.** `pair.0`, `pair.1`, chains like
+`nested.0.1`, and assignment through `mut` bindings — all over the
+tuple's flat storage, so a nested write mutates the tuple, never a
+copy. Destructuring is no longer the only way in.
+
+Also fixed and improved:
+
+- Iterator-protocol `next()` calls, indexing subjects, destructuring
+  subjects, and functions passed as values are now all visible to
+  platform checking and async inference — each was a blind spot that
+  could hide a platform requirement or an await.
+- Two build units writing the same `dist/<name>.js` are rejected at
+  build instead of silently overwriting each other.
+- `vilan upgrade` prunes stale materialized-std cache directories after
+  a successful swap.
+- `[macro]` in a manifest no longer warns as an unknown key.
+- `std::time`'s documented instant comparison was wrong at runtime
+  (`started < deadline` always produced `false`); the docs now use
+  `lt` and the compiler rejects the old form.
+
 ## v0.3.0 — 2026-07-13
 
 **The toolchain updates itself.** `vilan upgrade` finds the newest
