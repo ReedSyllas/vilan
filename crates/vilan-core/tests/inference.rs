@@ -11825,10 +11825,11 @@ fn a_closures_platform_charges_its_creator() {
 }
 
 #[test]
-#[ignore = "per-instantiation coloring (proposal/platform-coloring.md §3.2): candidates \
-            over-approximate like async_infer, so a neutral instantiation is rejected \
-            when a colored impl exists — the recorded refinement lifts this"]
 fn a_neutral_instantiation_is_admitted_despite_a_colored_impl() {
+    // §3.2's refinement, landed: the walk threads each call's recorded
+    // bindings, so `save_it(MemStore { .. })` descends only into
+    // `MemStore`'s impl — `DiskStore`'s `@process` body no longer charges
+    // an instantiation that never selects it.
     assert_compiles_browser(
         r#"
         import std::fs::write_file;
@@ -11861,6 +11862,128 @@ fn a_neutral_instantiation_is_admitted_despite_a_colored_impl() {
             save_it(MemStore { last = "" });
         }
         "#,
+    );
+}
+
+#[test]
+fn a_colored_instantiation_still_rejects_beside_a_neutral_one() {
+    // The refinement is not a hole: when the SAME generic is instantiated
+    // both ways, the colored instantiation's path still rejects — chained
+    // through the impl that instantiation actually selects.
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        trait Save {
+            fun save(self): bool;
+        }
+
+        struct MemStore { last: str }
+        struct DiskStore { path: str }
+
+        impl MemStore with Save {
+            fun save(self): bool { true }
+        }
+
+        impl DiskStore with Save {
+            fun save(self): bool {
+                write_file(self.path, "state");
+                true
+            }
+        }
+
+        fun save_it<T: Save>(store: T): bool {
+            store.save()
+        }
+
+        fun main() {
+            save_it(MemStore { last = "" });
+            save_it(DiskStore { path = "s.txt" });
+        }
+        "#,
+        "reachable from the entry: main → save_it → save → write_file (std::fs)",
+    );
+}
+
+#[test]
+fn instantiation_bindings_compose_through_nested_generics() {
+    // `route<T>` forwards to `commit<U>` — the binding threads two frames
+    // deep, so the neutral instantiation stays admitted even though the
+    // dispatch happens in the inner generic.
+    assert_compiles_browser(
+        r#"
+        import std::fs::write_file;
+
+        trait Save {
+            fun save(self): bool;
+        }
+
+        struct MemStore { last: str }
+        struct DiskStore { path: str }
+
+        impl MemStore with Save {
+            fun save(self): bool { true }
+        }
+
+        impl DiskStore with Save {
+            fun save(self): bool {
+                write_file(self.path, "state");
+                true
+            }
+        }
+
+        fun commit<U: Save>(store: U): bool {
+            store.save()
+        }
+
+        fun route<T: Save>(store: T): bool {
+            commit(store)
+        }
+
+        fun main() {
+            route(MemStore { last = "" });
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_never_instantiated_impls_globals_leave_no_residue() {
+    // The emission side moves with the refinement (emitted ⊆ admitted): a
+    // binding referenced only by the impl no instantiation selects is
+    // dropped, its callees — and their `node:` imports — with it.
+    let source = r#"
+        import std::fs::exists;
+
+        trait Save {
+            fun save(self): bool;
+        }
+
+        struct MemStore { last: str }
+        struct DiskStore { path: str }
+
+        let disk_ready = exists("state");
+
+        impl MemStore with Save {
+            fun save(self): bool { true }
+        }
+
+        impl DiskStore with Save {
+            fun save(self): bool { disk_ready }
+        }
+
+        fun save_it<T: Save>(store: T): bool {
+            store.save()
+        }
+
+        fun main() {
+            save_it(MemStore { last = "" });
+        }
+        "#;
+    let browser = compile_browser(source).expect("the neutral instantiation compiles");
+    assert!(
+        !browser.contains("node:") && !browser.contains("\"state\""),
+        "the unselected impl's binding leaked into the bundle:\n{browser}"
     );
 }
 

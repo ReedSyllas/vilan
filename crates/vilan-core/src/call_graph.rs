@@ -288,6 +288,11 @@ impl CallGraph {
             .unwrap_or(&[])
     }
 
+    /// The closures a node creates directly in its body, in build order.
+    pub fn closure_children_of(&self, id: Id) -> Option<&[Id]> {
+        self.closure_children.get(&id).map(Vec::as_slice)
+    }
+
     /// The closures created inside a module-level binding's (non-`const`)
     /// initializer.
     pub fn initializer_closures_of(&self, id: Id) -> &[Id] {
@@ -348,27 +353,9 @@ impl CallGraph {
         successors
     }
 
-    /// The module-level bindings whose initializers RUN for a program entered
-    /// at `entry`: those reachable from it over [`CallGraph::successors`].
-    /// Emission consults this before walking a binding (a dropped binding's
-    /// initializer must not retain its callees or their host imports), and
-    /// platform coloring admits exactly the same set — the two can never
-    /// disagree about which initializers execute.
-    pub fn reachable_bindings(&self, program: &Program, entry: Id) -> HashSet<Id> {
-        let bindings: HashSet<Id> = program.module_level_bindings().into_iter().collect();
-        let mut visited: HashSet<Id> = HashSet::new();
-        let mut queue: Vec<Id> = vec![entry];
-        visited.insert(entry);
-        while let Some(node) = queue.pop() {
-            for (successor, _) in self.successors(program, node) {
-                if visited.insert(successor) {
-                    queue.push(successor);
-                }
-            }
-        }
-        visited.retain(|id| bindings.contains(id));
-        visited
-    }
+    // (Binding reachability moved to `platform_color::reachable_bindings`,
+    // which threads per-instantiation substitutions — admission, emission,
+    // and the async-initializer gate all consume that one definition.)
 
     /// Every code-bearing node, in build order.
     pub fn nodes(&self) -> &[Node] {
@@ -497,6 +484,23 @@ impl<'a, 'src> Collector<'a, 'src> {
                 // The arguments and (for an indirect call) the subject can hold
                 // further calls; walk them, but never the resolved callee body.
                 if let Some(function_call) = self.program.function_calls.get(call_id) {
+                    // A subject that merely NAMES a function (a direct call, a
+                    // wired method subject) is not a function VALUE — recording
+                    // it as a coercion reference would add a context-free edge
+                    // to the callee, defeating the per-instantiation walk (the
+                    // call edge above already carries the charge, WITH its
+                    // bindings). Pre-mark it visited so the subject walk skips.
+                    let subject_names_a_function =
+                        match self.program.entity_map.get(&function_call.subject_id) {
+                            Some(Expr::Local(binding)) => {
+                                self.program.functions.contains_key(binding)
+                            }
+                            Some(Expr::Function(_)) => true,
+                            _ => false,
+                        };
+                    if subject_names_a_function {
+                        self.visited.insert(function_call.subject_id);
+                    }
                     self.walk(function_call.subject_id);
                     self.walk_all(&function_call.argument_ids);
                 }

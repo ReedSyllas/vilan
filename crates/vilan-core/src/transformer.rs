@@ -565,7 +565,8 @@ impl<'src> Transformer<'src> {
         // everywhere else — such a binding is walked but then dropped here,
         // and it was admission-checked by the same graph).
         let graph = crate::call_graph::CallGraph::build(self.program);
-        let reachable_bindings = graph.reachable_bindings(self.program, main_fn.id);
+        let reachable_bindings =
+            crate::platform_color::reachable_bindings(self.program, &graph, main_fn.id);
         let binding_nodes: Vec<(Id, Vec<js::Node<'src>>)> = global_variables
             .iter()
             .filter(|binding| reachable_bindings.contains(binding))

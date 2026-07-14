@@ -34,87 +34,260 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::analyzer::Program;
-use crate::call_graph::CallGraph;
+use crate::analyzer::{GenericDispatch, Program};
+use crate::call_graph::{CallGraph, CallTarget, IndirectReason};
 use crate::error::Error;
 use crate::id::Id;
 use crate::span::Span;
 use crate::target::Platform;
+use crate::type_::{Type, TypeId};
 
 /// Checks platform admission for everything reachable from the program's
 /// entry (`main`), pushing chain-rendered diagnostics for violations. A
 /// program with no user `main` (a library module, a fragment) has no entry
 /// and nothing to admit — library boundaries are `check_library_contract`'s
 /// job.
+///
+/// Reachability is **per instantiation** (§3.2): the walk threads each
+/// call's recorded type bindings (`method_call_substitution` — the same
+/// single channel monomorphization uses), so a trait/generic-bounded call
+/// whose receiver is RESOLVED descends only into the member that
+/// instantiation actually selects. `save_it(MemStore { .. })` no longer
+/// charges `DiskStore`'s impl just because it exists. An unresolvable
+/// binding falls back to every candidate — over-approximate but sound.
 pub fn check(program: &mut Program, platform: Platform) {
     let Some(entry) = entry_function(program) else {
         return;
     };
     let graph = CallGraph::build(program);
-
-    // The DFS stack carries the discovery path: (node, the call span that
-    // reached it, whether that call site is in user code).
-    let mut visited: HashSet<Id> = HashSet::new();
-    let mut trail: Vec<(Id, Option<(Span, bool)>)> = Vec::new();
-    let mut diagnostics: Vec<Error> = Vec::new();
-    walk(
-        program,
-        platform,
-        &graph,
-        entry,
-        None,
-        &mut visited,
-        &mut trail,
-        &mut diagnostics,
-    );
+    let mut traversal = Traversal::new(program, &graph, Some(platform));
+    traversal.walk(entry, &SubstitutionContext::new(), None);
+    let diagnostics = traversal.diagnostics;
     program.diagnostics.extend(diagnostics);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk(
-    program: &Program,
-    platform: Platform,
-    graph: &CallGraph,
-    node: Id,
-    arrived_by: Option<(Span, bool)>,
-    visited: &mut HashSet<Id>,
-    trail: &mut Vec<(Id, Option<(Span, bool)>)>,
-    diagnostics: &mut Vec<Error>,
-) {
-    if !visited.insert(node) {
-        return;
-    }
-    trail.push((node, arrived_by));
+/// The module-level bindings whose initializers run for a program entered at
+/// `entry`, under the SAME per-instantiation reachability the admission walk
+/// uses — emission and the async-initializer gate consume this, so
+/// emitted ⊆ admitted holds by construction even under the refinement.
+pub(crate) fn reachable_bindings(program: &Program, graph: &CallGraph, entry: Id) -> HashSet<Id> {
+    let mut traversal = Traversal::new(program, graph, None);
+    traversal.walk(entry, &SubstitutionContext::new(), None);
+    traversal.reached_bindings
+}
 
-    if let Some(requirement) = requirement_of(program, node) {
-        let admitted = requirement
-            .patterns
-            .iter()
-            .any(|pattern| platform.matches(*pattern).is_some());
-        if !admitted {
-            // Report the BOUNDARY — the first off-platform function reached
-            // from admissible code — and do not descend: everything beneath
-            // it lives in the same layer, and one chain tells the story.
-            diagnostics.push(violation(program, platform, trail, node, requirement));
-            trail.pop();
-            return;
+/// A per-call type binding: the analyzer's constraint id → bound type id.
+type SubstitutionContext = HashMap<TypeId, TypeId>;
+
+/// The contextual DFS shared by admission (`platform` set: check + prune +
+/// chain diagnostics) and binding reachability (`platform` empty: collect).
+struct Traversal<'a, 'src> {
+    program: &'a Program<'src>,
+    graph: &'a CallGraph,
+    platform: Option<Platform>,
+    /// Nodes visited PER instantiation — keyed like `emit_instance`, by the
+    /// resolved bindings — so the same generic function re-walks under a
+    /// different `T` but recursion still terminates.
+    visited: HashSet<(Id, Vec<(u32, u32)>)>,
+    trail: Vec<(Id, Option<(Span, bool)>)>,
+    diagnostics: Vec<Error>,
+    module_bindings: HashSet<Id>,
+    reached_bindings: HashSet<Id>,
+}
+
+impl<'a, 'src> Traversal<'a, 'src> {
+    fn new(program: &'a Program<'src>, graph: &'a CallGraph, platform: Option<Platform>) -> Self {
+        Traversal {
+            program,
+            graph,
+            platform,
+            visited: HashSet::new(),
+            trail: Vec::new(),
+            diagnostics: Vec::new(),
+            module_bindings: program.module_level_bindings().into_iter().collect(),
+            reached_bindings: HashSet::new(),
         }
     }
 
-    for (callee, arrived) in edges(program, graph, node) {
-        walk(
-            program,
-            platform,
-            graph,
-            callee,
-            arrived,
-            visited,
-            trail,
-            diagnostics,
-        );
+    fn walk(
+        &mut self,
+        node: Id,
+        substitution: &SubstitutionContext,
+        arrived_by: Option<(Span, bool)>,
+    ) {
+        let mut key: Vec<(u32, u32)> = substitution
+            .iter()
+            .map(|(constraint, bound)| (constraint.0, self.resolve_type_id(*bound, substitution).0))
+            .collect();
+        key.sort_unstable();
+        if !self.visited.insert((node, key)) {
+            return;
+        }
+        self.trail.push((node, arrived_by));
+
+        if self.module_bindings.contains(&node) {
+            self.reached_bindings.insert(node);
+        }
+
+        if let Some(platform) = self.platform {
+            if let Some(requirement) = requirement_of(self.program, node) {
+                let admitted = requirement
+                    .patterns
+                    .iter()
+                    .any(|pattern| platform.matches(*pattern).is_some());
+                if !admitted {
+                    // Report the BOUNDARY — the first off-platform function
+                    // reached from admissible code — and do not descend:
+                    // everything beneath it lives in the same layer, and one
+                    // chain tells the story.
+                    let error = violation(self.program, platform, &self.trail, node, requirement);
+                    self.diagnostics.push(error);
+                    self.trail.pop();
+                    return;
+                }
+            }
+        }
+
+        for call in self
+            .graph
+            .calls_of(node)
+            .iter()
+            .chain(self.graph.initializer_calls_of(node))
+        {
+            let arrived = self.arrival(call.call_id);
+            match call.target {
+                CallTarget::Function(callee)
+                | CallTarget::Closure(callee)
+                | CallTarget::External(callee) => {
+                    let next = self.callee_substitution(call.call_id, callee, substitution);
+                    self.walk(callee, &next, arrived);
+                }
+                CallTarget::Variant(_) => {}
+                CallTarget::Indirect(IndirectReason::Value) => {
+                    // The creator rule: whoever created the closure was
+                    // charged for its body; a call through the value adds
+                    // nothing.
+                }
+                CallTarget::Indirect(_) => {
+                    // THE refinement: a resolved receiver selects one impl's
+                    // member; an unresolved one keeps every candidate.
+                    let receiver = self.dispatch_receiver(call.call_id, substitution);
+                    let candidates = crate::async_infer::dispatch_candidates_for(
+                        self.program,
+                        call.call_id,
+                        receiver.as_ref(),
+                    );
+                    for candidate in candidates {
+                        let next = self.callee_substitution(call.call_id, candidate, substitution);
+                        self.walk(candidate, &next, arrived);
+                    }
+                }
+            }
+        }
+        // Referencing a module-level binding runs its initializer (F6);
+        // initializers are never generic, so they walk context-free.
+        for (reference, global) in self.graph.global_references_of(node) {
+            let arrived = self.arrival(*reference);
+            self.walk(*global, &SubstitutionContext::new(), arrived);
+        }
+        // A function passed as a value charges at the reference site; with no
+        // call record there is no binding to thread.
+        for (reference, function) in self.graph.function_references_of(node) {
+            let arrived = self.arrival(*reference);
+            self.walk(*function, &SubstitutionContext::new(), arrived);
+        }
+        // Creating a closure charges its body (v1 creator rule); a closure
+        // inherits its creator's bindings — its body uses the enclosing `T`s.
+        if let Some(children) = self.graph.closure_children_of(node) {
+            for closure in children.to_vec() {
+                self.walk(closure, &substitution.clone(), None);
+            }
+        }
+        for closure in self.graph.initializer_closures_of(node).to_vec() {
+            self.walk(closure, &SubstitutionContext::new(), None);
+        }
+
+        self.trail.pop();
     }
 
-    trail.pop();
+    fn arrival(&self, site: Id) -> Option<(Span, bool)> {
+        let span = self.program.span_map.get(&site).map(|span| **span)?;
+        Some((span, is_user_code(self.program, site)))
+    }
+
+    /// The bindings a call hands its callee — the transformer's
+    /// `call_substitution` channels, mirrored: the call's generic arguments
+    /// zipped with the callee's parameters, else the recorded
+    /// `method_call_substitution` entry; either way each bound type resolves
+    /// under the CALLER's bindings so nested instantiations compose —
+    /// exactly `emit_instance`'s rule. With neither channel, a callee that
+    /// shares the caller's constraints inherits them (a nested call inside
+    /// a generic body).
+    fn callee_substitution(
+        &self,
+        call_id: Id,
+        callee: Id,
+        incoming: &SubstitutionContext,
+    ) -> SubstitutionContext {
+        if let Some(function) = self.program.functions.get(&callee) {
+            if !function.generic_parameter_constraint_ids.is_empty() {
+                if let Some(function_call) = self.program.function_calls.get(&call_id) {
+                    if !function_call.generic_argument_ids.is_empty() {
+                        return function
+                            .generic_parameter_constraint_ids
+                            .iter()
+                            .copied()
+                            .zip(function_call.generic_argument_ids.iter().copied())
+                            .map(|(constraint, bound)| {
+                                (constraint, self.resolve_type_id(bound, incoming))
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+        if let Some(recorded) = self.program.method_call_substitution.get(&call_id) {
+            return recorded
+                .iter()
+                .map(|(constraint, bound)| (*constraint, self.resolve_type_id(*bound, incoming)))
+                .collect();
+        }
+        // No record: pass the caller's bindings through — a call inside a
+        // generic body resolves the shared constraints; unrelated keys are
+        // inert (nothing looks them up).
+        incoming.clone()
+    }
+
+    /// Follows `Generic` links through the active bindings (bounded, so a
+    /// self-referential binding can't loop).
+    fn resolve_type_id(&self, type_id: TypeId, substitution: &SubstitutionContext) -> TypeId {
+        let mut current = type_id;
+        for _ in 0..16 {
+            match self.program.type_id_to_type_map.get(&current) {
+                Some(Type::Generic(constraint)) => match substitution.get(constraint) {
+                    Some(bound) if *bound != current => current = *bound,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        current
+    }
+
+    /// The concrete receiver a dispatch resolves to under the bindings, if
+    /// the record + the substitution pin one down.
+    fn dispatch_receiver(&self, call_id: Id, substitution: &SubstitutionContext) -> Option<Type> {
+        let resolved = match crate::async_infer::dispatch_at(self.program, call_id)? {
+            GenericDispatch::OnConstraint(constraint_id, _) => {
+                self.resolve_type_id(*substitution.get(&constraint_id)?, substitution)
+            }
+            GenericDispatch::OnType(receiver, _) => self.resolve_type_id(receiver?, substitution),
+        };
+        match self.program.type_id_to_type_map.get(&resolved) {
+            Some(concrete @ (Type::Struct(_, _) | Type::Enum(_, _))) => Some(concrete.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// [`CallGraph::successors`] — the shared edge vocabulary — with each site

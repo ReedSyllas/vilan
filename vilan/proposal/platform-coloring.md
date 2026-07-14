@@ -84,7 +84,23 @@ body — so nothing errors. Reach it, and the error names the chain.
   loses precision. Over-approximate is sound (it can only reject more).
 - Monomorphization: a generic function's requirement is computed **per
   instantiation** — `save<T: Persist>(x: T)` is `@process` only for the `T`s
-  whose `Persist` impl is.
+  whose `Persist` impl is. *(Landed 2026-07-14, v0.5.0: the walk threads
+  each call's recorded bindings — `method_call_substitution` plus the call's
+  solved generic arguments, the same channels monomorphization reads —
+  composing them under the caller's like `emit_instance`; a dispatch whose
+  receiver resolves under those bindings descends only into the member that
+  instantiation selects (nominal impl match, else its traits' defaults);
+  anything unresolved keeps every candidate, over-approximate but sound.
+  Visited states key on (node, resolved bindings), so distinct
+  instantiations re-walk and recursion terminates. Emission's binding
+  reachability and the async-initializer gate consume the SAME traversal
+  (`platform_color::reachable_bindings`), preserving emitted ⊆ admitted
+  under the refinement. Found and fixed while landing it: a resolved call's
+  SUBJECT (the callee's name, incl. wired method subjects) was recorded as
+  a fn-coercion reference — a context-free duplicate edge that would have
+  defeated the refinement; call subjects no longer record. Hover's
+  `requirements` map deliberately stays entry-independent and
+  over-approximate — a function's hover shows what it COULD require.)*
 - Closures, v1 rule: a closure literal's body color **propagates to the
   function that creates it**. Creating a `@process` closure marks the creator
   `@process`. This is deliberately conservative: it keeps closure *values*
