@@ -1,7 +1,17 @@
 # The docs walkthrough app (docs/guide/walkthrough.md): a tiny team notes
 # app — sign-in, a live-synced note list, routing, and a local-first editor.
+# ONE package, two entries (tour/platforms.md): the browser client and the
+# node server build from the same source tree, and platform coloring keeps
+# each entry honest about what it actually reaches.
 #
-#   vilan build .           compiles client + server into dist/
-#   node dist/server.js     serves the app at http://localhost:4600
-[project]
-packages = ["common", "client", "server"]
+#   vilan build .           compiles both entries into dist/
+#   vilan run .             builds, then starts the server
+#                           → http://localhost:4600
+[package]
+name = "notes"
+
+[entry.client]
+target = "browser"
+
+[entry.server]
+# target defaults to node; path defaults to server.vl under src/

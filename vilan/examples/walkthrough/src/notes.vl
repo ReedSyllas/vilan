@@ -1,0 +1,21 @@
+// The shared vocabulary: the types that cross the wire. Both entries import
+// this module, so it uses base-layer std only — not because a package
+// boundary forces it, but because anything an entry reaches must run where
+// that entry runs, and these types travel to both.
+
+// A note. Wire so it can travel, PartialEq so mirrors and the UI can
+// compare values, Debug for error paths.
+[derive(Wire, PartialEq, Debug)]
+struct Note {
+	id: i32,
+	title: str,
+	body: str,
+}
+
+// What sign_in returns: a session token on success, a reason on failure.
+[derive(Wire, PartialEq, Debug)]
+struct AuthOutcome {
+	ok: bool,
+	token: str,
+	reason: str,
+}

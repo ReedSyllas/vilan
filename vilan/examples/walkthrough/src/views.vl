@@ -11,7 +11,8 @@ import std::router::{ link, navigate };
 import std::storage;
 import std::option::Option::{ self, Some, None };
 import std::style::{ style, space, Style, Color, Length, Display, FlexDirection, AlignItems, Cursor };
-import common::{ Note, AuthOutcome, NotesClient };
+import pkg::notes::{ Note, AuthOutcome };
+import pkg::store::NotesClient;
 import pkg::routes::{ Route, href };
 
 // --- styles (compiled at build time; see the styling guide) ---

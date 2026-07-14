@@ -110,10 +110,12 @@ async fun main() {
 }
 ```
 
-In a real app the service definition lives in a shared `[library]`
-package (usually called `common`) that both the client and server
-import. [Hello vilan](../tour/hello-vilan.md) shows that workspace
-layout.
+In a real app the service lives in its own module, next to the
+resources its bodies use, and the client entry imports the generated
+`NotesClient` from it — see
+[Where the service lives](#where-the-service-lives) below for why the
+browser build may do that, and the [walkthrough](walkthrough.md) for
+the full shape.
 
 ## What can cross the wire: `Wire`
 

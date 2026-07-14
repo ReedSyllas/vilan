@@ -1,0 +1,26 @@
+// The server entry: read the built client bundle, boot the store, and serve
+// http + rpc on one port. Everything stateful lives in `pkg::store`, next to
+// its database.
+
+import std::print;
+import std::fs;
+import std::json::json_codec;
+import std::http::Response;
+import std::rpc_server::serve_service;
+import pkg::store::boot;
+
+async fun main() {
+	let client_js = fs::read_file_to_str("dist/client.js");
+	let client_css = fs::read_file_to_str("dist/client.css");
+	let app_html = fs::read_file_to_str("src/app.html");
+
+	let store = boot();
+
+	serve_service(4600, store.dispatcher().into_protocol(json_codec()), |request| {
+		match request.path() {
+			"/client.js" => Response::builder().set_header("Content-Type", "text/javascript").body(client_js).build(),
+			"/client.css" => Response::builder().set_header("Content-Type", "text/css").body(client_css).build(),
+			_ => Response::builder().set_header("Content-Type", "text/html").body(app_html).build(),
+		}
+	}, || print("notes server listening on http://localhost:4600"));
+}

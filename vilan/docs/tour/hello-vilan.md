@@ -104,19 +104,33 @@ qualifying it.
 
 ## The shape of a full-stack app
 
-When you get to building a client + server app, the layout is a workspace
-with three packages. The [services guide](../guide/services.md) builds on
-this shape:
+When you get to building a client + server app, the smallest layout is
+**one package with two entries** — the browser client and the node server
+build from the same source tree:
+
+```toml
+[package]
+name = "app"
+
+[entry.client]
+target = "browser"
+
+[entry.server]
+```
 
 ```
 app/
-  vilan.toml            [project] packages = ["common", "client", "server"]
-  common/               [library] — shared types, the service definition
-  client/               [package] target = "browser"
-  server/               [package] (node)
+  vilan.toml
+  src/
+    client.vl     the browser entry
+    server.vl     the node entry
+    …             everything else, shared by whichever entry reaches it
 ```
 
-The compiler knows which standard-library modules exist on which platform.
-If the client tries to import `std::db` (a server thing) or the server
-tries `std::ui` (a browser thing), you get a clear compile error at the
-import. The [platforms chapter](platforms.md) has the details.
+Larger apps split into a `[project]` workspace of packages and libraries,
+as above. Either way, the compiler knows which standard-library modules
+exist on which platform: if code the browser entry can *reach* calls into
+`std::db` (a server thing), you get a clear compile error naming the call
+chain — importing the module is fine, reaching it is what's checked. The
+[platforms chapter](platforms.md) has the details, and the
+[walkthrough](../guide/walkthrough.md) builds a whole app in this shape.

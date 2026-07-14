@@ -6,14 +6,14 @@ live between browser windows, and an editor that saves as you type.
 
 The finished app lives in the repo at
 [`vilan/examples/walkthrough/`](https://github.com/ReedSyllas/vilan/tree/main/vilan/examples/walkthrough/), about 500
-lines across three packages. Every snippet below is quoted from those
-files, and the test suite builds the app on every run, so this chapter
-can't quietly rot. To run it:
+lines in **one package**. Every snippet below is quoted from those files,
+and the test suite builds the app on every run, so this chapter can't
+quietly rot. To run it:
 
 ```sh
 cd vilan/examples/walkthrough
-vilan build .
-node dist/server.js     # → http://localhost:4600
+vilan run .             # builds both entries, starts the server
+                        # → http://localhost:4600
 ```
 
 Open two browser windows side by side. Sign in, add a note in one window,
@@ -22,17 +22,36 @@ follows keystroke by keystroke.
 
 ## The shape
 
-```
-walkthrough/
-  vilan.toml            [project] packages = ["common", "client", "server"]
-  common/               [library] — the service + the types that cross the wire
-  client/               [package] target = "browser"
-  server/               [package] (node)
+```toml
+[package]
+name = "notes"
+
+[entry.client]
+target = "browser"
+
+[entry.server]
 ```
 
-One workspace, three packages ([Hello vilan](../tour/hello-vilan.md)
-introduced this layout). `common` is imported by both sides, so it may
-only use platform-neutral std. The compiler enforces that.
+```
+walkthrough/
+  vilan.toml
+  src/
+    client.vl     the browser entry
+    server.vl     the node entry
+    store.vl      the service, next to its database
+    notes.vl      the types that cross the wire
+    routes.vl     the route enum
+    views.vl      the UI
+    app.html      the shell the server serves
+```
+
+One package, two entries ([Platforms](../tour/platforms.md) introduced
+this layout). There is no client/server directory split and no shared
+`common` package — every file is visible to both entries, and the
+compiler sorts out what may run where by **what each entry reaches**.
+`store.vl` uses SQLite freely because only the server entry calls into
+it; if client code ever reached that far, the build would fail with the
+call chain.
 
 The data flows in one loop, and the whole app hangs off it:
 
@@ -45,11 +64,12 @@ Your own edit comes back to you the same way everyone else's does. There
 is no "local state vs server state" bookkeeping — the mirror *is* the
 state, and drafts smooth over the last inch (the input you're typing in).
 
-## `common`: the contract
+## The wire types
 
-The shared package declares the payload type and the service. This is
-the whole client/server contract — there is no schema file, no endpoint
-list, no client SDK to regenerate:
+[`src/notes.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/notes.vl)
+declares the payloads both sides speak. This is most of the
+client/server contract — there is no schema file, no endpoint list, no
+client SDK to regenerate:
 
 ```vilan,fragment
 [derive(Wire, PartialEq, Debug)]
@@ -58,53 +78,33 @@ struct Note {
 	title: str,
 	body: str,
 }
+```
 
+## The service: next to its resources
+
+[`src/store.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/store.vl)
+is the heart of the app, and it holds the database **directly**:
+
+```vilan,fragment
 [service(NotesClient)]
 struct NotesStore {
 	[expose] notes: Signal<List<Note>>,
-	sign_in_hook: Shared<|str, str| AuthOutcome>,
-	add_hook: Shared<|str, str| i32>,
-	retitle_hook: Shared<|str, i32, str| i32>,
-	rewrite_hook: Shared<|str, i32, str| i32>,
-	delete_hook: Shared<|str, i32| i32>,
+	db: Database,
 }
 ```
 
-Two design choices worth pausing on:
-
-- **The hooks pattern.** The rpc methods just call closures the server
-  installs at boot. That keeps `common` free of SQL and platform code —
-  it describes the surface, and the server supplies the behavior.
-- **Title and body commit separately** (`retitle_note` and
-  `rewrite_note`). The editor uses one draft per field, and per-field
-  rpcs mean one field's edit never re-sends the other's text.
-
-Each `[rpc]` method is small and uniform:
+`[service(NotesClient)]` generates the typed client; `[expose]` mirrors
+the note list to every connected client; each `[rpc]` method is callable
+remotely — and its body just uses `self.db`. Every write method has the
+same rhythm: check the session, write SQL, then update the signal:
 
 ```vilan,fragment
 [rpc]
 fun retitle_note(self, token: str, note_id: i32, title: str): i32 {
-	let hook = self.retitle_hook.read();
-	hook(token, note_id, title)
-}
-```
-
-(The bind-then-call shape is a current parser limitation — see
-[gotchas](../appendix/gotchas.md).)
-
-## The server: SQL first, then the signal
-
-The server ([`server/src/main.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/server/src/main.vl))
-opens SQLite, loads the mirror once, and wires each hook. Every write
-hook has the same rhythm — check the session, write SQL, then update the
-signal:
-
-```vilan,fragment
-let retitle = |token: str, note_id: i32, title: str| {
-	match session_user(db, token) {
+	match session_user(self.db, token) {
 		Some(let _user) => {
-			db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
-			notes.set_with(|list| list.map(|note| {
+			self.db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
+			self.notes.set_with(|list| list.map(|note| {
 				if note.id == note_id {
 					Note { id = note.id, title = title, body = note.body }
 				} else {
@@ -115,38 +115,65 @@ let retitle = |token: str, note_id: i32, title: str| {
 		},
 		None => 0 - 1,
 	}
-};
+}
 ```
 
-The order matters: persist first, then update the signal. The signal
-write is what broadcasts to every client, so a crash between the two can
-never announce state that was never stored
-([Persistence](persistence.md) covers this).
+Two things worth pausing on:
+
+- **No injected hooks.** The service used to be forced into a shared
+  package that couldn't name `Database`, so its methods called closures
+  the server installed at boot. Platform coloring removed the need: the
+  service lives with its resources, the browser build takes only the
+  generated stub and contract hash from this module, and the bodies stay
+  server-side because only the server entry reaches them ([Services &
+  RPC](services.md#where-the-service-lives)).
+- **The order matters.** Persist first, then update the signal. The
+  signal write is what broadcasts to every client, so a crash between
+  the two can never announce state that was never stored
+  ([Persistence](persistence.md) covers this).
+
+Title and body commit separately (`retitle_note` and `rewrite_note`):
+the editor uses one draft per field, and per-field rpcs mean one field's
+edit never re-sends the other's text.
 
 Auth is register-or-login in one rpc: an unknown username creates the
 account (pbkdf2-hashed password), a known one checks it, and either path
-opens a session row whose token identifies later calls
-([Services & RPC](services.md#authentication)).
+opens a session row whose token identifies later calls ([Services &
+RPC](services.md#authentication)). `boot()` at the bottom of the module
+opens the database, creates the tables, and loads the mirror once.
 
-Boot is five lines at the end: read the client bundle and shell from
-disk, then
+## The server entry: read, boot, serve
+
+[`src/server.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/server.vl)
+is now the boring file, which is the point:
 
 ```vilan,fragment
-serve_service(4600, store.dispatcher().into_protocol(json_codec()), |request| {
-	match request.path() {
-		"/client.js" => Response::builder().set_header("Content-Type", "text/javascript").body(client_js).build(),
-		"/client.css" => Response::builder().set_header("Content-Type", "text/css").body(client_css).build(),
-		_ => Response::builder().set_header("Content-Type", "text/html").body(app_html).build(),
-	}
-}, || print("notes server listening on http://localhost:4600"));
+async fun main() {
+	let client_js = fs::read_file_to_str("dist/client.js");
+	let client_css = fs::read_file_to_str("dist/client.css");
+	let app_html = fs::read_file_to_str("src/app.html");
+
+	let store = boot();
+
+	serve_service(4600, store.dispatcher().into_protocol(json_codec()), |request| {
+		match request.path() {
+			"/client.js" => Response::builder().set_header("Content-Type", "text/javascript").body(client_js).build(),
+			"/client.css" => Response::builder().set_header("Content-Type", "text/css").body(client_css).build(),
+			_ => Response::builder().set_header("Content-Type", "text/html").body(app_html).build(),
+		}
+	}, || print("notes server listening on http://localhost:4600"));
+}
 ```
 
 The catch-all serves the shell for every unknown path. That's what makes
 deep links like `/note/7` load ([Routing](routing.md#deep-links-and-the-server)).
+The client bundle it ships is `dist/client.js` — `vilan build` compiles
+browser entries first, so the file is always fresh by the time the
+server entry builds.
 
 ## The client entry: four signals and a mount
 
-[`client/src/main.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/client/src/main.vl) is
+[`src/client.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/client.vl) is
 the whole wiring diagram:
 
 ```vilan,fragment
@@ -166,12 +193,14 @@ async fun main() {
 ```
 
 Read it as: mirror in, token from `localStorage` (a reload stays signed
-in), the typed route derived from the URL, connect, mount. Everything
-after this line is just views reading those signals.
+in), the typed route derived from the URL, connect, mount. `NotesClient`
+comes from `import pkg::store::NotesClient;` — the same module whose
+bodies run SQL on the server, of which this build sees only the stub.
+Everything after this line is just views reading those signals.
 
 ## Routes
 
-[`client/src/routes.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/client/src/routes.vl)
+[`src/routes.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/routes.vl)
 is the enum-router pattern from [Routing](routing.md), at its smallest:
 
 ```vilan,fragment
@@ -188,7 +217,7 @@ plus `parse` and `href` as the inverse pair, and pages that `swap` on
 
 ## The views
 
-[`client/src/views.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/client/src/views.vl)
+[`src/views.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/views.vl)
 has three layers, each one guide's idea:
 
 **The gate.** The sign-in panel `show`s while the token is empty; the
@@ -250,12 +279,15 @@ there is nothing left for one to do.
   did that, not the mirror.
 - **Deep-link** to a note (`/note/1`) in a fresh window: "loading…"
   flashes until the first sync, then the editor seeds.
+- **Cross the platform line.** Add `load_notes(self.db)` — or any
+  `pkg::store` call — somewhere the client entry reaches, and rebuild:
+  the error names the whole chain from `main` down to the SQL.
 
 ## Where each idea came from
 
 | In this app | Taught in |
 |---|---|
-| the workspace, `vilan.toml` | [Hello vilan](../tour/hello-vilan.md) |
+| the package, its two entries | [Hello vilan](../tour/hello-vilan.md), [Platforms](../tour/platforms.md) |
 | `Note`, derives, the enums | [Data & traits](../tour/data-and-traits.md) |
 | signals, effects, drafts | [Reactive state](reactive.md) |
 | views, `bind_each`, `when`, `show` | [Building UI](ui.md) |
