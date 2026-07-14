@@ -12109,15 +12109,15 @@ fn an_unreached_function_still_knows_its_requirement() {
 fn a_module_initializers_call_colors_the_referencing_entry() {
     assert_fails_browser_with(
         r#"
-        import std::fs::read_file_to_str;
+        import std::fs::exists;
 
-        let cache = read_file_to_str("cache.txt");
+        let cache = exists("cache.txt");
 
         fun main() {
             let content = cache;
         }
         "#,
-        "`read_file_to_str` requires the `process` layer of `std` and cannot run on `browser`\n  reachable from the entry: main → cache → read_file_to_str (std::fs)",
+        "`exists` requires the `process` layer of `std` and cannot run on `browser`\n  reachable from the entry: main → cache → exists (std::fs)",
     );
 }
 
@@ -12146,11 +12146,10 @@ fn an_initializer_violation_anchors_at_the_initializer_call() {
 fn an_initializer_reaching_a_user_function_colors_through_it() {
     assert_fails_browser_with(
         r#"
-        import std::fs::write_file;
+        import std::fs::exists;
 
         fun boot_check(): bool {
-            write_file("state", "checked");
-            true
+            exists("state")
         }
 
         let ready = boot_check();
@@ -12159,7 +12158,7 @@ fn an_initializer_reaching_a_user_function_colors_through_it() {
             let r = ready;
         }
         "#,
-        "reachable from the entry: main → ready → boot_check → write_file (std::fs)",
+        "reachable from the entry: main → ready → boot_check → exists (std::fs)",
     );
 }
 
@@ -12167,16 +12166,16 @@ fn an_initializer_reaching_a_user_function_colors_through_it() {
 fn a_global_referencing_a_colored_global_chains_through_both() {
     assert_fails_browser_with(
         r#"
-        import std::fs::read_file_to_str;
+        import std::fs::exists;
 
-        let raw = read_file_to_str("data.txt");
+        let raw = exists("data.txt");
         let copy = raw;
 
         fun main() {
             let c = copy;
         }
         "#,
-        "reachable from the entry: main → copy → raw → read_file_to_str (std::fs)",
+        "reachable from the entry: main → copy → raw → exists (std::fs)",
     );
 }
 
@@ -12402,9 +12401,9 @@ fn a_dropped_bindings_initializer_leaves_no_residue_in_the_bundle() {
     let node = compile(
         r#"
         import std::print;
-        import std::fs::read_file_to_str;
+        import std::fs::exists;
 
-        let cache = read_file_to_str("cache.txt");
+        let cache = exists("cache.txt");
 
         fun main() {
             print(cache);
@@ -13661,6 +13660,78 @@ fn same_type_native_comparisons_still_compile_and_run() {
         }
         "#,
         "ok\n",
+    );
+}
+
+// --- §J.3: module-level initializers cannot await ----------------------------
+//
+// Initializers run at module load — no enclosing function to become async,
+// no top-level await in the emission model. An async call there used to
+// type-check as `T` while holding a live promise at runtime (`state + 1`
+// was garbage); it is now refused cleanly. Creating async closures stays
+// legal: nothing awaits at load.
+
+#[test]
+fn an_async_call_in_a_module_initializer_is_rejected() {
+    assert_fails_spanning(
+        r#"
+        import std::print;
+        import std::time::{ sleep_for, Duration };
+
+        async fun ready(tag: str): i32 {
+            sleep_for(Duration::millis(1));
+            42
+        }
+
+        let state = ready("boot");
+
+        fun main() {
+            print(state + 1);
+        }
+        "#,
+        r#"ready("boot")"#,
+        "a module-level binding cannot await",
+    );
+}
+
+#[test]
+fn an_initializer_calling_an_inferred_async_function_is_rejected() {
+    // `warm` never says `async`; it is inferred (it calls `sleep_for`), and
+    // the initializer's call to it is refused all the same.
+    assert_fails_spanning(
+        r#"
+        import std::time::{ sleep_for, Duration };
+
+        fun warm(tag: str): i32 {
+            sleep_for(Duration::millis(1));
+            7
+        }
+
+        let state = warm("boot");
+
+        fun main() {
+            let _s = state;
+        }
+        "#,
+        r#"warm("boot")"#,
+        "calls `warm`, which is async",
+    );
+}
+
+#[test]
+fn creating_an_async_closure_in_an_initializer_stays_legal() {
+    // The charge is on AWAITING at load, not on holding async machinery:
+    // a closure created in an initializer awaits nothing until called.
+    assert_compiles(
+        r#"
+        import std::time::{ sleep_for, Duration };
+
+        let warm = || sleep_for(Duration::millis(1));
+
+        fun main() {
+            let _w = warm;
+        }
+        "#,
     );
 }
 

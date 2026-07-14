@@ -346,8 +346,10 @@ fn name_of(program: &Program, id: Id) -> String {
     "closure".to_string()
 }
 
-/// The program's entry: a function named `main` defined in user code.
-fn entry_function(program: &Program) -> Option<Id> {
+/// The program's entry: a function named `main` defined in user code. Also
+/// used by async inference's initializer check — "which initializers run"
+/// must mean the same thing to admission, emission, and awaiting.
+pub(crate) fn entry_function(program: &Program) -> Option<Id> {
     program
         .functions
         .iter()

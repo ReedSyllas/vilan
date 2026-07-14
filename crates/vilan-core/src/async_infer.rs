@@ -190,6 +190,92 @@ pub fn infer(program: &mut Program) {
         program.diagnostics.push(crate::error::Error { span, msg });
     }
 
+    // --- Module-level initializers cannot await (backlog §J.3): they run at
+    // module load, where there is no enclosing function to become async and
+    // no top-level await in the emission model. A call to an
+    // (inferred-)async function here would leave a live promise typed as
+    // `T` — `state + 1` on it is garbage — so it is refused cleanly.
+    // Creating an async closure (or an `async { .. }` block) in an
+    // initializer stays legal: nothing awaits at load. `const` initializers
+    // never reach here (they are compile-time; the graph skips them).
+    // F6 gates the check exactly as it gates emission and coloring: a
+    // binding the entry never reaches never runs, so it cannot await —
+    // with no user `main` (a library, a fragment) every binding is checked,
+    // since each runs in some dependent program.
+    let running_bindings = crate::platform_color::entry_function(program)
+        .map(|entry| graph.reachable_bindings(program, entry));
+    let mut initializer_awaits: Vec<(crate::span::Span, String)> = Vec::new();
+    for binding in program.module_level_bindings() {
+        if running_bindings
+            .as_ref()
+            .is_some_and(|running| !running.contains(&binding))
+        {
+            continue;
+        }
+        for call in graph.initializer_calls_of(binding) {
+            let async_target = match call.target {
+                CallTarget::Function(callee) | CallTarget::External(callee) => {
+                    async_set.contains(&callee).then_some(callee)
+                }
+                CallTarget::Indirect(
+                    IndirectReason::GenericMember | IndirectReason::TraitDispatch,
+                ) => dispatch_candidates(program, call.call_id)
+                    .into_iter()
+                    .find(|member| async_set.contains(member)),
+                // A call through an `async || T`-typed value awaits too.
+                _ => program
+                    .function_calls
+                    .get(&call.call_id)
+                    .and_then(|function_call| {
+                        match program.entity_map.get(&function_call.subject_id) {
+                            Some(Expr::Local(target)) => Some(*target),
+                            _ => None,
+                        }
+                    })
+                    .filter(|target| program.async_values.contains(target)),
+            };
+            let Some(target) = async_target else {
+                continue;
+            };
+            let target_name = program
+                .functions
+                .get(&target)
+                .map(|function| function.name)
+                .or_else(|| {
+                    program
+                        .external_functions
+                        .get(&target)
+                        .map(|external| external.name)
+                })
+                .unwrap_or("an async value");
+            let binding_name = program
+                .variables
+                .get(&binding)
+                .map(|variable| variable.name)
+                .unwrap_or("_");
+            let span = program
+                .span_map
+                .get(&call.call_id)
+                .map(|span| **span)
+                .unwrap_or(crate::span::Span {
+                    start: 0,
+                    end: 0,
+                    context: (),
+                });
+            initializer_awaits.push((
+                span,
+                format!(
+                    "the initializer of `{binding_name}` calls `{target_name}`, which is \
+                     async — a module-level binding cannot await (module initialization \
+                     is synchronous); wrap the work in a function and call it from `main`"
+                ),
+            ));
+        }
+    }
+    for (span, msg) in initializer_awaits {
+        program.diagnostics.push(crate::error::Error { span, msg });
+    }
+
     program.async_functions = async_set;
 }
 

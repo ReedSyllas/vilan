@@ -134,6 +134,14 @@ or — if fire-and-forget is fine — the parameter's return type should be
 across the suspension.
 → [Async](../tour/async.md), [Functions & closures](../tour/functions-and-closures.md)
 
+**"the initializer of `…` calls `…`, which is async — a module-level binding cannot await"**
+A top-level `let` runs when the module loads, and module initialization
+is synchronous — there is no enclosing function to become async, so the
+value would be a live promise wearing the wrong type. Wrap the work in
+a function and call it from `main`. (Creating an async closure at top
+level is fine; it awaits nothing until called.)
+→ [Async](../tour/async.md)
+
 **"`!` requires the nearest enclosing function to declare an `Option`/`Result`-compatible return type …"**
 `!` propagates the failure by *returning* it, so the surrounding
 function must return an `Option`/`Result` that can carry it. Inside a

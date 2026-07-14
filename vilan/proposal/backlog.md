@@ -1059,20 +1059,19 @@ have gaps.
    which interacts with B15 clauses (a clause-typed async closure) and the async-model
    phases above.
 
-3. **Async calls in module-level initializers are invisible to async inference** (M;
-   found 2026-07-13 while making initializers platform-colored) — `let state = ready();`
-   where `ready` is async type-checks as `i32` ("no errors") but holds a live Promise at
-   runtime: initializers are not `nodes()` in the call graph, so `async_infer` never sees
-   the call, and nothing awaits it (`state + 1` is garbage or a crash). Platform coloring
-   now walks initializer calls via `CallGraph::initializer_calls_of`, so the plumbing to
-   seed inference exists — but the FIX is a design question first: module init runs at
-   load, so an awaited initializer implies top-level await (the emitted bundles are ESM,
-   so TLA is *available* on every emitted host) plus an ordering story for dependent
-   bindings. Until designed, the cheap honest move is a diagnostic: a promise-typed
-   initializer is an error ("a module-level binding cannot await — wrap it in a
-   function"), turning the silent miscompile into a clean refusal. Probe: `async fun
-   ready(): i32 {..}` + `let state = ready();` + `print(state + 1)` — checks clean,
-   crashes under node.
+3. **Async calls in module-level initializers** (found 2026-07-13 while making
+   initializers platform-colored) — `let state = ready();` where `ready` is async
+   type-checked as `i32` but held a live Promise at runtime (`state + 1` was garbage):
+   initializers are not `nodes()`, so `async_infer` never saw the call and nothing
+   awaited it. **The diagnostic HALF is FIXED 2026-07-14** (v0.4.0 bundle): after the
+   async fixpoint, every module binding's `initializer_calls_of` is checked — a call to
+   an (inferred-)async function/extern, an async dispatch candidate, or an
+   `async ||`-typed value errors at the call span ("a module-level binding cannot await —
+   module initialization is synchronous; wrap the work in a function"); creating async
+   closures/blocks at top level stays legal (3 pins). REMAINING (the design half):
+   actually *allowing* awaited initializers implies top-level await (the emitted bundles
+   are ESM, so TLA is available on every emitted host) plus an ordering story for
+   dependent bindings — design before implementing.
 
 ---
 
