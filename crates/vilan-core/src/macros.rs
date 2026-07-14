@@ -753,7 +753,6 @@ struct Expander<'r, 'd> {
     rust_source: String,
     rust_traits: std::collections::HashSet<&'static str>,
     rust_any_service: bool,
-    rust_enum_json: bool,
     diagnostics: &'d mut Vec<Error>,
     /// The per-splice-site counter that stamps `__m<N>` gensym placeholders
     /// unique (§7): deterministic — sites are visited in file/node order.
@@ -783,7 +782,6 @@ pub(crate) fn expand_source(
         rust_source: String::new(),
         rust_traits: std::collections::HashSet::new(),
         rust_any_service: false,
-        rust_enum_json: false,
         diagnostics,
         site_counter,
         output: ExpansionOutput::default(),
@@ -843,9 +841,6 @@ impl Expander<'_, '_> {
                         RUST_DERIVES.iter().find(|known| **known == *name).copied()
                     {
                         self.rust_traits.insert(known);
-                        if matches!(known, "Json" | "Wire") && matches!(item.0, Node::Enum(..)) {
-                            self.rust_enum_json = true;
-                        }
                         self.rust_source
                             .push_str(&crate::analyzer::derive_impl_source(&[name], item));
                     }
@@ -1017,16 +1012,17 @@ impl Expander<'_, '_> {
             prelude.push_str("import std::default::Default;\n");
         }
         if self.rust_traits.contains("Json") || self.rust_traits.contains("Wire") {
-            prelude
-                .push_str("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n");
+            // Mirrors the `Json`/`Wire` macro entry points: the validating
+            // `from_json` yields a `Result` (I3), so the output needs `Result`
+            // in scope; it reads JSON through methods (`try_parse_json`,
+            // `has_field`), so no `parse_json_value`/`panic` import.
+            prelude.push_str("import std::json::{ Json, FromJson, JsonValue };\n");
+            prelude.push_str("import std::result::Result;\n");
         }
         if self.rust_traits.contains("Wire") {
             prelude.push_str(
                 "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n",
             );
-        }
-        if self.rust_enum_json {
-            prelude.push_str("import std::io::panic;\n");
         }
         if self.rust_traits.contains("Debug") {
             prelude.push_str("import std::debug::Debug;\n");

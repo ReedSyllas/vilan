@@ -330,6 +330,12 @@ fn helper_source(name: &str) -> &'static str {
         "__json_tag" => {
             "function __json_tag(value) {\n\treturn typeof value === \"string\" ? value : Object.keys(value)[0];\n}"
         }
+        // The normalized JSON type of a parsed value: `typeof` buckets arrays and
+        // `null` as `"object"`, so name them explicitly. Basis for the decode
+        // type checks (`JsonValue.kind()` in json.vl).
+        "__json_kind" => {
+            "function __json_kind(value) {\n\tif (value === null) return \"null\";\n\tif (Array.isArray(value)) return \"array\";\n\treturn typeof value;\n}"
+        }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays and a
         // `Set`/`Map` is a JS `Set`/`Map`, so recurse into them; everything else —
         // primitives and closures — is returned by reference (a closure is
@@ -2657,6 +2663,14 @@ impl<'src> Transformer<'src> {
                 Box::new(args.next().unwrap_or(js::Node::Void)),
                 Box::new(js::Node::Null),
             ),
+            // The normalized JSON kind string, for the decode type checks.
+            Intrinsic::JsonKind => {
+                self.used_helpers.insert("__json_kind");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__json_kind".to_string())),
+                    args.collect(),
+                )
+            }
             // `Array.from(document.querySelectorAll(selector))` — the NodeList as a
             // real array, so `List` operations (`map`/`push`/…) behave.
             Intrinsic::QuerySelectorAll => {

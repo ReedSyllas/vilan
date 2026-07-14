@@ -393,9 +393,10 @@ fn collection_json_roundtrip() {
         r#"
         import std::print;
         import std::json::{ Json, FromJson };
+        import std::result::Result::{ self, Ok, Err };
         fun main() {
-            let nums: List<i32> = List::from_json("[1,2,3]");
-            print(nums.to_json());
+            let nums: Result<List<i32>, str> = List::from_json("[1,2,3]");
+            print(nums is Ok(let ns) && ns.to_json() == "[1,2,3]");
         }
         "#,
     );
@@ -1045,7 +1046,7 @@ fn enum_constructor_propagates_expected_type_to_payload() {
         [derive(Json)] struct User { id: i32, name: str }
         fun main() {
             let decoded: Result<Option<User>, str> =
-                Ok(Option::from_json("{\"id\":1,\"name\":\"Ada\"}"));
+                Option::from_json("{\"id\":1,\"name\":\"Ada\"}");
             match decoded {
                 Ok(Some(let u)) => print(u.name),
                 Ok(None) => print("none"),
@@ -1130,7 +1131,7 @@ fn from_json_indirect_element_type_runs() {
         import std::option::Option::{ self, Some, None };
         import std::result::Result::{ self, Ok, Err };
         [derive(Json)] struct User { id: i32, name: str }
-        fun decode(text: str): Result<Option<User>, str> { Ok(Option::from_json(text)) }
+        fun decode(text: str): Result<Option<User>, str> { Option::from_json(text) }
         fun main() {
             match decode("{\"id\":1,\"name\":\"Ada\"}") {
                 Ok(Some(let u)) => print(u.name),
@@ -1181,7 +1182,7 @@ fn from_json_return_type_flows_through_match_arm() {
         [derive(Json)] struct User { id: i32, name: str }
         fun decode(tag: str, json: str): Result<Option<User>, str> {
             match tag {
-                "ok" => Ok(Option::from_json(json)),
+                "ok" => Option::from_json(json),
                 _ => Err("bad tag"),
             }
         }
@@ -1280,9 +1281,13 @@ fn single_level_container_from_json_roundtrip_runs() {
         r#"
         import std::print;
         import std::json::{ Json, FromJson };
+        import std::result::Result::{ self, Ok, Err };
         fun main() {
-            let nums: List<i32> = List::from_json("[1,2,3]");
-            print(nums.to_json());
+            let nums: Result<List<i32>, str> = List::from_json("[1,2,3]");
+            match nums {
+                Ok(let ns) => print(ns.to_json()),
+                Err(let e) => print(e),
+            }
         }
         "#,
         "[1,2,3]\n",
@@ -1302,11 +1307,18 @@ fn nested_container_from_json_roundtrip_runs() {
         r#"
         import std::print;
         import std::json::{ Json, FromJson };
+        import std::result::Result::{ self, Ok, Err };
         fun main() {
-            let grid: List<List<i32>> = List::from_json("[[1,2],[3,4]]");
-            print(grid.to_json());
-            let deep: List<List<List<i32>>> = List::from_json("[[[1]],[[2,3]]]");
-            print(deep.to_json());
+            let grid: Result<List<List<i32>>, str> = List::from_json("[[1,2],[3,4]]");
+            match grid {
+                Ok(let g) => print(g.to_json()),
+                Err(let e) => print(e),
+            }
+            let deep: Result<List<List<List<i32>>>, str> = List::from_json("[[[1]],[[2,3]]]");
+            match deep {
+                Ok(let d) => print(d.to_json()),
+                Err(let e) => print(e),
+            }
         }
         "#,
         "[[1,2],[3,4]]\n[[[1]],[[2,3]]]\n",
@@ -1324,14 +1336,24 @@ fn mixed_nested_container_from_json_roundtrips() {
         import std::print;
         import std::json::{ Json, FromJson };
         import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
         [derive(Json)] struct P { x: i32 }
         fun main() {
-            let a: Option<List<i32>> = Option::from_json("[1,2,3]");
-            print(a.to_json());
-            let b: List<Option<i32>> = List::from_json("[1,null,3]");
-            print(b.to_json());
-            let c: List<P> = List::from_json("[{\"x\":1},{\"x\":2}]");
-            print(c.to_json());
+            let a: Result<Option<List<i32>>, str> = Option::from_json("[1,2,3]");
+            match a {
+                Ok(let av) => print(av.to_json()),
+                Err(let e) => print(e),
+            }
+            let b: Result<List<Option<i32>>, str> = List::from_json("[1,null,3]");
+            match b {
+                Ok(let bv) => print(bv.to_json()),
+                Err(let e) => print(e),
+            }
+            let c: Result<List<P>, str> = List::from_json("[{\"x\":1},{\"x\":2}]");
+            match c {
+                Ok(let cv) => print(cv.to_json()),
+                Err(let e) => print(e),
+            }
         }
         "#,
         "[1,2,3]\n[1,null,3]\n[{\"x\":1},{\"x\":2}]\n",
@@ -2509,7 +2531,7 @@ fn generic_call_over_a_bounded_transport_decodes() {
         struct Pt { x: i32 }
         fun fetch<T: FromJson, Tx: Wire>(transport: Tx, msg: str): Result<T, str> {
             let reply = await transport.send(msg);
-            Ok(T::from_json(reply))                       // decode the generic T from the reply
+            T::from_json(reply)                           // decode the generic T from the reply
         }
         struct Client<Tx: Wire> { transport: Tx }
         impl Client<type Tx> {
@@ -2538,6 +2560,7 @@ fn wire_derives_the_json_round_trip() {
     assert_compiles_and_runs(
         r#"
         import std::print;
+        import std::result::Result::{ self, Ok, Err };
         [derive(Wire)]
         struct Point { x: i32, y: i32 }
         [derive(Wire)]
@@ -2546,11 +2569,16 @@ fn wire_derives_the_json_round_trip() {
         enum Shape { Seg(Line), Empty }
         fun main() {
             let line = Line { from = Point { x = 1, y = 2 }, to = Point { x = 3, y = 4 }, tags = ["a"] };
-            let back = Line::from_json(line.to_json());
-            print(i"{back.from.x} {back.from.y} {back.to.x} {back.to.y}");   // 1 2 3 4
-            match Shape::from_json(Shape::Seg(back).to_json()) {
-                Shape::Seg(let l) => print(i"seg {l.from.x}"),               // seg 1
-                Shape::Empty => print("empty"),
+            match Line::from_json(line.to_json()) {                          // decoding yields a Result (I3)
+                Ok(let back) => {
+                    print(i"{back.from.x} {back.from.y} {back.to.x} {back.to.y}");   // 1 2 3 4
+                    match Shape::from_json(Shape::Seg(back).to_json()) {
+                        Ok(Shape::Seg(let l)) => print(i"seg {l.from.x}"),           // seg 1
+                        Ok(Shape::Empty) => print("empty"),
+                        Err(let e) => print(e),
+                    }
+                }
+                Err(let e) => print(e),
             }
         }
         "#,
@@ -5304,7 +5332,7 @@ fn bang_directs_return_position_generics_into_its_receiver() {
         import std::json::FromJson;
 
         fun decode_as<T: FromJson>(text: str): Result<T, str> {
-        	Ok(T::from_json(text))
+        	T::from_json(text)
         }
 
         fun run(): Result<i32, str> {
@@ -15270,5 +15298,252 @@ fn a_bare_function_name_stays_a_value() {
         }
         "#,
         "42\n",
+    );
+}
+
+// --- I3: validating per-type `from_json` -----------------------------------------
+// Decoding is fallible and never crashes: a missing field, a wrong-shaped value,
+// or text that is not JSON is a `Result` decode error rather than `undefined`
+// garbage or a thrown `JSON.parse`. Both `FromJson` methods return
+// `Result<Self, str>`; the `!` operator threads a leaf failure.
+
+#[test]
+fn from_json_decodes_a_valid_scalar() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+
+        fun main() {
+            print(i32::from_json("7") is Ok(let n) && n == 7);
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_rejects_a_wrong_typed_scalar() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+
+        fun main() {
+            print(i32::from_json("\"x\"") is Err(let e));
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_rejects_malformed_text() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+
+        fun main() {
+            print(i32::from_json("not json") is Err(let e) && e == "not valid JSON");
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_names_a_missing_struct_field() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::FromJson;
+        import std::result::Result::{ self, Ok, Err };
+
+        [derive(Json)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            match Point::from_json("{\"x\":1}") {
+                Ok(_) => print("?"),
+                Err(let reason) => print(reason),
+            }
+        }
+        "#,
+        "missing field y\n",
+    );
+}
+
+#[test]
+fn from_json_rejects_a_wrong_typed_struct_field() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::FromJson;
+        import std::result::Result::{ self, Ok, Err };
+
+        [derive(Json)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            print(Point::from_json("{\"x\":1,\"y\":\"z\"}") is Err(let e));
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_ignores_extra_struct_fields() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::FromJson;
+        import std::result::Result::{ self, Ok, Err };
+
+        [derive(Json)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fun main() {
+            print(Point::from_json("{\"x\":1,\"y\":2,\"z\":3}") is Ok(let p) && p.x == 1);
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_recurses_into_a_nested_struct() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::FromJson;
+        import std::result::Result::{ self, Ok, Err };
+
+        [derive(Json)]
+        struct Point {
+            x: i32,
+        }
+
+        [derive(Json)]
+        struct Line {
+            from: Point,
+            to: Point,
+        }
+
+        fun main() {
+            // The inner `Point` is missing its field — the failure propagates.
+            print(Line::from_json("{\"from\":{\"x\":1},\"to\":{}}") is Err(let e));
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_reads_option_null_and_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+
+        fun main() {
+            let empty: Result<Option<i32>, str> = Option::from_json("null");
+            print(empty is Ok(let a) && a is None);
+            let some: Result<Option<i32>, str> = Option::from_json("7");
+            print(some is Ok(let b) && b is Some(let v) && v == 7);
+        }
+        "#,
+        "true\ntrue\n",
+    );
+}
+
+#[test]
+fn from_json_rejects_a_non_array_for_a_list() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+
+        fun main() {
+            let bad: Result<List<i32>, str> = List::from_json("5");
+            print(bad is Err(let e) && e == "expected an array");
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_short_circuits_on_a_bad_list_element() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+
+        fun main() {
+            let good: Result<List<i32>, str> = List::from_json("[1,2,3]");
+            print(good is Ok(let xs) && xs.len() == 3);
+            let bad: Result<List<i32>, str> = List::from_json("[1,\"x\",3]");
+            print(bad is Err(let e));
+        }
+        "#,
+        "true\ntrue\n",
+    );
+}
+
+#[test]
+fn from_json_rejects_an_unknown_enum_variant() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::FromJson;
+        import std::result::Result::{ self, Ok, Err };
+
+        [derive(Json)]
+        enum Shape {
+            Circle(i32),
+            Empty,
+        }
+
+        fun main() {
+            print(Shape::from_json("\"Triangle\"") is Err(let e));
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn from_json_round_trips_a_derived_enum() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::FromJson;
+        import std::result::Result::{ self, Ok, Err };
+
+        [derive(Json, PartialEq)]
+        enum Shape {
+            Circle(i32),
+            Rect(i32, i32),
+            Empty,
+        }
+
+        fun main() {
+            let r = Shape::Rect(2, 3);
+            print(Shape::from_json(r.to_json()) is Ok(let back) && back == r);
+        }
+        "#,
+        "true\n",
     );
 }

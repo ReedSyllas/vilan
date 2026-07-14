@@ -1042,12 +1042,18 @@ have gaps.
    `bits-and-bytes.md`); what remains is the general fixed-length / contiguous array type,
    cheaper than the heap-boxed, length-mutable `List<T>` stand-in.
 
-3. **Validating per-type `from_json`** (M; interacts with B11 `?`/try) — the codec seam validates
-   end to end (sticky deserializer errors, `RpcError::Decode`, and malformed JSON is a decode
-   error rather than a thrown `JSON.parse`); the per-type `to_json`/`from_json` convenience
-   surface is what remains trusting: a missing/mistyped field decodes to `undefined` and flows
-   onward as garbage — the *silent* failure mode. Wanted: decode reports an error (a `Result`, or
-   at minimum a `panic` naming the field) when a field is absent or the wrong shape.
+3. ~~**Validating per-type `from_json`**~~ — **SHIPPED 2026-07-14**
+   (`proposal/validating-from-json.md`). The per-type surface was the last
+   trusting decoder: a missing/mistyped field decoded to `undefined` and flowed
+   on as garbage, and `from_json(text)` crashed on malformed input via
+   `JSON.parse`. Now both `FromJson` methods return `Result<Self, str>` (matching
+   `decode_json`): scalars validate the JSON type before coercing (new
+   `JsonValue.kind()` intrinsic + `is_number`/`is_string`/`is_bool`/`is_array`),
+   the struct derive presence-checks each field (naming a missing one) and threads
+   leaves with `!`, the enum derive validates the tag, and `from_json` parses
+   non-crashingly through `try_parse_json`. Composes with B11 `!`/`?.`. 13 pins +
+   8 migrated tests + 3 goldens; docs updated. Deferred: JSON-pointer error paths,
+   number-range checks, deduplicating the two readers (validating-from-json.md §7).
 
 4. ~~**Subscript absence semantics**~~ — **SHIPPED 2026-07-10**: panic, checked at use
    and at mint. `a[i]` — read, write, or `&mut a[i]` — requires `0 <= i < a.len()`; a

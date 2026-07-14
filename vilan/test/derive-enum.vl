@@ -1,5 +1,6 @@
 import std::print;
 import std::json::FromJson;
+import std::result::Result::{ self, Ok, Err };
 
 // Derives extend to enums via a `match` over the variants. `Json` is externally
 // tagged: a payload-less variant is a string `"V"`, a single payload is
@@ -34,8 +35,13 @@ fun main() {
 	print(r.to_json()); // {"Rect":[4,5]}
 	print(e.to_json()); // "Empty"
 
-	// from_json reads each tag form back; the round-trip reproduces the value.
-	print(Shape::from_json(c.to_json()) == c); // true
-	print(Shape::from_json(r.to_json()) == r); // true
-	print(Shape::from_json(e.to_json()) == e); // true
+	// from_json reads each tag form back; decoding is fallible (I3), so it
+	// yields a `Result` — the round-trip reproduces the value.
+	print(Shape::from_json(c.to_json()) is Ok(let back_c) && back_c == c); // true
+	print(Shape::from_json(r.to_json()) is Ok(let back_r) && back_r == r); // true
+	print(Shape::from_json(e.to_json()) is Ok(let back_e) && back_e == e); // true
+
+	// An unknown tag is a decode error, not a crash.
+	print(Shape::from_json("\"Hexagon\"") is Err(let unknown)); // true
+	print(unknown); // unknown variant in JSON for enum Shape
 }

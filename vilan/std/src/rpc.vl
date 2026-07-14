@@ -19,6 +19,7 @@
 
 import pkg::promise::Promise;
 import pkg::shared::Shared;
+import pkg::io::panic;
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 import pkg::json::JsonValue;

@@ -1,10 +1,12 @@
 import std::print;
+import std::result::Result::{ self, Ok, Err };
 
 // `[derive(Json)]` synthesizes both directions — `to_json` (a faithful JSON object
 // with real field names, which a bare `JSON.stringify` of a vilan struct can't
 // produce) and `from_json` (rebuilding the struct from that object). Scalars
-// serialize via the host `JSON.stringify` and coerce back via `Number`/`String`/
-// `Boolean`; nested derived structs recurse in both directions.
+// serialize via the host `JSON.stringify` and are validated on the way back (a
+// wrong-typed or missing field is a decode error, so `from_json` yields a
+// `Result` — I3); nested derived structs recurse in both directions.
 [derive(Json)]
 struct Point {
 	x: i32,
@@ -33,10 +35,19 @@ fun main() {
 	let text = person.to_json();
 	print(text);
 
-	// `from_json` parses it back into a `Person`; the nested `Point` and every
-	// scalar survive, so re-serializing reproduces the original document.
-	let back = Person::from_json(text);
-	print(back.to_json() == text); // true
-	print(back.home.y); // 4
-	print(back.name); // Ada "A"
+	// `from_json` parses and validates it back into a `Person`; the nested
+	// `Point` and every scalar survive, so re-serializing reproduces the
+	// original document.
+	print(Person::from_json(text) is Ok(let back)
+		&& back.to_json() == text // re-serializes identically
+		&& back.home.y == 4       // nested field survives
+		&& back.name == "Ada \"A\""); // escaped string survives
+
+	// A missing field is a decode error naming the field, not silent garbage.
+	print(Person::from_json("{\"name\":\"x\",\"age\":1,\"active\":true}") is Err(let missing));
+	print(missing); // missing field home
+
+	// A wrong-typed field is a decode error too.
+	print(Person::from_json("{\"name\":5,\"age\":1,\"active\":true,\"home\":{\"x\":0,\"y\":0}}") is Err(let wrong));
+	print(wrong); // expected a string
 }

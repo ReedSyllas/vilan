@@ -1,11 +1,13 @@
 import std::print;
 import std::json::{ Json, FromJson };
 import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
 
 // `[derive(Json)]` gives a struct both directions; `List`/`Option` serialize and
-// parse each element via its own `Json`/`FromJson`. `List::from_json` infers its
-// element type from the binding's annotation (a return-type-only generic), and
-// the derived struct fields parse their `List`/`Option` members in turn.
+// parse each element via its own `Json`/`FromJson`. Decoding is fallible (I3), so
+// `from_json` yields a `Result`; the element type comes from the `Result<..>`
+// annotation (a return-type-only generic), and the derived struct fields parse
+// their `List`/`Option` members in turn.
 [derive(Json)]
 struct Team {
 	name: str,
@@ -15,21 +17,21 @@ struct Team {
 
 fun main() {
 	// Collections, both directions.
-	let nums: List<i32> = List::from_json("[1,2,3]");
-	print(nums.to_json()); // [1,2,3]
+	let nums: Result<List<i32>, str> = List::from_json("[1,2,3]");
+	print(nums is Ok(let ns) && ns.to_json() == "[1,2,3]"); // true
 
-	let some: Option<i32> = Option::from_json("7");
-	print(some.to_json()); // 7
-	let none: Option<i32> = Option::from_json("null");
-	print(none.to_json()); // null
+	let some: Result<Option<i32>, str> = Option::from_json("7");
+	print(some is Ok(let s) && s.to_json() == "7"); // true
+	let none: Result<Option<i32>, str> = Option::from_json("null");
+	print(none is Ok(let n) && n.to_json() == "null"); // true
 
 	// A struct whose fields are themselves a `List` and an `Option`.
 	let json = "{\"name\":\"Reds\",\"members\":[\"Ada\",\"Bob\"],\"captain\":\"Ada\"}";
-	let team: Team = Team::from_json(json);
-	print(team.to_json()); // round-trips to the same document
-	print(team.members.to_json()); // ["Ada","Bob"]
+	print(Team::from_json(json) is Ok(let team)
+		&& team.to_json() == json          // round-trips to the same document
+		&& team.members.to_json() == "[\"Ada\",\"Bob\"]"); // true
 
 	// A list of those structs.
-	let teams: List<Team> = List::from_json("[" + json + "]");
-	print(teams.to_json());
+	let teams: Result<List<Team>, str> = List::from_json("[" + json + "]");
+	print(teams is Ok(let ts) && ts.to_json() == "[" + json + "]"); // true
 }

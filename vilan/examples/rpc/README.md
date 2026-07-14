@@ -231,11 +231,12 @@ in `inference.rs`).
 ### 4. `from_json` element-type inference through an indirect path — ✅ FIXED
 
 ```vilan
-RpcReply::Success(let json) => Ok(Option::from_json(json)),   // ✓ now binds WireUser
+RpcReply::Success(let json) => Option::from_json(json),   // ✓ now binds WireUser
 ```
 
-Here `Option::from_json` must infer its element type `WireUser` through the `Ok(..)`
-wrapper and the function's return type. That indirect path *used to* lower the inner
+Here `Option::from_json` (which itself returns `Result<Option<WireUser>, str>`, I3)
+must infer its element type `WireUser` through the function's return type. That
+indirect path *used to* lower the inner
 decode to the empty abstract `from_json_value`, yielding `Some(undefined)` — so the
 stub pinned the type with a local `let user: Option<WireUser> = ..`.
 

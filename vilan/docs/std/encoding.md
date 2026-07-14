@@ -20,11 +20,18 @@ trait FromJson {                              // decode
 ```
 
 `[derive(Json)]` implements both from a struct/enum's shape; scalars,
-`List`, and `Option` nest:
+`List`, and `Option` nest.
+
+Encoding (`to_json`) is total, but **decoding is fallible**: the input is
+untrusted, so a missing field, a wrong-shaped value, or text that isn't
+JSON is a decode error rather than silent garbage or a crash. Both
+`from_json(text)` and `from_json_value(value)` return `Result<Self, str>`
+— handle it with `!`, `match`, or `is Ok(..)`:
 
 ```vilan
 import std::print;
-import std::json::Json;
+import std::json::{ Json, FromJson };
+import std::result::Result::{ self, Ok, Err };
 
 [derive(Json)]
 struct Point {
@@ -35,9 +42,18 @@ struct Point {
 fun main() {
 	let point = Point { x = 1, y = 2 };
 	let text = point.to_json();
-	print(text);
-	let back = Point::from_json(text);
-	print(back.x);
+	print(text); // {"x":1,"y":2}
+
+	match Point::from_json(text) {
+		Ok(let back) => print(back.x), // 1
+		Err(let reason) => print(reason),
+	}
+
+	// A missing field is a decode error naming the field.
+	match Point::from_json("{\"x\":1}") {
+		Ok(_) => print("decoded"),
+		Err(let reason) => print(reason), // missing field y
+	}
 }
 ```
 

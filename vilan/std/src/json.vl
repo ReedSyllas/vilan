@@ -106,75 +106,173 @@ impl JsonValue {
 
 	// Whether this value is JSON `null` (the `Option::None` discriminator).
 	external fun is_null(self): bool;
+
+	// The normalized JSON type — `"number"`/`"string"`/`"boolean"`/`"array"`/
+	// `"object"`/`"null"` (an intrinsic: `typeof` mis-buckets arrays and null).
+	// The decode type checks below read it so a leaf refuses a wrong-shaped
+	// value instead of coercing it to garbage.
+	external fun kind(self): str;
+
+	fun is_number(self): bool {
+		self.kind() == "number"
+	}
+
+	fun is_string(self): bool {
+		self.kind() == "string"
+	}
+
+	fun is_bool(self): bool {
+		self.kind() == "boolean"
+	}
+
+	fun is_array(self): bool {
+		self.kind() == "array"
+	}
+
+	// Whether an object has a named field — the missing-field check the derived
+	// struct decoder reads (a method so it resolves through the value's type in
+	// generated code, like `field`/`tag`).
+	fun has_field(self, name: str): bool {
+		has_json_field(self, name)
+	}
 }
 
+// Decoding is fallible and NEVER crashes: a missing field, a wrong shape, or
+// text that is not JSON at all is a decode error, not `undefined` garbage and
+// not a thrown `JSON.parse` (the same rule the wire codec follows — I3). Both
+// methods return `Result`; `from_json` parses the text (non-crashing) and hands
+// off to `from_json_value`, which validates the value's shape. Callers thread
+// failures with `!` or handle the `Result`.
 trait FromJson {
 	// Parse a JSON document into a value of this type.
-	fun from_json(text: str): FromJson;
+	fun from_json(text: str): Result<FromJson, str>;
 	// Rebuild this type from an already-parsed value (used when nesting).
-	fun from_json_value(value: JsonValue): FromJson;
+	fun from_json_value(value: JsonValue): Result<FromJson, str>;
 }
 
+// The scalar leaves check the JSON type before coercing (`Number`/`String`/
+// `Boolean` would otherwise turn `undefined`/a wrong type into `NaN`/`"undefined"`
+// /`true`). The raw coercion stays a host extern, now reached only past the check.
+[extern("String")]
+external fun coerce_str(value: JsonValue): str;
+[extern("Boolean")]
+external fun coerce_bool(value: JsonValue): bool;
+[extern("Number")]
+external fun coerce_i8(value: JsonValue): i8;
+[extern("Number")]
+external fun coerce_u8(value: JsonValue): u8;
+[extern("Number")]
+external fun coerce_i16(value: JsonValue): i16;
+[extern("Number")]
+external fun coerce_u16(value: JsonValue): u16;
+[extern("Number")]
+external fun coerce_i32(value: JsonValue): i32;
+[extern("Number")]
+external fun coerce_u32(value: JsonValue): u32;
+[extern("Number")]
+external fun coerce_i53(value: JsonValue): i53;
+[extern("Number")]
+external fun coerce_u53(value: JsonValue): u53;
+[extern("Number")]
+external fun coerce_f32(value: JsonValue): f32;
+[extern("Number")]
+external fun coerce_f64(value: JsonValue): f64;
+
 impl str with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): str;
-	[extern("String")]
-	external fun from_json_value(value: JsonValue): str;
+	fun from_json(text: str): Result<str, str> {
+		match text.try_parse_json() {
+			Some(let value) => str::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<str, str> {
+		if value.is_string() { Ok(coerce_str(value)) } else { Err("expected a string") }
+	}
 }
 
 impl i32 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): i32;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): i32;
+	fun from_json(text: str): Result<i32, str> {
+		match text.try_parse_json() {
+			Some(let value) => i32::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<i32, str> {
+		if value.is_number() { Ok(coerce_i32(value)) } else { Err("expected a number") }
+	}
 }
 
 impl u32 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): u32;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): u32;
+	fun from_json(text: str): Result<u32, str> {
+		match text.try_parse_json() {
+			Some(let value) => u32::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<u32, str> {
+		if value.is_number() { Ok(coerce_u32(value)) } else { Err("expected a number") }
+	}
 }
 
 impl f64 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): f64;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): f64;
+	fun from_json(text: str): Result<f64, str> {
+		match text.try_parse_json() {
+			Some(let value) => f64::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<f64, str> {
+		if value.is_number() { Ok(coerce_f64(value)) } else { Err("expected a number") }
+	}
 }
 
 impl bool with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): bool;
-	[extern("Boolean")]
-	external fun from_json_value(value: JsonValue): bool;
+	fun from_json(text: str): Result<bool, str> {
+		match text.try_parse_json() {
+			Some(let value) => bool::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<bool, str> {
+		if value.is_bool() { Ok(coerce_bool(value)) } else { Err("expected a boolean") }
+	}
 }
 
 // A JSON `null` is `None`; anything else is `Some` of the parsed value.
 impl Option<type T: FromJson> with FromJson {
-	fun from_json(text: str): Option<T> {
-		Option::from_json_value(parse_json_value(text))
+	fun from_json(text: str): Result<Option<T>, str> {
+		match text.try_parse_json() {
+			Some(let value) => Option::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
 	}
-	fun from_json_value(value: JsonValue): Option<T> {
+	fun from_json_value(value: JsonValue): Result<Option<T>, str> {
 		if value.is_null() {
-			Option::None
+			Ok(Option::None)
 		} else {
-			Option::Some(T::from_json_value(value))
+			Ok(Option::Some(T::from_json_value(value)!))
 		}
 	}
 }
 
-// A JSON array rebuilds into a `List`, each element parsed via its own type.
+// A JSON array rebuilds into a `List`, each element parsed via its own type; the
+// first bad element short-circuits the decode.
 impl List<type T: FromJson> with FromJson {
-	fun from_json(text: str): List<T> {
-		List::from_json_value(parse_json_value(text))
+	fun from_json(text: str): Result<List<T>, str> {
+		match text.try_parse_json() {
+			Some(let value) => List::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
 	}
-	fun from_json_value(value: JsonValue): List<T> {
+	fun from_json_value(value: JsonValue): Result<List<T>, str> {
+		if !value.is_array() {
+			ret Err("expected an array")
+		}
 		mut result: List<T> = [];
 		for element in value.elements() {
-			result.push(T::from_json_value(element));
+			result.push(T::from_json_value(element)!);
 		}
-		result
+		Ok(result)
 	}
 }
 
@@ -515,34 +613,38 @@ impl JsonReader with Deserialize {
 		let _ = self.take();
 	}
 
+	// The reader has its own sticky-error model (`ok()`/`fail()`), so it reads a
+	// scalar through the raw coercion rather than the validating `from_json_value`
+	// (which now returns a `Result`) — the leaf is already inside the reader's
+	// error discipline.
 	fun str_value(self): str {
 		let value = self.take();
-		if self.ok() { str::from_json_value(value) } else { "" }
+		if self.ok() { coerce_str(value) } else { "" }
 	}
 
 	fun i32_value(self): i32 {
 		let value = self.take();
-		if self.ok() { i32::from_json_value(value) } else { 0 }
+		if self.ok() { coerce_i32(value) } else { 0 }
 	}
 
 	fun u32_value(self): u32 {
 		let value = self.take();
-		if self.ok() { u32::from_json_value(value) } else { 0 }
+		if self.ok() { coerce_u32(value) } else { 0 }
 	}
 
 	fun i53_value(self): i53 {
 		let value = self.take();
-		if self.ok() { i53::from_json_value(value) } else { 0 }
+		if self.ok() { coerce_i53(value) } else { 0 }
 	}
 
 	fun f64_value(self): f64 {
 		let value = self.take();
-		if self.ok() { f64::from_json_value(value) } else { 0.0 }
+		if self.ok() { coerce_f64(value) } else { 0.0 }
 	}
 
 	fun bool_value(self): bool {
 		let value = self.take();
-		if self.ok() { bool::from_json_value(value) } else { false }
+		if self.ok() { coerce_bool(value) } else { false }
 	}
 
 	fun fail(self, reason: str) {
@@ -636,19 +738,31 @@ macro fun struct_json_impls(target: StructItem): str {
 		.parameter("self")
 		.returns("str")
 		.expr(join(parts, " + "));
+	// Decoding is fallible (I3): `from_json` parses the text without crashing,
+	// `from_json_value` checks each field is present (naming a missing one) and
+	// threads a leaf failure with `!`.
+	let result_type = i"Result<{target.name}, str>";
 	let from_json = fun_of("from_json")
 		.parameter("text: str")
-		.returns(target.name)
-		.expr(i"{target.name}::from_json_value(parse_json_value(text))");
+		.returns(result_type)
+		.expr(i"{target.name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)");
+	mut from_json_value = fun_of("from_json_value")
+		.parameter("value: JsonValue")
+		.returns(result_type);
+	// The output uses fully-qualified `Result::Ok`/`Result::Err` so it does not
+	// depend on the deriving file importing the variants (`Result` the type is
+	// reachable wherever the derive is; its variants may not be in scope).
+	for field in target.fields {
+		let label = quote(field.name);
+		from_json_value = from_json_value.line(
+			i"if !value.has_field({label}) \{ ret Result::Err(\"missing field {field.name}\") \}");
+	}
 	mut literal = init_of(target.name);
 	for field in target.fields {
 		let label = quote(field.name);
-		literal = literal.field(field.name, i"{field.type_.render()}::from_json_value(value.field({label}))");
+		literal = literal.field(field.name, i"{field.type_.render()}::from_json_value(value.field({label}))!");
 	}
-	let from_json_value = fun_of("from_json_value")
-		.parameter("value: JsonValue")
-		.returns(target.name)
-		.expr(literal.render());
+	from_json_value = from_json_value.expr(i"Result::Ok({literal.render()})");
 	impl_of(target.name).implements("Json").method(to_json).render()
 		+ impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
 }
@@ -716,43 +830,45 @@ macro fun enum_json_impls(target: EnumItem): str {
 				opener + " + " + join(parts, separator) + " + " + quote("]}"));
 		}
 	}
+	// Decoding validates the tag (an unknown one is a decode error, not a panic)
+	// and threads each payload leaf's failure with `!` (I3).
 	mut from_arms = match_of("value.tag()");
 	for variant in target.variants {
 		let arity = variant.payload.len();
 		let tag = quote(variant.name);
 		if arity == 0 {
-			from_arms = from_arms.arm(tag, i"{target.name}::{variant.name}");
+			from_arms = from_arms.arm(tag, i"Result::Ok({target.name}::{variant.name})");
 		} else if arity == 1 {
 			let payload_type = match variant.payload.get(0) {
 				Some(let type_) => type_.render(),
 				None => "_",
 			};
-			from_arms = from_arms.arm(tag, i"{target.name}::{variant.name}({payload_type}::from_json_value(value.field({tag})))");
+			from_arms = from_arms.arm(tag, i"Result::Ok({target.name}::{variant.name}({payload_type}::from_json_value(value.field({tag}))!))");
 		} else {
 			mut elements: List<str> = [];
 			mut index = 0;
 			for type_ in variant.payload {
 				let position = quote(i"{index}");
-				elements.push(i"{type_.render()}::from_json_value(value.field({tag}).field({position}))");
+				elements.push(i"{type_.render()}::from_json_value(value.field({tag}).field({position}))!");
 				index = index + 1;
 			}
 			let element_list = join(elements, ", ");
-			from_arms = from_arms.arm(tag, i"{target.name}::{variant.name}({element_list})");
+			from_arms = from_arms.arm(tag, i"Result::Ok({target.name}::{variant.name}({element_list}))");
 		}
 	}
-	let complaint = quote(i"unknown variant in JSON for enum {target.name}");
-	from_arms = from_arms.arm("_", i"panic({complaint})");
+	from_arms = from_arms.arm("_", i"Result::Err(\"unknown variant in JSON for enum {target.name}\")");
+	let result_type = i"Result<{target.name}, str>";
 	let to_json = fun_of("to_json")
 		.parameter("self")
 		.returns("str")
 		.expr(to_arms.render());
 	let from_json = fun_of("from_json")
 		.parameter("text: str")
-		.returns(target.name)
-		.expr(i"{target.name}::from_json_value(parse_json_value(text))");
+		.returns(result_type)
+		.expr(i"{target.name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)");
 	let from_json_value = fun_of("from_json_value")
 		.parameter("value: JsonValue")
-		.returns(target.name)
+		.returns(result_type)
 		.expr(from_arms.render());
 	impl_of(target.name).implements("Json").method(to_json).render()
 		+ impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
@@ -852,10 +968,10 @@ macro fun Json(item: Item): Source {
 	import macro_std::option::Option::{ self, Some, None };
 
 	if item.as_struct() is Some(let target) {
-		ret source("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n" + struct_json_impls(target));
+		ret source("import std::json::{ Json, FromJson, JsonValue };\n" + "import std::result::Result;\n" + struct_json_impls(target));
 	}
 	if item.as_enum() is Some(let target) {
-		ret source("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n" + "import std::io::panic;\n" + enum_json_impls(target));
+		ret source("import std::json::{ Json, FromJson, JsonValue };\n" + "import std::result::Result;\n" + enum_json_impls(target));
 	}
 	source("")
 }
@@ -864,10 +980,10 @@ macro fun Wire(item: Item): Source {
 	import macro_std::option::Option::{ self, Some, None };
 
 	if item.as_struct() is Some(let target) {
-		ret source("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n" + "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n" + struct_json_impls(target) + struct_wire_impls(target));
+		ret source("import std::json::{ Json, FromJson, JsonValue };\n" + "import std::result::Result;\n" + "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n" + struct_json_impls(target) + struct_wire_impls(target));
 	}
 	if item.as_enum() is Some(let target) {
-		ret source("import std::json::{ Json, FromJson, JsonValue, parse_json_value };\n" + "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n" + "import std::io::panic;\n" + enum_json_impls(target) + enum_wire_impls(target));
+		ret source("import std::json::{ Json, FromJson, JsonValue };\n" + "import std::result::Result;\n" + "import std::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer };\n" + enum_json_impls(target) + enum_wire_impls(target));
 	}
 	source("")
 }
@@ -884,10 +1000,15 @@ impl i8 with Json {
 }
 
 impl i8 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): i8;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): i8;
+	fun from_json(text: str): Result<i8, str> {
+		match text.try_parse_json() {
+			Some(let value) => i8::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<i8, str> {
+		if value.is_number() { Ok(coerce_i8(value)) } else { Err("expected a number") }
+	}
 }
 
 impl u8 with Json {
@@ -896,10 +1017,15 @@ impl u8 with Json {
 }
 
 impl u8 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): u8;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): u8;
+	fun from_json(text: str): Result<u8, str> {
+		match text.try_parse_json() {
+			Some(let value) => u8::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<u8, str> {
+		if value.is_number() { Ok(coerce_u8(value)) } else { Err("expected a number") }
+	}
 }
 
 impl i16 with Json {
@@ -908,10 +1034,15 @@ impl i16 with Json {
 }
 
 impl i16 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): i16;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): i16;
+	fun from_json(text: str): Result<i16, str> {
+		match text.try_parse_json() {
+			Some(let value) => i16::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<i16, str> {
+		if value.is_number() { Ok(coerce_i16(value)) } else { Err("expected a number") }
+	}
 }
 
 impl u16 with Json {
@@ -920,10 +1051,15 @@ impl u16 with Json {
 }
 
 impl u16 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): u16;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): u16;
+	fun from_json(text: str): Result<u16, str> {
+		match text.try_parse_json() {
+			Some(let value) => u16::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<u16, str> {
+		if value.is_number() { Ok(coerce_u16(value)) } else { Err("expected a number") }
+	}
 }
 
 impl i53 with Json {
@@ -932,10 +1068,15 @@ impl i53 with Json {
 }
 
 impl i53 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): i53;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): i53;
+	fun from_json(text: str): Result<i53, str> {
+		match text.try_parse_json() {
+			Some(let value) => i53::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<i53, str> {
+		if value.is_number() { Ok(coerce_i53(value)) } else { Err("expected a number") }
+	}
 }
 
 impl u53 with Json {
@@ -944,10 +1085,15 @@ impl u53 with Json {
 }
 
 impl u53 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): u53;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): u53;
+	fun from_json(text: str): Result<u53, str> {
+		match text.try_parse_json() {
+			Some(let value) => u53::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<u53, str> {
+		if value.is_number() { Ok(coerce_u53(value)) } else { Err("expected a number") }
+	}
 }
 
 impl f32 with Json {
@@ -956,8 +1102,13 @@ impl f32 with Json {
 }
 
 impl f32 with FromJson {
-	[extern("JSON.parse")]
-	external fun from_json(text: str): f32;
-	[extern("Number")]
-	external fun from_json_value(value: JsonValue): f32;
+	fun from_json(text: str): Result<f32, str> {
+		match text.try_parse_json() {
+			Some(let value) => f32::from_json_value(value),
+			None => Err("not valid JSON"),
+		}
+	}
+	fun from_json_value(value: JsonValue): Result<f32, str> {
+		if value.is_number() { Ok(coerce_f32(value)) } else { Err("expected a number") }
+	}
 }

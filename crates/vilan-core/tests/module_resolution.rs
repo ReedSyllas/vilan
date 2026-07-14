@@ -786,11 +786,12 @@ fn derive_in_an_imported_module_resolves() {
     // there, visible to the importer — derive expansion is no longer entry-file-only.
     let entry = concat!(
         "import std::json::{ Json, FromJson };\n",
+        "import std::result::Result::{ self, Ok, Err };\n",
         "import pkg::contract::User;\n",
         "fun main() {\n",
         "    let user = User { id = 1, name = \"Ada\" };\n",
-        "    let back: User = User::from_json(user.to_json());\n",
-        "    back.name\n",
+        "    let back: Result<User, str> = User::from_json(user.to_json());\n",
+        "    back is Ok(let u) && u.name == \"Ada\"\n",
         "}\n",
     );
     let contract = "[derive(Json)]\nstruct User {\n    id: i32,\n    name: str,\n}\n";
@@ -811,11 +812,12 @@ fn derive_in_a_dependency_library_resolves() {
     // `lib.vl`, used by the app — the derive expands in the dependency too.
     let entry = concat!(
         "import std::json::{ Json, FromJson };\n",
+        "import std::result::Result::{ self, Ok, Err };\n",
         "import common::User;\n",
         "fun main() {\n",
         "    let user = User { id = 1, name = \"Ada\" };\n",
-        "    let back: User = User::from_json(user.to_json());\n",
-        "    back.name\n",
+        "    let back: Result<User, str> = User::from_json(user.to_json());\n",
+        "    back is Ok(let u) && u.name == \"Ada\"\n",
         "}\n",
     );
     let common = Dep {

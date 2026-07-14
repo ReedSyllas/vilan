@@ -13442,6 +13442,12 @@ pub enum Intrinsic {
     // `JsonValue.is_null(): bool` -> `self === null` (JSON `null` parses to JS
     // `null`); the `Option::None` discriminator.
     JsonIsNull,
+    // `JsonValue.kind(): str` -> the value's JSON type as a normalized string
+    // (`"number"`/`"string"`/`"boolean"`/`"array"`/`"object"`/`"null"`), the
+    // basis for the decode type checks (`is_number`/… in json.vl). `typeof`
+    // has no plain extern shape and mis-buckets arrays and null as `"object"`,
+    // so a helper normalizes them.
+    JsonKind,
     // `dom::query_selector_all(selector): List<Element>` -> the matches as a real
     // array, `Array.from(document.querySelectorAll(selector))` (querySelectorAll
     // yields a NodeList, which a `List` would otherwise mishandle).
@@ -14030,15 +14036,19 @@ fn derive_enum_impls(
                 // the bare string; a single payload is `value.field(tag)`; several
                 // are positional elements of the tagged array. Each payload is
                 // coerced via its own type's `from_json_value`.
+                // Decoding is fallible (I3): validate the tag (unknown = a decode
+                // error, not a panic) and thread each payload leaf with `!`.
                 let mut arms = String::new();
                 for (name, payload_types) in &variants {
                     let arity = payload_types.len();
                     if arity == 0 {
-                        arms.push_str(&format!("\t\t\t\"{name}\" => {enum_name}::{name},\n"));
+                        arms.push_str(&format!(
+                            "\t\t\t\"{name}\" => Result::Ok({enum_name}::{name}),\n"
+                        ));
                     } else if arity == 1 {
                         let payload_type = &payload_types[0];
                         arms.push_str(&format!(
-                            "\t\t\t\"{name}\" => {enum_name}::{name}({payload_type}::from_json_value(value.field(\"{name}\"))),\n"
+                            "\t\t\t\"{name}\" => Result::Ok({enum_name}::{name}({payload_type}::from_json_value(value.field(\"{name}\"))!)),\n"
                         ));
                     } else {
                         let elements = payload_types
@@ -14046,25 +14056,25 @@ fn derive_enum_impls(
                             .enumerate()
                             .map(|(index, payload_type)| {
                                 format!(
-                                    "{payload_type}::from_json_value(value.field(\"{name}\").field(\"{index}\"))"
+                                    "{payload_type}::from_json_value(value.field(\"{name}\").field(\"{index}\"))!"
                                 )
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
                         arms.push_str(&format!(
-                            "\t\t\t\"{name}\" => {enum_name}::{name}({elements}),\n"
+                            "\t\t\t\"{name}\" => Result::Ok({enum_name}::{name}({elements})),\n"
                         ));
                     }
                 }
                 arms.push_str(&format!(
-                    "\t\t\t_ => panic(\"unknown variant in JSON for enum {enum_name}\"),\n"
+                    "\t\t\t_ => Result::Err(\"unknown variant in JSON for enum {enum_name}\"),\n"
                 ));
                 out.push_str(&format!(
                     "impl {enum_name} with FromJson {{\n\
-                     \tfun from_json(text: str): {enum_name} {{\n\
-                     \t\t{enum_name}::from_json_value(parse_json_value(text))\n\
+                     \tfun from_json(text: str): Result<{enum_name}, str> {{\n\
+                     \t\t{enum_name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)\n\
                      \t}}\n\
-                     \tfun from_json_value(value: JsonValue): {enum_name} {{\n\
+                     \tfun from_json_value(value: JsonValue): Result<{enum_name}, str> {{\n\
                      \t\tmatch value.tag() {{\n{arms}\t\t}}\n\
                      \t}}\n\
                      }}\n"
@@ -14458,23 +14468,31 @@ pub(crate) fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> 
                      \t}}\n\
                      }}\n"
                 ));
-                // The reverse direction: parse a document into the struct, reading
-                // each field by name from the host value and coercing it back via
-                // the field type's own `from_json_value` (nested structs recurse).
+                // The reverse direction (I3): decoding is fallible, so `from_json`
+                // yields a `Result`. Each field is checked present (naming a
+                // missing one), then coerced via the field type's own
+                // `from_json_value` (nested structs recurse), threading a leaf
+                // failure with `!`.
+                let mut presence = String::new();
+                for (field, _) in &fields {
+                    presence.push_str(&format!(
+                        "\t\tif !value.has_field(\"{field}\") {{ ret Result::Err(\"missing field {field}\") }}\n"
+                    ));
+                }
                 let initializers = fields
                     .iter()
                     .map(|(field, type_)| {
-                        format!("{field} = {type_}::from_json_value(value.field(\"{field}\"))")
+                        format!("{field} = {type_}::from_json_value(value.field(\"{field}\"))!")
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push_str(&format!(
                     "impl {struct_name} with FromJson {{\n\
-                     \tfun from_json(text: str): {struct_name} {{\n\
-                     \t\t{struct_name}::from_json_value(parse_json_value(text))\n\
+                     \tfun from_json(text: str): Result<{struct_name}, str> {{\n\
+                     \t\t{struct_name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)\n\
                      \t}}\n\
-                     \tfun from_json_value(value: JsonValue): {struct_name} {{\n\
-                     \t\t{struct_name} {{ {initializers} }}\n\
+                     \tfun from_json_value(value: JsonValue): Result<{struct_name}, str> {{\n\
+                     {presence}\t\tResult::Ok({struct_name} {{ {initializers} }})\n\
                      \t}}\n\
                      }}\n"
                 ));
@@ -16144,6 +16162,7 @@ pub fn analyze<'src>(
                     ("tag", Intrinsic::JsonTag),
                     ("elements", Intrinsic::JsonElements),
                     ("is_null", Intrinsic::JsonIsNull),
+                    ("kind", Intrinsic::JsonKind),
                 ] {
                     if let Some(id) = implementation.declarations.get(name).copied() {
                         intrinsics.insert(id, intrinsic);

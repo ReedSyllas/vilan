@@ -236,7 +236,9 @@ fun accept_socket(
 		socket.destroy();
 		ret;
 	}
-	let key: str = str::from_json_value(headers.field("sec-websocket-key"));
+	// Present (checked above) and a string by the WS handshake, so a decode
+	// error is impossible; `unwrap_or` keeps the read total.
+	let key: str = str::from_json_value(headers.field("sec-websocket-key")).unwrap_or("");
 	socket.write_text(
 		"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "
 			+ ws_accept_key(key)

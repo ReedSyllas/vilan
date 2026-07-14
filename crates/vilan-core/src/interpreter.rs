@@ -1038,6 +1038,22 @@ impl Interpreter {
                     type_name(&other)
                 ))),
             },
+            // The normalized JSON kind: `typeof`, with arrays and null named
+            // (mirrors the `__json_kind` codegen helper). Basis for the decode
+            // type checks (`JsonValue.kind()`).
+            "__json_kind" => {
+                let kind = match take(0) {
+                    Value::Null => "null",
+                    Value::Array(_) => "array",
+                    Value::Number(_) | Value::BigInt(_) => "number",
+                    Value::Str(_) => "string",
+                    Value::Bool(_) => "boolean",
+                    Value::Object(_) => "object",
+                    Value::Undefined => "undefined",
+                    _ => "object",
+                };
+                Ok(Value::Str(Rc::from(kind)))
+            }
             "__parse_i32" => {
                 let text = expect_str(&take(0))?;
                 let trimmed = text.trim();
