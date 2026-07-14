@@ -2101,6 +2101,110 @@ impl<'src> Analyzer<'src> {
     /// lower to their integer discriminant). Such a type needs no trait dispatch
     /// for its operators, and a missing operator impl is not an error for it —
     /// dispatching would recurse anyway, since the impl body uses the same operator.
+    /// Renders one type id for a declaration label (empty substitution).
+    fn declaration_type_label(&self, type_id: TypeId) -> String {
+        self.pretty_print_type(&type_id.get_type(self), &HashMap::new())
+    }
+
+    /// The generic-parameter list of a declaration (`<T: Greeter, U>`), empty
+    /// string when there are none.
+    fn generic_list_label(&self, constraint_ids: &[TypeId]) -> String {
+        if constraint_ids.is_empty() {
+            return String::new();
+        }
+        let parts: Vec<String> = constraint_ids
+            .iter()
+            .map(|constraint_id| {
+                let name = self
+                    .generic_constraint_names
+                    .get(constraint_id)
+                    .copied()
+                    .unwrap_or("_");
+                match constraint_id.get_type(self) {
+                    Type::Trait(_, _) => {
+                        format!("{name}: {}", self.declaration_type_label(*constraint_id))
+                    }
+                    _ => name.to_string(),
+                }
+            })
+            .collect();
+        format!("<{}>", parts.join(", "))
+    }
+
+    /// A function's full signature for hover (E9): `fun name<G>(a: T, …): R`.
+    /// Declared `async` renders here; INFERRED async is prepended by the
+    /// language server (inference runs after this label is built).
+    fn function_signature_label(&self, function: &Function) -> String {
+        let mut parameters: Vec<String> = Vec::new();
+        for parameter_id in &function.parameters {
+            let Some(parameter) = self.parameters.get(parameter_id) else {
+                continue;
+            };
+            if parameter.name == "self" {
+                parameters.push("self".to_string());
+            } else {
+                parameters.push(format!(
+                    "{}: {}",
+                    parameter.name,
+                    self.declaration_type_label(parameter.type_id)
+                ));
+            }
+        }
+        let generics = self.generic_list_label(&function.generic_parameter_constraint_ids);
+        let return_label = function
+            .return_type_id
+            .map(|return_type_id| format!(": {}", self.declaration_type_label(return_type_id)))
+            .unwrap_or_default();
+        format!(
+            "fun {}{generics}({}){return_label}",
+            function.name,
+            parameters.join(", ")
+        )
+    }
+
+    /// A struct's declaration block for hover: name, generics, and fields.
+    fn struct_declaration_label(&self, struct_: &Struct) -> String {
+        let generics = self.generic_list_label(&struct_.generic_parameter_constraint_ids);
+        let mut out = format!("struct {}{generics} {{", struct_.name);
+        for field in &struct_.fields {
+            out.push_str(&format!(
+                "\n\t{}: {},",
+                field.name,
+                self.declaration_type_label(field.type_id)
+            ));
+        }
+        if struct_.fields.is_empty() {
+            out.push('}');
+        } else {
+            out.push_str("\n}");
+        }
+        out
+    }
+
+    /// An enum's declaration block for hover: name, generics, and variants.
+    fn enum_declaration_label(&self, enum_: &Enum) -> String {
+        let generics = self.generic_list_label(&enum_.generic_parameter_constraint_ids);
+        let mut out = format!("enum {}{generics} {{", enum_.name);
+        for variant in &enum_.variants {
+            if variant.data_type_ids.is_empty() {
+                out.push_str(&format!("\n\t{},", variant.name));
+            } else {
+                let payloads: Vec<String> = variant
+                    .data_type_ids
+                    .iter()
+                    .map(|type_id| self.declaration_type_label(*type_id))
+                    .collect();
+                out.push_str(&format!("\n\t{}({}),", variant.name, payloads.join(", ")));
+            }
+        }
+        if enum_.variants.is_empty() {
+            out.push('}');
+        } else {
+            out.push_str("\n}");
+        }
+        out
+    }
+
     fn is_native_operator_type(&self, type_: &Type) -> bool {
         match type_ {
             Type::Struct(id, _) => [
@@ -13492,6 +13596,9 @@ pub struct Program<'src> {
     // language-server hover. Keyed by expr id; `expr_id_to_type_id_map` wins
     // over `resolved_types` where both apply (matching `type_of_expr`).
     pub expr_types: HashMap<Id, String>,
+    /// Full declaration labels for hover (E9): function signatures,
+    /// struct/enum blocks — keyed by declaration id, fenced by the LSP.
+    pub declaration_labels: HashMap<Id, String>,
     // The resolved type id of every typed expression and binding (same merge as
     // `expr_types`). The transformer reads this to compute a tuple's flat-storage
     // layout — which elements are themselves tuples (and so are spread, not nested)
@@ -16097,6 +16204,47 @@ pub fn analyze<'src>(
             analyzer.pretty_print_type(&Type::Enum(enum_id, Vec::new()), &empty_substitution);
         expr_types.insert(enum_id, label);
     }
+    // Full declaration labels for hover (E9): a function's complete
+    // signature, a struct/enum's fields and variants — the language server
+    // fences these as code and appends docs and platform lines.
+    let mut declaration_labels: HashMap<Id, String> = HashMap::new();
+    for (function_id, function) in &analyzer.functions {
+        declaration_labels.insert(*function_id, analyzer.function_signature_label(function));
+    }
+    for (function_id, external) in &analyzer.external_functions {
+        let mut parameters: Vec<String> = Vec::new();
+        for parameter_id in &external.parameters {
+            if let Some(parameter) = analyzer.parameters.get(parameter_id) {
+                if parameter.name == "self" {
+                    parameters.push("self".to_string());
+                } else {
+                    parameters.push(format!(
+                        "{}: {}",
+                        parameter.name,
+                        analyzer.declaration_type_label(parameter.type_id)
+                    ));
+                }
+            }
+        }
+        let return_label = format!(
+            ": {}",
+            analyzer.declaration_type_label(external.return_type_id)
+        );
+        declaration_labels.insert(
+            *function_id,
+            format!(
+                "external fun {}({}){return_label}",
+                external.name,
+                parameters.join(", ")
+            ),
+        );
+    }
+    for (struct_id, struct_) in &analyzer.structs {
+        declaration_labels.insert(*struct_id, analyzer.struct_declaration_label(struct_));
+    }
+    for (enum_id, enum_) in &analyzer.enums {
+        declaration_labels.insert(*enum_id, analyzer.enum_declaration_label(enum_));
+    }
     for trait_id in analyzer.traits.keys().copied().collect::<Vec<_>>() {
         let label =
             analyzer.pretty_print_type(&Type::Trait(trait_id, Vec::new()), &empty_substitution);
@@ -16225,6 +16373,7 @@ pub fn analyze<'src>(
         struct_initializer_to_def: analyzer.struct_initializer_to_def,
         type_references,
         expr_types,
+        declaration_labels,
         expr_type_ids,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),

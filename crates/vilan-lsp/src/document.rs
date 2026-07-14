@@ -403,17 +403,37 @@ impl Document {
             .map(|(_, _, id)| *id)
     }
 
-    /// The hover label for the entity under `offset`: its rendered type, plus
-    /// — when the entity names a function with an inferred platform
-    /// requirement — the requirement line ("requires the `process` layer of
-    /// `std` (via `…`)", proposal/platform-coloring.md phase 2).
+    /// The hover for the entity under `offset` (E9): a fenced full
+    /// declaration when the entity names one (function signature — with
+    /// inferred `async` prepended — or a struct/enum block), the
+    /// declaration's leading `//` comment as prose, and the platform
+    /// requirement line where one is inferred. Anything else keeps its
+    /// rendered type.
     pub fn hover(&self, offset: usize) -> Option<String> {
         let program = self.program.as_ref()?;
-        // A type name in type position renders its type directly.
-        if let Some((_, label)) = self.type_reference_at(program, offset) {
+        // A type name in type position: the full declaration when known.
+        if let Some((definition, label)) = self.type_reference_at(program, offset) {
+            if let Some(definition) = definition {
+                if let Some(declaration) = program.declaration_labels.get(&definition) {
+                    return Some(self.compose_hover(program, definition, declaration, None));
+                }
+            }
             return Some(label);
         }
         let id = self.entity_at(offset)?;
+        // A function (or requirement-carrying binding): the full signature.
+        if let Some(target) = self.function_target(program, id) {
+            let requirement = self.platform_requirements.get(&target).cloned();
+            if let Some(declaration) = program.declaration_labels.get(&target) {
+                return Some(self.compose_hover(program, target, declaration, requirement));
+            }
+        }
+        // A struct/enum name in value position (a constructor, a variant).
+        if let Some(definition) = self.type_declaration_target(program, id) {
+            if let Some(declaration) = program.declaration_labels.get(&definition) {
+                return Some(self.compose_hover(program, definition, declaration, None));
+            }
+        }
         let type_label = self.hover_label(program, id);
         let requirement = self
             .function_target(program, id)
@@ -426,6 +446,98 @@ impl Document {
             (Some(type_label), None) => Some(type_label),
             (None, requirement) => requirement,
         }
+    }
+
+    /// Assembles a declaration hover: the fenced declaration (with inferred
+    /// `async` prepended to a function signature), its leading `//` doc
+    /// block, and the platform requirement, each as its own paragraph.
+    fn compose_hover(
+        &self,
+        program: &Program,
+        declaration_id: Id,
+        declaration: &str,
+        requirement: Option<String>,
+    ) -> String {
+        let declaration = if program.async_functions.contains(&declaration_id)
+            && !declaration.starts_with("async ")
+        {
+            format!("async {declaration}")
+        } else {
+            declaration.to_string()
+        };
+        let mut out = format!("```vilan\n{declaration}\n```");
+        if let Some(docs) = self.doc_comment_of(program, declaration_id) {
+            out.push_str("\n\n");
+            out.push_str(&docs);
+        }
+        if let Some(requirement) = requirement {
+            out.push_str("\n\n");
+            out.push_str(&requirement);
+        }
+        out
+    }
+
+    /// The struct/enum definition an entity names in VALUE position — a
+    /// constructor, a bare type reference, or an enum variant.
+    fn type_declaration_target(&self, program: &Program, id: Id) -> Option<Id> {
+        if program.structs.contains_key(&id) || program.enums.contains_key(&id) {
+            return Some(id);
+        }
+        match program.entity_map.get(&id)? {
+            Expr::Struct(struct_id) => Some(*struct_id),
+            Expr::StructInitializer(initializer_id, _) => program
+                .struct_initializer_to_def
+                .get(initializer_id)
+                .copied(),
+            Expr::Enum(enum_id) | Expr::EnumVariant(enum_id, _) => Some(*enum_id),
+            _ => None,
+        }
+    }
+
+    /// The contiguous `//` block directly above a declaration's name line —
+    /// its doc comment, with the comment markers stripped. Attribute lines
+    /// (`[must_use]`, `[platform(…)]`) between the block and the name are
+    /// skipped. The entry file reads from the open buffer; other sources
+    /// read from disk on demand (hover-time, cheap).
+    fn doc_comment_of(&self, program: &Program, declaration_id: Id) -> Option<String> {
+        let source = program.source_of(declaration_id)?;
+        let name_span = self.definition_name_span(program, declaration_id)?;
+        let owned;
+        let text: &str = if source == SourceId(0) {
+            &self.text
+        } else {
+            let path = program.source_path(source)?;
+            owned = std::fs::read_to_string(path).ok()?;
+            &owned
+        };
+        let start = name_span.into_range().start.min(text.len());
+        let head = &text[..start];
+        let mut lines: Vec<&str> = head.lines().collect();
+        // Drop the (partial) declaration line itself.
+        lines.pop();
+        // Skip attribute and modifier-only lines between docs and the name.
+        while let Some(last) = lines.last() {
+            let trimmed = last.trim();
+            if trimmed.starts_with('[') || trimmed == "async" || trimmed == "external" {
+                lines.pop();
+            } else {
+                break;
+            }
+        }
+        let mut docs: Vec<String> = Vec::new();
+        while let Some(last) = lines.last() {
+            let trimmed = last.trim();
+            let Some(comment) = trimmed.strip_prefix("//") else {
+                break;
+            };
+            docs.push(comment.strip_prefix(' ').unwrap_or(comment).to_string());
+            lines.pop();
+        }
+        if docs.is_empty() {
+            return None;
+        }
+        docs.reverse();
+        Some(docs.join("\n"))
     }
 
     /// The requirement-carrying entity the cursor *names*, if any: a function
@@ -1676,6 +1788,83 @@ mod tests {
                 "requires the `process` layer of `std` (via `read_file_to_str (std::fs)`)"
             )),
             "{hover:?}"
+        );
+    }
+
+    // E9: hovering a function shows its FULL signature, fenced as code —
+    // parameter names and types, the return type.
+    #[test]
+    fn hover_shows_the_full_function_signature() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\nfun descr|ibe(count: i32, label: str): str {\n\tlabel\n}\n\nfun main() {\n\tprint(describe(1, \"x\"));\n}\n",
+        )
+        .expect("hovering the declaration should produce a label");
+        assert!(
+            hover.contains("```vilan\nfun describe(count: i32, label: str): str\n```"),
+            "{hover}"
+        );
+    }
+
+    // E9: INFERRED async (no `async` keyword written) prepends to the
+    // signature — inference runs after the labels are built, so the server
+    // adds it.
+    #[test]
+    fn hover_prepends_inferred_async() {
+        let hover = hover_at_cursor(
+            "import std::time::{ sleep_for, Duration };\n\nfun wa|rm() {\n\tsleep_for(Duration::millis(1));\n}\n\nfun main() {\n\twarm();\n}\n",
+        )
+        .expect("hover on the declaration");
+        assert!(hover.contains("```vilan\nasync fun warm()\n```"), "{hover}");
+    }
+
+    // E9: the declaration's leading `//` block surfaces as prose, and
+    // attribute lines between it and the name don't break the chain.
+    #[test]
+    fn hover_surfaces_the_leading_doc_comment() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\n// Renders the badge label.\n// Two lines of docs.\n[must_use]\nfun bad|ge(count: i32): str {\n\t\"b\"\n}\n\nfun main() {\n\tlet _b = badge(1);\n\tprint(\"x\");\n}\n",
+        )
+        .expect("hover on the declaration");
+        assert!(
+            hover.contains("Renders the badge label.\nTwo lines of docs."),
+            "{hover}"
+        );
+        assert!(hover.contains("fun badge(count: i32): str"), "{hover}");
+    }
+
+    // E9: struct hovers show the declaration block with fields; enum hovers
+    // show variants with payloads.
+    #[test]
+    fn hover_shows_struct_fields_and_enum_variants() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\nstruct Point { x: i32, name: str }\n\nfun main() {\n\tlet p = Po|int { x = 1, name = \"a\" };\n\tprint(p.name);\n}\n",
+        )
+        .expect("hover on the constructor");
+        assert!(
+            hover.contains("```vilan\nstruct Point {\n\tx: i32,\n\tname: str,\n}\n```"),
+            "{hover}"
+        );
+        let hover = hover_at_cursor(
+            "import std::print;\n\nenum Shape {\n\tDot,\n\tBox2(i32, i32),\n}\n\nfun main() {\n\tlet s = Sha|pe::Dot;\n\tmatch s {\n\t\tShape::Dot => print(\"dot\"),\n\t\tShape::Box2(let _w, let _h) => print(\"box\"),\n\t}\n}\n",
+        )
+        .expect("hover on the enum reference");
+        assert!(
+            hover.contains("Dot,") && hover.contains("Box2(i32, i32),"),
+            "{hover}"
+        );
+    }
+
+    // E9: a std function's docs come from its source file on disk (the
+    // non-entry read path) alongside the signature.
+    #[test]
+    fn hover_reads_imported_declarations_from_their_files() {
+        let hover = hover_at_cursor(
+            "import std::fs::exists;\n\nfun main() {\n\tlet _e = exi|sts(\"x\");\n}\n",
+        )
+        .expect("hover on the std call");
+        assert!(
+            hover.contains("exists(") && hover.contains("```vilan"),
+            "{hover}"
         );
     }
 

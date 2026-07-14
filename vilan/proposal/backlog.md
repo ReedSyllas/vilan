@@ -623,17 +623,17 @@ have gaps.
     other — a package must be free to name a module `ui`/`json`/`db` without
     colliding with std. Scope the resolution by the import root.
 
-9. **Richer hover tooltips** (S–M per slice; user request 2026-07-10) — hover today is the
-   bare inferred-type label (`expr_types` + `type_label`). Candidate upgrades, roughly in
-   value order: (a) full declaration signatures on functions/methods — name, parameter
-   names AND types, return type, `context` clauses, `async` — not just the closure type;
-   (b) doc comments: surface a decl's leading `//` block in the hover (and decide whether
-   to bless a `///` doc convention while at it); (c) markdown formatting — code-fence the
-   signature, prose for docs (the LSP already returns markdown-capable `Hover`); (d) struct
-   /enum hovers show their fields/variants; (e) constants show their value. Scope each
-   slice with a look at what `Program` already carries (signatures largely reconstructable;
-   doc comments need trivia access — the lexer skips them today, so (b) likely needs a
-   trivia side-channel, which H6's handwritten-frontend trigger list also wants).
+9. **Richer hover tooltips** (user request 2026-07-10) — **(a)–(d) SHIPPED
+   2026-07-14**: `Program.declaration_labels` pre-renders full signatures
+   (params with names+types, returns, generics with bounds; declared `async`
+   in the label, INFERRED async prepended by the server post-inference) and
+   struct/enum declaration blocks; the LSP fences them as ```vilan code,
+   surfaces the declaration's leading `//` block as prose (a TEXT-side scan
+   above the name span — entry buffer or the source file read on demand — no
+   lexer trivia side-channel needed after all; attribute/modifier lines
+   between docs and the name are skipped), and keeps the platform-requirement
+   paragraph. 5 pins. REMAINING slices: (e) constants show their value; a
+   `///` doc-comment convention decision; `context` clauses in signatures.
 
 3. **Fix per-analysis `Box::leak` + incremental analysis** (L; roadmap #12, caching Tier 2/3) —
    the leak grows each keystroke/compile; true incremental is blocked by global
