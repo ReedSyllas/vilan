@@ -6,6 +6,17 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.5.1 — 2026-07-14
+
+**A type name isn't a value.** `let q = Point;` used to compile, quietly
+binding the constructor object; now it's an error that points you at the
+fix — construct the type, name a variant, or call a static. This also
+closes a trap the v0.5.0 grammar could spring: `if p == Point { … } { … }`
+(a struct-literal comparison a user meant, written without parentheses)
+parsed `p == Point` against the type object and ran. It now reports
+`` `Point` is a type, not a value `` at the name instead of misbehaving at
+runtime. Traits, type parameters, and module names get the same check.
+
 ## v0.5.0 — 2026-07-14
 
 **Your types order themselves.** `<` `<=` `>` `>=` now dispatch through
