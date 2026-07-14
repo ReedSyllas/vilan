@@ -13511,48 +13511,156 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
-// --- B24: primitive comparisons skip operand-type checking ------------------
+// --- B24: primitive comparisons skip operand-type checking (FIXED) ----------
 //
 // Found writing the spec (§5.7): comparison operators between PRIMITIVES
-// bypass the PartialEq/PartialOrd dispatch, so ill-typed mixes compile and
-// emit raw JS comparisons (with JS coercion semantics). User-defined types
-// DO get checked (the bound machinery), so the gap is the primitive fast
-// path. Intent (spec §5.7): comparisons type like the traits they dispatch
-// through — `bool` has no PartialOrd, and mixed widths don't unify.
+// bypassed the PartialEq/PartialOrd model, so ill-typed mixes compiled and
+// emitted raw JS comparisons (with JS coercion semantics). The rule now
+// checked on the native fast path: the right operand types as `B = Self`
+// with no implicit conversions (§5.8), `bool` has no ordering, and `&&`/`||`
+// take `bool`. The right side is inferred WITH the left's type as its
+// expectation, so an unsuffixed literal adapts exactly as it does in a
+// `let` — `1i53 < 3` is `i53 < i53` — while genuinely typed operands must
+// match.
 
 #[test]
-#[ignore = "B24: bool < i32 compiles and emits a coercing JS comparison"]
 fn a_bool_compared_to_an_integer_is_rejected() {
-    assert_fails(
+    assert_fails_spanning(
         r#"
         fun main() {
             let _x = true < 3;
         }
         "#,
+        "true < 3",
+        "`bool` has no ordering",
     );
 }
 
 #[test]
-#[ignore = "B24: i32 == str compiles and emits a coercing JS comparison"]
 fn an_integer_compared_to_a_string_is_rejected() {
-    assert_fails(
+    assert_fails_spanning(
         r#"
         fun main() {
             let _x = 1 == "a";
         }
         "#,
+        r#"1 == "a""#,
+        "`==` compares two values of the same type",
     );
 }
 
 #[test]
-#[ignore = "B24: i53 < i32 compiles though the same mix errors under arithmetic"]
-fn mixed_width_integer_comparison_is_rejected() {
-    assert_fails(
+fn mixed_width_typed_comparison_is_rejected() {
+    // TYPED operands of different widths reject — no implicit conversions.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let a: i53 = 1;
+            let b: i32 = 3;
+            let _x = a < b;
+        }
+        "#,
+        "a < b",
+        "`<` compares two values of the same type",
+    );
+}
+
+#[test]
+fn an_unsuffixed_literal_adapts_to_the_comparisons_peer() {
+    // The literal rule (numeric-types.md §3): an unsuffixed integer takes
+    // the expected type — the peer operand here — so this is `i53 < i53`.
+    assert_compiles(
         r#"
         fun main() {
             let _x = 1i53 < 3;
         }
         "#,
+    );
+}
+
+#[test]
+fn equality_between_mismatched_natives_is_rejected_for_typed_operands() {
+    assert_fails(
+        r#"
+        fun main() {
+            let n: u32 = 5;
+            let s = "five";
+            let _x = n == s;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn logical_operators_take_bool_operands() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let _x = 1 && true;
+        }
+        "#,
+        "1 && true",
+        "`&&` takes `bool` operands; the left operand is `i32`",
+    );
+}
+
+#[test]
+#[ignore = "B25: `<` does not dispatch to user `PartialOrd` impls (spec §5.7 promises it; \
+            std's `Instant`/`Duration` carry the impls). Until wired, such comparisons \
+            are rejected (the pin below) instead of emitting a JS object comparison \
+            that is always false."]
+fn ordering_dispatches_through_a_partial_ord_impl() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::{ now, Duration };
+
+        fun main() {
+            let started = now();
+            let deadline = started + Duration::hours(2i53);
+            if started < deadline {
+                print("dispatches");
+            }
+        }
+        "#,
+        "dispatches\n",
+    );
+}
+
+#[test]
+fn ordering_a_struct_is_rejected_not_js_compared() {
+    // No `PartialOrd` dispatch for user types yet — a silent raw-JS `<`
+    // (object coercion) would be a miscompile, so it errors instead.
+    assert_fails_spanning(
+        r#"
+        struct Point { x: i32 }
+
+        fun main() {
+            let a = Point { x = 1 };
+            let b = Point { x = 2 };
+            let _x = a < b;
+        }
+        "#,
+        "a < b",
+        "ordering dispatches through `PartialOrd`",
+    );
+}
+
+#[test]
+fn same_type_native_comparisons_still_compile_and_run() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun main() {
+            let a: u32 = 5;
+            let b: u32 = 9;
+            if a < b && "x" == "x" && 1.5 < 2.5 && true == false || 3 <= 3 {
+                print("ok");
+            }
+        }
+        "#,
+        "ok\n",
     );
 }
 

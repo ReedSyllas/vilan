@@ -57,9 +57,15 @@ fun main() {
 	let started = now();
 	let deadline = started + Duration::hours(2i53);
 	print(deadline.since(started).describe());
-	print(started < deadline);
+	print(started.lt(deadline));
 }
 ```
+
+Ordering two instants goes through `PartialOrd`'s methods (`lt`, `le`,
+`gt`, `ge`, `partial_compare`) for now — the `<` operator does not yet
+dispatch to user-defined `PartialOrd` impls, and the compiler will say
+so rather than emit a JavaScript object comparison that is always
+`false`.
 
 ## Timers
 

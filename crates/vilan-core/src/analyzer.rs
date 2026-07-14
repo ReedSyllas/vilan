@@ -1103,6 +1103,40 @@ fn is_overloadable_operator(op: BinaryOp) -> bool {
     operator_trait_method(op).is_some()
 }
 
+/// Ordering comparisons — dispatched through `PartialOrd` in the model
+/// (spec §5.7); not overloadable yet, but their operands are checked (B24).
+fn is_ordering_operator(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq
+    )
+}
+
+/// The operator's source spelling, for diagnostics.
+fn operator_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        BinaryOp::UShr => ">>>",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitXor => "^",
+        BinaryOp::BitOr => "|",
+        BinaryOp::Eq => "==",
+        BinaryOp::NotEq => "!=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Gt => ">",
+        BinaryOp::LtEq => "<=",
+        BinaryOp::GtEq => ">=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+    }
+}
+
 /// The `(trait name, method name)` an arithmetic operator dispatches to, e.g.
 /// `+` -> `("Add", "add")`. Returns `None` for comparison/logical operators,
 /// which are not overloadable.
@@ -5713,7 +5747,12 @@ impl<'src> Analyzer<'src> {
             Node::Binary(op, lhs, rhs) => {
                 let lhs_id = self.walk_expr_node(lhs, scope_id);
                 let rhs_id = self.walk_expr_node(rhs, scope_id);
-                if is_overloadable_operator(*op) {
+                // Overloadable operators dispatch; orderings and `&&`/`||`
+                // aren't overloadable but their operands are checked (B24).
+                if is_overloadable_operator(*op)
+                    || is_ordering_operator(*op)
+                    || matches!(op, BinaryOp::And | BinaryOp::Or)
+                {
                     self.prepped_binary_ops.push((id, *op, lhs_id));
                 }
                 Some(Expr::Binary(*op, lhs_id, rhs_id))
@@ -12104,6 +12143,98 @@ impl<'src> Analyzer<'src> {
                     _ => {}
                 }
             }
+            // §5.7/§5.8 (B24): comparisons and logical operators type like the
+            // traits they model — the right operand is `B = Self`, `&&`/`||`
+            // take `bool`, and there are no implicit conversions. The native
+            // fast path (raw JS emission) previously skipped the CHECK too, so
+            // `true < 3`, `1 == "a"`, and typed mixed-width operands all
+            // compiled as coercing JS comparisons. The right side is inferred
+            // WITH the left's type as its expectation, so an unsuffixed
+            // literal adapts (`1i53 < 3` is `i53 < i53`) exactly as in a
+            // `let` — only genuinely differently-typed operands reject.
+            let symbol = operator_symbol(op);
+            let grounded = |type_: &Type| {
+                !matches!(type_, Type::Unknown | Type::Unresolved | Type::Generic(_))
+            };
+            let rhs_id = match self.expr_id_to_expr_map.get(&binary_id) {
+                Some(Expr::Binary(_, _, rhs_id)) => Some(*rhs_id),
+                _ => None,
+            };
+            if let Some(rhs_id) = rhs_id {
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    let bool_type = self.bool_type();
+                    for (operand_id, side) in [(lhs_id, "left"), (rhs_id, "right")] {
+                        let operand = self.infer_type(operand_id, &bool_type, &HashMap::new());
+                        if grounded(&operand)
+                            && !self.compare_type(&bool_type, &operand, &HashMap::new())
+                        {
+                            let label = self.pretty_print_type(&operand, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!(
+                                    "`{symbol}` takes `bool` operands; the {side} operand is `{label}`"
+                                ),
+                            });
+                        }
+                    }
+                    continue;
+                }
+                let is_bool = |type_: &Type| match type_ {
+                    Type::Enum(id, _) => self.bool_enum_id == Some(*id),
+                    _ => false,
+                };
+                if is_ordering_operator(op) && grounded(&lhs_type) {
+                    if is_bool(&lhs_type) {
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "`bool` has no ordering — `{symbol}` models `PartialOrd`, which \
+                                 `bool` does not implement; compare with `==`/`!=`"
+                            ),
+                        });
+                        continue;
+                    }
+                    if !self.is_native_operator_type(&lhs_type)
+                        && !matches!(lhs_type, Type::Generic(_))
+                    {
+                        let label = self.pretty_print_type(&lhs_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "`{label}` cannot be compared with `{symbol}` — ordering \
+                                 dispatches through `PartialOrd`, which is not wired for \
+                                 user types yet; expose a method (or compare a field)"
+                            ),
+                        });
+                        continue;
+                    }
+                }
+                // Same-type operands on the native path (`B = Self`). The
+                // non-native equality path falls through to the trait
+                // dispatch below, exactly as before.
+                if (is_ordering_operator(op) || matches!(op, BinaryOp::Eq | BinaryOp::NotEq))
+                    && grounded(&lhs_type)
+                    && self.is_native_operator_type(&lhs_type)
+                {
+                    let rhs_type = self.infer_type(rhs_id, &lhs_type, &HashMap::new());
+                    if grounded(&rhs_type)
+                        && !self.compare_type(&lhs_type, &rhs_type, &HashMap::new())
+                    {
+                        let lhs_label = self.pretty_print_type(&lhs_type, &HashMap::new());
+                        let rhs_label = self.pretty_print_type(&rhs_type, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "`{symbol}` compares two values of the same type, but the \
+                                 operands are `{lhs_label}` and `{rhs_label}` — there are no \
+                                 implicit conversions; suffix the literal or convert with `as_*`"
+                            ),
+                        });
+                        continue;
+                    }
+                }
+            }
+
             // A generic-bounded operand (`x == y` where `x: T: PartialEq`, e.g. the
             // element compare inside `Option<T>::eq`) dispatches to the operator
             // trait method, re-resolved to T's concrete impl at each monomorphization

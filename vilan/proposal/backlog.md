@@ -382,15 +382,27 @@ have gaps.
     math::min(…)`); supporting them directly is a possible H-series
     follow-up.
 
-24. **Primitive comparisons skip operand-type checking** (M; pinned
-    `#[ignore]`d ×3; found writing the spec 2026-07-12, §5.7) — `true < 3`,
-    `1 == "a"`, and even `1i64 < 3` all COMPILE and emit raw JS comparisons
-    (coercion semantics at runtime), though the same `i64`/`i32` mix errors
-    under `+` and `bool` implements only `PartialEq`. Comparison operators
-    between primitives bypass the `PartialEq`/`PartialOrd` dispatch (a
-    primitive fast path); user-defined types are checked via the normal
-    bound machinery. Intent (spec §5.7): comparisons type like the traits
-    they dispatch through. Pins: bool-vs-int, int-vs-str, mixed-width.
+24. ~~**Primitive comparisons skip operand-type checking**~~ — **FIXED
+    2026-07-14** (v0.4.0 bundle): the native fast path now checks
+    `B = Self` with the right operand inferred against the left's type
+    (so an unsuffixed literal adapts, `1i53 < 3` stays legal — the
+    original third pin asserted rejection on the strength of "the same
+    mix errors under `+`", which literal adaptation had since made
+    untrue); `bool` has no ordering; `&&`/`||` take `bool`; ordering a
+    user-defined type errors (see 25). 8 pins.
+
+25. **Ordering operators don't dispatch to `PartialOrd` impls** (M; pinned
+    `#[ignore]`d `ordering_dispatches_through_a_partial_ord_impl`; split
+    from 24 when its fix caught `std::time`'s documented `started <
+    deadline` example) — spec §5.7 says `< <= > >=` dispatch through
+    `PartialOrd`; std ships impls (`Instant`, `Duration`, `str`); nothing
+    wires the OPERATOR to them — `instant_a < instant_b` used to emit a JS
+    object comparison (always `false` — objects stringify) and, since 24's
+    fix, is a compile error steering to the trait methods (`lt`/`le`/…).
+    The fix is operator→`partial_compare`-family dispatch in the
+    binary-op path (analyzer records like `binary_op_dispatch`, transformer
+    emits the method call), plus un-ignoring the pin and restoring
+    `started < deadline` in `docs/std/time.md`.
 
 23. ~~**An `effect` closure's unannotated parameter doesn't ground from a
     generic signal's payload**~~ — **FIXED 2026-07-12** (the gotchas

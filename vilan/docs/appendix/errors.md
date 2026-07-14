@@ -73,6 +73,16 @@ remember patterns bind with `let` — a bare misspelled variant is an
 error here, never a silent catch-all.
 → [Control flow](../tour/control-flow.md)
 
+**"`…` compares two values of the same type, but the operands are `…` and `…`"**
+Comparisons follow the trait model (`==` is `PartialEq`, `<` is
+`PartialOrd`): the right operand must be the left's type, and there are
+no implicit conversions. An unsuffixed literal adapts to its peer
+(`stamp < 3` is fine for an `i53` stamp); two differently-typed
+*variables* need a suffix or an `as_*` conversion. Related:
+**"`bool` has no ordering"** (compare with `==`/`!=`) and
+**"`&&` takes `bool` operands"** (vilan has no truthiness).
+→ [Values and types](../tour/values-and-types.md)
+
 **"the literal `…` is out of range for `…` (…)"**
 The number doesn't fit the type. For `i53`/`u53` the range is ±2^53 —
 JavaScript's exact-integer window. Bigger integers take `BigInt` (`7n`).
