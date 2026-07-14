@@ -358,14 +358,17 @@ have gaps.
     diverging leg/branch results as statements (`return e`, never
     `x = return e`). Spec §5.1/§5.11 updated.
 
-19. **Tuple member access (`.0`/`.1`) is unimplemented** (M; pinned
-    `#[ignore]`d `tuple_member_access_grounds`; discovered 2026-07-12
-    pinning item 18) — `.N` parses (a Number member) but the analyzer's
-    field path handles only struct subjects: even an ANNOTATED
-    `pair: (i32, i32)` errors "cannot access field '0'". Needs a Tuple
-    arm in the field-accessor resolution + a lowering (tuples are JS
-    arrays; `subject[N]`). Destructuring is the working form; docs say
-    so (values-and-types, gotchas).
+19. ~~**Tuple member access (`.0`/`.1`) is unimplemented**~~ — **FIXED
+    2026-07-14** (v0.4.0 bundle): number members ride the same
+    `FieldAccessorConstraint` as named ones (the no-deferral pre-solve
+    shunt they used to take is deleted); `pair.0.1` (lexed as the float
+    `0.1`) splits into chained accesses at the walk; `TupleIndex(subject,
+    flat_offset, flat_width)` does slot arithmetic over the FLAT storage
+    with chained accesses folding onto the root, so nested writes hit the
+    storage, never a resliced copy; multi-slot regions read as reslices
+    and assign slot-by-slot (the const-eval interpreter's equivalence gate
+    rejected splice-with-spread). 12 pins + a corpus golden; docs updated
+    (values-and-types, gotchas, spec §5.9).
 
 25. ~~**A bare `std::…` path in expression position panicked the
     compiler**~~ — **FIXED 2026-07-12** (found building the docs
