@@ -11739,6 +11739,151 @@ fn swap_renders_a_dynamic_subtree_per_route_value() {
     );
 }
 
+// --- B6: closure-return element inference (CLOSED) ---------------------------
+//
+// `xs.map(|p| p.x)` once typed as `List<unknown>`: `map` bound its result
+// generic `U` from the closure's return while the body's field accessor was
+// still in-flight. A first general fix deadlocked the slot case and was
+// reverted; the B19 defer machinery (plus this window's binder work) closed
+// the family for real. These pins hold every recorded shape — this area has
+// regressed before, so each case stands on its own.
+
+#[test]
+fn a_field_mapped_element_types_without_annotation() {
+    // The headline case: `U` comes only from the closure's `p.name`, and the
+    // element must be concrete enough to dispatch `len()`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Point { x: i32, name: str }
+        fun main() {
+            let points = [Point { x = 1, name = "ab" }];
+            let names = points.map(|p| p.name);
+            print(names[0].len());
+        }
+        "#,
+        "2\n",
+    );
+}
+
+#[test]
+fn a_field_mapped_element_meets_an_annotated_expectation() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Point { x: i32, name: str }
+        fun main() {
+            let points = [Point { x = 1, name = "abc" }];
+            let names: List<str> = points.map(|p| p.name);
+            print(names[0].len());
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn a_field_mapped_result_chains_immediately() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Point { x: i32, name: str }
+        fun main() {
+            let points = [Point { x = 1, name = "ab" }];
+            print(points.map(|p| p.name)[0].len());
+        }
+        "#,
+        "2\n",
+    );
+}
+
+#[test]
+fn mapped_maps_thread_the_element_type() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Point { x: i32, name: str }
+        fun main() {
+            let points = [Point { x = 1, name = "abc" }];
+            let lens = points.map(|p| p.name).map(|s| s.len());
+            print(lens[0]);
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn a_nested_accessor_closure_return_grounds() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Inner { v: i32 }
+        struct Point { inner: Inner }
+        fun main() {
+            let points = [Point { inner = Inner { v = 41 } }];
+            let vs = points.map(|p| p.inner.v);
+            print(vs[0] + 1);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_struct_element_map_dispatches_members_downstream() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Point { x: i32, name: str }
+        fun main() {
+            let points = [Point { x = 1, name = "ab" }];
+            let same = points.map(|p| p);
+            print(same.map(|q| q.name)[0].len());
+        }
+        "#,
+        "2\n",
+    );
+}
+
+#[test]
+fn a_slot_grounded_list_maps_a_field_closure() {
+    // The combination the reverted general fix deadlocked on: the element
+    // type comes from a `push`-grounded slot AND the map's `U` comes from a
+    // field-access closure return. Both resolutions must be observable to
+    // the constraint wake.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Point { x: i32, name: str }
+        fun main() {
+            mut ps = List::new();
+            ps.push(Point { x = 1, name = "abcd" });
+            let names = ps.map(|p| p.name);
+            print(names[0].len());
+        }
+        "#,
+        "4\n",
+    );
+}
+
+#[test]
+fn a_slot_grounded_list_maps_and_sums() {
+    // The exact deadlock reproducer from the reverted attempt.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut xs = List::new();
+            xs.push(1);
+            let s = xs.map(|n| n + 1).sum();
+            print(s);
+        }
+        "#,
+        "2\n",
+    );
+}
+
 #[test]
 fn a_mapped_signal_meets_a_bound_without_annotation() {
     // B19 (FIXED): `current_path().map(..)` yields `Signal<U = Route>`;

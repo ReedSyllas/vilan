@@ -215,14 +215,16 @@ have gaps.
    fixed). Making it *work* by value needs a runtime representation (a `(value, vtable)` pair /
    `Box<dyn>`-style) — a real language feature; nothing uses it today.
 
-6. **Closure-return element inference gap** (M) — a method whose **result element** comes from a
-   field-access closure return (`xs.map(|p| p.x)`) types as `List<unknown>` instead of `List<i32>`.
-   Root: `map` binds its result generic `U` from `infer_type(closure return)` while the closure's
-   `p.field` accessor is still in-flight, so `U` commits wrong. A general fix (in-flight reports
-   `Unresolved`, dependents defer and wake) fixed the literal case but deadlocked the slot case
-   (`List::new()`+`push`+`map().sum()`), so it was reverted — the clean fix needs the slot-fill and
-   closure-return resolutions both observable to the wake (its own slice). Common uses (`sum`,
-   `for`, arithmetic over the mapped element) work today.
+6. ~~**Closure-return element inference gap**~~ — **CLOSED, pinned 2026-07-14**:
+   found already-fixed when scheduled (the B19 defer machinery — method
+   resolution defers while a closure argument is unresolved — plus the
+   2026-07-14 binder-window solver work closed it incidentally). Every
+   recorded shape now types and RUNS: unannotated `xs.map(|p| p.name)` with
+   member dispatch on the element, immediate chaining, map-of-map, nested
+   accessors, struct-element maps, and both slot-grounded combinations
+   including the exact deadlock reproducer from the reverted general fix
+   (`List::new()`+`push`+`map().sum()`). 8 pins hold the family — this area
+   regressed before, so each case stands alone.
 
 8. ~~**Trait-argument binders**~~ — **FIXED 2026-07-14** (v0.5.0 arc):
    `impl X with Trait<type S: Bound>` registers with-clause binders exactly
