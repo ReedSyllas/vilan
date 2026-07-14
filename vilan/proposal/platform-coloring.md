@@ -249,19 +249,16 @@ the entry compiles + runs); the moved-service e2e over `local_rpc` and over
 the http mount; chain-rendering `assert_fails_spanning` pins; a
 `[library]` contract check unchanged under the new pass.
 
-## 7. Open decisions
+## 7. Decisions (settled with the user, 2026-07-13)
 
-1. **Terminology in docs**: "platform requirement" (spec register) vs
-   "coloring" (explains the async rhyme). Suggest: requirement in
-   diagnostics and spec, coloring in the guide.
-2. **Explicit annotation**: should `[platform(process)]` exist as a
-   *declared* color for documentation/boundary-hardening (checked against
-   inference, like a type annotation), or is v1 pure inference? Suggest:
-   pure inference in v1; the annotation is cheap to add later where teams
-   want fences.
-3. **Client→server package dependency direction** (pre–phase 3): bless the
-   todo shape (client depends on the package that defines the service), or
-   encourage a third `service` package until single-package lands? Suggest:
-   bless it — it is temporary scaffolding either way.
-4. **`vilan check` default for multi-entry**: all entries always (suggest —
-   it is the contract-check spirit), or the `--platform` flag narrows.
+1. **Terminology**: "platform requirement" in diagnostics and the spec;
+   "coloring" in the guide, where the async rhyme helps teach it.
+2. **Explicit annotation**: none in v1 — pure inference. A declared
+   `[platform(…)]` fence (checked against inference, like a type
+   annotation) is cheap to add later where teams want boundaries.
+3. **Dependency direction pre–phase 3**: blessed — a client may depend on
+   the package that defines the service; it is temporary scaffolding until
+   single-package entries land.
+4. **`vilan check` on multi-entry packages**: checks all entries, always —
+   the contract-check spirit. `--platform` narrows a `build`, not a
+   `check`.
