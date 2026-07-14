@@ -980,6 +980,11 @@ pub struct Analyzer<'src> {
     // resolved after typing to decide native JS arithmetic vs an operator-trait
     // method call (`Add::add`, ...).
     prepped_binary_ops: Vec<(Id, BinaryOp, Id)>,
+    // Bound-less impl binders whose subject type wasn't walked yet
+    // (`impl Wrapper<type T>` before `struct Wrapper<T: Greeter>`): the
+    // binder's fresh constraint id + where to find the subject's declared
+    // bound once every declaration exists — resolved just before solving.
+    prepped_binder_inheritance: Vec<(TypeId, &'src str, usize, Id)>,
     // Arithmetic binary expressions whose left operand's type implements the
     // matching operator trait: the resolved method id, so codegen emits
     // `add(lhs, rhs)` instead of `lhs + rhs`.
@@ -1288,6 +1293,7 @@ impl<'src> Analyzer<'src> {
             for_each_views: HashMap::new(),
             wrapped_view_captures: HashMap::new(),
             prepped_binary_ops: Vec::new(),
+            prepped_binder_inheritance: Vec::new(),
             binary_op_dispatch: HashMap::new(),
             bitwise_u32: HashSet::new(),
             bitwise_generic_lhs: HashMap::new(),
@@ -4890,16 +4896,31 @@ impl<'src> Analyzer<'src> {
                     // `Subject`'s declared bound for this position, if known.
                     if let Node::TypeBinder(binder_name, bounds) = &argument.0
                         && bounds.is_empty()
-                        && let Some(constraint_id) = inherited
+                    {
+                        if let Some(constraint_id) = inherited
                             .as_ref()
                             .and_then(|ids| ids.get(position).copied())
-                    {
-                        self.register_generic_parameter(
-                            binder_name,
-                            &argument.1,
-                            constraint_id,
-                            scope_id,
-                        );
+                        {
+                            self.register_generic_parameter(
+                                binder_name,
+                                &argument.1,
+                                constraint_id,
+                                scope_id,
+                            );
+                        } else {
+                            // The subject is declared LATER in the file, so its
+                            // bounds aren't walkable yet: register the binder
+                            // unbounded and retrofit the inherited bound just
+                            // before solving, when every declaration exists.
+                            let fresh =
+                                self.register_binder(binder_name, &argument.1, &[], scope_id);
+                            self.prepped_binder_inheritance.push((
+                                fresh,
+                                subject_name,
+                                position,
+                                scope_id,
+                            ));
+                        }
                         continue;
                     }
                     self.register_subject_binders(argument, scope_id);
@@ -6255,6 +6276,16 @@ impl<'src> Analyzer<'src> {
                 // Option<(type T, type U)>`, or a blanket `impl type T`). Register
                 // them before walking the subject so they resolve.
                 self.register_subject_binders(subject, body_scope_id);
+                // Binders may also sit in the WITH-clause's trait arguments
+                // (`impl Point with DescribeInto<type S: Sink>`) — the impl is
+                // generic over them exactly like subject binders (a bound-less
+                // one inherits the trait's declared bound for its position,
+                // with the same deferred retrofit when the trait is declared
+                // later). Registered before the body walks, since member
+                // signatures reference them.
+                for trait_ in traits {
+                    self.register_subject_binders(trait_, body_scope_id);
+                }
                 let subject_type_id = self.walk_type_node(subject, body_scope_id);
                 // Within an `impl`, `Self` refers to the subject type.
                 self.register_self_type(body_scope_id, subject_type_id);
@@ -7337,7 +7368,14 @@ impl<'src> Analyzer<'src> {
         let Some((parameter_ids, own_generics)) = self.method_signature(member_id) else {
             return unresolved_closure_argument;
         };
-        if own_generics.is_empty() {
+        // Bindable here: the method's own generics AND the declaring impl's
+        // binders — a with-clause binder (`impl P with Trait<type S: Sink>`)
+        // appears only in parameter types, so an argument is its ONE binding
+        // channel (subject binders usually bind via the receiver first; an
+        // already-bound id reconciles to itself and re-inserts harmlessly).
+        let mut bindable = own_generics.clone();
+        bindable.extend(self.impl_binder_generics(member_id));
+        if bindable.is_empty() {
             return unresolved_closure_argument;
         }
         for (index, argument_id) in argument_ids.iter().enumerate() {
@@ -7368,7 +7406,7 @@ impl<'src> Analyzer<'src> {
                 self.reconcile_type(&parameter_type, &argument_type, substitution)
             {
                 for (constraint_id, type_id) in bindings {
-                    if own_generics.contains(&constraint_id) {
+                    if bindable.contains(&constraint_id) {
                         substitution.insert(constraint_id, type_id);
                     }
                 }
@@ -7379,6 +7417,37 @@ impl<'src> Analyzer<'src> {
         // the same as the free-function path in `resolve_call_subject`.
         self.derive_generics_from_bounds(&own_generics, &own_generics, substitution);
         unresolved_closure_argument
+    }
+
+    /// The generic binder constraint ids of the impl DECLARING `member_id`:
+    /// subject binders (`impl Wrapper<type T>`, recoverable from the subject's
+    /// type arguments) and with-clause binders (`impl P with Trait<type S:
+    /// Bound>`, recoverable from the impl's recorded trait arguments).
+    fn impl_binder_generics(&self, member_id: Id) -> Vec<TypeId> {
+        let Some(implementation) = self.implementations.iter().find(|implementation| {
+            implementation
+                .declarations
+                .values()
+                .any(|declared| *declared == member_id)
+        }) else {
+            return Vec::new();
+        };
+        let mut argument_ids: Vec<TypeId> = Vec::new();
+        if let Type::Struct(_, arguments) | Type::Enum(_, arguments) =
+            implementation.subject.get_type(self)
+        {
+            argument_ids.extend(arguments);
+        }
+        for (_, arguments) in &implementation.trait_args {
+            argument_ids.extend(arguments.iter().copied());
+        }
+        argument_ids
+            .into_iter()
+            .filter_map(|argument| match argument.get_type(self) {
+                Type::Generic(constraint_id) => Some(constraint_id),
+                _ => None,
+            })
+            .collect()
     }
 
     fn infer_closure_args_against_params(
@@ -11610,6 +11679,35 @@ impl<'src> Analyzer<'src> {
             self.attribute_new_diagnostics(use_diagnostics_before, source_id);
         }
 
+        // --- Deferred binder-bound inheritance --- an `impl Wrapper<type T>`
+        // walked before `struct Wrapper<T: Greeter>` couldn't see the bound;
+        // every declaration exists now, so attach it to the binder's
+        // constraint id (multi-bounds live in `generic_bounds`; a single
+        // bound — recoverable from the subject's constraint id itself —
+        // stores here as a one-element list).
+        for (binder_constraint_id, subject_name, position, scope_id) in
+            std::mem::take(&mut self.prepped_binder_inheritance)
+        {
+            let Some(declared) = self.declared_generic_constraint_ids(subject_name, scope_id)
+            else {
+                continue;
+            };
+            let Some(subject_constraint_id) = declared.get(position).copied() else {
+                continue;
+            };
+            // Link by ID only: the subject's bound TYPES may not have
+            // resolved yet ("bounds resolve in build()"), but every read of
+            // `generic_bounds` resolves its entries at USE time, so the link
+            // is enough — the binder's bounds become the subject's, single or
+            // multi alike.
+            let bounds = self
+                .generic_bounds
+                .get(&subject_constraint_id)
+                .cloned()
+                .unwrap_or_else(|| vec![subject_constraint_id]);
+            self.generic_bounds.insert(binder_constraint_id, bounds);
+        }
+
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             match self.try_get_expr_id_by_name(name, scope_id) {
@@ -12206,6 +12304,41 @@ impl<'src> Analyzer<'src> {
         // left operand's type implements the matching operator trait
         // (`impl T with Add` for `+`, ...) dispatches to that method; everything
         // else (numbers, strings) keeps native JS arithmetic.
+        // --- Deferred binder-bound inheritance --- an `impl Wrapper<type T>`
+        // walked before `struct Wrapper<T: Greeter>` couldn't see the bound;
+        // every declaration exists now, so attach it to the binder's
+        // constraint id (multi-bounds live in `generic_bounds`; a single
+        // bound — recoverable from the subject's constraint id itself —
+        // stores here as a one-element list).
+        for (binder_constraint_id, subject_name, position, scope_id) in
+            std::mem::take(&mut self.prepped_binder_inheritance)
+        {
+            let Some(declared) = self.declared_generic_constraint_ids(subject_name, scope_id)
+            else {
+                continue;
+            };
+            let Some(subject_constraint_id) = declared.get(position).copied() else {
+                continue;
+            };
+            // Make the binder indistinguishable from the explicit form: the
+            // constraint id's own TYPE becomes the (first) bound — that's how
+            // single-bound resolution recovers the trait from the id itself —
+            // and any multi-bound list attaches in `generic_bounds`. (Types
+            // are minted per call and mutated in place elsewhere too; the
+            // fresh id is unshared by construction.)
+            // Link by ID only: the subject's bound TYPES may not have
+            // resolved yet ("bounds resolve in build()"), but every read of
+            // `generic_bounds` resolves its entries at USE time, so the link
+            // is enough — the binder's bounds become the subject's, single or
+            // multi alike.
+            let bounds = self
+                .generic_bounds
+                .get(&subject_constraint_id)
+                .cloned()
+                .unwrap_or_else(|| vec![subject_constraint_id]);
+            self.generic_bounds.insert(binder_constraint_id, bounds);
+        }
+
         for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {
             let lhs_type = self.infer_type(lhs_id, &Type::Unknown, &HashMap::new());
             // Record the unsigned-emission verdict for bitwise/shift binaries

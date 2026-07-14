@@ -1876,15 +1876,11 @@ fn impl_binder_without_a_declared_bound_stays_unconstrained() {
 }
 
 #[test]
-#[ignore = "bound inheritance needs the subject type walked first; \
-            forward-referencing a struct declared after the impl falls back to \
-            requiring the explicit bound"]
 fn impl_binder_inherits_bound_from_a_later_declared_struct() {
-    // The same program as `impl_binder_inherits_struct_bound`, but with the struct
-    // declared *after* the impl. The analyzer is single-pass and resolves the
-    // subject type only in `build()`, so the struct's declared bound is not yet
-    // available when the impl's binders are registered. Inheritance therefore does
-    // not fire here; the explicit `impl Wrapper<type T: Greeter>` form still works.
+    // The same program as `impl_binder_inherits_struct_bound`, but with the
+    // struct declared *after* the impl. The walk registers the binder
+    // unbounded and retrofits the struct's bound just before solving, once
+    // every declaration exists — declaration order no longer matters.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -1900,6 +1896,138 @@ fn impl_binder_inherits_bound_from_a_later_declared_struct() {
         }
         "#,
         "hi x\n",
+    );
+}
+
+#[test]
+fn impl_binder_inherits_multiple_bounds_from_a_later_declared_struct() {
+    // The deferred retrofit carries MULTI-bounds too: `T: Greeter + Counter`
+    // declared after the impl, methods from both traits resolving.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        trait Counter { fun count(self): i32; }
+        struct Hello { name: str }
+        impl Hello with Greeter { fun greet(self): str { "hi " + self.name } }
+        impl Hello with Counter { fun count(self): i32 { self.name.len() } }
+        impl Wrapper<type T> {
+            fun describe(self): str {
+                (self.inner).greet()
+            }
+            fun tally(self): i32 {
+                (self.inner).count()
+            }
+        }
+        struct Wrapper<T: Greeter + Counter> { inner: T }
+        fun main() {
+            let wrapped = Wrapper { inner = Hello { name = "xy" } };
+            print(wrapped.describe());
+            print(wrapped.tally());
+        }
+        "#,
+        "hi xy\n2\n",
+    );
+}
+
+#[test]
+fn impl_binder_inherits_bound_from_a_later_declared_enum() {
+    // Enum subjects inherit through the same deferred path as structs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        trait Greeter { fun greet(self): str; }
+        struct Hello { name: str }
+        impl Hello with Greeter { fun greet(self): str { "hi " + self.name } }
+        impl Holder<type T> {
+            fun open(self): str {
+                match self {
+                    Holder::Item(let inner) => inner.greet(),
+                }
+            }
+        }
+        enum Holder<T: Greeter> {
+            Item(T),
+        }
+        fun main() {
+            print(Holder::Item(Hello { name = "e" }).open());
+        }
+        "#,
+        "hi e\n",
+    );
+}
+
+#[test]
+fn a_boundless_trait_argument_binder_inherits_the_traits_bound() {
+    // `with DescribeInto<type S>` omits the bound; the TRAIT declares
+    // `S: Sink`, so the binder inherits it — the subject-binder rule applied
+    // to the with-clause.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        trait Sink { fun put(self, value: i32); }
+        struct Collector { total: Shared<i32> }
+        impl Collector with Sink {
+            fun put(self, value: i32) {
+                self.total.write() = self.total.read() + value;
+            }
+        }
+        trait DescribeInto<S: Sink> {
+            fun describe_into(self, sink: S);
+        }
+        struct Point { x: i32 }
+        impl Point with DescribeInto<type S> {
+            fun describe_into(self, sink: S) {
+                sink.put(self.x);
+            }
+        }
+        fun main() {
+            let point = Point { x = 5 };
+            let collector = Collector { total = Shared::new(0) };
+            point.describe_into(collector);
+            print(collector.total.read());
+        }
+        "#,
+        "5\n",
+    );
+}
+
+#[test]
+fn subject_and_trait_argument_binders_compose_on_one_impl() {
+    // `impl Box<type T> with DescribeInto<type S: Sink>` — the receiver binds
+    // T, the argument binds S, one call resolves both.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::shared::Shared;
+        trait Sink { fun put(self, value: i32); }
+        struct Collector { total: Shared<i32> }
+        impl Collector with Sink {
+            fun put(self, value: i32) {
+                self.total.write() = self.total.read() + value;
+            }
+        }
+        trait Sized2 { fun size(self): i32; }
+        struct Pair { a: i32, b: i32 }
+        impl Pair with Sized2 { fun size(self): i32 { 2 } }
+        trait DescribeInto<S> {
+            fun describe_into(self, sink: S);
+        }
+        struct Box2<T: Sized2> { inner: T }
+        impl Box2<type T> with DescribeInto<type S: Sink> {
+            fun describe_into(self, sink: S) {
+                sink.put((self.inner).size());
+            }
+        }
+        fun main() {
+            let boxed = Box2 { inner = Pair { a = 1, b = 2 } };
+            let collector = Collector { total = Shared::new(40) };
+            boxed.describe_into(collector);
+            print(collector.total.read());
+        }
+        "#,
+        "42\n",
     );
 }
 
@@ -3432,11 +3560,11 @@ fn generic_trait_method_dispatches_through_a_bound() {
 }
 
 #[test]
-#[ignore = "an impl cannot bind a trait's generic argument (`impl T with Trait<type S: Bound>`)"]
 fn impl_binder_in_trait_argument_position() {
-    // One impl serving every sink: the binder sits in the TRAIT argument. The
-    // analyzer reports "cannot find type 'S'" — unsupported, so a per-serializer
-    // generic impl can't be written (transport-rpc.md §6.1's other gap).
+    // One impl serving every sink: the binder sits in the TRAIT argument,
+    // registered like a subject binder (bound-less ones inherit the trait's
+    // declared bound for the position) — transport-rpc.md §6.1's other gap,
+    // closed.
     assert_compiles_and_runs(
         r#"
         import std::print;

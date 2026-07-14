@@ -224,12 +224,24 @@ have gaps.
    closure-return resolutions both observable to the wake (its own slice). Common uses (`sum`,
    `for`, arithmetic over the mapped element) work today.
 
-8. **Trait-argument binders** (M; pin ledger) — `impl X with Trait<type S: Bound>` is an
-   unsupported *feature* with a clean error, pinned `#[ignore]`d. Also notable as the alternative
-   route to trait-shaped visitors (p6-followups #2/#4 record the context).
+8. ~~**Trait-argument binders**~~ — **FIXED 2026-07-14** (v0.5.0 arc):
+   `impl X with Trait<type S: Bound>` registers with-clause binders exactly
+   like subject binders (bound-less ones inherit the trait's declared bound
+   for the position, deferred retrofit included), and the CALL binds them:
+   `bind_method_own_generics`'s adopt-filter grew the declaring impl's binder
+   ids (`impl_binder_generics` — subject args + recorded trait_args), since a
+   with-clause binder appears only in parameter types and an argument is its
+   one binding channel. Without that second half the program COMPILED and
+   monomorphized `sink.put` to the abstract no-op (printed 0). 3 pins
+   (explicit bound, trait-declared-bound inheritance, subject+trait binders
+   composing). Unblocks trait-shaped visitors (p6-followups #2/#4).
 
-9. **Impl-binder declaration order** (S; pin ledger) — the second `#[ignore]` pin; declaration
-   order affects binder resolution. Trivial workaround (reorder declarations); fix for hygiene.
+9. ~~**Impl-binder declaration order**~~ — **FIXED 2026-07-14** (v0.5.0 arc):
+   a bound-less binder whose subject is declared LATER registers fresh and
+   retrofits the subject's bounds just before solving (`generic_bounds` link
+   by ID only — the bound types themselves resolve later in build()), placed
+   after import/use resolution and before anything types. Declaration order
+   no longer matters; multi-bounds and enum subjects pinned too.
 
 11. **`!` / `?.` deferred tail** (M; `try-and-lift.md`) — the operators shipped 2026-07-04
     (both slices + the stabilization arc: bang-directed return-position generics, closure-`ret`
