@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use vilan_core::analyzer::{DERIVED_SOURCE, Expr, Implementation, SourceId};
 use vilan_core::id::Id;
-use vilan_core::manifest::EntrySection;
 use vilan_core::type_::Type;
 use vilan_core::{
     Error, Manifest, Platform as BuildPlatform, Program, Span, Workspace as BuildWorkspace,
@@ -40,10 +39,11 @@ impl ProjectContext {
 }
 
 /// Resolves a file's [`ProjectContext`] from the nearest ancestor `vilan.toml`.
-/// A `[package]` roots `pkg::` at its source `root`, analyzes its files against the
-/// package `target` platform, and resolves its dependency workspace (so cross-package
-/// imports type-check); the legacy `[server]`/`[client]` form keeps its role-based
-/// platform. Anything unreadable / unrecognized yields [`ProjectContext::none`].
+/// A `[package]` roots `pkg::` at its source `root`, analyzes its files against
+/// its platform (the package `target`, or per-entry targets under the
+/// `[entry.<name>]` form), and resolves its dependency workspace (so
+/// cross-package imports type-check). Anything unreadable / unrecognized
+/// yields [`ProjectContext::none`].
 fn resolve_project_context(entry_path: &Path) -> ProjectContext {
     let mut directory = entry_path.parent();
     let (manifest_path, root) = loop {
@@ -63,36 +63,26 @@ fn resolve_project_context(entry_path: &Path) -> ProjectContext {
         return ProjectContext::none();
     };
 
-    // Legacy full-stack: platform by the file's role; `pkg::` roots at its own
-    // directory (no declared package root), so leave `pkg_root` to the fallback.
-    if manifest.is_legacy_fullstack() {
-        let is_entry = |section: &Option<EntrySection>| {
-            section
-                .as_ref()
-                .and_then(|section| section.entry.as_deref())
-                .is_some_and(|entry| same_file(&root.join(entry), entry_path))
-        };
-        let platform = if is_entry(&manifest.client) {
-            Some(BuildPlatform::Browser)
-        } else if is_entry(&manifest.server) {
-            Some(BuildPlatform::default())
-        } else {
-            None
-        };
-        return ProjectContext {
-            platform,
-            pkg_root: None,
-            workspace: BuildWorkspace::default(),
-        };
-    }
-
-    // A package: root `pkg::` at its declared source root, analyze every file under
-    // that root against the package platform (default Node), and resolve the package's
-    // dependency workspace (best-effort — a resolution error degrades to no deps).
+    // A package: root `pkg::` at its declared source root and resolve its
+    // dependency workspace (best-effort — a resolution error degrades to no
+    // deps). The platform: the classic single-entry form analyzes every file
+    // under the root against the package target; a multi-entry package
+    // (proposal/platform-coloring.md §4.2) analyzes an ENTRY file under its
+    // declared target, and any other file with a platform inferred from its
+    // own imports — a module may be reached from several entries, and having
+    // no `main` it faces no admission walk, so the choice only affects
+    // scratch-style inference (hover colors are platform-independent).
     if let Some(package) = &manifest.package {
         let pkg_root = root.join(package.root());
-        let build_platform = package.resolved_target().unwrap_or_default();
-        let platform = is_within(&pkg_root, entry_path).then_some(build_platform);
+        let platform = if manifest.entries.is_empty() {
+            let build_platform = package.resolved_target().unwrap_or_default();
+            is_within(&pkg_root, entry_path).then_some(build_platform)
+        } else {
+            manifest.entries.iter().find_map(|(name, entry)| {
+                same_file(&pkg_root.join(entry.path(name)), entry_path)
+                    .then(|| entry.resolved_target().unwrap_or_default())
+            })
+        };
         let workspace = vilan_core::manifest::resolve_workspace(root).unwrap_or_default();
         return ProjectContext {
             platform,
@@ -1551,6 +1541,68 @@ mod tests {
                 .map(|item| &item.message)
                 .collect::<Vec<_>>()
         );
+    }
+
+    // A multi-entry package (proposal/platform-coloring.md §4.2): an entry
+    // file analyzes under ITS entry's target — the browser entry colors on
+    // reaching the store, the node entry running the same code doesn't — and
+    // a shared module (no entry, no `main`) analyzes clean, its hover still
+    // knowing the color.
+    #[test]
+    fn multi_entry_files_analyze_under_their_entry_targets() {
+        let manifest =
+            "[package]\nname = \"app\"\n\n[entry.client]\ntarget = \"browser\"\n\n[entry.server]\n";
+        let store = "import std::fs;\n\nfun load(): bool {\n\tfs::exists(\"state\")\n}\n";
+        let reach = "import std::print;\nimport pkg::store::load;\n\nfun main() {\n\tif load() { print(\"?\") }\n}\n";
+        let (dir, client) = analyze_workspace(&[
+            ("src/client.vl", reach),
+            ("vilan.toml", manifest),
+            ("src/store.vl", store),
+            ("src/server.vl", reach),
+        ]);
+        assert!(
+            client.published_diagnostics().iter().any(|item| {
+                item.message
+                    .contains("requires the `process` layer of `std`")
+                    && item.message.contains("cannot run on `browser`")
+            }),
+            "the client entry should color: {:?}",
+            client
+                .published_diagnostics()
+                .iter()
+                .map(|item| &item.message)
+                .collect::<Vec<_>>()
+        );
+        // The node entry, same code: admissible.
+        let entry = dir.join("src/server.vl");
+        let server = Document::analyze(
+            &std::fs::read_to_string(&entry).unwrap(),
+            &std_root(),
+            &entry,
+        );
+        assert!(
+            server.published_diagnostics().is_empty(),
+            "{:?}",
+            server
+                .published_diagnostics()
+                .iter()
+                .map(|item| &item.message)
+                .collect::<Vec<_>>()
+        );
+        // The shared module: no `main`, no admission walk — clean, but hover
+        // on `load` still shows its requirement.
+        let entry = dir.join("src/store.vl");
+        let text = std::fs::read_to_string(&entry).unwrap();
+        let module = Document::analyze(&text, &std_root(), &entry);
+        assert!(module.published_diagnostics().is_empty());
+        let hover = module
+            .hover(text.find("load").unwrap())
+            .expect("hover on `load` should produce a label");
+        assert!(
+            hover.contains("requires the `process` layer of `std`"),
+            "{hover}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The hover text at the cursor marked `|` in `src` (a bare manifest-less

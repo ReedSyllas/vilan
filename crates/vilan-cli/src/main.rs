@@ -18,7 +18,7 @@ use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
 use vilan_core::context;
 use vilan_core::lexer::lexer;
-use vilan_core::manifest::{EntrySection, Package};
+use vilan_core::manifest::Package;
 use vilan_core::parser::parser;
 use vilan_core::transformer::transform;
 use vilan_core::{Backend, BuildOptions, Manifest, Platform, Workspace};
@@ -664,45 +664,73 @@ fn unit_from_package(directory: &Path, package: &Package, options: BuildOptions)
     }
 }
 
+/// The build units a `[package]` manifest contributes: one per `[entry.<name>]`
+/// when declared (proposal/platform-coloring.md §4.2), else the single classic
+/// unit. Entry units build browser-class entries FIRST (stable within a class)
+/// — the order is semantic, so a process entry that serves bundles always
+/// finds them freshly built, whatever order the manifest declares.
+fn package_units(
+    directory: &Path,
+    package: &Package,
+    manifest: &Manifest,
+    options: BuildOptions,
+) -> Vec<(Unit, Platform)> {
+    if manifest.entries.is_empty() {
+        let platform = package.resolved_target().unwrap_or_default();
+        return vec![(unit_from_package(directory, package, options), platform)];
+    }
+    let pkg_root = directory.join(package.root());
+    let mut units: Vec<(Unit, Platform)> = manifest
+        .entries
+        .iter()
+        .map(|(name, entry)| {
+            (
+                Unit {
+                    name: name.clone(),
+                    entry: pkg_root.join(entry.path(name)),
+                    pkg_root: pkg_root.clone(),
+                    package_dir: Some(directory.to_path_buf()),
+                    options,
+                },
+                entry.resolved_target().unwrap_or_default(),
+            )
+        })
+        .collect();
+    units.sort_by_key(|(_, platform)| !matches!(platform, Platform::Browser));
+    units
+}
+
+/// Rejects two build units sharing a name — their `dist/<name>.js` outputs
+/// would silently overwrite each other. (`none` members emit nothing, so they
+/// can't collide.)
+fn reject_output_collisions(members: &[(Unit, Platform)]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for (unit, platform) in members {
+        if platform.is_none() {
+            continue;
+        }
+        if !seen.insert(unit.name.as_str()) {
+            return Err(format!(
+                "two build units are both named `{}`, so their outputs would \
+                 collide at dist/{}.js — rename one (the package name or the \
+                 `[entry.<name>]`)",
+                unit.name, unit.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Resolves the project rooted at `directory` from its `vilan.toml`. A `[package]`
-/// is a single package (`entry` resolves against `root`; `target` is the default).
-/// A `[project]` is a workspace — each member builds for its own platform. The legacy
-/// `[server]`/`[client]` pair lowers onto a two-member workspace.
+/// is a single package (`entry` resolves against `root`; `target` is the default),
+/// unless it declares `[entry.<name>]` sections — then it lowers onto a workspace
+/// with one member per entry. A `[project]` is a workspace — each member builds
+/// for its own platform (and may itself declare entries).
 fn project_from_manifest(directory: &Path) -> Result<Project, String> {
     let manifest = read_manifest(directory)?;
     let options = manifest
         .build_options()
         .map_err(|error| format!("invalid {}/vilan.toml: {error}", directory.display()))?;
-
-    // Legacy full-stack: a browser client + a Node server, as a two-member
-    // workspace (client first, since the server serves `dist/client.js`).
-    if manifest.is_legacy_fullstack() {
-        let member = |section: &Option<EntrySection>, name: &str, platform: Platform| {
-            let entry = directory.join(
-                section
-                    .as_ref()
-                    .and_then(|section| section.entry.as_deref())
-                    .unwrap_or(Path::new("main.vl")),
-            );
-            (
-                Unit {
-                    name: name.to_string(),
-                    pkg_root: pkg_root_of(&entry),
-                    entry,
-                    package_dir: None,
-                    options,
-                },
-                platform,
-            )
-        };
-        return Ok(Project::Workspace {
-            root: directory.to_path_buf(),
-            members: vec![
-                member(&manifest.client, "client", Platform::Browser),
-                member(&manifest.server, "server", Platform::default()),
-            ],
-        });
-    }
 
     // A workspace: each `[project] packages` member is built for its own platform.
     if let Some(project) = &manifest.project {
@@ -725,12 +753,14 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
             let member_options = member_manifest
                 .build_options()
                 .map_err(|error| format!("invalid {}/vilan.toml: {error}", member_dir.display()))?;
-            let platform = package.resolved_target().unwrap_or_default();
-            members.push((
-                unit_from_package(&member_dir, package, member_options),
-                platform,
+            members.extend(package_units(
+                &member_dir,
+                package,
+                &member_manifest,
+                member_options,
             ));
         }
+        reject_output_collisions(&members)?;
         return Ok(Project::Workspace {
             root: directory.to_path_buf(),
             members,
@@ -750,6 +780,20 @@ fn project_from_manifest(directory: &Path) -> Result<Project, String> {
     // A single package. `validate` guarantees one of the three sections is present,
     // and the others are ruled out above.
     let package = manifest.package.as_ref().expect("validated package");
+
+    // `[entry.<name>]` sections: the single-package full-stack form
+    // (proposal/platform-coloring.md §4.2). Lowers onto the same workspace
+    // orchestration as a `[project]` — every entry builds to `dist/<name>.js`,
+    // `run` picks the one node entry, `check` checks them all.
+    if !manifest.entries.is_empty() {
+        let members = package_units(directory, package, &manifest, options);
+        reject_output_collisions(&members)?;
+        return Ok(Project::Workspace {
+            root: directory.to_path_buf(),
+            members,
+        });
+    }
+
     Ok(Project::Single {
         unit: unit_from_package(directory, package, options),
         platform: package.resolved_target(),

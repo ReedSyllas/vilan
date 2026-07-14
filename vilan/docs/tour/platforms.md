@@ -34,12 +34,41 @@ runtime crash. That's the whole idea of this chapter.
 
 ## Full-stack packages
 
-A client + server app is a workspace of three packages. The shared
-`common` library holds the payload types both sides speak (base-layer
-std only); the service itself can live in the server package, next to
-its resources — the client depends on the server package and imports
-the generated client from it (see
-[Services](../guide/services.md)):
+A client + server app fits in **one package** with two entries — each
+`[entry.<name>]` names an entry file and the platform it builds for:
+
+```toml
+[package]
+name = "app"
+
+[entry.client]
+target = "browser"
+
+[entry.server]
+# target defaults to node; path defaults to <name>.vl under src/
+```
+
+```
+app/
+  vilan.toml
+  src/
+    client.vl     the browser entry
+    server.vl     the node entry
+    store.vl      the service, next to its resources
+    todo.vl       shared types — anything both entries import
+```
+
+`vilan build` compiles every entry for its own target into
+`dist/<name>.js` (browser entries first, so a server that ships bundles
+finds them fresh); `vilan run` builds everything and starts the one
+node entry; `vilan check` checks all entries, always. Reachability does
+the sorting: the same `store.vl` may use `std::fs` freely, because only
+the server entry reaches into it — if client code ever calls that far,
+the build fails with the call chain.
+
+Larger apps can still split into a workspace of packages — a shared
+`[library]` for payload types, a browser package, a server package —
+and each member may declare its own entries:
 
 ```
 app/
@@ -49,9 +78,10 @@ app/
   server/          [package] (node)
 ```
 
-`vilan build .` at the root builds every package. The compiler checks
-each one against its own platform, including that `common` stays
-platform-neutral.
+`vilan build .` at the root builds every member the same way. The
+compiler checks each against its own platform, including that `common`
+stays platform-neutral. Either shape, the service lives next to its
+resources (see [Services](../guide/services.md)).
 
 ## Externs — talking to the host
 

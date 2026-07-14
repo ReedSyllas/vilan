@@ -191,19 +191,57 @@ load-bearing. A manifest can declare two entries in one package:
 [package]
 name = "todo"
 
-[entry.server]
-platform = "node"
-path = "src/server.vl"
-
 [entry.client]
-platform = "browser"
-path = "src/client.vl"
+target = "browser"
+
+[entry.server]
+# target defaults to node; path defaults to <name>.vl under the root
 ```
 
 `vilan build` compiles each entry against its platform; functions color by
 inference; the service struct sits wherever it reads best; `common` becomes
 taste. (The `EntrySection` remnant in the manifest parser is the fossil of
 the old `[server]`/`[client]` sections — this is that idea done right.)
+
+Design, settled at implementation (2026-07-13):
+
+- **Keys.** `[entry.<name>]` takes `target` (same vocabulary and validation
+  as `[package] target`; the early sketch's `platform =` key is spelled
+  `target` so the manifest has one word for it) and `path` (resolved
+  against the package `root`, like `[package] entry`; default `<name>.vl`
+  — so `[entry.server]` alone means `src/server.vl`). `target` defaults to
+  node. Entries therefore live under the source root by construction, and
+  `pkg::` resolves from any of them.
+- **Validation.** Entries require a `[package]`; they are mutually
+  exclusive with the single-entry keys `[package] entry`/`target` (one
+  manifest, one way to say it). An entry name must be a valid identifier
+  (it names `dist/<name>.js`); `path` must be relative and free of `..`;
+  at least one entry when the table appears.
+- **Lowering.** A multi-entry package lowers onto the existing workspace
+  orchestration: one build unit per entry, all sharing the package's
+  source root, dependencies, and `[build]` options, with outputs at
+  `<package dir>/dist/<name>.js` (assets — e.g. a browser entry's CSS —
+  beside them, as today). Build order is *semantic*, not
+  declaration-order: browser-class entries build first (stable among
+  themselves), so a process entry that serves bundles always finds them
+  fresh. A `[project]` member may itself declare entries and contributes
+  one unit per entry; duplicate output names across a workspace are
+  rejected at lowering. `--platform`/`--stdout` don't apply to multi-entry
+  builds (exactly as they don't to workspaces).
+- **`vilan run` / `vilan check`.** The workspace rules apply unchanged:
+  `run` builds everything and runs the single node-platform entry (zero or
+  several is an error naming the ambiguity); `check` checks every entry,
+  always (§7 decision 4).
+- **Editor.** A file matching an entry's path analyzes under that entry's
+  target; any other file under the root has no single platform (it may be
+  reached from several entries), so its platform is inferred from its own
+  imports — harmless, because a module has no `main` and thus no
+  admission walk; it still gets hover colors, which are
+  platform-independent.
+- **The legacy `[server]`/`[client]` pair is retired.** No manifest in the
+  tree uses it; `validate` now rejects it with a migration hint pointing
+  at `[entry.server]`/`[entry.client]` (the serde fields survive solely to
+  render that hint), and the CLI/LSP lowering paths are gone.
 
 ## 5. What does NOT change
 

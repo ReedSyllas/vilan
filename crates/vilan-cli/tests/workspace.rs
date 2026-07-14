@@ -1,7 +1,9 @@
-//! End-to-end CLI tests for the multi-package workspace model (P2): building a
-//! workspace emits one bundle per host member, the platform-compatibility rule and
-//! dependency cycles are rejected, and the legacy `[server]`/`[client]` form still
-//! builds (the examples have migrated to workspaces, so this is its only coverage).
+//! End-to-end CLI tests for the multi-package workspace model (P2) and the
+//! single-package multi-entry form (`[entry.<name>]`,
+//! proposal/platform-coloring.md §4.2): building a workspace emits one bundle
+//! per host member / per entry, the platform-compatibility rule and dependency
+//! cycles are rejected, and the retired `[server]`/`[client]` form fails with
+//! its migration hint.
 //!
 //! Each test writes a throwaway project tree and drives the built `vilan` binary.
 
@@ -231,12 +233,143 @@ fn dependency_cycle_is_rejected() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Writes a two-entry single package (§4.2): a browser `client` and a node
+/// `server`, sharing a `pkg::store` module whose `load` reaches `std::fs`.
+/// Only the server calls `load` — the shape a full-stack app actually has.
+fn write_multi_entry_package(dir: &Path) {
+    write(
+        dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\n\n[entry.client]\ntarget = \"browser\"\n\n[entry.server]\n",
+    );
+    write(
+        dir,
+        "src/store.vl",
+        "import std::fs;\n\nfun load(): bool {\n\tfs::exists(\"state\")\n}\n",
+    );
+    write(
+        dir,
+        "src/server.vl",
+        "import std::print;\nimport pkg::store::load;\n\nfun main() {\n\tif load() { print(\"loaded\") } else { print(\"fresh\") }\n}\n",
+    );
+    write(
+        dir,
+        "src/client.vl",
+        "import std::print;\n\nfun main() {\n\tprint(\"ui\");\n}\n",
+    );
+}
+
 #[test]
-fn legacy_server_client_still_builds() {
-    // The deprecated `[server]`/`[client]` form lowers onto a two-member workspace
-    // and must keep building `dist/{server,client}.js` (the examples no longer use
-    // it, so this is its regression).
-    let dir = temp_project("legacy");
+fn a_multi_entry_package_builds_every_entry_into_dist() {
+    // `[entry.<name>]` lowers onto the workspace orchestration: one
+    // `dist/<name>.js` per entry, each compiled for its own target — the
+    // node-only `store.load` is fine because the client never reaches it.
+    let dir = temp_project("entries");
+    write_multi_entry_package(&dir);
+    let output = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "multi-entry build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dir.join("dist/server.js").is_file(),
+        "missing dist/server.js"
+    );
+    assert!(
+        dir.join("dist/client.js").is_file(),
+        "missing dist/client.js"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_picks_the_single_node_entry() {
+    // `vilan run` on a multi-entry package builds everything, then runs the
+    // one node entry (the workspace rule, unchanged).
+    let dir = temp_project("entries_run");
+    write_multi_entry_package(&dir);
+    let output = vilan(&["run", dir.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("fresh"), "server should run: {stdout}");
+    assert!(
+        dir.join("dist/client.js").is_file(),
+        "run should have built the client bundle first"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_colors_each_entry_against_its_own_target() {
+    // `vilan check` checks every entry, always (§7 decision 4). The same
+    // package is clean until the CLIENT entry reaches the store — then the
+    // browser build fails with the coloring chain while the server stays fine.
+    let dir = temp_project("entries_check");
+    write_multi_entry_package(&dir);
+    let clean = vilan(&["check", dir.to_str().unwrap()]);
+    assert!(
+        clean.status.success(),
+        "clean check failed: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    write(
+        &dir,
+        "src/client.vl",
+        "import std::print;\nimport pkg::store::load;\n\nfun main() {\n\tif load() { print(\"?\") }\n}\n",
+    );
+    let violating = vilan(&["check", dir.to_str().unwrap()]);
+    assert!(
+        !violating.status.success(),
+        "the client's reach into `std::fs` must fail the browser entry"
+    );
+    let text = combined(&violating);
+    assert!(
+        text.contains("requires the `process` layer of `std`")
+            && text.contains("cannot run on `browser`"),
+        "unexpected output: {text}"
+    );
+    assert!(
+        text.contains("main → load → exists (std::fs)"),
+        "the chain should name the path: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn colliding_output_names_are_rejected() {
+    // A workspace member named `app` and a sibling's `[entry.app]` would both
+    // write `dist/app.js` — rejected at lowering instead of silently racing.
+    let dir = temp_project("collide");
+    write(
+        &dir,
+        "vilan.toml",
+        "[project]\npackages = [\"app\", \"site\"]\n",
+    );
+    write(&dir, "app/vilan.toml", "[package]\nname = \"app\"\n");
+    write(&dir, "app/src/main.vl", "fun main() { }\n");
+    write(
+        &dir,
+        "site/vilan.toml",
+        "[package]\nname = \"site\"\n\n[entry.app]\ntarget = \"browser\"\n",
+    );
+    write(&dir, "site/src/app.vl", "fun main() { }\n");
+    let output = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(!output.status.success(), "expected a collision failure");
+    let text = combined(&output);
+    assert!(text.contains("dist/app.js"), "unexpected output: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_retired_server_client_form_fails_with_the_migration_hint() {
+    // The old top-level pair doesn't lower any more — it names its
+    // replacement instead of building.
+    let dir = temp_project("retired");
     write(
         &dir,
         "vilan.toml",
@@ -249,18 +382,11 @@ fn legacy_server_client_still_builds() {
     );
     write(&dir, "client.vl", "fun main() { }\n");
     let output = vilan(&["build", dir.to_str().unwrap()]);
+    assert!(!output.status.success(), "the retired form must not build");
+    let text = combined(&output);
     assert!(
-        output.status.success(),
-        "legacy build failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        dir.join("dist/server.js").is_file(),
-        "missing dist/server.js"
-    );
-    assert!(
-        dir.join("dist/client.js").is_file(),
-        "missing dist/client.js"
+        text.contains("[entry.server]"),
+        "the error should name the replacement: {text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

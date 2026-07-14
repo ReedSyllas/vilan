@@ -21,8 +21,9 @@ use crate::target::{Platform, PlatformPattern};
 
 /// A parsed `vilan.toml`. Exactly one of `[package]` (an app) / `[library]` (an
 /// importable library) / `[project]` (a workspace) is present for a current-shape
-/// manifest; the legacy `[server]` + `[client]` pair (P2 replaces it with
-/// per-package targets) is still accepted.
+/// manifest. A `[package]` may declare several build entries with
+/// `[entry.<name>]` sections (proposal/platform-coloring.md §4.2) — the
+/// single-package full-stack form.
 #[derive(Debug, Default, Deserialize)]
 pub struct Manifest {
     pub package: Option<Package>,
@@ -34,9 +35,14 @@ pub struct Manifest {
     /// rounds, default 16).
     #[serde(rename = "macro", default)]
     pub macro_: Option<MacroSection>,
-    /// Legacy full-stack server entry (`[server]`), kept working through P1.
+    /// `[entry.<name>]` — the package's build entries, each with its own
+    /// platform. Empty for the classic single-entry form.
+    #[serde(rename = "entry", default)]
+    pub entries: BTreeMap<String, EntryDecl>,
+    /// The retired `[server]` form — parsed only so `validate` can point its
+    /// users at `[entry.server]` instead of an unknown-key shrug.
     pub server: Option<EntrySection>,
-    /// Legacy full-stack client entry (`[client]`), kept working through P1.
+    /// The retired `[client]` form (see `server`).
     pub client: Option<EntrySection>,
 }
 
@@ -110,7 +116,34 @@ pub struct Project {
     pub dependencies: BTreeMap<String, Dependency>,
 }
 
-/// A legacy `[server]` / `[client]` section — only its `entry` is read.
+/// One `[entry.<name>]`: a build entry of a multi-entry package. The name
+/// labels its `dist/<name>.js` output.
+#[derive(Debug, Default, Deserialize)]
+pub struct EntryDecl {
+    /// The entry file, resolved against the package `root` (like
+    /// `[package] entry`). Default `<name>.vl`.
+    pub path: Option<PathBuf>,
+    /// The entry's build platform (`node` / `deno` / `bun` / `browser`).
+    /// Default `node`.
+    pub target: Option<String>,
+}
+
+impl EntryDecl {
+    /// The entry file relative to the package root (default `<name>.vl`).
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("{name}.vl")))
+    }
+
+    /// The declared platform, if any (validated by [`Manifest::validate`]).
+    pub fn resolved_target(&self) -> Option<Platform> {
+        self.target.as_deref().and_then(|t| Platform::parse(t).ok())
+    }
+}
+
+/// A retired `[server]` / `[client]` section — kept parseable only so the
+/// migration error in [`Manifest::validate`] can name the replacement.
 #[derive(Debug, Deserialize)]
 pub struct EntrySection {
     pub entry: Option<PathBuf>,
@@ -187,7 +220,9 @@ impl Manifest {
         // so a typo doesn't silently do nothing. A second, untyped parse keeps the
         // typed deserialize free of a catch-all field.
         let table: toml::Table = toml::from_str(text).map_err(|error| error.to_string())?;
-        const KNOWN: &[&str] = &["package", "library", "project", "build", "server", "client"];
+        const KNOWN: &[&str] = &[
+            "package", "library", "project", "build", "macro", "entry", "server", "client",
+        ];
         let warnings = table
             .keys()
             .filter(|key| !KNOWN.contains(&key.as_str()))
@@ -196,55 +231,42 @@ impl Manifest {
         Ok((manifest, warnings))
     }
 
-    /// Whether this is a legacy full-stack manifest (`[server]` + `[client]`).
-    pub fn is_legacy_fullstack(&self) -> bool {
-        self.server.is_some() && self.client.is_some()
-    }
-
     /// Validates the schema, returning a (possibly empty) list of error messages.
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
-        let has_legacy = self.server.is_some() || self.client.is_some();
 
-        if has_legacy {
-            // The legacy shape needs both halves; a lone `[server]`/`[client]` is
-            // an incomplete pair (use a `[package]` with a `target` instead).
-            if self.server.is_none() || self.client.is_none() {
-                errors.push(
-                    "a `[server]` needs a matching `[client]` (and vice versa); \
-                     for a single-target app use `[package]` with a `target`"
-                        .to_string(),
-                );
-            }
-            if self.package.is_some() || self.library.is_some() || self.project.is_some() {
-                errors.push(
-                    "the legacy `[server]`/`[client]` form can't be combined with \
-                     `[package]`, `[library]`, or `[project]`"
-                        .to_string(),
-                );
-            }
-        } else {
-            // Exactly one of `[package]` (app) / `[library]` / `[project]` (workspace).
-            let kinds = self.package.is_some() as u8
-                + self.library.is_some() as u8
-                + self.project.is_some() as u8;
-            if kinds > 1 {
-                errors.push(
-                    "set exactly one of `[package]`, `[library]`, or `[project]` — an app, a \
-                     library, and a workspace root are different manifests"
-                        .to_string(),
-                );
-            } else if kinds == 0 {
-                errors.push(
-                    "`vilan.toml` must declare a `[package]`, `[library]`, or `[project]`"
-                        .to_string(),
-                );
-            }
+        // The old `[server]`/`[client]` full-stack pair is retired; its
+        // replacement is per-entry targets in one `[package]`
+        // (proposal/platform-coloring.md §4.2).
+        if self.server.is_some() || self.client.is_some() {
+            errors.push(
+                "the `[server]`/`[client]` form was removed — declare a `[package]` \
+                 with `[entry.server]` / `[entry.client]` sections instead (each \
+                 takes an optional `path` and `target`)"
+                    .to_string(),
+            );
+        }
+
+        // Exactly one of `[package]` (app) / `[library]` / `[project]` (workspace).
+        let kinds = self.package.is_some() as u8
+            + self.library.is_some() as u8
+            + self.project.is_some() as u8;
+        if kinds > 1 {
+            errors.push(
+                "set exactly one of `[package]`, `[library]`, or `[project]` — an app, a \
+                 library, and a workspace root are different manifests"
+                    .to_string(),
+            );
+        } else if kinds == 0 && self.server.is_none() && self.client.is_none() {
+            errors.push(
+                "`vilan.toml` must declare a `[package]`, `[library]`, or `[project]`".to_string(),
+            );
         }
 
         if let Some(package) = &self.package {
             self.validate_package(package, &mut errors);
         }
+        self.validate_entries(&mut errors);
         if let Some(library) = &self.library {
             self.validate_library(library, &mut errors);
         }
@@ -281,6 +303,66 @@ impl Manifest {
         if let Some(target) = &package.target {
             if let Err(error) = Platform::parse(target) {
                 errors.push(format!("invalid `[package] target`: {error}"));
+            }
+        }
+    }
+
+    /// Validates `[entry.<name>]` sections: they belong to a `[package]`, they
+    /// replace (not combine with) the single-entry `entry`/`target` keys, each
+    /// name labels a `dist/<name>.js` output, and each path stays inside the
+    /// package root.
+    fn validate_entries(&self, errors: &mut Vec<String>) {
+        if self.entries.is_empty() {
+            return;
+        }
+        if self.package.is_none() {
+            errors.push(
+                "`[entry.<name>]` sections require a `[package]` (a library has \
+                 no entries; a workspace's entries live in its member packages)"
+                    .to_string(),
+            );
+        }
+        if let Some(package) = &self.package {
+            if package.entry.is_some() || package.target.is_some() {
+                errors.push(
+                    "`[package] entry`/`target` can't be combined with \
+                     `[entry.<name>]` sections — with multiple entries, each \
+                     declares its own `path` and `target`"
+                        .to_string(),
+                );
+            }
+        }
+        for (name, entry) in &self.entries {
+            if !is_identifier(name) {
+                errors.push(format!(
+                    "`[entry.{name}]` — an entry name must be a valid identifier \
+                     (it names the `dist/{name}.js` output)"
+                ));
+            }
+            if let Some(target) = &entry.target {
+                match Platform::parse(target) {
+                    Err(error) => errors.push(format!("invalid `[entry.{name}] target`: {error}")),
+                    // An entry is something to build and run; `none` is the
+                    // pure-library platform and would build nothing.
+                    Ok(Platform::None) => errors.push(format!(
+                        "`[entry.{name}] target` must be a host platform \
+                         (`node`/`deno`/`bun`/`browser`), not `none`"
+                    )),
+                    Ok(_) => {}
+                }
+            }
+            if let Some(path) = &entry.path {
+                let escapes = path.is_absolute()
+                    || path
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir));
+                if escapes {
+                    errors.push(format!(
+                        "`[entry.{name}] path` must be relative to the package \
+                         root and free of `..` (got `{}`)",
+                        path.display()
+                    ));
+                }
             }
         }
     }
@@ -772,16 +854,97 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fullstack_parses() {
-        let manifest = parse("[server]\nentry = \"server.vl\"\n[client]\nentry = \"client.vl\"\n");
-        assert!(manifest.is_legacy_fullstack());
-        assert!(manifest.validate().is_empty());
+    fn the_retired_server_client_form_gets_a_migration_error() {
+        // Not an unknown-key shrug: the old form names its replacement.
+        for source in [
+            "[server]\nentry = \"server.vl\"\n[client]\nentry = \"client.vl\"\n",
+            "[client]\nentry = \"app.vl\"\n",
+        ] {
+            let manifest = parse(source);
+            assert!(
+                manifest
+                    .validate()
+                    .iter()
+                    .any(|e| e.contains("removed") && e.contains("[entry.server]")),
+                "{source}"
+            );
+        }
     }
 
     #[test]
-    fn lone_client_is_an_error() {
-        let manifest = parse("[client]\nentry = \"app.vl\"\n");
-        assert!(manifest.validate().iter().any(|e| e.contains("matching")));
+    fn entries_parse_with_root_relative_defaults() {
+        let manifest = parse(
+            "[package]\nname = \"app\"\n\n[entry.server]\n\n\
+             [entry.client]\ntarget = \"browser\"\npath = \"web/main.vl\"\n",
+        );
+        assert!(manifest.validate().is_empty());
+        let server = &manifest.entries["server"];
+        assert_eq!(server.path("server"), Path::new("server.vl"));
+        assert!(server.resolved_target().is_none(), "target defaults later");
+        let client = &manifest.entries["client"];
+        assert_eq!(client.path("client"), Path::new("web/main.vl"));
+        assert_eq!(client.resolved_target(), Some(Platform::Browser));
+    }
+
+    #[test]
+    fn entries_require_a_package() {
+        let manifest = parse("[library]\nname = \"lib\"\n\n[entry.server]\n");
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|e| e.contains("require a `[package]`"))
+        );
+    }
+
+    #[test]
+    fn entries_replace_the_single_entry_keys() {
+        let manifest = parse("[package]\nname = \"app\"\ntarget = \"browser\"\n\n[entry.server]\n");
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|e| e.contains("can't be combined with"))
+        );
+    }
+
+    #[test]
+    fn an_entry_name_must_be_an_identifier() {
+        let manifest = parse("[package]\nname = \"app\"\n\n[entry.\"my app\"]\n");
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|e| e.contains("valid identifier"))
+        );
+    }
+
+    #[test]
+    fn an_entry_target_must_be_a_host_platform() {
+        let none = parse("[package]\nname = \"app\"\n\n[entry.lib]\ntarget = \"none\"\n");
+        assert!(
+            none.validate()
+                .iter()
+                .any(|e| e.contains("host platform") && e.contains("`none`"))
+        );
+        let unknown = parse("[package]\nname = \"app\"\n\n[entry.app]\ntarget = \"wat\"\n");
+        assert!(
+            unknown
+                .validate()
+                .iter()
+                .any(|e| e.contains("invalid `[entry.app] target`"))
+        );
+    }
+
+    #[test]
+    fn an_entry_path_stays_inside_the_package() {
+        let manifest = parse("[package]\nname = \"app\"\n\n[entry.out]\npath = \"../out.vl\"\n");
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|e| e.contains("free of `..`"))
+        );
     }
 
     #[test]
