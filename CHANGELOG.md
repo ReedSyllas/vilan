@@ -6,6 +6,49 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.5.0 — 2026-07-14
+
+**Your types order themselves.** `<` `<=` `>` `>=` now dispatch through
+`PartialOrd` — implement (or derive) `partial_compare` and the
+operators just work, `started < deadline` on instants included. v0.4.0
+steered you to calling `lt` by hand; that detour is over.
+
+**Platform checking follows the instantiation.** A generic function is
+checked with the types each call actually binds — `save(disk_store)` in
+the server entry charges `std::fs` there and only there, while
+`save(memory_store)` in the browser entry stays clean. Before, one
+colored instantiation could taint every use of the generic.
+
+**Boundaries you can declare: `[platform("browser")]`.** Inference
+still colors everything; a fence turns intent into a checked promise —
+verified on every compile, for every host the pattern names, libraries
+included. Reach outside it and the error renders the chain from the
+fenced function.
+
+**Struct literals are operands.** `Point { x = 1, y = 2 } == p`
+compares and `Rect { .. }.area()` chains — no more binding to a local
+first. Conditions keep the brace for the block (`if Foo { … }` stays a
+condition and a block), so a literal in a condition is parenthesized:
+`if p == (Point { x = 1 }) { … }`.
+
+**A local module may share a std name.** `pkg::ui` is always your
+`ui.vl`; `std::ui` is always std's. Resolution is scoped by the import
+root, so naming a module `ui`, `json`, or `io` no longer collides with
+— or silently loses to — the standard library. (`pkg::` also no longer
+accidentally aliases std modules you never wrote.)
+
+**Hover tells the whole story.** The editor now renders the full
+declaration — signature with parameter names, generics with their
+bounds, struct and enum bodies, an `async` prefix when inference adds
+one — plus the `//` doc block above the item, its `[platform]` fence,
+and the inferred platform requirement with its via-chain.
+
+Also fixed and improved:
+
+- Impl binders: a `type T` binder impl declared before the subject's
+  other impls no longer misresolves, and binders in trait-argument
+  position (`impl X with Wire<type F>`) register and dispatch.
+
 ## v0.4.0 — 2026-07-14
 
 **Platform checking moved from imports to reach.** A build may import
