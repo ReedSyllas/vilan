@@ -81,6 +81,20 @@ fn assert_fails(source: &str) {
     );
 }
 
+/// Asserts compilation fails with a diagnostic containing `message_part` — like
+/// [`assert_fails`] but pinning *which* error, so a test can't pass on an
+/// unrelated failure.
+#[track_caller]
+fn assert_fails_with(source: &str, message_part: &str) {
+    match compile(source) {
+        Ok(_) => panic!("expected a compile error, but it compiled cleanly"),
+        Err(errors) => assert!(
+            errors.iter().any(|error| error.contains(message_part)),
+            "no diagnostic contains {message_part:?}; got: {errors:#?}"
+        ),
+    }
+}
+
 #[track_caller]
 fn assert_compiles_browser(source: &str) {
     if let Err(errors) = compile_browser(source) {
@@ -12881,7 +12895,10 @@ fn an_iterator_protocols_next_call_colors_the_loop() {
         }
 
         fun main() {
-            for n in Audited { limit = 3 } {
+            // The struct-literal iterable is parenthesized: a `for .. in`
+            // iterable is a condition position, which excludes bare struct
+            // literals (§H.1).
+            for n in (Audited { limit = 3 }) {
                 let _n = n;
             }
         }
@@ -15074,15 +15091,18 @@ fn a_for_iterable_does_not_take_a_struct_literal() {
     );
 }
 
-// A bare type name in VALUE position is accepted today (`let q = Point;`
-// compiles), which is what lets `if p == Point { x = 1 } { .. }` silently
-// misparse into a condition against the type object plus two blocks and then
-// trap at runtime. The analyzer should reject a type name used as a value;
-// both pins un-ignore when it does (backlog §B.27).
+// --- B.27: a bare type name is not a value --------------------------------------
+// A bare name that resolves to a non-value entity — a type (struct/enum,
+// primitives included), a trait, a type parameter, or a module — is rejected in
+// value position (it used to compile, `let q = Point;` binding the constructor
+// object). This is also what disarmed the condition-position misparse: with H.1
+// keeping struct literals out of conditions, `if p == Point { .. } { .. }`
+// parses `p == Point` as the condition, which now errors on `Point` instead of
+// running against the type object and trapping at runtime.
+
 #[test]
-#[ignore]
-fn a_bare_type_name_is_not_a_value() {
-    assert_fails(
+fn a_bare_struct_name_is_not_a_value() {
+    assert_fails_with(
         r#"
         struct Point {
             x: i32,
@@ -15092,13 +15112,95 @@ fn a_bare_type_name_is_not_a_value() {
             let q = Point;
         }
         "#,
+        "`Point` is a type, not a value",
     );
 }
 
 #[test]
-#[ignore]
+fn a_bare_enum_name_is_not_a_value() {
+    assert_fails_with(
+        r#"
+        enum Color {
+            Red,
+            Green,
+        }
+
+        fun main() {
+            let q = Color;
+        }
+        "#,
+        "`Color` is a type, not a value",
+    );
+}
+
+#[test]
+fn a_bare_trait_name_is_not_a_value() {
+    assert_fails_with(
+        r#"
+        trait Show {
+        }
+
+        fun main() {
+            let q = Show;
+        }
+        "#,
+        "`Show` is a trait, not a value",
+    );
+}
+
+#[test]
+fn a_bare_type_parameter_is_not_a_value() {
+    // Inside an instantiated generic, `T` names a type, not a runtime value.
+    assert_fails_with(
+        r#"
+        import std::print;
+
+        fun identity<T>(x: T): T {
+            let q = T;
+            x
+        }
+
+        fun main() {
+            print(identity(5));
+        }
+        "#,
+        "`T` is a type parameter, not a value",
+    );
+}
+
+#[test]
+fn a_bare_primitive_name_is_not_a_value() {
+    // Primitives are source `external struct`s, so they take the same path.
+    assert_fails_with(
+        r#"
+        fun main() {
+            let q = i32;
+        }
+        "#,
+        "`i32` is a type, not a value",
+    );
+}
+
+#[test]
+fn a_bare_module_name_is_not_a_value() {
+    assert_fails_with(
+        r#"
+        import std::math;
+
+        fun main() {
+            let q = math;
+        }
+        "#,
+        "`math` is a module, not a value",
+    );
+}
+
+#[test]
 fn an_unparenthesized_struct_literal_condition_is_rejected_not_misparsed() {
-    assert_fails(
+    // The realistic shape: a user writes a struct-literal comparison in a
+    // condition. H.1 parses `p == Point` (struct-free condition); B.27 then
+    // rejects `Point` as a value, so it's a clear error, not a runtime trap.
+    assert_fails_with(
         r#"
         import std::print;
 
@@ -15109,10 +15211,64 @@ fn an_unparenthesized_struct_literal_condition_is_rejected_not_misparsed() {
 
         fun main() {
             let p = Point { x = 1 };
-            if p == Point { x = 1 } {
+            if p == Point {
                 print("y");
             }
         }
         "#,
+        "`Point` is a type, not a value",
+    );
+}
+
+// --- B.27 regression guards: these value forms must still compile --------------
+
+#[test]
+fn an_enum_variant_and_struct_literal_stay_values() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        enum Color {
+            Red,
+            Green,
+        }
+
+        [derive(PartialEq)]
+        struct Point {
+            x: i32,
+        }
+
+        fun main() {
+            let c = Color::Red;
+            print(c is Color::Red);
+            let p = Point { x = 1 };
+            print(p == Point { x = 1 });
+        }
+        "#,
+        "true\ntrue\n",
+    );
+}
+
+#[test]
+fn a_bare_function_name_stays_a_value() {
+    // B20 fn→closure coercion: a function used as a value (here coerced to a
+    // closure parameter) is not rejected — only type-like names are.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun apply(f: |i32| i32, x: i32): i32 {
+            f(x)
+        }
+
+        fun double(x: i32): i32 {
+            x * 2
+        }
+
+        fun main() {
+            print(apply(double, 21));
+        }
+        "#,
+        "42\n",
     );
 }

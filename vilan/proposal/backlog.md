@@ -419,17 +419,24 @@ have gaps.
     WITH the operators — dispatching a native into one recurses; found
     live). 6 pins; `started < deadline` restored in `docs/std/time.md`.
 
-27. **A bare type name is accepted in value position** (S; found 2026-07-14
-    while pinning §H.1's condition negatives) — `let q = Point;` compiles
-    clean, and the emitted JS binds the constructor object. Consequence: the
-    condition-position misparse trap — `if p == Point { x = 1 } { .. }`
-    parses as `p == Point` (against the type object), an `{ x = 1 }`
-    then-block, and a trailing bare block, compiling silently and trapping
-    at runtime. The analyzer should reject a type name used as a value
-    (there are no unit structs to except); with that, the misparse becomes
-    a clear compile error. 2 `#[ignore]`d pins in `inference.rs`
-    (`a_bare_type_name_is_not_a_value`,
-    `an_unparenthesized_struct_literal_condition_is_rejected_not_misparsed`).
+27. ~~**A bare type name is accepted in value position**~~ — **FIXED
+    2026-07-14** (found while pinning §H.1's condition negatives). `let q =
+    Point;` compiled clean, binding the constructor object; it also armed the
+    condition-position trap — `if p == Point { .. } { .. }` parsed `p ==
+    Point` (against the type object) and ran, trapping at runtime. Fix: one
+    guard in the `prepped_locals` (bare value-name) resolution loop —
+    `bare_name_not_a_value(subject_id, name)` rejects a name resolving to a
+    non-value entity (`Expr::Struct`/`Enum`/`Trait`/`Generic`/`Module`,
+    primitives included as source `external struct`s; `Expr::Macro` folded in
+    from its old inline check), with a per-kind steering message. Values
+    (bindings, functions — B20 coercion — enum variants) pass through. With
+    the type name rejected early (`Expr::Error`), the misparse becomes a clear
+    error spanned at the name instead of a runtime trap. 8 live pins in
+    `inference.rs` (struct/enum/trait/type-parameter/primitive/module + the
+    realistic condition misparse + two value-form regression guards) via a new
+    `assert_fails_with` helper; ignored-pin ledger now EMPTY. One test fixture
+    repaired (`an_iterator_protocols_next_call_colors_the_loop` parenthesized
+    its struct-literal iterable, the §H.1 migration). Corpus byte-identical.
 
 23. ~~**An `effect` closure's unannotated parameter doesn't ground from a
     generic signal's payload**~~ — **FIXED 2026-07-12** (the gotchas

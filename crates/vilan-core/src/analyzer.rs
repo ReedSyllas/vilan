@@ -11696,6 +11696,47 @@ impl<'src> Analyzer<'src> {
         }
     }
 
+    /// The diagnostic to raise when the bare name `name`, resolving to
+    /// `subject_id`, is used in **value position** but names a non-value entity
+    /// — a type (struct/enum, primitives included), a trait, a type parameter,
+    /// a module, or a macro. Returns `None` when the resolution IS a value (a
+    /// binding, a function — which coerces to a closure — or an enum variant).
+    ///
+    /// This is the single guard (§B.27) that stops a type name from silently
+    /// binding as a value (`let q = Point;` used to compile, emitting the
+    /// constructor object). It also disarms the condition-position misparse it
+    /// enabled: `if p == Point { .. } { .. }` parses `p == Point` as the
+    /// condition (H.1 keeps struct literals out of conditions), which now
+    /// errors on `Point` instead of running against the type object.
+    fn bare_name_not_a_value(&self, subject_id: Id, name: &str) -> Option<String> {
+        match self.expr_id_to_expr_map.get(&subject_id) {
+            Some(Expr::Struct(_)) => Some(format!(
+                "`{name}` is a type, not a value — construct it (`{name} {{ .. }}`) \
+                 or call a static like `{name}::new(..)`"
+            )),
+            Some(Expr::Enum(_)) => Some(format!(
+                "`{name}` is a type, not a value — use one of its variants \
+                 (`{name}::Variant`)"
+            )),
+            Some(Expr::Trait(_)) => Some(format!(
+                "`{name}` is a trait, not a value — vilan has no trait objects; use \
+                 a generic parameter (`<T: {name}>`) or a concrete type"
+            )),
+            Some(Expr::Generic(_)) => Some(format!(
+                "`{name}` is a type parameter, not a value — it names a type, not a \
+                 runtime value"
+            )),
+            Some(Expr::Module(_)) => Some(format!(
+                "`{name}` is a module, not a value — qualify through it (`{name}::item`)"
+            )),
+            Some(Expr::Macro) => Some(format!(
+                "`{name}` is a macro, not a value — use it as `[{name}]` on an item \
+                 or invoke it with `macro {name}(..)`"
+            )),
+            _ => None,
+        }
+    }
+
     fn build(&mut self) {
         // Resolve imports/re-exports to a fixpoint: a re-export may name an item
         // bound by another re-export resolved in a later pass (a chain of relay
@@ -11824,26 +11865,22 @@ impl<'src> Analyzer<'src> {
         for (id, name) in self.prepped_locals.clone() {
             let scope_id = self.get_scope_id_for_entity(id);
             match self.try_get_expr_id_by_name(name, scope_id) {
-                Some(subject_id)
-                    if matches!(self.expr_id_to_expr_map.get(&subject_id), Some(Expr::Macro)) =>
-                {
-                    let diagnostics_before = self.diagnostics.len();
-                    self.diagnostics.push(Error {
-                        span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                        msg: format!(
-                            "`{name}` is a macro, not a value — use it as `[{name}]` on an \
-                             item or invoke it with `macro {name}(..)`"
-                        ),
-                    });
-                    if let Some(source) = self.source_of_id(id) {
-                        self.attribute_new_diagnostics(diagnostics_before, source);
-                    }
-                    self.expr_id_to_expr_map.insert(id, Expr::Error);
-                }
                 Some(subject_id) => {
-                    let rc = self.reference_count.entry(subject_id).or_insert(0);
-                    *rc += 1;
-                    self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
+                    if let Some(message) = self.bare_name_not_a_value(subject_id, name) {
+                        let diagnostics_before = self.diagnostics.len();
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                            msg: message,
+                        });
+                        if let Some(source) = self.source_of_id(id) {
+                            self.attribute_new_diagnostics(diagnostics_before, source);
+                        }
+                        self.expr_id_to_expr_map.insert(id, Expr::Error);
+                    } else {
+                        let rc = self.reference_count.entry(subject_id).or_insert(0);
+                        *rc += 1;
+                        self.expr_id_to_expr_map.insert(id, Expr::Local(subject_id));
+                    }
                 }
                 None => {
                     let diagnostics_before = self.diagnostics.len();

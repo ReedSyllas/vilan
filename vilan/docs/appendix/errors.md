@@ -228,6 +228,16 @@ output (a closure, a host object). Fold values, not behavior.
 **A struct literal in a condition parses as the block**
 Struct literals are ordinary operator operands (`Point { … } == q`
 compares), but condition positions exclude them — after `if Foo` or a
-`match` subject, the `{` is the block/arms, by design. Parenthesize the
-literal there: `if p == (Point { x = 1 }) { … }`.
+`match` subject, the `{` is the block/arms, by design. Written without
+parentheses, `if p == Point { … } { … }` leaves a bare `Point` as the
+condition's operand, which reports **"`Point` is a type, not a value"**.
+Parenthesize the literal: `if p == (Point { x = 1 }) { … }`.
 → [spec §3.8](../spec/grammar.md)
+
+**"`Name` is a type, not a value"** (also *"a trait / a type parameter /
+a module, not a value"*)
+A type, trait, type parameter, or module name was used where a value is
+expected (`let q = Point;`). A type names a kind, not a runtime value —
+construct it (`Point { … }`), name a variant (`Color::Red`), or call a
+static (`Point::new(…)`).
+→ [spec §4.2](../spec/names.md)
