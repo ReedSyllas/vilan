@@ -428,21 +428,25 @@ impl Document {
         }
     }
 
-    /// The function the entity under the cursor *names*, if any: a declaration
-    /// name, a binding that resolves to a function, or a call's callee
-    /// (including method calls, whose wired subject is a `Local` pointing at
-    /// the resolved method). Deliberately strict — a variable holding a
-    /// function's *result* names no function, so it inherits no requirement.
+    /// The requirement-carrying entity the cursor *names*, if any: a function
+    /// declaration name, a binding that resolves to a function or to a
+    /// module-level binding with a requirement (its initializer is code), or
+    /// a call's callee (including method calls, whose wired subject is a
+    /// `Local` pointing at the resolved method). Deliberately strict — a
+    /// local holding a function's *result* names nothing; only ids the
+    /// requirements map actually knows can surface a line.
     fn function_target(&self, program: &Program, id: Id) -> Option<Id> {
-        let is_function = |id: &Id| {
-            program.functions.contains_key(id) || program.external_functions.contains_key(id)
+        let carries_requirement = |id: &Id| {
+            program.functions.contains_key(id)
+                || program.external_functions.contains_key(id)
+                || self.platform_requirements.contains_key(id)
         };
-        if is_function(&id) {
+        if carries_requirement(&id) {
             return Some(id);
         }
         match program.entity_map.get(&id)? {
             Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => {
-                is_function(binding).then_some(*binding)
+                carries_requirement(binding).then_some(*binding)
             }
             Expr::Function(function_id) | Expr::ExternalFunction(function_id) => Some(*function_id),
             Expr::Call(call_id) => {
@@ -1657,6 +1661,21 @@ mod tests {
         assert!(
             hover.contains("requires the `process` layer of `std` (via `write_file (std::fs)`)"),
             "{hover}"
+        );
+    }
+
+    // A module-level binding's requirement rides hover like a function's —
+    // its initializer is code, and the line says what running it needs.
+    #[test]
+    fn hover_on_a_global_reference_shows_the_initializers_requirement() {
+        let hover = hover_at_cursor(
+            "import std::fs::read_file_to_str;\n\nlet cache = read_file_to_str(\"cache.txt\");\n\nfun main() {\n\tlet content = ca|che;\n}\n",
+        );
+        assert!(
+            hover.as_deref().is_some_and(|hover| hover.contains(
+                "requires the `process` layer of `std` (via `read_file_to_str (std::fs)`)"
+            )),
+            "{hover:?}"
         );
     }
 

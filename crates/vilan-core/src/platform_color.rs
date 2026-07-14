@@ -17,9 +17,12 @@
 //! - A call through a closure *value* descends nowhere: a closure's body was
 //!   already charged to the function that **created** it (the v1 creator
 //!   rule), which the walk reaches lexically via the closure-parent links.
-//! - Known v1 gap (recorded in the proposal): a *direct* call in a
-//!   module-level initializer is not a graph node and is not walked; global
-//!   closures are.
+//! - A **module-level binding** is reached by *reference*: its initializer
+//!   runs iff something reachable references it (F6 — the same rule emission
+//!   uses), so a reference is an edge, and the initializer's calls, created
+//!   closures, and references to other bindings are the binding's out-edges.
+//!   A `const`-marked initializer runs in the compile-time interpreter, not
+//!   on the build platform — it has no edges and seeds nothing.
 //!
 //! A violation reports the call chain from the entry (backlog §E.8's
 //! standard), anchored at the deepest call site in **user** code.
@@ -32,7 +35,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::analyzer::Program;
-use crate::call_graph::{CallGraph, CallTarget, IndirectReason, Node};
+use crate::call_graph::CallGraph;
 use crate::error::Error;
 use crate::id::Id;
 use crate::span::Span;
@@ -48,7 +51,6 @@ pub fn check(program: &mut Program, platform: Platform) {
         return;
     };
     let graph = CallGraph::build(program);
-    let children = closure_children(&graph);
 
     // The DFS stack carries the discovery path: (node, the call span that
     // reached it, whether that call site is in user code).
@@ -59,7 +61,6 @@ pub fn check(program: &mut Program, platform: Platform) {
         program,
         platform,
         &graph,
-        &children,
         entry,
         None,
         &mut visited,
@@ -74,7 +75,6 @@ fn walk(
     program: &Program,
     platform: Platform,
     graph: &CallGraph,
-    children: &HashMap<Id, Vec<Id>>,
     node: Id,
     arrived_by: Option<(Span, bool)>,
     visited: &mut HashSet<Id>,
@@ -101,12 +101,11 @@ fn walk(
         }
     }
 
-    for (callee, arrived) in edges(program, graph, children, node) {
+    for (callee, arrived) in edges(program, graph, node) {
         walk(
             program,
             platform,
             graph,
-            children,
             callee,
             arrived,
             visited,
@@ -118,62 +117,21 @@ fn walk(
     trail.pop();
 }
 
-/// Lexical closure children: creating a closure charges its body to the
-/// creator (the v1 creator rule).
-fn closure_children(graph: &CallGraph) -> HashMap<Id, Vec<Id>> {
-    let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
-    for node in graph.nodes() {
-        if let Node::Closure(closure_id) = node {
-            if let Some(parent) = graph.closure_parent_of(*closure_id) {
-                children.entry(parent).or_default().push(*closure_id);
-            }
-        }
-    }
-    children
-}
-
-/// Everything `node` charges, with the call span that reaches each charge
-/// (`None` for a created closure's body): resolved callees and externs,
-/// every dispatch candidate of a trait/generic-bounded call, and the
-/// closures `node` creates. The single edge vocabulary of this pass — the
-/// admission walk and the [`requirements`] fixpoint both consume it, so the
-/// two can never drift apart.
-fn edges(
-    program: &Program,
-    graph: &CallGraph,
-    children: &HashMap<Id, Vec<Id>>,
-    node: Id,
-) -> Vec<(Id, Option<(Span, bool)>)> {
-    let mut edges = Vec::new();
-    for call in graph.calls_of(node) {
-        let span = program.span_map.get(&call.call_id).map(|span| **span);
-        let in_user = span.is_some() && is_user_code(program, call.call_id);
-        let arrived = span.map(|span| (span, in_user));
-        match call.target {
-            CallTarget::Function(callee)
-            | CallTarget::Closure(callee)
-            | CallTarget::External(callee) => {
-                edges.push((callee, arrived));
-            }
-            CallTarget::Variant(_) => {}
-            CallTarget::Indirect(IndirectReason::Value) => {
-                // The creator rule: whoever created the closure was charged
-                // for its body; a call through the value adds nothing.
-            }
-            CallTarget::Indirect(_) => {
-                for candidate in crate::async_infer::dispatch_candidates(program, call.call_id) {
-                    edges.push((candidate, arrived));
-                }
-            }
-        }
-    }
-    // Creating a closure charges its body (v1 creator rule).
-    if let Some(created) = children.get(&node) {
-        for closure in created {
-            edges.push((*closure, None));
-        }
-    }
-    edges
+/// [`CallGraph::successors`] — the shared edge vocabulary — with each site
+/// expression resolved to the diagnostic's raw material: its span and whether
+/// it lies in user code (`None` for a created closure's body).
+fn edges(program: &Program, graph: &CallGraph, node: Id) -> Vec<(Id, Option<(Span, bool)>)> {
+    graph
+        .successors(program, node)
+        .into_iter()
+        .map(|(successor, site)| {
+            let arrived = site.and_then(|site| {
+                let span = program.span_map.get(&site).map(|span| **span)?;
+                Some((span, is_user_code(program, site)))
+            });
+            (successor, arrived)
+        })
+        .collect()
 }
 
 /// Per-function platform requirements, rendered for tooling: every function,
@@ -194,17 +152,18 @@ fn edges(
 /// no chain. Multiple layers render one line each, in label order.
 pub fn requirements(program: &Program) -> HashMap<Id, String> {
     let graph = CallGraph::build(program);
-    let children = closure_children(&graph);
 
-    // The node universe: every code-bearing node plus every extern (a leaf
-    // that can seed a requirement), in deterministic build order.
+    // The node universe: every code-bearing node, every extern (a leaf that
+    // can seed a requirement), and every module-level binding (whose
+    // initializer both seeds and propagates), in deterministic build order.
     let mut universe: Vec<Id> = graph.nodes().iter().map(|node| node.id()).collect();
     universe.extend(program.external_functions.keys().copied());
+    universe.extend(program.module_level_bindings());
 
     let mut callers: HashMap<Id, Vec<Id>> = HashMap::new();
-    for node in graph.nodes() {
-        for (callee, _) in edges(program, &graph, &children, node.id()) {
-            callers.entry(callee).or_default().push(node.id());
+    for id in &universe {
+        for (callee, _) in edges(program, &graph, *id) {
+            callers.entry(callee).or_default().push(*id);
         }
     }
 
@@ -264,10 +223,25 @@ struct Requirement<'program> {
     patterns: &'program [crate::target::PlatformPattern],
 }
 
+/// Whether `id` is a binding whose initializer is `const`-marked: evaluated
+/// by the compile-time interpreter and serialized as a value, so at runtime
+/// it is data — it runs nothing and requires nothing of the build platform.
+fn is_const_global(program: &Program, id: Id) -> bool {
+    program
+        .variables
+        .get(&id)
+        .and_then(|variable| variable.initial)
+        .is_some_and(|initial| program.const_exprs.contains(&initial))
+}
+
 /// The platform requirement seeded by `node`'s definition site: the layer
 /// whose root contains its source file, if any. Base-layer and user files
-/// (empty-pattern entries or no entry) seed nothing.
+/// (empty-pattern entries or no entry) seed nothing; a `const` binding is
+/// compile-time data and seeds nothing wherever it is defined.
 fn requirement_of<'program>(program: &'program Program, node: Id) -> Option<Requirement<'program>> {
+    if is_const_global(program, node) {
+        return None;
+    }
     let source = program.source_of(node)?;
     let path = program.sources.get(source.0 as usize)?;
     for (root, _library, label, patterns) in &program.layer_platforms {
@@ -365,6 +339,9 @@ fn name_of(program: &Program, id: Id) -> String {
     }
     if let Some(external) = program.external_functions.get(&id) {
         return external.name.to_string();
+    }
+    if let Some(variable) = program.variables.get(&id) {
+        return variable.name.to_string();
     }
     "closure".to_string()
 }

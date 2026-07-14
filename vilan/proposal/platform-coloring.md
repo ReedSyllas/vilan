@@ -95,6 +95,31 @@ body — so nothing errors. Reach it, and the error names the chain.
   *store* colored closures it never calls — is recorded as a future step; it
   is the platform analogue of J2's async-type-in-field limitation and should
   probably land with it.
+- A named function passed as a *value* (fn-to-closure coercion,
+  fn-coercion.md) has no creation event for that rule, so **the reference is
+  the charge**: `apply(save)` colors the passer with `save`'s body color,
+  and the later value-indirect calls stay uncharged — same shape as the
+  closure rule, anchored at the coercion site. *(Added 2026-07-13; shipped
+  with the initializer work — the reference edge was missing entirely, so a
+  browser build could pass a `@process` function into a callback and ship
+  it.)*
+- **Module-level initializers** (added 2026-07-13, closing the recorded v1
+  gap): a binding's initializer runs iff something reachable references it —
+  F6, the transformer's stated emission semantics ("a dropped binding's
+  initializer does not run; top-level side effects are not a promise"). So a
+  *reference* to a module-level binding is an edge to it, and the binding's
+  out-edges are its initializer's calls, its created closures (the creator
+  rule, with the binding as creator — global closures previously charged
+  nobody), and its references to other bindings. Chains render the binding
+  as a frame: `main → cache → read_file_to_str (std::fs)`. A `const`-marked
+  initializer is evaluated at compile time and ships as a serialized value —
+  it has no edges and seeds nothing, wherever it is defined. Emission
+  consumes the same reachability (`CallGraph::reachable_bindings`): a
+  dropped binding is never even walked, so its callees — and their
+  `import … from "node:…"` extern lines, which previously leaked into every
+  bundle and would kill a real browser at module parse — never emit.
+  Admission and emission share one successor expansion
+  (`CallGraph::successors`), so *emitted ⊆ admitted* holds by construction.
 
 ### 3.3 Checking
 

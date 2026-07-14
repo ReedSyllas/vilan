@@ -1047,6 +1047,21 @@ have gaps.
    which interacts with B15 clauses (a clause-typed async closure) and the async-model
    phases above.
 
+3. **Async calls in module-level initializers are invisible to async inference** (M;
+   found 2026-07-13 while making initializers platform-colored) — `let state = ready();`
+   where `ready` is async type-checks as `i32` ("no errors") but holds a live Promise at
+   runtime: initializers are not `nodes()` in the call graph, so `async_infer` never sees
+   the call, and nothing awaits it (`state + 1` is garbage or a crash). Platform coloring
+   now walks initializer calls via `CallGraph::initializer_calls_of`, so the plumbing to
+   seed inference exists — but the FIX is a design question first: module init runs at
+   load, so an awaited initializer implies top-level await (the emitted bundles are ESM,
+   so TLA is *available* on every emitted host) plus an ordering story for dependent
+   bindings. Until designed, the cheap honest move is a diagnostic: a promise-typed
+   initializer is an error ("a module-level binding cannot await — wrap it in a
+   function"), turning the silent miscompile into a clean refusal. Probe: `async fun
+   ready(): i32 {..}` + `let state = ready();` + `print(state + 1)` — checks clean,
+   crashes under node.
+
 ---
 
 ## K. Std runtime

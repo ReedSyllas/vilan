@@ -13134,6 +13134,46 @@ impl<'src> Program<'src> {
     pub fn source_path(&self, source: SourceId) -> Option<&Path> {
         self.sources.get(source.0 as usize).map(PathBuf::as_path)
     }
+
+    /// Every module-level `let` binding of the program, in declaration order:
+    /// the globals of the entry (reached through the global scope's names,
+    /// recursing into user modules) plus the top-level `let`s of loaded (std)
+    /// modules, whose items live in their module's scope with an empty
+    /// `Module.body`. One definition shared by the transformer (F6 — a
+    /// binding emits only if something reachable references it), the call
+    /// graph, and platform coloring, so "which initializers run" can never
+    /// mean different things to emission and admission.
+    pub fn module_level_bindings(&self) -> Vec<Id> {
+        fn from_names(program: &Program, names: &[Id], bindings: &mut Vec<Id>) {
+            for id in names {
+                if program.variables.contains_key(id) {
+                    bindings.push(*id);
+                } else if let Some(module) = program.modules.get(id) {
+                    from_names(program, &module.body.0, bindings);
+                }
+            }
+        }
+        let mut bindings = Vec::new();
+        if let Some(global_scope) = self.scopes.get(&self.global_scope_id) {
+            let names: Vec<Id> = global_scope
+                .name_to_id_map
+                .iter()
+                .map(|(_, id)| *id)
+                .collect();
+            from_names(self, &names, &mut bindings);
+        }
+        for module in self.modules.values() {
+            let module_scope = module.body.1;
+            for variable_id in self.variables.keys() {
+                if self.entity_scope_map.get(variable_id) == Some(&module_scope) {
+                    bindings.push(*variable_id);
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        bindings.retain(|id| seen.insert(*id));
+        bindings
+    }
 }
 
 /// Lexes and parses a Vilan source file into an AST, leaking the source and the

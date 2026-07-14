@@ -6,9 +6,6 @@ function __at_put(list, index, value) {
 	if (index >= 0 && index < list.length) return list[index] = value;
 	throw "index out of bounds: the length is " + list.length + " but the index is " + index;
 }
-function __shared_new(value) {
-	return { v: value };
-}
 function show(plan) {
 	let out = "";
 	for (const step of plan[0]) {

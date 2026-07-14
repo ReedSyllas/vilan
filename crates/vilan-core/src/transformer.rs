@@ -55,17 +55,7 @@ pub fn transform_functions<'src>(
 ) -> Result<(JsProgram<'src>, HashMap<Id, String>), Error> {
     let mut transformer = Transformer::new(program, options);
 
-    let global_scope = program.scopes.get(&program.global_scope_id).unwrap();
-    let mut global_variables = transformer.find_global_variables(
-        &global_scope
-            .name_to_id_map
-            .iter()
-            .map(|(_, x)| *x)
-            .collect(),
-    );
-    global_variables.extend(transformer.module_level_variables());
-    let mut seen = std::collections::HashSet::new();
-    global_variables.retain(|id| seen.insert(*id));
+    let global_variables = program.module_level_bindings();
     let t_global_variables = transformer.walk_list(&global_variables);
 
     let mut names = HashMap::new();
@@ -546,19 +536,10 @@ impl<'src> Transformer<'src> {
             .get(&self.program.global_scope_id)
             .unwrap();
 
-        let mut global_variables = self.find_global_variables(
-            &global_scope
-                .name_to_id_map
-                .iter()
-                .map(|(_, x)| *x)
-                .collect(),
-        );
-        // Top-level `let`s declared in a loaded module are globals too. A loaded
-        // (std) module stores its items directly with an empty `Module.body`, so
-        // the name-walk above can't reach them; collect them by scope instead.
-        global_variables.extend(self.module_level_variables());
-        let mut seen = std::collections::HashSet::new();
-        global_variables.retain(|id| seen.insert(*id));
+        // Every module-level binding, in declaration order — the entry's own
+        // globals plus loaded modules' top-level `let`s (one shared
+        // definition; platform coloring admits the same set it emits).
+        let global_variables = self.program.module_level_bindings();
 
         let main_fn = global_scope
             .name_to_id_map
@@ -570,16 +551,24 @@ impl<'src> Transformer<'src> {
             })?;
         let main_is_async = self.program.async_functions.contains(&main_fn.id);
 
-        // Walk every module-level binding in ORDER, keeping each binding's
-        // nodes separate: inclusion is decided at assembly, after main and
-        // every required function have been walked (F6 — a binding emits only
-        // if something reachable references it). The stated semantics: a
+        // Walk the module-level bindings the entry can REACH, in declaration
+        // order, keeping each binding's nodes separate (F6 — a binding emits
+        // only if something reachable references it; the stated semantics: a
         // dropped binding's initializer does not run — module state exists
         // only if something reaches it; top-level side effects are not a
-        // promise. (Known over-approximation: a reference made inside a
-        // DROPPED binding's own initializer still retains its target.)
+        // promise). Reachability comes from the call graph — the same edges
+        // platform coloring admits over — so a dropped binding is never even
+        // walked: its initializer can't retain callees, nor drag their host
+        // `import ... from "node:..."` lines into a bundle that never runs
+        // it. Assembly still keeps only bindings that emitted code actually
+        // referenced (dispatch candidates over-approximate reachability, like
+        // everywhere else — such a binding is walked but then dropped here,
+        // and it was admission-checked by the same graph).
+        let graph = crate::call_graph::CallGraph::build(self.program);
+        let reachable_bindings = graph.reachable_bindings(self.program, main_fn.id);
         let binding_nodes: Vec<(Id, Vec<js::Node<'src>>)> = global_variables
             .iter()
+            .filter(|binding| reachable_bindings.contains(binding))
             .map(|&binding| (binding, self.walk_list(&vec![binding])))
             .collect();
 
@@ -671,39 +660,6 @@ impl<'src> Transformer<'src> {
             helpers,
             nodes,
         })
-    }
-
-    fn find_global_variables(&self, globals: &Vec<Id>) -> Vec<Id> {
-        let mut global_variables = Vec::new();
-
-        for id in globals {
-            if self.program.variables.contains_key(id) {
-                global_variables.push(*id);
-            } else if self.program.modules.contains_key(id) {
-                let module = self.program.modules.get(id).unwrap();
-                let mut children = self.find_global_variables(&module.body.0);
-                global_variables.append(&mut children);
-            }
-        }
-
-        global_variables
-    }
-
-    /// The top-level `let`s of every loaded module — variables whose declaring
-    /// scope is a module's own scope. A loaded (std) module's items are walked
-    /// straight into the program with an empty `Module.body`, so they aren't
-    /// reachable through the name-walk; this finds them by scope.
-    fn module_level_variables(&self) -> Vec<Id> {
-        let mut variables = Vec::new();
-        for module in self.program.modules.values() {
-            let module_scope = module.body.1;
-            for variable_id in self.program.variables.keys() {
-                if self.program.entity_scope_map.get(variable_id) == Some(&module_scope) {
-                    variables.push(*variable_id);
-                }
-            }
-        }
-        variables
     }
 
     /// Push an expression-position result into `body`: normally an
@@ -3759,16 +3715,8 @@ pub fn transform_const_program<'src>(
     // free locals (checked by the caller) and module-level bindings reached
     // through called functions. Everything else referenced is declared inside
     // the emitted code itself (function-body and block locals).
-    let global_scope = program.scopes.get(&program.global_scope_id).unwrap();
-    let mut module_bindings = transformer.find_global_variables(
-        &global_scope
-            .name_to_id_map
-            .iter()
-            .map(|(_, x)| *x)
-            .collect(),
-    );
-    module_bindings.extend(transformer.module_level_variables());
-    let external: HashSet<Id> = module_bindings
+    let external: HashSet<Id> = program
+        .module_level_bindings()
         .into_iter()
         .chain(external_bindings.iter().copied())
         .collect();

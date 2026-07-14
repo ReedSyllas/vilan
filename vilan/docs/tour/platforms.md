@@ -16,6 +16,11 @@ runtime crash. That's the whole idea of this chapter.
 > std layers, flowing through calls — the same way `async` is inferred),
 > and checks the colors only along paths that start at your `main`. When
 > a path crosses onto the wrong platform, the error shows that path.
+> Module-level `let`s follow the same rule: a binding's initializer runs
+> (and is checked, and is bundled) only if something reachable references
+> it — a server-only global in a shared file costs the browser build
+> nothing. `const` initializers run at build time and ship as plain
+> values, so they never color anything.
 > The editor shows the same information as you write: violations appear
 > as live diagnostics at the offending call, and hovering a function
 > shows its inferred requirement and how it got it — e.g. ``requires the

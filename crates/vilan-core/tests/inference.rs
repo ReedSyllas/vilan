@@ -225,7 +225,16 @@ fn requirement_line_of(source: &str, function_name: &str) -> Option<String> {
                         .find(|(_, function)| function.name == function_name.as_str())
                         .map(|(id, _)| *id)
                 })
-                .unwrap_or_else(|| panic!("no function named `{function_name}`"));
+                .or_else(|| {
+                    // A module-level binding: its initializer is code, so it
+                    // carries a requirement line like a function does.
+                    program
+                        .variables
+                        .iter()
+                        .find(|(_, variable)| variable.name == function_name.as_str())
+                        .map(|(id, _)| *id)
+                })
+                .unwrap_or_else(|| panic!("no function or binding named `{function_name}`"));
             vilan_core::platform_color::requirements(&program)
                 .get(&function_id)
                 .cloned()
@@ -12085,6 +12094,366 @@ fn an_unreached_function_still_knows_its_requirement() {
     assert_eq!(
         line,
         "requires the `process` layer of `std` (via `write_file (std::fs)`)"
+    );
+}
+
+// --- platform coloring: module-level initializers ----------------------------
+//
+// A module-level binding's initializer runs iff something reachable
+// references it (F6 — emission's rule), so a REFERENCE is an edge and the
+// initializer's calls color like any body. Previously initializers were not
+// graph nodes at all: a browser build could reference a binding whose
+// initializer called `std::fs` and compile clean, shipping a load-time crash.
+
+#[test]
+fn a_module_initializers_call_colors_the_referencing_entry() {
+    assert_fails_browser_with(
+        r#"
+        import std::fs::read_file_to_str;
+
+        let cache = read_file_to_str("cache.txt");
+
+        fun main() {
+            let content = cache;
+        }
+        "#,
+        "`read_file_to_str` requires the `process` layer of `std` and cannot run on `browser`\n  reachable from the entry: main → cache → read_file_to_str (std::fs)",
+    );
+}
+
+#[test]
+fn an_initializer_violation_anchors_at_the_initializer_call() {
+    // The deepest user-code call site on the path is the initializer's own
+    // call — the squiggle lands on the code that would run off-platform.
+    // (Span-pinned on the node build via a browser-layer binding, the
+    // `navigate` precedent.)
+    assert_fails_spanning(
+        r#"
+        import std::storage::get;
+
+        let token = get("notes-token");
+
+        fun main() {
+            let t = token;
+        }
+        "#,
+        r#"get("notes-token")"#,
+        "requires the `browser` layer of `std` and cannot run on `node",
+    );
+}
+
+#[test]
+fn an_initializer_reaching_a_user_function_colors_through_it() {
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        fun boot_check(): bool {
+            write_file("state", "checked");
+            true
+        }
+
+        let ready = boot_check();
+
+        fun main() {
+            let r = ready;
+        }
+        "#,
+        "reachable from the entry: main → ready → boot_check → write_file (std::fs)",
+    );
+}
+
+#[test]
+fn a_global_referencing_a_colored_global_chains_through_both() {
+    assert_fails_browser_with(
+        r#"
+        import std::fs::read_file_to_str;
+
+        let raw = read_file_to_str("data.txt");
+        let copy = raw;
+
+        fun main() {
+            let c = copy;
+        }
+        "#,
+        "reachable from the entry: main → copy → raw → read_file_to_str (std::fs)",
+    );
+}
+
+#[test]
+fn a_global_closures_body_charges_the_binding_that_creates_it() {
+    // The creator rule, at module level: the initializer creates the closure,
+    // so referencing the binding is what admits (or rejects) the body.
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        let saver = |content: str| write_file("state", content);
+
+        fun main() {
+            let s = saver;
+        }
+        "#,
+        "reachable from the entry: main → saver → closure → write_file (std::fs)",
+    );
+}
+
+#[test]
+fn calling_a_global_closure_colors_via_its_binding() {
+    // Before initializer edges, a global closure's body was charged to
+    // NOBODY: the call is value-indirect (skipped) and it has no lexical
+    // parent. The call's subject is a reference to the binding, so the
+    // reference edge now carries the charge.
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        let saver = |content: str| write_file("state", content);
+
+        fun main() {
+            saver("boot");
+        }
+        "#,
+        "requires the `process` layer of `std` and cannot run on `browser`",
+    );
+}
+
+#[test]
+fn an_unreferenced_colored_global_is_elided_not_rejected() {
+    // F6: a dropped binding's initializer does not run — referencing it only
+    // from unreached code keeps the browser build clean.
+    assert_compiles_browser(
+        r#"
+        import std::fs::read_file_to_str;
+
+        let cache = read_file_to_str("cache.txt");
+
+        fun server_only(): str {
+            cache
+        }
+
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn a_neutral_global_is_colorless_everywhere() {
+    assert_compiles_browser(
+        r#"
+        import std::print;
+
+        let greeting = "hello";
+
+        fun main() {
+            print(greeting);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_const_bindings_initializer_is_compile_time_data() {
+    // `const` initializers run in the compile-time interpreter and ship as
+    // serialized values — nothing runs on the build platform, so the binding
+    // seeds nothing and carries no requirement line.
+    assert_compiles_browser(
+        r#"
+        import std::print;
+
+        let width = const 2 + 2;
+
+        fun main() {
+            print(width);
+        }
+        "#,
+    );
+    assert_eq!(
+        requirement_line_of(
+            r#"
+        import std::print;
+
+        let width = const 2 + 2;
+
+        fun main() {
+            print(width);
+        }
+        "#,
+            "width",
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_coerced_functions_body_charges_the_reference_site() {
+    // fn-to-closure coercion (proposal/fn-coercion.md): a named function
+    // passed as a value has no closure-creation event for the creator rule,
+    // so the REFERENCE is the charge — every later call through the value is
+    // deliberately uncharged (`Indirect(Value)`).
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        fun save(content: str) {
+            write_file("state", content);
+        }
+
+        fun apply(action: |str| void) {
+            action("x");
+        }
+
+        fun main() {
+            apply(save);
+        }
+        "#,
+        "reachable from the entry: main → save → write_file (std::fs)",
+    );
+}
+
+#[test]
+fn an_index_expressions_subject_reference_colors() {
+    // The `Index` collector blind spot: `cache[0]` never walked its subject,
+    // so the reference — and the initializer behind it — went unseen (it also
+    // dropped load-bearing bindings from emission; `const.vl`'s golden pins
+    // that side).
+    assert_fails_browser_with(
+        r#"
+        import std::print;
+        import std::fs::read_file_to_str;
+
+        let cache = [read_file_to_str("cache.txt")];
+
+        fun main() {
+            print(cache[0]);
+        }
+        "#,
+        "requires the `process` layer of `std` and cannot run on `browser`",
+    );
+}
+
+#[test]
+fn an_iterator_protocols_next_call_colors_the_loop() {
+    // `for x in iterable` calls the resolved protocol `next()` every pass —
+    // an edge anchored at the loop (previously invisible: the desugar happened
+    // at emission, after the graph was built).
+    assert_fails_browser_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        import std::iterator::Iterator;
+        import std::fs::write_file;
+
+        mut produced = 0;
+
+        struct Audited { limit: i32 }
+
+        impl Audited with Iterator<i32> {
+            fun next(self): Option<i32> {
+                write_file("audit.log", "tick");
+                produced = produced + 1;
+                if produced <= self.limit {
+                    Some(produced)
+                } else {
+                    None
+                }
+            }
+        }
+
+        fun main() {
+            for n in Audited { limit = 3 } {
+                let _n = n;
+            }
+        }
+        "#,
+        "requires the `process` layer of `std` and cannot run on `browser`",
+    );
+}
+
+#[test]
+fn a_dropped_bindings_initializer_leaves_no_residue_in_the_bundle() {
+    // Emission's half of F6 (the phantom-retention fix): a binding referenced
+    // only by unreached code must not drag its callees — nor their host
+    // `import ... from "node:..."` lines — into the bundle. A browser bundle
+    // with a `node:` import fails at module parse, before any code runs.
+    let source = r#"
+        import std::fs::read_file_to_str;
+
+        let cache = read_file_to_str("cache.txt");
+
+        fun server_only(): str {
+            cache
+        }
+
+        fun main() {}
+        "#;
+    let browser = compile_browser(source).expect("the elided reach compiles for the browser");
+    assert!(
+        !browser.contains("node:"),
+        "phantom host import in the browser bundle:\n{browser}"
+    );
+    assert!(
+        !browser.contains("cache.txt"),
+        "dropped initializer emitted:\n{browser}"
+    );
+    // The same binding still emits where the reference is load-bearing. (A
+    // reference inside an ELIDED unused local doesn't count as running the
+    // initializer — emission drops both, and admission merely
+    // over-approximates in the safe direction by still checking it.)
+    let node = compile(
+        r#"
+        import std::print;
+        import std::fs::read_file_to_str;
+
+        let cache = read_file_to_str("cache.txt");
+
+        fun main() {
+            print(cache);
+        }
+        "#,
+    )
+    .expect("the node build admits the reach");
+    assert!(node.contains("cache.txt"), "reached initializer must emit");
+}
+
+#[test]
+fn a_globals_requirement_line_serves_hover_like_a_functions() {
+    let line = requirement_line_of(
+        r#"
+        import std::fs::read_file_to_str;
+
+        let cache = read_file_to_str("cache.txt");
+
+        fun main() {}
+        "#,
+        "cache",
+    )
+    .expect("`cache`'s initializer reaches the layer");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `read_file_to_str (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_function_referencing_a_colored_global_inherits_its_line() {
+    let line = requirement_line_of(
+        r#"
+        import std::fs::read_file_to_str;
+
+        let cache = read_file_to_str("cache.txt");
+
+        fun peek(): str {
+            cache
+        }
+
+        fun main() {}
+        "#,
+        "peek",
+    )
+    .expect("`peek` runs the initializer by referencing the binding");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `cache → read_file_to_str (std::fs)`)"
     );
 }
 
