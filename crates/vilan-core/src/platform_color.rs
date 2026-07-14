@@ -189,12 +189,42 @@ struct Requirement<'program> {
 fn requirement_of<'program>(program: &'program Program, node: Id) -> Option<Requirement<'program>> {
     let source = program.source_of(node)?;
     let path = program.sources.get(source.0 as usize)?;
-    for (root, label, patterns) in &program.layer_platforms {
+    for (root, _library, label, patterns) in &program.layer_platforms {
         if !patterns.is_empty() && path.starts_with(root) {
             return Some(Requirement { label, patterns });
         }
     }
     None
+}
+
+/// A frame's display name: bare for user code, `name (lib::module)` for
+/// library code — the chain then reads `main → boot (server::store) →
+/// exists (std::fs)`.
+fn frame_label(program: &Program, id: Id) -> String {
+    let name = name_of(program, id);
+    if is_user_code(program, id) {
+        return name;
+    }
+    let module = program
+        .source_of(id)
+        .and_then(|source| program.sources.get(source.0 as usize))
+        .and_then(|path| {
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            let library = program
+                .layer_platforms
+                .iter()
+                .find(|(root, _, _, _)| path.starts_with(root))
+                .map(|(_, library, _, _)| library.clone())?;
+            Some(if stem == "lib" {
+                library
+            } else {
+                format!("{library}::{stem}")
+            })
+        });
+    match module {
+        Some(module) => format!("{name} ({module})"),
+        None => name,
+    }
 }
 
 /// Whether the entity's file is the user's own code — not under any recorded
@@ -209,7 +239,7 @@ fn is_user_code(program: &Program, id: Id) -> bool {
     !program
         .layer_platforms
         .iter()
-        .any(|(root, _, _)| path.starts_with(root))
+        .any(|(root, _, _, _)| path.starts_with(root))
 }
 
 fn violation(
@@ -221,7 +251,7 @@ fn violation(
 ) -> Error {
     let chain = trail
         .iter()
-        .map(|(id, _)| name_of(program, *id))
+        .map(|(id, _)| frame_label(program, *id))
         .collect::<Vec<_>>()
         .join(" → ");
     // Anchor at the deepest user-code call site on the path; a violation with

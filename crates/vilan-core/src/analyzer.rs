@@ -13063,7 +13063,7 @@ pub struct Program<'src> {
     // Library layer roots with their platform patterns (plus base roots with
     // empty patterns, marking library territory) — the seeds and the
     // user-code test for platform coloring (`platform_color`).
-    pub layer_platforms: Vec<(PathBuf, String, Vec<PlatformPattern>)>,
+    pub layer_platforms: Vec<(PathBuf, String, String, Vec<PlatformPattern>)>,
     // Use-site identifier spans for field accesses / method calls (`.x`), keyed
     // by the access expr id — drives rename and go-to-definition on members.
     pub member_name_spans: HashMap<Id, Span>,
@@ -15687,16 +15687,22 @@ pub fn analyze<'src>(
     // patterns, and every base root (empty patterns) so user-code detection
     // knows library territory.
     let layer_platforms = {
-        let mut recorded: Vec<(PathBuf, String, Vec<PlatformPattern>)> = Vec::new();
+        let mut recorded: Vec<(PathBuf, String, String, Vec<PlatformPattern>)> = Vec::new();
         let record = |name: &str, spec: &PackageSpec, recorded: &mut Vec<_>| {
             for layer in &spec.layers {
                 recorded.push((
                     layer.root.clone(),
+                    name.to_string(),
                     format!("the `{}` layer of `{name}`", layer.name),
                     layer.patterns.clone(),
                 ));
             }
-            recorded.push((spec.base_root.clone(), format!("`{name}`"), Vec::new()));
+            recorded.push((
+                spec.base_root.clone(),
+                name.to_string(),
+                format!("`{name}`"),
+                Vec::new(),
+            ));
         };
         record("std", std, &mut recorded);
         for (dep_name, index) in &workspace.entry_dependencies {
