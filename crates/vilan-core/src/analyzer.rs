@@ -1198,6 +1198,13 @@ fn operator_trait_method(op: BinaryOp) -> Option<(&'static str, &'static str)> {
         // `!=` dispatches to `eq` too; the transformer negates it. (Resolving the
         // `ne` default here would miss impls that only provide `eq`.)
         BinaryOp::Eq | BinaryOp::NotEq => Some(("PartialEq", "eq")),
+        // Orderings dispatch to `PartialOrd`'s comparison methods — usually
+        // the trait DEFAULTS (impls provide `partial_compare`), resolved
+        // through the inherited-default path like any method call (B25).
+        BinaryOp::Lt => Some(("PartialOrd", "lt")),
+        BinaryOp::Gt => Some(("PartialOrd", "gt")),
+        BinaryOp::LtEq => Some(("PartialOrd", "le")),
+        BinaryOp::GtEq => Some(("PartialOrd", "ge")),
         _ => None,
     }
 }
@@ -12292,20 +12299,6 @@ impl<'src> Analyzer<'src> {
                         });
                         continue;
                     }
-                    if !self.is_native_operator_type(&lhs_type)
-                        && !matches!(lhs_type, Type::Generic(_))
-                    {
-                        let label = self.pretty_print_type(&lhs_type, &HashMap::new());
-                        self.diagnostics.push(Error {
-                            span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
-                            msg: format!(
-                                "`{label}` cannot be compared with `{symbol}` — ordering \
-                                 dispatches through `PartialOrd`, which is not wired for \
-                                 user types yet; expose a method (or compare a field)"
-                            ),
-                        });
-                        continue;
-                    }
                 }
                 // Same-type operands on the native path (`B = Self`). The
                 // non-native equality path falls through to the trait
@@ -12377,6 +12370,48 @@ impl<'src> Analyzer<'src> {
                             .insert(binary_id, bindings.into_iter().collect());
                     }
                 }
+            } else if let Some((_member_id, impl_subject_id, trait_id, trait_arguments)) =
+                // Natives never dispatch — native JS IS their operator
+                // semantics (std's numeric impls carry default bodies written
+                // WITH the operators; dispatching a native back into one
+                // recurses forever).
+                (!self.is_native_operator_type(&lhs_type))
+                        .then(|| {
+                            operator_trait_method(op).and_then(|(_, method_name)| {
+                                self.method_member_in_inherited_defaults(&lhs_type, method_name)
+                            })
+                        })
+                        .flatten()
+            {
+                // The impl doesn't declare the operator method itself, but a
+                // (super)trait provides it as a DEFAULT (`PartialOrd`'s
+                // `lt`/`le`/`gt`/`ge` over the impl's `partial_compare`):
+                // re-dispatch to this concrete type at codegen, binding the
+                // providing impl's generics from the receiver — the same
+                // Gap-E path an ordinary method call takes.
+                let (_, method_name) = operator_trait_method(op).expect("checked above");
+                let receiver_type_id = lhs_type.clone().get_type_id(self);
+                self.generic_dispatch.insert(
+                    binary_id,
+                    GenericDispatch::OnType(Some(receiver_type_id), method_name),
+                );
+                let impl_subject = impl_subject_id.get_type(self);
+                let mut bindings: SubstitutionContext = self
+                    .reconcile_type(&impl_subject, &lhs_type, &HashMap::new())
+                    .map(|(_, bindings)| bindings.into_iter().collect())
+                    .unwrap_or_default();
+                let trait_parameter_ids = self
+                    .traits
+                    .get(&trait_id)
+                    .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
+                    .unwrap_or_default();
+                for (parameter_id, argument_id) in trait_parameter_ids.iter().zip(trait_arguments) {
+                    let resolved = self.substitute_type(&argument_id.get_type(self), &bindings);
+                    bindings.insert(*parameter_id, resolved.get_type_id(self));
+                }
+                if !bindings.is_empty() {
+                    self.method_call_substitution.insert(binary_id, bindings);
+                }
             } else if let Some((trait_name, method_name)) = operator_trait_method(op) {
                 // The operator maps to a trait but this operand doesn't provide it.
                 // Native-operator types (the scalars, `bool`, numeric enums) use
@@ -12388,11 +12423,18 @@ impl<'src> Analyzer<'src> {
                         _ => None,
                     }
                     .unwrap_or("value");
+                    // Advise the trait's REQUIRED method — the operator method
+                    // is usually an inherited default over it.
+                    let required = if trait_name == "PartialOrd" {
+                        "partial_compare"
+                    } else {
+                        method_name
+                    };
                     self.diagnostics.push(Error {
                         span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "type '{type_name}' does not implement the `{trait_name}` operator; \
-                             add `impl {trait_name} for {type_name}` with the `{method_name}` method"
+                             add `impl {type_name} with {trait_name}` providing `{required}`"
                         ),
                     });
                 }

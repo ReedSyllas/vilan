@@ -83,6 +83,13 @@ no implicit conversions. An unsuffixed literal adapts to its peer
 **"`&&` takes `bool` operands"** (vilan has no truthiness).
 → [Values and types](../tour/values-and-types.md)
 
+**"type '…' does not implement the `…` operator; add `impl … with …` providing `…`"**
+An operator was used on a type without the matching trait impl — `+`
+needs `Add`, `==` needs `PartialEq`, `<`/`<=`/`>`/`>=` need
+`PartialOrd` (implement `partial_compare` once; the operators dispatch
+through it, and `lt`/`le`/`gt`/`ge` come free as defaults).
+→ [Data and traits](../tour/data-and-traits.md)
+
 **"the literal `…` is out of range for `…` (…)"**
 The number doesn't fit the type. For `i53`/`u53` the range is ±2^53 —
 JavaScript's exact-integer window. Bigger integers take `BigInt` (`7n`).

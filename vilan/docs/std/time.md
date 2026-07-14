@@ -57,15 +57,13 @@ fun main() {
 	let started = now();
 	let deadline = started + Duration::hours(2i53);
 	print(deadline.since(started).describe());
-	print(started.lt(deadline));
+	print(started < deadline);
 }
 ```
 
-Ordering two instants goes through `PartialOrd`'s methods (`lt`, `le`,
-`gt`, `ge`, `partial_compare`) for now — the `<` operator does not yet
-dispatch to user-defined `PartialOrd` impls, and the compiler will say
-so rather than emit a JavaScript object comparison that is always
-`false`.
+Ordering two instants (or durations) is the `<`/`<=`/`>`/`>=` operators
+dispatching through their `PartialOrd` impls — the same
+`partial_compare` you'd call by hand.
 
 ## Timers
 

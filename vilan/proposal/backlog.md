@@ -394,18 +394,16 @@ have gaps.
     untrue); `bool` has no ordering; `&&`/`||` take `bool`; ordering a
     user-defined type errors (see 25). 8 pins.
 
-25. **Ordering operators don't dispatch to `PartialOrd` impls** (M; pinned
-    `#[ignore]`d `ordering_dispatches_through_a_partial_ord_impl`; split
-    from 24 when its fix caught `std::time`'s documented `started <
-    deadline` example) — spec §5.7 says `< <= > >=` dispatch through
-    `PartialOrd`; std ships impls (`Instant`, `Duration`, `str`); nothing
-    wires the OPERATOR to them — `instant_a < instant_b` used to emit a JS
-    object comparison (always `false` — objects stringify) and, since 24's
-    fix, is a compile error steering to the trait methods (`lt`/`le`/…).
-    The fix is operator→`partial_compare`-family dispatch in the
-    binary-op path (analyzer records like `binary_op_dispatch`, transformer
-    emits the method call), plus un-ignoring the pin and restoring
-    `started < deadline` in `docs/std/time.md`.
+25. ~~**Ordering operators don't dispatch to `PartialOrd` impls**~~ —
+    **FIXED 2026-07-14** (v0.5.0 arc): `< <= > >=` resolve `PartialOrd`'s
+    `lt`/`le`/`gt`/`ge` — usually the trait DEFAULTS over the impl's
+    `partial_compare`, recorded as `GenericDispatch::OnType` with the
+    receiver bindings (the Gap-E inherited-default path method calls use)
+    and re-dispatched at emission; an impl-declared override takes the
+    `binary_op_dispatch` path; `T: PartialOrd` bounds take `OnConstraint`.
+    Natives NEVER dispatch (std's numeric impls have default bodies written
+    WITH the operators — dispatching a native into one recurses; found
+    live). 6 pins; `started < deadline` restored in `docs/std/time.md`.
 
 23. ~~**An `effect` closure's unannotated parameter doesn't ground from a
     generic signal's payload**~~ — **FIXED 2026-07-12** (the gotchas

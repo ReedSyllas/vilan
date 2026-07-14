@@ -13604,11 +13604,10 @@ fn logical_operators_take_bool_operands() {
 }
 
 #[test]
-#[ignore = "B25: `<` does not dispatch to user `PartialOrd` impls (spec §5.7 promises it; \
-            std's `Instant`/`Duration` carry the impls). Until wired, such comparisons \
-            are rejected (the pin below) instead of emitting a JS object comparison \
-            that is always false."]
 fn ordering_dispatches_through_a_partial_ord_impl() {
+    // B25, fixed: the ordering operators resolve `PartialOrd`'s comparison
+    // methods — usually the trait DEFAULTS over the impl's `partial_compare`,
+    // re-dispatched to the concrete receiver like any inherited method.
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -13627,6 +13626,105 @@ fn ordering_dispatches_through_a_partial_ord_impl() {
 }
 
 #[test]
+fn all_four_orderings_dispatch_on_a_user_type() {
+    // lt / le / gt / ge, each through the trait default over one
+    // `partial_compare` — both truth values exercised.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::{ PartialEq, PartialOrd, Ordering };
+        import std::option::Option::{ self, Some };
+
+        struct Level { rank: i32 }
+
+        impl Level with PartialEq {
+            fun eq(self, b: Level): bool { self.rank == b.rank }
+        }
+
+        impl Level with PartialOrd {
+            fun partial_compare(self, b: Level): Option<Ordering> {
+                self.rank.partial_compare(b.rank)
+            }
+        }
+
+        fun main() {
+            let low = Level { rank = 1 };
+            let high = Level { rank = 9 };
+            if low < high { print("lt"); }
+            if low <= low { print("le"); }
+            if high > low { print("gt"); }
+            if high >= high { print("ge"); }
+            if high < low { print("wrong-lt"); }
+            if low > high { print("wrong-gt"); }
+        }
+        "#,
+        "lt\nle\ngt\nge\n",
+    );
+}
+
+#[test]
+fn a_declared_lt_override_wins_over_the_default() {
+    // An impl may declare the operator method itself (the `binary_op_dispatch`
+    // path) — reversed ordering proves the OVERRIDE ran, not the default.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::{ PartialEq, PartialOrd, Ordering };
+        import std::option::Option::{ self, Some };
+
+        struct Upside { value: i32 }
+
+        impl Upside with PartialEq {
+            fun eq(self, b: Upside): bool { self.value == b.value }
+        }
+
+        impl Upside with PartialOrd {
+            fun partial_compare(self, b: Upside): Option<Ordering> {
+                self.value.partial_compare(b.value)
+            }
+
+            fun lt(self, b: Upside): bool {
+                self.value > b.value
+            }
+        }
+
+        fun main() {
+            let small = Upside { value = 1 };
+            let big = Upside { value = 9 };
+            if big < small { print("override"); }
+            if small < big { print("default"); }
+        }
+        "#,
+        "override\n",
+    );
+}
+
+#[test]
+fn a_partial_ord_bound_dispatches_orderings_generically() {
+    // `T: PartialOrd` — the `OnConstraint` path, re-resolved per
+    // monomorphization; exercised with std's `Duration` impl.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::compare::PartialOrd;
+        import std::time::Duration;
+
+        fun smallest<T: PartialOrd>(a: T, b: T): T {
+            if a < b { a } else { b }
+        }
+
+        fun main() {
+            let short = Duration::seconds(5i53);
+            let long = Duration::minutes(2i53);
+            print(smallest(long, short).describe());
+            print(smallest(3, 11));
+        }
+        "#,
+        "5s\n3\n",
+    );
+}
+
+#[test]
 fn ordering_a_struct_is_rejected_not_js_compared() {
     // No `PartialOrd` dispatch for user types yet — a silent raw-JS `<`
     // (object coercion) would be a miscompile, so it errors instead.
@@ -13641,7 +13739,7 @@ fn ordering_a_struct_is_rejected_not_js_compared() {
         }
         "#,
         "a < b",
-        "ordering dispatches through `PartialOrd`",
+        "does not implement the `PartialOrd` operator; add `impl Point with PartialOrd` providing `partial_compare`",
     );
 }
 
@@ -13654,7 +13752,7 @@ fn same_type_native_comparisons_still_compile_and_run() {
         fun main() {
             let a: u32 = 5;
             let b: u32 = 9;
-            if a < b && "x" == "x" && 1.5 < 2.5 && true == false || 3 <= 3 {
+            if a < b && "a" < "b" && "x" == "x" && 1.5 < 2.5 && true == false || 3 <= 3 {
                 print("ok");
             }
         }

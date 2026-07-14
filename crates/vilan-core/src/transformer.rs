@@ -1530,6 +1530,33 @@ impl<'src> Transformer<'src> {
                 // `x op y` where `x: T` is a trait-bounded generic: dispatch to T's
                 // concrete operator impl at this monomorphization, re-resolved like
                 // the instance-method generic dispatch. (`!=` negates `eq`, as below.)
+                // A CONCRETE receiver whose operator method is an inherited trait
+                // default (`instant < instant` over `PartialOrd`'s `lt`) records
+                // `OnType` instead — same re-dispatch, the type known up front.
+                if let Some(GenericDispatch::OnType(Some(receiver_type_id), member_name)) =
+                    self.program.generic_dispatch.get(&id).copied()
+                {
+                    let concrete = self.resolve_type_id(receiver_type_id);
+                    if !self.compares_natively(concrete) {
+                        if let Some(dispatch) = self.resolve_dispatch(concrete, member_name) {
+                            let substitution = self
+                                .program
+                                .method_call_substitution
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_default();
+                            let saved = self.current_substitution.clone();
+                            self.current_substitution.extend(substitution);
+                            let call = self.emit_dispatch(dispatch, vec![lhs.clone(), rhs.clone()]);
+                            self.current_substitution = saved;
+                            return Some(if matches!(*op, BinaryOp::NotEq) {
+                                js::Node::Unary('!', Box::new(call))
+                            } else {
+                                call
+                            });
+                        }
+                    }
+                }
                 if let Some(GenericDispatch::OnConstraint(constraint_id, member_name)) =
                     self.program.generic_dispatch.get(&id).copied()
                 {
