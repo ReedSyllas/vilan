@@ -223,6 +223,7 @@ pub fn analyze_source(
                     external: false,
                     extern_binding: None,
                     must_use: false,
+                    platform_fence: Vec::new(),
                     rpc: false,
                     trait_only: false,
                     doc_hidden: false,

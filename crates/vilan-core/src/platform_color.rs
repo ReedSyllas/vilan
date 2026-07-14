@@ -56,14 +56,92 @@ use crate::type_::{Type, TypeId};
 /// charges `DiskStore`'s impl just because it exists. An unresolvable
 /// binding falls back to every candidate — over-approximate but sound.
 pub fn check(program: &mut Program, platform: Platform) {
-    let Some(entry) = entry_function(program) else {
-        return;
-    };
     let graph = CallGraph::build(program);
-    let mut traversal = Traversal::new(program, &graph, Some(platform));
-    traversal.walk(entry, &SubstitutionContext::new(), None);
-    let diagnostics = traversal.diagnostics;
+    // Declared fences check on EVERY compile, entry or not — fencing library
+    // code is their point (platform-coloring.md §3.7).
+    let mut diagnostics = check_fences(program, &graph);
+    if let Some(entry) = entry_function(program) {
+        let mut traversal = Traversal::new(program, &graph, Some(platform));
+        traversal.walk(entry, &SubstitutionContext::new(), None);
+        diagnostics.extend(traversal.diagnostics);
+    }
     program.diagnostics.extend(diagnostics);
+}
+
+/// The concrete host platforms the checker enumerates for a fence pattern —
+/// the supported hosts (manifest layers use the same vocabulary).
+fn known_hosts() -> [Platform; 4] {
+    [
+        Platform::Node {
+            version: crate::target::NODE_LTS,
+        },
+        Platform::Deno {
+            version: crate::target::DENO_CURRENT,
+        },
+        Platform::Bun {
+            version: crate::target::BUN_CURRENT,
+        },
+        Platform::Browser,
+    ]
+}
+
+/// Checks every `[platform("…")]` fence: for each concrete host matching a
+/// declared pattern, everything reachable from the fenced function must admit
+/// that host. Runs regardless of the build target and needs no entry —
+/// violations land at the fence with the chain, not at some distant entry in
+/// a dependent build. A fence on a generic function walks unbound
+/// (dispatches consider every candidate): it promises for every possible
+/// instantiation.
+fn check_fences(program: &Program, graph: &CallGraph) -> Vec<Error> {
+    let mut diagnostics = Vec::new();
+    for (id, function) in &program.functions {
+        if function.platform_fence.is_empty() {
+            continue;
+        }
+        let fence_label = function
+            .platform_fence
+            .iter()
+            .map(|(pattern, _)| format!("\"{pattern}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut checked_platforms: Vec<Platform> = Vec::new();
+        for (pattern_text, pattern_span) in &function.platform_fence {
+            let Some(patterns) = crate::target::PlatformPattern::parse(pattern_text) else {
+                diagnostics.push(Error {
+                    span: *pattern_span,
+                    msg: format!(
+                        "unknown platform pattern `{pattern_text}` in `[platform(…)]` \
+                         (expected `node`/`deno`/`bun`/`browser`, or a family like \
+                         `@process`)"
+                    ),
+                });
+                continue;
+            };
+            for pattern in patterns {
+                for host in known_hosts() {
+                    if host.matches(pattern).is_some() && !checked_platforms.contains(&host) {
+                        checked_platforms.push(host);
+                    }
+                }
+            }
+        }
+        for host in checked_platforms {
+            let mut traversal = Traversal::new(program, graph, Some(host));
+            traversal.origin = Origin::Fence {
+                function: function.name.to_string(),
+                fence: fence_label.clone(),
+            };
+            traversal.walk(*id, &SubstitutionContext::new(), None);
+            diagnostics.extend(traversal.diagnostics);
+        }
+    }
+    diagnostics
+}
+
+/// What a violation chain hangs from: the build's entry, or a declared fence.
+enum Origin {
+    Entry,
+    Fence { function: String, fence: String },
 }
 
 /// The module-level bindings whose initializers run for a program entered at
@@ -93,6 +171,7 @@ struct Traversal<'a, 'src> {
     diagnostics: Vec<Error>,
     module_bindings: HashSet<Id>,
     reached_bindings: HashSet<Id>,
+    origin: Origin,
 }
 
 impl<'a, 'src> Traversal<'a, 'src> {
@@ -106,6 +185,7 @@ impl<'a, 'src> Traversal<'a, 'src> {
             diagnostics: Vec::new(),
             module_bindings: program.module_level_bindings().into_iter().collect(),
             reached_bindings: HashSet::new(),
+            origin: Origin::Entry,
         }
     }
 
@@ -140,7 +220,14 @@ impl<'a, 'src> Traversal<'a, 'src> {
                     // reached from admissible code — and do not descend:
                     // everything beneath it lives in the same layer, and one
                     // chain tells the story.
-                    let error = violation(self.program, platform, &self.trail, node, requirement);
+                    let error = violation(
+                        self.program,
+                        platform,
+                        &self.trail,
+                        node,
+                        requirement,
+                        &self.origin,
+                    );
                     self.diagnostics.push(error);
                     self.trail.pop();
                     return;
@@ -476,6 +563,7 @@ fn violation(
     trail: &[(Id, Option<(Span, bool)>)],
     node: Id,
     requirement: Requirement,
+    origin: &Origin,
 ) -> Error {
     let chain = trail
         .iter()
@@ -494,13 +582,20 @@ fn violation(
             end: 0,
             context: (),
         });
+    let from = match origin {
+        Origin::Entry => "reachable from the entry".to_string(),
+        Origin::Fence { function, fence } => {
+            format!("reachable from `{function}`, fenced `[platform({fence})]`")
+        }
+    };
     Error {
         span: anchor,
         msg: format!(
-            "`{}` requires {} and cannot run on `{}`\n  reachable from the entry: {}",
+            "`{}` requires {} and cannot run on `{}`\n  {}: {}",
             name_of(program, node),
             requirement.label,
             platform.name(),
+            from,
             chain
         ),
     }

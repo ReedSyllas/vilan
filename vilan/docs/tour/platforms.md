@@ -21,6 +21,13 @@ runtime crash. That's the whole idea of this chapter.
 > it — a server-only global in a shared file costs the browser build
 > nothing. `const` initializers run at build time and ship as plain
 > values, so they never color anything.
+> Where a team wants an explicit boundary, `[platform("browser")]` on a
+> function declares the platforms it promises to run on — the compiler
+> checks the promise on every compile (entry or not, whatever the build
+> target), and a violation lands at the fence with its chain instead of
+> at some distant entry in a dependent build. Patterns use the manifest
+> layers' vocabulary: `"node"`, `"browser"`, families like
+> `"@process"`, or several at once for code that must stay neutral.
 > The editor shows the same information as you write: violations appear
 > as live diagnostics at the offending call, and hovering a function
 > shows its inferred requirement and how it got it — e.g. ``requires the

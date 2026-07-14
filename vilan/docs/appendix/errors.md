@@ -30,6 +30,14 @@ is. Move the call behind the right entry, or check the package's
 `target`.
 → [Platforms](../tour/platforms.md)
 
+**"`…` requires … and cannot run on `…` / reachable from `…`, fenced `[platform(…)]`"**
+A function declared a platform fence and something it (transitively)
+reaches requires a layer one of the fenced platforms doesn't serve. The
+chain shows the path from the fence. Fences check on every compile —
+narrowing the fence, or moving the colored call out from behind it, are
+the two fixes.
+→ [Platforms](../tour/platforms.md)
+
 **"cannot find module '…' to import"**
 The path names a module file that doesn't exist. `pkg::routes` means
 "`routes.vl` in this package's source root" — check the file name and

@@ -863,6 +863,24 @@ where
         .labelled("trait_only attribute")
         .boxed();
 
+    // `[platform("@process", "browser")]` — a declared platform fence: the
+    // function's inferred requirement is checked against these patterns on
+    // every compile (platform-coloring.md §3.7).
+    let platform_attribute = just(Token::Ctrl('['))
+        .ignore_then(select! { Token::Ident("platform") => () }.labelled("`platform`"))
+        .ignore_then(
+            select! { Token::String(s) => s }
+                .map_with(|pattern, e| (pattern, e.span()))
+                .separated_by(just(Token::Ctrl(',')))
+                .at_least(1)
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+        )
+        .then_ignore(just(Token::Ctrl(']')))
+        .labelled("platform attribute")
+        .boxed();
+
     // `[doc(hidden)]` — tooling only: the method stays fully callable, but the
     // language server omits it from completion. No resolution change.
     let doc_hidden_attribute = just(Token::Ctrl('['))
@@ -893,6 +911,11 @@ where
             doc_hidden_attribute
                 .or_not()
                 .map(|doc_hidden| doc_hidden.is_some()),
+        )
+        .then(
+            platform_attribute
+                .or_not()
+                .map(|fence| fence.unwrap_or_default()),
         )
         .then(just(Token::Async).or_not().map(|async_| async_.is_some()))
         .then(
@@ -984,8 +1007,11 @@ where
                                     (
                                         (
                                             (
-                                                (((extern_binding, must_use), rpc), trait_only),
-                                                doc_hidden,
+                                                (
+                                                    (((extern_binding, must_use), rpc), trait_only),
+                                                    doc_hidden,
+                                                ),
+                                                platform_fence,
                                             ),
                                             is_async,
                                         ),
@@ -1014,6 +1040,7 @@ where
                         rpc,
                         trait_only,
                         doc_hidden,
+                        platform_fence,
                         generic_parameters,
                         parameters,
                         return_type,
@@ -1392,7 +1419,7 @@ where
         Token::Ident(name) if !matches!(
             name,
             "derive" | "service" | "extern" | "must_use" | "rpc" | "trait_only" | "doc"
-                | "expose"
+                | "expose" | "platform"
         ) => name
     };
     let macro_attributed_item = just(Token::Ctrl('['))

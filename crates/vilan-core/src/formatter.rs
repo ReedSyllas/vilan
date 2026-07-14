@@ -591,6 +591,16 @@ impl<'src> Printer<'src> {
             self.out.push_str("[doc(hidden)]");
             self.line();
         }
+        if !func.platform_fence.is_empty() {
+            let patterns = func
+                .platform_fence
+                .iter()
+                .map(|(pattern, _)| format!("\"{pattern}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.out.push_str(&format!("[platform({patterns})]"));
+            self.line();
+        }
         if func.is_async {
             self.out.push_str("async ");
         }
@@ -1478,7 +1488,7 @@ mod idempotency {
     /// safety check, silently leaving the whole file unformatted.)
     #[test]
     fn attributes_round_trip() {
-        let source = "trait Source {\n\t[must_use]\n\tfun sub(self): i32;\n\
+        let source = "trait Source {\n\t[must_use]\n\t[platform(\"@process\", \"browser\")]\n\tfun sub(self): i32;\n\
                       \t[trait_only]\n\tfun tag(self): str;\n\
                       \t[doc(hidden)]\n\tfun internal(self): i32;\n}\n\
                       [service(Client)]\n\
@@ -1490,8 +1500,9 @@ mod idempotency {
             "service attribute lost:\n{formatted}"
         );
         assert!(
-            formatted.contains("[must_use]"),
-            "must_use attribute lost:\n{formatted}"
+            formatted.contains("[must_use]")
+                && formatted.contains("[platform(\"@process\", \"browser\")]"),
+            "attributes lost:\n{formatted}"
         );
         assert!(
             formatted.contains("[expose] status"),

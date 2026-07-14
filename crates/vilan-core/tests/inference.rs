@@ -11993,6 +11993,132 @@ fn a_neutral_instantiation_is_admitted_despite_a_colored_impl() {
     );
 }
 
+// --- §3.7: declared platform fences ------------------------------------------
+//
+// `[platform("…")]` declares the platforms a function promises to run on;
+// the inferred requirement is checked against every matching host on EVERY
+// compile — no entry needed, independent of the build target. Violations
+// hang their chain from the fence.
+
+#[test]
+fn a_platform_fence_rejects_an_off_platform_reach() {
+    // Checked on a NODE build (which itself admits `exists`) and with main
+    // never calling the fenced function — the fence alone carries the check.
+    assert_fails_spanning(
+        r#"
+        import std::fs::exists;
+
+        [platform("browser")]
+        fun probe_cache(): bool {
+            exists("cache")
+        }
+
+        fun main() {}
+        "#,
+        r#"exists("cache")"#,
+        "reachable from `probe_cache`, fenced `[platform(\"browser\")]`",
+    );
+}
+
+#[test]
+fn a_satisfied_fence_compiles_on_every_build_target() {
+    let source = r#"
+        import std::fs::exists;
+
+        [platform("@process")]
+        fun probe_cache(): bool {
+            exists("cache")
+        }
+
+        fun main() {}
+        "#;
+    assert_compiles(source);
+    assert_compiles_browser(source);
+}
+
+#[test]
+fn a_neutral_fence_spanning_families_holds_for_base_code() {
+    assert_compiles(
+        r#"
+        import std::print;
+
+        [platform("@process", "browser")]
+        fun shared_label(): str {
+            "everywhere"
+        }
+
+        fun main() {
+            print(shared_label());
+        }
+        "#,
+    );
+}
+
+#[test]
+fn an_unknown_fence_pattern_errors() {
+    assert_fails(
+        r#"
+        [platform("wat")]
+        fun probe(): i32 { 1 }
+
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn a_fence_on_a_generic_promises_every_instantiation() {
+    // Fences walk unbound, so dispatch considers every candidate: the
+    // colored impl's existence alone breaks a browser fence on the generic —
+    // deliberate conservatism (the fence promises for every possible T).
+    assert_fails_browser_with(
+        r#"
+        import std::fs::exists;
+
+        trait Check {
+            fun check(self): bool;
+        }
+
+        struct DiskProbe { path: str }
+
+        impl DiskProbe with Check {
+            fun check(self): bool {
+                exists(self.path)
+            }
+        }
+
+        [platform("browser")]
+        fun run_check<T: Check>(subject: T): bool {
+            subject.check()
+        }
+
+        fun main() {}
+        "#,
+        "reachable from `run_check`, fenced `[platform(\"browser\")]`",
+    );
+}
+
+#[test]
+fn a_fence_on_a_method_checks_like_a_functions() {
+    assert_fails_browser_with(
+        r#"
+        import std::fs::exists;
+
+        struct Store { path: str }
+
+        impl Store {
+            [platform("browser")]
+            fun probe(self): bool {
+                exists(self.path)
+            }
+        }
+
+        fun main() {}
+        "#,
+        "reachable from `probe`, fenced `[platform(\"browser\")]`",
+    );
+}
+
 #[test]
 fn a_colored_instantiation_still_rejects_beside_a_neutral_one() {
     // The refinement is not a hole: when the SAME generic is instantiated

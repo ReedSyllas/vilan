@@ -191,6 +191,10 @@ pub enum ExprPattern {
 pub struct Function<'src> {
     pub id: Id,
     pub name: &'src str,
+    /// Declared `[platform("…", …)]` fence patterns (empty = no fence) —
+    /// checked against the inferred requirement on every compile
+    /// (platform-coloring.md §3.7).
+    pub platform_fence: Vec<(&'src str, Span)>,
     /// The span of the function's name in the source (for go-to-definition and
     /// rename), distinct from the whole-declaration span in `span_map`.
     pub name_span: Span,
@@ -5743,6 +5747,11 @@ impl<'src> Analyzer<'src> {
                                 Some(Node::Reference(true, _))
                             ),
                             must_use: function.must_use,
+                            platform_fence: function
+                                .platform_fence
+                                .iter()
+                                .map(|(pattern, span)| (*pattern, *span))
+                                .collect(),
                             rpc: function.rpc,
                             trait_only: function.trait_only,
                             doc_hidden: function.doc_hidden,

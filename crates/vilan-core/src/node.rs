@@ -84,6 +84,10 @@ pub struct Func<'src> {
     // Declared `[must_use]`: dropping a call's result (a bare statement that
     // discards it) is a warning.
     pub must_use: bool,
+    // Declared `[platform("…", …)]` — a platform FENCE: the function's
+    // inferred requirement is checked against these patterns on every
+    // compile (platform-coloring.md §3.7). Empty = no fence.
+    pub platform_fence: Vec<Spanned<&'src str>>,
     // Declared `[rpc]`: callable over the wire as part of a service's surface.
     // Its parameters and return must be Wire types — checked by the analyzer
     // (`proposal/transport-rpc.md` §4.2).
