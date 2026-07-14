@@ -666,6 +666,7 @@ fn contract_violations(
             },
         ],
         dependencies: Vec::new(),
+        surface: true,
     };
     let violations = vilan_core::analyzer::check_library_contract(&spec)
         .into_iter()

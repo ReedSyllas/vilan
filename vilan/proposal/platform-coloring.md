@@ -228,10 +228,19 @@ the old `[server]`/`[client]` sections — this is that idea done right.)
   `std::db`-style access (via a small on-disk store; the example keeps
   `todos.json`), client build green, and the error chain renders for a
   deliberate violation.
-- **Phase 2 — polish**: LSP surfacing (colors as hover info; violations as
-  live diagnostics under the document's entry), error-format bake-off,
-  `--platform` interaction audit (`vilan check` of a multi-entry package
-  checks every entry).
+- **Phase 2 — polish** *(SHIPPED)*: LSP surfacing (colors as hover info;
+  violations as live diagnostics under the document's entry), error-format
+  bake-off, `--platform` interaction audit (`vilan check` of a multi-entry
+  package checks every entry). Landed as: chains label library frames with
+  their module (`boot (server::store) → exists (std::fs)`); `vilan check`
+  audited (it funnels through the same pipeline as `build`, proven on a
+  violating file); live editor diagnostics pinned (manifest `target` drives
+  the platform, scratch files infer theirs from imports); and hover shows a
+  function's requirement via `platform_color::requirements` — an
+  entry-independent per-function fixpoint (multi-source BFS per layer label,
+  caller-ward over the same edge expansion as the admission walk) whose
+  witness links render a shortest via-chain, e.g. ``requires the `process`
+  layer of `std` (via `save → write_file (std::fs)`)``.
 - **Phase 3 — multi-entry packages**: the `[entry.<name>]` manifest form,
   `vilan build`/`run` orchestration, the walkthrough rewritten as one
   package (docs: services guide, platform guide, walkthrough — same

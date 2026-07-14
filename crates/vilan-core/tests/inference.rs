@@ -186,6 +186,55 @@ fn warnings(source: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The rendered per-function requirement line (`platform_color::requirements`
+/// — the hover's data) for the named function, through the real pipeline on
+/// the default platform. `None` = the function is colorless. Panics on
+/// analysis errors or an unknown name, so a pin can't pass vacuously.
+fn requirement_line_of(source: &str, function_name: &str) -> Option<String> {
+    let source = source.to_string();
+    let function_name = function_name.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let leaked: &'static str = Box::leak(source.into_boxed_str());
+            let (program, errors) = analyze_source(
+                leaked,
+                &std_spec(),
+                Path::new("."),
+                Path::new("test.vl"),
+                Some(Platform::default()),
+                &Workspace::default(),
+            );
+            let messages: Vec<String> = errors.into_iter().map(|error| error.msg).collect();
+            assert!(
+                messages.is_empty(),
+                "expected a clean analysis, got: {messages:#?}"
+            );
+            let program = program.expect("analysis should produce a program");
+            let function_id = program
+                .functions
+                .iter()
+                .find(|(_, function)| function.name == function_name.as_str())
+                .map(|(id, _)| *id)
+                .or_else(|| {
+                    // A layer function may be a bodiless extern (e.g.
+                    // `std::fs::write_file`), seeded exactly like one with a body.
+                    program
+                        .external_functions
+                        .iter()
+                        .find(|(_, function)| function.name == function_name.as_str())
+                        .map(|(id, _)| *id)
+                })
+                .unwrap_or_else(|| panic!("no function named `{function_name}`"));
+            vilan_core::platform_color::requirements(&program)
+                .get(&function_id)
+                .cloned()
+        })
+        .expect("spawn worker")
+        .join()
+        .expect("worker panicked")
+}
+
 /// Compile, then execute the emitted JS with `node`, returning its stdout. A
 /// compile failure or a non-zero exit becomes `Err`. This catches *runtime*
 /// miscompiles — a program that type-checks but emits the wrong code (e.g. a
@@ -11822,6 +11871,247 @@ fn the_router_is_browser_only() {
         "#,
         r#"navigate("/home")"#,
         "requires the `browser` layer of `std` and cannot run on `node",
+    );
+}
+
+// --- platform coloring: per-function requirement lines (hover's data) --------
+//
+// `platform_color::requirements` renders what the admission walk knows into an
+// entry-independent per-function map — the language server appends these lines
+// to hover (proposal/platform-coloring.md phase 2). The pins fix the exact
+// vocabulary: the layer label, a SHORTEST via-chain, library frames labeled
+// with their module, user frames bare.
+
+#[test]
+fn a_requirement_line_names_the_layer_and_the_via_chain() {
+    let line = requirement_line_of(
+        r#"
+        import std::fs;
+
+        fun save() {
+            fs::write_file("state", "data");
+        }
+
+        fun main() {
+            save();
+        }
+        "#,
+        "save",
+    )
+    .expect("`save` reaches `std::fs` and should carry a requirement");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `write_file (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_requirement_line_propagates_to_callers_growing_the_chain() {
+    // `main` acquires the same label one hop later; its own frame is implicit,
+    // the user frame `save` renders bare, the library frame keeps its module.
+    let line = requirement_line_of(
+        r#"
+        import std::fs;
+
+        fun save() {
+            fs::write_file("state", "data");
+        }
+
+        fun main() {
+            save();
+        }
+        "#,
+        "main",
+    )
+    .expect("`main` reaches `std::fs` through `save`");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `save → write_file (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_seeded_library_functions_line_has_no_chain() {
+    // The std function itself is seeded at its definition site — its line is
+    // the bare requirement, no `via`.
+    let line = requirement_line_of(
+        r#"
+        import std::fs;
+
+        fun main() {
+            fs::write_file("state", "data");
+        }
+        "#,
+        "write_file",
+    )
+    .expect("`write_file` is defined in the layer");
+    assert_eq!(line, "requires the `process` layer of `std`");
+}
+
+#[test]
+fn the_via_chain_is_a_shortest_path_to_the_layer() {
+    // `main` reaches the layer both through `relay → save` and through `save`
+    // directly; the witness chain takes the short way.
+    let line = requirement_line_of(
+        r#"
+        import std::fs;
+
+        fun save() {
+            fs::write_file("state", "data");
+        }
+
+        fun relay() {
+            save();
+        }
+
+        fun main() {
+            relay();
+            save();
+        }
+        "#,
+        "main",
+    )
+    .expect("`main` reaches the layer");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `save → write_file (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_created_closures_requirement_lands_on_its_creator_line() {
+    // The v1 creator rule, rendered: the closure's body charges its creator,
+    // and the chain shows the closure frame it traveled through.
+    let line = requirement_line_of(
+        r#"
+        import std::fs::write_file;
+
+        fun make_saver(path: str): |str| void {
+            |content: str| {
+                write_file(path, content);
+            }
+        }
+
+        fun main() {
+            let _saver = make_saver("s.txt");
+        }
+        "#,
+        "make_saver",
+    )
+    .expect("`make_saver` creates the colored closure");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `closure → write_file (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_dispatch_candidates_requirement_reaches_the_bounded_caller_line() {
+    // Candidate descent (async_infer's rule): the bounded call charges the
+    // colored impl's method, and the line says which one — even though this
+    // node build ADMITS the layer (the map is platform-independent).
+    let line = requirement_line_of(
+        r#"
+        import std::fs::write_file;
+
+        trait Save {
+            fun save(self): bool;
+        }
+
+        struct DiskStore { path: str }
+
+        impl DiskStore with Save {
+            fun save(self): bool {
+                write_file(self.path, "state");
+                true
+            }
+        }
+
+        fun save_it<T: Save>(store: T): bool {
+            store.save()
+        }
+
+        fun main() {
+            save_it(DiskStore { path = "s.txt" });
+        }
+        "#,
+        "save_it",
+    )
+    .expect("`save_it`'s bound admits the colored impl");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `save → write_file (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_base_only_function_is_colorless() {
+    assert_eq!(
+        requirement_line_of(
+            r#"
+        import std::print;
+
+        fun greet() {
+            print("hi");
+        }
+
+        fun main() {
+            greet();
+        }
+        "#,
+            "greet",
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_unreached_function_still_knows_its_requirement() {
+    // Entry-independence: nothing calls `orphan`, but its line exists — the
+    // fixpoint serves the editor, not just the entry walk.
+    let line = requirement_line_of(
+        r#"
+        import std::fs;
+
+        fun orphan() {
+            fs::write_file("state", "data");
+        }
+
+        fun main() {}
+        "#,
+        "orphan",
+    )
+    .expect("`orphan` should be colored without being reachable");
+    assert_eq!(
+        line,
+        "requires the `process` layer of `std` (via `write_file (std::fs)`)"
+    );
+}
+
+#[test]
+fn a_function_requiring_two_layers_renders_one_line_each_in_label_order() {
+    // The mixed form: one function reaching two different layers gets one
+    // line per label, label-sorted. (`torn` is unreached, so the node build
+    // stays admissible while the browser requirement is still computed.)
+    let line = requirement_line_of(
+        r#"
+        import std::fs;
+        import std::router::navigate;
+
+        fun torn() {
+            fs::write_file("state", "data");
+            navigate("/home");
+        }
+
+        fun main() {}
+        "#,
+        "torn",
+    )
+    .expect("`torn` requires both layers");
+    assert_eq!(
+        line,
+        "requires the `browser` layer of `std` (via `navigate (std::router)`)\n\
+         requires the `process` layer of `std` (via `write_file (std::fs)`)"
     );
 }
 

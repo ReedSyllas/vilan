@@ -2,7 +2,7 @@
 //! handlers run against it: position→entity lookup, hover, go-to-definition,
 //! find-references, and rename.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use vilan_core::analyzer::{DERIVED_SOURCE, Expr, Implementation, SourceId};
@@ -223,6 +223,10 @@ pub struct Document {
     /// `(start, end, id)` for every entry-file entity with a real span, used to
     /// find the innermost entity under a cursor.
     entity_spans: Vec<(usize, usize, Id)>,
+    /// Per-function platform requirements (`platform_color::requirements`),
+    /// rendered lines like ``requires the `process` layer of `std` (via `…`)``
+    /// — appended to the hover of any function that carries one.
+    platform_requirements: HashMap<Id, String>,
 }
 
 /// One diagnostic as the language server publishes it: the file it belongs to
@@ -311,6 +315,10 @@ impl Document {
             .as_ref()
             .map(|program| program.warnings.clone())
             .unwrap_or_default();
+        let platform_requirements = program
+            .as_ref()
+            .map(vilan_core::platform_color::requirements)
+            .unwrap_or_default();
 
         Document {
             line_index,
@@ -321,6 +329,7 @@ impl Document {
             text: text.to_string(),
             text_hash,
             entity_spans,
+            platform_requirements,
         }
     }
 
@@ -404,14 +413,54 @@ impl Document {
             .map(|(_, _, id)| *id)
     }
 
-    /// The hover label (a rendered type) for the entity under `offset`.
+    /// The hover label for the entity under `offset`: its rendered type, plus
+    /// — when the entity names a function with an inferred platform
+    /// requirement — the requirement line ("requires the `process` layer of
+    /// `std` (via `…`)", proposal/platform-coloring.md phase 2).
     pub fn hover(&self, offset: usize) -> Option<String> {
         let program = self.program.as_ref()?;
         // A type name in type position renders its type directly.
         if let Some((_, label)) = self.type_reference_at(program, offset) {
             return Some(label);
         }
-        self.hover_label(program, self.entity_at(offset)?)
+        let id = self.entity_at(offset)?;
+        let type_label = self.hover_label(program, id);
+        let requirement = self
+            .function_target(program, id)
+            .and_then(|function| self.platform_requirements.get(&function))
+            .cloned();
+        match (type_label, requirement) {
+            // A blank markdown line, so the requirement renders as its own
+            // paragraph under the type.
+            (Some(type_label), Some(requirement)) => Some(format!("{type_label}\n\n{requirement}")),
+            (Some(type_label), None) => Some(type_label),
+            (None, requirement) => requirement,
+        }
+    }
+
+    /// The function the entity under the cursor *names*, if any: a declaration
+    /// name, a binding that resolves to a function, or a call's callee
+    /// (including method calls, whose wired subject is a `Local` pointing at
+    /// the resolved method). Deliberately strict — a variable holding a
+    /// function's *result* names no function, so it inherits no requirement.
+    fn function_target(&self, program: &Program, id: Id) -> Option<Id> {
+        let is_function = |id: &Id| {
+            program.functions.contains_key(id) || program.external_functions.contains_key(id)
+        };
+        if is_function(&id) {
+            return Some(id);
+        }
+        match program.entity_map.get(&id)? {
+            Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => {
+                is_function(binding).then_some(*binding)
+            }
+            Expr::Function(function_id) | Expr::ExternalFunction(function_id) => Some(*function_id),
+            Expr::Call(call_id) => {
+                let subject = program.function_calls.get(call_id)?.subject_id;
+                self.function_target(program, subject)
+            }
+            _ => None,
+        }
     }
 
     fn hover_label(&self, program: &Program, id: Id) -> Option<String> {
@@ -1268,7 +1317,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (relative, contents) in files {
-            std::fs::write(dir.join(relative), contents).unwrap();
+            let path = dir.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, contents).unwrap();
         }
         let entry = dir.join(files[0].0);
         let text = std::fs::read_to_string(&entry).unwrap();
@@ -1397,6 +1450,176 @@ mod tests {
             warning.message
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── platform coloring in the editor (proposal/platform-coloring.md, phase 2) ──
+
+    // A browser-target package whose entry REACHES `std::fs` publishes the
+    // coloring violation live: chain-rendered with module-labeled library
+    // frames, anchored at the offending call in the entry.
+    #[test]
+    fn coloring_violation_publishes_live_on_a_browser_target() {
+        let entry = "import std::fs;\n\nfun main() {\n\tlet present = fs::exists(\"marker\");\n}\n";
+        let (dir, document) = analyze_workspace(&[
+            ("src/main.vl", entry),
+            (
+                "vilan.toml",
+                "[package]\nname = \"app\"\ntarget = \"browser\"\n",
+            ),
+        ]);
+        let published = document.published_diagnostics();
+        let violation = published
+            .iter()
+            .find(|item| {
+                item.message
+                    .contains("requires the `process` layer of `std`")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no coloring violation published: {:?}",
+                    published
+                        .iter()
+                        .map(|item| &item.message)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(violation.path.is_none(), "anchored in the entry itself");
+        assert!(!violation.warning);
+        assert!(
+            violation.message.contains("cannot run on `browser`"),
+            "{}",
+            violation.message
+        );
+        assert!(
+            violation.message.contains("main → exists (std::fs)"),
+            "{}",
+            violation.message
+        );
+        // The anchor is the deepest user-code call site: the `fs::exists` call.
+        let call = entry.find("exists(").unwrap();
+        let range = violation.span.into_range();
+        assert!(
+            range.start <= call && call < range.end,
+            "span {range:?} should cover the call at {call}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The same reach under the package's declared `node` target is admissible —
+    // the manifest's `target` is what drives the editor's platform.
+    #[test]
+    fn the_manifest_target_admits_the_same_reach_on_node() {
+        let entry = "import std::fs;\n\nfun main() {\n\tlet present = fs::exists(\"marker\");\n}\n";
+        let (dir, document) = analyze_workspace(&[
+            ("src/main.vl", entry),
+            (
+                "vilan.toml",
+                "[package]\nname = \"app\"\ntarget = \"node\"\n",
+            ),
+        ]);
+        let published = document.published_diagnostics();
+        assert!(
+            published.is_empty(),
+            "{:?}",
+            published
+                .iter()
+                .map(|item| &item.message)
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A manifest-less scratch file gets its platform INFERRED from its imports:
+    // `std::dom` marks it a browser file, so reaching `std::fs` colors.
+    #[test]
+    fn an_inferred_browser_file_colors_without_a_manifest() {
+        let document = Document::analyze(
+            "import std::dom;\nimport std::fs;\n\nfun main() {\n\tlet present = fs::exists(\"marker\");\n}\n",
+            &std_root(),
+            Path::new("scratch.vl"),
+        );
+        let published = document.published_diagnostics();
+        assert!(
+            published.iter().any(|item| {
+                item.message
+                    .contains("requires the `process` layer of `std`")
+                    && item.message.contains("cannot run on `browser`")
+            }),
+            "{:?}",
+            published
+                .iter()
+                .map(|item| &item.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The hover text at the cursor marked `|` in `src` (a bare manifest-less
+    /// file, like `completions_at_cursor` — keep the sources closure-free, the
+    /// marker would collide with closure pipes).
+    fn hover_at_cursor(src: &str) -> Option<String> {
+        let offset = src
+            .find('|')
+            .expect("test source needs a `|` cursor marker");
+        let text = src.replace('|', "");
+        let document = Document::analyze(&text, &std_root(), Path::new("test.vl"));
+        document.hover(offset)
+    }
+
+    // Hovering a function name appends its inferred platform requirement — the
+    // coloring fixpoint surfaced in the editor, with the same via-chain
+    // vocabulary the diagnostics use.
+    #[test]
+    fn hover_appends_a_functions_platform_requirement() {
+        let hover = hover_at_cursor(
+            "import std::fs;\n\nfun save() {\n\tfs::write_file(\"state\", \"data\");\n}\n\nfun main() {\n\tsa|ve();\n}\n",
+        )
+        .expect("hovering `save` should produce a label");
+        assert!(
+            hover.contains("requires the `process` layer of `std` (via `write_file (std::fs)`)"),
+            "{hover}"
+        );
+    }
+
+    // The declaration name carries the requirement too, not just call sites.
+    #[test]
+    fn hover_on_the_definition_name_carries_the_requirement() {
+        let hover = hover_at_cursor(
+            "import std::fs;\n\nfun sa|ve() {\n\tfs::write_file(\"state\", \"data\");\n}\n\nfun main() {\n\tsave();\n}\n",
+        );
+        assert!(
+            hover
+                .as_deref()
+                .is_some_and(|hover| { hover.contains("requires the `process` layer of `std`") }),
+            "hover on the declaration name should carry the requirement: {hover:?}"
+        );
+    }
+
+    // A method call resolves through its wired subject to the method function,
+    // whose requirement rides the hover alongside the call's type.
+    #[test]
+    fn hover_on_a_method_call_attributes_the_methods_requirement() {
+        let hover = hover_at_cursor(
+            "import std::fs;\n\nstruct Store { path: str }\n\nimpl Store {\n\tfun persist(self): bool {\n\t\tfs::write_file(self.path, \"state\");\n\t\ttrue\n\t}\n}\n\nfun main() {\n\tlet store = Store { path = \"s.txt\" };\n\tstore.per|sist();\n}\n",
+        )
+        .expect("hovering `persist` should produce a label");
+        assert!(
+            hover.contains("requires the `process` layer of `std` (via `write_file (std::fs)`)"),
+            "{hover}"
+        );
+    }
+
+    // Colorless functions hover exactly as before — no requirement line.
+    #[test]
+    fn hover_stays_clean_on_a_colorless_function() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\nfun greet() {\n\tprint(\"hi\");\n}\n\nfun main() {\n\tgre|et();\n}\n",
+        );
+        assert!(
+            hover
+                .as_deref()
+                .is_none_or(|hover| !hover.contains("requires")),
+            "{hover:?}"
+        );
     }
 
     /// The completion labels offered at the cursor marked `|` in `src`.

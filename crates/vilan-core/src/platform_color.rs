@@ -23,8 +23,13 @@
 //!
 //! A violation reports the call chain from the entry (backlog §E.8's
 //! standard), anchored at the deepest call site in **user** code.
+//!
+//! [`requirements`] is the same reachability turned into tooling data: an
+//! entry-independent per-function map of rendered requirement lines (what the
+//! language server shows on hover), computed caller-ward from the seeds so
+//! every function gets a shortest witness chain to the layer it requires.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::analyzer::Program;
 use crate::call_graph::{CallGraph, CallTarget, IndirectReason, Node};
@@ -43,16 +48,7 @@ pub fn check(program: &mut Program, platform: Platform) {
         return;
     };
     let graph = CallGraph::build(program);
-
-    // Lexical closure children: creating a closure charges its body here.
-    let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
-    for node in graph.nodes() {
-        if let Node::Closure(closure_id) = node {
-            if let Some(parent) = graph.closure_parent_of(*closure_id) {
-                children.entry(parent).or_default().push(*closure_id);
-            }
-        }
-    }
+    let children = closure_children(&graph);
 
     // The DFS stack carries the discovery path: (node, the call span that
     // reached it, whether that call site is in user code).
@@ -105,36 +101,59 @@ fn walk(
         }
     }
 
+    for (callee, arrived) in edges(program, graph, children, node) {
+        walk(
+            program,
+            platform,
+            graph,
+            children,
+            callee,
+            arrived,
+            visited,
+            trail,
+            diagnostics,
+        );
+    }
+
+    trail.pop();
+}
+
+/// Lexical closure children: creating a closure charges its body to the
+/// creator (the v1 creator rule).
+fn closure_children(graph: &CallGraph) -> HashMap<Id, Vec<Id>> {
+    let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
+    for node in graph.nodes() {
+        if let Node::Closure(closure_id) = node {
+            if let Some(parent) = graph.closure_parent_of(*closure_id) {
+                children.entry(parent).or_default().push(*closure_id);
+            }
+        }
+    }
+    children
+}
+
+/// Everything `node` charges, with the call span that reaches each charge
+/// (`None` for a created closure's body): resolved callees and externs,
+/// every dispatch candidate of a trait/generic-bounded call, and the
+/// closures `node` creates. The single edge vocabulary of this pass — the
+/// admission walk and the [`requirements`] fixpoint both consume it, so the
+/// two can never drift apart.
+fn edges(
+    program: &Program,
+    graph: &CallGraph,
+    children: &HashMap<Id, Vec<Id>>,
+    node: Id,
+) -> Vec<(Id, Option<(Span, bool)>)> {
+    let mut edges = Vec::new();
     for call in graph.calls_of(node) {
         let span = program.span_map.get(&call.call_id).map(|span| **span);
         let in_user = span.is_some() && is_user_code(program, call.call_id);
         let arrived = span.map(|span| (span, in_user));
         match call.target {
-            CallTarget::Function(callee) | CallTarget::Closure(callee) => {
-                walk(
-                    program,
-                    platform,
-                    graph,
-                    children,
-                    callee,
-                    arrived,
-                    visited,
-                    trail,
-                    diagnostics,
-                );
-            }
-            CallTarget::External(callee) => {
-                walk(
-                    program,
-                    platform,
-                    graph,
-                    children,
-                    callee,
-                    arrived,
-                    visited,
-                    trail,
-                    diagnostics,
-                );
+            CallTarget::Function(callee)
+            | CallTarget::Closure(callee)
+            | CallTarget::External(callee) => {
+                edges.push((callee, arrived));
             }
             CallTarget::Variant(_) => {}
             CallTarget::Indirect(IndirectReason::Value) => {
@@ -143,17 +162,7 @@ fn walk(
             }
             CallTarget::Indirect(_) => {
                 for candidate in crate::async_infer::dispatch_candidates(program, call.call_id) {
-                    walk(
-                        program,
-                        platform,
-                        graph,
-                        children,
-                        candidate,
-                        arrived,
-                        visited,
-                        trail,
-                        diagnostics,
-                    );
+                    edges.push((candidate, arrived));
                 }
             }
         }
@@ -161,21 +170,93 @@ fn walk(
     // Creating a closure charges its body (v1 creator rule).
     if let Some(created) = children.get(&node) {
         for closure in created {
-            walk(
-                program,
-                platform,
-                graph,
-                children,
-                *closure,
-                None,
-                visited,
-                trail,
-                diagnostics,
-            );
+            edges.push((*closure, None));
+        }
+    }
+    edges
+}
+
+/// Per-function platform requirements, rendered for tooling: every function,
+/// closure, or extern that (transitively) requires a layer maps to a line
+/// like
+///
+/// ```text
+/// requires the `process` layer of `std` (via `load (server::store) → exists (std::fs)`)
+/// ```
+///
+/// Unlike [`check`] this is **entry-independent** — a library function nobody
+/// calls yet still knows its color, which is exactly what an editor hover
+/// wants. Requirements propagate caller-ward from the definition-site seeds
+/// (one multi-source BFS per layer label over the same [`edges`] the
+/// admission walk uses), and each reached node records the callee it acquired
+/// the label through, so following those witnesses callee-ward yields a
+/// *shortest* via-chain down to the layer. A seeded node's own line carries
+/// no chain. Multiple layers render one line each, in label order.
+pub fn requirements(program: &Program) -> HashMap<Id, String> {
+    let graph = CallGraph::build(program);
+    let children = closure_children(&graph);
+
+    // The node universe: every code-bearing node plus every extern (a leaf
+    // that can seed a requirement), in deterministic build order.
+    let mut universe: Vec<Id> = graph.nodes().iter().map(|node| node.id()).collect();
+    universe.extend(program.external_functions.keys().copied());
+
+    let mut callers: HashMap<Id, Vec<Id>> = HashMap::new();
+    for node in graph.nodes() {
+        for (callee, _) in edges(program, &graph, &children, node.id()) {
+            callers.entry(callee).or_default().push(node.id());
         }
     }
 
-    trail.pop();
+    let mut seeds: BTreeMap<&str, Vec<Id>> = BTreeMap::new();
+    for id in &universe {
+        if let Some(requirement) = requirement_of(program, *id) {
+            seeds.entry(requirement.label).or_default().push(*id);
+        }
+    }
+
+    let mut lines: HashMap<Id, Vec<String>> = HashMap::new();
+    for (label, sources) in &seeds {
+        // node → the callee it acquired this label from (`None` = seeded).
+        let mut witness: HashMap<Id, Option<Id>> = HashMap::new();
+        let mut queue: VecDeque<Id> = VecDeque::new();
+        for source in sources {
+            witness.insert(*source, None);
+            queue.push_back(*source);
+        }
+        while let Some(node) = queue.pop_front() {
+            let Some(callers_of_node) = callers.get(&node) else {
+                continue;
+            };
+            for caller in callers_of_node {
+                if !witness.contains_key(caller) {
+                    witness.insert(*caller, Some(node));
+                    queue.push_back(*caller);
+                }
+            }
+        }
+        for id in &universe {
+            let Some(acquired_through) = witness.get(id) else {
+                continue;
+            };
+            let mut chain = Vec::new();
+            let mut cursor = *acquired_through;
+            while let Some(next) = cursor {
+                chain.push(frame_label(program, next));
+                cursor = witness.get(&next).copied().flatten();
+            }
+            let line = if chain.is_empty() {
+                format!("requires {label}")
+            } else {
+                format!("requires {label} (via `{}`)", chain.join(" → "))
+            };
+            lines.entry(*id).or_default().push(line);
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(id, lines)| (id, lines.join("\n")))
+        .collect()
 }
 
 struct Requirement<'program> {

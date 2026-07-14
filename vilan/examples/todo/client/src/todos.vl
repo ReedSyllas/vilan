@@ -14,7 +14,8 @@ import std::display::format;
 import std::result::Result::{ self, Ok, Err };
 import std::rpc::{ SocketTransport, RpcError };
 import std::style::{ style, space, Style, Color, Length, Display, AlignItems, Cursor };
-import common::{ Todo, TodoClient };
+import common::Todo;
+import server::store::TodoClient;
 
 // The styles (proposal/ui-styling.md): typed values built inside `const`, so
 // every rule below lands in `dist/client.css` at BUILD time — app.html's old
