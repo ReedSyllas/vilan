@@ -13060,6 +13060,10 @@ pub struct Program<'src> {
     // its file (see `source_of`); both drive cross-file navigation in the LSP.
     pub sources: Vec<PathBuf>,
     pub source_ranges: Vec<SourceRange>,
+    // Library layer roots with their platform patterns (plus base roots with
+    // empty patterns, marking library territory) — the seeds and the
+    // user-code test for platform coloring (`platform_color`).
+    pub layer_platforms: Vec<(PathBuf, String, Vec<PlatformPattern>)>,
     // Use-site identifier spans for field accesses / method calls (`.x`), keyed
     // by the access expr id — drives rename and go-to-definition on members.
     pub member_name_spans: HashMap<Id, Span>,
@@ -14092,49 +14096,6 @@ fn collect_module_refs<'a>(nodes: &'a NodeList<'a>, root: &str) -> Vec<(&'a str,
     modules
 }
 
-/// Pushes a recoverable cross-platform error — spanned at the offending `import` —
-/// for each module imported from `library` that isn't available for the build
-/// `platform` (it lives only in a layer serving *other* platforms). The module
-/// still loads for typing (from wherever it is), so the file doesn't cascade.
-/// Imports that aren't module files in any layer — an item re-exported from
-/// `lib.vl`, or a typo — are left to normal name resolution.
-fn gate_library_imports(
-    refs: &[(&str, Span)],
-    library: &PackageSpec,
-    library_name: &str,
-    platform: Platform,
-    diagnostics: &mut Vec<Error>,
-) {
-    let mut reported: HashSet<&str> = HashSet::new();
-    for (name, span) in refs {
-        if !reported.insert(*name) {
-            continue;
-        }
-        // Available for this platform (a matching layer or the base)? then fine.
-        if resolve_module_in_roots(&library.available_roots(platform), name)
-            .0
-            .is_some()
-        {
-            continue;
-        }
-        // Not available here, but present in a layer serving another platform →
-        // cross-platform.
-        if resolve_module_in_roots(&library.search_roots(platform), name)
-            .0
-            .is_some()
-        {
-            diagnostics.push(Error {
-                span: *span,
-                msg: format!(
-                    "`{library_name}::{name}` is in another platform's layer and is not \
-                     available when building for `{}`",
-                    platform.name()
-                ),
-            });
-        }
-    }
-}
-
 /// Lists the module files directly under `root`: a flat `name.vl` or a directory
 /// `name/lib.vl` (the two forms an importer can't tell apart). Returns each
 /// `(module name, file path)` in a stable (sorted) order, so diagnostics built from
@@ -14500,15 +14461,7 @@ pub fn analyze<'src>(
         to_load.push((Origin::Std, "rpc"));
     }
     let entry_std_refs = collect_module_refs(&nodes.0, "std");
-    if !compiling_std {
-        gate_library_imports(
-            &entry_std_refs,
-            std,
-            "std",
-            platform,
-            &mut analyzer.diagnostics,
-        );
-    }
+    if !compiling_std {}
     to_load.extend(
         entry_std_refs
             .into_iter()
@@ -14610,13 +14563,6 @@ pub fn analyze<'src>(
         // items resolve and the file doesn't cascade (L1).
         for (name, index) in &workspace.entry_dependencies {
             let refs = collect_module_refs(&nodes.0, name);
-            gate_library_imports(
-                &refs,
-                &workspace.packages[*index],
-                name,
-                platform,
-                &mut analyzer.diagnostics,
-            );
             to_load.extend(
                 refs.into_iter()
                     .map(|(module, _)| (Origin::Dep(*index), module)),
@@ -14875,13 +14821,6 @@ pub fn analyze<'src>(
                 Origin::Std => {}
                 Origin::Pkg => {
                     let std_refs = collect_module_refs(&ast.0, "std");
-                    gate_library_imports(
-                        &std_refs,
-                        std,
-                        "std",
-                        platform,
-                        &mut analyzer.diagnostics,
-                    );
                     to_load.extend(
                         std_refs
                             .into_iter()
@@ -14889,13 +14828,6 @@ pub fn analyze<'src>(
                     );
                     for (name, index) in &workspace.entry_dependencies {
                         let refs = collect_module_refs(&ast.0, name);
-                        gate_library_imports(
-                            &refs,
-                            &workspace.packages[*index],
-                            name,
-                            platform,
-                            &mut analyzer.diagnostics,
-                        );
                         to_load.extend(
                             refs.into_iter()
                                 .map(|(module, _)| (Origin::Dep(*index), module)),
@@ -15742,6 +15674,31 @@ pub fn analyze<'src>(
             })
             .collect()
     };
+    // The library platform map for coloring: every layer root with its
+    // patterns, and every base root (empty patterns) so user-code detection
+    // knows library territory.
+    let layer_platforms = {
+        let mut recorded: Vec<(PathBuf, String, Vec<PlatformPattern>)> = Vec::new();
+        let record = |name: &str, spec: &PackageSpec, recorded: &mut Vec<_>| {
+            for layer in &spec.layers {
+                recorded.push((
+                    layer.root.clone(),
+                    format!("the `{}` layer of `{name}`", layer.name),
+                    layer.patterns.clone(),
+                ));
+            }
+            recorded.push((spec.base_root.clone(), format!("`{name}`"), Vec::new()));
+        };
+        record("std", std, &mut recorded);
+        for (dep_name, index) in &workspace.entry_dependencies {
+            record(dep_name, &workspace.packages[*index], &mut recorded);
+        }
+        for spec in &workspace.packages {
+            record("a dependency", spec, &mut recorded);
+        }
+        recorded
+    };
+
     Program {
         platform,
         closures: analyzer.closures,
@@ -15794,6 +15751,7 @@ pub fn analyze<'src>(
         parameters: analyzer.parameters,
         sources,
         source_ranges: std::mem::take(&mut analyzer.source_ranges),
+        layer_platforms,
         diagnostic_sources,
         member_name_spans: analyzer.member_name_spans,
         struct_initializer_to_def: analyzer.struct_initializer_to_def,

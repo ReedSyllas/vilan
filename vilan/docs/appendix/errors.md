@@ -21,10 +21,13 @@ spelling isn't supported. Import the module, then qualify through its
 name: `import std::math;` and `math::min(1, 2)`.
 → [Hello vilan](../tour/hello-vilan.md)
 
-**"`std::…` is in another platform's layer and is not available when building for …"**
-You imported a module the current platform doesn't have — `std::ui` in a
-node build, `std::db` in a browser build. If this is shared code, it must
-stay platform-neutral; if it's app code, check the package's `target`.
+**"`…` requires the `…` layer of `std` and cannot run on `…`"**
+Code reachable from this build's entry calls into a module the platform
+doesn't have — `std::fs` from a browser build, `std::dom` from a node
+build. The error lists the call chain from `main` to the crossing.
+Importing the module is not the problem (imports are free); reaching it
+is. Move the call behind the right entry, or check the package's
+`target`.
 → [Platforms](../tour/platforms.md)
 
 **"cannot find module '…' to import"**

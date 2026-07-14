@@ -11711,10 +11711,107 @@ fn link_accepts_any_routable_and_chains() {
 }
 
 #[test]
+fn platform_requirement_flows_through_trait_dispatch() {
+    // A bounded method call can't name one callee pre-monomorphization, so the
+    // walk descends into every CANDIDATE (async_infer's rule): a browser build
+    // reaching `save_it` is charged for the @process impl.
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        trait Save {
+            fun save(self): bool;
+        }
+
+        struct DiskStore { path: str }
+
+        impl DiskStore with Save {
+            fun save(self): bool {
+                write_file(self.path, "state");
+                true
+            }
+        }
+
+        fun save_it<T: Save>(store: T): bool {
+            store.save()
+        }
+
+        fun main() {
+            save_it(DiskStore { path = "s.txt" });
+        }
+        "#,
+        "requires the `process` layer of `std`",
+    );
+}
+
+#[test]
+fn a_closures_platform_charges_its_creator() {
+    // The v1 creator rule: making the closure is the colored act — the body
+    // is charged where the literal is created, whether or not it is called.
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+
+        fun make_saver(path: str): |str| void {
+            |content: str| {
+                write_file(path, content);
+            }
+        }
+
+        fun main() {
+            let _saver = make_saver("s.txt");
+        }
+        "#,
+        "requires the `process` layer of `std`",
+    );
+}
+
+#[test]
+#[ignore = "per-instantiation coloring (proposal/platform-coloring.md §3.2): candidates \
+            over-approximate like async_infer, so a neutral instantiation is rejected \
+            when a colored impl exists — the recorded refinement lifts this"]
+fn a_neutral_instantiation_is_admitted_despite_a_colored_impl() {
+    assert_compiles_browser(
+        r#"
+        import std::fs::write_file;
+
+        trait Save {
+            fun save(self): bool;
+        }
+
+        struct MemStore { last: str }
+        struct DiskStore { path: str }
+
+        impl MemStore with Save {
+            fun save(self): bool { true }
+        }
+
+        impl DiskStore with Save {
+            fun save(self): bool {
+                write_file(self.path, "state");
+                true
+            }
+        }
+
+        fun save_it<T: Save>(store: T): bool {
+            store.save()
+        }
+
+        fun main() {
+            // Only the neutral impl is instantiated; the disk impl exists but
+            // is never reached on this build.
+            save_it(MemStore { last = "" });
+        }
+        "#,
+    );
+}
+
+#[test]
 fn the_router_is_browser_only() {
-    // `std::router` lives in the browser layer; a process-platform build
-    // importing it is the platform error the architecture wants (the
-    // server-side story is a future base-layer lift — proposal/router.md §4).
+    // `std::router` lives in the browser layer. Under platform coloring the
+    // import is fine — REACHING `navigate` from a node build's entry is the
+    // violation, anchored at the user call site with the chain
+    // (proposal/platform-coloring.md §3.6).
     assert_fails_spanning(
         r#"
         import std::router::navigate;
@@ -11723,8 +11820,8 @@ fn the_router_is_browser_only() {
             navigate("/home");
         }
         "#,
-        "router",
-        "is in another platform's layer",
+        r#"navigate("/home")"#,
+        "requires the `browser` layer of `std` and cannot run on `node",
     );
 }
 

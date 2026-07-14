@@ -196,7 +196,7 @@ pub fn infer(program: &mut Program) {
 /// The concrete member ids a trait/generic-bounded dispatch at `call_id` could
 /// resolve to across monomorphizations: an impl's member for the method, or the
 /// trait's own default. The async fixpoint marks the caller async if any is.
-fn dispatch_candidates(program: &Program, call_id: Id) -> Vec<Id> {
+pub(crate) fn dispatch_candidates(program: &Program, call_id: Id) -> Vec<Id> {
     let Some(dispatch) = dispatch_at(program, call_id) else {
         return Vec::new();
     };

@@ -101,14 +101,21 @@ fn both_forms_is_ambiguous() {
 }
 
 #[test]
-fn none_platform_rejects_platform_std() {
-    // A `none` (pure-library) platform reaches only the base std layer, so importing
-    // a process-layer module is a clear platform diagnostic rather than a build.
-    let entry = "import std::http;\nfun main() {}\n";
-    let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::None);
+fn none_platform_rejects_reaching_platform_std() {
+    // A `none` (pure-library) platform admits only base-layer code. Importing a
+    // process-layer module is fine (coloring: imports are not the checkpoint);
+    // REACHING it from the entry is the violation.
+    let import_only = "import std::http;\nfun main() {}\n";
+    let errors = analyze_package(&[("main.vl", import_only)], "main.vl", Platform::None);
+    assert!(errors.is_empty(), "import alone is legal: {errors:#?}");
+
+    let reaching = "import std::http::Server;\nfun main() { Server::builder(); }\n";
+    let errors = analyze_package(&[("main.vl", reaching)], "main.vl", Platform::None);
     assert!(
-        errors.iter().any(|error| error.contains("not available")),
-        "expected a platform-gate error, got: {errors:#?}"
+        errors
+            .iter()
+            .any(|error| error.contains("requires the `process` layer of `std`")),
+        "expected a platform-coloring violation, got: {errors:#?}"
     );
 }
 
@@ -317,14 +324,15 @@ fn cross_platform_std_import_does_not_cascade() {
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("std::http") && e.contains("not available")),
-        "missing the std::http cross-platform error: {errors:#?}"
+            .any(|e| e.contains("`read_file_to_str` requires the `process` layer of `std`")),
+        "missing the fs boundary violation: {errors:#?}"
     );
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("std::fs") && e.contains("not available")),
-        "missing the std::fs cross-platform error: {errors:#?}"
+            .any(|e| e.contains("requires the `process` layer of `std`")
+                && e.contains("main → builder")),
+        "missing the http boundary violation: {errors:#?}"
     );
     assert!(
         !errors.iter().any(|e| e.contains("cannot find")),
@@ -334,17 +342,18 @@ fn cross_platform_std_import_does_not_cascade() {
 
 #[test]
 fn cross_platform_diagnostic_is_spanned() {
-    // The error points at the offending `import` (not EMPTY_SPAN at 0..0).
+    // The violation anchors at the user CALL SITE (not EMPTY_SPAN at 0..0, and
+    // not the import — proposal/platform-coloring.md §3.6).
     let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
     let errors = analyze_package_raw(&[("main.vl", entry)], "main.vl", Platform::Browser);
     let http = errors
         .iter()
-        .find(|e| e.msg.contains("std::http") && e.msg.contains("not available"))
-        .expect("a std::http cross-platform error");
+        .find(|e| e.msg.contains("requires the `process` layer of `std`"))
+        .expect("a platform-coloring violation");
     let range = http.span.into_range();
     assert!(
         range.start < range.end && range.start > 0,
-        "expected a real import span, got {range:?}"
+        "expected a real call span, got {range:?}"
     );
 }
 
@@ -354,15 +363,15 @@ fn cross_platform_transitive_import_not_reported() {
     // transitively (std-internal) load but are not separately gated.
     let entry = "import std::http::Server;\nfun main() { Server::builder(); }\n";
     let errors = analyze_package(&[("main.vl", entry)], "main.vl", Platform::Browser);
-    let cross_platform = errors
+    let violations = errors
         .iter()
-        .filter(|e| e.contains("not available"))
+        .filter(|e| e.contains("cannot run on"))
         .count();
     assert_eq!(
-        cross_platform, 1,
-        "expected exactly one cross-platform error (http), got: {errors:#?}"
+        violations, 1,
+        "one violation at the boundary, not one per function inside the layer: {errors:#?}"
     );
-    assert!(errors.iter().any(|e| e.contains("std::http")));
+    assert!(errors.iter().any(|e| e.contains("main → builder")));
 }
 
 #[test]
@@ -378,15 +387,10 @@ fn platform_modules_load_for_typing_under_opposite_platform() {
     ] {
         let entry = format!("import std::{module};\nfun main() {{}}\n");
         let errors = analyze_package(&[("main.vl", &entry)], "main.vl", platform);
-        assert_eq!(
-            errors.len(),
-            1,
-            "`std::{module}` under {platform:?} should yield exactly the one cross-platform \
-             error (loading-for-typing introduced no others): {errors:#?}"
-        );
         assert!(
-            errors[0].contains(module) && errors[0].contains("not available"),
-            "`std::{module}` under {platform:?}: unexpected error: {errors:#?}"
+            errors.is_empty(),
+            "`std::{module}` under {platform:?}: importing without reaching is legal \
+             (elision), and loading-for-typing introduces no errors: {errors:#?}"
         );
     }
 }
@@ -472,8 +476,9 @@ fn layer_module_available_only_for_its_platform() {
     assert!(
         browser
             .iter()
-            .any(|e| e.contains("another platform's layer")),
-        "expected a cross-platform error for browser, got: {browser:#?}"
+            .any(|e| e.contains("requires the `process` layer of `plat`")
+                && e.contains("cannot run on `browser`")),
+        "expected a platform-coloring violation for browser, got: {browser:#?}"
     );
     assert!(
         !browser.iter().any(|e| e.contains("cannot find")),
@@ -581,14 +586,15 @@ fn process_layer_std_is_reachable_for_deno() {
 
 #[test]
 fn browser_layer_std_is_cross_platform_for_deno() {
-    // The browser layer doesn't serve deno, so `std::dom` is a cross-platform import.
-    let entry = "import std::dom;\nfun main() {}\n";
+    // The browser layer doesn't serve deno: reaching a browser-layer function
+    // from a deno build is a coloring violation (pattern matching, not names).
+    let entry = "import std::router::navigate;\nfun main() { navigate(\"/x\"); }\n";
     let errors = analyze_package(&[("main.vl", entry)], "main.vl", deno());
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("std::dom") && e.contains("not available")),
-        "std::dom should be cross-platform for deno: {errors:#?}"
+            .any(|e| e.contains("requires the `browser` layer of `std`")),
+        "reaching the browser layer should violate for deno: {errors:#?}"
     );
 }
 

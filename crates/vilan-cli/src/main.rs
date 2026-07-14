@@ -1157,6 +1157,7 @@ fn compile_to_js(
         // Infer which functions/closures are async (drives `async`/`await`
         // code generation).
         async_infer::infer(&mut program);
+        vilan_core::platform_color::check(&mut program, platform);
 
         // Evaluate `const` expressions (proposal/const-eval.md); the results
         // serialize in place at transform time, the failures are ordinary

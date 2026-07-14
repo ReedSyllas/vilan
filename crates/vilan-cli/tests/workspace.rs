@@ -137,8 +137,8 @@ fn cross_platform_library_module_is_rejected_without_cascade() {
     );
     let text = combined(&output);
     assert!(
-        text.contains("another platform's layer"),
-        "unexpected output: {text}"
+        text.contains("requires the `process` layer of `platlib`") && text.contains("main → value"),
+        "expected a chain-rendered coloring violation: {text}"
     );
     assert!(
         !text.contains("cannot find"),

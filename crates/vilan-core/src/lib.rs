@@ -17,6 +17,7 @@ pub mod manifest;
 pub mod node;
 pub mod options;
 pub mod parser;
+pub mod platform_color;
 pub mod span;
 pub mod target;
 pub mod token;
@@ -264,6 +265,7 @@ pub fn analyze_source(
         let mut program = analyze(root, source, std, pkg_root, entry_path, platform, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
+        platform_color::check(&mut program, platform);
         // The const pass (proposal/const-eval.md): evaluate `const`-marked
         // expressions in dependency order; results serialize in place at
         // transform time, failures are ordinary diagnostics. Runs here so

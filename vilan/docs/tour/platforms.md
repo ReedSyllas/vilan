@@ -4,10 +4,18 @@ One language, several runtimes. A package builds for **node** (the
 default), **deno**, **bun**, or the **browser** — set `target` in
 `vilan.toml`, or pass `--platform` on the CLI.
 
-The standard library is layered so each build only sees what its platform
-can actually do. Import a server module in a browser build and you get a
-clear compile error at the import, not a runtime crash. That's the whole
-idea of this chapter.
+The standard library is layered so each build only uses what its platform
+can actually do. Call a server function from code a browser build can
+reach, and you get a clear compile error naming the call chain — not a
+runtime crash. That's the whole idea of this chapter.
+
+> **Going deeper.** The check is on *reachable code*, not on imports. A
+> file may import `std::fs` and compile for the browser, as long as no
+> code the browser entry can reach actually calls into it. The compiler
+> colors every function with the platforms it can run on (seeded by the
+> std layers, flowing through calls — the same way `async` is inferred),
+> and checks the colors only along paths that start at your `main`. When
+> a path crosses onto the wrong platform, the error shows that path.
 
 ## The std layers
 
