@@ -403,6 +403,7 @@ pub fn resolve_library(dir: &Path) -> PackageSpec {
         base_root: dir.to_path_buf(),
         layers: Vec::new(),
         dependencies: Vec::new(),
+        surface: true,
     }
 }
 
@@ -460,6 +461,7 @@ fn library_spec(dir: &Path, library: &Library, dependencies: Vec<(String, usize)
         base_root: dir.join(library.base_root()),
         layers,
         dependencies,
+        surface: true,
     }
 }
 
@@ -514,21 +516,18 @@ fn resolve_dependency_edges(
         }
         let manifest = load_manifest(&dependency_dir)
             .map_err(|error| format!("dependency `{import_name}`: {error}"))?;
-        // A dependency must be a `[library]` — you depend on libraries, not apps
-        // (L1, Q2). A `[package]` (app) dependency is an error with a migration hint.
-        let library = match (&manifest.library, &manifest.package) {
-            (Some(_), _) => manifest.library.unwrap(),
-            (None, Some(_)) => {
-                return Err(format!(
-                    "dependency `{import_name}` at `{}` is a `[package]` (an app); only \
-                     `[library]` packages can be depended on — change its `[package]` to a \
-                     `[library]`",
-                    dependency_dir.display()
-                ));
-            }
+        // A dependency is a `[library]` (layered, contract-checked, with a
+        // `lib.vl` surface) — or, since platform coloring, a `[package]` (an
+        // app): its `src/` modules import by path, its items color
+        // inferentially, and reaching an off-platform function is the
+        // analyzer's chain diagnostic. This is the blessed client→server
+        // service shape (proposal/platform-coloring.md §7.3).
+        let (library, package_dependencies) = match (&manifest.library, &manifest.package) {
+            (Some(_), _) => (Some(manifest.library.unwrap()), None),
+            (None, Some(package)) => (None, Some(package.dependencies.clone())),
             (None, None) => {
                 return Err(format!(
-                    "dependency `{import_name}` at `{}` is not a `[library]`",
+                    "dependency `{import_name}` at `{}` is not a `[library]` or `[package]`",
                     dependency_dir.display()
                 ));
             }
@@ -538,8 +537,13 @@ fn resolve_dependency_edges(
         // base plus each declared per-target overlay) come from `library_spec`; a
         // target-specific module being unavailable for the build target is the
         // analyzer's per-module diagnostic at the import (L1), not a resolution error.
+        let own_dependencies = library
+            .as_ref()
+            .map(|library| library.dependencies.clone())
+            .or(package_dependencies)
+            .unwrap_or_default();
         let dependency_edges = resolve_dependency_edges(
-            &library.dependencies,
+            &own_dependencies,
             &dependency_dir,
             packages,
             index_by_path,
@@ -547,7 +551,18 @@ fn resolve_dependency_edges(
         )?;
         visiting.remove(&canonical);
         let index = packages.len();
-        packages.push(library_spec(&dependency_dir, &library, dependency_edges));
+        let spec = match &library {
+            Some(library) => library_spec(&dependency_dir, library, dependency_edges),
+            // A `[package]` dependency: base-only over its `src/`, no layers,
+            // no `lib.vl` surface.
+            None => PackageSpec {
+                base_root: dependency_dir.join("src"),
+                layers: Vec::new(),
+                dependencies: dependency_edges,
+                surface: false,
+            },
+        };
+        packages.push(spec);
         index_by_path.insert(canonical, index);
         edges.push((import_name.clone(), index));
     }

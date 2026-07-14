@@ -4,3 +4,7 @@ target = "browser"
 
 [package.dependencies]
 common = { path = "../common" }
+# The service lives in the server package; the browser build imports its
+# generated `TodoClient` from there (platform coloring keeps the server-only
+# bodies out of reach).
+server = { path = "../server" }

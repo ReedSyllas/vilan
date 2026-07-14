@@ -1,0 +1,136 @@
+// The service — living in the SERVER package, where its resources are
+// (proposal/platform-coloring.md §4.1). The `[service(TodoClient)]` macro
+// still generates both sides from this one struct: the dispatcher and these
+// bodies compile only where they're reachable (the server), while the browser
+// build, importing `server::store::TodoClient`, takes just the generated stub
+// and the contract hash — so this module may use `std::fs` directly, and the
+// whole boot/persist lifecycle is the store's own business instead of wiring
+// injected from `main`.
+
+import std::reactive::Signal;
+import std::shared::Shared;
+import std::json::json_codec;
+import std::wire::{ encode, decode, Frame };
+import std::result::Result::{ self, Ok, Err };
+import std::fs;
+import common::Todo;
+
+// Where the list lives between runs — reloaded on boot, rewritten on change.
+let storage = "todos.json";
+
+[service(TodoClient)]
+struct TodoStore {
+	// The one authoritative list. `[expose]`d, so the generated
+	// `TodoClient::connect` mirrors it on every connection's wire.
+	[expose] todos: Signal<List<Todo>>,
+	// Ids stay unique across restarts: `boot` seeds this past the stored list.
+	next_id: Shared<i32>,
+}
+
+impl TodoStore {
+	[rpc]
+	fun add(self, label: str): i32 {
+		let id = self.next_id.read();
+		self.next_id.write() = id + 1;
+		self.todos.set_with(|list| {
+			mut updated = list;
+			updated.push(Todo { id = id, label = label, done = false });
+			updated
+		});
+		id
+	}
+
+	[rpc]
+	fun toggle(self, id: i32): bool {
+		// Read the pre-state outside the closure (a closure captures copies, so
+		// mutating an outer local inside one wouldn't be seen out here).
+		mut now_done = false;
+		for todo in self.todos.get() {
+			if todo.id == id {
+				now_done = !todo.done;
+			}
+		}
+		self.todos.set_with(|list| {
+			mut updated: List<Todo> = [];
+			for todo in list {
+				if todo.id == id {
+					updated.push(Todo { id = todo.id, label = todo.label, done = !todo.done });
+				} else {
+					updated.push(todo);
+				}
+			}
+			updated
+		});
+		now_done
+	}
+
+	[rpc]
+	fun remove(self, id: i32): bool {
+		mut found = false;
+		for todo in self.todos.get() {
+			if todo.id == id {
+				found = true;
+			}
+		}
+		self.todos.set_with(|list| {
+			mut kept: List<Todo> = [];
+			for todo in list {
+				if todo.id != id {
+					kept.push(todo);
+				}
+			}
+			kept
+		});
+		found
+	}
+}
+
+// Boot the store from disk: reload the list, seed the id counter past it, and
+// subscribe persistence — `sub` fires immediately with the current value, so
+// a first run writes the file eagerly, and every later change (whoever makes
+// it) rides the same one code path to disk. Dropping the subscription handle
+// doesn't stop it; the store persists for the process's life.
+fun boot(): TodoStore {
+	let stored = load();
+	let store = TodoStore {
+		todos = Signal::new(stored),
+		next_id = Shared::new(next_id_after(stored)),
+	};
+	let _persisting = store.todos.sub(|list| persist(list));
+	store
+}
+
+// One JSON frame at rest, riding the same codec seam as the wire. (The write
+// is fire-and-forget; rapid changes could land out of order — fine for a
+// demo, a real app would serialize its writes.)
+fun persist(list: List<Todo>) {
+	match encode(json_codec(), list) {
+		Frame::Text(let text) => fs::write_file(storage, text),
+		Frame::Binary(let _bytes) => {},
+	}
+}
+
+// The stored list — empty on a first run, and empty (not a crash) if the file
+// is corrupt: the codec's decode is validating.
+fun load(): List<Todo> {
+	if fs::exists(storage) {
+		let stored: Result<List<Todo>, str> = decode(json_codec(), Frame::Text(fs::read_file_to_str(storage)));
+		match stored {
+			Ok(let list) => list,
+			Err(let _reason) => [],
+		}
+	} else {
+		[]
+	}
+}
+
+// One past the largest stored id, so restored and new todos never collide.
+fun next_id_after(todos: List<Todo>): i32 {
+	mut next = 0;
+	for todo in todos {
+		if todo.id >= next {
+			next = todo.id + 1;
+		}
+	}
+	next
+}

@@ -1,27 +1,16 @@
-// The server: owns the one authoritative `TodoStore`, serves the browser bundle,
-// and mounts the store's generated dispatcher on a connected server
-// (`std::rpc_server::serve_connected`) — `POST /rpc` carries the client's calls,
-// and each session's SSE stream (`GET /events`) carries the list's changes out
-// to every subscribed tab.
-//
-// Persistence is just another subscription: the same `Signal` the wire fans out
-// from also writes `todos.json` — one code path for every observer of the list —
-// and it rides the same codec seam as the wire (`encode`/`decode` over
-// `json_codec()`): the file is one JSON frame at rest.
+// The server: boots the one authoritative `TodoStore` (which owns its own
+// persistence — see `store.vl`), serves the browser bundle, and mounts the
+// store's generated dispatcher on a connected server
+// (`std::rpc_server::serve_connected`) — `POST /rpc` carries the client's
+// calls, and each session's SSE stream (`GET /events`) carries the list's
+// changes out to every subscribed tab.
 
 import std::print;
-import std::reactive::Signal;
-import std::shared::Shared;
 import std::json::json_codec;
-import std::wire::{ encode, decode, Frame };
-import std::result::Result::{ self, Ok, Err };
-import std::fs;
 import std::http::Response;
 import std::rpc_server::serve_service;
-import common::{ Todo, TodoStore };
-
-// Where the list lives between runs — reloaded on boot, rewritten on change.
-let storage = "todos.json";
+import std::fs;
+import pkg::store::boot;
 
 async fun main() {
 	// Read the browser bundle once (`vilan build`/`run` writes it to
@@ -33,19 +22,8 @@ async fun main() {
 
 	let app_html = fs::read_file_to_str("server/src/app.html");
 
-	let stored = load();
-	let store = TodoStore { todos = Signal::new(stored), next_id = Shared::new(next_id_after(stored)) };
-
-	// The persistence subscription. `sub` fires immediately with the current
-	// value, so boot writes the file once, creating it eagerly. (The write is
-	// fire-and-forget; rapid changes could land out of order — fine for a demo,
-	// a real app would serialize its writes.)
-	let saving = store.todos.sub(|list| {
-		match encode(json_codec(), list) {
-			Frame::Text(let text) => fs::write_file(storage, text),
-			Frame::Binary(let _bytes) => {},
-		}
-	});
+	// Reload, seed ids, subscribe persistence — the store's own lifecycle.
+	let store = boot();
 
 	serve_service(59386, store.dispatcher().into_protocol(json_codec()), |request| {
 		match request.path() {
@@ -56,27 +34,3 @@ async fun main() {
 	}, || print("todo server: http://localhost:59386/ — open it in two tabs"));
 }
 
-// The stored list — empty on a first run, and empty (not a crash) if the file
-// is corrupt: the codec's decode is validating.
-fun load(): List<Todo> {
-	if fs::exists(storage) {
-		let stored: Result<List<Todo>, str> = decode(json_codec(), Frame::Text(fs::read_file_to_str(storage)));
-		match stored {
-			Ok(let list) => list,
-			Err(let _reason) => [],
-		}
-	} else {
-		[]
-	}
-}
-
-// One past the largest stored id, so restored and new todos never collide.
-fun next_id_after(todos: List<Todo>): i32 {
-	mut next = 0;
-	for todo in todos {
-		if todo.id >= next {
-			next = todo.id + 1;
-		}
-	}
-	next
-}

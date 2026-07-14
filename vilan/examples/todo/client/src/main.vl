@@ -9,7 +9,8 @@ import std::reactive::Signal;
 import std::json::json_codec;
 import std::result::Result::{ Ok, Err };
 import std::ui::mount_root;
-import common::{ Todo, TodoClient };
+import common::Todo;
+import server::store::TodoClient;
 import pkg::todos::todos;
 
 async fun main() {

@@ -221,6 +221,28 @@ When token-per-call gets noisy, the recorded refinement is
 connection-scoped identity via `std::context`. It isn't built into the
 generated dispatch yet.
 
+## Where the service lives
+
+The service can live **in the server package**, right next to the
+resources its methods use — a database handle, the filesystem, other
+services. The client package depends on the server package and imports
+just the generated client:
+
+```vilan,fragment
+// server/src/store.vl — bodies use server std directly
+[service(TodoClient)]
+struct TodoStore { … }
+
+// client/src/main.vl
+import server::store::TodoClient;
+```
+
+The browser build takes only the stub and the contract hash from that
+module; the method bodies and the dispatcher are server-colored and out
+of its reach (see [Platforms](../tour/platforms.md)). A shared `common`
+library is still the right home for the payload types both sides speak —
+it's just no longer the only legal home for the service.
+
 ## The server side
 
 ```vilan,fragment

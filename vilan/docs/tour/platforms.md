@@ -31,13 +31,16 @@ runtime crash. That's the whole idea of this chapter.
 ## Full-stack packages
 
 A client + server app is a workspace of three packages. The shared
-`common` library holds the service definition and the payload types, and
-because both sides import it, it may only use base-layer std:
+`common` library holds the payload types both sides speak (base-layer
+std only); the service itself can live in the server package, next to
+its resources — the client depends on the server package and imports
+the generated client from it (see
+[Services](../guide/services.md)):
 
 ```
 app/
   vilan.toml       [project] packages = ["common", "client", "server"]
-  common/          [library] — service + types (base layer only)
+  common/          [library] — payload types (base layer only)
   client/          [package] target = "browser"
   server/          [package] (node)
 ```

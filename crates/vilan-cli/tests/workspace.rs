@@ -148,10 +148,12 @@ fn cross_platform_library_module_is_rejected_without_cascade() {
 }
 
 #[test]
-fn dependency_must_be_a_library() {
-    // You depend on libraries, not apps (L1, Q2): a `[package]` dependency is an
-    // error with a migration hint.
-    let dir = temp_project("notlib");
+fn a_package_dependency_is_allowed_and_colors_inferentially() {
+    // Platform coloring's blessed shape (platform-coloring.md §7.3): an app
+    // may depend on a `[package]`. Its neutral items are reachable from any
+    // build; reaching a function that touches platform std is the chain
+    // diagnostic — the dependency's `target` declares its entry, not a gate.
+    let dir = temp_project("pkgdep");
     write(
         dir.as_path(),
         "applib/vilan.toml",
@@ -159,15 +161,40 @@ fn dependency_must_be_a_library() {
     );
     write(dir.as_path(), "applib/src/main.vl", "fun main() {}\n");
     write(
+        dir.as_path(),
+        "applib/src/util.vl",
+        "import std::fs::write_file;\nfun neutral(): i32 { 2 }\nfun save() { write_file(\"x\", \"y\") }\n",
+    );
+    write(
         &dir,
         "web/vilan.toml",
-        "[package]\nname = \"web\"\ntarget = \"node\"\n\n[package.dependencies]\napplib = { path = \"../applib\" }\n",
+        "[package]\nname = \"web\"\ntarget = \"browser\"\n\n[package.dependencies]\napplib = { path = \"../applib\" }\n",
     );
-    write(&dir, "web/src/main.vl", "fun main() {}\n");
-    let output = vilan(&["check", dir.join("web").to_str().unwrap()]);
-    assert!(!output.status.success(), "expected a not-a-library failure");
+    // Reaching the neutral item from the browser: fine.
+    write(
+        &dir,
+        "web/src/main.vl",
+        "import applib::util::neutral;\nfun main() { neutral(); }\n",
+    );
+    let output = vilan(&["build", dir.join("web").to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "a neutral package-dependency item should build for the browser: {}",
+        combined(&output)
+    );
+    // Reaching the fs-colored item: the chain diagnostic.
+    write(
+        &dir,
+        "web/src/main.vl",
+        "import applib::util::save;\nfun main() { save(); }\n",
+    );
+    let output = vilan(&["build", dir.join("web").to_str().unwrap()]);
+    assert!(!output.status.success(), "expected a coloring violation");
     let text = combined(&output);
-    assert!(text.contains("[library]"), "unexpected output: {text}");
+    assert!(
+        text.contains("requires the `process` layer of `std`") && text.contains("main → save"),
+        "expected the chain diagnostic: {text}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

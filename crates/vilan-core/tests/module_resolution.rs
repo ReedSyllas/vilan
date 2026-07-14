@@ -168,6 +168,7 @@ fn analyze_workspace(entry: &str, deps: &[Dep], platform: Platform) -> Vec<Strin
             base_root: dep_root,
             layers: Vec::new(),
             dependencies: Vec::new(),
+            surface: true,
         });
         entry_dependencies.push((dep.import_name.to_string(), index));
     }
@@ -265,6 +266,7 @@ fn dependency_pkg_self_reference_is_isolated() {
             base_root: dep_root,
             layers: Vec::new(),
             dependencies: Vec::new(),
+            surface: true,
         }],
         entry_dependencies: vec![("common".to_string(), 0)],
         macro_limits: MacroLimits::default(),
@@ -440,6 +442,7 @@ fn analyze_layered(entry: &str, platform: Platform) -> Vec<String> {
                 },
             ],
             dependencies: Vec::new(),
+            surface: true,
         }],
         entry_dependencies: vec![("plat".to_string(), 0)],
         macro_limits: MacroLimits::default(),
@@ -540,6 +543,7 @@ fn base_lib_reexporting_a_layer_module_errors() {
                 root: plat.join("src/process"),
             }],
             dependencies: Vec::new(),
+            surface: true,
         }],
         entry_dependencies: vec![("plat".to_string(), 0)],
         macro_limits: MacroLimits::default(),

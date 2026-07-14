@@ -14224,6 +14224,10 @@ pub struct PackageSpec {
     /// How this library addresses its own dependencies: `(import name, index into
     /// the package slice)`. Lets a transitive `dep::subdep::item` resolve.
     pub dependencies: Vec<(String, usize)>,
+    /// Whether the package has a public surface (`lib.vl`) to load — true for
+    /// libraries, false for a `[package]` dependency (its modules import by
+    /// path; it has a `main.vl` instead).
+    pub surface: bool,
 }
 
 impl PackageSpec {
@@ -14576,6 +14580,11 @@ pub fn analyze<'src>(
             let namespace_scope_id = analyzer.packages[package_index].namespace_scope_id;
             // A library's public surface is its base `lib.vl` (the base layer is
             // target-agnostic), loaded once for every target.
+            // A `[package]` dependency has no `lib.vl` surface — its modules
+            // load on import by path.
+            if !spec.surface {
+                continue;
+            }
             let lib_path = std_module_path(&spec.base_root, "lib.vl");
             let Some(lib_loaded) = load_package_module(&lib_path) else {
                 analyzer.diagnostics.push(Error {

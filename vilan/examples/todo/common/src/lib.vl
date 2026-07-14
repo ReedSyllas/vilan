@@ -1,88 +1,13 @@
-// `common` — the shared vocabulary of the to-do app: the wire type (`Todo`) and
-// the service (`TodoStore`) both sides meet at. `[derive(Wire)]` gives `Todo`
-// its codec and proves every field is wire-safe; `[service(TodoClient)]`
-// generates the plumbing from the one struct — `TodoStore::dispatcher()` for the
-// server, the typed `TodoClient<T: Transport>` stub (each call `Result`-wrapped)
-// for the browser, and a shared `contract_hash()` tying the two builds together.
-
-import std::reactive::Signal;
-import std::shared::Shared;
-import std::json::Json;
+// `common` — the shared vocabulary of the to-do app: just the wire type now.
+// `[derive(Wire)]` gives `Todo` its codec and proves every field is
+// wire-safe. The service itself lives with its resources in
+// `server/src/store.vl` (platform coloring lets the browser build import its
+// generated client from there without compiling the server-only bodies);
+// this library keeps the payload types both sides speak.
 
 [derive(Wire, PartialEq)]
 struct Todo {
 	id: i32,
 	label: str,
 	done: bool,
-}
-
-[service(TodoClient)]
-struct TodoStore {
-	// The one authoritative list. `[expose]`d, so the generated
-	// `TodoClient::connect` mirrors it on every connection's wire — each
-	// subscribed session (and the persistence subscription) sees every change
-	// as it lands. The whole per-connection session dance this example used to
-	// hand-write (a sessions map, an `attach` method, connect/disconnect
-	// plumbing) is now the runtime's (§4.2).
-	[expose] todos: Signal<List<Todo>>,
-	// Ids stay unique across restarts: the server seeds this past the stored list.
-	next_id: Shared<i32>,
-}
-
-impl TodoStore {
-	[rpc]
-	fun add(self, label: str): i32 {
-		let id = self.next_id.read();
-		self.next_id.write() = id + 1;
-		self.todos.set_with(|list| {
-			mut updated = list;
-			updated.push(Todo { id = id, label = label, done = false });
-			updated
-		});
-		id
-	}
-
-	[rpc]
-	fun toggle(self, id: i32): bool {
-		// Read the pre-state outside the closure (a closure captures copies, so
-		// mutating an outer local inside one wouldn't be seen out here).
-		mut now_done = false;
-		for todo in self.todos.get() {
-			if todo.id == id {
-				now_done = !todo.done;
-			}
-		}
-		self.todos.set_with(|list| {
-			mut updated: List<Todo> = [];
-			for todo in list {
-				if todo.id == id {
-					updated.push(Todo { id = todo.id, label = todo.label, done = !todo.done });
-				} else {
-					updated.push(todo);
-				}
-			}
-			updated
-		});
-		now_done
-	}
-
-	[rpc]
-	fun remove(self, id: i32): bool {
-		mut found = false;
-		for todo in self.todos.get() {
-			if todo.id == id {
-				found = true;
-			}
-		}
-		self.todos.set_with(|list| {
-			mut kept: List<Todo> = [];
-			for todo in list {
-				if todo.id != id {
-					kept.push(todo);
-				}
-			}
-			kept
-		});
-		found
-	}
 }
