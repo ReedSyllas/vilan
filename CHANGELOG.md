@@ -6,6 +6,22 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.6.2 — 2026-07-15
+
+**Two generic miscompiles fixed.** A `&mut T` view resolving to `bool` through
+a generic, and integer division / bitwise ops on `i32`/`u32` through a generic,
+silently did the wrong thing: the boolean write-through was a no-op, `i32`/`u32`
+division skipped its truncation (`7 / 2` came out `3.5`), and a `u32` shift used
+the signed operator. Both were monomorphization-time classifications that dropped
+their verdict for the native-JS types — concrete code and every other integer
+width were already correct. Found by an audit after v0.6.1's `&mut bool` fix.
+
+**`!` guides you to convert errors.** `!` returns a failure as-is, so the error
+types must match; when they don't, the compiler now points at the fix instead of
+calling it unsupported — `.map_err(…)` to change a `Result`'s error, `.ok_or(err)`
+to turn an `Option`'s `None` into one. Conversion stays explicit (no hidden
+`From` behind the operator), by design.
+
 ## v0.6.1 — 2026-07-15
 
 **`&mut bool` write-through, fixed.** A writable view of a boolean *local* —
