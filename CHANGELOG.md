@@ -6,6 +6,16 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.6.1 — 2026-07-15
+
+**`&mut bool` write-through, fixed.** A writable view of a boolean *local* —
+`let v = &mut flag`, or passing `&mut flag` to a function — silently did
+nothing; the write never reached the original. v0.6.0 introduced `&mut bool`
+views but boxed only number and string locals, so a boolean's backing cell
+was missing and the write landed nowhere. Views of boolean *list elements*
+and *struct fields* were already correct; this fixes the bare-local case,
+the `v = !*v` toggle included.
+
 ## v0.6.0 — 2026-07-15
 
 **Map and Set key by value.** A struct, enum, or `List` works as a key
