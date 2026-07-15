@@ -15547,3 +15547,174 @@ fn from_json_round_trips_a_derived_enum() {
         "true\n",
     );
 }
+
+// --- I1: value-keyed Map/Set via Hashable ---------------------------------------
+// Map/Set key by value: a struct/enum/List key works (via `[derive(Hashable)]`
+// or a hand-written impl), a fresh equal key hits, and `key.hash()` is dispatched
+// so a custom impl is honored inside std collections.
+
+#[test]
+fn a_derived_struct_key_maps_by_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        import std::hash::Hashable;
+        import std::option::Option::{ self, Some, None };
+
+        [derive(Hashable)]
+        struct Point { x: i32, y: i32 }
+
+        fun main() {
+            mut m: Map<Point, str> = Map::new();
+            m.insert(Point { x = 1, y = 2 }, "here");
+            // A FRESH, distinct-but-equal Point hits.
+            match m.get(Point { x = 1, y = 2 }) {
+                Some(let v) => print(v),
+                None => print("miss"),
+            }
+            print(m.contains_key(Point { x = 9, y = 9 }));
+        }
+        "#,
+        "here\nfalse\n",
+    );
+}
+
+#[test]
+fn a_set_dedups_struct_elements_by_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::set::Set;
+        import std::hash::Hashable;
+
+        [derive(Hashable)]
+        struct Point { x: i32, y: i32 }
+
+        fun main() {
+            mut s: Set<Point> = Set::new();
+            s.insert(Point { x = 1, y = 2 });
+            s.insert(Point { x = 1, y = 2 });   // dup by value
+            s.insert(Point { x = 3, y = 4 });
+            print(s.len());                      // 2
+            print(s.contains(Point { x = 1, y = 2 }));
+        }
+        "#,
+        "2\ntrue\n",
+    );
+}
+
+#[test]
+fn a_derived_enum_is_a_valid_key() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::set::Set;
+        import std::hash::Hashable;
+
+        [derive(Hashable)]
+        enum Shape { Circle(i32), Rect(i32, i32), Empty }
+
+        fun main() {
+            mut s: Set<Shape> = Set::new();
+            s.insert(Shape::Circle(5));
+            s.insert(Shape::Circle(5));   // dup by value
+            s.insert(Shape::Empty);
+            print(s.len());               // 2
+            print(s.contains(Shape::Circle(5)));
+        }
+        "#,
+        "2\ntrue\n",
+    );
+}
+
+#[test]
+fn a_custom_hashable_impl_is_honored_by_map() {
+    // Genuine per-call dispatch: a hand-written `hash()` (by one field) is used
+    // inside the std Map, so two values that hash equal collide.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        import std::hash::{ Hashable, Hash };
+
+        struct User { id: i32, name: str }
+        impl User with Hashable {
+            fun hash(self): Hash {
+                self.id.hash()
+            }
+        }
+
+        fun main() {
+            mut m: Map<User, str> = Map::new();
+            m.insert(User { id = 1, name = "Ada" }, "a");
+            m.insert(User { id = 1, name = "Bob" }, "b");   // same id -> overwrites
+            print(m.len());                                  // 1
+        }
+        "#,
+        "1\n",
+    );
+}
+
+#[test]
+fn a_list_is_a_valid_key() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        import std::hash::Hashable;
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+            mut m: Map<List<i32>, str> = Map::new();
+            m.insert([1, 2, 3], "here");
+            match m.get([1, 2, 3]) {
+                Some(let v) => print(v),
+                None => print("miss"),
+            }
+        }
+        "#,
+        "here\n",
+    );
+}
+
+#[test]
+fn map_keys_and_set_iteration_return_real_values() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        import std::set::Set;
+        import std::hash::Hashable;
+
+        [derive(Hashable, Debug)]
+        struct Point { x: i32, y: i32 }
+
+        fun main() {
+            mut m: Map<Point, i32> = Map::new();
+            m.insert(Point { x = 1, y = 2 }, 10);
+            for key in m.keys() { print(key.debug()); }   // Point { x = 1, y = 2 }
+            mut s: Set<i32> = Set::new();
+            s.insert(7);
+            s.insert(8);
+            for x in s { print(x); }                       // 7, 8
+        }
+        "#,
+        "Point { x = 1, y = 2 }\n7\n8\n",
+    );
+}
+
+#[test]
+fn a_non_hashable_field_is_rejected_by_the_derive() {
+    // The all-fields check: a closure field can't be canonically hashed.
+    assert_fails(
+        r#"
+        import std::hash::Hashable;
+
+        [derive(Hashable)]
+        struct Handler { name: str, callback: || void }
+
+        fun main() {}
+        "#,
+    );
+}

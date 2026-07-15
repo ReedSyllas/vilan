@@ -806,6 +806,12 @@ pub struct Analyzer<'src> {
     /// walked, validated once `wire_names` is complete: `(type name, [(member
     /// label, member type node, span)])`.
     wire_types_to_check: Vec<WireTypeCheck<'src>>,
+    /// Names of `[derive(Hashable)]` structs/enums, and the ones awaiting the
+    /// all-fields-Hashable check (I1) — same shape as the Wire pair. A field of a
+    /// derived Hashable type must itself be Hashable, or `canonical_hash`
+    /// (JSON.stringify) would silently mangle it into a broken key.
+    hashable_names: HashSet<&'src str>,
+    hashable_types_to_check: Vec<WireTypeCheck<'src>>,
     /// `[rpc]` methods awaiting the Wire-signature check (`check_rpc_signatures`),
     /// collected as each is walked, validated once `wire_names` is complete.
     rpc_signatures_to_check: Vec<RpcSignatureCheck<'src>>,
@@ -1248,6 +1254,8 @@ impl<'src> Analyzer<'src> {
             diagnostics: Vec::new(),
             wire_names: HashSet::new(),
             wire_types_to_check: Vec::new(),
+            hashable_names: HashSet::new(),
+            hashable_types_to_check: Vec::new(),
             rpc_signatures_to_check: Vec::new(),
             expose_fields_to_check: Vec::new(),
             return_type_stack: Vec::new(),
@@ -1884,6 +1892,88 @@ impl<'src> Analyzer<'src> {
                              which is not Wire — every field of a Wire type must itself be Wire \
                              (a scalar, `str`, `bool`, `List`/`Option` of Wire, or another \
                              `[derive(Wire)]` type)"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Record a `[derive(Hashable)]` struct/enum for the all-fields-Hashable
+    /// check (I1) — the same collection as `collect_wire_type`.
+    fn collect_hashable_type(&mut self, item: &'src Node<'src>) {
+        match item {
+            Node::Struct(name, _generics, _external, Some(body)) => {
+                self.hashable_names.insert(name.0);
+                let mut members = Vec::new();
+                for field in &body.0 {
+                    let field_name = field.0.0.0;
+                    if let Some((type_node, type_span)) = field.0.1.as_ref() {
+                        members.push((format!("field `{field_name}`"), type_node, *type_span));
+                    }
+                }
+                self.hashable_types_to_check.push((name.0, members));
+            }
+            Node::Enum(name, _generics, variants) => {
+                self.hashable_names.insert(name.0);
+                let mut members = Vec::new();
+                for variant in &variants.0 {
+                    let variant_name = variant.0.0;
+                    for (index, payload) in variant.0.1.iter().enumerate() {
+                        members.push((
+                            format!("variant `{variant_name}` payload {index}"),
+                            &payload.0,
+                            payload.1,
+                        ));
+                    }
+                }
+                self.hashable_types_to_check.push((name.0, members));
+            }
+            _ => {}
+        }
+    }
+
+    /// A field type is Hashable iff it is a scalar (any numeric, `str`, `bool`), a
+    /// `List`/`Option` of Hashable (recursing into the element), or a named
+    /// `[derive(Hashable)]` type. A closure, `Set`/`Map`/`Shared`, or a view is
+    /// not — `canonical_hash` would mangle it. (Tuple *fields* are deferred, like
+    /// `Wire`.)
+    fn is_hashable_type(&self, node: &Node) -> bool {
+        const HASHABLE_SCALARS: &[&str] = &[
+            "str", "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i53", "u53", "f32", "f64",
+            "Hash",
+        ];
+        match node {
+            Node::Accessor(name) => {
+                HASHABLE_SCALARS.contains(name) || self.hashable_names.contains(*name)
+            }
+            Node::AccessorWithGenerics(name, arguments) => {
+                matches!(*name, "List" | "Option")
+                    && arguments
+                        .0
+                        .iter()
+                        .all(|argument| self.is_hashable_type(&argument.0))
+            }
+            _ => false,
+        }
+    }
+
+    /// Enforce the Hashable boundary (I1): every field of a `[derive(Hashable)]`
+    /// type must itself be Hashable, else the derived `canonical_hash(self)` would
+    /// silently produce a broken key. Runs after all modules are walked.
+    fn check_hashable_boundary(&mut self) {
+        let checks = std::mem::take(&mut self.hashable_types_to_check);
+        for (type_name, members) in &checks {
+            for (label, type_node, span) in members {
+                if !self.is_hashable_type(type_node) {
+                    let rendered = render_type(type_node);
+                    self.diagnostics.push(Error {
+                        span: *span,
+                        msg: format!(
+                            "{label} of `[derive(Hashable)]` type `{type_name}` is `{rendered}`, \
+                             which is not `Hashable` — every field must be (a scalar, `str`, \
+                             `bool`, `List`/`Option` of `Hashable`, or another \
+                             `[derive(Hashable)]` type)"
                         ),
                     });
                 }
@@ -5656,6 +5746,9 @@ impl<'src> Analyzer<'src> {
                 // (`check_wire_boundary`), which runs once every module is walked.
                 if derives.iter().any(|(name, _)| *name == "Wire") {
                     self.collect_wire_type(&inner.0);
+                }
+                if derives.iter().any(|(name, _)| *name == "Hashable") {
+                    self.collect_hashable_type(&inner.0);
                 }
                 for (name, name_span) in derives {
                     self.record_macro_reference(name, *name_span, scope_id);
@@ -13934,6 +14027,16 @@ fn derive_enum_impls(
     let mut out = String::new();
     for derive in derives {
         match *derive {
+            // The canonical key is the JSON of the value (I1).
+            "Hashable" => {
+                out.push_str(&format!(
+                    "impl {enum_name} with Hashable {{\n\
+                     \tfun hash(self): Hash {{\n\
+                     \t\tcanonical_hash(self)\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
             "PartialEq" => {
                 // `match (self, other) { (E::V(let s0,..), E::V(let o0,..)) => s0
                 // == o0 && .., (E::W, E::W) => true, _ => false }`.
@@ -14410,6 +14513,17 @@ pub(crate) fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> 
                     "impl {struct_name} with PartialEq {{\n\
                      \tfun eq(self, other: {struct_name}): bool {{\n\
                      \t\t{comparison}\n\
+                     \t}}\n\
+                     }}\n"
+                ));
+            }
+            // The canonical key is the JSON of the value (I1); the all-fields
+            // check has already rejected any non-Hashable field.
+            "Hashable" => {
+                out.push_str(&format!(
+                    "impl {struct_name} with Hashable {{\n\
+                     \tfun hash(self): Hash {{\n\
+                     \t\tcanonical_hash(self)\n\
                      \t}}\n\
                      }}\n"
                 ));
@@ -15995,6 +16109,7 @@ pub fn analyze<'src>(
     analyzer.check_invalidation();
     analyzer.check_reseat_escape();
     analyzer.check_wire_boundary();
+    analyzer.check_hashable_boundary();
     analyzer.check_rpc_signatures();
     analyzer.check_expose_fields();
     analyzer.check_generic_bound_satisfaction();

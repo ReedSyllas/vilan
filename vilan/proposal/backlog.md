@@ -1034,8 +1034,22 @@ have gaps.
 
 ## I. Collections
 
-1. **Struct keys for `Map`/`Set`** (M) — value `==` exists, but JS Map/Set key objects by
-   *reference*, so by-value aggregate keys need key-serialization or a custom table.
+1. ~~**Struct keys for `Map`/`Set`**~~ — **SHIPPED 2026-07-14**
+   (`proposal/hashable-keys.md`). `Map`/`Set` now key **by value**: a
+   struct/enum/`List` key works with `[derive(Hashable)]` (or a hand-written
+   `impl Hashable`), and a fresh equal key hits. A new `std::hash` gives a
+   `Hashable` trait producing an opaque `Hash` (canonical key: a primitive
+   as-is, an aggregate as its `JSON.stringify` string, via the `canonical_hash`
+   intrinsic). `Map`/`Set` are vilan wrappers over a raw `NativeMap` that
+   dispatch `key.hash()` — so a custom impl (hash-by-subset) is honored inside
+   std collections too, not just user-built tables (bound on `K: Hashable`, key
+   a `Map<Hash, …>`). The derive's recursive all-fields check rejects a
+   non-`Hashable` field. Deferred: tuple *keys* / tuple *fields* (structural
+   bound satisfaction, like `Wire`), a real hash table on a native backend
+   (the opaque `Hash` seam makes it user-invisible), identity (`Shared`) keys.
+   Two pre-existing analyzer gaps noted en route (bound mis-propagation through
+   a two-param generic's argument; struct-literal fields don't direct a generic
+   call).
 
 2. **`[T; n]` — a general fixed-length array type** (M) — the codec slice shipped this item's
    immediate wants (hex literals, bitwise/shift operators, `std::bytes` over `Uint8Array` —

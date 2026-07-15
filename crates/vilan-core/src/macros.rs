@@ -38,7 +38,7 @@ use crate::{PackageSpec, Platform, Workspace, analyze_source};
 /// The derive names the RUST generators still serve when no macro is in
 /// scope (fixture stds without the std macros; the macro world's own nested
 /// compile). Frozen byte-identical copies of the migrated macros.
-const RUST_DERIVES: &[&str] = &["PartialEq", "Default", "Debug", "Json", "Wire"];
+const RUST_DERIVES: &[&str] = &["PartialEq", "Default", "Debug", "Json", "Wire", "Hashable"];
 
 /// The per-package expansion budgets (`vilan.toml [macro]`, macro-engine.md
 /// §5/§12): `fuel` bounds one macro run's interpreter steps; `depth` bounds
@@ -1026,6 +1026,9 @@ impl Expander<'_, '_> {
         }
         if self.rust_traits.contains("Debug") {
             prelude.push_str("import std::debug::Debug;\n");
+        }
+        if self.rust_traits.contains("Hashable") {
+            prelude.push_str("import std::hash::{ Hashable, Hash, canonical_hash };\n");
         }
         if self.rust_any_service {
             prelude.push_str(

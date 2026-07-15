@@ -3,6 +3,7 @@
 // `Hashable` turns a value into a `Hash` — an opaque canonical key. `Map` and
 // `Set` bound their key on it, and anyone can build their own container the
 // same way: bound on `K: Hashable`, call `key.hash()`, key a `Map<Hash, ..>`.
+import pkg::option::Option;
 
 // An opaque canonical key. Its runtime form IS its key — a primitive as-is, an
 // aggregate as its JSON string — so it keys a native `Map`/`Set` by value. A
@@ -95,4 +96,38 @@ impl f64 with Hashable {
 	fun hash(self): Hash {
 		canonical_hash(self)
 	}
+}
+
+// A `List`/`Option` of `Hashable` is itself `Hashable` (used directly as a key,
+// e.g. `Map<List<i32>, V>`): the canonical hash of the whole aggregate.
+impl Option<type T: Hashable> with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl List<type T: Hashable> with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+// The `[derive(Hashable)]` derive: a struct/enum's canonical key is the JSON
+// string of its value (`canonical_hash`). The analyzer's all-fields-Hashable
+// check (I1) rejects a non-Hashable field, so this stays a uniform one-liner.
+macro fun Hashable(item: Item): Source {
+	import macro_std::option::Option::{ self, Some, None };
+	import macro_std::build::{ impl_of, fun_of };
+
+	if item.as_struct() is Some(let target) {
+		let hasher = fun_of("hash").parameter("self").returns("Hash").expr("canonical_hash(self)");
+		ret source("import std::hash::{ Hashable, Hash, canonical_hash };\n"
+			+ impl_of(target.name).implements("Hashable").method(hasher).render());
+	}
+	if item.as_enum() is Some(let target) {
+		let hasher = fun_of("hash").parameter("self").returns("Hash").expr("canonical_hash(self)");
+		ret source("import std::hash::{ Hashable, Hash, canonical_hash };\n"
+			+ impl_of(target.name).implements("Hashable").method(hasher).render());
+	}
+	source("")
 }
