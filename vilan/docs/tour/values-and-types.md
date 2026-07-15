@@ -148,10 +148,10 @@ really copies. If you're used to passing an array around and mutating it
 from several places, that's the habit to unlearn. The
 [memory model](memory-model.md) chapter shows what to do instead.
 
-> **Going deeper.** `Map` and `Set` sit on the host's `Map`/`Set`, which
-> key by identity. Scalar keys (`i32`, `str`) behave the way you expect.
-> Struct keys don't yet — two equal struct values are two different keys
-> — so key by an id for now. This is a recorded gap.
+> **Going deeper.** `Map` and `Set` key **by value**. Scalar keys (`i32`,
+> `str`) work directly; a struct, enum, or `List` key works once it derives
+> `Hashable` (`[derive(Hashable)]`), so two equal values are the same key.
+> See [collections](../std/collections.md).
 
 ## Where's `null`?
 

@@ -154,6 +154,7 @@ is unchanged.
 ## Further out (own proposals)
 
 The macro engine (roadmap #9 — would eventually subsume the derive/service
-generators), WASM/native backends (backlog F3/F4), Map/Set struct keys (I1),
+generators), WASM/native backends (backlog F3/F4),
 `?`/try (Q10, which unblocks `arg -> Result` ergonomics and guarded JSON
-parse), per-platform library body type-check.
+parse), per-platform library body type-check. (Map/Set struct keys — I1 —
+shipped 2026-07-14, `proposal/hashable-keys.md`.)

@@ -15718,3 +15718,79 @@ fn a_non_hashable_field_is_rejected_by_the_derive() {
         "#,
     );
 }
+
+#[test]
+fn an_aggregate_key_is_snapshot_on_insert() {
+    // Value semantics: the key is copied into the map, so mutating the original
+    // afterward can't desync it (§3.6).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        import std::hash::Hashable;
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+            mut xs: List<i32> = [1, 2];
+            mut m: Map<List<i32>, str> = Map::new();
+            m.insert(xs, "here");
+            xs.push(3);                        // mutate the original AFTER insert
+            print(m.contains_key([1, 2]));     // true  — snapshot held
+            print(m.contains_key([1, 2, 3]));  // false — the mutation didn't leak
+        }
+        "#,
+        "true\nfalse\n",
+    );
+}
+
+#[test]
+fn hashable_builds_a_reusable_container() {
+    // The point of a trait-with-a-value (not a marker): a user bounds their own
+    // container on `K: Hashable`, calls `key.hash()`, and keys a `Map<Hash, ..>`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        import std::hash::{ Hashable, Hash };
+        import std::option::Option::{ self, Some, None };
+
+        struct Counter<K: Hashable> {
+            counts: Map<Hash, i32>,
+        }
+
+        impl Counter<type K: Hashable> {
+            fun new(): Counter<K> {
+                let counts: Map<Hash, i32> = Map::new();
+                Counter { counts = counts }
+            }
+            fun bump(&mut self, key: K) {
+                let h = key.hash();
+                let current = match self.counts.get(h) {
+                    Some(let n) => n,
+                    None => 0,
+                };
+                self.counts.insert(h, current + 1);
+            }
+            fun count(self, key: K): i32 {
+                match self.counts.get(key.hash()) {
+                    Some(let n) => n,
+                    None => 0,
+                }
+            }
+        }
+
+        [derive(Hashable)]
+        struct Word { text: str }
+
+        fun main() {
+            mut c: Counter<Word> = Counter::new();
+            c.bump(Word { text = "hi" });
+            c.bump(Word { text = "hi" });
+            c.bump(Word { text = "bye" });
+            print(c.count(Word { text = "hi" }));   // 2
+            print(c.count(Word { text = "bye" }));  // 1
+        }
+        "#,
+        "2\n1\n",
+    );
+}
