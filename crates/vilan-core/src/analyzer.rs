@@ -2582,6 +2582,20 @@ impl<'src> Analyzer<'src> {
         .any(|name| self.primitive_struct_ids.get(name) == Some(&id))
     }
 
+    /// Whether a type is a scalar for the **view** machinery — a `(base, key)`
+    /// pair written through by `base[key] = v` rather than an aggregate reference.
+    /// The scalar primitives, plus `bool`: `bool` is a numeric *enum*, so
+    /// `is_scalar_primitive` (which checks struct ids) misses it, which used to
+    /// route `&mut bool` down the aggregate `Object.assign` path — a silent no-op
+    /// write (C5.3).
+    fn is_scalar_view_pointee(&self, type_: &Type) -> bool {
+        match type_ {
+            Type::Struct(id, _) => self.is_scalar_primitive(*id),
+            Type::Enum(id, _) => self.bool_enum_id == Some(*id),
+            _ => false,
+        }
+    }
+
     /// Whether a type lowers to a mutable JS aggregate (a struct, `List`,
     /// `Context`, or a tuple) — the types that alias under assignment and so
     /// need a semantic copy (rule 1). Scalars and `bool` do not.
@@ -2939,9 +2953,12 @@ impl<'src> Analyzer<'src> {
         // }`): the wrapped view projects a parameter, so the pair is a sanctioned
         // borrow the caller unwraps via `match`, not an escape.
         let function_ids: Vec<Id> = self.functions.keys().copied().collect();
+        // ...plus inline transients (`match Some(&mut a) { … }`): the constructor
+        // is unwrapped in the same expression, so its view payload never escapes.
         let sanctioned_wrapped: HashSet<Id> = function_ids
             .into_iter()
             .flat_map(|function_id| self.wrapped_view_return_calls(function_id))
+            .chain(self.transient_wrapped_view_calls())
             .collect();
         let mut escapes: Vec<Id> = Vec::new();
         for expr in self.expr_id_to_expr_map.values() {
@@ -3274,10 +3291,8 @@ impl<'src> Analyzer<'src> {
     /// Whether a place is a scalar primitive — the case that needs a `(base, key)`
     /// view, since a JS number/string isn't addressable on its own.
     fn place_is_scalar(&self, expr_id: Id) -> bool {
-        matches!(
-            self.place_value_type(expr_id),
-            Some(Type::Struct(id, _)) if self.is_scalar_primitive(id)
-        )
+        self.place_value_type(expr_id)
+            .is_some_and(|type_| self.is_scalar_view_pointee(&type_))
     }
 
     /// Whether a function returns a scalar `(base, key)` view: it has a `borrows`
@@ -3286,10 +3301,10 @@ impl<'src> Analyzer<'src> {
     fn function_returns_scalar_view(&self, function_id: Id) -> bool {
         self.functions.get(&function_id).is_some_and(|function| {
             function.borrows
-                && matches!(
-                    function.return_type_id.map(|type_id| type_id.get_type(self)),
-                    Some(Type::Struct(id, _)) if self.is_scalar_primitive(id)
-                )
+                && function
+                    .return_type_id
+                    .map(|type_id| type_id.get_type(self))
+                    .is_some_and(|type_| self.is_scalar_view_pointee(&type_))
         })
     }
 
@@ -3345,6 +3360,118 @@ impl<'src> Analyzer<'src> {
             }
             _ => None,
         }
+    }
+
+    /// A variant constructor built inline and immediately matched — `match
+    /// Some(&mut a) { … }` — carries its view payload as a *transient*: the match
+    /// destructures it in the same expression, so the view never outlives its
+    /// target. Returns the view's `(mutable, scalar)` if `call_id` is such a
+    /// constructor. Two payload shapes qualify: a fresh reference `&[mut] place`
+    /// (a view of a local is sound here — unlike a *returned* wrapped view — because
+    /// the transient cannot escape the match), or a bare view binding/parameter
+    /// forwarded straight in (`fun f(p: &mut T) { match Some(p) { … } }`), whose
+    /// capture aliases the same view.
+    fn inline_wrapped_view_shape(&self, call_id: Id) -> Option<(bool, bool)> {
+        if !self.call_is_variant_constructor(call_id) {
+            return None;
+        }
+        let [argument_id] = self.function_calls.get(&call_id)?.argument_ids.as_slice() else {
+            return None;
+        };
+        match self.expr_id_to_expr_map.get(argument_id)? {
+            Expr::Reference(operand, mutable) => Some((*mutable, self.place_is_scalar(*operand))),
+            Expr::Local(binding_id) if self.binding_or_param_is_view(*binding_id) => Some((
+                self.view_mutability(*binding_id)?,
+                self.view_pointee_is_scalar(*binding_id),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Whether a view binding/parameter is writable — `&mut` → `true`, `&` →
+    /// `false`, not a view → `None`. Unifies `view_binding_mutability` (bindings,
+    /// captures, `borrows`-call results) with a `&`/`&mut` parameter's convention.
+    fn view_mutability(&self, binding_id: Id) -> Option<bool> {
+        self.view_binding_mutability(binding_id).or_else(|| {
+            self.parameters
+                .get(&binding_id)
+                .and_then(|parameter| match parameter.convention {
+                    Convention::RefMut => Some(true),
+                    Convention::Ref => Some(false),
+                    _ => None,
+                })
+        })
+    }
+
+    /// Whether a view binding/parameter points at a scalar — the `(base, key)`
+    /// shape — rather than an aggregate. A wrapped-view capture already knows;
+    /// otherwise the binding's / parameter's own (pointee) type decides.
+    fn view_pointee_is_scalar(&self, binding_id: Id) -> bool {
+        if let Some(&(_, scalar)) = self.wrapped_view_captures.get(&binding_id) {
+            return scalar;
+        }
+        if let Some(variable) = self.variables.get(&binding_id) {
+            return self.is_scalar_view_pointee(&variable.type_id.get_type(self));
+        }
+        if let Some(parameter) = self.parameters.get(&binding_id) {
+            return self.is_scalar_view_pointee(&parameter.type_id.get_type(self));
+        }
+        false
+    }
+
+    /// The `(mutable, scalar)` shape of the view a `match` subject yields as an
+    /// inline transient — the direct `match Some(&mut a) { … }` or the conditional
+    /// `match if c { Some(&mut x) } else { None } { … }`. Every view-carrying tail
+    /// leaf of the subject must be a transient constructor and they must agree on
+    /// the shape (mirroring `function_returns_wrapped_view` for the return case);
+    /// `None` if the subject yields no inline view. A call *returning* a wrapped
+    /// view is handled separately by `call_returns_wrapped_view`.
+    fn inline_subject_wrapped_view_shape(&self, subject_id: Id) -> Option<(bool, bool)> {
+        let mut leaves = Vec::new();
+        self.collect_tail_leaves(subject_id, &mut leaves);
+        let mut shape = None;
+        for leaf in leaves {
+            let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(&leaf) else {
+                continue;
+            };
+            if let Some(leaf_shape) = self.inline_wrapped_view_shape(*call_id) {
+                match shape {
+                    None => shape = Some(leaf_shape),
+                    Some(previous) if previous != leaf_shape => return None,
+                    _ => {}
+                }
+            }
+        }
+        shape
+    }
+
+    /// The variant-constructor call ids a `match` uses as an inline transient (the
+    /// tail leaves of its subject — direct or conditional). `check_view_escape`
+    /// must not reject these: the payload is unwrapped in the same expression,
+    /// never stored.
+    fn transient_wrapped_view_calls(&self) -> HashSet<Id> {
+        let mut calls = HashSet::new();
+        for expr in self.expr_id_to_expr_map.values() {
+            let Expr::Match(subject_id, _) = expr else {
+                continue;
+            };
+            if self
+                .inline_subject_wrapped_view_shape(*subject_id)
+                .is_none()
+            {
+                continue;
+            }
+            let mut leaves = Vec::new();
+            self.collect_tail_leaves(*subject_id, &mut leaves);
+            for leaf in leaves {
+                if let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(&leaf)
+                    && self.inline_wrapped_view_shape(*call_id).is_some()
+                {
+                    calls.insert(*call_id);
+                }
+            }
+        }
+        calls
     }
 
     /// If a function returns a view wrapped in a single-payload enum variant
@@ -3413,10 +3540,16 @@ impl<'src> Analyzer<'src> {
             let Expr::Match(subject_id, legs) = expr else {
                 continue;
             };
-            let Some(Expr::Call(call_id)) = self.expr_id_to_expr_map.get(subject_id) else {
-                continue;
+            // Either a call *returning* a wrapped view (`arena.get(i)`) or an
+            // inline transient in the subject (`match Some(&mut a)`, incl. the
+            // conditional form) — both bind the capture to the view.
+            let call_return_shape = match self.expr_id_to_expr_map.get(subject_id) {
+                Some(Expr::Call(call_id)) => self.call_returns_wrapped_view(*call_id),
+                _ => None,
             };
-            let Some(shape) = self.call_returns_wrapped_view(*call_id) else {
+            let Some(shape) =
+                call_return_shape.or_else(|| self.inline_subject_wrapped_view_shape(*subject_id))
+            else {
                 continue;
             };
             for leg in legs {
@@ -3486,7 +3619,7 @@ impl<'src> Analyzer<'src> {
         // pair into the list, so `*e` derefs through it.
         for binding_id in self.for_each_views.keys() {
             let is_scalar = self.variables.get(binding_id).is_some_and(|variable| {
-                matches!(variable.type_id.get_type(self), Type::Struct(id, _) if self.is_scalar_primitive(id))
+                self.is_scalar_view_pointee(&variable.type_id.get_type(self))
             });
             if is_scalar {
                 views.insert(*binding_id);
@@ -3520,10 +3653,7 @@ impl<'src> Analyzer<'src> {
         for parameter in self.parameters.values() {
             let is_scalar_view =
                 matches!(parameter.convention, Convention::Ref | Convention::RefMut)
-                    && matches!(
-                        parameter.type_id.get_type(self),
-                        Type::Struct(id, _) if self.is_scalar_primitive(id)
-                    );
+                    && self.is_scalar_view_pointee(&parameter.type_id.get_type(self));
             if is_scalar_view {
                 views.insert(parameter.id);
             }
@@ -4477,6 +4607,108 @@ impl<'src> Analyzer<'src> {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether an expression is a **scalar** view being read as a value — a bare
+    /// view binding / `&[mut] place` whose element is a scalar primitive, so its
+    /// runtime form is the `(base, key)` pair rather than the value. Reading it
+    /// where a value is expected (a value/`any` argument, a binary operand) would
+    /// leak the pair; the model requires an explicit `*` (C5.1).
+    fn is_scalar_view_read(&self, expr_id: Id, view_bindings: &HashSet<Id>) -> bool {
+        // The compiler-synthesized re-read of a compound write-through (`s += 5`
+        // → `s = s + 5`) is a sanctioned view use (R5), not a value read.
+        if self.compound_reread_ids.contains(&expr_id) {
+            return false;
+        }
+        if !self.is_view_expr(expr_id, view_bindings) {
+            return false;
+        }
+        // The view's element type is recorded on the BINDING (or the referent),
+        // not on the use expression; a scalar element leaks the `(base, key)` pair.
+        let type_id = match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::Local(binding_id)) => self
+                .variables
+                .get(binding_id)
+                .map(|variable| variable.type_id)
+                .or_else(|| {
+                    self.parameters
+                        .get(binding_id)
+                        .map(|parameter| parameter.type_id)
+                }),
+            Some(Expr::Reference(operand_id, _)) => {
+                self.expr_id_to_type_id_map.get(operand_id).copied()
+            }
+            _ => None,
+        };
+        type_id
+            .map(|type_id| type_id.get_type(self))
+            .is_some_and(|type_| self.is_scalar_view_pointee(&type_))
+    }
+
+    /// Transparent references: a view's value is explicit (`*v` is the only way
+    /// to cross from view to value — `transparent-references.md`). A **scalar**
+    /// view used where a value is expected — a value/`any` call argument or a
+    /// binary operand — would otherwise silently pass its `(base, key)` pair
+    /// (C5.1); require the `*`, mirroring the `let`-binding rule (R1). Only direct
+    /// calls (`subject -> Local(callee)`) resolve their parameters, like
+    /// `check_mutable_arguments`; dispatched callees are conservatively skipped.
+    fn check_view_value_reads(&mut self) {
+        let view_bindings = self.compute_view_bindings();
+        let mut leaks: Vec<Id> = Vec::new();
+        for expr in self.expr_id_to_expr_map.values() {
+            match expr {
+                // Both operands of a binary operator are values.
+                Expr::Binary(_, lhs, rhs) => {
+                    for operand in [*lhs, *rhs] {
+                        if self.is_scalar_view_read(operand, &view_bindings) {
+                            leaks.push(operand);
+                        }
+                    }
+                }
+                // A call argument whose parameter is NOT a view (`&[mut] T`) wants
+                // the value. An `any` parameter isn't a view, so it's caught too.
+                Expr::Call(call_id) => {
+                    let Some(function_call) = self.function_calls.get(call_id) else {
+                        continue;
+                    };
+                    let callee_id = match self.expr_id_to_expr_map.get(&function_call.subject_id) {
+                        Some(Expr::Local(callee_id)) => *callee_id,
+                        _ => continue,
+                    };
+                    let parameter_ids = self
+                        .functions
+                        .get(&callee_id)
+                        .map(|function| &function.parameters)
+                        .or_else(|| {
+                            self.external_functions
+                                .get(&callee_id)
+                                .map(|external| &external.parameters)
+                        });
+                    let Some(parameter_ids) = parameter_ids else {
+                        continue;
+                    };
+                    for (parameter_id, argument_id) in
+                        parameter_ids.iter().zip(function_call.argument_ids.iter())
+                    {
+                        if !self.binding_or_param_is_view(*parameter_id)
+                            && self.is_scalar_view_read(*argument_id, &view_bindings)
+                        {
+                            leaks.push(*argument_id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for leak in leaks {
+            let span = **self.span_map.get(&leak).unwrap_or(&&EMPTY_SPAN);
+            self.diagnostics.push(Error {
+                span,
+                msg: "a view can't be read as a value here; write `*` to copy the value out \
+                      (a view's value is explicit — `*v` is the only way to cross from view to value)"
+                    .to_string(),
+            });
         }
     }
 
@@ -16104,6 +16336,7 @@ pub fn analyze<'src>(
     analyzer.check_mutable_references();
     analyzer.check_view_bindings();
     analyzer.check_view_arguments();
+    analyzer.check_view_value_reads();
     analyzer.check_must_use();
     analyzer.check_view_escape();
     analyzer.check_invalidation();

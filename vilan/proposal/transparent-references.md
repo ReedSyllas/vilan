@@ -174,9 +174,14 @@ Mechanical, and small: in the existing view corpus, **drop `*` from assignment l
 ## Open questions for the spec (the reason D1 exists)
 
 - **Pattern syntax for `Option<&mut T>`.** `Some(x)` binds `x : &mut T` (a view, by R3); there is no
-  `ref` / `&mut` in patterns. Confirm, and confirm that constructing an `Option<&mut T>` *inline as a
-  transient* (`match Some(&mut a) { … }`) is allowed, not only *returning* one (the Phase-5
-  `Arena::get` shape).
+  `ref` / `&mut` in patterns. Confirmed. **Inline transient confirmed and shipped (2026-07-14, backlog
+  §C.5):** constructing an `Option<&mut T>` *inline* and matching it is allowed, not only *returning*
+  one (the Phase-5 `Arena::get` shape). The direct form `match Some(&mut a) { … }`, the conditional
+  form `match if c { Some(&mut x) } else { None } { … }`, and forwarding a bare view parameter
+  (`match Some(p) { … }` for `p: &mut T`) all bind the capture to the view and write through; because
+  the transient never outlives the `match`, a view of a *local* is sound here (unlike a returned view,
+  which must project a parameter). Storing the same constructor in a `let` still escapes and is
+  rejected.
 - **Equality / ordering on views.** `x == y` requires `*x == *y` (value comparison) under R1/R6;
   confirm there is no view-identity comparison.
 - **`*` on an aggregate.** It is a deep copy by value semantics; confirm it participates in the

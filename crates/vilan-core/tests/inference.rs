@@ -879,6 +879,125 @@ fn transparent_references_reject_view_into_value_binding() {
 }
 
 #[test]
+fn an_inline_option_view_transient_writes_through() {
+    // C5.2: constructing an `Option<&mut T>` inline and immediately matching it —
+    // the transient the spec's open question sanctioned. The `Some(&mut a)` never
+    // outlives the `match`, so it doesn't escape; the capture binds the view and
+    // writes through. Both the direct subject and the conditional form (`match if
+    // c { Some(..) } else { None }`, the inline analogue of `Arena::get`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut a = 5;
+            match Some(&mut a) {          // direct scalar transient
+                Some(let v) => { v = 99; }
+                None => {}
+            }
+            print(a);                    // 99 — written through
+
+            mut b = 10;
+            let take = false;
+            match if take { Some(&mut b) } else { None } {   // conditional
+                Some(let v) => { v = 1; }
+                None => { print("none"); }
+            }
+            print(b);                    // 10 — None branch, untouched
+        }
+        "#,
+        "99\nnone\n10\n",
+    );
+}
+
+#[test]
+fn an_inline_aggregate_option_view_transient_writes_through() {
+    // C5.2, aggregate flavor: the payload is a `&mut struct`, so the capture is
+    // the value's own reference and `.field` write-through reaches the original.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct Node { value: i32 }
+        fun main() {
+            mut node = Node { value = 1 };
+            match Some(&mut node) {
+                Some(let v) => { v.value = 42; }
+                None => {}
+            }
+            print(node.value);           // 42
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn a_view_parameter_forwarded_into_an_inline_transient_writes_through() {
+    // C5.2, forward flavor: a bare `&mut` parameter passed straight into the
+    // inline constructor (`Some(p)`) — the capture aliases the same view, so the
+    // write reaches the caller's value. Scalar (`(base, key)`) and aggregate.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct Node { value: i32 }
+        fun bump_scalar(p: &mut i32) {
+            match Some(p) { Some(let v) => { v += 1; } None => {} }
+        }
+        fun bump_field(p: &mut Node) {
+            match Some(p) { Some(let v) => { v.value += 1; } None => {} }
+        }
+        fun main() {
+            mut a = 41;
+            bump_scalar(&mut a);
+            print(a);              // 42
+
+            mut n = Node { value = 41 };
+            bump_field(&mut n);
+            print(n.value);        // 42
+        }
+        "#,
+        "42\n42\n",
+    );
+}
+
+#[test]
+fn a_forwarded_immutable_view_transient_rejects_a_write() {
+    // C5.2 boundary: forwarding a `&` (read-only) view keeps its convention — a
+    // write through the capture is still rejected.
+    assert_fails(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        fun peek(p: &i32) {
+            match Some(p) { Some(let v) => { v = 9; } None => {} }
+        }
+        fun main() { mut a = 5; peek(&a); }
+        "#,
+    );
+}
+
+#[test]
+fn a_stored_inline_option_view_is_rejected() {
+    // C5.2 boundary: the sanction is for the *transient* only. Binding the same
+    // `Some(&mut a)` to a `let` stores the view in an enum payload that outlives
+    // the statement — a real escape, still rejected.
+    assert_fails(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut a = 5;
+            let stored = Some(&mut a);
+            match stored {
+                Some(let v) => { v = 9; }
+                None => {}
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
 fn transparent_references_reject_value_into_view_binding() {
     // R1: a view annotation (`&mut T`) cannot bind a value.
     assert_fails(
@@ -8562,7 +8681,7 @@ fn a_mut_call_on_a_viewed_scalar_root_compiles() {
             mut a: i32 = 10;
             let b: &mut i32 = &mut a;
             add_ten(&mut a);
-            print(b);
+            print(*b);
         }
         main();
         "#,
@@ -15792,5 +15911,112 @@ fn hashable_builds_a_reusable_container() {
         }
         "#,
         "2\n1\n",
+    );
+}
+
+// --- C5.1: a scalar view read as a value requires `*` -----------------------------
+// `transparent-references.md`: `*v` is the only way to cross from view to value —
+// the language never silently converts. A bare scalar view (whose runtime form is
+// the `(base, key)` pair) in a value position used to leak that pair; now it's an
+// error, mirroring the let-binding rule (R1).
+
+#[test]
+fn a_scalar_view_read_as_a_value_is_rejected() {
+    // `print(b)` for `let b = &mut a[0]` would leak `[[99],0]`.
+    assert_fails(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [99];
+            let b = &mut a[0];
+            print(b);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_scalar_view_as_a_value_parameter_is_rejected() {
+    assert_fails(
+        r#"
+        fun take_value(x: i32): i32 { x }
+        fun main() {
+            mut a = [99];
+            let b = &mut a[0];
+            let _ = take_value(b);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_scalar_view_as_a_binary_operand_is_rejected() {
+    assert_fails(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [99];
+            let b = &mut a[0];
+            print(b + 1);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn an_explicit_deref_reads_the_scalar_view() {
+    // The fix steers to `*b`, which reads the element.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut a = [99];
+            let b = &mut a[0];
+            print(*b);       // 99
+            print(*b + 1);   // 100
+        }
+        "#,
+        "99\n100\n",
+    );
+}
+
+#[test]
+fn a_scalar_view_passes_to_a_view_parameter() {
+    // A view binding is still allowed as a view argument (aliasing) and for a
+    // compound write-through — neither is a value read.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun bump(v: &mut i32) { v = *v + 1; }
+        fun main() {
+            mut a = [99];
+            let b = &mut a[0];
+            bump(b);      // aliasing — not a value read
+            b += 5;       // compound write-through — sanctioned
+            print(*b);    // 105
+        }
+        "#,
+        "105\n",
+    );
+}
+
+#[test]
+fn a_mut_bool_view_writes_through() {
+    // C5.3: `bool` is a numeric enum, so it used to take the aggregate view path
+    // (`Object.assign`) — a no-op write. It's a scalar `(base, key)` view now.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun set_true(v: &mut bool) { v = true; }
+        fun main() {
+            mut flags = [false, false];
+            let b = &mut flags[0];
+            set_true(b);          // writes through
+            print(*b);            // true
+            print(flags[0]);      // true — the write reached the list
+            print(flags[1]);      // false — untouched
+        }
+        "#,
+        "true\ntrue\nfalse\n",
     );
 }

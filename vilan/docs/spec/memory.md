@@ -48,10 +48,14 @@ deliberately second-class — a view may not outlive the thing it views:
   `borrows` projection; may not be captured by a closure that outlives
   the place; may not cross an `await` (§6.6).
 
-Mutating through a view writes the viewed place; `*v` reads it.
-Iteration by view (`for e in &mut list`) binds each element as a view —
-assignment and field writes go through; `*e` reads the element. The
-parameter conventions:
+Mutating through a view writes the viewed place; reading its value
+requires an explicit `*`. A view in **value position** — passed where a
+value is expected, used as an operator's operand, or bound to a value
+type — is a compile error, never a silent coercion to the pointee (so the
+`(base, key)` representation of a scalar view can't leak); write `*v` to
+copy the value out. Iteration by view (`for e in &mut list`) binds each
+element as a view — assignment and field writes go through; `*e` reads the
+element. The parameter conventions:
 
 | Convention | Written | Meaning |
 |---|---|---|
@@ -91,7 +95,14 @@ is treated as viewed while the result is live (rule 4 applies to it).
 Returning a view of a **local** is always an error (it would dangle).
 
 `Option<&T>` is permitted as a return type for "a view, maybe" (map
-lookups); the `Some` payload obeys the same anchoring.
+lookups); the `Some` payload obeys the same anchoring. An `Option<&mut T>`
+may also be built **inline as a transient** and matched in the same
+expression — `match Some(&mut a) { Some(let v) => … }`, including the
+conditional form `match if c { Some(&mut x) } else { None } { … }` and
+forwarding a bare view parameter (`match Some(p) { … }` for `p: &mut T`).
+Because the transient never outlives the `match` that consumes it, its
+payload may view a **local** (unlike a returned projection). Binding the
+same constructor to a `let` stores the view and is rejected.
 
 ## 6.6 Views and suspension
 

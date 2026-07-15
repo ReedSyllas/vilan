@@ -603,19 +603,30 @@ have gaps.
 
 4. **Deterministic destruction** (L) — scope-end destructors / `Drop`-equivalent.
 
-5. **Transparent-references remainder** (M; `transparent-references.md` shipped the model) —
-   three sub-items:
-   - **Scalar views don't auto-deref in argument position** (found 2026-07-09 probing
-     `view-invalidation.md`): `print(b)` for `let b = &mut a[0]` prints the raw
-     `(base, key)` pair (`[ [ 99 ], 0 ]`) instead of the element — a view passed where a
-     value is expected (at least for `any`-typed parameters) leaks the representation.
-   - **Inline `Option<&mut T>` transient:** `match Some(&mut a) { Some(let x) => … }` —
-     constructing and matching a wrapped view *inline* is only recognized when the subject is a
-     view-returning *call*; extend `compute_wrapped_view_captures` (and the escape analysis) to
-     admit an immediately-matched inline constructor and a bare `&[mut]`-parameter forward.
-   - **`&mut bool`:** broken for both concrete and generic — `bool` is a numeric enum, excluded
-     from `is_scalar_primitive`, so it takes the aggregate view path. Fixing it means a scalar
-     `(base, key)` view representation for `bool` across the view machinery (its own slice).
+5. ~~**Transparent-references remainder**~~ — **ALL THREE SHIPPED 2026-07-14**
+   (`transparent-references.md`; pins in `inference.rs`, corpus in
+   `test/transparent-references.vl`):
+   - ~~**Scalar views don't auto-deref in argument position**~~ (found 2026-07-09 probing
+     `view-invalidation.md`): `print(b)` for `let b = &mut a[0]` printed the raw
+     `(base, key)` pair (`[ [ 99 ], 0 ]`) instead of the element. **Resolved by rejecting
+     it** (the user's call: the language never silently converts view→value, so require the
+     explicit `*`): a scalar view read in value position — an argument, a binary operand, a
+     value binding — is now a compile error (`check_view_value_reads`, keyed off a
+     `is_scalar_view_pointee` classification that includes `bool`), so the representation can
+     never leak. Compound write-through (`s += 5`) stays sanctioned (excluded via
+     `compound_reread_ids`).
+   - ~~**Inline `Option<&mut T>` transient**~~: `match Some(&mut a) { Some(let x) => … }` now
+     binds the capture to the view and writes through. `inline_wrapped_view_shape` +
+     `inline_subject_wrapped_view_shape` recognize the direct, conditional (`if c { Some(..) }
+     else { None }`), and forwarded-bare-view-parameter (`Some(p)` for `p: &mut T`) shapes;
+     `transient_wrapped_view_calls` adds the constructor to `check_view_escape`'s sanctioned
+     set (the transient never outlives the `match`, so a view of a local is sound). A *stored*
+     `let x = Some(&mut a)` still escapes and is rejected.
+   - ~~**`&mut bool`**~~: `bool` is a numeric enum, so it was excluded from `is_scalar_primitive`
+     and took the aggregate view path (`Object.assign` — a silent no-op write). The view
+     machinery now classifies pointees through `is_scalar_view_pointee` (structs via
+     `is_scalar_primitive`, **plus `bool` via `bool_enum_id`**), so `&mut bool` lowers to the
+     scalar `(base, key)` view and writes through.
 
 ---
 

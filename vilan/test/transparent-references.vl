@@ -49,4 +49,24 @@ fun main() {
 		None => {}
 	}
 	print(cell.value); // 105
+
+	// An `Option<&mut T>` constructed *inline* and matched as a transient — the
+	// view never outlives the `match`, so it doesn't escape (rule R5, C5.2).
+	mut n: i32 = 1;
+	match Some(&mut n) {
+		Some(let v) => {
+			v = 8; // write-through the inline scalar transient
+		}
+		None => {}
+	}
+	print(n); // 8
+
+	let live = false;
+	match if live { Some(&mut n) } else { None } { // the conditional form
+		Some(let v) => {
+			v = 0;
+		}
+		None => {}
+	}
+	print(n); // 8 — None branch, untouched
 }
