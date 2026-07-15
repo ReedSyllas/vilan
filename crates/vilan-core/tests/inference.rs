@@ -5032,7 +5032,7 @@ fn bang_on_option_requires_an_option_function() {
         }
         "#,
         "lookup()!",
-        "must return `Option`",
+        ".ok_or(err)",
     );
 }
 
@@ -5056,7 +5056,57 @@ fn bang_result_error_types_must_match() {
         }
         "#,
         "inner()!",
-        "error types must match",
+        "Convert the error first: `.map_err(…)`",
+    );
+}
+
+#[test]
+fn explicit_error_conversion_composes_with_bang() {
+    // `!` stays same-type (no implicit `From`/`Into` — the no-silent-conversion
+    // rule); crossing error types is EXPLICIT at the value, before the `!`. The
+    // std combinators compose: `.map_err(f)!` maps `E1 → E2` (a named fn or a
+    // closure), and `.ok_or(err)!` turns an `Option`'s `None` into a supplied
+    // `Err`. All three run and the converted error reaches the caller.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+        import std::option::Option::{ self, Some, None };
+
+        struct DbError { code: i32 }
+        struct AppError { msg: str }
+        fun to_app(e: DbError): AppError { AppError { msg = "db" } }
+
+        fun query(): Result<i32, DbError> { Err(DbError { code = 7 }) }
+        fun parse(text: str): Result<i32, str> { Err(text) }
+        fun find(): Option<i32> { None }
+
+        fun via_named(): Result<i32, AppError> {
+            let value = query().map_err(to_app)!;      // E1 -> E2, named fn
+            Ok(value)
+        }
+        fun via_closure(): Result<i32, AppError> {
+            let value = parse("oops").map_err(|e| AppError { msg = e })!;  // closure
+            Ok(value)
+        }
+        fun via_ok_or(): Result<i32, AppError> {
+            let value = find().ok_or(AppError { msg = "missing" })!;  // Option -> Result
+            Ok(value)
+        }
+
+        fun show(result: Result<i32, AppError>) {
+            match result {
+                Ok(let v) => { print(v); },
+                Err(let e) => { print(e.msg); },
+            }
+        }
+        fun main() {
+            show(via_named());     // db
+            show(via_closure());   // oops
+            show(via_ok_or());     // missing
+        }
+        "#,
+        "db\noops\nmissing\n",
     );
 }
 
@@ -5399,7 +5449,7 @@ fn lift_flatten_requires_matching_result_errors() {
         }
         "#,
         "start()?.widen()",
-        "error types must match",
+        "Convert the error first with `.map_err(…)`",
     );
 }
 

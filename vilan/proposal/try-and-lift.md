@@ -248,7 +248,10 @@ transformer-emitted):
   the same reconcile-and-record channel as the two-step form. Pin un-ignored.
 
 - Expression-level lifting (`a? + 10`) and the applicative form (`a? + b?`) — §0.3.
-- Error conversion across types (`Option` in a `Result` fn; `From`-style `E1 → E2`).
+- ~~Error conversion across types (`Option` in a `Result` fn; `From`-style `E1 → E2`)~~
+  — **resolved 2026-07-15: EXPLICIT by design (§9)**. `!` stays same-type; convert at
+  the value first — `.map_err(to_e2)!` for `E1 → E2`, `.ok_or(err)!` for `Option` in a
+  `Result` fn. No implicit `From`/`Into` coercion (the no-silent-conversion rule).
 - `!` inside closures/async blocks — kept deferred through the stabilization pass: its
   real payoff needs the `arg → Result` API redesign (the RPC-handler case), and a
   bang-in-tail closure is semantically invalid anyway (`|k| lookup(k)!` cannot rebuild
@@ -283,3 +286,43 @@ transformer-emitted):
    is an optimization over those impls, not a substitute for them (pinned equivalent: a
    user-`Try` type and `Option` must behave identically through `!` modulo the v1
    same-type restriction).
+
+## 9. Error conversion at the `!` boundary — resolved: EXPLICIT (2026-07-15)
+
+§6's `E1 → E2` deferral asked how `!` should cross error types. **Decision (settled
+with the user): it does not — conversion is explicit, at the value, before the `!`.**
+`!` stays same-type: it returns the bad half *as-is*, so the value's error type must
+already be the function's. Rust folds a `From`-conversion into `?`; vilan does not,
+for the same reason it forbids a silent view→value cross (transparent-references) — an
+error changing type is a real operation, and the language does not perform real
+operations invisibly. The `Add`/`Try` "programmable per type" rule (§0.4) governs what
+*bad* means, not an automatic coercion of it.
+
+**The explicit path — already complete, no new machinery.** The std combinators
+compose with `!` today:
+
+- **`E1 → E2` (`Result`):** `value.map_err(to_e2)!` — `Result::map_err(|E1| E2)` maps
+  the error, then `!` returns the now-matching `E2`. A named fn or a closure both work
+  (`query().map_err(|e| AppError { msg = e })!`).
+- **`Option` in a `Result` fn:** `opt.ok_or(err)!` — `Option::ok_or(E)` turns `None`
+  into `Err(err)` with a caller-supplied error, then `!` returns it. `ok_or_else(|| …)`
+  for a lazy error. This is why `Option`-through-`!` requires a `Result` fn: the error
+  value is *supplied here*, not fabricated.
+
+So the only compiler work is **diagnostics**: the two mismatch errors, which read like
+a missing feature ("error conversion is not supported yet"), instead point at the
+explicit helper —
+
+- `Result` `E1 != E2` → "…the error types must match; convert first with
+  `.map_err(…)` before `!`".
+- `Option` in a non-`Option` (`Result`) fn → "…convert to `Result` first with
+  `.ok_or(err)` (or `ok_or_else`)".
+
+**Scope.** `!` diagnostics + the analogous `?.` flatten mismatch message (§3, same
+shape). No lowering change — `!` is untouched, so all existing codegen stays
+byte-identical.
+
+**Test plan (per case).** `map_err(fn)!` and `map_err(|e| …)!` run and convert
+(observable via the caller's `Err`); `ok_or(e)!` converts `None`→`Err` and runs;
+same-type `!` unchanged; the `E1 != E2` mismatch is rejected with the `.map_err` hint;
+`Option`-in-`Result` rejected with the `.ok_or` hint; a docs example shows the pattern.

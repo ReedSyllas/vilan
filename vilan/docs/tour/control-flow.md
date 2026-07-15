@@ -156,6 +156,38 @@ fun main() {
 This is what `try`/`catch` becomes: failures travel up through return
 types, visibly, and the caller decides what to do.
 
+`!` returns the failure **as-is**, so the value's error type must already
+be the function's — vilan doesn't convert it behind your back. When the
+types differ, convert at the value, before the `!`: `.map_err(…)` changes
+a `Result`'s error, and `.ok_or(err)` turns an `Option`'s `None` into an
+`Err` you supply.
+
+```vilan
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+
+fun lookup(key: str): Option<i32> {
+	if key == "answer" { Some(42) } else { None }
+}
+
+fun read(key: str): Result<i32, str> {
+	let value = lookup(key).ok_or(i"no entry for {key}")!;  // None -> Err
+	Ok(value)
+}
+
+fun main() {
+	match read("answer") {
+		Ok(let value) => print(value),          // 42
+		Err(let why) => print(why),
+	}
+	match read("missing") {
+		Ok(let value) => print(value),
+		Err(let why) => print(why),             // no entry for missing
+	}
+}
+```
+
 **`?.` reaches inside the container.** It looks like optional chaining
 from JS, and on `Option` it plays the same role — with the compiler
 checking it:

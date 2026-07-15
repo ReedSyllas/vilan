@@ -10991,7 +10991,7 @@ impl<'src> Analyzer<'src> {
                     self.diagnostics.push(Error {
                         span,
                         msg: format!(
-                            "`?.` flattens into the chain's own `Result`, so the error types must match: the subject's is {subject_rendered}, the chain yields {continuation_rendered}"
+                            "`?.` flattens into the chain's own `Result`, so the error types must match: the subject's is {subject_rendered}, the chain yields {continuation_rendered}. Convert the error first with `.map_err(…)`."
                         ),
                     });
                 }
@@ -11284,7 +11284,7 @@ impl<'src> Analyzer<'src> {
                     self.diagnostics.push(Error {
                         span,
                         msg: format!(
-                            "`!` on an `Option` returns `None` early, so the enclosing function must return `Option` — it returns {rendered}"
+                            "`!` on an `Option` returns `None` early, so the enclosing function must return `Option` — it returns {rendered}. If it returns `Result`, convert first: `.ok_or(err)` turns `None` into an `Err`."
                         ),
                     });
                 }
@@ -11320,7 +11320,7 @@ impl<'src> Analyzer<'src> {
                         self.diagnostics.push(Error {
                             span,
                             msg: format!(
-                                "`!` returns this `Result`'s error as-is, so the error types must match: the value's is {receiver_rendered}, the function returns {return_rendered} (error conversion is not supported yet)"
+                                "`!` returns this `Result`'s error as-is, so the error types must match: the value's is {receiver_rendered}, the function returns {return_rendered}. Convert the error first: `.map_err(…)` before `!`."
                             ),
                         });
                     }
