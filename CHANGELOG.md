@@ -6,6 +6,40 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.6.0 — 2026-07-15
+
+**Map and Set key by value.** A struct, enum, or `List` works as a key
+once it derives `Hashable` (`[derive(Hashable)]`) — two equal values are
+the same key, and a freshly-built equal key finds the entry a stored one
+made. Scalar keys (`i32`, `str`) still work directly. Hand-write
+`impl Hashable` to key by a subset of fields, or to build your own
+hash-keyed structure on the `Hash` value the trait returns.
+
+**Decoding validates.** A generated `from_json` returns
+`Result<Self, str>` and checks the shape of what it is handed — a missing
+field, a wrong JSON type, an absent required value — and returns an `Err`
+with a reason instead of a struct half-built from garbage. Round-tripping
+your own types across the wire or through a file is safe by construction.
+
+**A view crosses to a value explicitly.** Reading a scalar view's value
+requires the `*`. `print(v)` for a `&mut i32` used to leak the view's
+internal `(base, key)` representation; it now tells you to write `*v`. The
+language never silently converts a view to a value — storing one where it
+would escape was already an error, and this closes the read half.
+
+**`Option<&mut T>`, built inline.** `match Some(&mut a) { Some(let v) => … }`
+constructs a mutable-view option on the spot and writes through it — the
+direct form, the conditional `match if c { Some(&mut x) } else { None }`,
+and forwarding a `&mut` parameter. It is a transient, so it may view a
+local: it never outlives the `match`. Bind it to a `let` and it escapes,
+rejected as before.
+
+**`&mut bool` writes through — and toggles.** A writable view of a boolean
+now lowers like any other scalar view, so `v = true` reaches the original;
+and toggling reads naturally, `v = !*v`. (The toggle also needed a lexer
+fix: adjacent prefix operators like `!*`, `!!`, and `-*` were fusing into
+one bogus token and failing to parse — a space was the only workaround.)
+
 ## v0.5.1 — 2026-07-14
 
 **A type name isn't a value.** `let q = Point;` used to compile, quietly
