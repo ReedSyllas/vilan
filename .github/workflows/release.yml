@@ -52,7 +52,20 @@ jobs:
           targets: ${{ matrix.target }}
       - name: musl linker
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        # apt on the hosted runners fails intermittently (mirror / index-fetch
+        # hiccups) — one such blip on the arm runner sank an otherwise-green
+        # v0.6.0 build. Retry with backoff so a transient network failure can't
+        # fail the whole release.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get update && sudo apt-get install -y musl-tools; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed; retrying in $((attempt * 5))s"
+            sleep $((attempt * 5))
+          done
+          echo "musl-tools install failed after 5 attempts"
+          exit 1
       - name: Build (build paths remapped away)
         # The CC_/LINKER variables point cc-rs (psm, via chumsky's stacker)
         # and the linker at musl-gcc; they are unused on the mac targets.
