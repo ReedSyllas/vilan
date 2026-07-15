@@ -852,10 +852,26 @@ impl<'src> Transformer<'src> {
         matches!(
             self.program
                 .type_id_to_type_map
-                .get(&self.resolve_type_id(*constraint_id)),
+                .get(&self.resolve_constraint(*constraint_id)),
             Some(Type::Struct(id, _))
                 if self.program.structs.get(id).is_some_and(|struct_| struct_.name == "u32")
         )
+    }
+
+    /// Resolve a generic's *constraint id* — as stored in `bitwise_generic_lhs` /
+    /// `division_generic_lhs` — to its concrete type under the active
+    /// monomorphization. The recorded id is the bound itself (`Trait(Div)`), NOT a
+    /// `Generic(constraint)` wrapper, so `resolve_type_id` (which only unwraps a
+    /// `Generic`) would leave it untouched; the substitution is keyed by exactly
+    /// this id, so look it up directly, then resolve the binding in case it is
+    /// itself generic (a composed instantiation). Missing `bool` was one drift
+    /// bug; this untouched-constraint was another — a generic `i32`/`u32` division
+    /// or bitwise op silently dropped its truncation / unsigned verdict.
+    fn resolve_constraint(&self, constraint_id: TypeId) -> TypeId {
+        self.current_substitution
+            .get(&constraint_id)
+            .map(|type_id| self.resolve_type_id(*type_id))
+            .unwrap_or(constraint_id)
     }
 
     /// Whether a division's operands are an INTEGER primitive — the switch to
@@ -873,7 +889,7 @@ impl<'src> Transformer<'src> {
         matches!(
             self.program
                 .type_id_to_type_map
-                .get(&self.resolve_type_id(*constraint_id)),
+                .get(&self.resolve_constraint(*constraint_id)),
             Some(Type::Struct(id, _))
                 if self
                     .program

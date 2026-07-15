@@ -1,23 +1,23 @@
 function fold_unsigned(value, modulus) {
 	const truncated = Math.trunc(value);
 	const wrapped = truncated % modulus;
-	let $b = null;
+	let $d = null;
 	if (wrapped < 0) {
-		$b = wrapped + modulus;
+		$d = wrapped + modulus;
 	} else {
-		$b = wrapped;
+		$d = wrapped;
 	}
-	return $b;
+	return $d;
 }
 function fold_signed(value, modulus, half) {
 	const wrapped = fold_unsigned(value, modulus);
-	let $c = null;
+	let $e = null;
 	if (wrapped >= half) {
-		$c = wrapped - modulus;
+		$e = wrapped - modulus;
 	} else {
-		$c = wrapped;
+		$e = wrapped;
 	}
-	return $c;
+	return $e;
 }
 function as_i8(self) {
 	const widened = Number(self);
@@ -52,6 +52,12 @@ function to_json(self) {
 function $a(value, divisor) {
 	return div(value, divisor);
 }
+function $b(value, divisor) {
+	return Math.trunc(value / divisor);
+}
+function $c(value, divisor) {
+	return Math.trunc(value / divisor);
+}
 const byte = 0xFF;
 const short = 60000;
 const wide = 9007199254740992;
@@ -70,6 +76,8 @@ let counter = 9;
 counter = Math.trunc(counter / 2);
 console.log(counter);
 console.log($a(100, 8));
+console.log($b(7, 2));
+console.log($c(9, 4));
 console.log(as_u8(300));
 console.log(as_u8(-(1)));
 console.log(as_i8(130));

@@ -45,6 +45,10 @@ fun main() {
 	counter /= 2;
 	print(counter);
 	print(halve(100i16, 8i16));
+	// The native-JS widths (i32/u32) monomorphize the generic `/` inline rather
+	// than dispatching, and must still truncate through the generic bound.
+	print(halve(7i32, 2i32));
+	print(halve(9u32, 4u32));
 
 	// Conversions: identity, widening, narrowing folds, float truncation.
 	print((300).as_u8());

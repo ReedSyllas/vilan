@@ -7076,6 +7076,36 @@ fn integer_division_truncates_toward_zero() {
     );
 }
 
+#[test]
+fn generic_numeric_operators_apply_their_verdict_for_every_width() {
+    // A generic `T: Div`/`T: Shr` monomorphized to a native-JS width (`i32`/`u32`)
+    // took an INLINE fast path in the transformer that dropped the per-instantiation
+    // numeric verdict — division without `Math.trunc` (`7/2 == 3.5`), a `u32` shift
+    // with the signed `>>` instead of `>>>`. Root cause: the recorded generic-lhs is
+    // the bound's id (`Trait(Div)`), not a `Generic(..)` wrapper, so `resolve_type_id`
+    // left it untouched; `resolve_constraint` now looks it up in the substitution.
+    // Every other width was correct only because it DISPATCHED to its `number.vl`
+    // impl — the one prior generic-division pin used `i16`, so it hid `i32`/`u32`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::operators::{ Div, Shr, BitAnd };
+        fun halve<T: Div>(v: T, d: T): T { v / d }
+        fun shift<T: Shr>(v: T, by: T): T { v >> by }
+        fun mask<T: BitAnd>(v: T, m: T): T { v & m }
+        fun main() {
+            print(halve(7i8, 2i8));      // 3
+            print(halve(7i32, 2i32));    // 3 — was 3.5
+            print(halve(9u32, 4u32));    // 2 — was 2.25
+            print(halve(100i53, 8i53));  // 12
+            print(shift(0x80000000u32, 1u32));  // 1073741824 — unsigned, was negative
+            print(mask(0xF0u32, 0x3Cu32));      // 48
+        }
+        "#,
+        "3\n3\n2\n12\n1073741824\n48\n",
+    );
+}
+
 // Conversions carry Rust-`as` semantics: truncate toward zero, then fold
 // two's-complement into the target's width.
 #[test]
