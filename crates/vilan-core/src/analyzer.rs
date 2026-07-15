@@ -3274,11 +3274,17 @@ impl<'src> Analyzer<'src> {
                         .get(&root)
                         .map(|variable| variable.type_id.get_type(self))
                     {
-                        Some(Type::Struct(id, _)) if self.is_scalar_primitive(id) => {
-                            boxed.insert(root);
-                        }
                         Some(Type::Generic(_)) => {
                             generic_referenced_roots.insert(root);
+                        }
+                        // A scalar local a view is taken of — a number/string, or
+                        // `bool` (a numeric enum, hence `is_scalar_view_pointee`
+                        // not `is_scalar_primitive`) — is boxed to `[value]` so the
+                        // `(base, key)` view has a real cell to write through. A
+                        // bare `bool` local was missed, so `&mut b` lowered to
+                        // `[b, 0]` over the raw value and its write-through no-oped.
+                        Some(type_) if self.is_scalar_view_pointee(&type_) => {
+                            boxed.insert(root);
                         }
                         _ => {}
                     }
@@ -4466,10 +4472,14 @@ impl<'src> Analyzer<'src> {
                                 .map(|parameter| parameter.type_id)
                         })
                         .map(|type_id| type_id.get_type(self));
-                    if matches!(
-                        root_type,
-                        Some(Type::Struct(id, _)) if self.is_scalar_primitive(id)
-                    ) {
+                    // A scalar root (a number/string or `bool`) has no geometry —
+                    // a callee can only write its boxed slot, the aliasing the
+                    // model permits — so E2 exempts it. `bool` is a numeric enum,
+                    // hence `is_scalar_view_pointee` rather than `is_scalar_primitive`.
+                    if root_type
+                        .as_ref()
+                        .is_some_and(|type_| self.is_scalar_view_pointee(type_))
+                    {
                         continue;
                     }
                     if live

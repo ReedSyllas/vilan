@@ -69,4 +69,11 @@ fun main() {
 		None => {}
 	}
 	print(n); // 8 — None branch, untouched
+
+	// A scalar-local `&mut bool` view: the local is boxed to `[value]` so the
+	// `(base, key)` pair writes through, and `!*v` toggles it (C5.3).
+	mut flag = true;
+	let toggle = &mut flag;
+	toggle = !*toggle; // write-through a negated read
+	print(flag); // false
 }

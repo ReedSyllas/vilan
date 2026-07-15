@@ -16042,3 +16042,28 @@ fn a_mut_bool_view_toggles_through_a_negated_deref() {
         "false\ntrue\n",
     );
 }
+
+#[test]
+fn a_mut_bool_view_of_a_scalar_local_writes_through() {
+    // C5.3 gap (found verifying the v0.6.0 release): a view of a scalar *local*
+    // must box the local to `[value]` so the `(base, key)` pair has a real cell.
+    // `bool` is a numeric enum, so `compute_boxed_locals` (keyed on
+    // `is_scalar_primitive`, structs only) skipped it — `&mut b` lowered to
+    // `[b, 0]` over the raw value and the write-through no-oped. The earlier bool
+    // pins used list elements (base already an object), so they missed it.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun toggle(v: &mut bool) { v = !*v; }
+        fun main() {
+            mut b = true;
+            toggle(&mut b);      // through a call
+            print(b);            // false
+            let w = &mut b;      // direct local view
+            w = true;
+            print(b);            // true
+        }
+        "#,
+        "false\ntrue\n",
+    );
+}

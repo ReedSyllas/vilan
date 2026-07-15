@@ -62,3 +62,7 @@ if ($h[0] === 0) {
 }
 $i;
 console.log(n[0]);
+let flag = [ true ];
+const toggle = [ flag, 0 ];
+toggle[0][toggle[1]] = !(toggle[0][toggle[1]]);
+console.log(flag[0]);
