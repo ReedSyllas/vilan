@@ -2574,12 +2574,9 @@ impl<'src> Analyzer<'src> {
     /// *aggregate* primitives (`List`, `Context`), which lower to mutable JS
     /// arrays and do.
     fn is_scalar_primitive(&self, id: Id) -> bool {
-        [
-            "str", "i32", "u32", "f64", "BigInt", "null", "i8", "u8", "i16", "u16", "i53", "u53",
-            "f32",
-        ]
-        .iter()
-        .any(|name| self.primitive_struct_ids.get(name) == Some(&id))
+        crate::type_::SCALAR_PRIMITIVE_NAMES
+            .iter()
+            .any(|name| self.primitive_struct_ids.get(name) == Some(&id))
     }
 
     /// Whether a type is a scalar for the **view** machinery — a `(base, key)`

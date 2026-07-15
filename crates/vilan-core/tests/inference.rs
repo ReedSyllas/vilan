@@ -16067,3 +16067,34 @@ fn a_mut_bool_view_of_a_scalar_local_writes_through() {
         "false\ntrue\n",
     );
 }
+
+#[test]
+fn a_mut_view_through_a_generic_param_writes_through_for_every_scalar() {
+    // A generic `&mut T` param's pointee is abstract in the analyzer, so the
+    // scalar-vs-aggregate view lowering is re-decided in the transformer at each
+    // monomorphization (`resolves_to_scalar_view_pointee`). That check carried its
+    // own copy of the scalar names and never grew `bool` (a numeric enum), so a
+    // generic `&mut T` resolving to `bool` took the aggregate `Object.assign` path
+    // — a silent no-op — while `i32`/`str` wrote through. Pins both kinds (a scalar
+    // struct and the bool enum) so the analyzer and transformer can't drift again.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun set<T>(v: &mut T, x: T) { v = x; }
+        fun main() {
+            mut n = 1;
+            set(&mut n, 42);
+            print(n);            // 42 — scalar struct
+
+            mut s = "a";
+            set(&mut s, "b");
+            print(s);            // b — str
+
+            mut flag = true;
+            set(&mut flag, false);
+            print(flag);         // false — bool enum (the regression)
+        }
+        "#,
+        "42\nb\nfalse\n",
+    );
+}

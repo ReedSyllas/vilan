@@ -14,6 +14,11 @@ fun same(x: &mut i32): &mut i32 borrows x {
 	x // forward the view (re-borrow)
 }
 
+fun set<T>(v: &mut T, x: T) {
+	v = x; // write-through a generic `&mut T` — scalar-vs-aggregate re-decided
+	// per monomorphization; a scalar pointee (incl. `bool`) writes the slot.
+}
+
 struct Cell {
 	value: i32,
 }
@@ -76,4 +81,13 @@ fun main() {
 	let toggle = &mut flag;
 	toggle = !*toggle; // write-through a negated read
 	print(flag); // false
+
+	// A generic `&mut T` writes through for every scalar pointee — the lowering
+	// is re-decided per monomorphization, `bool` (a numeric enum) included.
+	mut count = 1;
+	set(&mut count, 42);
+	print(count); // 42
+	mut ready = false;
+	set(&mut ready, true);
+	print(ready); // true
 }

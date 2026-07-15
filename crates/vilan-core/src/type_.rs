@@ -2,6 +2,19 @@ use std::collections::HashMap;
 
 use crate::id::Id;
 
+/// The scalar primitive type names — each backed by a JS value (a number or a
+/// string), so a `&mut` view of one lowers to a `(base, key)` pair rather than
+/// an aggregate reference, and assigning one never aliases. `bool` is a scalar
+/// too but is a numeric *enum*, not a struct, so it is handled alongside this
+/// list (never in it) at each view-pointee check — the analyzer's
+/// `is_scalar_view_pointee` and the transformer's `resolves_to_scalar_view_pointee`.
+/// One source of truth: those two classifiers drifted once (the transformer
+/// carried its own copy of the names and never grew the `bool` case), which
+/// miscompiled a generic `&mut T` resolving to `bool`.
+pub const SCALAR_PRIMITIVE_NAMES: &[&str] = &[
+    "str", "i32", "u32", "f64", "BigInt", "null", "i8", "u8", "i16", "u16", "i53", "u53", "f32",
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Any,

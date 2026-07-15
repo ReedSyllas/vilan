@@ -7,6 +7,12 @@ function same(x) {
 function slot(self) {
 	return [ 0, [ self, 0 ] ];
 }
+function $j(v3, x) {
+	v3[0][v3[1]] = x;
+}
+function $k(v3, x) {
+	v3[0][v3[1]] = x;
+}
 let a = [ 10 ];
 const b = [ a, 0 ];
 const c = b;
@@ -66,3 +72,9 @@ let flag = [ true ];
 const toggle = [ flag, 0 ];
 toggle[0][toggle[1]] = !(toggle[0][toggle[1]]);
 console.log(flag[0]);
+let count = [ 1 ];
+$j([ count, 0 ], 42);
+console.log(count[0]);
+let ready = [ false ];
+$k([ ready, 0 ], true);
+console.log(ready[0]);

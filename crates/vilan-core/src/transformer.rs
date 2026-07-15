@@ -7,7 +7,7 @@ use crate::id::Id;
 use crate::interpreter::ConstValue;
 use crate::node::{BinaryOp, Convention, ExternBinding};
 use crate::options::BuildOptions;
-use crate::type_::{Type, TypeId};
+use crate::type_::{SCALAR_PRIMITIVE_NAMES, Type, TypeId};
 use chumsky::span::Span;
 use indexmap::IndexMap;
 use std::borrow::Cow;
@@ -811,34 +811,30 @@ impl<'src> Transformer<'src> {
                         self.program.type_id_to_type_map.get(&parameter.type_id),
                         Some(Type::Generic(_))
                     )
-                    && self.resolves_to_scalar_primitive(parameter.type_id)
+                    && self.resolves_to_scalar_view_pointee(parameter.type_id)
             })
     }
 
     /// Whether `type_id`, resolved under the active monomorphization substitution,
-    /// is one of the scalar primitives that take a `(base, key)` view (the same
-    /// set as the analyzer's `is_scalar_primitive`).
-    fn resolves_to_scalar_primitive(&self, type_id: TypeId) -> bool {
-        matches!(
-            self.program.type_id_to_type_map.get(&self.resolve_type_id(type_id)),
-            Some(Type::Struct(id, _))
-                if self.program.structs.get(id).is_some_and(|struct_|
-                    matches!(
-                    struct_.name,
-                    "str" | "i32"
-                        | "u32"
-                        | "f64"
-                        | "BigInt"
-                        | "null"
-                        | "i8"
-                        | "u8"
-                        | "i16"
-                        | "u16"
-                        | "i53"
-                        | "u53"
-                        | "f32"
-                ))
-        )
+    /// is a scalar the **view** machinery lowers to a `(base, key)` pair — a scalar
+    /// primitive (`SCALAR_PRIMITIVE_NAMES`), or `bool` (a numeric enum, so it is
+    /// not in that struct set). The analyzer's `is_scalar_view_pointee` is the
+    /// matching predicate; missing `bool` here routed a generic `&mut T` resolving
+    /// to `bool` down the aggregate `Object.assign` path — a silent no-op write.
+    fn resolves_to_scalar_view_pointee(&self, type_id: TypeId) -> bool {
+        match self
+            .program
+            .type_id_to_type_map
+            .get(&self.resolve_type_id(type_id))
+        {
+            Some(Type::Struct(id, _)) => self
+                .program
+                .structs
+                .get(id)
+                .is_some_and(|struct_| SCALAR_PRIMITIVE_NAMES.contains(&struct_.name)),
+            Some(Type::Enum(id, _)) => Some(*id) == self.program.bool_enum_id,
+            _ => false,
+        }
     }
 
     /// Whether a bitwise/shift binary's operands are `u32` — the emission
@@ -898,7 +894,7 @@ impl<'src> Transformer<'src> {
                     .program
                     .variables
                     .get(&id)
-                    .is_some_and(|variable| self.resolves_to_scalar_primitive(variable.type_id)))
+                    .is_some_and(|variable| self.resolves_to_scalar_view_pointee(variable.type_id)))
     }
 
     /// Whether `&[mut] operand` (the reference expr `ref_id`) lowers to a scalar
@@ -908,11 +904,9 @@ impl<'src> Transformer<'src> {
         self.program.scalar_view_refs.contains(&ref_id)
             || self.place_root_local(operand).is_some_and(|root| {
                 self.program.generic_referenced_roots.contains(&root)
-                    && self
-                        .program
-                        .variables
-                        .get(&root)
-                        .is_some_and(|variable| self.resolves_to_scalar_primitive(variable.type_id))
+                    && self.program.variables.get(&root).is_some_and(|variable| {
+                        self.resolves_to_scalar_view_pointee(variable.type_id)
+                    })
             })
     }
 
