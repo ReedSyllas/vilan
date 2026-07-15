@@ -16020,3 +16020,25 @@ fn a_mut_bool_view_writes_through() {
         "true\ntrue\nfalse\n",
     );
 }
+
+#[test]
+fn a_mut_bool_view_toggles_through_a_negated_deref() {
+    // C5.3 + the operator-lexer fix: the natural thing to do with a `&mut bool`
+    // view is toggle it, `v = !*v`. That failed to *parse* before — the lexer
+    // fused `!*` into one bogus token — so the scalar-bool view shipped without
+    // an ergonomic toggle. Now it reads through (`*v`), negates, and writes back.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun toggle(v: &mut bool) { v = !*v; }
+        fun main() {
+            mut flags = [true, false];
+            toggle(&mut flags[0]);   // transient views — none outlive its call
+            toggle(&mut flags[1]);
+            print(flags[0]);   // false
+            print(flags[1]);   // true
+        }
+        "#,
+        "false\ntrue\n",
+    );
+}

@@ -69,11 +69,27 @@ where
     // A parser for operators. `^` is bitwise-xor; `<`/`>` are control tokens
     // (generics), so the shifts have no token here — the parser reads two
     // adjacent `<`/`>` controls in expression position.
-    let op = one_of("-:!*/+=|&^?%")
-        .repeated()
-        .at_least(1)
-        .to_slice()
-        .map(Token::Op);
+    //
+    // The known operators are matched longest-first, so a two-character operator
+    // (`+=`, `==`, `::`, `&&`, …) wins over its single-character prefix. A blind
+    // maximal munch over the operator charset instead FUSED unrelated adjacent
+    // prefixes into one bogus token — `!*v` (negate a deref), `!!b` (double
+    // negation), `-*v` — which then failed to parse; recognizing the real set
+    // keeps those as separate tokens. (`=>` is the `arrow` token above; `?.` and
+    // `..` split on the `.` control character, so neither is listed here.)
+    let op = choice((
+        just("!=").to(Token::Op("!=")),
+        just("%=").to(Token::Op("%=")),
+        just("&&").to(Token::Op("&&")),
+        just("*=").to(Token::Op("*=")),
+        just("+=").to(Token::Op("+=")),
+        just("-=").to(Token::Op("-=")),
+        just("/=").to(Token::Op("/=")),
+        just("::").to(Token::Op("::")),
+        just("==").to(Token::Op("==")),
+        just("||").to(Token::Op("||")),
+        one_of("-:!*/+=|&^?%").to_slice().map(Token::Op),
+    ));
 
     // A parser for control characters (delimiters, semicolons, etc.). Attributes
     // use bracket syntax (`[extern(..)]`, `[derive(..)]`), so they need no special
@@ -309,6 +325,48 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(10),
             "lexing a ~1MB whitespace prefix took {:?} — the trivia loop has gone quadratic again",
             start.elapsed()
+        );
+    }
+
+    #[test]
+    fn adjacent_prefix_operators_do_not_fuse() {
+        // The operator lexer recognizes the real operator set rather than
+        // maximal-munching the charset, so a `!`/`-` prefix chained onto `*`/`!`
+        // stays two tokens — `!*v` (negate a deref), `!!b` (double negation),
+        // `-*v`. The blind munch fused these into bogus `!*` / `!!` / `-*` tokens
+        // that then failed to parse (`found '!*' expected expression`).
+        assert_eq!(
+            lex("!*v"),
+            vec![Token::Op("!"), Token::Op("*"), Token::Ident("v")]
+        );
+        assert_eq!(
+            lex("!!b"),
+            vec![Token::Op("!"), Token::Op("!"), Token::Ident("b")]
+        );
+        assert_eq!(
+            lex("-*v"),
+            vec![Token::Op("-"), Token::Op("*"), Token::Ident("v")]
+        );
+    }
+
+    #[test]
+    fn multi_character_operators_win_over_their_prefixes() {
+        // Longest-match: each two-character operator lexes whole, not as its
+        // single-character prefix. (A regression to per-char lexing would split
+        // every one of these.)
+        for op in ["!=", "%=", "&&", "*=", "+=", "-=", "/=", "::", "==", "||"] {
+            assert_eq!(lex(op), vec![Token::Op(op)], "lexing {op:?}");
+        }
+        // The boundary holds mid-stream: `x-=-y` is `x`, `-=`, `-`, `y` — the
+        // compound assignment wins, then a separate prefix `-`.
+        assert_eq!(
+            lex("x-=-y"),
+            vec![
+                Token::Ident("x"),
+                Token::Op("-="),
+                Token::Op("-"),
+                Token::Ident("y"),
+            ]
         );
     }
 }
