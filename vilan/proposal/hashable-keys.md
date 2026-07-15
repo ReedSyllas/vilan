@@ -103,8 +103,11 @@ Not `Hashable` in v1: closures, `Set`/`Map`, `Shared<T>`, `Promise`, view types.
 
 ### 3.5 `Map` / `Set` dispatch through the trait
 
-So a hand-written `hash()` is actually honored, `Map`/`Set` become thin vilan
-wrappers over a raw native map keyed by `Hash`, and their methods call
+**Decided 2026-07-14: genuine per-call dispatch** (over the simpler canonical
+shortcut) — so a hand-written `hash()` is honored inside std collections too.
+`Map`/`Set` become thin vilan wrappers over a raw `NativeMap<K, V>` (the current
+`Map` intrinsics, extracted to `std::native_map` — a JS `Map` keyed by whatever,
+here a `Hash` which is a string/primitive JS keys by value). Their methods call
 `key.hash()` (a normal, monomorphized method call):
 
 - `Map<K: Hashable, V>` wraps a native `Map<Hash, (K, V)>`.

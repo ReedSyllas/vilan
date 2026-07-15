@@ -1027,6 +1027,18 @@ impl Interpreter {
                     .collect();
                 Ok(Value::Array(Rc::new(RefCell::new(values))))
             }
+            // `[...set[0].values()]` — the `Set` struct is `[table]`; iterate the
+            // backing map's stored originals by reference (matching the spread).
+            "__set_iter" => {
+                let set = take(0);
+                let Value::Array(elements) = &set else {
+                    return Err(Failure::internal("__set_iter on a non-Set".to_string()));
+                };
+                let table = elements.borrow().first().cloned().unwrap_or(Value::Undefined);
+                let map = expect_map(&table)?;
+                let values = map.borrow().values().map(|(_, value)| value.clone()).collect();
+                Ok(Value::Array(Rc::new(RefCell::new(values))))
+            }
             "__json_tag" => match take(0) {
                 Value::Str(s) => Ok(Value::Str(s)),
                 Value::Object(object) => match object.borrow().keys().next() {

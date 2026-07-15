@@ -325,6 +325,9 @@ fn helper_source(name: &str) -> &'static str {
         "__map_values" => {
             "function __map_values(map) {\n\treturn [ ...map.values() ].map(__clone);\n}"
         }
+        // `for x in set`: `Set` is a struct `[table]` over a `NativeMap`, so the
+        // elements are the backing map's stored originals, in insertion order (I1).
+        "__set_iter" => "function __set_iter(set) {\n\treturn [ ...set[0].values() ];\n}",
         // The externally-tagged enum discriminator: a bare `"Variant"` is its own
         // tag, a `{"Variant":..}` object's tag is its single key.
         "__json_tag" => {
@@ -1884,6 +1887,17 @@ impl<'src> Transformer<'src> {
                 let t_iterable = self
                     .walk_entity(*iterable_id, block)
                     .unwrap_or(js::Node::Void);
+                // `Set` is a vilan struct over a `NativeMap`; iterate the backing
+                // map's stored originals (`set[0].values()`), in insertion order.
+                let t_iterable = if self.is_set_typed(*iterable_id) {
+                    self.used_helpers.insert("__set_iter");
+                    js::Node::Call(
+                        Box::new(js::Node::Local("__set_iter".to_string())),
+                        vec![t_iterable],
+                    )
+                } else {
+                    t_iterable
+                };
 
                 if let Some(&next_id) = self.program.for_each_next.get(&id) {
                     // Iterator protocol: evaluate the iterator once, then loop
@@ -3277,6 +3291,23 @@ impl<'src> Transformer<'src> {
             .map(|type_id| self.resolve_type_id(type_id))
             .and_then(|type_id| self.program.type_id_to_type_map.get(&type_id))
             .is_some_and(|type_| matches!(type_, Type::Tuple(_)))
+    }
+
+    /// Whether an expression's (monomorphized) type is the built-in `Set` — a
+    /// vilan struct wrapping a `NativeMap` (I1). Its elements are the backing
+    /// map's stored originals, so `for x in set` iterates `set[0].values()`.
+    fn is_set_typed(&self, expr_id: Id) -> bool {
+        self.expr_type_id(expr_id)
+            .map(|type_id| self.resolve_type_id(type_id))
+            .and_then(|type_id| self.program.type_id_to_type_map.get(&type_id))
+            .is_some_and(|type_| match type_ {
+                Type::Struct(id, _) => self
+                    .program
+                    .structs
+                    .get(id)
+                    .is_some_and(|struct_| struct_.name == "Set"),
+                _ => false,
+            })
     }
 
     fn resolve_type_id(&self, type_id: TypeId) -> TypeId {

@@ -1,26 +1,46 @@
-// `Set<T>` is the built-in hash set, backed by a native JS `Set`. It holds
-// unique values compared by JS value-equality, so primitive elements (`i32`,
-// `str`, `bool`, …) work directly. Struct/enum elements compare by reference
-// (JS `Set` keys objects by identity), so by-value membership of aggregates is
-// not supported yet — see proposal/roadmap.md.
-//
-// `Set` is `external` (an opaque intrinsic): `Set::new()` is `new Set()`,
-// `insert` is the native `.add`, and a `for x in set` iterates natively.
+// `Set<T>` is the built-in hash set. It holds unique values compared **by
+// value** — a struct/enum/tuple element works as long as it derives `Hashable`
+// (I1). Each element is turned into a canonical `Hash` via `value.hash()`, which
+// keys the underlying native map; the original value is stored alongside so
+// `for x in set` yields real `T`s in insertion order.
+import pkg::hash::{ Hashable, Hash };
+import pkg::native_map::NativeMap;
 
-external struct Set<T>;
+struct Set<T: Hashable> {
+	table: NativeMap<T>,
+}
 
-impl Set<type T> {
-	external fun new(): Set<T>;
+impl Set<type T: Hashable> {
+	fun new(): Set<T> {
+		// The annotated `let` directs `NativeMap::new()`'s element type; a
+		// struct-literal field doesn't direct a generic call (a known gap).
+		let table: NativeMap<T> = NativeMap::new();
+		Set { table = table }
+	}
 
-	external fun insert(&mut self, value: T): void;
+	fun insert(&mut self, value: T) {
+		self.table.insert(value.hash(), value);
+	}
 
-	external fun contains(self, value: T): bool;
+	fun contains(self, value: T): bool {
+		self.table.contains_key(value.hash())
+	}
 
-	external fun remove(&mut self, value: T): void;
+	fun remove(&mut self, value: T) {
+		self.table.remove(value.hash());
+	}
 
-	external fun len(self): i32;
+	fun len(self): i32 {
+		self.table.len()
+	}
 
 	fun is_empty(self): bool {
 		self.len() == 0
+	}
+
+	// A `List` snapshot of the elements, in insertion order (`for x in set`
+	// iterates these).
+	fun values(self): List<T> {
+		self.table.values()
 	}
 }
