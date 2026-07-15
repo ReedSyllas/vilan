@@ -13448,6 +13448,11 @@ pub enum Intrinsic {
     // has no plain extern shape and mis-buckets arrays and null as `"object"`,
     // so a helper normalizes them.
     JsonKind,
+    // `hash::canonical_hash(value): Hash` -> the value's canonical key: a
+    // primitive as-is (JS keys those by value), an aggregate as its
+    // `JSON.stringify` string. The basis of `Hashable` / value-keyed `Map`/`Set`
+    // (proposal/hashable-keys.md, I1).
+    CanonicalHash,
     // `dom::query_selector_all(selector): List<Element>` -> the matches as a real
     // array, `Array.from(document.querySelectorAll(selector))` (querySelectorAll
     // yields a NodeList, which a `List` would otherwise mishandle).
@@ -15101,7 +15106,7 @@ pub fn analyze<'src>(
     // (macro-engine.md §10 — the ambient derive vocabulary), so they must be
     // loaded before the registry builds, derives or not.
     for core in [
-        "boolean", "list", "null", "promise", "compare", "default", "debug", "json",
+        "boolean", "list", "null", "promise", "compare", "default", "debug", "json", "hash",
     ] {
         to_load.push((Origin::Std, core));
     }
@@ -16199,6 +16204,9 @@ pub fn analyze<'src>(
     };
     if let Some(scan_id) = module_member("process", "scan") {
         intrinsics.insert(scan_id, Intrinsic::Scan);
+    }
+    if let Some(hash_id) = module_member("hash", "canonical_hash") {
+        intrinsics.insert(hash_id, Intrinsic::CanonicalHash);
     }
     for (name, intrinsic) in [
         ("range_i32", Intrinsic::RandomInt),

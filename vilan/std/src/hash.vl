@@ -1,0 +1,98 @@
+// `std::hash` — value keys for `Map` / `Set` (proposal/hashable-keys.md, I1).
+//
+// `Hashable` turns a value into a `Hash` — an opaque canonical key. `Map` and
+// `Set` bound their key on it, and anyone can build their own container the
+// same way: bound on `K: Hashable`, call `key.hash()`, key a `Map<Hash, ..>`.
+
+// An opaque canonical key. Its runtime form IS its key — a primitive as-is, an
+// aggregate as its JSON string — so it keys a native `Map`/`Set` by value. A
+// `Hash` is itself `Hashable` (a hash is already a canonical key).
+external struct Hash;
+
+trait Hashable {
+	fun hash(self): Hash;
+}
+
+// The uniform hasher every stock impl delegates to: a primitive keys as itself
+// (JS keys those by value), an aggregate canonicalizes to its JSON string. A
+// hand-written `impl Hashable` may instead hash by a subset of fields — its
+// obligation is consistency with the equality the key is used under.
+external fun canonical_hash(value: any): Hash;
+
+impl Hash with Hashable {
+	fun hash(self): Hash {
+		self
+	}
+}
+
+impl str with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl bool with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl i8 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl u8 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl i16 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl u16 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl i32 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl u32 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl i53 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl u53 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl f32 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}
+
+impl f64 with Hashable {
+	fun hash(self): Hash {
+		canonical_hash(self)
+	}
+}

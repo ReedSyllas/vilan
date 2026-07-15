@@ -336,6 +336,12 @@ fn helper_source(name: &str) -> &'static str {
         "__json_kind" => {
             "function __json_kind(value) {\n\tif (value === null) return \"null\";\n\tif (Array.isArray(value)) return \"array\";\n\treturn typeof value;\n}"
         }
+        // The canonical key of a value: a primitive keys as itself (JS keys those
+        // by value), an aggregate (an object/array) canonicalizes to its JSON
+        // string. Basis of `Hashable` / value-keyed `Map`/`Set`.
+        "__hash" => {
+            "function __hash(value) {\n\treturn (typeof value === \"object\" && value !== null) ? JSON.stringify(value) : value;\n}"
+        }
         // Value-semantics deep clone. Structs/lists/enums/tuples are arrays and a
         // `Set`/`Map` is a JS `Set`/`Map`, so recurse into them; everything else —
         // primitives and closures — is returned by reference (a closure is
@@ -2668,6 +2674,14 @@ impl<'src> Transformer<'src> {
                 self.used_helpers.insert("__json_kind");
                 js::Node::Call(
                     Box::new(js::Node::Local("__json_kind".to_string())),
+                    args.collect(),
+                )
+            }
+            // The canonical key of a value (Hashable / value-keyed Map/Set).
+            Intrinsic::CanonicalHash => {
+                self.used_helpers.insert("__hash");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__hash".to_string())),
                     args.collect(),
                 )
             }

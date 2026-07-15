@@ -1054,6 +1054,19 @@ impl Interpreter {
                 };
                 Ok(Value::Str(Rc::from(kind)))
             }
+            // The canonical key: a primitive keys as itself; an aggregate (array
+            // or object) canonicalizes to its JSON string (mirrors `__hash`).
+            "__hash" => {
+                let value = take(0);
+                match value {
+                    Value::Array(_) | Value::Object(_) => {
+                        let mut out = String::new();
+                        json_stringify(&value, &mut out)?;
+                        Ok(Value::Str(Rc::from(out.as_str())))
+                    }
+                    other => Ok(other),
+                }
+            }
             "__parse_i32" => {
                 let text = expect_str(&take(0))?;
                 let trimmed = text.trim();
