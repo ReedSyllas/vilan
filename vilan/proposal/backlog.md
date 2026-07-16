@@ -1227,12 +1227,17 @@ have gaps.
    structural. 2 pins + corpus `db.vl` (interpreter-excluded). Recorded: i64
    rowids, transactions, deno-native verification.
 
-5. **`std::time`** (S–M; Kolt gap — kolt-migration.md §2.5) — minimal v1: epoch
-   millis `now()` (impure host capability — correctly not const-evaluable),
-   duration arithmetic, basic formatting. Not a luxon; grow the surface from
-   Kolt's real call sites.
+5. ~~**`std::time`**~~ — **SHIPPED 2026-07-11** (kolt-migration.md §2.5; this entry
+   was stale until 2026-07-16): `std/src/time.vl` — `now()` (host clock, correctly
+   not const-evaluable), `Instant`/`Duration` (both Wire; epoch-milli `i53`),
+   constructors/truncating accessors, `Add`/`Sub`/`PartialOrd`, `to_iso`,
+   `describe()` ("2h 3m"), `sleep`/`sleep_for`. Docs `std/time.md`; corpus
+   `time.vl` (node-run, interpreter-excluded — host clock) + 5 pins. Kolt has no
+   live date call sites yet — grow-from-real-call-sites stands.
 
-6. **Transport robustness — Railway parity** (M; Kolt gap — kolt-migration.md
-   §2.6; p6-followups territory) — `SocketTransport` reconnect with backoff,
-   request retry policy, and `RemoteSource` RE-SUBSCRIPTION after a drop (mirrors
-   must resync on reconnect).
+6. ~~**Transport robustness — Railway parity**~~ — **SHIPPED 2026-07-11**
+   (`proposal/transport-robustness.md`; this entry was stale until 2026-07-16):
+   `ConnectionState` signal, doubling-backoff reconnect (dial included), typed
+   pending-rejection (`RpcError::Transport`), mirror re-subscription via
+   `reattach_mirrors`; SIGSTOP/SIGKILL e2e. Found B21 (stale Rust fixture
+   generator behind a missing dependency-surface rpc seed) — fixed same day.
