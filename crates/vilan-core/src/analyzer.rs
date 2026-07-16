@@ -8383,7 +8383,7 @@ impl<'src> Analyzer<'src> {
                             self.diagnostics.push(Error {
                                 span: **self.span_map.get(item_id).unwrap_or(&&EMPTY_SPAN),
                                 msg: format!(
-                                    "Expected {expected} (the array's element type), but got {got} instead."
+                                    "Expected {expected} (this literal's element type), but got {got} instead."
                                 ),
                             });
                         }
@@ -8406,6 +8406,20 @@ impl<'src> Analyzer<'src> {
                         None => Type::Unknown,
                     };
                 }
+                // The expected element type, when the expectation is a `List<T>`
+                // — consulted by the mismatch REPORT below (an element a
+                // `List<any>` parameter absorbs is legitimate), deliberately NOT
+                // seeded into the unification itself: directing every list
+                // literal's elements by the expectation shifts inference
+                // (adaptation order, generic grounding) far beyond this check.
+                let expected_element = match &constraint {
+                    Type::Struct(id, arguments)
+                        if Some(*id) == self.primitive_struct_ids.get("List").copied() =>
+                    {
+                        arguments.first().map(|argument| argument.get_type(self))
+                    }
+                    _ => None,
+                };
                 let mut element_type = Type::Unknown;
                 for item_id in &item_ids {
                     let item_type = self.infer_type_inner(
@@ -8423,7 +8437,35 @@ impl<'src> Analyzer<'src> {
                         substitution_context,
                     ) {
                         Some((unified, _)) => unified,
-                        None => element_type,
+                        // A real mismatch: the elements don't share a type. This
+                        // used to fall through silently, typing the whole literal
+                        // by its first element — `[1, "x"]` became a `List<i32>`
+                        // with a `str` inside (reads through it were unsound).
+                        // Report (once — inference may re-run) and keep unifying
+                        // the rest against the established element type. An
+                        // element the EXPECTED element type absorbs (`["text",
+                        // 0]` under `parameters: List<any>`) is legitimate and
+                        // not reported — the literal still types by its first
+                        // element, exactly as before, and the call-site check
+                        // accepts it against the `any`.
+                        None => {
+                            let absorbed = expected_element.as_ref().is_some_and(|expected| {
+                                self.reconcile_type(expected, &item_type, substitution_context)
+                                    .is_some()
+                            });
+                            if !absorbed && self.reported_literal_errors.insert(*item_id) {
+                                let expected =
+                                    self.pretty_print_type(&element_type, &HashMap::new());
+                                let got = self.pretty_print_type(&item_type, &HashMap::new());
+                                self.diagnostics.push(Error {
+                                    span: **self.span_map.get(item_id).unwrap_or(&&EMPTY_SPAN),
+                                    msg: format!(
+                                        "Expected {expected} (this literal's element type), but got {got} instead."
+                                    ),
+                                });
+                            }
+                            element_type
+                        }
                     };
                 }
                 match self.primitive_struct_ids.get("List").copied() {

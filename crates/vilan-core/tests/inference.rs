@@ -16335,6 +16335,69 @@ fn context_directed_array_literal_elements_must_be_t() {
         }
         "#,
         r#""x""#,
-        "Expected i32 (the array's element type), but got str instead.",
+        "Expected i32 (this literal's element type), but got str instead.",
+    );
+}
+
+#[test]
+fn a_heterogeneous_list_literal_is_rejected() {
+    // The element reconcile chain used to swallow a mismatch silently, typing
+    // the literal by its FIRST element — `[1, "x"]` became a `List<i32>` with a
+    // `str` inside, and reads through it were unsound. Now each element that
+    // fails to unify reports, annotated or not.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let a = [1, "x"];
+        }
+        "#,
+        r#""x""#,
+        "Expected i32 (this literal's element type), but got str instead.",
+    );
+}
+
+#[test]
+fn an_annotated_heterogeneous_list_literal_is_rejected() {
+    assert_fails(
+        r#"
+        fun main() {
+            let a: List<i32> = [1, "x"];
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_mixed_literal_under_a_list_of_any_parameter_is_legitimate() {
+    // The std::db shape: `run(parameters: List<any>)` takes a deliberately mixed
+    // parameter list. An element the EXPECTED element type absorbs is not a
+    // mismatch — the check consults the `List<T>` expectation before reporting.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun describe(values: List<any>): i32 {
+            values.len()
+        }
+        fun main() {
+            print(describe(["write the pilot", 0]));   // 2 — str + i32, absorbed by any
+        }
+        "#,
+        "2\n",
+    );
+}
+
+#[test]
+fn an_array_annotation_catches_elements_that_unify_with_each_other() {
+    // The array arm's own element check still matters when the elements DO
+    // unify with each other but not with `T`: `[1, 2]` unifies to i32, which the
+    // list-level check can't fault — only the `[str; 2]` direction can.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let a: [str; 2] = [1, 2];
+        }
+        "#,
+        "1",
+        "Expected str (this literal's element type), but got i32 instead.",
     );
 }
