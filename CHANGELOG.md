@@ -6,6 +6,44 @@ deprecation period; patch versions are fixes. Each release below links
 the highlights — the [book](https://reedsyllas.github.io/vilan/) always
 tracks the latest state.
 
+## v0.7.0 — 2026-07-16
+
+**Expression lifting: a bare `?` lifts the whole expression.** Where `?.`
+continues a member chain, `?` on its own lifts the rest of the surrounding
+expression — `count? * 2`, `deadline? < now()`, and the two-receiver form
+`price? + tax?`, which is good only when every receiver is and
+short-circuits left to right (a receiver after a `None`/`Err` never runs,
+like `&&`; on `Result`, the first error wins and every receiver shares one
+error type). The lift stops at natural boundaries — call arguments, struct
+fields, parentheses — and a `?` that lifts nothing, or would turn an `if`
+condition into an `Option<bool>`, is an error with a steer. `?.` chains are
+unchanged. `Option`/`Result` only for now; lowers to plain branches, no
+closures.
+
+**Fixed arrays round out: `.len()` and destructuring.** `arr.len()` folds to
+the constant (the length lives in the type; a side-effectful subject still
+evaluates, exactly once). `let [r, g, b] = rgb;` destructures — irrefutable,
+element count checked against the type, nesting arrays and tuples freely,
+and it works in parameter position (`fun sum([a, b]: [i32; 2])`). Elements
+come out as value copies, like everything else.
+
+**Conditions are type-checked now.** `if 5 { .. }` used to compile and
+branch on JS truthiness — an `Option` condition always took the branch.
+Every `if`/`for` condition must now be a `bool`, spanned at the condition.
+
+**Two soundness holes closed.** An unannotated `Map::new()` never grounded
+its key/value types, so mixed-typed inserts compiled and ran — a binding
+whose type keeps a callee's parameters now demands an annotation. And a
+derive's internal imports leaked into the deriving module (`JsonValue`
+resolved with no import after `[derive(Json)]`) — expansion imports are
+scoped to the expansion now.
+
+**Editor and diagnostics.** Unsaved edits propagate to dependent files
+immediately (analysis reads open buffers, not disk). A conflicting call on
+an unannotated closure names the first call that fixed the parameter's
+type. A heterogeneous list literal (`[1, "x"]`) is rejected instead of
+silently typing by its first element.
+
 ## v0.6.2 — 2026-07-15
 
 **Two generic miscompiles fixed.** A `&mut T` view resolving to `bool` through
