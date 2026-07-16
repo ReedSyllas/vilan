@@ -5686,6 +5686,337 @@ fn a_mappable_type_without_the_lift_marker_is_rejected() {
     );
 }
 
+// --- Expression lifting `a? + 10` / `a? + b?` (proposal/expression-lifting.md) ---
+
+#[test]
+fn expression_lift_maps_a_single_receiver() {
+    // One bare `?`: the rest of the expression is the continuation; the
+    // region types as the container of the body (`Option<i32>` here).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let count = Some(2);
+            let doubled: Option<i32> = count? * 2;
+            print(doubled.unwrap_or(-1));   // 4
+            let missing: Option<i32> = None;
+            print((missing? * 2).unwrap_or(-1));   // -1 — None short-circuits
+        }
+        "#,
+        "4\n-1\n",
+    );
+}
+
+#[test]
+fn expression_lift_operands_are_symmetrical() {
+    // The `?` may mark either operand — and a call LEFT of a bad `?` still
+    // runs (source evaluation order; the hoisted eval step).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun bump(log: &mut List<i32>): i32 {
+            log.push(1);
+            10
+        }
+        fun main() {
+            let count = Some(4);
+            print((2 * count?).unwrap_or(-1));   // 8
+            mut log: List<i32> = [];
+            let missing: Option<i32> = None;
+            let compared: Option<bool> = bump(&mut log) < missing?;
+            print(compared.is_some());   // false — the region is None…
+            print(log.len());            // 1 — …but bump ran (left of the ?)
+        }
+        "#,
+        "8\nfalse\n1\n",
+    );
+}
+
+#[test]
+fn expression_lift_applicative_short_circuits_lazily() {
+    // Two `?`s: good only if both are; a receiver RIGHT of a bad `?` is not
+    // evaluated (the `&&` precedent) — pinned through the log.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun fetch(log: &mut List<i32>, value: Option<i32>): Option<i32> {
+            log.push(1);
+            value
+        }
+        fun main() {
+            mut log: List<i32> = [];
+            let total = fetch(&mut log, Some(40))? + fetch(&mut log, Some(2))?;
+            print(total.unwrap_or(-1));   // 42
+            print(log.len());             // 2 — both ran
+            mut log2: List<i32> = [];
+            let bad = fetch(&mut log2, None)? + fetch(&mut log2, Some(2))?;
+            print(bad.unwrap_or(-1));     // -1
+            print(log2.len());            // 1 — the right receiver never ran
+        }
+        "#,
+        "42\n2\n-1\n1\n",
+    );
+}
+
+#[test]
+fn expression_lift_on_results_first_error_wins() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::result::Result::{ self, Ok, Err };
+        fun parse(tag: str): Result<i32, str> {
+            if tag == "good" { Ok(21) } else { Err("bad: " + tag) }
+        }
+        fun main() {
+            let sum = parse("good")? + parse("good")?;
+            match sum {
+                Ok(let n) => print(n),          // 42
+                Err(let e) => print(e),
+            }
+            let first = parse("x")? + parse("y")?;
+            match first {
+                Ok(let n) => print(n),
+                Err(let e) => print(e),          // bad: x — the FIRST error
+            }
+        }
+        "#,
+        "42\nbad: x\n",
+    );
+}
+
+#[test]
+fn expression_lift_result_receivers_need_one_error_type() {
+    // One region has one result type, so two `Result` receivers must carry
+    // the same `E` (§6.5's corollary) — with the explicit-conversion hint.
+    assert_fails_with(
+        r#"
+        import std::result::Result::{ self, Ok, Err };
+        struct Wrapped { msg: str }
+        fun a(): Result<i32, str> { Ok(1) }
+        fun b(): Result<i32, Wrapped> { Ok(2) }
+        fun main() {
+            let sum = a()? + b()?;
+        }
+        "#,
+        "Convert the error first with `.map_err(…)`",
+    );
+}
+
+#[test]
+fn expression_lift_mixed_containers_are_rejected() {
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        import std::result::Result::{ self, Ok, Err };
+        fun main() {
+            let opt = Some(1);
+            let res: Result<i32, str> = Ok(2);
+            let sum = opt? + res?;
+        }
+        "#,
+        "must split the same container",
+    );
+}
+
+#[test]
+fn expression_lift_flattens_a_container_body() {
+    // The body yields the receivers' own container (`rows?[0]` on an
+    // `Option<List<Option<i32>>>`) — one level, not `Option<Option<_>>`
+    // (the chain rule, inherited; pinned by the annotation).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let rows: Option<List<Option<i32>>> = Some([Some(7), None]);
+            let first: Option<i32> = rows?[0];
+            print(first.unwrap_or(-1));   // 7
+        }
+        "#,
+        "7\n",
+    );
+}
+
+#[test]
+fn expression_lift_identity_is_rejected() {
+    // A region whose body is just the hole computes nothing — a hard error
+    // (§6.3): `let x = a?;` and the argument-slot form `f(a?)` alike.
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let a = Some(1);
+            let x = a?;
+        }
+        "#,
+        "`?` lifts nothing here",
+    );
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun describe(value: Option<i32>): str { "x" }
+        fun main() {
+            let a = Some(1);
+            print(describe(a?));
+        }
+        "#,
+        "`?` lifts nothing here",
+    );
+}
+
+#[test]
+fn expression_lift_in_a_condition_is_rejected() {
+    // A condition is its own slot: the region lifts the comparison to
+    // `Option<bool>`, which a condition cannot take — an EXPLICIT check
+    // (conditions are not generally type-checked yet, and an Option is a
+    // tagged array, i.e. always truthy — this would silently take the
+    // branch), with the match steer.
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let a = Some(1);
+            if a? > 0 {
+                print("positive");
+            }
+        }
+        "#,
+        "which a condition cannot take",
+    );
+}
+
+#[test]
+fn expression_lift_never_absorbs_a_chain() {
+    // `a?.b == None` keeps its shipped, container-typed meaning (§5 — the
+    // absorption rejection): the chain is a sealed atom inside the region.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct User { name: str }
+        fun main() {
+            let user = Some(User { name = "ada" });
+            print(user?.name == None);            // false — Option == Option
+            let nobody: Option<User> = None;
+            print(nobody?.name == None);          // true
+        }
+        "#,
+        "false\ntrue\n",
+    );
+}
+
+#[test]
+fn expression_lift_parens_delimit_the_region() {
+    // `(a? + 1)` seals at the paren and composes outside it; a lifted chain
+    // in parens stays container-typed, so `(a?.b) + 1` is the ordinary
+    // type error.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let a = Some(41);
+            let x: Option<i32> = (a? + 1);
+            print(x.unwrap_or(-1));   // 42
+        }
+        "#,
+        "42\n",
+    );
+    assert_fails(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        struct User { age: i32 }
+        fun main() {
+            let user = Some(User { age = 1 });
+            let x = (user?.age) + 1;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn expression_lift_rejects_bang_after_a_split() {
+    // `!` may not run after a `?` in one region — it would early-return
+    // from inside the lift.
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        fun main(): Option<i32> {
+            let a = Some(1);
+            let b = Some(2);
+            let x = a? + b!;
+            None
+        }
+        "#,
+        "`!` cannot run after a `?` inside a lifted expression",
+    );
+}
+
+#[test]
+fn expression_lift_composes_with_bang_outside() {
+    // `(region)!` asserts on the lifted result — the region seals at the
+    // paren, `!` applies to the whole `Option`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun total(a: Option<i32>, b: Option<i32>): Option<i32> {
+            let sum = (a? + b?)!;
+            Some(sum * 10)
+        }
+        fun main() {
+            print(total(Some(4), Some(2)).unwrap_or(-1));   // 60
+            print(total(Some(4), None).unwrap_or(-1));      // -1 — the ! returned
+        }
+        "#,
+        "60\n-1\n",
+    );
+}
+
+#[test]
+fn expression_lift_twice_evaluated_receiver_is_legal() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let size = Some(4);
+            let area: Option<i32> = size? * size?;
+            print(area.unwrap_or(-1));   // 16
+        }
+        "#,
+        "16\n",
+    );
+}
+
+#[test]
+fn expression_lift_on_a_user_container_is_the_recorded_follow_up() {
+    // v1 lifts the std pair at a bare `?`; a user `Lift` container gets the
+    // clean follow-up error (its `?.` chains keep working).
+    assert_fails_with(
+        r#"
+        import std::operators::Lift;
+        struct Boxy<T> { value: T }
+        impl Boxy<type T> with Lift {}
+        impl Boxy<type T> {
+            fun map<U>(self, fn: |T| U): Boxy<U> {
+                Boxy { value = fn(self.value) }
+            }
+        }
+        fun main() {
+            let boxed = Boxy { value = 1 };
+            let x = boxed? + 1;
+        }
+        "#,
+        "a bare `?` lifts an `Option` or a `Result`",
+    );
+}
+
 // The primitive operator/equality impls: generic `T: Add`/`T: BitAnd` code
 // dispatches to the numeric primitives (and `str` for Add), and the bodies
 // lower to the native operators — including u32's `>>> 0` correction.

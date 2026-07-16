@@ -218,13 +218,44 @@ fun main() {
 and wrap it back up; if it's `None`, stay `None`. It works on `Result`
 too, passing an `Err` through untouched.
 
+**A bare `?` lifts a whole expression.** Where `?.` continues a member
+chain, a `?` on its own lifts the rest of the surrounding expression —
+operators included:
+
+```vilan
+import std::print;
+import std::option::Option::{ self, Some, None };
+
+fun main() {
+	let price = Some(40);
+	let tax = Some(2);
+	print((price? * 2).unwrap_or(-1));     // 80 — lift, multiply, rewrap
+	print((price? + tax?).unwrap_or(-1));  // 42 — Some only if BOTH are
+	let missing: Option<i32> = None;
+	print((price? + missing?).unwrap_or(-1));   // -1
+}
+```
+
+With two `?`s the region is good only when every receiver is — and it
+short-circuits left to right, so a receiver right of a `None`/`Err`
+never evaluates (like `&&`). On `Result`, the first `Err` wins and
+passes through unchanged, which also means every `Result` receiver in
+one expression must carry the same error type (convert first with
+`.map_err(…)`). The lift stops at natural boundaries: a call argument,
+a struct field, parentheses — `describe(status?)` is an error rather
+than something spooky, and `(a? + 1) * 2` seals the lift inside the
+parens. A `?` in an `if` condition is rejected too: the condition
+would become an `Option<bool>`, so `match` on the lifted value
+instead.
+
 > **Going deeper.** Both operators are trait-driven, not hard-coded to
 > `Option` and `Result`. `!` dispatches through `Try`, and `?.` through
 > `Try` plus the `Lift` marker (`std::operators`). Your own
 > two-outcome type can implement them and join in. A `?.` continuation
 > that itself produces the container flattens instead of nesting, so
 > `find(key)?.shelf()` on an `Option`-returning method stays a single
-> `Option`.
+> `Option`. (A bare `?` lifts the std pair only for now — a user `Lift`
+> container lifts through `?.` chains.)
 
 ## Panics and asserts
 

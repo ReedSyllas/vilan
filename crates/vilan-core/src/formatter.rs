@@ -988,6 +988,24 @@ impl<'src> Printer<'src> {
                 self.print_expr(continuation);
             }
             Node::LiftBinder => {}
+            // A bare-`?` expression-lifting mark — the formatter parses raw
+            // trees (the region rewrite runs only at the analyzer's entry),
+            // so the mark prints back exactly as written.
+            Node::Lifted(subject) => {
+                self.print_operand(subject, 100);
+                self.out.push('?');
+            }
+            // A recorded region-delimiting paren group: the parens are
+            // semantic (they bound the lift), so they always reprint.
+            Node::LiftGroup(inner) => {
+                self.out.push('(');
+                self.print_expr(inner);
+                self.out.push(')');
+            }
+            // Rewrite output — never present in the formatter's raw parse.
+            Node::LiftRegion(..) | Node::LiftHole(_) => {
+                unreachable!("lift regions exist only after the analyzer-entry rewrite")
+            }
             Node::Reference(mutable, operand) => {
                 self.out.push('&');
                 if *mutable {

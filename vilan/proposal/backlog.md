@@ -248,12 +248,22 @@ have gaps.
 11. **`!` / `?.` deferred tail** (M; `try-and-lift.md`) — the operators shipped 2026-07-04
     (both slices + the stabilization arc: bang-directed return-position generics, closure-`ret`
     participation, user-`Lift` lowering). ~~Error conversion at the `!` boundary~~ —
-    resolved EXPLICIT + shipped 2026-07-15 (§9; 7796628). Remaining deferrals:
-    closure `!` (the RPC-handler follow-up; needs the `arg → Result` linkage design),
-    expression lifting + applicatives (`a? + 10`, `a? + b?` — **proposal drafted
-    2026-07-16, `expression-lifting.md`, awaiting review**: slot-root lift regions,
-    left-to-right short-circuiting applicative, std inline lowering), and
-    `Signal`/`Promise` `Lift` opt-ins.
+    resolved EXPLICIT + shipped 2026-07-15 (§9; 7796628). ~~Expression lifting +
+    applicatives~~ — **v1 SHIPPED 2026-07-16** (`expression-lifting.md`: slot-root
+    lift regions over the std pair, lazy-right applicative, source-order eval
+    hoisting, paren delimiting, 15 pins + corpus + docs; chain absorption REJECTED
+    for soundness — `a?.b == None` keeps its meaning). Remaining deferrals:
+    the bare-`?` TRAIT path (user `Lift` containers — today a clean error steering
+    to `?.`), closure `!` (the RPC-handler follow-up; needs the `arg → Result`
+    linkage design), and `Signal`/`Promise` `Lift` opt-ins.
+
+28. **Conditions are not type-checked** (S–M; found 2026-07-16 building expression
+    lifting) — `if 5 { .. }` compiles and runs (the branch is truthiness-driven at
+    the JS level). Nothing checks an `if`/`for` condition against `bool`. Lifted
+    conditions (`if a? > 0`) got an explicit rejection because an `Option` is a
+    tagged ARRAY — always truthy, a silent wrong-branch — but the general check is
+    missing. Wants: infer every condition against `bool` and reject mismatches
+    (spanned at the condition), with a corpus sweep for accidental dependence.
 
 12. ~~**Missing-impl bound dispatch emits the abstract method**~~ — **FIXED 2026-07-08**:
     `check_generic_bound_satisfaction`, a post-solve pass over

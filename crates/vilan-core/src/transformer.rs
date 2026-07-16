@@ -752,6 +752,75 @@ impl<'src> Transformer<'src> {
         }
     }
 
+    /// One step of an expression-lifting region, then the rest nested inside
+    /// its good branch (a split) or plainly after it (an eval) —
+    /// `expression-lifting.md` §4's std lowering. The recursion bottoms out by
+    /// assigning the (map-wrapped or flattened) body to the result temp.
+    fn emit_lift_region_steps(
+        &mut self,
+        region_id: Id,
+        steps: &[(Id, Id, bool)],
+        body_id: Id,
+        result_name: &str,
+        block: &mut Vec<js::Node<'src>>,
+    ) {
+        let Some(((step_id, binder_id, is_split), rest)) = steps.split_first() else {
+            let value = self.walk_entity(body_id, block).unwrap_or(js::Node::Void);
+            let wrapped = match self.program.lift_dispatch.get(&region_id) {
+                Some(LiftDispatch::Std { flatten: true, .. }) | None => value,
+                Some(LiftDispatch::Std {
+                    flatten: false,
+                    enum_id,
+                }) => self.variant_value(*enum_id, 0, vec![value]),
+                // v1 regions are std-only (the analyzer rejects user `Lift`
+                // containers at a bare `?` with the recorded follow-up note).
+                Some(LiftDispatch::Trait { .. }) => unreachable!(),
+            };
+            block.push(js::Node::Assignment(
+                Box::new(js::Node::Local(result_name.to_string())),
+                Box::new(wrapped),
+            ));
+            return;
+        };
+        let value = self.walk_entity(*step_id, block).unwrap_or(js::Node::Void);
+        let step_name = self.ng.next_name();
+        block.push(js::Node::ConstVariable(js::Variable {
+            name: step_name.clone(),
+            value: Box::new(value),
+        }));
+        if !is_split {
+            self.is_bindings
+                .insert(*binder_id, js::Node::Local(step_name));
+            self.emit_lift_region_steps(region_id, rest, body_id, result_name, block);
+            return;
+        }
+        self.is_bindings.insert(
+            *binder_id,
+            js::Node::PropertyIndex(
+                Box::new(js::Node::Local(step_name.clone())),
+                Box::new(js::Node::Number("1".to_string(), None)),
+            ),
+        );
+        let bad_body = vec![js::Node::Assignment(
+            Box::new(js::Node::Local(result_name.to_string())),
+            Box::new(js::Node::Local(step_name.clone())),
+        )];
+        let mut good_body = Vec::new();
+        self.emit_lift_region_steps(region_id, rest, body_id, result_name, &mut good_body);
+        block.push(js::Node::If(js::IfBranch::If(
+            Box::new(js::Node::Binary(
+                BinaryOp::Eq,
+                Box::new(js::Node::PropertyIndex(
+                    Box::new(js::Node::Local(step_name)),
+                    Box::new(js::Node::Number("0".to_string(), None)),
+                )),
+                Box::new(js::Node::Number("1".to_string(), None)),
+            )),
+            bad_body,
+            Some(Box::new(js::IfBranch::Else(good_body))),
+        )));
+    }
+
     /// Whether an expression may have a side effect — a call, an `await`, or an
     /// assignment, or anything containing one. An unused `let` binding can be
     /// dropped only if its initializer is side-effect-free; a side-effecting one
@@ -774,6 +843,13 @@ impl<'src> Transformer<'src> {
             | Some(Expr::ArrayLen(subject, _)) => self.expr_has_side_effects(*subject),
             // `[value; n]` evaluates its value expression once.
             Some(Expr::Repeat(value, _)) => self.expr_has_side_effects(*value),
+            // A lift region runs its steps and (conditionally) its body.
+            Some(Expr::LiftRegion(steps, body_id)) => {
+                steps
+                    .iter()
+                    .any(|(step_id, _, _)| self.expr_has_side_effects(*step_id))
+                    || self.expr_has_side_effects(*body_id)
+            }
             // A checked subscript can panic, so an indexing expression is
             // effectful in itself: dropping it would drop its bounds check.
             Some(Expr::Index(_, _)) => true,
@@ -1473,6 +1549,26 @@ impl<'src> Transformer<'src> {
             // Only reachable through the `Local` alias inside a continuation;
             // standalone it has no value.
             Expr::LiftBinder => js::Node::Void,
+            // An expression-lifting region (expression-lifting.md §4): the
+            // steps emit as progressively nested guards — an eval step is a
+            // temp binding (hoisted pre-`?` material, source order), a split
+            // step branches on the bad tag and short-circuits the region with
+            // the bad container as-is; the body computes in the innermost
+            // good branch and wraps back into the container (map) or stands
+            // as-is (flatten). No closures — cheaper than the `and_then`/
+            // `map` nest it replaces.
+            Expr::LiftRegion(steps, body_id) => {
+                let result_name = self.ng.next_name();
+                block.push(js::Node::LetVariable(js::Variable {
+                    name: result_name.clone(),
+                    value: Box::new(js::Node::Null),
+                }));
+                self.emit_lift_region_steps(id, steps, *body_id, &result_name, block);
+                for (_, binder_id, _) in steps {
+                    self.is_bindings.remove(binder_id);
+                }
+                js::Node::Local(result_name)
+            }
             // `expr!` (proposal/try-and-lift.md §4): evaluate the receiver once,
             // branch on the bad tag, return the bad half, yield the good half.
             Expr::TryAssert(receiver_id) => {

@@ -12,6 +12,7 @@ pub mod formatter;
 pub mod id;
 pub mod interpreter;
 pub mod lexer;
+pub mod lift;
 pub(crate) mod macros;
 pub mod manifest;
 pub mod node;
@@ -254,6 +255,10 @@ pub fn analyze_source(
         }
     }
 
+    // Bare-`?` marks become lift regions before the tree freezes
+    // (expression-lifting.md) — the formatter parses separately and keeps
+    // raw trees, so source text prints back verbatim.
+    lift::rewrite_items(&mut root.0);
     let root = Box::leak(Box::new(root));
     // Use the front-end's resolved platform (e.g. from `vilan.toml`), else infer
     // one from the file's own imports: a file importing the browser DOM layer is a

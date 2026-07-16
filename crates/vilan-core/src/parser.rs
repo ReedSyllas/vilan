@@ -415,7 +415,18 @@ where
         tuple,
         expression
             .clone()
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))),
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            // Parens DELIMIT a lift region (expression-lifting.md §6.2), so a
+            // parenthesized expression containing a bare-`?` mark is recorded
+            // as a group for the region rewrite; every other paren dissolves
+            // exactly as before.
+            .map_with(|inner: Spanned<Node>, e| {
+                if inner.0.contains_lift_mark() {
+                    (Node::LiftGroup(Box::new(inner)), e.span())
+                } else {
+                    inner
+                }
+            }),
     ))
     // Attempt to recover anything that looks like a parenthesised expression but contains errors
     .recover_with(via_parser(nested_delimiters(
@@ -1745,6 +1756,10 @@ where
         Index(Spanned<Node<'src>>),
         TryAssert,
         LiftMember(Spanned<Node<'src>>),
+        // A bare `?` — not followed by `.`: an expression-lifting mark
+        // (expression-lifting.md). The region rewrite at the analyzer's entry
+        // turns the marked slot-root expression into a `LiftRegion`.
+        LiftBare,
         // `subject(args)` where the subject is itself a postfix result — a
         // method-call result, an index (`handlers[0](x)`), a lifted member.
         // The `call` level below the postfixes only folds suffixes onto the
@@ -1766,6 +1781,7 @@ where
             ),
             Postfix::Index(index) => (Node::Index(Box::new(subject), Box::new(index)), span),
             Postfix::TryAssert => (Node::TryAssert(Box::new(subject)), span),
+            Postfix::LiftBare => (Node::Lifted(Box::new(subject)), span),
             // Grouping happens in the outer loop; a stray lift link here is
             // unreachable.
             Postfix::LiftMember(member) => (
@@ -1856,6 +1872,9 @@ where
                     .map(|(dot_span, member)| {
                         Postfix::LiftMember(member.unwrap_or((Node::Error, dot_span)))
                     }),
+                // A bare `?` — an expression-lifting mark. Tried after `?.`,
+                // so a lifted member link always wins the `?`-then-`.` case.
+                just(Token::Op("?")).map(|_| Postfix::LiftBare),
             ))
             .map_with(|postfix, e| (postfix, e.span()))
             .repeated()

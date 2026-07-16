@@ -1187,7 +1187,10 @@ fn compile_to_js(
         },
     };
 
-    if let Some(root) = root {
+    if let Some(mut root) = root {
+        // Bare-`?` marks become lift regions before analysis
+        // (expression-lifting.md).
+        vilan_core::lift::rewrite_items(&mut root.0);
         if emit_debug {
             write_debug(file, "parse.out", &format!("{root:#?}"));
         }

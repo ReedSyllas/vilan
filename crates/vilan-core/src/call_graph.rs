@@ -578,6 +578,15 @@ impl<'a, 'src> Collector<'a, 'src> {
                 self.walk(*continuation_id);
             }
             Expr::LiftBinder => {}
+            // A lift region evaluates its steps (receivers and hoisted
+            // pre-`?` material) and its body — all real call/reference
+            // surface.
+            Expr::LiftRegion(steps, body_id) => {
+                for (step_id, _, _) in steps {
+                    self.walk(*step_id);
+                }
+                self.walk(*body_id);
+            }
             Expr::Binary(_, lhs, rhs) => {
                 self.walk(*lhs);
                 self.walk(*rhs);

@@ -1,7 +1,20 @@
 # Expression lifting — `a? + 10` and `a? + b?` (B11 deferred tail)
 
-Status: **ACCEPTED 2026-07-16** — the five review questions resolved with the
-user (§6). The §0.3 deferral of `try-and-lift.md`, designed. Everything here
+Status: **v1 SHIPPED 2026-07-16** (same day: accepted after the five review
+questions resolved with the user — §6 — then built). Live for the std pair:
+bare-`?` regions over `Option`/`Result` — map, the applicative form with lazy
+right receivers and source-order eval hoisting, flatten, paren delimiting,
+`(region)!` composition — plus the full v1 error surface (identity lift,
+mixed containers, same-`E`, `!`-after-split, lifted conditions — the last an
+EXPLICIT check, since building this found that conditions are not generally
+type-checked at all: `if 5 {}` compiles, recorded as its own backlog item).
+15 pins, corpus `expression-lift.vl` (node-run + interpreter-equivalent),
+tour docs. **Recorded remainders:** the trait path (a user `Lift` container
+at a bare `?` errors cleanly toward `?.` for now); LSP hover/completion at
+region holes unverified; marks in positions the rewrite doesn't cover get a
+clean "not supported in this position" error by construction.
+
+The §0.3 deferral of `try-and-lift.md`, designed. Everything here
 layers on the shipped `?.`/`!` machinery; nothing changes for existing
 programs (bare `?` is a parse error today, so the new form occupies empty
 grammar space).

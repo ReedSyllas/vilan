@@ -257,6 +257,26 @@ pub enum Node<'src> {
     Lift(Box<Spanned<Self>>, Box<Spanned<Self>>),
     // The continuation's hole: the lifted element inside a `Lift` chain.
     LiftBinder,
+    // A bare postfix `?` (one NOT followed by `.`) — an expression-lifting mark
+    // (proposal/expression-lifting.md). Exists only between parse and the
+    // region rewrite at the analyzer's entry, which linearizes every marked
+    // slot-root expression into a `LiftRegion`; the walk never sees it.
+    Lifted(Box<Spanned<Self>>),
+    // A parenthesized expression that contains a `Lifted` mark. Parens delimit
+    // a lift region (§6.2), so the parser records them in exactly this case
+    // (a paren without a mark dissolves as always); the region rewrite seals
+    // the inner expression as its own region root and the wrapper vanishes.
+    LiftGroup(Box<Spanned<Self>>),
+    // A sealed lift region (rewrite output): the ordered evaluation steps and
+    // the residual body skeleton. A step is (expression, is_split): an `Eval`
+    // step (false) hoists effectful pre-`?` material so source evaluation
+    // order holds; a `Split` step (true) is a `?` receiver — bad
+    // short-circuits the region with the bad half as-is. The skeleton
+    // references step results through `LiftHole(step_index)`.
+    LiftRegion(Vec<(Spanned<Self>, bool)>, Box<Spanned<Self>>),
+    // A hole in a region's body skeleton: the result of step `n` — the element
+    // for a split step, the hoisted value for an eval step.
+    LiftHole(usize),
     If(NodeIfBranch<'src>),
     // `subject is pattern` — a pattern test that yields a `bool` and binds the
     // pattern's captures into the surrounding scope.
@@ -387,6 +407,23 @@ pub enum Node<'src> {
 }
 
 impl<'src> Node<'src> {
+    /// Whether this subtree contains a bare-`?` expression-lifting mark
+    /// (`Node::Lifted`) anywhere. The parser uses it to decide whether a
+    /// parenthesized expression must be recorded as a region-delimiting
+    /// `LiftGroup`; the region rewrite uses it to skip unmarked trees.
+    pub fn contains_lift_mark(&self) -> bool {
+        if matches!(self, Node::Lifted(_)) {
+            return true;
+        }
+        let mut found = false;
+        self.for_each_child(&mut |child| {
+            if !found && child.0.contains_lift_mark() {
+                found = true;
+            }
+        });
+        found
+    }
+
     /// Visits every direct child node. Whole-tree scans that must see nodes at
     /// any nesting depth (`collect_module_refs` finding a block-scoped `import`
     /// inside a closure, the platform sniffer) recurse with this. The match is
@@ -478,6 +515,7 @@ impl<'src> Node<'src> {
             | Node::Import(_)
             | Node::Jump(_)
             | Node::LiftBinder
+            | Node::LiftHole(_)
             | Node::MacroInvocation(..)
             | Node::Null
             | Node::Number(..)
@@ -499,7 +537,15 @@ impl<'src> Node<'src> {
             | Node::Service(_, inner)
             | Node::StaticAccessor(inner, _)
             | Node::TryAssert(inner)
+            | Node::Lifted(inner)
+            | Node::LiftGroup(inner)
             | Node::Unary(_, inner) => visit(inner),
+            Node::LiftRegion(steps, body) => {
+                for (step, _) in steps {
+                    visit(step);
+                }
+                visit(body);
+            }
             Node::TypeBinder(_, bounds) => {
                 for bound in bounds {
                     visit(bound);

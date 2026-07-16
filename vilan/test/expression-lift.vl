@@ -1,0 +1,61 @@
+// expression-lift.vl — bare-`?` expression lifting (proposal/expression-lifting.md):
+// single-receiver map (either operand side), the applicative form with lazy
+// right receivers, Result first-error-wins, flatten through a container body,
+// paren-delimited regions composing with `!`, and a twice-evaluated receiver.
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::result::Result::{ self, Ok, Err };
+
+fun fetch(log: &mut List<i32>, value: Option<i32>): Option<i32> {
+	log.push(1);
+	value
+}
+
+fun parse(tag: str): Result<i32, str> {
+	if tag == "good" {
+		Ok(21)
+	} else {
+		Err("bad: " + tag)
+	}
+}
+
+fun total(a: Option<i32>, b: Option<i32>): Option<i32> {
+	let sum = (a? + b?)!; // the region seals at the paren; ! asserts on it
+	Some(sum * 10)
+}
+
+fun main() {
+	let count = Some(2);
+	print((count? * 2).unwrap_or(-1)); // 4 — map
+	print((2 * count?).unwrap_or(-1)); // 4 — either operand side
+
+	mut log: List<i32> = [];
+	let both = fetch(&mut log, Some(40))? + fetch(&mut log, Some(2))?;
+	print(both.unwrap_or(-1)); // 42 — applicative
+	print(log.len()); // 2 — both receivers ran
+
+	mut log2: List<i32> = [];
+	let bad = fetch(&mut log2, None)? + fetch(&mut log2, Some(2))?;
+	print(bad.unwrap_or(-1)); // -1
+	print(log2.len()); // 1 — the right receiver never ran (lazy)
+
+	let sum = parse("good")? + parse("good")?;
+	match sum {
+		Ok(let n) => print(n), // 42
+		Err(let e) => print(e),
+	}
+	match parse("x")? + parse("y")? {
+		Ok(let n) => print(n),
+		Err(let e) => print(e), // bad: x — the FIRST error wins
+	}
+
+	let rows: Option<List<Option<i32>>> = Some([Some(7), None]);
+	let first: Option<i32> = rows?[0]; // body yields the container — flattens
+	print(first.unwrap_or(-1)); // 7
+
+	print(total(Some(4), Some(2)).unwrap_or(-1)); // 60
+	print(total(Some(4), None).unwrap_or(-1)); // -1 — the ! returned early
+
+	let size = Some(4);
+	print((size? * size?).unwrap_or(-1)); // 16 — a receiver may repeat
+}

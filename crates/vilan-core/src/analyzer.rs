@@ -105,6 +105,13 @@ pub enum Expr<'src> {
     // The lifted element inside a `Lift` continuation — typed when the Lift
     // constraint resolves the subject's element.
     LiftBinder,
+    // An expression-lifting region (proposal/expression-lifting.md): the
+    // ordered steps — (step expr, binder entity, is_split) — and the body
+    // skeleton, which references step results through the binders. An eval
+    // step hoists effect-capable pre-`?` material (source order); a split
+    // step is a `?` receiver whose bad half short-circuits the region.
+    // Typed by `Constraint::LiftRegion`.
+    LiftRegion(Vec<(Id, Id, bool)>, Id),
     Generic(TypeId),
     If(ExprIfBranch),
     Impl(Id),
@@ -646,6 +653,15 @@ enum Constraint<'src> {
         binder_id: Id,
         continuation_id: Id,
     },
+    /// An expression-lifting region (`a? + b?`) — types each split binder as
+    /// its receiver's element (every receiver the same std container, `Result`
+    /// errors unified), each eval binder as its step's own type, then the
+    /// whole region as map-or-flatten of the body's type.
+    LiftRegion {
+        id: Id,
+        steps: Vec<(Id, Id, bool)>,
+        body_id: Id,
+    },
     /// A closure's collected `ret`s, checked against its inferred tail type
     /// (proposal/ret-checking.md rule 4's follow-up).
     ClosureReturns {
@@ -680,6 +696,7 @@ impl Constraint<'_> {
             Constraint::ReturnType { body_id, .. } => *body_id,
             Constraint::TryAssert { id, .. } => *id,
             Constraint::Lift { id, .. } => *id,
+            Constraint::LiftRegion { id, .. } => *id,
             Constraint::ClosureReturns { closure_id, .. } => *closure_id,
         }
     }
@@ -709,6 +726,7 @@ impl Constraint<'_> {
             Constraint::ReturnType { .. } => 10,
             Constraint::TryAssert { .. } => 10,
             Constraint::Lift { .. } => 10,
+            Constraint::LiftRegion { .. } => 10,
             Constraint::ClosureReturns { .. } => 10,
             Constraint::CallSubject(_) => 11,
         }
@@ -1114,6 +1132,10 @@ pub struct Analyzer<'src> {
     // The enclosing `Lift` continuations' binder entities, innermost last —
     // what a walked `LiftBinder` node resolves to.
     lift_binder_stack: Vec<Id>,
+    // Expression-lifting region frames: the binder ids of the region being
+    // walked, by step index — `Node::LiftHole(i)` resolves against the
+    // innermost frame. Regions nest only through slots, so a stack suffices.
+    lift_region_frames: Vec<Vec<Id>>,
     // Per `expr!` site: how the transformer lowers it (proposal/try-and-lift.md §4).
     try_dispatch: HashMap<Id, TryDispatch>,
     // Per `?.` site: the lowering (std pair inline; flatten or map).
@@ -1133,6 +1155,21 @@ static EMPTY_SPAN: Span = Span {
 // `a::{ b, c::d }` becomes `([a], b)` and `([a, c], d)`.
 /// Whether `op` is an arithmetic operator that a type can overload by
 /// implementing the corresponding `std::operators` trait.
+/// Whether a subtree contains an `expr!` at any depth — the region walk's v1
+/// check that `!` never runs after a `?` inside a lifted expression.
+fn contains_try_assert(node: &Node) -> bool {
+    if matches!(node, Node::TryAssert(_)) {
+        return true;
+    }
+    let mut found = false;
+    node.for_each_child(&mut |child| {
+        if !found && contains_try_assert(&child.0) {
+            found = true;
+        }
+    });
+    found
+}
+
 fn is_overloadable_operator(op: BinaryOp) -> bool {
     operator_trait_method(op).is_some()
 }
@@ -1360,6 +1397,7 @@ impl<'src> Analyzer<'src> {
             try_trait_id: None,
             lift_trait_id: None,
             lift_binder_stack: Vec::new(),
+            lift_region_frames: Vec::new(),
             try_dispatch: HashMap::new(),
             lift_dispatch: HashMap::new(),
             promise_struct_id: None,
@@ -5565,6 +5603,22 @@ impl<'src> Analyzer<'src> {
             .collect::<Vec<_>>()
     }
 
+    /// A condition is its own lift slot, but a lifted condition is an
+    /// `Option`/`Result` where a `bool` is needed — and conditions are not
+    /// yet generally type-checked, so an Option (a tagged array, always
+    /// truthy) would silently take the branch. Reject it here with the
+    /// steer the proposal promises (expression-lifting.md §2).
+    fn reject_lift_region_condition(&mut self, condition: &Spanned<Node<'src>>) {
+        if matches!(condition.0, Node::LiftRegion(..)) {
+            self.diagnostics.push(Error {
+                span: condition.1,
+                msg: "the `?` lifts this condition to an `Option`/`Result`, which a \
+                      condition cannot take — `match` on the lifted value instead"
+                    .to_string(),
+            });
+        }
+    }
+
     fn walk_expr_node(&mut self, node: &'src Spanned<Node<'src>>, scope_id: Id) -> Id {
         // `const expr` marks and FORWARDS: the inner expression is the entity
         // (no wrapper), so every downstream pass sees a plain subtree; the
@@ -5586,6 +5640,13 @@ impl<'src> Analyzer<'src> {
             let inner_id = self.walk_expr_node(inner, scope_id);
             self.const_exprs.push(inner_id);
             return inner_id;
+        }
+        // A recorded lift-region paren group forwards like `const` does: the
+        // region rewrite normally dissolves it, so one reaching the walk sits
+        // in a position the rewrite does not descend into — its inner marks
+        // report through the `Node::Lifted` arm below.
+        if let Node::LiftGroup(inner) = &node.0 {
+            return self.walk_expr_node(inner, scope_id);
         }
         let id = self.new_entity_id();
 
@@ -5811,6 +5872,9 @@ impl<'src> Analyzer<'src> {
             }
             Node::For(condition, body) => {
                 let body_scope_id = self.create_owned_scope(Some(scope_id)).id;
+                if let Some(condition) = condition.as_ref() {
+                    self.reject_lift_region_condition(condition);
+                }
                 let condition_id = condition
                     .as_ref()
                     .map(|condition| self.walk_expr_node(condition, body_scope_id));
@@ -6080,6 +6144,7 @@ impl<'src> Analyzer<'src> {
                     match branch {
                         NodeIfBranch::If(if_) => {
                             let body_scope_id = s.create_owned_scope(Some(scope_id)).id;
+                            s.reject_lift_region_condition(&if_.condition);
                             let condition_id = s.walk_expr_node(&if_.condition, body_scope_id);
                             let then_ids = s.walk_expr_nodes(&if_.then.0.0, body_scope_id);
                             let then_expr_id = s.walk_expr_node(&if_.then.0.1, body_scope_id);
@@ -6331,6 +6396,92 @@ impl<'src> Analyzer<'src> {
                 // Resolve to the innermost enclosing Lift's binder entity, like
                 // a reference to a local.
                 match self.lift_binder_stack.last().copied() {
+                    Some(binder_id) => Some(Expr::Local(binder_id)),
+                    None => Some(Expr::Error),
+                }
+            }
+            // Handled by the forwarding arm above the entity match.
+            Node::LiftGroup(..) => unreachable!("a lift group forwards to its inner expression"),
+            Node::Lifted(inner) => {
+                // A bare-`?` mark the region rewrite did not cover — a
+                // position v1 does not lift in. Sound by construction: the
+                // mark is never silently dropped, it errors here.
+                self.walk_expr_node(inner, scope_id);
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "a bare `?` (expression lifting) is not supported in this position"
+                        .to_string(),
+                });
+                Some(Expr::Error)
+            }
+            Node::LiftRegion(steps, body) => {
+                // v1 validations, where the node shapes and spans are natural.
+                // A region whose body is exactly one split's hole computes
+                // nothing (`let x = a?;`, `f(status?)`) — resolved as a hard
+                // error in review (expression-lifting.md §6.3).
+                if let Node::LiftHole(index) = body.0
+                    && steps.get(index).is_some_and(|(_, is_split)| *is_split)
+                {
+                    self.diagnostics.push(Error {
+                        span: node.1,
+                        msg: "`?` lifts nothing here — the region is the whole expression; \
+                              use `?.` for member access, or remove the `?`"
+                            .to_string(),
+                    });
+                }
+                // `!` may not run after a split: it would early-return from
+                // inside the region (the closure problem, rejected uniformly
+                // in v1 — expression-lifting.md §2).
+                if let Some(first_split) = steps.iter().position(|(_, is_split)| *is_split) {
+                    let after_split_try_assert = steps
+                        .iter()
+                        .skip(first_split + 1)
+                        .any(|(step, _)| contains_try_assert(&step.0))
+                        || contains_try_assert(&body.0);
+                    if after_split_try_assert {
+                        self.diagnostics.push(Error {
+                            span: node.1,
+                            msg: "`!` cannot run after a `?` inside a lifted expression — it \
+                                  would early-return from inside the region; bind the `!` \
+                                  result first (`let ok = value!;`)"
+                                .to_string(),
+                        });
+                    }
+                }
+                let mut walked_steps: Vec<(Id, Id, bool)> = Vec::with_capacity(steps.len());
+                self.lift_region_frames.push(Vec::new());
+                for (step, is_split) in steps {
+                    // Steps may reference EARLIER steps' holes (a receiver
+                    // built from a hoisted value), so the frame grows as the
+                    // walk proceeds.
+                    let step_id = self.walk_expr_node(step, scope_id);
+                    let binder_id = self.new_entity_id();
+                    self.expr_id_to_expr_map.insert(binder_id, Expr::LiftBinder);
+                    self.expr_id_to_scope_id_map.insert(binder_id, scope_id);
+                    self.span_map.insert(binder_id, &step.1);
+                    self.lift_region_frames
+                        .last_mut()
+                        .expect("frame pushed above")
+                        .push(binder_id);
+                    walked_steps.push((step_id, binder_id, *is_split));
+                }
+                let body_id = self.walk_expr_node(body, scope_id);
+                self.lift_region_frames.pop();
+                self.constraints.push(Constraint::LiftRegion {
+                    id,
+                    steps: walked_steps.clone(),
+                    body_id,
+                });
+                Some(Expr::LiftRegion(walked_steps, body_id))
+            }
+            Node::LiftHole(index) => {
+                // The result of a region step — a reference to its binder.
+                match self
+                    .lift_region_frames
+                    .last()
+                    .and_then(|frame| frame.get(*index))
+                    .copied()
+                {
                     Some(binder_id) => Some(Expr::Local(binder_id)),
                     None => Some(Expr::Error),
                 }
@@ -8279,10 +8430,11 @@ impl<'src> Analyzer<'src> {
                 }
                 Type::Unresolved
             }
-            // `a?.b` and its binder: typed by `Constraint::Lift` (landing in
+            // `a?.b` / a lift region and their binders: typed by
+            // `Constraint::Lift` / `Constraint::LiftRegion` (landing in
             // `resolved_types`, consulted above); unresolved until then so
             // dependents defer and wake.
-            Expr::Lift(..) | Expr::LiftBinder => {
+            Expr::Lift(..) | Expr::LiftBinder | Expr::LiftRegion(..) => {
                 if let Some(waiting) = self.current_waiting_on.as_mut() {
                     waiting.push(expr_id);
                 }
@@ -10029,6 +10181,9 @@ impl<'src> Analyzer<'src> {
                 binder_id,
                 continuation_id,
             } => self.resolve_lift(*id, *subject_id, *binder_id, *continuation_id),
+            Constraint::LiftRegion { id, steps, body_id } => {
+                self.resolve_lift_region(*id, &steps.clone(), *body_id)
+            }
             Constraint::ClosureReturns {
                 closure_id,
                 tail_id,
@@ -11235,6 +11390,180 @@ impl<'src> Analyzer<'src> {
         let result_id = result.get_type_id(self);
         self.resolved_types.insert(id, result_id);
         Resolution::Resolved
+    }
+
+    /// An expression-lifting region (proposal/expression-lifting.md): every
+    /// `?` receiver must split the SAME std container — `Option`, or `Result`
+    /// with one error type (v1 lifts the std pair; a user `Lift` type lifts
+    /// through `?.` chains, the trait path is the recorded follow-up). Each
+    /// split binder grounds as its own receiver's element, each eval binder
+    /// as its step's type; the body then types the region — wrapped back into
+    /// the container (map), or taken as-is when it yields the container
+    /// itself (flatten, the chain rule inherited).
+    fn resolve_lift_region(&mut self, id: Id, steps: &[(Id, Id, bool)], body_id: Id) -> Resolution {
+        let span = **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN);
+        let mut family: Option<(Id, Vec<TypeId>)> = None;
+        for (step_id, binder_id, is_split) in steps {
+            if !self.expr_id_to_expr_map.contains_key(step_id) {
+                return Resolution::Deferred;
+            }
+            let step_type = self.infer_type(*step_id, &Type::Unknown, &HashMap::new());
+            if matches!(step_type, Type::Unresolved) {
+                return Resolution::Deferred;
+            }
+            if !*is_split {
+                // An eval step's binder carries the hoisted value unchanged.
+                let step_type_id = step_type.get_type_id(self);
+                if self.resolved_types.get(binder_id) != Some(&step_type_id) {
+                    self.resolved_types.insert(*binder_id, step_type_id);
+                }
+                continue;
+            }
+            let step_span = **self.span_map.get(step_id).unwrap_or(&&EMPTY_SPAN);
+            let (enum_id, arguments) = match &step_type {
+                Type::Enum(enum_id, arguments)
+                    if Some(*enum_id) == self.option_enum_id
+                        || Some(*enum_id) == self.result_enum_id =>
+                {
+                    (*enum_id, arguments.clone())
+                }
+                other => {
+                    let rendered = self.pretty_print_type(other, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span: step_span,
+                        msg: format!(
+                            "a bare `?` lifts an `Option` or a `Result` — this is {rendered} \
+                             (expression lifting for user `Lift` containers is a recorded \
+                             follow-up; `?.` chains already support them)"
+                        ),
+                    });
+                    return Resolution::Failed;
+                }
+            };
+            match &family {
+                None => family = Some((enum_id, arguments.clone())),
+                Some((family_id, family_arguments)) => {
+                    if *family_id != enum_id {
+                        let first = self.render_container_name(*family_id);
+                        let second = self.render_container_name(enum_id);
+                        self.diagnostics.push(Error {
+                            span,
+                            msg: format!(
+                                "every `?` in one lifted expression must split the same \
+                                 container: this region lifts both `{first}` and `{second}`. \
+                                 Convert first — `.ok_or(err)` turns an `Option` into a \
+                                 `Result`."
+                            ),
+                        });
+                        return Resolution::Failed;
+                    }
+                    // One region has one result type, so two `Result`
+                    // receivers must carry the same error (§6.5's corollary).
+                    if Some(enum_id) == self.result_enum_id
+                        && let (Some(family_error), Some(step_error)) =
+                            (family_arguments.get(1), arguments.get(1))
+                    {
+                        let family_error_type = family_error.get_type(self);
+                        let step_error_type = step_error.get_type(self);
+                        if self
+                            .reconcile_type(&family_error_type, &step_error_type, &HashMap::new())
+                            .is_none()
+                        {
+                            let first = self.pretty_print_type(&family_error_type, &HashMap::new());
+                            let second = self.pretty_print_type(&step_error_type, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: step_span,
+                                msg: format!(
+                                    "`?` short-circuits a lifted expression with the first bad \
+                                     half, so every `Result` receiver must carry the same error \
+                                     type: the region's is {first}, this receiver's is {second}. \
+                                     Convert the error first with `.map_err(…)`."
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+            // Ground this split's binder as ITS receiver's element (elements
+            // may differ across receivers; only the container must match).
+            let element = arguments
+                .first()
+                .map(|type_id| type_id.get_type(self))
+                .unwrap_or(Type::Unknown);
+            let element_id = element.get_type_id(self);
+            if self.resolved_types.get(binder_id) != Some(&element_id) {
+                self.resolved_types.insert(*binder_id, element_id);
+            }
+        }
+        let Some((family_id, family_arguments)) = family else {
+            // A region without a split cannot be built by the rewrite.
+            return Resolution::Failed;
+        };
+        let body_type = self.infer_type(body_id, &Type::Unknown, &HashMap::new());
+        if matches!(body_type, Type::Unresolved) {
+            // The body resolves after the binders' wake; retry then.
+            return Resolution::Deferred;
+        }
+        let flatten = matches!(&body_type, Type::Enum(enum_id, _) if *enum_id == family_id);
+        let result = if flatten {
+            // Flatten: the body's container IS the region. For Result, the
+            // error types must agree (the short-circuited Err passes through
+            // unchanged) — the chain rule's check, region-worded.
+            if Some(family_id) == self.result_enum_id
+                && let (Type::Enum(_, body_arguments), Some(region_error)) =
+                    (&body_type, family_arguments.get(1))
+                && let Some(body_error) = body_arguments.get(1)
+            {
+                let region_error_type = region_error.get_type(self);
+                let body_error_type = body_error.get_type(self);
+                if self
+                    .reconcile_type(&region_error_type, &body_error_type, &HashMap::new())
+                    .is_none()
+                {
+                    let first = self.pretty_print_type(&region_error_type, &HashMap::new());
+                    let second = self.pretty_print_type(&body_error_type, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span,
+                        msg: format!(
+                            "this lifted expression flattens into its own `Result`, so the \
+                             error types must match: the receivers' is {first}, the body \
+                             yields {second}. Convert the error first with `.map_err(…)`."
+                        ),
+                    });
+                }
+            }
+            body_type
+        } else {
+            let body_type_id = body_type.get_type_id(self);
+            let mut result_arguments = family_arguments.clone();
+            if result_arguments.is_empty() {
+                result_arguments.push(body_type_id);
+            } else {
+                result_arguments[0] = body_type_id;
+            }
+            Type::Enum(family_id, result_arguments)
+        };
+        self.lift_dispatch.insert(
+            id,
+            LiftDispatch::Std {
+                flatten,
+                enum_id: family_id,
+            },
+        );
+        let result_id = result.get_type_id(self);
+        self.resolved_types.insert(id, result_id);
+        Resolution::Resolved
+    }
+
+    /// The short name of a std container enum, for region diagnostics.
+    fn render_container_name(&self, enum_id: Id) -> &'static str {
+        if Some(enum_id) == self.option_enum_id {
+            "Option"
+        } else if Some(enum_id) == self.result_enum_id {
+            "Result"
+        } else {
+            "container"
+        }
     }
 
     /// `?.` on a user `Lift` container (proposal/try-and-lift.md §3): the
@@ -14391,7 +14720,8 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     // The fast path: a clean module (the overwhelming case — std parses clean
     // on every compile) skips rich-error bookkeeping entirely; anything else
     // falls through to the rich parse below for its diagnostics.
-    if let Some(root) = crate::parse_clean(source) {
+    if let Some(mut root) = crate::parse_clean(source) {
+        crate::lift::rewrite_items(&mut root.0);
         let loaded = LoadedModule {
             ast: &*Box::leak(Box::new(root)),
             text: source,
@@ -14428,7 +14758,10 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
                     .map(|error| render_at(source, error.span().start, error.to_string())),
             );
             match root {
-                Some((root, _file_span)) => &*Box::leak(Box::new(root)),
+                Some((mut root, _file_span)) => {
+                    crate::lift::rewrite_items(&mut root.0);
+                    &*Box::leak(Box::new(root))
+                }
                 // Recovery failed outright: an empty module + the errors above —
                 // loud, instead of pretending the file doesn't exist.
                 None => empty_ast(),
