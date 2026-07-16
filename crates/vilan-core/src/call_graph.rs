@@ -702,6 +702,11 @@ impl<'a, 'src> Collector<'a, 'src> {
                     self.walk_pattern(sub_pattern);
                 }
             }
+            ExprPattern::Array(sub_patterns) => {
+                for sub_pattern in sub_patterns {
+                    self.walk_pattern(sub_pattern);
+                }
+            }
             ExprPattern::Wildcard | ExprPattern::Binding(_) => {}
         }
     }

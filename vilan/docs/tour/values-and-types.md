@@ -175,7 +175,9 @@ fun main() {
 Reach for `[T; n]` over `List<T>` when the count never changes — a color, a
 matrix row, a lookup table. Everything else (`push`, growing) is what `List`
 is for. `.len()` on an array is free: the length lives in the type, so the
-compiler folds it to the constant.
+compiler folds it to the constant. And because the length is known,
+`let [r, g, b] = rgb;` destructures one — irrefutably, with the element
+count checked against the type (works in parameter position too).
 
 > **Going deeper.** `Map` and `Set` key **by value**. Scalar keys (`i32`,
 > `str`) work directly; a struct, enum, or `List` key works once it derives

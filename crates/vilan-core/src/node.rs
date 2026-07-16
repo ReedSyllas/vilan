@@ -462,7 +462,7 @@ impl<'src> Node<'src> {
                         visit_pattern(sub, visit);
                     }
                 }
-                Pattern::Tuple(elements) => {
+                Pattern::Tuple(elements) | Pattern::Array(elements) => {
                     for (sub, _) in elements {
                         visit_pattern(sub, visit);
                     }
@@ -752,6 +752,10 @@ pub enum Pattern<'src> {
     Variant(Vec<&'src str>, Option<Vec<Spanned<Pattern<'src>>>>),
     // `(a, b, ...)` — a tuple pattern.
     Tuple(Vec<Spanned<Pattern<'src>>>),
+    // `[a, b, c]` — a fixed-array binder pattern (`let [a, b, c] = arr`,
+    // fixed-arrays.md §7): irrefutable, its element count must equal the
+    // array type's length. Binder positions only (`let`, parameters) in v1.
+    Array(Vec<Spanned<Pattern<'src>>>),
     // A literal value pattern (`"quit"`, `42`, `true`): matches by equality,
     // binding nothing. Holds the literal as its node.
     Literal(Box<Spanned<Node<'src>>>),

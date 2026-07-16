@@ -2522,6 +2522,18 @@ impl<'src> Transformer<'src> {
                     self.compile_is_pattern(sub_pattern, element, conditions);
                 }
             }
+            // Array binders are irrefutable and parse only in binder position
+            // (`let`/parameters) in v1, so an `is`/match array pattern cannot
+            // reach here — but sub-patterns recurse defensively, condition-free.
+            ExprPattern::Array(elements) => {
+                for (index, sub_pattern) in elements.iter().enumerate() {
+                    let element = js::Node::PropertyIndex(
+                        Box::new(subject.clone()),
+                        Box::new(js::Node::Number(index.to_string(), None)),
+                    );
+                    self.compile_is_pattern(sub_pattern, element, conditions);
+                }
+            }
             ExprPattern::Literal(literal_id) => {
                 conditions.push(self.literal_equality(*literal_id, subject));
             }
@@ -2884,6 +2896,11 @@ impl<'src> Transformer<'src> {
                         collect(sub_pattern, ids);
                     }
                 }
+                ExprPattern::Array(elements) => {
+                    for sub_pattern in elements {
+                        collect(sub_pattern, ids);
+                    }
+                }
                 ExprPattern::Wildcard | ExprPattern::Literal(_) => {}
             }
         }
@@ -2949,6 +2966,24 @@ impl<'src> Transformer<'src> {
                 let mut leaves = Vec::new();
                 Self::flatten_tuple_pattern(elements, &subject, 0, &mut leaves);
                 for (sub_pattern, element) in leaves {
+                    self.compile_pattern(sub_pattern, element, conditions, bindings);
+                }
+            }
+            ExprPattern::Array(elements) => {
+                // A fixed array stores as a plain JS array: element `i` reads
+                // `subject[i]`, CLONED — a destructured binding is a value copy
+                // (rule 1), and `__clone` is identity on scalars. Indices are
+                // statically in range (count == length was checked at
+                // resolution), so no bounds helper is needed.
+                self.used_helpers.insert("__clone");
+                for (index, sub_pattern) in elements.iter().enumerate() {
+                    let element = js::Node::Call(
+                        Box::new(js::Node::Local("__clone".to_string())),
+                        vec![js::Node::PropertyIndex(
+                            Box::new(subject.clone()),
+                            Box::new(js::Node::Number(index.to_string(), None)),
+                        )],
+                    );
                     self.compile_pattern(sub_pattern, element, conditions, bindings);
                 }
             }

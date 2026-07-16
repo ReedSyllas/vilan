@@ -1280,6 +1280,16 @@ impl<'src> Printer<'src> {
                 }
                 self.out.push(')');
             }
+            Pattern::Array(elements) => {
+                self.out.push('[');
+                for (index, (element, _)) in elements.iter().enumerate() {
+                    if index > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.print_pattern(element);
+                }
+                self.out.push(']');
+            }
             Pattern::Literal(literal) => self.print_expr(literal),
         }
     }

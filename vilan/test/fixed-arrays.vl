@@ -2,7 +2,8 @@
 // repeat literal `[value; n]`, context-directed `[a, b, c]` under a `[T; n]`
 // annotation, index read/write, `&mut arr[i]` element views, `for` iteration,
 // value-copy independence (scalar and aggregate), params/returns, nesting, and
-// `.len()` (folds to the constant; a call subject still evaluates — §10).
+// `.len()` (folds to the constant; a call subject still evaluates — §10), and
+// destructuring `let [a, b] = arr` (irrefutable, count = the type's length).
 import std::print;
 
 struct Cell {
@@ -56,4 +57,13 @@ fun main() {
 	print(buf.len()); // 3 — folds to the constant
 	print(grid[0].len()); // 2 — a subscript subject stays evaluated (bounds check)
 	print(make().len()); // 2 — a call subject runs, `.length` read in place
+
+	let [left, right] = grid; // destructuring — nested [i32; 2] copies
+	let [l0, l1] = left;
+	print(l0 + l1); // 3
+	mut [r0, r1] = right;
+	r0 = r0 + 100;
+	print(r0); // 103
+	print(grid[1][0]); // 3 — the source is untouched
+	print(r1); // 4
 }

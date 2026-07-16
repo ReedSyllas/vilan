@@ -114,7 +114,12 @@ recursion. (`.len()` shipped separately as slice 2 — §10.)
 - **`List` ↔ `[T; n]` conversion** — `arr.to_list()` / `list.to_array<n>()` (the latter
   is fallible — length mismatch). Explicit methods, not coercion (no silent conversion).
 - **Multi-dimensional sugar / slicing** — `arr[1..3]` (needs a slice/range type first).
-- **Destructuring** `let [a, b, c] = arr`.
+- ~~**Destructuring** `let [a, b, c] = arr`~~ — **SHIPPED 2026-07-16**: a
+  `Pattern::Array` binder (`let`/`mut` and PARAMETER position — the binder grammar
+  is shared), irrefutable with count = the type's length (mismatch and non-array
+  subjects are spanned errors), nesting arrays and tuples freely; each element
+  read lowers as `__clone(subject[i])` (value copies; `__clone` is identity on
+  scalars; indices statically in range, no bounds helper). 6 pins + corpus.
 
 ## 8. Implementation surface (from the read)
 

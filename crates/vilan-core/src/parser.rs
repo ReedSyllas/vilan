@@ -455,14 +455,24 @@ where
     // the `match` pattern grammar (no variants/literals/guards). Nests recursively.
     let binder = recursive(|binder| {
         let tuple = binder
+            .clone()
             .separated_by(just(Token::Ctrl(',')))
             .at_least(2)
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
             .map_with(|patterns, e| (Pattern::Tuple(patterns), e.span()));
+        // `[a, b, c]` — a fixed-array binder (`let [a, b, c] = arr`);
+        // irrefutable, count-checked against the array type's length.
+        let array = binder
+            .separated_by(just(Token::Ctrl(',')))
+            .at_least(1)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+            .map_with(|patterns, e| (Pattern::Array(patterns), e.span()));
         let name = identifier.map_with(|name, e| (Pattern::Binding(name, false), e.span()));
-        choice((tuple, name))
+        choice((tuple, array, name))
     });
 
     let closure = binder

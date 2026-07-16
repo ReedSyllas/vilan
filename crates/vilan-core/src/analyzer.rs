@@ -198,6 +198,10 @@ pub enum ExprPattern {
     // tuple element occupies more than one slot), so the transformer reads each
     // at its flat offset and reslices a multi-slot capture.
     Tuple(Vec<(ExprPattern, usize)>),
+    // A fixed-array destructure (`let [a, b, c] = arr`): element `i` reads
+    // `subject[i]` (a value copy — the transformer clones each element read,
+    // value semantics; count-vs-length was checked at resolution).
+    Array(Vec<ExprPattern>),
     // A literal value test: the matched value equals this literal expression.
     Literal(Id),
 }
@@ -390,6 +394,9 @@ enum WalkPattern<'src> {
         Option<Vec<WalkPattern<'src>>>,
     ),
     Tuple(Span, Vec<WalkPattern<'src>>),
+    // `[a, b, c]` — a fixed-array binder (fixed-arrays.md §7): irrefutable,
+    // its element count must equal the array type's length.
+    Array(Span, Vec<WalkPattern<'src>>),
     // A literal value, walked to its expression id (for type-checking + codegen).
     Literal(Id),
 }
@@ -7337,7 +7344,7 @@ impl<'src> Analyzer<'src> {
                     variable.mutable = true;
                 }
             }
-            WalkPattern::Tuple(_, patterns) => {
+            WalkPattern::Tuple(_, patterns) | WalkPattern::Array(_, patterns) => {
                 for sub_pattern in patterns {
                     self.set_pattern_bindings_mutable(sub_pattern);
                 }
@@ -7537,6 +7544,20 @@ impl<'src> Analyzer<'src> {
                 }),
             ),
             Pattern::Tuple(patterns) => WalkPattern::Tuple(
+                *span,
+                patterns
+                    .iter()
+                    .map(|sub_pattern| {
+                        self.walk_pattern(
+                            &sub_pattern.0,
+                            &sub_pattern.1,
+                            scope_id,
+                            keyword_prefixed,
+                        )
+                    })
+                    .collect(),
+            ),
+            Pattern::Array(patterns) => WalkPattern::Array(
                 *span,
                 patterns
                     .iter()
@@ -7789,6 +7810,50 @@ impl<'src> Analyzer<'src> {
                     ));
                 }
                 Some(ExprPattern::Tuple(resolved))
+            }
+            WalkPattern::Array(span, patterns) => {
+                // The subject must be a fixed array whose length equals the
+                // pattern's element count — irrefutability IS that equality
+                // (the length is in the type). Every element types as `T`.
+                let expected = expected_type_id.get_type(self);
+                let element_type_id = match expected {
+                    Type::Array(element_id, length) => {
+                        if length != patterns.len() {
+                            self.diagnostics.push(Error {
+                                span: *span,
+                                msg: format!(
+                                    "this pattern binds {} {}, but the array's length is {}",
+                                    patterns.len(),
+                                    plural(patterns.len(), "element", "elements"),
+                                    length
+                                ),
+                            });
+                            return None;
+                        }
+                        element_id
+                    }
+                    Type::Unknown | Type::Unresolved | Type::Any => Type::Unknown.get_type_id(self),
+                    other => {
+                        let rendered = self.pretty_print_type(&other, &HashMap::new());
+                        self.diagnostics.push(Error {
+                            span: *span,
+                            msg: format!(
+                                "cannot destructure {rendered} as a fixed array — \
+                                 `[a, b, c]` binds a `[T; n]`"
+                            ),
+                        });
+                        return None;
+                    }
+                };
+                let mut resolved = Vec::new();
+                for sub_pattern in patterns {
+                    resolved.push(self.resolve_pattern(
+                        sub_pattern,
+                        element_type_id,
+                        lookup_scope_id,
+                    )?);
+                }
+                Some(ExprPattern::Array(resolved))
             }
             WalkPattern::Literal(literal_id) => {
                 // The literal's type must be compatible with the matched value's.

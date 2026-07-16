@@ -17058,6 +17058,116 @@ fn an_array_annotation_catches_elements_that_unify_with_each_other() {
     );
 }
 
+// --- Fixed-array destructuring `let [a, b, c] = arr` (fixed-arrays.md §7) --------
+
+#[test]
+fn fixed_array_destructuring_binds_elements() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let rgb: [i32; 3] = [255, 128, 0];
+            let [r, g, b] = rgb;
+            print(r + g + b);   // 383
+        }
+        "#,
+        "383\n",
+    );
+}
+
+#[test]
+fn fixed_array_destructuring_nests_and_copies() {
+    // Nested array patterns, a `mut` pattern (every binding mutable), and
+    // value semantics: the destructured copies are independent of the source.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut source: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+            let [first, second] = source;
+            let [c, d] = first;
+            print(c + d);          // 3
+            mut [x, y] = second;
+            x = x + 100;
+            print(x);              // 103
+            print(y);              // 4
+            print(source[1][0]);   // 3 — the source is untouched
+        }
+        "#,
+        "3\n103\n4\n3\n",
+    );
+}
+
+#[test]
+fn fixed_array_destructuring_of_aggregate_elements_is_a_copy() {
+    // An aggregate element clones on the way out (rule 1): mutating the
+    // binding leaves the source array's element unchanged.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Cell { n: i32 }
+        fun main() {
+            let cells: [Cell; 2] = [Cell { n = 1 }, Cell { n = 2 }];
+            mut [a, b] = cells;
+            a.n = 99;
+            print(a.n);           // 99
+            print(cells[0].n);    // 1 — independent
+            print(b.n);           // 2
+        }
+        "#,
+        "99\n1\n2\n",
+    );
+}
+
+#[test]
+fn fixed_array_destructuring_in_parameter_position() {
+    // Binder patterns are shared between `let` and parameters, and a tuple
+    // pattern nests inside an array pattern (flat tuple reads under an
+    // indexed element read).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun sum([a, b]: [i32; 2]): i32 { a + b }
+        fun main() {
+            print(sum([40, 2]));   // 42
+            let pairs: [(i32, str); 2] = [(1, "a"), (2, "b")];
+            let [(n1, s1), (n2, s2)] = pairs;
+            print(n1 + n2);        // 3
+            print(s1 + s2);        // ab
+        }
+        "#,
+        "42\n3\nab\n",
+    );
+}
+
+#[test]
+fn fixed_array_destructuring_count_must_match() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let a: [i32; 3] = [1, 2, 3];
+            let [x, y] = a;
+        }
+        "#,
+        "this pattern binds 2 elements, but the array's length is 3",
+    );
+}
+
+#[test]
+fn fixed_array_destructuring_rejects_a_list() {
+    // A List's length isn't in its type, so `[a, b]` can't be irrefutable
+    // over it — the pattern is for `[T; n]` only.
+    assert_fails_with(
+        r#"
+        fun main() {
+            let xs = [1, 2];
+            let [a, b] = xs;
+        }
+        "#,
+        "cannot destructure List<i32> as a fixed array",
+    );
+}
+
 // --- `[T; n].len()` — the fold (fixed-arrays.md §10) -----------------------------
 
 #[test]
