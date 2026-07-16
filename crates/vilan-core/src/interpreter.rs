@@ -924,6 +924,20 @@ impl Interpreter {
                 Ok(Value::Map(Rc::new(RefCell::new(map))))
             }
             "__clone" => Ok(deep_clone(&take(0))),
+            // `[value; n]` — n independent slots. `deep_clone` per slot matches the
+            // emitted helper (a primitive copies, an aggregate is cloned) for both
+            // kinds, so node and the interpreter agree.
+            "__repeat" => {
+                let value = take(0);
+                let count = expect_number(&take(1))?;
+                let count = if count >= 0.0 && count.fract() == 0.0 {
+                    count as usize
+                } else {
+                    0
+                };
+                let items = (0..count).map(|_| deep_clone(&value)).collect();
+                Ok(Value::Array(Rc::new(RefCell::new(items))))
+            }
             "__shared_new" => {
                 let mut cell = IndexMap::new();
                 cell.insert(Rc::from("v"), take(0));

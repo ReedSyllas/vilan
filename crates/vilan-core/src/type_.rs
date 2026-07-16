@@ -40,6 +40,11 @@ pub enum Type {
     // selection and a mapped trait template's inversion.
     Trait(Id, Vec<TypeId>),
     Tuple(Vec<TypeId>),
+    // A fixed-length array `[T; n]` — the element type and a compile-time-known
+    // length (`[i32; 4]` -> `Array(i32, 4)`). Unlike `List<T>` (a growable
+    // `Struct(list_id, [T])`), the length is part of the type, so `[i32; 3]` and
+    // `[i32; 4]` are distinct and neither resizes. Lowers to a plain JS array.
+    Array(TypeId, usize),
     // A mapped tuple type `(U in T: F<U>)`, symbolic while the source tuple `T` is
     // still abstract: the binder `U`'s generic id, the source tuple type, and the
     // template `F<U>`. Expands to a concrete `Tuple` once `T` resolves to one

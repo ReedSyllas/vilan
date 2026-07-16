@@ -114,6 +114,9 @@ pub enum Expr<'src> {
     // surrounding scope.
     Is(Id, ExprPattern),
     List(Vec<Id>),
+    // `[value; n]` — a fixed-length array literal: the value expr and the
+    // compile-time length `n` (an integer literal in v1). `value` copied per slot.
+    Repeat(Id, usize),
     Local(Id),
     // A match expression: the subject and the resolved legs.
     Match(Id, Vec<ExprMatchLeg>),
@@ -933,6 +936,11 @@ pub struct Analyzer<'src> {
     // to be deref-wrapped alongside the target — distinct from a user-written
     // value-position read, which keeps its explicit `*` (R6).
     compound_reread_ids: HashSet<Id>,
+    // Literal-element diagnostics already emitted (keyed by the offending item's
+    // expr id, or the literal's own id for a count mismatch). These checks run
+    // inside type INFERENCE, which the constraint fixpoint may re-run after a
+    // deferral — the guard keeps each error to exactly one report.
+    reported_literal_errors: HashSet<Id>,
     // For each *annotated* binding (`let v: T = …`), whether the annotation was a
     // view (`&[mut] T` → true) or a value (`T` → false). The `&`/`&mut` is erased
     // from the type, so this records it for the R1 check that a view annotation
@@ -1291,6 +1299,7 @@ impl<'src> Analyzer<'src> {
             list_element_slots: HashMap::new(),
             prepped_assignments: Vec::new(),
             compound_reread_ids: HashSet::new(),
+            reported_literal_errors: HashSet::new(),
             binding_annotation_view: HashMap::new(),
             prepped_imports: Vec::new(),
             macro_item_invocations: HashSet::new(),
@@ -2600,6 +2609,9 @@ impl<'src> Analyzer<'src> {
         match type_ {
             Type::Struct(id, _) => !self.is_scalar_primitive(*id),
             Type::Tuple(_) => true,
+            // A fixed-length array is a value like a `List`/tuple — copied, so
+            // `mut b = a` deep-clones it (`__clone` recurses the JS array).
+            Type::Array(_, _) => true,
             _ => false,
         }
     }
@@ -5524,6 +5536,24 @@ impl<'src> Analyzer<'src> {
         scope.name_to_id_map.insert("Self", self_id);
     }
 
+    /// The compile-time length of a `[T; n]` type or `[value; n]` literal — a
+    /// non-negative integer literal in v1 (a `const`-named length is deferred).
+    /// Emits an error and returns 0 (harmlessly failing the compile) otherwise.
+    fn array_length_literal(&mut self, node: &Spanned<Node<'src>>) -> usize {
+        if let Node::Number(whole, None, _) = &node.0
+            && let Ok(length) = whole.parse::<usize>()
+        {
+            return length;
+        }
+        self.diagnostics.push(Error {
+            span: node.1,
+            msg: "an array length must be a non-negative integer literal \
+                  (a `const` length is not supported yet)"
+                .to_string(),
+        });
+        0
+    }
+
     fn walk_expr_nodes(&mut self, list: &'src NodeList<'src>, scope_id: Id) -> Vec<Id> {
         list.iter()
             .map(|child| self.walk_expr_node(child, scope_id))
@@ -5747,6 +5777,22 @@ impl<'src> Analyzer<'src> {
             Node::List(items) => {
                 let ids = self.walk_expr_nodes(items, scope_id);
                 Some(Expr::List(ids))
+            }
+            Node::Repeat(value, length_node) => {
+                let value_id = self.walk_expr_node(value, scope_id);
+                let length = self.array_length_literal(length_node);
+                Some(Expr::Repeat(value_id, length))
+            }
+            Node::ArrayType(..) => {
+                // `[T; n]` is a TYPE — the type parser produces it in type
+                // position only; in value position it's a stray type annotation.
+                self.diagnostics.push(Error {
+                    span: node.1,
+                    msg: "a `[T; n]` array type isn't a value; write an array \
+                          literal like `[value; n]`"
+                        .to_string(),
+                });
+                Some(Expr::Error)
             }
             Node::Tuple(items) => {
                 let ids = self.walk_expr_nodes(items, scope_id);
@@ -7653,6 +7699,13 @@ impl<'src> Analyzer<'src> {
             // `&T` / `&mut T` carries the inner type for now (identity); a
             // parameter captures the `&`/`&mut` separately as its convention.
             Node::Reference(_, inner) => return self.walk_type_node(inner, scope_id),
+            // `[T; n]` — a fixed-length array type. Walk the element; the length
+            // is an integer literal (v1) resolved to a `usize`.
+            Node::ArrayType(element, length) => {
+                let element_type_id = self.walk_type_node(element, scope_id);
+                let length = self.array_length_literal(length);
+                Some(Type::Array(element_type_id, length))
+            }
             x => unimplemented!("unhandled type node: {:?}", x),
         };
 
@@ -7690,6 +7743,8 @@ impl<'src> Analyzer<'src> {
                     .first()
                     .map(|element_type_id| element_type_id.get_type(self))
             }
+            // `[T; n]` is a JS array too — iterate its element type `T`.
+            Type::Array(element_id, _) => Some(element_id.get_type(self)),
             // A custom iterator (e.g. `Range`): its element is the payload of
             // `next(self): Option<T>` (or `next_mut(&mut self): Option<&mut T>` for
             // a `&mut` view loop), so the binding gets type `T`.
@@ -8288,6 +8343,53 @@ impl<'src> Analyzer<'src> {
                 // against the grounded element — a zero-argument `List` here
                 // once made every method call on it vacuous (B16).
                 let item_ids = item_ids.clone();
+                // Context-direction: when the expected type is a fixed array
+                // `[T; n]`, the same literal elaborates to that array instead of
+                // a `List` — its element count must equal `n`, and each element
+                // is inferred against `T`. (`[a, b, c]` is otherwise a `List`.)
+                if let Type::Array(element_type_id, length) = constraint {
+                    let element_type = element_type_id.get_type(self);
+                    if item_ids.len() != length && self.reported_literal_errors.insert(expr_id) {
+                        self.diagnostics.push(Error {
+                            span: **self.span_map.get(&expr_id).unwrap_or(&&EMPTY_SPAN),
+                            msg: format!(
+                                "this array literal has {} element{}, but its type is `[_; {length}]`",
+                                item_ids.len(),
+                                if item_ids.len() == 1 { "" } else { "s" }
+                            ),
+                        });
+                    }
+                    for item_id in &item_ids {
+                        let item_type = self.infer_type_inner(
+                            *item_id,
+                            &element_type,
+                            substitution_context,
+                            exprs_seen,
+                        );
+                        if matches!(item_type, Type::Unresolved) {
+                            return Type::Unresolved;
+                        }
+                        // Each element must actually BE a `T` — the constraint
+                        // directs inference but doesn't enforce, and this arm
+                        // returns the expected array type, so without a check a
+                        // stray `str` in an `[i32; n]` would sail through.
+                        if self
+                            .reconcile_type(&element_type, &item_type, substitution_context)
+                            .is_none()
+                            && self.reported_literal_errors.insert(*item_id)
+                        {
+                            let expected = self.pretty_print_type(&element_type, &HashMap::new());
+                            let got = self.pretty_print_type(&item_type, &HashMap::new());
+                            self.diagnostics.push(Error {
+                                span: **self.span_map.get(item_id).unwrap_or(&&EMPTY_SPAN),
+                                msg: format!(
+                                    "Expected {expected} (the array's element type), but got {got} instead."
+                                ),
+                            });
+                        }
+                    }
+                    return Type::Array(element_type_id, length);
+                }
                 if item_ids.is_empty() {
                     return match self.primitive_struct_ids.get("List").copied() {
                         Some(list_id) => {
@@ -8335,6 +8437,25 @@ impl<'src> Analyzer<'src> {
                     }
                     None => Type::Unknown,
                 }
+            }
+            Expr::Repeat(value_id, length) => {
+                // `[value; n]` is `[T; n]` where `T` is the value's type. Direct
+                // the value against the expected array's element type, if any.
+                let length = *length;
+                let element_constraint = match constraint {
+                    Type::Array(element_id, _) => element_id.get_type(self),
+                    _ => Type::Unknown,
+                };
+                let element_type = self.infer_type_inner(
+                    *value_id,
+                    &element_constraint,
+                    substitution_context,
+                    exprs_seen,
+                );
+                if matches!(element_type, Type::Unresolved) {
+                    return Type::Unresolved;
+                }
+                Type::Array(element_type.get_type_id(self), length)
             }
             Expr::Tuple(item_ids) => {
                 let constraint_items = match constraint {
@@ -9151,6 +9272,18 @@ impl<'src> Analyzer<'src> {
                 }
                 (Type::Tuple(result_items), all_bindings)
             }
+            // Two arrays unify only at the SAME length (the length is part of the
+            // type) — a mismatch falls through to the no-reconcile path, so
+            // `[i32; 3]` and `[i32; 4]` are distinct. Same length → reconcile the
+            // element (binding a generic element like `List<T>` does).
+            (Type::Array(l_element, l_length), Type::Array(r_element, r_length))
+                if l_length == r_length =>
+            {
+                let l = l_element.get_type(self);
+                let r = r_element.get_type(self);
+                let (element, bindings) = self.reconcile_type(&l, &r, substitution_context)?;
+                (Type::Array(element.get_type_id(self), *l_length), bindings)
+            }
             // Same nominal type: unify argument-wise, keeping the instantiated
             // side when the other is erased. Reconciling the arguments collects
             // the generic bindings that drive element-type inference (e.g.
@@ -9479,6 +9612,13 @@ impl<'src> Analyzer<'src> {
             Type::Tuple(element_ids) => {
                 let element_ids = element_ids.clone();
                 Type::Tuple(self.substitute_argument_types(&element_ids, substitution_context))
+            }
+            // `[T; n]` substitutes its element (the length is a constant, carried
+            // through), so a generic `[T; 4]` monomorphizes to `[i32; 4]`.
+            Type::Array(element_id, length) => {
+                let element = element_id.get_type(self);
+                let substituted = self.substitute_type(&element, substitution_context);
+                Type::Array(substituted.get_type_id(self), *length)
             }
             // A mapped tuple substitutes its source; once that is a concrete tuple
             // it expands element-wise (`F[U := X]` per element `X`), otherwise it
@@ -12016,11 +12156,42 @@ impl<'src> Analyzer<'src> {
                 self.expr_id_to_expr_map.insert(id, Expr::Error);
                 Resolution::Failed
             }
+            // `[T; n]` is indexable like a `List`, yielding the element type — but
+            // a literal index the type proves out of range is a compile error (the
+            // length is in the type); a dynamic index keeps its runtime bounds check.
+            Type::Array(element_id, length) => {
+                let literal_index = match self.expr_id_to_expr_map.get(&index_id) {
+                    Some(Expr::Number(whole, None, _)) => whole.parse::<usize>().ok(),
+                    _ => None,
+                };
+                if let Some(literal_index) = literal_index
+                    && literal_index >= length
+                {
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "index {literal_index} is out of range for an array of length {length} \
+                             (valid indices are 0 to {})",
+                            length.saturating_sub(1)
+                        ),
+                    });
+                    self.expr_id_to_expr_map.insert(id, Expr::Error);
+                    return Resolution::Failed;
+                }
+                self.expr_id_to_expr_map
+                    .insert(id, Expr::Index(subject_id, index_id));
+                self.expr_id_to_type_id_map.insert(id, element_id);
+                self.resolved_types.insert(id, element_id);
+                Resolution::Resolved
+            }
             subject_type => {
                 let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
                     span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                    msg: format!("cannot index {} (only a `List` is indexable)", subject_str),
+                    msg: format!(
+                        "cannot index {} (only a `List` or `[T; n]` array is indexable)",
+                        subject_str
+                    ),
                 });
                 self.expr_id_to_expr_map.insert(id, Expr::Error);
                 Resolution::Failed
@@ -13397,6 +13568,9 @@ impl<'src> Analyzer<'src> {
                     self.collect_generics(&item.get_type(self), depth + 1, out);
                 }
             }
+            Type::Array(element_id, _) => {
+                self.collect_generics(&element_id.get_type(self), depth + 1, out);
+            }
             _ => {}
         }
     }
@@ -13629,6 +13803,12 @@ impl<'src> Analyzer<'src> {
                     buf.push_str(&item_str);
                 }
                 buf.push(')');
+            }
+            Type::Array(element_id, length) => {
+                let element = element_id.get_type(self);
+                let element_str =
+                    self.pretty_print_type_at(&element, substitution, depth + 1, visiting);
+                buf.push_str(&format!("[{element_str}; {length}]"));
             }
             Type::Mapped(binder_id, source_id, template_id) => {
                 let binder = self

@@ -350,6 +350,16 @@ fn helper_source(name: &str) -> &'static str {
         // primitives and closures — is returned by reference (a closure is
         // immutable, so sharing it is a copy). Unlike `structuredClone`, this
         // doesn't throw on functions.
+        // `[value; n]` — value evaluated once (the argument), then n slots. A
+        // primitive fills directly (copies are trivial); an aggregate is cloned
+        // per slot so the slots are independent (value semantics).
+        "__repeat" => {
+            "function __repeat(value, n) {\n\
+             \treturn typeof value === \"object\" && value !== null\n\
+             \t\t? Array.from({ length: n }, () => __clone(value))\n\
+             \t\t: new Array(n).fill(value);\n\
+             }"
+        }
         "__clone" => {
             "function __clone(value) {\n\
              \tif (Array.isArray(value)) return value.map(__clone);\n\
@@ -2243,6 +2253,18 @@ impl<'src> Transformer<'src> {
                     .collect();
                 js::Node::Array(items)
             }
+            Expr::Repeat(value_id, length) => {
+                // `[value; n]` -> `__repeat(value, n)`: the value is evaluated once
+                // (the argument) and copied into each slot (a primitive fills, an
+                // aggregate clones per slot — see the helper).
+                self.used_helpers.insert("__repeat");
+                self.used_helpers.insert("__clone");
+                let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
+                js::Node::Call(
+                    Box::new(js::Node::Local("__repeat".to_string())),
+                    vec![value, js::Node::Number(length.to_string(), None)],
+                )
+            }
             Expr::Tuple(ids) => {
                 // Tuples store flat: a tuple-typed element's value is itself a flat
                 // array, so splice its slots in (`...elem`) rather than nesting it.
@@ -3267,6 +3289,9 @@ impl<'src> Transformer<'src> {
                 }
                 self.collect_type_generics(return_type_id, depth + 1, out);
             }
+            Some(Type::Array(element_id, _)) => {
+                self.collect_type_generics(*element_id, depth + 1, out);
+            }
             _ => {}
         }
     }
@@ -3437,6 +3462,10 @@ impl<'src> Transformer<'src> {
             }
             (Type::Tuple(pattern_args), Type::Tuple(concrete_args)) => {
                 zip_args(out, &pattern_args, &concrete_args, self);
+            }
+            // `[T; n]` against `[i32; n]` binds `T = i32` through the element.
+            (Type::Array(pattern_element, _), Type::Array(concrete_element, _)) => {
+                self.bind_generics(pattern_element, concrete_element, out);
             }
             (
                 Type::Closure(pattern_params, pattern_ret),

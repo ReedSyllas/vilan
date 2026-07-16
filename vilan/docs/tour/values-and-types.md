@@ -148,6 +148,33 @@ really copies. If you're used to passing an array around and mutating it
 from several places, that's the habit to unlearn. The
 [memory model](memory-model.md) chapter shows what to do instead.
 
+When the size is fixed and known, `[T; n]` is a **fixed-length array** — the
+length is part of the type, so it can't grow or shrink, and `[i32; 3]` is a
+different type from `[i32; 4]`. Write `[value; n]` to fill `n` slots, or a
+plain literal under a `[T; n]` annotation:
+
+```vilan
+import std::print;
+
+fun main() {
+	let buffer = [0; 4];            // [i32; 4] — four zeros
+	mut rgb: [u8; 3] = [255u8, 128u8, 0u8];
+	rgb[2] = 64u8;                  // indexed like a List
+	print(buffer[0]);              // 0
+	print(rgb[2]);                 // 64
+
+	mut sum = 0;
+	for channel in rgb {
+		sum = sum + channel.as_i32();
+	}
+	print(sum);                    // 447
+}
+```
+
+Reach for `[T; n]` over `List<T>` when the count never changes — a color, a
+matrix row, a lookup table. Everything else (`push`, growing) is what `List`
+is for.
+
 > **Going deeper.** `Map` and `Set` key **by value**. Scalar keys (`i32`,
 > `str`) work directly; a struct, enum, or `List` key works once it derives
 > `Hashable` (`[derive(Hashable)]`), so two equal values are the same key.

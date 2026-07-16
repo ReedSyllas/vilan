@@ -16178,3 +16178,163 @@ fn a_mut_view_through_a_generic_param_writes_through_for_every_scalar() {
         "42\nb\nfalse\n",
     );
 }
+
+// --- Fixed-length arrays `[T; n]` (proposal/fixed-arrays.md) ---------------------
+
+#[test]
+fn fixed_array_repeat_literal_and_indexing() {
+    // `[value; n]` builds a fixed array; scalar values fill, and indexing reads.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let zeros = [0; 4];        // [i32; 4]
+            print(zeros[0]);           // 0
+            mut buf: [i32; 3] = [1, 2, 3];  // context-directed list literal
+            buf[1] = 20;               // index write
+            print(buf[1]);             // 20
+            print(buf[0] + buf[2]);    // 4
+        }
+        "#,
+        "0\n20\n4\n",
+    );
+}
+
+#[test]
+fn fixed_array_repeat_of_an_aggregate_copies_each_slot() {
+    // `[value; n]` for an aggregate clones the value into each slot, so the slots
+    // are independent (value semantics) — mutating one leaves the others.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Cell { n: i32 }
+        fun main() {
+            mut cells = [Cell { n = 7 }; 3];
+            cells[0].n = 99;
+            print(cells[0].n);   // 99
+            print(cells[1].n);   // 7 — independent
+            print(cells[2].n);   // 7
+        }
+        "#,
+        "99\n7\n7\n",
+    );
+}
+
+#[test]
+fn fixed_array_value_copy_is_independent() {
+    // A fixed array is a value: `let b = a` deep-copies, so a later write to `a`
+    // leaves `b` untouched.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            mut a: [i32; 3] = [1, 2, 3];
+            let b = a;
+            a[0] = 99;
+            print(b[0]);   // 1
+            print(a[0]);   // 99
+        }
+        "#,
+        "1\n99\n",
+    );
+}
+
+#[test]
+fn fixed_array_element_view_writes_through() {
+    // `&mut arr[i]` is an element view — writing through it reaches the array.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun bump(v: &mut i32) { v += 100; }
+        fun main() {
+            mut buf: [i32; 3] = [1, 2, 3];
+            let v = &mut buf[1];
+            bump(v);
+            print(buf[1]);   // 102
+        }
+        "#,
+        "102\n",
+    );
+}
+
+#[test]
+fn fixed_array_iteration_params_returns_and_nesting() {
+    // `for x in arr` iterates the elements; arrays pass as parameters and returns;
+    // and `[[T; m]; n]` nests.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun total(a: [i32; 3]): i32 {
+            mut sum = 0;
+            for x in a { sum = sum + x; }
+            sum
+        }
+        fun make(): [i32; 2] { [5; 2] }
+        fun main() {
+            print(total([1, 2, 3]));   // 6
+            let m = make();
+            print(m[0] + m[1]);        // 10
+            let grid: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+            print(grid[1][0]);         // 3
+        }
+        "#,
+        "6\n10\n3\n",
+    );
+}
+
+#[test]
+fn fixed_array_literal_index_out_of_range_is_a_compile_error() {
+    // The length is in the type, so a literal index proven out of range is caught
+    // at compile time (a dynamic index keeps its runtime bounds check).
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let a: [i32; 4] = [1, 2, 3, 4];
+            let x = a[9];
+        }
+        "#,
+        "a[9]",
+        "out of range for an array of length 4",
+    );
+}
+
+#[test]
+fn fixed_arrays_of_different_lengths_are_distinct_types() {
+    // The length is part of the type — `[i32; 3]` is not `[i32; 4]`.
+    assert_fails(
+        r#"
+        fun main() {
+            let a: [i32; 3] = [1, 2, 3];
+            let b: [i32; 4] = a;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn context_directed_array_literal_count_must_match() {
+    // A list literal directed to `[T; n]` must have exactly `n` elements.
+    assert_fails(
+        r#"
+        fun main() {
+            let a: [i32; 3] = [1, 2];
+        }
+        "#,
+    );
+}
+
+#[test]
+fn context_directed_array_literal_elements_must_be_t() {
+    // The direction arm returns the expected array type, so it must CHECK each
+    // element against `T` — without the check a stray `str` in an `[i32; n]`
+    // sailed straight through the annotation.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let a: [i32; 2] = [1, "x"];
+        }
+        "#,
+        r#""x""#,
+        "Expected i32 (the array's element type), but got str instead.",
+    );
+}

@@ -629,6 +629,7 @@ impl<'a, 'src> Collector<'a, 'src> {
                 }
             }
             Expr::List(ids) | Expr::Tuple(ids) => self.walk_all(ids),
+            Expr::Repeat(value_id, _) => self.walk(*value_id),
             Expr::StructInitializer(_, fields) => {
                 for value_id in fields.values() {
                     self.walk(*value_id);

@@ -325,6 +325,12 @@ pub enum Node<'src> {
         bool,
     ),
     List(NodeList<'src>),
+    // `[value; n]` — a fixed-length array literal: `value` copied into each of
+    // `n` slots (value semantics — independent copies). Value and length exprs.
+    Repeat(Box<Spanned<Self>>, Box<Spanned<Self>>),
+    // `[T; n]` — a fixed-length array TYPE (type position only): element-type
+    // node and length expr (an integer literal in v1).
+    ArrayType(Box<Spanned<Self>>, Box<Spanned<Self>>),
     // A match expression: subject and legs of `patterns (if guard)? => body`.
     Match(Box<Spanned<Self>>, Spanned<Vec<MatchLeg<'src>>>),
     MemberAccessor(Box<Spanned<Self>>, Box<Spanned<Self>>),
@@ -618,6 +624,10 @@ impl<'src> Node<'src> {
                 for item in items {
                     visit(item);
                 }
+            }
+            Node::Repeat(value, length) | Node::ArrayType(value, length) => {
+                visit(value);
+                visit(length);
             }
             Node::Match(subject, legs) => {
                 visit(subject);

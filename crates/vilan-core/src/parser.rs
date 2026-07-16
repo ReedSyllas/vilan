@@ -333,6 +333,15 @@ where
         .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
         .map_with(|x, e| (Node::List(x), e.span()));
 
+    // `[value; n]` — a fixed-length array literal. Tried before `list`; the `;`
+    // after the first element is the fork (a comma continues a list literal).
+    let repeat = expression
+        .clone()
+        .then_ignore(just(Token::Ctrl(';')))
+        .then(expression.clone())
+        .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+        .map_with(|(value, length), e| (Node::Repeat(Box::new(value), Box::new(length)), e.span()));
+
     let tuple = expression
         .clone()
         .separated_by(just(Token::Ctrl(',')))
@@ -401,6 +410,7 @@ where
         macro_block.clone(),
         local,
         local_type.clone(),
+        repeat,
         list,
         tuple,
         expression
@@ -1569,11 +1579,30 @@ where
         )))
         .labelled("context clause");
 
+    // `[T; n]` — a fixed-length array type. The length is an integer literal in
+    // v1 (the analyzer walk resolves it; a `const`-named length is deferred).
+    let array_length = select! {
+        Token::Number(whole, fraction, suffix) => Node::Number(whole, fraction, suffix),
+    }
+    .map_with(|node, e| (node, e.span()));
+    let array_type = type_
+        .clone()
+        .then_ignore(just(Token::Ctrl(';')))
+        .then(array_length)
+        .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+        .map_with(|(element, length), e| {
+            (
+                Node::ArrayType(Box::new(element), Box::new(length)),
+                e.span(),
+            )
+        });
+
     // `local_type` (e.g. `FromFn<T>`) must come before the plain identifier so
     // generic arguments are consumed as part of the type. `type_binder` is first
     // so the `type` keyword isn't mistaken for an identifier.
     type_.define(
         choice((
+            array_type,
             reference_type,
             type_binder,
             closure_type,

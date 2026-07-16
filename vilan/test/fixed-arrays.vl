@@ -1,0 +1,54 @@
+// fixed-arrays.vl — `[T; n]` fixed-length arrays (proposal/fixed-arrays.md): the
+// repeat literal `[value; n]`, context-directed `[a, b, c]` under a `[T; n]`
+// annotation, index read/write, `&mut arr[i]` element views, `for` iteration,
+// value-copy independence (scalar and aggregate), params/returns, and nesting.
+import std::print;
+
+struct Cell {
+	n: i32,
+}
+
+fun total(values: [i32; 3]): i32 {
+	mut sum = 0;
+	for value in values {
+		sum = sum + value;
+	}
+	sum
+}
+
+fun make(): [i32; 2] {
+	[5; 2] // repeat literal, returned
+}
+
+fun bump(view: &mut i32) {
+	view += 100; // write-through an element view
+}
+
+fun main() {
+	let zeros = [0; 4]; // [i32; 4]
+	print(zeros[0]); // 0
+
+	mut buf: [i32; 3] = [1, 2, 3]; // context-directed list literal
+	buf[1] = 20; // index write
+	print(buf[1]); // 20
+	print(total(buf)); // 24 (passed as a parameter)
+
+	let view = &mut buf[2];
+	bump(view);
+	print(buf[2]); // 103
+
+	let copy = buf; // value copy
+	buf[0] = 99;
+	print(copy[0]); // 1 — independent of buf
+
+	mut cells = [Cell { n = 7 }; 3]; // aggregate repeat — independent slots
+	cells[0].n = 42;
+	print(cells[0].n); // 42
+	print(cells[1].n); // 7
+
+	let two = make();
+	print(two[0] + two[1]); // 10 (returned array)
+
+	let grid: [[i32; 2]; 2] = [[1, 2], [3, 4]]; // nested
+	print(grid[1][0]); // 3
+}
