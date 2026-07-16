@@ -11,7 +11,6 @@ grammar space).
 ```vilan
 // One `?` — map. The rest of the expression is the continuation.
 let doubled = count? * 2;                 // Option<i32> — Some(n * 2) or None
-let banner  = user?.name + "!";           // Option<str> — chain and operators in one region
 let overdue = deadline? < now();          // Option<bool>
 
 // The `?` may mark EITHER operand — the region rule is position-independent
@@ -145,20 +144,39 @@ No new runtime, and for std containers no closures:
   `map`, each continuation an IR-level closure over the remaining region —
   the user-`Lift` chain lowering, nested. Left-to-right, so effects order as
   written.
-- **Analyzer shape**: parse bare postfix `?` as an ordinary postfix node
-  (today's "must be followed by `.`" check removed); the *walk* groups every
-  `?` under a slot root into one region with binder holes — the existing
-  `Constraint::Lift`/`LiftBinder` machinery, extended from "postfix
-  continuation" to "expression continuation". Chain form `a?.b.c` becomes
-  the special case it always was: a region whose body is a member chain.
+- **Analyzer shape**: the parser gains one postfix — a bare `?` (not
+  followed by `.`) marks its operand `Node::Lifted`; parens containing a
+  mark seal as a group. A pure Node→Node **region rewrite** runs once per
+  item at the analyzer's entry (the formatter keeps raw trees, so source
+  parens and `?` positions print back verbatim): it walks each tree in
+  evaluation order, seals slot children as their own roots, and linearizes
+  each marked region into an ordered **step list** — `Eval` steps (maximal
+  hole-free subexpressions that may have effects, hoisted to preserve
+  source evaluation order — §2's "left of a `?` runs unconditionally") and
+  `Split` steps (the receivers) — over a residual body skeleton with binder
+  holes. The walk turns that into a new `Expr::LiftRegion`; typing
+  generalizes `Constraint::Lift`'s grounding/flatten logic across the split
+  list. **Chain-form `?.` keeps its shipped nodes, constraint, and lowering
+  untouched** (§5 — a chain is a sealed atom).
 
 ## 5. Interactions
 
-- **`?.` chains**: unchanged meaning, one generalization — `a?.b + 1`
-  (today a type error: `Option + i32`) becomes legal, the region absorbing
-  the operator tail: `a.map(|x| x.b + 1)`. Existing well-typed programs are
-  untouched (anything that compiles today keeps its meaning; the new
-  meanings occupy what were errors).
+- **`?.` chains: fully unchanged — a chain is a sealed atom, never absorbed
+  into a region** *(revised during implementation, 2026-07-16)*. The draft
+  claimed `a?.b + 1` would become legal by absorbing the chain into the
+  region. That is **not soundly possible**: `Option`/`Result` carry
+  conditional `PartialEq` impls (`option.vl:219`, `result.vl:208`), and
+  `a?.b == None` / `chain == Some(x)` are *legal, corpus-pinned idioms
+  today* (`equality.vl`) — absorption would silently change their meaning
+  from a container-typed `bool` to a lifted `Option<bool>`. So: **only a
+  bare `?` (one not followed by `.`) opens an expression region**; a `?.`
+  chain keeps its shipped meaning and participates in a region as an
+  ordinary container-typed operand. `a?.b + 1` stays the type error it is
+  today. The member-then-operator intent is spelled by binding first —
+  `let name = user?.name; name? + "!"` — or by keeping the work postfix
+  (`user?.name.describe()`). Absorption is *rejected*, not deferred.
+  Everything that compiles today keeps its meaning; the new forms occupy
+  what were errors.
 - **`!`**: region delimiter (§2); composition `(region)!` works as today's
   `a?.parse()!` does.
 - **Evaluation twice?** `size? * size?` evaluates `size` twice (two temps,
@@ -194,7 +212,9 @@ good / left bad / right bad, with **effect-order pins** (right receiver not
 called on left-bad); `Result` first-error-wins + same-`E` mismatch (with the
 `.map_err` hint); mixed `Option`/`Result` region rejected (`.ok_or` hint);
 flatten (body yields the container — pinned by type, `M<V>` not `M<M<V>>`);
-chain-tail generalization `a?.b + 1`; slot boundaries (`describe(status?)`
+chain non-absorption (`a?.b == None` keeps its container-typed `bool`
+meaning — regression-pinned; `a?.b + 1` stays a type error); slot
+boundaries (`describe(status?)`
 identity error; `?` in a condition errors with the hint; branch-local
 region); **paren delimiting** (`(a?.b) + 1` is the Option+i32 type error;
 `(a? + b?)` groups as one region; formatter idempotence over recorded
