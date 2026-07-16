@@ -247,9 +247,12 @@ have gaps.
 
 11. **`!` / `?.` deferred tail** (M; `try-and-lift.md`) — the operators shipped 2026-07-04
     (both slices + the stabilization arc: bang-directed return-position generics, closure-`ret`
-    participation, user-`Lift` lowering). Remaining here are the recorded deferrals only:
-    closure `!` (the RPC-handler follow-up; needs the `arg → Result` linkage design), error
-    conversion at the `!` boundary, expression lifting (`a? + 10`), applicatives, and
+    participation, user-`Lift` lowering). ~~Error conversion at the `!` boundary~~ —
+    resolved EXPLICIT + shipped 2026-07-15 (§9; 7796628). Remaining deferrals:
+    closure `!` (the RPC-handler follow-up; needs the `arg → Result` linkage design),
+    expression lifting + applicatives (`a? + 10`, `a? + b?` — **proposal drafted
+    2026-07-16, `expression-lifting.md`, awaiting review**: slot-root lift regions,
+    left-to-right short-circuiting applicative, std inline lowering), and
     `Signal`/`Promise` `Lift` opt-ins.
 
 12. ~~**Missing-impl bound dispatch emits the abstract method**~~ — **FIXED 2026-07-08**:

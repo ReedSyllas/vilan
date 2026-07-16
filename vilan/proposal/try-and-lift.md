@@ -248,6 +248,9 @@ transformer-emitted):
   the same reconcile-and-record channel as the two-step form. Pin un-ignored.
 
 - Expression-level lifting (`a? + 10`) and the applicative form (`a? + b?`) — §0.3.
+  **Proposal drafted 2026-07-16 (`expression-lifting.md`, awaiting review):** lift
+  regions bounded at slot roots, applicative = left-to-right short-circuiting
+  `and_then` nesting, std inline lowering, five open questions recorded.
 - ~~Error conversion across types (`Option` in a `Result` fn; `From`-style `E1 → E2`)~~
   — **resolved 2026-07-15: EXPLICIT by design (§9)**. `!` stays same-type; convert at
   the value first — `.map_err(to_e2)!` for `E1 → E2`, `.ok_or(err)!` for `Option` in a
