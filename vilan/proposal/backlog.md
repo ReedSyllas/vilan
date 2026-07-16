@@ -915,9 +915,16 @@ have gaps.
    bulk list forms, expansion-scoped `uses`, quoted-expressions-with-handle-splices,
    semantic handles v1 against loaded modules), six open questions drafted, full
    normalization recorded as the §7 horizon behind the API-churn problem (candidate:
-   a small versioned stable IR + generated adapters). The DERIVE-IMPORT LEAK stays a
-   live bug meanwhile (JsonValue resolves without an import after [derive(Json)];
-   std's rpc.vl once depended on such a leak) — standalone wrapper fix available.
+   a small versioned stable IR + generated adapters). ~~The DERIVE-IMPORT LEAK~~ — **FIXED
+   standalone 2026-07-16**: generated items walk under a CHILD scope (expansion
+   imports bind there, invisible to the module; the expansion's own references
+   resolve via parent fallthrough) and the expansion's DEFINITIONS hoist to the
+   module scope by node-level name (Func/Struct/Enum+variants/Trait/MacroFun/Let,
+   unwrapped through Export/Derive/Service/MacroAttribute — import-bound names
+   and definitions are indistinguishable by Expr kind, so the NODE shapes are the
+   whitelist). rpc.vl's old leaked-name dependence turned out already gone (full
+   suite green untouched). 2 pins (JsonValue no longer resolves; derived impls
+   stay module-visible alongside an explicit import of the same name).
 
 2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10,
    revised same day to the EXPRESSION form; **SHIPPED same day, v1 complete** —

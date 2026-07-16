@@ -14653,6 +14653,50 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- The derive-import leak: expansion imports are scoped (FIXED) ------------
+//
+// A derive expansion self-carries its imports; they used to register into
+// the DERIVING module's scope, so `JsonValue` resolved after `[derive(Json)]`
+// with no import — and user code could silently depend on an invisible name.
+// Generated items now walk under a child scope (imports bind there only)
+// with the expansion's DEFINITIONS hoisted to the module by node-level name.
+
+#[test]
+fn a_derives_imports_no_longer_leak() {
+    assert_fails_with(
+        r#"
+        [derive(Json)]
+        struct Point { x: i32 }
+        fun main() {
+            let v: JsonValue = Point { x = 1 }.to_json();
+        }
+        "#,
+        "cannot find type 'JsonValue'",
+    );
+}
+
+#[test]
+fn a_derived_impl_stays_module_visible_and_explicit_imports_coexist() {
+    // The hoist keeps generated definitions usable from module code, and an
+    // explicit import of the same name a derive uses internally is fine.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::json::JsonValue;
+        [derive(PartialEq, Json)]
+        struct Point { x: i32 }
+        fun typed(value: JsonValue): JsonValue { value }
+        fun main() {
+            let a = Point { x = 1 };
+            let b = Point { x = 1 };
+            print(a == b);                          // true — the derived impl
+            print(Point { x = 2 }.to_json().len() > 0);   // true — Json derive
+        }
+        "#,
+        "true\ntrue\n",
+    );
+}
+
 // --- B13 residual: a later conflicting call names the inferring one (FIXED) --
 
 #[test]

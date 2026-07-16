@@ -2571,6 +2571,73 @@ impl<'src> Analyzer<'src> {
         id
     }
 
+    /// Walks one expansion's generated items with the expansion's imports
+    /// SCOPED to it (the derive-import leak fix): items walk under a child
+    /// scope — `import`/`use` bindings land there, invisible to the module —
+    /// and the DEFINITIONS the expansion declares are then re-registered into
+    /// the module scope by name. The whitelist comes from the generated NODES
+    /// (an import-bound name and a definition are indistinguishable by their
+    /// `Expr` kind — the node shapes are what separate them). The expansion's
+    /// own references resolve through the child scope's parent fallthrough.
+    fn walk_generated_items(&mut self, generated: &'src NodeList<'src>, module_scope_id: Id) {
+        let expansion_scope_id = self.create_owned_scope(Some(module_scope_id)).id;
+        self.walk_expr_nodes(generated, expansion_scope_id);
+        for item in generated {
+            self.hoist_generated_declarations(&item.0, expansion_scope_id, module_scope_id);
+        }
+    }
+
+    fn hoist_generated_declarations(
+        &mut self,
+        node: &Node<'src>,
+        expansion_scope_id: Id,
+        module_scope_id: Id,
+    ) {
+        let mut move_name = |analyzer: &mut Self, name: &'src str| {
+            let Some(id) = analyzer
+                .scopes
+                .get(&expansion_scope_id)
+                .and_then(|scope| scope.name_to_id_map.get(name).copied())
+            else {
+                return;
+            };
+            let scope = analyzer.mut_scope_for_scope_id(module_scope_id);
+            scope.name_to_id_map.insert(name, id);
+        };
+        match node {
+            Node::Export(inner)
+            | Node::Derive(_, inner)
+            | Node::Service(_, inner)
+            | Node::MacroAttribute(_, _, _, inner) => {
+                self.hoist_generated_declarations(&inner.0, expansion_scope_id, module_scope_id);
+            }
+            Node::Func(function) => move_name(self, function.name.0),
+            Node::MacroFun(function) => {
+                move_name(self, function.name.0);
+                if let Some(marker) = self
+                    .scopes
+                    .get(&expansion_scope_id)
+                    .and_then(|scope| scope.macro_name_to_id.get(function.name.0).copied())
+                {
+                    self.mut_scope_for_scope_id(module_scope_id)
+                        .macro_name_to_id
+                        .insert(function.name.0, marker);
+                }
+            }
+            Node::Struct(name, ..) | Node::Trait(name, ..) => move_name(self, name.0),
+            Node::Enum(name, _, variants) => {
+                move_name(self, name.0);
+                // Variant constructor names registered by the enum walk (if
+                // any) belong with the enum — a missing name is a no-op.
+                for variant in &variants.0 {
+                    move_name(self, variant.0.0);
+                }
+            }
+            Node::Let(name, ..) => move_name(self, name.0),
+            _ => {}
+        }
+    }
+
     fn create_owned_scope(&mut self, parent_id: Option<Id>) -> &mut Scope<'src> {
         let id = self.new_scope_id();
         let scope = Scope {
@@ -16873,7 +16940,7 @@ pub fn analyze<'src>(
         // `DERIVED_SOURCE` (editor features skip them).
         for generated in generated_by_source.get(source_id).into_iter().flatten() {
             let generated_start = analyzer.entity_id;
-            analyzer.walk_expr_nodes(generated, *module_scope_id);
+            analyzer.walk_generated_items(generated, *module_scope_id);
             analyzer.source_ranges.push(SourceRange {
                 start: generated_start,
                 end: analyzer.entity_id,
@@ -16909,7 +16976,7 @@ pub fn analyze<'src>(
         // namespace; generated-text spans record under `DERIVED_SOURCE`.
         for generated in generated_by_source.get(source_id).into_iter().flatten() {
             let generated_start = analyzer.entity_id;
-            analyzer.walk_expr_nodes(generated, *namespace_scope_id);
+            analyzer.walk_generated_items(generated, *namespace_scope_id);
             analyzer.source_ranges.push(SourceRange {
                 start: generated_start,
                 end: analyzer.entity_id,
@@ -17117,7 +17184,7 @@ pub fn analyze<'src>(
         // under `DERIVED_SOURCE` so editor features skip them.
         for generated in generated_by_source.get(&SourceId(0)).into_iter().flatten() {
             let generated_start = analyzer.entity_id;
-            analyzer.walk_expr_nodes(generated, global_scope_id);
+            analyzer.walk_generated_items(generated, global_scope_id);
             analyzer.source_ranges.push(SourceRange {
                 start: generated_start,
                 end: analyzer.entity_id,
