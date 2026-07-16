@@ -128,7 +128,47 @@ answer (the `[derive(Wire)]` all-fields check is the standing candidate);
 keep direct graph mutation off the table as a *contract*, even if the
 staged expander uses it internally.
 
-## 5. Open questions for the discussion
+## 5. Convergence (user + review, 2026-07-16): the `macro_std` contract
+
+Agreed: analyzer access is INDIRECT, through `macro_std` — a curated API is
+the control point for what macros may see and do. The user pushes further:
+output should be a **simple, normalized API too, not source text**. Position
+after review — agreed, with one boundary drawn carefully:
+
+- **The curated API dissolves the API-stability objection.** §4's worry was
+  exposing the graph/`Node` enum; a small `macro_std` vocabulary is a
+  versioned, documented contract, and the adapter (builder values → whatever
+  the compiler holds internally) is compiler-private and free to churn.
+- **Structured output is the better contract.** Text's failure modes are
+  real and lived-with: escaping/interpolation traps, precedence accidents at
+  splice points, string-level gensyms, post-reparse diagnostics on synthetic
+  spans. Structured values make malformed output unrepresentable-or-checked
+  at CONSTRUCTION (with the macro's own spans), imports become first-class
+  values the engine scopes (the §2 leak fix falls out as engine behavior,
+  not a wrapper bolt-on), and provenance improves: a generated impl can say
+  which macro built it (E8's missing ingredient).
+- **The boundary: normalize ITEMS, quote EXPRESSIONS.** The builders should
+  stay a small closed set of item/declaration shapes (`impl_of`, `fun_of`,
+  `struct_of`, fields, imports…) — but macro output legitimately contains
+  arbitrary expression BODIES, and rebuilding the whole expression grammar
+  as builders is the churn trap §4 warned about. Expression leaves stay
+  QUOTED (parsed text at the leaf, small and cacheable) inside normalized
+  item skeletons — the Rust `quote!`/Scala typed-quotes shape. Parsing
+  shrinks to leaves; the STRUCTURE is normalized.
+- **Symmetry with reads.** Reflection inputs are already structured meta
+  values (`Item`, `Arguments`; the meta-layout contract in macros.rs is
+  pinned e2e) — structured output makes the API symmetric, and §4's staged
+  semantic queries return the same vocabulary when they arrive.
+
+**Sequencing:** (1) fix `rpc.vl`'s leaked-name dependence now — it is a bug
+under every future; (2) evolve `macro_std::build` from str-returning to
+value-returning builders with the engine splicing structurally — the
+derives/`[service]` byte-gate protects the migration, and import scoping
+ships as engine behavior here (subsuming §2's wrapper); (3) staged semantic
+queries (§4) as the capability follow-on. The measured 0.8% parse cost was
+never the reason to do this; the contract is.
+
+## 6. Open questions for the discussion
 
 1. Should an expansion be able to *opt into* exporting an import (re-export
    from generated code)? (Draft answer: no — generated re-exports are spooky;
