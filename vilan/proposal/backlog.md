@@ -257,13 +257,17 @@ have gaps.
     to `?.`), closure `!` (the RPC-handler follow-up; needs the `arg → Result`
     linkage design), and `Signal`/`Promise` `Lift` opt-ins.
 
-28. **Conditions are not type-checked** (S–M; found 2026-07-16 building expression
-    lifting) — `if 5 { .. }` compiles and runs (the branch is truthiness-driven at
-    the JS level). Nothing checks an `if`/`for` condition against `bool`. Lifted
-    conditions (`if a? > 0`) got an explicit rejection because an `Option` is a
-    tagged ARRAY — always truthy, a silent wrong-branch — but the general check is
-    missing. Wants: infer every condition against `bool` and reject mismatches
-    (spanned at the condition), with a corpus sweep for accidental dependence.
+28. ~~**Conditions are not type-checked**~~ — **FIXED 2026-07-16** (found the same
+    day building expression lifting): `if 5 { .. }` compiled and branched on JS
+    truthiness — any non-empty aggregate (an Option is a tagged array) always took
+    the branch. Now every `if`/`for` condition rides a post-solve `bool` check
+    (`prepped_conditions`, the B24 `&&`/`||`-operand pattern: a grounded non-`bool`
+    rejects, spanned at the condition; `Never`/`any` pass by their own rules;
+    generics stay lenient like the operator checks; match guards already had their
+    own check). A lifted condition keeps its earlier, targeted walk-time message —
+    the general check skips `LiftRegion` conditions to avoid the double report.
+    6 pins (i32/str/Option `if`, i32 `for`, the full legitimate-shape positive,
+    the `any` leniency); corpus byte-identical — nothing depended on truthiness.
 
 12. ~~**Missing-impl bound dispatch emits the abstract method**~~ — **FIXED 2026-07-08**:
     `check_generic_bound_satisfaction`, a post-solve pass over

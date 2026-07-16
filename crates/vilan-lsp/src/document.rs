@@ -1791,6 +1791,40 @@ mod tests {
         );
     }
 
+    // Expression lifting (expression-lifting.md): hovering the RECEIVER of a
+    // bare `?` shows the receiver's own container type — the region's binder
+    // entity carries an empty span exactly so it cannot tie with the
+    // receiver in the narrowest-span selection and leak the element type.
+    #[test]
+    fn hover_on_a_lift_receiver_shows_the_container_type() {
+        let hover = hover_at_cursor(
+            "import std::option::Option::{ self, Some, None };\n\nfun main() {\n\tlet count = Some(2);\n\tlet doubled = cou|nt? * 2;\n}\n",
+        )
+        .expect("hovering the receiver should produce a label");
+        assert!(hover.contains("Option<i32>"), "{hover}");
+    }
+
+    // The binding a region initializes hovers as the lifted type.
+    #[test]
+    fn hover_on_a_region_initialized_binding_shows_the_lifted_type() {
+        let hover = hover_at_cursor(
+            "import std::option::Option::{ self, Some, None };\n\nfun main() {\n\tlet count = Some(2);\n\tlet dou|bled = count? * 2;\n}\n",
+        )
+        .expect("hovering the binding should produce a label");
+        assert!(hover.contains("Option<i32>"), "{hover}");
+    }
+
+    // The applicative form analyzes and hovers without incident too — the
+    // whole-document smoke for the region machinery under the LSP path.
+    #[test]
+    fn hover_across_an_applicative_region_document() {
+        let hover = hover_at_cursor(
+            "import std::option::Option::{ self, Some, None };\n\nfun main() {\n\tlet price = Some(40);\n\tlet tax = Some(2);\n\tlet tot|al = price? + tax?;\n}\n",
+        )
+        .expect("hovering the binding should produce a label");
+        assert!(hover.contains("Option<i32>"), "{hover}");
+    }
+
     // E9: hovering a function shows its FULL signature, fenced as code —
     // parameter names and types, the return type.
     #[test]

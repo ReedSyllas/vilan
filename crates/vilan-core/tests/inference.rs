@@ -5995,6 +5995,52 @@ fn expression_lift_twice_evaluated_receiver_is_legal() {
 }
 
 #[test]
+fn expression_lift_match_subject_region_works() {
+    // A match subject is a slot, and a region there is meaningful: the legs
+    // match the LIFTED value (`Option<i32>` here) — unlike a condition,
+    // nothing needs `bool`, so it stays legal.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let count = Some(2);
+            match count? * 2 {
+                Some(let n) => print(n),   // 4
+                None => print("none"),
+            }
+            let missing: Option<i32> = None;
+            match missing? * 2 {
+                Some(let n) => print(n),
+                None => print("none"),     // none
+            }
+        }
+        "#,
+        "4\nnone\n",
+    );
+}
+
+#[test]
+fn expression_lift_bare_iterable_is_the_identity_error() {
+    // `for x in items?` — the iterable slot's region is just the hole, so
+    // the identity-lift error fires: an Option isn't iterable; unwrap or
+    // match first.
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let items = Some([1, 2]);
+            for x in items? {
+                print(x);
+            }
+        }
+        "#,
+        "`?` lifts nothing here",
+    );
+}
+
+#[test]
 fn expression_lift_on_a_user_container_is_the_recorded_follow_up() {
     // v1 lifts the std pair at a bare `?`; a user `Lift` container gets the
     // clean follow-up error (its `?.` chains keep working).
@@ -14604,6 +14650,119 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
         main();
         "#,
         "a\n",
+    );
+}
+
+// --- B28: conditions are not type-checked (FIXED) ----------------------------
+//
+// Found building expression lifting: NOTHING checked an `if`/`for` condition
+// against `bool`, so `if 5 { .. }` compiled and branched on JS truthiness —
+// and any non-empty aggregate (an Option is a tagged array) always took the
+// branch. Conditions now check post-solve like the `&&`/`||` operands (B24):
+// a grounded non-`bool` rejects; `Never`/`any` pass by their own rules;
+// match guards already had their own equivalent check.
+
+#[test]
+fn an_integer_if_condition_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            if 5 {
+                let _x = 1;
+            }
+        }
+        "#,
+        "this `if` condition is `i32`, but a condition must be `bool`",
+    );
+}
+
+#[test]
+fn a_string_if_condition_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let name = "ada";
+            if name {
+                let _x = 1;
+            }
+        }
+        "#,
+        "this `if` condition is `str`, but a condition must be `bool`",
+    );
+}
+
+#[test]
+fn an_option_if_condition_is_rejected() {
+    // The truthiness trap the check exists for: an Option is a tagged array
+    // at runtime — always truthy, so this silently took the branch.
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let maybe = Some(1);
+            if maybe {
+                let _x = 1;
+            }
+        }
+        "#,
+        "but a condition must be `bool`",
+    );
+}
+
+#[test]
+fn a_non_bool_while_condition_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            mut n = 3;
+            for n {
+                n = n - 1;
+            }
+        }
+        "#,
+        "this `for` condition is `i32`, but a condition must be `bool`",
+    );
+}
+
+#[test]
+fn bool_conditions_of_every_shape_still_compile_and_run() {
+    // The whole legitimate surface: a bool binding, a comparison, an `is`
+    // test, `&&`-composition, a bool-returning call — in `if` and `for`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun ready(n: i32): bool { n > 1 }
+        fun main() {
+            let flag = true;
+            if flag { print("flag"); }
+            let maybe = Some(2);
+            if maybe is Some(let n) && n > 1 { print("is"); }
+            if ready(2) { print("call"); }
+            mut n = 2;
+            for n > 0 { n = n - 1; }
+            print(n);
+        }
+        "#,
+        "flag\nis\ncall\n0\n",
+    );
+}
+
+#[test]
+fn an_any_condition_stays_lenient() {
+    // `any` absorbs everywhere (the std::db parameter rule); a condition of
+    // type `any` keeps that leniency — documented, pinned.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let flags: List<any> = [true];
+            if flags[0] {
+                print("lenient");
+            }
+        }
+        "#,
+        "lenient\n",
     );
 }
 

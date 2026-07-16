@@ -1021,6 +1021,9 @@ pub struct Analyzer<'src> {
     // resolved after typing to decide native JS arithmetic vs an operator-trait
     // method call (`Add::add`, ...).
     prepped_binary_ops: Vec<(Id, BinaryOp, Id)>,
+    // `if`/`for` conditions awaiting the post-solve `bool` check (B28), with
+    // the construct label the diagnostic names.
+    prepped_conditions: Vec<(Id, &'static str)>,
     // Bound-less impl binders whose subject type wasn't walked yet
     // (`impl Wrapper<type T>` before `struct Wrapper<T: Greeter>`): the
     // binder's fresh constraint id + where to find the subject's declared
@@ -1356,6 +1359,7 @@ impl<'src> Analyzer<'src> {
             for_each_views: HashMap::new(),
             wrapped_view_captures: HashMap::new(),
             prepped_binary_ops: Vec::new(),
+            prepped_conditions: Vec::new(),
             prepped_binder_inheritance: Vec::new(),
             binary_op_dispatch: HashMap::new(),
             bitwise_u32: HashSet::new(),
@@ -5878,6 +5882,12 @@ impl<'src> Analyzer<'src> {
                 let condition_id = condition
                     .as_ref()
                     .map(|condition| self.walk_expr_node(condition, body_scope_id));
+                if let (Some(condition_id), Some(condition)) = (condition_id, condition.as_ref())
+                    && !matches!(condition.0, Node::LiftRegion(..))
+                {
+                    self.prepped_conditions
+                        .push((condition_id, "`for` condition"));
+                }
                 let ids = self.walk_expr_nodes(&body.0.0, body_scope_id);
                 let expr_id = self.walk_expr_node(&body.0.1, body_scope_id);
                 Some(Expr::For(condition_id, (ids, expr_id)))
@@ -6146,6 +6156,11 @@ impl<'src> Analyzer<'src> {
                             let body_scope_id = s.create_owned_scope(Some(scope_id)).id;
                             s.reject_lift_region_condition(&if_.condition);
                             let condition_id = s.walk_expr_node(&if_.condition, body_scope_id);
+                            // A lifted condition was already rejected above
+                            // with its targeted message — no second report.
+                            if !matches!(if_.condition.0, Node::LiftRegion(..)) {
+                                s.prepped_conditions.push((condition_id, "`if` condition"));
+                            }
                             let then_ids = s.walk_expr_nodes(&if_.then.0.0, body_scope_id);
                             let then_expr_id = s.walk_expr_node(&if_.then.0.1, body_scope_id);
                             ExprIfBranch::If(
@@ -6458,7 +6473,12 @@ impl<'src> Analyzer<'src> {
                     let binder_id = self.new_entity_id();
                     self.expr_id_to_expr_map.insert(binder_id, Expr::LiftBinder);
                     self.expr_id_to_scope_id_map.insert(binder_id, scope_id);
-                    self.span_map.insert(binder_id, &step.1);
+                    // The binder deliberately gets an EMPTY span: it would
+                    // otherwise tie with its receiver in the LSP's
+                    // narrowest-span hover selection and flakily show the
+                    // ELEMENT type over the receiver's own. Diagnostics
+                    // anchor at the step and region ids, never the binder.
+                    self.span_map.insert(binder_id, &EMPTY_SPAN);
                     self.lift_region_frames
                         .last_mut()
                         .expect("frame pushed above")
@@ -13396,6 +13416,32 @@ impl<'src> Analyzer<'src> {
                 .cloned()
                 .unwrap_or_else(|| vec![subject_constraint_id]);
             self.generic_bounds.insert(binder_constraint_id, bounds);
+        }
+
+        // B28: an `if`/`for` condition must be `bool`. Nothing checked this —
+        // the branch was JS-truthiness-driven, so `if 5 { .. }` compiled and
+        // any non-empty aggregate (an Option is a tagged array) always took
+        // the branch. Same leniency as the `&&`/`||` operand check below:
+        // only a grounded type rejects (`Never` and `any` pass `compare_type`
+        // by their own rules; match guards have their own equivalent check).
+        {
+            let bool_type = self.bool_type();
+            for (condition_id, construct) in std::mem::take(&mut self.prepped_conditions) {
+                let condition = self.infer_type(condition_id, &bool_type, &HashMap::new());
+                if !matches!(
+                    condition,
+                    Type::Unknown | Type::Unresolved | Type::Generic(_)
+                ) && !self.compare_type(&bool_type, &condition, &HashMap::new())
+                {
+                    let label = self.pretty_print_type(&condition, &HashMap::new());
+                    self.diagnostics.push(Error {
+                        span: **self.span_map.get(&condition_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "this {construct} is `{label}`, but a condition must be `bool`"
+                        ),
+                    });
+                }
+            }
         }
 
         for (binary_id, op, lhs_id) in std::mem::take(&mut self.prepped_binary_ops) {

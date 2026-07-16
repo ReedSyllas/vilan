@@ -9,10 +9,16 @@ mixed containers, same-`E`, `!`-after-split, lifted conditions — the last an
 EXPLICIT check, since building this found that conditions are not generally
 type-checked at all: `if 5 {}` compiles, recorded as its own backlog item).
 15 pins, corpus `expression-lift.vl` (node-run + interpreter-equivalent),
-tour docs. **Recorded remainders:** the trait path (a user `Lift` container
-at a bare `?` errors cleanly toward `?.` for now); LSP hover/completion at
-region holes unverified; marks in positions the rewrite doesn't cover get a
-clean "not supported in this position" error by construction.
+tour docs. **Wrap-up 2026-07-16 (same day):** match-subject regions pinned
+legal (`match a? * 2 { … }` — the legs match the lifted value); a bare-`?`
+iterable (`for x in items?`) pinned as the identity error; B28 shipped the
+GENERAL condition `bool` check the §2 rejection was a patch over.
+**Recorded remainders:** the trait path (a user `Lift` container at a bare
+`?` errors cleanly toward `?.` for now); the `!`-after-split rejection could
+be RELAXED for std containers someday (the statement lowering makes an
+early-return from a guard branch sound — it is rejected uniformly in v1 so
+the rule doesn't fork by container); marks in positions the rewrite doesn't
+cover get a clean "not supported in this position" error by construction.
 
 The §0.3 deferral of `try-and-lift.md`, designed. Everything here
 layers on the shipped `?.`/`!` machinery; nothing changes for existing
