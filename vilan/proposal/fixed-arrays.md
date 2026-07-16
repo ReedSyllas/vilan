@@ -98,6 +98,19 @@ recursion. (`.len()` shipped separately as slice 2 — §10.)
 
 - **Const-named / const-generic lengths** — `[u8; SIZE]`, `fun f<const N>(a: [T; N])`.
   Needs `const_eval` in type resolution, then length as a const-expr id in the type.
+  **Design debt before any slice (2026-07-16):** the "values in generics" model is
+  under-specified — what does `const N` as a generic parameter *mean* (a value
+  parameter monomorphized like a type, presumably — but its identity/equality rules
+  need stating)? can *any* constant value be passed (plain-data only? structs?
+  strings?), or only what participates in type equality? and how is it *constrained*
+  to a number (`<const N: i32>`-style typed const parameters — which reads as a
+  type ascription but is a value domain)? Also the mechanical fork, from reading
+  `const_eval.rs`: it is strictly POST-analysis (refuses to run on any diagnostic,
+  assembles mini-programs from the analyzed program) while lengths are needed
+  mid-fixpoint — so either a staged-analysis design, or first the cheap honest
+  subset (a name whose initializer is an integer literal — the same "literal"
+  classification `const_eval::classify` already draws). Settle the semantics on
+  paper before building either.
 - **`List` ↔ `[T; n]` conversion** — `arr.to_list()` / `list.to_array<n>()` (the latter
   is fallible — length mismatch). Explicit methods, not coercion (no silent conversion).
 - **Multi-dimensional sugar / slicing** — `arr[1..3]` (needs a slice/range type first).

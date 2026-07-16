@@ -1062,10 +1062,22 @@ have gaps.
    a two-param generic's argument; struct-literal fields don't direct a generic
    call).
 
-2. **`[T; n]` — a general fixed-length array type** (M) — the codec slice shipped this item's
-   immediate wants (hex literals, bitwise/shift operators, `std::bytes` over `Uint8Array` —
-   `bits-and-bytes.md`); what remains is the general fixed-length / contiguous array type,
-   cheaper than the heap-boxed, length-mutable `List<T>` stand-in.
+2. **`[T; n]` — fixed-length arrays, the deferred tail** (M; v1 **SHIPPED 2026-07-15**,
+   4bd978a + review follow-ups — `Type::Array(TypeId, usize)`, repeat `[v; n]`,
+   context-directed `[a, b, c]`, index/view/copy/iteration, literal-OOB compile error;
+   `.len()` fold **SHIPPED 2026-07-16**, 94fdd8d — pure subject folds to the constant,
+   a side-effectful subject reads `.length` in place; `proposal/fixed-arrays.md`).
+   Remaining, per §7:
+   - **Const-named / const-generic lengths** (`[u8; SIZE]`, `<const N>`) — **blocked on
+     design, not code** (recorded 2026-07-16 in the proposal §7): the "values in
+     generics" model is under-specified — what `const N` *means*, whether any constant
+     value can be passed or only plain data, and how to constrain one to a number
+     (`<const N: i32>`). Plus the mechanical fork: `const_eval` is strictly
+     post-analysis while lengths are needed mid-fixpoint (staged analysis vs. the
+     cheap literal-initialized-name subset). Proposal work first.
+   - `List` ↔ `[T; n]` conversions (explicit methods, no coercion); destructuring
+     `let [a, b, c] = arr`; slicing (wants a range type); generic `[T; N].len()` → `N`
+     (rides const lengths).
 
 3. ~~**Validating per-type `from_json`**~~ — **SHIPPED 2026-07-14**
    (`proposal/validating-from-json.md`). The per-type surface was the last
