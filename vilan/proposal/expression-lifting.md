@@ -1,9 +1,10 @@
 # Expression lifting — `a? + 10` and `a? + b?` (B11 deferred tail)
 
-Status: **PROPOSAL (2026-07-16) — not accepted.** The §0.3 deferral of
-`try-and-lift.md`, designed. Everything here layers on the shipped `?.`/`!`
-machinery; nothing changes for existing programs (bare `?` is a parse error
-today, so the new form occupies empty grammar space).
+Status: **ACCEPTED 2026-07-16** — the five review questions resolved with the
+user (§6). The §0.3 deferral of `try-and-lift.md`, designed. Everything here
+layers on the shipped `?.`/`!` machinery; nothing changes for existing
+programs (bare `?` is a parse error today, so the new form occupies empty
+grammar space).
 
 ## 1. What it looks like
 
@@ -106,11 +107,16 @@ literals, struct literals, list/tuple elements — but it never crosses:
    v1: the continuation may not early-return from inside a lift (the same
    closure problem `!`-in-closures defers).
 
-**The escape hatch is a binding, not parentheses.** `let inner = a?.b; f(inner)`
-— vilan's AST does not preserve redundant parens past the parser, so unlike
-the chain-internal grouping rule, `(…)` does not re-delimit a region. If
-review prefers paren-delimiting, the parser must record a `Node::Paren` —
-noted as an open question (§6).
+**Parentheses delimit the region** *(resolved in review — §6.2)*:
+`(a?.b) + 1` means `(a.map(|x| x.b)) + 1` — the lift does not reach outside
+the parens (and that particular expression is then the ordinary
+`Option + i32` type error). This matches the chain-internal grouping rule
+("escaping a group is parenthesization") and TS intuition. Implementation
+consequence: the parser must *record* parenthesization (a lightweight
+`Node::Paren` wrapper, or equivalent) so the walk-time region builder can
+see the boundary — today redundant parens dissolve at parse. The wrapper is
+region-delimiting and otherwise fully transparent (typing, lowering,
+formatter idempotence all unchanged).
 
 ## 3. Why the region stops at slots (the rejected alternative)
 
@@ -163,20 +169,21 @@ No new runtime, and for std containers no closures:
   positions.
 - **Formatter**: `?` prints tight to its operand, as `?.` does.
 
-## 6. Open questions (for review before any code)
+## 6. Resolved in review (2026-07-16, with the user)
 
-1. **Slot inventory.** Is *argument-is-a-slot* right (§3), or should a
-   bare-`?` argument lift its call after all? (Recommended: slot; it keeps
-   `?` local and matches the chain precedent.)
-2. **Paren escape.** Live without it (bind a `let` to escape), or record
-   `Node::Paren` to allow `(a?.b) + 1` to mean "lift stops at the paren"?
-   (Recommended: live without; add parens only on demonstrated need.)
-3. **Identity lift.** `let x = a?;` and `f(a?)` — hard error (recommended)
-   or silently `a`?
-4. **Applicative short-circuit.** Confirm lazy right operands (recommended;
-   the alternative — evaluate all receivers, then combine — is "zip", which
-   changes observable effects and matches no precedent the language leans on).
-5. **`Result` same-`E`.** Inherited from `!`/§9 — reconfirm for regions.
+1. **Slot inventory — argument-is-a-slot stands.** `?` stays local; lifting
+   the enclosing call was judged too confusing. `describe(status?)` errors.
+2. **Parens delimit the region.** `(a?.b) + 1` = `(a.map(|x| x.b)) + 1` —
+   the lift never reaches outside parens. Requires recording parens in the
+   AST (§2's implementation note).
+3. **Identity lift is a hard error.** `let x = a?;` / `f(a?)` — "`?` lifts
+   nothing here", with the `?.`/`map` steer.
+4. **Lazy right operands confirmed.** Receivers right of a bad `?` do not
+   evaluate; receivers/operands left of it already did (source order).
+5. **`Result` regions preserve `E`.** `result? + 1` on `Result<i32, E>` is
+   `Result<i32, E>` — the bad half rides through unchanged. Corollary: all
+   `Result` receivers in one region must share that `E` (one result type),
+   so `E1`/`E2` mixing is the `.map_err(…)` -hinted error, exactly as at `!`.
 
 ## 7. Test plan (per case, as always)
 
@@ -189,7 +196,9 @@ called on left-bad); `Result` first-error-wins + same-`E` mismatch (with the
 flatten (body yields the container — pinned by type, `M<V>` not `M<M<V>>`);
 chain-tail generalization `a?.b + 1`; slot boundaries (`describe(status?)`
 identity error; `?` in a condition errors with the hint; branch-local
-region); `!` between `?`s rejected; `(region)!` composes; twice-evaluated
+region); **paren delimiting** (`(a?.b) + 1` is the Option+i32 type error;
+`(a? + b?)` groups as one region; formatter idempotence over recorded
+parens); `!` between `?`s rejected; `(region)!` composes; twice-evaluated
 receiver; user-`Lift` type through the trait path (effects ordered);
 corpus byte-identical (nothing uses bare `?` today); docs page + gotcha
 entry; interpreter equivalence for every runnable pin.
