@@ -1,6 +1,10 @@
 # Macros: the normalized `macro_std` contract
 
-Status: **DESIGN (2026-07-16) — awaiting sign-off, then implementation.**
+Status: **DESIGN COMPLETE, DEFERRED ENTIRELY (2026-07-16).** The user
+explored the space and is not ready for implementation; nothing here is
+scheduled. The derive-import LEAK (§1) remains a live, open bug — fixable
+standalone via an expansion scope wrapper (the pre-contract design, in git
+history) if it needs to die before this item is picked up.
 Settled through discussion with the user (this document's earlier framing —
 text-vs-tree interchange, expansion scope wrappers — is superseded and lives
 in git history). Companion: `macro-engine.md` (the engine this evolves).

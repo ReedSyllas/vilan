@@ -903,6 +903,16 @@ have gaps.
    on-disk caching, batched parsing), each recorded with its trigger, plus the
    derive-name registration decoupling (deferred to the first user derive needing it).
 
+2. **The `macro_std` output contract** (M–L; `proposal/macros-post-parse.md`,
+   design complete 2026-07-16, **DEFERRED by decision** — explored, not ready to
+   build): `Output` values over text `Source` (value-returning item builders with
+   bulk list forms, expansion-scoped `uses`, quoted-expressions-with-handle-splices,
+   semantic handles v1 against loaded modules), six open questions drafted, full
+   normalization recorded as the §7 horizon behind the API-churn problem (candidate:
+   a small versioned stable IR + generated adapters). The DERIVE-IMPORT LEAK stays a
+   live bug meanwhile (JsonValue resolves without an import after [derive(Json)];
+   std's rpc.vl once depended on such a leak) — standalone wrapper fix available.
+
 2. **`const` — compile-time evaluation** (M–L; `proposal/const-eval.md`, 2026-07-10,
    revised same day to the EXPRESSION form; **SHIPPED same day, v1 complete** —
    slices 1–4 plus the asset channel + const-only bit (`std::asset::emit` live only
