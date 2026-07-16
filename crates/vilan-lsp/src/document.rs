@@ -1791,6 +1791,44 @@ mod tests {
         );
     }
 
+    // E6: a dependent's analysis reads an OPEN document's buffer, not the
+    // file on disk — the overlay seam in `load_package_module`. The disk
+    // copy of the helper only defines `one`; the overlay renames it to
+    // `two`, and the entry calling `two()` analyzes clean exactly when the
+    // overlay is consulted.
+    #[test]
+    fn a_dependents_analysis_reads_the_open_buffer_not_the_disk() {
+        let dir = std::env::temp_dir().join(format!("vilan-e6-overlay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let helper_path = dir.join("helper.vl");
+        std::fs::write(&helper_path, "export fun one(): i32 {\n\t1\n}\n").expect("write helper");
+        let entry_path = dir.join("main.vl");
+        let entry_text =
+            "import pkg::helper::two;\n\nfun main() {\n\tlet _x = two();\n}\n".to_string();
+        std::fs::write(&entry_path, &entry_text).expect("write entry");
+
+        // Disk truth: `two` does not exist — the entry has errors.
+        let stale = Document::analyze(&entry_text, &std_root(), &entry_path);
+        assert!(
+            !stale.diagnostics.is_empty(),
+            "expected the disk-backed analysis to fail on `two`"
+        );
+
+        // The helper is "open" with an edited, unsaved buffer defining `two`.
+        vilan_core::analyzer::set_document_overlay(
+            &helper_path,
+            Some("export fun two(): i32 {\n\t2\n}\n".to_string()),
+        );
+        let live = Document::analyze(&entry_text, &std_root(), &entry_path);
+        vilan_core::analyzer::set_document_overlay(&helper_path, None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            live.diagnostics.is_empty(),
+            "expected the overlay-backed analysis to be clean, got {:?}",
+            live.diagnostics
+        );
+    }
+
     // Expression lifting (expression-lifting.md): hovering the RECEIVER of a
     // bare `?` shows the receiver's own container type — the region's binder
     // entity carries an empty span exactly so it cannot tie with the

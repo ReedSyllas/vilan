@@ -399,6 +399,9 @@ impl LanguageServer for Backend {
         // but there a previous analysis is always already in place.)
         let uri = params.text_document.uri;
         let path = uri.to_file_path().unwrap_or_default();
+        // Register the buffer so OTHER documents' analyses load this one's
+        // live content instead of the file on disk (backlog E6).
+        vilan_core::analyzer::set_document_overlay(&path, Some(params.text_document.text.clone()));
         let std_dir = discover_std_dir(&path);
         let document = Document::analyze(&params.text_document.text, &std_dir, &path);
         self.documents.insert(uri.clone(), document);
@@ -413,6 +416,11 @@ impl LanguageServer for Backend {
             // just-typed character (e.g. the `.` that selects member completion).
             if let Some(mut document) = self.documents.get_mut(&uri) {
                 document.set_text(&change.text);
+            }
+            // The overlay updates immediately (pre-debounce), so any analysis
+            // that runs meanwhile — a dependent's, this one's — sees the edit.
+            if let Ok(path) = uri.to_file_path() {
+                vilan_core::analyzer::set_document_overlay(&path, Some(change.text.clone()));
             }
             self.on_change(uri, change.text);
         }
@@ -441,6 +449,10 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
+        // Disk truth returns for other documents' analyses.
+        if let Ok(path) = uri.to_file_path() {
+            vilan_core::analyzer::set_document_overlay(&path, None);
+        }
         self.documents.remove(&uri);
         // Drop the edit generation so any in-flight debounced analysis bails.
         self.pending.remove(&uri);

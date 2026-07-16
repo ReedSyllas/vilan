@@ -716,10 +716,13 @@ have gaps.
    `.js` snapshot check, separate from the behavior runner; unify.
 
 6. **Diagnostics remainder** (M; what E1 left open when it shipped 2026-07-04) —
-   - **Buffer overlay for unsaved dependencies:** module loading is disk-backed
-     (`load_package_module`), so a dependent's re-analysis sees an edited-but-unsaved import's
-     *disk* content until save (`did_save` closes the loop today). A buffer overlay needs a core
-     seam for the loader to consult open-document contents.
+   - ~~**Buffer overlay for unsaved dependencies**~~ — **FIXED 2026-07-16**: a
+     process-global overlay in the loader (`set_document_overlay`, canonicalized
+     path keys; `load_package_module` consults it before the disk read — the
+     content-addressed parse cache is untouched, an overlay only changes WHICH
+     content loads). The server registers buffers on open/change (pre-debounce)
+     and clears on close; `on_change` already re-analyzed dependents, so unsaved
+     edits now propagate live. Pinned (disk-vs-overlay dependent analysis).
    - **Async lifecycle harness:** the publish bookkeeping (explicit empties, `published_extra`
      diffing, close-clears-extras) is exercised only structurally; the fake-`Client` +
      edit-sequence property test (*published == fresh analysis, always*) remains to build.

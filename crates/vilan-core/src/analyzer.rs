@@ -14844,6 +14844,45 @@ pub(crate) struct LoadedModule {
     pub(crate) parse_errors: &'static [String],
 }
 
+/// The open-document overlay (backlog E6): the language server registers each
+/// open document's CURRENT buffer, so a dependent file's re-analysis sees
+/// unsaved edits instead of the on-disk content (module loading is otherwise
+/// disk-backed, and `did_save` used to be what closed the gap). Keys are
+/// canonicalized where possible so the loader's join-built paths and the
+/// server's URI-derived paths meet. The content-addressed parse cache below
+/// is unaffected — an overlay only changes WHICH content gets loaded.
+static DOCUMENT_OVERLAY: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
+
+fn overlay_key(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|canonical| canonical.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Register (`Some`) or clear (`None`) an open document's buffer. The
+/// language server calls this on open/change/close; nothing else should.
+pub fn set_document_overlay(path: &Path, text: Option<String>) {
+    let overlay = DOCUMENT_OVERLAY.get_or_init(Default::default);
+    let key = overlay_key(&path.to_string_lossy());
+    let mut overlay = overlay.lock().unwrap();
+    match text {
+        Some(text) => {
+            overlay.insert(key, text);
+        }
+        None => {
+            overlay.remove(&key);
+        }
+    }
+}
+
+fn document_overlay_get(path: &str) -> Option<String> {
+    let overlay = DOCUMENT_OVERLAY.get()?;
+    let overlay = overlay.lock().unwrap();
+    overlay.get(&overlay_key(path)).cloned()
+}
+
 pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     use chumsky::prelude::*;
     use std::collections::HashMap;
@@ -14859,7 +14898,10 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     static CACHE: OnceLock<Mutex<HashMap<u64, LoadedModule>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    let source = std::fs::read_to_string(path).ok()?;
+    let source = match document_overlay_get(path) {
+        Some(buffered) => buffered,
+        None => std::fs::read_to_string(path).ok()?,
+    };
     let key = {
         let mut hasher = DefaultHasher::new();
         source.hash(&mut hasher);
