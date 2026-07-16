@@ -162,6 +162,7 @@ fun main() {
 	rgb[2] = 64u8;                  // indexed like a List
 	print(buffer[0]);              // 0
 	print(rgb[2]);                 // 64
+	print(rgb.len());              // 3 — known at compile time
 
 	mut sum = 0;
 	for channel in rgb {
@@ -173,7 +174,8 @@ fun main() {
 
 Reach for `[T; n]` over `List<T>` when the count never changes — a color, a
 matrix row, a lookup table. Everything else (`push`, growing) is what `List`
-is for.
+is for. `.len()` on an array is free: the length lives in the type, so the
+compiler folds it to the constant.
 
 > **Going deeper.** `Map` and `Set` key **by value**. Scalar keys (`i32`,
 > `str`) work directly; a struct, enum, or `List` key works once it derives

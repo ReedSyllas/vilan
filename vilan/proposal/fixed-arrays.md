@@ -61,10 +61,9 @@ program and corpus depends on it):
 - **`for x in arr`** iterates the `n` elements (`iterable_element_type`,
   `analyzer.rs:7666`, gains an `Array` arm → `T`); `for e in &mut arr` gives element
   views, exactly like `List`.
-- **The length is in the type** (`[i32; 4]` — you already know it is 4). A `.len()`
-  method is deferred (§7): folding it to the constant while preserving a side-effectful
-  subject's evaluation is its own small slice, and pairs naturally with the generic
-  `[T; N].len()` → `N` that const-length lengths unlock.
+- **The length is in the type** (`[i32; 4]` — you already know it is 4). `.len()`
+  ships as slice 2 — see §10; the generic `[T; N].len()` → `N` waits on const-length
+  lengths (§7).
 
 ## 4. Length `n` — literals in v1
 
@@ -92,14 +91,11 @@ arises under a new `[T; n]` annotation).
 
 Type `[T; n]` (`Type::Array`), the repeat literal `[v; n]`, context-directed `[a,b,c]`,
 indexing (read / write / `&[mut]` view / literal-OOB compile error), value-copy, `for`
-iteration (by value and by view), `.len()` folding. Nested arrays (`[[T; m]; n]`) fall
-out of the recursion.
+iteration (by value and by view). Nested arrays (`[[T; m]; n]`) fall out of the
+recursion. (`.len()` shipped separately as slice 2 — §10.)
 
 ## 7. Deferred (recorded)
 
-- **`.len()`** — folds to the constant `n` (or, for a generic `[T; N]`, to `N`). Its own
-  slice: the fold must preserve a side-effectful subject's evaluation, and the useful
-  generic form waits on const-length lengths anyway.
 - **Const-named / const-generic lengths** — `[u8; SIZE]`, `fun f<const N>(a: [T; N])`.
   Needs `const_eval` in type resolution, then length as a const-expr id in the type.
 - **`List` ↔ `[T; n]` conversion** — `arr.to_list()` / `list.to_array<n>()` (the latter
@@ -135,3 +131,37 @@ write / `&mut` view write-through; literal-OOB compile error; dynamic-index runt
 bounds panic; value-copy (`mut b = a; b[0]=…` leaves `a`); `for` by value and by `&mut`
 view; `[i32; 3]` ≠ `[i32; 4]` (a mismatched assign is a spanned error); corpus
 byte-identical; a docs example. Interpreter-equivalence for every runnable pin.
+
+## 10. Slice 2 — `.len()` (the fold)
+
+`arr.len()` on a `[T; n]` subject returns **`i32`** (matching `List.len()`), value `n`.
+
+- **Resolution, not a member.** `[T; n]` is structural — there is no impl to look up.
+  `resolve_method_call` gains a `Type::Array` intercept: `len` with zero arguments (and
+  no generic arguments) resolves the call directly to a new `Expr::ArrayLen(subject, n)`;
+  a non-empty argument list is a spanned error (`` `len` takes no arguments ``), and any
+  other method name keeps the standard "`[i32; 4]` has no method 'x'" error.
+- **The fold preserves evaluation order.** A **pure** subject (an identifier, a field
+  path — anything `expr_has_side_effects` clears) folds to the literal `n` and the
+  subject is not emitted. A **side-effectful** subject (`make().len()`,
+  `grid[i].len()` — a subscript can panic, so it counts) emits `subject.length` **in
+  place** instead: the array is a plain JS array, so `.length` is exactly `n`, the
+  subject evaluates exactly once in source order (no statement hoisting, which could
+  reorder it against sibling operands), and no new JS node shapes are needed — it is
+  the same lowering `List.len()`'s intrinsic uses. The fold is the optimization; the
+  in-place property read is the correctness fallback.
+- **Nested arrays**: `grid.len()` is the outer length; `grid[0].len()` the inner —
+  and the subscript keeps its bounds check (it is the side-effectful case above).
+- **Views are transparent**: a view of an array reads as the array, so `.len()`
+  through `&arr` / a `for … in &grid` binder resolves the same way.
+- **Generic `[T; N].len()` → `N`** stays deferred with const-generic lengths (§7).
+- **Fan-out** (the recorded `Type`-variant lesson, applied to `Expr`): the new
+  `Expr::ArrayLen` needs arms in `infer_type_inner` (→ `i32`), the call-graph walk
+  (the subject must still async-infer and platform-color), the transformer, and
+  `expr_has_side_effects` (inherits the subject's). No macro-interpreter change: the
+  emission uses only existing JS node shapes.
+
+Tests (per case): pure fold runs (`[0; 4].len() == 4` via a binding); arithmetic use
+types as `i32`; nested outer/inner; a side-effectful subject evaluates exactly once
+(observable via a `&mut` log) and still yields `n`; `a.len(1)` errors; `a.push(1)`
+errors ("no method"); `List.len()` regression-guarded by the existing corpus.

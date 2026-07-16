@@ -630,6 +630,9 @@ impl<'a, 'src> Collector<'a, 'src> {
             }
             Expr::List(ids) | Expr::Tuple(ids) => self.walk_all(ids),
             Expr::Repeat(value_id, _) => self.walk(*value_id),
+            // `arr.len()` folds to a constant, but its subject still evaluates
+            // (a call subject must async-infer and platform-color).
+            Expr::ArrayLen(subject_id, _) => self.walk(*subject_id),
             Expr::StructInitializer(_, fields) => {
                 for value_id in fields.values() {
                     self.walk(*value_id);

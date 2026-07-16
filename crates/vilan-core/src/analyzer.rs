@@ -117,6 +117,11 @@ pub enum Expr<'src> {
     // `[value; n]` — a fixed-length array literal: the value expr and the
     // compile-time length `n` (an integer literal in v1). `value` copied per slot.
     Repeat(Id, usize),
+    // `arr.len()` on a `[T; n]` subject — the subject and the compile-time
+    // length `n` read off its type. There is no member to dispatch to (`[T; n]`
+    // is structural); a pure subject folds to the literal, a side-effectful one
+    // still evaluates (fixed-arrays.md §10).
+    ArrayLen(Id, usize),
     Local(Id),
     // A match expression: the subject and the resolved legs.
     Match(Id, Vec<ExprMatchLeg>),
@@ -8499,6 +8504,9 @@ impl<'src> Analyzer<'src> {
                 }
                 Type::Array(element_type.get_type_id(self), length)
             }
+            // `arr.len()` — the length is a compile-time constant; the result is
+            // `i32`, matching `List.len()`.
+            Expr::ArrayLen(_, _) => self.primitive_struct_type("i32"),
             Expr::Tuple(item_ids) => {
                 let constraint_items = match constraint {
                     Type::Tuple(items) => items.clone(),
@@ -10444,6 +10452,33 @@ impl<'src> Analyzer<'src> {
             })
         {
             return Resolution::Deferred;
+        }
+        // `[T; n]` is structural — there is no impl to look up. Its one method is
+        // `len()`, resolved directly to `Expr::ArrayLen` with the length read off
+        // the type (fixed-arrays.md §10); anything else keeps the standard
+        // no-method error.
+        if let Type::Array(_, length) = &subject_type {
+            let length = *length;
+            if member_name != "len" {
+                let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span: arguments_span,
+                    msg: format!("{} has no method '{}'", type_str, member_name),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                return Resolution::Failed;
+            }
+            if !argument_ids.is_empty() || !generic_argument_ids.is_empty() {
+                self.diagnostics.push(Error {
+                    span: arguments_span,
+                    msg: "`len` takes no arguments".to_string(),
+                });
+                self.expr_id_to_expr_map.insert(id, Expr::Error);
+                return Resolution::Failed;
+            }
+            self.expr_id_to_expr_map
+                .insert(id, Expr::ArrayLen(subject_id, length));
+            return Resolution::Resolved;
         }
         let found = |member_id: Option<Id>| match member_id {
             Some(member_id) => MethodLookup::Found(member_id),

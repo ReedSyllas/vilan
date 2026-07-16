@@ -54,3 +54,6 @@ const two = make();
 console.log(__at(two, 0) + __at(two, 1));
 const grid = [ [ 1, 2 ], [ 3, 4 ] ];
 console.log(__at(__at(grid, 1), 0));
+console.log(3);
+console.log(__at(grid, 0).length);
+console.log(make().length);

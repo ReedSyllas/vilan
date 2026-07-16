@@ -1,7 +1,8 @@
 // fixed-arrays.vl — `[T; n]` fixed-length arrays (proposal/fixed-arrays.md): the
 // repeat literal `[value; n]`, context-directed `[a, b, c]` under a `[T; n]`
 // annotation, index read/write, `&mut arr[i]` element views, `for` iteration,
-// value-copy independence (scalar and aggregate), params/returns, and nesting.
+// value-copy independence (scalar and aggregate), params/returns, nesting, and
+// `.len()` (folds to the constant; a call subject still evaluates — §10).
 import std::print;
 
 struct Cell {
@@ -51,4 +52,8 @@ fun main() {
 
 	let grid: [[i32; 2]; 2] = [[1, 2], [3, 4]]; // nested
 	print(grid[1][0]); // 3
+
+	print(buf.len()); // 3 — folds to the constant
+	print(grid[0].len()); // 2 — a subscript subject stays evaluated (bounds check)
+	print(make().len()); // 2 — a call subject runs, `.length` read in place
 }

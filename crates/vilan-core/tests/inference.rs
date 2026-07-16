@@ -16401,3 +16401,116 @@ fn an_array_annotation_catches_elements_that_unify_with_each_other() {
         "Expected str (this literal's element type), but got i32 instead.",
     );
 }
+
+// --- `[T; n].len()` — the fold (fixed-arrays.md §10) -----------------------------
+
+#[test]
+fn fixed_array_len_folds_to_the_constant_and_types_as_i32() {
+    // `arr.len()` is the compile-time length, typed `i32` (like `List.len()`),
+    // so it participates in arithmetic and satisfies an `i32` annotation.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let a = [0; 4];
+            let n: i32 = a.len();
+            print(n);             // 4
+            print(a.len() + 1);   // 5
+        }
+        "#,
+        "4\n5\n",
+    );
+}
+
+#[test]
+fn fixed_array_len_on_nested_arrays_and_through_a_view() {
+    // The outer length, the inner length through a subscript (which keeps its
+    // bounds check — the side-effectful emission path), and a `for … in &grid`
+    // view binder (views type transparently).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let grid: [[i32; 2]; 3] = [[1, 2], [3, 4], [5, 6]];
+            print(grid.len());      // 3
+            print(grid[0].len());   // 2
+            for row in &grid {
+                print(row.len());   // 2, three times
+            }
+        }
+        "#,
+        "3\n2\n2\n2\n2\n",
+    );
+}
+
+#[test]
+fn fixed_array_len_evaluates_a_side_effectful_subject_once() {
+    // A call subject must still run — exactly once — even though the result's
+    // length is known statically (the emission reads `subject.length` in place
+    // rather than folding the subject away).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun make(log: &mut List<i32>): [i32; 2] {
+            log.push(7);
+            [5; 2]
+        }
+        fun main() {
+            mut log: List<i32> = [];
+            print(make(&mut log).len());   // 2
+            print(log.len());              // 1 — the subject ran once
+        }
+        "#,
+        "2\n1\n",
+    );
+}
+
+#[test]
+fn fixed_array_len_takes_no_arguments() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let a = [0; 4];
+            let n = a.len(1);
+        }
+        "#,
+        "`len` takes no arguments",
+    );
+}
+
+#[test]
+fn an_array_has_no_method_besides_len() {
+    // No `push` — the contract is "exactly `n`, always"; the standard
+    // no-method error names the array type.
+    assert_fails_with(
+        r#"
+        fun main() {
+            mut a = [0; 4];
+            a.push(1);
+        }
+        "#,
+        "has no method 'push'",
+    );
+}
+
+#[test]
+fn an_unused_repeat_of_a_side_effectful_value_still_runs() {
+    // `[value; n]` evaluates its value once, so an unused binding whose
+    // initializer is a repeat of a CALL cannot be elided — the call's side
+    // effect must land (`expr_has_side_effects` recurses into the repeat).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun bump(log: &mut List<i32>): i32 {
+            log.push(1);
+            0
+        }
+        fun main() {
+            mut log: List<i32> = [];
+            let unused = [bump(&mut log); 3];
+            print(log.len());   // 1 — evaluated once, not dropped, not per-slot
+        }
+        "#,
+        "1\n",
+    );
+}

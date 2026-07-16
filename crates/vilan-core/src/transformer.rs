@@ -769,9 +769,11 @@ impl<'src> Transformer<'src> {
             Some(Expr::Unary(_, operand))
             | Some(Expr::Reference(operand, _))
             | Some(Expr::Dereference(operand)) => self.expr_has_side_effects(*operand),
-            Some(Expr::Field(subject, _, _)) | Some(Expr::TupleIndex(subject, _, _)) => {
-                self.expr_has_side_effects(*subject)
-            }
+            Some(Expr::Field(subject, _, _))
+            | Some(Expr::TupleIndex(subject, _, _))
+            | Some(Expr::ArrayLen(subject, _)) => self.expr_has_side_effects(*subject),
+            // `[value; n]` evaluates its value expression once.
+            Some(Expr::Repeat(value, _)) => self.expr_has_side_effects(*value),
             // A checked subscript can panic, so an indexing expression is
             // effectful in itself: dropping it would drop its bounds check.
             Some(Expr::Index(_, _)) => true,
@@ -2264,6 +2266,20 @@ impl<'src> Transformer<'src> {
                     Box::new(js::Node::Local("__repeat".to_string())),
                     vec![value, js::Node::Number(length.to_string(), None)],
                 )
+            }
+            Expr::ArrayLen(subject_id, length) => {
+                // `arr.len()` — the length is in the type. A pure subject folds to
+                // the literal; a side-effectful one (`make().len()`, `grid[i].len()`)
+                // reads `subject.length` in place instead — same value (the array is
+                // a plain JS array), evaluated exactly once in source order.
+                if self.expr_has_side_effects(*subject_id) {
+                    let subject = self
+                        .walk_entity(*subject_id, block)
+                        .unwrap_or(js::Node::Void);
+                    js::Node::Property(Box::new(subject), "length".to_string())
+                } else {
+                    js::Node::Number(length.to_string(), None)
+                }
             }
             Expr::Tuple(ids) => {
                 // Tuples store flat: a tuple-typed element's value is itself a flat
