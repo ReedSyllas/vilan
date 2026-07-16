@@ -335,8 +335,11 @@ have gaps.
     declared parameter type when it is concrete (breaking the
     body-waits-for-param-waits-for-body deadlock; a generic declared type
     still defers to the closure's owning call, preserving the
-    `count.derive(|n| format(n))` channel). Residual (recorded): the first
-    call site wins; later conflicting calls diagnose against it.
+    `count.derive(|n| format(n))` channel). ~~Residual: the first
+    call site wins; later conflicting calls diagnose against it~~ — the residual's
+    DIAGNOSTIC half closed 2026-07-16: a later conflicting call now names the
+    origin ("inferred from the closure's FIRST call") and steers to annotating
+    the parameter; first-call-wins itself stands (it is the design).
 
 18. ~~**Calling a method-call result directly doesn't parse**~~ — **FIXED
     2026-07-12** (the gotchas sweep). A member now fuses at most ONE call;

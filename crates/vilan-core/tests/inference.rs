@@ -14653,6 +14653,43 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- B13 residual: a later conflicting call names the inferring one (FIXED) --
+
+#[test]
+fn a_conflicting_later_call_names_the_first_call_inference() {
+    // The first call fills an unannotated closure parameter's type; a later
+    // conflicting call used to read as a bare mismatch with no hint of WHERE
+    // i32 came from. It now names the origin and the fix.
+    // (`|x| print(x)` would not reproduce: `print`'s `any` parameter makes
+    // `x` adopt `any` through the argument-adoption channel before any call
+    // — the identity body keeps the parameter open until the first call.)
+    assert_fails_with(
+        r#"
+        fun main() {
+            let pass = |x| x;
+            let a = pass(1);
+            let b = pass("two");
+        }
+        "#,
+        "inferred from the closure's FIRST call",
+    );
+}
+
+#[test]
+fn consistent_later_calls_stay_clean() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let show = |x| print(x);
+            show(1);
+            show(2);
+        }
+        "#,
+        "1\n2\n",
+    );
+}
+
 // --- B16 remainder: an unannotated Map::new() checked vacuously (FIXED) ------
 //
 // `mut table = Map::new(); table.insert("k", 1); table.insert(2, "v")`

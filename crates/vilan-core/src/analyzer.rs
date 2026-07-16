@@ -1024,6 +1024,10 @@ pub struct Analyzer<'src> {
     // `if`/`for` conditions awaiting the post-solve `bool` check (B28), with
     // the construct label the diagnostic names.
     prepped_conditions: Vec<(Id, &'static str)>,
+    // Where an unannotated closure parameter's shared type slot was filled
+    // from (the FIRST call's argument, B13) — a later conflicting call
+    // diagnoses naming that origin instead of a bare mismatch.
+    closure_parameter_fill_sites: HashMap<TypeId, Span>,
     // Bound-less impl binders whose subject type wasn't walked yet
     // (`impl Wrapper<type T>` before `struct Wrapper<T: Greeter>`): the
     // binder's fresh constraint id + where to find the subject's declared
@@ -1360,6 +1364,7 @@ impl<'src> Analyzer<'src> {
             wrapped_view_captures: HashMap::new(),
             prepped_binary_ops: Vec::new(),
             prepped_conditions: Vec::new(),
+            closure_parameter_fill_sites: HashMap::new(),
             prepped_binder_inheritance: Vec::new(),
             binary_op_dispatch: HashMap::new(),
             bitwise_u32: HashSet::new(),
@@ -10321,6 +10326,13 @@ impl<'src> Analyzer<'src> {
                 {
                     self.type_id_to_type_map
                         .insert(*parameter_type_id, argument_type.clone());
+                    // Remember WHO filled the slot: a later conflicting call
+                    // diagnoses against this one by name, not as a bare
+                    // mismatch (B13's recorded residual).
+                    if let Some(span) = self.span_map.get(&argument_id) {
+                        self.closure_parameter_fill_sites
+                            .insert(*parameter_type_id, **span);
+                    }
                     continue;
                 }
                 if self
@@ -10329,9 +10341,17 @@ impl<'src> Analyzer<'src> {
                 {
                     let expected = self.pretty_print_type(&parameter_type, &substitution_context);
                     let got = self.pretty_print_type(&argument_type, &substitution_context);
+                    let origin = match self.closure_parameter_fill_sites.get(parameter_type_id) {
+                        Some(_) => format!(
+                            " The parameter is unannotated, so its type was inferred from \
+                             the closure's FIRST call — annotate the parameter \
+                             (e.g. `|x: {expected}|`) to pin the type deliberately."
+                        ),
+                        None => String::new(),
+                    };
                     self.diagnostics.push(Error {
                         span: **self.span_map.get(&argument_id).unwrap(),
-                        msg: format!("Expected {}, but got {} instead.", expected, got),
+                        msg: format!("Expected {}, but got {} instead.{}", expected, got, origin),
                     });
                 }
             }
