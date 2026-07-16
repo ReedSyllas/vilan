@@ -14653,6 +14653,91 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- B16 remainder: an unannotated Map::new() checked vacuously (FIXED) ------
+//
+// `mut table = Map::new(); table.insert("k", 1); table.insert(2, "v")`
+// COMPILED AND RAN, and a read came back under any annotation: Map is not a
+// slot container, so K/V never grounded and every argument check reconciled
+// against raw generics. The post-solve sweep now rejects any binding whose
+// final type keeps a generic declared in ANOTHER file (`Map::new`'s `K` can
+// never ground in user code) — general over containers, not Map-cased. A
+// generic declared in the SAME file stays legal (a generic function's own
+// body); the same-file leak shape is the recorded miss.
+
+#[test]
+fn an_unannotated_map_new_requires_an_annotation() {
+    assert_fails_with(
+        r#"
+        import std::map::Map;
+        fun main() {
+            mut table = Map::new();
+            table.insert("k", 1);
+        }
+        "#,
+        "never fully determined",
+    );
+}
+
+#[test]
+fn an_unannotated_set_new_requires_an_annotation() {
+    assert_fails_with(
+        r#"
+        import std::set::Set;
+        fun main() {
+            mut seen = Set::new();
+            seen.insert(7);
+        }
+        "#,
+        "never fully determined",
+    );
+}
+
+#[test]
+fn an_annotated_map_checks_its_inserts() {
+    // With the annotation the parameters ground, so a mistyped insert is a
+    // real error (the B16 substitution-applied argument check).
+    assert_fails(
+        r#"
+        import std::map::Map;
+        fun main() {
+            mut table: Map<str, i32> = Map::new();
+            table.insert(2, "v");
+        }
+        "#,
+    );
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::map::Map;
+        fun main() {
+            mut table: Map<str, i32> = Map::new();
+            table.insert("k", 1);
+            print(table.get("k").unwrap_or(-1));
+        }
+        "#,
+        "1\n",
+    );
+}
+
+#[test]
+fn a_generic_functions_own_bindings_stay_legal() {
+    // The legitimacy rule: a residual generic declared in the SAME file (the
+    // enclosing generic function's own parameter) is not a leak.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun pick<T>(a: T): T {
+            let x = a;
+            x
+        }
+        fun main() {
+            print(pick(41) + 1);
+        }
+        "#,
+        "42\n",
+    );
+}
+
 // --- B28: conditions are not type-checked (FIXED) ----------------------------
 //
 // Found building expression lifting: NOTHING checked an `if`/`for` condition

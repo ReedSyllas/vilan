@@ -588,10 +588,23 @@ have gaps.
     typing is fixpoint-order-independent (a later push types an earlier guarded read —
     pinned). 12 pins; all 84 corpus goldens BYTE-IDENTICAL (no emission change — the
     world already type-checked cleanly under real checking); the playground repro now
-    errors at `"some text"`. Recorded remainders: an unannotated `Map::new()` stays
-    loose (Map is not a slot container — its K/V never ground from `insert`), and
-    grounding an empty literal from a LATER annotated use (`let b: List<str> = a`)
-    is not taken (pushes and annotations are the grounding channels).
+    errors at `"some text"`. ~~An unannotated `Map::new()` stays loose~~ — **CLOSED
+    2026-07-16** (verified live first: mixed-typed inserts compiled AND ran, reads
+    came back under any annotation). The post-solve sweep now rejects any REFERENCED
+    binding whose final type keeps a generic declared in ANOTHER file (`Map::new`'s
+    `K` can never ground in user code) — general over containers, with three
+    recorded bounds: a zero-reference binding is exempt (no uses = no vacuous
+    checks, and a pattern capture cannot take the annotation the fix asks for — the
+    walkthrough's unused `Some(let _note)` capture types abstractly, a B23-adjacent
+    latent case that now surfaces only if used); only STRUCT-headed types reject
+    (an enum keeping a payload parameter — `Ok("done")` with `E` never named,
+    `let x = None` — is commonplace, its residual sits in the never-constructed
+    leg; a possible future tightening); and a leak whose generic is declared in
+    the SAME file is not caught (rare; the cross-file std-container case is the
+    class).
+    4 pins. Still recorded: grounding an empty literal from a LATER annotated use
+    (`let b: List<str> = a`) is not taken (pushes and annotations are the grounding
+    channels).
 
 ---
 

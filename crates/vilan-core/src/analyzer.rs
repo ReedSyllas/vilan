@@ -7951,6 +7951,29 @@ impl<'src> Analyzer<'src> {
 
     /// If `type_` is a `List` whose element is still an unresolved inference slot
     /// (an `Unknown` type id from `List::new()`), returns that slot's type id.
+    /// Collects the `Generic` constraint ids still present in a type — the
+    /// residue the never-determined binding sweep checks against enclosing
+    /// declarations. Recurses through every type shape that carries arguments.
+    fn collect_residual_generics(&self, type_: &Type, out: &mut Vec<TypeId>) {
+        match type_ {
+            Type::Generic(constraint_id) => out.push(*constraint_id),
+            Type::Struct(_, arguments) | Type::Enum(_, arguments) | Type::Trait(_, arguments) => {
+                for argument in arguments {
+                    self.collect_residual_generics(&argument.get_type(self), out);
+                }
+            }
+            Type::Tuple(items) => {
+                for item in items {
+                    self.collect_residual_generics(&item.get_type(self), out);
+                }
+            }
+            Type::Array(element, _) => {
+                self.collect_residual_generics(&element.get_type(self), out);
+            }
+            _ => {}
+        }
+    }
+
     fn list_element_slot(&self, type_: &Type) -> Option<TypeId> {
         match type_ {
             Type::Struct(id, arguments) if self.is_slot_container(*id) && arguments.len() == 1 => {
@@ -8117,13 +8140,14 @@ impl<'src> Analyzer<'src> {
         for (_, arguments) in &implementation.trait_args {
             argument_ids.extend(arguments.iter().copied());
         }
-        argument_ids
-            .into_iter()
-            .filter_map(|argument| match argument.get_type(self) {
-                Type::Generic(constraint_id) => Some(constraint_id),
-                _ => None,
-            })
-            .collect()
+        // Binders may sit ANYWHERE in the subject pattern
+        // (`impl Option<(type T, type U)>` nests them in a tuple), so collect
+        // recursively — the flat scan missed nested binders.
+        let mut binders = Vec::new();
+        for argument in argument_ids {
+            self.collect_residual_generics(&argument.get_type(self), &mut binders);
+        }
+        binders
     }
 
     fn infer_closure_args_against_params(
@@ -13902,6 +13926,81 @@ impl<'src> Analyzer<'src> {
                     subject_str
                 ),
             });
+        }
+
+        // B16's Map-shaped remainder: a binding whose final type still carries
+        // a CALLEE's unbound type parameters checks vacuously forever after —
+        // `mut table = Map::new(); table.insert("k", 1); table.insert(2, "v")`
+        // compiled AND ran, and a read came back under any annotation. A
+        // residual `Generic` in a binding's type is legitimate only when an
+        // ENCLOSING function or impl declares that parameter (`fun f<T>(x: T)
+        // { let y = x; }`); one declared elsewhere (`Map::new`'s `K`) can
+        // never ground and the binding must be annotated instead.
+        // Legitimacy is by DECLARING FILE: a generic residual is fine while
+        // the binding sits in the same file that declares the parameter (a
+        // generic function's own body, std's internals, comprehension
+        // binders); one declared in ANOTHER file (`Map::new`'s `K` reaching a
+        // user binding) can never ground there. A generic with no recorded
+        // declaration stays lenient.
+        let generic_declaration_sources: HashMap<TypeId, SourceId> = self
+            .expr_id_to_expr_map
+            .iter()
+            .filter_map(|(entity_id, expr)| match expr {
+                Expr::Generic(constraint_id) => self
+                    .source_of_id(*entity_id)
+                    .map(|source| (*constraint_id, source)),
+                _ => None,
+            })
+            .collect();
+        let variable_ids: Vec<Id> = self.variables.keys().copied().collect();
+        for variable_id in variable_ids {
+            // The hazard is USES checking vacuously — a binding nothing reads
+            // has none (and a pattern capture like `Some(let _note)` cannot
+            // take the annotation the fix asks for).
+            if self.reference_count.get(&variable_id).copied().unwrap_or(0) == 0 {
+                continue;
+            }
+            let variable_type = self.infer_type(variable_id, &Type::Unknown, &HashMap::new());
+            // Only STRUCT-headed types (the container shape — `Map<K, V>`)
+            // reject. An enum keeping a payload parameter (`Ok("done")` with
+            // its `E` never named, `let x = None`) is commonplace and its
+            // residual sits in the leg that never constructs — recorded as a
+            // possible future tightening, not flagged today.
+            if !matches!(variable_type, Type::Struct(..)) {
+                continue;
+            }
+            let mut residuals = Vec::new();
+            self.collect_residual_generics(&variable_type, &mut residuals);
+            if residuals.is_empty() {
+                continue;
+            }
+            let Some(span) = self.span_map.get(&variable_id).map(|span| **span) else {
+                continue;
+            };
+            let Some(source) = self.source_of_id(variable_id) else {
+                continue;
+            };
+            let leaked = residuals.iter().any(|residual| {
+                generic_declaration_sources
+                    .get(residual)
+                    .is_some_and(|declared_in| *declared_in != source)
+            });
+            if leaked {
+                let name = self
+                    .variables
+                    .get(&variable_id)
+                    .map(|variable| variable.name)
+                    .unwrap_or("unknown");
+                let rendered = self.pretty_print_type(&variable_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    span,
+                    msg: format!(
+                        "the type of '{name}' is never fully determined: `{rendered}` keeps \
+                         its callee's type parameters, so uses of it cannot be checked — \
+                         annotate the binding (e.g. `: Map<str, i32>`)"
+                    ),
+                });
+            }
         }
 
         // Clear processed constraints
