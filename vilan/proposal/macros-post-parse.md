@@ -1,179 +1,143 @@
-# Macros as a post-parse stage? — discussion (2026-07-16)
+# Macros: the normalized `macro_std` contract
 
-Status: **DISCUSSION — no decision.** Raised by the user alongside the
-derive-import-leak bug; this note frames the question so the decision can be
-argued on paper. Context: `macro-engine.md` (the engine), the measured
-tree-interchange rejection (2026-07-07), and the expression-lifting rewrite
-(`lift.rs`), which quietly established the repo's first post-parse Node→Node
-stage.
+Status: **DESIGN (2026-07-16) — awaiting sign-off, then implementation.**
+Settled through discussion with the user (this document's earlier framing —
+text-vs-tree interchange, expansion scope wrappers — is superseded and lives
+in git history). Companion: `macro-engine.md` (the engine this evolves).
 
-## 1. What "post-parse" would even mean here
+## 1. The decision
 
-The engine already runs *after parsing and before analysis* — expansion is
-positionally a post-parse stage today. The real architectural axes are:
+Macros interact with the compiler **indirectly, through `macro_std`** — a
+small, curated, versioned API that strictly controls what a macro may see
+and do. Within that:
 
-- **Interchange**: expansion output is SOURCE TEXT, re-parsed and spliced.
-  Tree interchange (macros produce/receive `Node` values) was measured and
-  deliberately not taken: 0.8% of a real build; the caches erase it on
-  re-analysis; batching parses is the recorded cheap fallback.
-- **Scoping**: spliced items land *in the module* — so an expansion's
-  self-carried imports become module imports. This is the **derive-import
-  leak** (live, verified: `JsonValue` resolves after `[derive(Json)]` with no
-  import; std's `rpc.vl` once depended on exactly such a leak).
-- **Provenance**: text splices carry synthetic spans; expansions know their
-  originating item, but diagnostics into generated code still speak internal
-  vocabulary (backlog E8).
+- **Output is a normalized VALUE, not source text.** Today a macro returns
+  `Source` — a string the engine re-parses and splices, with everything that
+  implies: escaping and precedence traps at splice points, string-level
+  gensyms, post-reparse diagnostics on synthetic spans, and module-level
+  `import` lines that **leak into the deriving module** (live bug: after
+  `[derive(Json)]`, `JsonValue` resolves with no import — and code can
+  silently depend on it).
+- **Direct graph access stays off the table as a contract.** The analysis
+  graph is the compiler's most-churned surface; `macro_std` is the stable
+  boundary, and the adapter from API values to compiler internals is
+  private and free to change. (This also keeps worlds hermetic and the
+  text-keyed expansion caches valid — what makes per-keystroke re-analysis
+  affordable.)
+- **The boundary inside the API: normalize ITEMS, quote EXPRESSIONS.** The
+  builder vocabulary is a small closed set of declaration shapes — impls,
+  functions, struct/enum items, fields, `use`s. Expression *bodies* stay
+  quoted (parsed text at the leaves): rebuilding the whole expression
+  grammar as builders would put every future language feature on the API's
+  hook, forever. Parsing shrinks to small, cacheable leaves; the structure —
+  where hygiene, scoping, and provenance live — is fully normalized. (The
+  shape Rust's `quote!` and Scala's typed quotes both settled on.)
 
-The leak is a **scoping** problem. It is orthogonal to interchange: a
-tree-based engine that splices items into the module scope leaks identically.
-So "make macros post-parse/tree-based" would not, by itself, fix the bug —
-and the bug can be fixed without touching interchange.
+Why not speed: the re-parse cost was measured (2026-07-07) at 0.8% of a real
+build and the caches erase it. The reason is the **contract** — malformed
+output becomes unrepresentable-or-checked at construction (with the macro's
+own spans), imports become first-class values the engine scopes, and
+provenance improves: a generated impl knows which macro built it (the
+missing ingredient for anchoring diagnostics at user code, backlog E8).
 
-## 2. Options
+## 2. The contract, concretely
 
-**A. Keep the engine; add an expansion scope wrapper (recommended).**
-Expansion output parses exactly as today, but the spliced items arrive
-wrapped in a scope-carrying node (the `LiftGroup` precedent: a parse-shaped
-wrapper that changes only resolution). The walk pushes a child scope for the
-expansion: its `import`/`use` bindings resolve *inside the wrapper only*,
-while the items it defines (impls, functions, structs) register into the
-module as they must. Prerequisite: sweep std's derives/`[service]` for code
-that depends on a leaked name (`rpc.vl`'s old dependence) and make each
-expansion self-contained — which they nominally already are ("outputs
-self-carry imports" was the design). Small surface; no engine rewrite; kills
-the leak class.
+A macro returns an `Output` value (name open, §5):
 
-**B. Full tree interchange as a formal post-parse stage.** Macros produce
-`Node` trees; splicing is structural; scoping and provenance ride the tree.
-Buys: richer provenance for E8, no re-parse (already negligible), and a
-cleaner substrate IF macros ever need to *inspect* trees (semantic queries
-are the recorded beyond-v1 item). Costs: the engine's construction API
-(`macro_std::build`, quote/join, the str-returning derives) is text-shaped
-and load-bearing — all five derives plus `[service]` would migrate; the
-measured verdict said the win doesn't pay today. This is the right shape
-*eventually* if semantic queries or heavy metaprogramming arrive; nothing
-today forces it.
+- `output()` — an empty output; `.item(builder)` appends a normalized item.
+- **Item builders** — today's `macro_std::build` vocabulary (`impl_of`,
+  `fun_of`, `struct_of`, `init_of`, `match_of`, …), evolved from
+  str-returning (`.render()`) to **value-returning**: builders nest as
+  values, and `.render()`/string concatenation disappear from macro code.
+- `.uses("std::default::Default")` — a first-class import, **scoped to the
+  expansion by the engine**. The leak class dies here: an expansion cannot
+  express a module-level import at all.
+- **Quoted expressions** — `expr(i"{field.type_.render()}::default()")`
+  wherever a body/initializer is needed; quoted leaves parse (cached) inside
+  the normalized skeleton and report errors against the macro's span.
+- The READ side is already structured (`Item`, `Arguments`, the meta-layout
+  contract pinned end-to-end) — this makes the API symmetric, and the
+  future staged semantic queries (§4) return the same value vocabulary.
 
-**C. Status quo.** Leaves the leak. Not acceptable — user code can silently
-depend on invisible names.
+## 3. Before / after — the `Default` derive (real code)
 
-## 3. Recommendation
+Today (`std/src/default.vl` — builders exist but bottom out in strings, and
+note the leaking import line):
 
-Take **A** now (it is the derive-leak fix, properly scoped), and record **B**
-as the migration path gated on the first macro feature that genuinely needs
-trees (semantic queries / tree-pattern matching), not on hygiene or
-performance — both of which A and the existing caches already cover. The
-expression-lifting rewrite is a useful precedent for A's mechanics: a
-resolution-only wrapper node, exhaustively handled in `for_each_child`, with
-the formatter unaffected (expansions never reach `vilan fmt`).
+```vilan
+macro fun Default(item: Item): Source {
+	import macro_std::option::Option::{ self, Some, None };
+	import macro_std::build::{ impl_of, fun_of, init_of };
 
-## 4. The real question (user, 2026-07-16): analyzer-integrated macros
+	if item.as_struct() is Some(let target) {
+		mut literal = init_of(target.name);
+		for field in target.fields {
+			literal = literal.field(field.name, i"{field.type_.render()}::default()");
+		}
+		let constructor = fun_of("default")
+			.returns(target.name)
+			.expr(literal.render());
+		ret source("import std::default::Default;\n"
+			+ impl_of(target.name).implements("Default").method(constructor).render());
+	}
+	source("")
+}
+```
 
-The sharper proposal: macros don't emit source at all — they run against the
-analyzer and **mutate the analysis graph directly** (register entities,
-impls, scope bindings, types). Claimed wins: no parse time, no import
-leaking, and — the substantive one — *more capabilities*.
+After (value-returning builders; the import is declared, scoped, unleakable;
+no `.render()`, no string assembly, no re-parse of the structure):
 
-**What the capability win really is.** Today's derives are recursive-
-SYNTACTIC by necessity: a macro cannot ask "does this field's type implement
-`Wire`?" because it runs before analysis exists. Analyzer integration makes
-macros *semantic* — trait queries, resolved types, reachability. That is a
-genuinely new power class, and it is already the recorded trigger for the
-engine's beyond-v1 work (macro-engine.md §11 "semantic queries").
+```vilan
+macro fun Default(item: Item): Output {
+	import macro_std::option::Option::{ self, Some, None };
+	import macro_std::build::{ output, expr, impl_of, fun_of, init_of };
 
-**The hazards, in order of severity:**
+	if item.as_struct() is Some(let target) {
+		mut literal = init_of(target.name);
+		for field in target.fields {
+			literal = literal.field(field.name, expr(i"{field.type_.render()}::default()"));
+		}
+		let constructor = fun_of("default")
+			.returns(target.name)
+			.expr(literal);
+		ret output()
+			.uses("std::default::Default")
+			.item(impl_of(target.name).implements("Default").method(constructor));
+	}
+	output()
+}
+```
 
-1. **Staging becomes a fixpoint entanglement.** A macro that reads analysis
-   (does `Point: Wire` hold?) while other macros' outputs *change* analysis
-   (an impl that makes it hold) turns expansion order into a semantic
-   observable — the chicken-and-egg every mainstream design dodges: Rust
-   keeps proc macros token→token *specifically* so they can't observe types;
-   Zig gets semantic comptime only by making the whole analysis LAZY and
-   demand-driven. Today's clean staging (expand to fixpoint, then analyze
-   once) would need a real replacement, not an amendment.
-2. **The API surface is the compiler's most-churned internals.** The graph
-   (entities, `Expr`, constraints, scopes) changed shape twice THIS WEEK
-   (`LiftRegion`, `prepped_conditions`). Exposing it as the macro contract
-   either freezes it or breaks user macros every release. Emission-based
-   macros ride a small, stable surface (source text; someday `Node`).
-3. **Caching and the LSP.** Worlds and expansions cache on *text keys* —
-   deterministic, replayable, and what keeps per-keystroke re-analysis
-   cheap. A graph-mutating macro's input is *analyzer state*; invalidation
-   becomes graph-shaped, and hermeticity (the property that made
-   library-defined macros safe to run at all) is gone.
-4. **Provenance gets worse, not better.** Emitted source is inspectable —
-   error previews exist, spans exist. Graph mutations have no source to
-   show; E8's "diagnostic points into generated code" problem becomes
-   "diagnostic points into code that never existed anywhere".
+The diff is deliberately small — the 2026-07-07 builder migration did the
+hard part; this change is what the builders *return* and how the engine
+*receives* it. The quoted leaf (`expr(i"…::default()")`) is the
+items/expressions boundary made visible.
 
-**The middle path that captures the win without the hazards** — split the
-proposal's two halves:
+## 4. Sequencing
 
-- **Semantic READS (queries), staged:** macros keep *emitting*, but gain a
-  read-only reflection API over a completed analysis of the non-generated
-  program — expand in waves: analyze, expand the macros whose queries are
-  answerable, re-analyze, repeat to fixpoint (with a cycle diagnostic when a
-  macro's query depends on its own output — the honest version of the
-  chicken-and-egg, surfaced instead of resolved by luck). This is Zig's
-  discipline grafted onto the existing engine, and const-eval already shares
-  the interpreter, so the reflection vocabulary has a home.
-- **Graph WRITES stay the compiler's:** what macros "write" remains
-  declarative — emitted items, plus (cheaply, now) the scope wrapper for
-  hygiene. No parse-time argument survives measurement (0.8%, cached), and
-  the leak dies with the wrapper either way.
+1. **`rpc.vl` leak-dependence fix** — std code depending on a leaked name is
+   a bug under every design; clean it first, independently.
+2. **The contract migration** — `Output` + value-returning builders + engine
+   structural splicing + expansion-scoped `uses`. The derives/`[service]`
+   **byte-identical gate** protects the whole migration (same generated
+   program, new plumbing). Text `Source` remains accepted during the
+   transition, deprecated after std migrates.
+3. **Staged semantic queries** (the capability follow-on, own design when
+   demanded — the trait-based `[derive(Wire)]` check is the standing
+   candidate): expansion in waves against analyzed state, read-only, cycle
+   diagnostics when a macro's query depends on its own output. Recorded, not
+   in this slice.
 
-Recommendation: adopt the wrapper now (§2 A); design the staged-query
-reflection API as the engine's v2 when a macro genuinely needs a semantic
-answer (the `[derive(Wire)]` all-fields check is the standing candidate);
-keep direct graph mutation off the table as a *contract*, even if the
-staged expander uses it internally.
+## 5. Open questions (for sign-off)
 
-## 5. Convergence (user + review, 2026-07-16): the `macro_std` contract
-
-Agreed: analyzer access is INDIRECT, through `macro_std` — a curated API is
-the control point for what macros may see and do. The user pushes further:
-output should be a **simple, normalized API too, not source text**. Position
-after review — agreed, with one boundary drawn carefully:
-
-- **The curated API dissolves the API-stability objection.** §4's worry was
-  exposing the graph/`Node` enum; a small `macro_std` vocabulary is a
-  versioned, documented contract, and the adapter (builder values → whatever
-  the compiler holds internally) is compiler-private and free to churn.
-- **Structured output is the better contract.** Text's failure modes are
-  real and lived-with: escaping/interpolation traps, precedence accidents at
-  splice points, string-level gensyms, post-reparse diagnostics on synthetic
-  spans. Structured values make malformed output unrepresentable-or-checked
-  at CONSTRUCTION (with the macro's own spans), imports become first-class
-  values the engine scopes (the §2 leak fix falls out as engine behavior,
-  not a wrapper bolt-on), and provenance improves: a generated impl can say
-  which macro built it (E8's missing ingredient).
-- **The boundary: normalize ITEMS, quote EXPRESSIONS.** The builders should
-  stay a small closed set of item/declaration shapes (`impl_of`, `fun_of`,
-  `struct_of`, fields, imports…) — but macro output legitimately contains
-  arbitrary expression BODIES, and rebuilding the whole expression grammar
-  as builders is the churn trap §4 warned about. Expression leaves stay
-  QUOTED (parsed text at the leaf, small and cacheable) inside normalized
-  item skeletons — the Rust `quote!`/Scala typed-quotes shape. Parsing
-  shrinks to leaves; the STRUCTURE is normalized.
-- **Symmetry with reads.** Reflection inputs are already structured meta
-  values (`Item`, `Arguments`; the meta-layout contract in macros.rs is
-  pinned e2e) — structured output makes the API symmetric, and §4's staged
-  semantic queries return the same vocabulary when they arrive.
-
-**Sequencing:** (1) fix `rpc.vl`'s leaked-name dependence now — it is a bug
-under every future; (2) evolve `macro_std::build` from str-returning to
-value-returning builders with the engine splicing structurally — the
-derives/`[service]` byte-gate protects the migration, and import scoping
-ships as engine behavior here (subsuming §2's wrapper); (3) staged semantic
-queries (§4) as the capability follow-on. The measured 0.8% parse cost was
-never the reason to do this; the contract is.
-
-## 6. Open questions for the discussion
-
-1. Should an expansion be able to *opt into* exporting an import (re-export
-   from generated code)? (Draft answer: no — generated re-exports are spooky;
-   a macro can generate the item itself.)
-2. Do `macro { .. }` blocks (item position) get the same scope wrapper?
-   (Draft: yes — same splice channel, same rule.)
-3. Does the wrapper affect the world/expansion caches' keys? (Draft: no —
-   caching keys on source text; the wrapper is walk-time structure.)
+1. **Naming/shape of `Output`** — one value with `.item`/`.uses`, or a list
+   of items where `use` is itself an item builder? (Draft: one value; a
+   scoped `use` is semantically different from an emitted item.)
+2. **Re-exports from expansions** — may an expansion `export`? (Draft: no —
+   generated re-exports are spooky; generate the item itself.)
+3. **`macro { .. }` blocks and expression-position invocations** — same
+   `Output` channel with items restricted by position? (Draft: yes — an
+   expression-position macro returns a quoted expression, item position
+   returns items; the engine already distinguishes the positions.)
+4. **Cache keys** — unchanged (worlds and expansions still key on source
+   text; `Output` values are what the cache STORES post-execution). Confirm.
