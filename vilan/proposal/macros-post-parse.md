@@ -180,3 +180,45 @@ shape macro code should read as.
    another macro GENERATES reintroduces expansion-order sensitivity at the
    name level. Draft: v1 handles resolve only against loaded modules (std,
    real files); resolving generated items joins the staged-queries design.
+
+## 7. Full normalization — the horizon (recorded 2026-07-16, DEFERRED)
+
+The thought experiment (user): if API churn were solved, what would
+normalizing ALL the way — expression builders, no quoted text — buy beyond
+§2? Written down so the deferral is a decision, not amnesia:
+
+- **Ergonomics.** Macro authoring becomes typed, completable vilan: the LSP
+  helps write macros, malformed output is impossible at every level, no
+  escaping/interpolation reasoning ever, refactors are type-guided.
+- **Capabilities — the deep ones.** Values-in mean values-OUT and values
+  APART: reflection could extend from items to BODIES, enabling the macro
+  classes the engine structurally cannot host today — assert-diagram
+  macros, instrumentation/tracing wrappers that rewrite existing bodies,
+  checked DSLs, memoization attributes. With staged queries, builders could
+  take TYPE handles and check assignability at construction — generated
+  code correct before splicing. Every built node carries its constructing
+  call site — E8 diagnostics pointing at the macro line that built the
+  offending node.
+- **Open questions dissolve.** Q1: `.uses` disappears entirely (references
+  are handles); Q3: an expression-position macro just returns an expression
+  VALUE — no position-restricted parsing; Q5: the handle/quote boundary
+  stops existing. **Q6 does NOT dissolve** — order sensitivity against
+  generated items is a staging problem, orthogonal to normalization.
+- **Grammar decoupling cuts both ways.** Quoted text ties macros to the
+  surface grammar; builders tie them to a semantic API. Neither is free —
+  which is the churn problem restated.
+
+**The churn problem, and the candidate fix (user):** generate the builder
+boilerplate with Rust attributes/macros over the compiler's own enums.
+Assessment: that solves the BOILERPLATE half (writing/maintaining builders)
+but not the CONTRACT half — an auto-generated API mirrors internal shape,
+so internal churn becomes user-visible breakage instead of maintainer toil.
+The full fix likely needs both: a small versioned STABLE IR that builders
+target, with the Rust-macro trick generating the mechanical parts of the
+IR→internal adapter so the cost of keeping the IR stable while internals
+move stays near zero. Design that when this section is picked up.
+
+**Decision: deferred.** The §1–§6 contract (Output, value-returning item
+builders with bulk forms, scoped `uses`, quoted-with-splices, semantic
+handles v1 against loaded modules) is the implementation target now; this
+section is its recorded horizon.
