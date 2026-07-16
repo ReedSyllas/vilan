@@ -13,6 +13,13 @@ let doubled = count? * 2;                 // Option<i32> — Some(n * 2) or None
 let banner  = user?.name + "!";           // Option<str> — chain and operators in one region
 let overdue = deadline? < now();          // Option<bool>
 
+// The `?` may mark EITHER operand — the region rule is position-independent
+// (the body is the whole region with the element at the hole):
+let halved  = 2 * count?;                 // Option<i32> — count.map(|x| 2 * x)
+let expired = now() >= deadline?;         // Option<bool> — note: now() still runs
+                                          //   when deadline is None (§2 — operands
+                                          //   LEFT of a `?` evaluate unconditionally)
+
 // Two `?` — applicative. Good only if BOTH are good, left-to-right.
 let total = price? + tax?;                // Option<i32>
 let area  = width? * height?;             // Option<i32>
@@ -59,6 +66,14 @@ enclosing expression, up to its slot root**, as the continuation:
   / Rust-`?` precedent: `base()? + surcharge()?` never calls `surcharge`
   when `base()` is bad). This is `and_then` nesting ending in a `map`,
   spelled as one expression.
+- **The `?` may sit on any operand — binary operators stay symmetrical.**
+  `2 * count?` and `now() >= deadline?` lift exactly like their mirrored
+  forms: the hole's position in the body is wherever the `?` is; nothing
+  about the rule privileges the left operand. The one direction-sensitive
+  fact is *evaluation order*, which is source order: everything **left** of
+  a `?` has already evaluated by the time that receiver splits, so in
+  `now() >= deadline?` the `now()` call runs even when `deadline` is bad —
+  short-circuiting skips only what lies to the **right** of a bad `?`.
 - **Typing.** With every `?`-receiver `M<T₁> … M<Tₙ>` and the body typing as
   `U` (each hole at its element type): the region is `M<U>` — unless `U` is
   the receivers' own container `M<V>`, which **flattens** to `M<V>` (the
@@ -165,7 +180,9 @@ No new runtime, and for std containers no closures:
 
 ## 7. Test plan (per case, as always)
 
-Map region (`count? * 2` — Some and None, runtime-pinned); applicative both
+Map region (`count? * 2` — Some and None, runtime-pinned); the mirrored
+forms (`2 * count?`, `now() >= deadline?`) with an **effect-order pin** that
+a call LEFT of a bad `?` still runs; applicative both
 good / left bad / right bad, with **effect-order pins** (right receiver not
 called on left-bad); `Result` first-error-wins + same-`E` mismatch (with the
 `.map_err` hint); mixed `Option`/`Result` region rejected (`.ok_or` hint);
