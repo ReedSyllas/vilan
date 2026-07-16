@@ -56,9 +56,33 @@ A macro returns an `Output` value (name open, §5):
 - `.uses("std::default::Default")` — a first-class import, **scoped to the
   expansion by the engine**. The leak class dies here: an expansion cannot
   express a module-level import at all.
-- **Quoted expressions** — `expr(i"{field.type_.render()}::default()")`
-  wherever a body/initializer is needed; quoted leaves parse (cached) inside
-  the normalized skeleton and report errors against the macro's span.
+- **Semantic handles** *(user, 2026-07-16 — adopted)*: a macro resolves the
+  entities it references and constructs the reference BOUND to the resolved
+  identity, not to a name-in-scope:
+
+  ```vilan
+  let print_fn = resolve_module("std")?.namespace("io")?.item("print")!;
+  let print_call = FunctionCall::from_fn(print_fn, [ /* arguments */ ])!;
+  ```
+
+  This is Template Haskell's resolved-`Name` / Racket's binding-identity
+  move, and it is strictly better than name-based splicing wherever it
+  applies: no imports, no shadowing or capture hazards (hygiene by
+  identity), resolution failures are LOUD macro-time errors at the macro's
+  span (note the pseudo-code already reads naturally under expression
+  lifting), and arity/shape check at construction. Implementation stays
+  cheap: the engine can lower a handle to a hidden, gensym-named binding in
+  the expansion's scope — hygienic imports as plumbing, no new analyzer
+  primitives. The churn objection does NOT apply here: modules, items,
+  calls, constructions, and literals are the language's STABLE spine.
+- **Quoted expressions with handle splices** — the escape hatch for
+  arbitrary SHAPE (operators, matches, control flow — the grammar's churny
+  tail, which is exactly what must not become builders):
+  `expr(i"{lhs} + {rhs}")` where a hole accepts a handle or a built value,
+  not just text. Quote the shape, splice the identities — the
+  quasi-quotation shape TH and Scala both converged on. Quoted leaves parse
+  (cached) inside the normalized skeleton and report errors against the
+  macro's span.
 - The READ side is already structured (`Item`, `Arguments`, the meta-layout
   contract pinned end-to-end) — this makes the API symmetric, and the
   future staged semantic queries (§4) return the same value vocabulary.
@@ -145,3 +169,14 @@ shape macro code should read as.
    returns items; the engine already distinguishes the positions.)
 4. **Cache keys** — unchanged (worlds and expansions still key on source
    text; `Output` values are what the cache STORES post-execution). Confirm.
+5. **The handle/quote boundary** — which constructions get first-class
+   handle-based builders (calls, struct/variant construction, field access,
+   local bindings as gensym handles?) vs staying quoted-with-splices. Draft:
+   start with `resolve_module`/`.namespace`/`.item`, `FunctionCall::from_fn`,
+   construction, and gensym locals; grow the handle layer only from real
+   derive/`[service]` call sites, never speculatively — the quoted-splice
+   form is always available.
+6. **Handle resolution vs generated items** — a handle resolving an item
+   another macro GENERATES reintroduces expansion-order sensitivity at the
+   name level. Draft: v1 handles resolve only against loaded modules (std,
+   real files); resolving generated items joins the staged-queries design.
