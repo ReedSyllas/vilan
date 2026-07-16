@@ -49,6 +49,10 @@ A macro returns an `Output` value (name open, §5):
   `fun_of`, `struct_of`, `init_of`, `match_of`, …), evolved from
   str-returning (`.render()`) to **value-returning**: builders nest as
   values, and `.render()`/string concatenation disappear from macro code.
+  Wherever repetition occurs, builders take **bulk list forms** —
+  `.fields(List<(str, Expr)>)`, `.methods(…)`, `.legs(…)` — alongside the
+  single-entry forms, so macro code `map`s over reflection instead of
+  folding a mutable builder.
 - `.uses("std::default::Default")` — a first-class import, **scoped to the
   expansion by the engine**. The leak class dies here: an expansion cannot
   express a module-level import at all.
@@ -93,13 +97,11 @@ macro fun Default(item: Item): Output {
 	import macro_std::build::{ output, expr, impl_of, fun_of, init_of };
 
 	if item.as_struct() is Some(let target) {
-		mut literal = init_of(target.name);
-		for field in target.fields {
-			literal = literal.field(field.name, expr(i"{field.type_.render()}::default()"));
-		}
+		let defaults = target.fields
+			.map(|field| (field.name, expr(i"{field.type_.render()}::default()")));
 		let constructor = fun_of("default")
 			.returns(target.name)
-			.expr(literal);
+			.expr(init_of(target.name).fields(defaults));
 		ret output()
 			.uses("std::default::Default")
 			.item(impl_of(target.name).implements("Default").method(constructor));
@@ -111,7 +113,9 @@ macro fun Default(item: Item): Output {
 The diff is deliberately small — the 2026-07-07 builder migration did the
 hard part; this change is what the builders *return* and how the engine
 *receives* it. The quoted leaf (`expr(i"…::default()")`) is the
-items/expressions boundary made visible.
+items/expressions boundary made visible, and the bulk `.fields(…)` form
+turns the old mutable-builder fold into a `map` over the reflection — the
+shape macro code should read as.
 
 ## 4. Sequencing
 
