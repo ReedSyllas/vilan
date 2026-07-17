@@ -134,7 +134,7 @@ pub fn render_parse_error<T: std::fmt::Display>(
 ) -> String {
     use std::fmt::Write;
 
-    let mut message = render_parse_error_reason(error, source);
+    let mut message = render_parse_error_reason(error);
     for (label, _span) in error.contexts() {
         write!(message, " in {}", render_parse_pattern(label)).unwrap();
     }
@@ -149,7 +149,6 @@ pub fn render_parse_error<T: std::fmt::Display>(
 /// report) rather than inline.
 pub fn render_parse_error_reason<T: std::fmt::Display>(
     error: &chumsky::error::Rich<'_, T, Span>,
-    source: &str,
 ) -> String {
     use chumsky::error::{RichPattern, RichReason};
     use std::fmt::Write;

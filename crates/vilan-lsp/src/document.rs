@@ -1779,11 +1779,11 @@ fn identifier_ending_at(text: &str, end: usize) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn std_root() -> PathBuf {
+    pub(crate) fn std_root() -> PathBuf {
         // The std PACKAGE directory (holding `vilan.toml`), like the server's
         // `discover_std_dir` — pointing at the bare source root instead would
         // drop the manifest's platform layers (no `std::fs`/`std::http`/…).
@@ -1795,7 +1795,7 @@ mod tests {
     /// A throwaway on-disk package: `files` written under a fresh temp dir,
     /// the first file analyzed as the open document. Returns the temp dir (for
     /// later edits + cleanup) and the analyzed document.
-    fn analyze_workspace(files: &[(&str, &str)]) -> (PathBuf, Document) {
+    pub(crate) fn analyze_workspace(files: &[(&str, &str)]) -> (PathBuf, Document) {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);

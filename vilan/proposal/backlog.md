@@ -723,12 +723,19 @@ have gaps.
      content loads). The server registers buffers on open/change (pre-debounce)
      and clears on close; `on_change` already re-analyzed dependents, so unsaved
      edits now propagate live. Pinned (disk-vs-overlay dependent analysis).
-   - **Async lifecycle harness:** the publish bookkeeping (explicit empties, `published_extra`
-     diffing, close-clears-extras) is exercised only structurally; the fake-`Client` +
-     edit-sequence property test (*published == fresh analysis, always*) remains to build.
-   - **Shared-dependency last-writer-wins:** two open docs importing the same broken module each
-     publish their view of it; the merged per-URI union is not computed (harmless while both
-     views agree, which re-analyze-all keeps true).
+   - ~~**Async lifecycle harness**~~ — **BUILT 2026-07-17**: the publish bookkeeping
+     extracted from the server into a synchronous planner (`publish.rs`:
+     `PublishState::plan_publish`/`plan_close` return `(target, diagnostics)`
+     actions; the `Client` only transmits). The property test replays
+     open/edit/close sequences and asserts *published == fresh analysis* after
+     every step, including explicit empties and close-clears-extras.
+   - ~~**Shared-dependency last-writer-wins**~~ — **FIXED 2026-07-17**, same
+     refactor: a target's published list is the deduplicated union of every
+     open owner's group for it (`BTreeMap` owner order, so republishing
+     without a change is byte-stable — C1). Fixing or closing one importer
+     leaves the other's view of the shared module standing; the last owner's
+     close publishes the explicit empty. Pinned in the lifecycle property
+     test.
 
 7. **Diagnostic span precision — the long-tail audit** (SUPERSEDED by the
    diagnostics standard, 2026-07-16: `proposal/diagnostics-standard.md` +

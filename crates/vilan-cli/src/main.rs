@@ -1345,7 +1345,7 @@ fn report<'src>(
                 .map(|error| error.map_token(|token| token.to_string())),
         )
         .for_each(|error| {
-            let reason = vilan_core::render_parse_error_reason(&error, src);
+            let reason = vilan_core::render_parse_error_reason(&error);
             Report::build(
                 ReportKind::Error,
                 (filename.to_string(), error.span().into_range()),
