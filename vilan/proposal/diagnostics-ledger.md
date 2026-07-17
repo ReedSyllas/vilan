@@ -43,8 +43,8 @@ audit batch, in the batch's commit.
 | 32 | analyzer.rs:6326 | `an `external` function cannot have a body` | |
 | 33 | analyzer.rs:6375 | `function '{}' must have a body or be declared `external`` | |
 | 34 | analyzer.rs:6532 | `a bare `?` (expression lifting) is not supported in this pos` | |
-| 35 | analyzer.rs:6548 | ``?` lifts nothing here — the region is the whole expression;` | |
-| 36 | analyzer.rs:6566 | ``!` cannot run after a `?` inside a lifted expression — it ` | |
+| 35 | analyzer.rs:6548 | ``?` lifts nothing here — the region is the whole expression;` |QUALIFIES — expression-lifting pins (15) |
+| 36 | analyzer.rs:6566 | ``!` cannot run after a `?` inside a lifted expression — it ` |QUALIFIES — expression-lifting pins (15) |
 | 37 | analyzer.rs:6636 | ``!` requires the nearest enclosing function to declare an `O` | |
 | 38 | analyzer.rs:6697 | `a `context` clause is only supported on a closure type` | |
 | 39 | analyzer.rs:6788 | `a destructuring `let` requires a value` | |
@@ -92,12 +92,12 @@ audit batch, in the batch's commit.
 | 81 | analyzer.rs:11454 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 82 | analyzer.rs:11490 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 83 | analyzer.rs:11554 | `Expected {}, but got {} instead.` |QUALIFIES — B2; reassignments carry the B3 initializer note; pins a_reassignment_mismatch…, an_annotated_variables… |
-| 84 | analyzer.rs:11642 | ``?.` flattens into the chain's own `Result`, so the error ty` | |
-| 85 | analyzer.rs:11711 | `a bare `?` lifts an `Option` or a `Result` — this is {render` | |
-| 86 | analyzer.rs:11729 | `every `?` in one lifted expression must split the same ` | |
-| 87 | analyzer.rs:11755 | ``?` short-circuits a lifted expression with the first bad ` | |
-| 88 | analyzer.rs:11807 | `this lifted expression flattens into its own `Result`, so th` | |
-| 89 | analyzer.rs:11889 | ``?.` lifts an `Option`, a `Result`, or a type opting in with` | |
+| 84 | analyzer.rs:11642 | ``?.` flattens into the chain's own `Result`, so the error ty` |QUALIFIES — B4 map_err/ok_or steers (§9 pins) |
+| 85 | analyzer.rs:11711 | `a bare `?` lifts an `Option` or a `Result` — this is {render` |QUALIFIES — expression-lifting pins (15) |
+| 86 | analyzer.rs:11729 | `every `?` in one lifted expression must split the same ` |QUALIFIES — expression-lifting pins (15) |
+| 87 | analyzer.rs:11755 | ``?` short-circuits a lifted expression with the first bad ` |QUALIFIES — expression-lifting pins (15) |
+| 88 | analyzer.rs:11807 | `this lifted expression flattens into its own `Result`, so th` |QUALIFIES — expression-lifting pins (15) |
+| 89 | analyzer.rs:11889 | ``?.` lifts an `Option`, a `Result`, or a type opting in with` |QUALIFIES — expression-lifting pins (15) |
 | 90 | analyzer.rs:11904 | ``?.` needs a container with an element type — this is {rende` | |
 | 91 | analyzer.rs:11935 | ``?.` on {rendered} needs a `{member_name}` method — the Lift` | |
 | 92 | analyzer.rs:12011 | `a bare `ret` exits a closure whose body yields {tail_rendere` | |
@@ -140,10 +140,10 @@ audit batch, in the batch's commit.
 | 129 | analyzer.rs:13466 | `no bound of this type parameter ({}) has a member '{}'` | |
 | 130 | analyzer.rs:13487 | `cannot find trait '{}'` |QUALIFIES — B4 steer added (batch 1); pin: an_unknown_trait_steers… |
 | 131 | analyzer.rs:13499 | `'{}' is not a trait` | |
-| 132 | analyzer.rs:13567 | `'{}' does not implement trait '{}': missing '{}'` | |
-| 133 | analyzer.rs:13736 | `this {construct} is `{label}`, but a condition must be `bool` | |
-| 134 | analyzer.rs:13815 | ``{symbol}` takes `bool` operands; the {side} operand is `{la` | |
-| 135 | analyzer.rs:13831 | ``bool` has no ordering — `{symbol}` models `PartialOrd`, whi` | |
+| 132 | analyzer.rs:13567 | `'{}' does not implement trait '{}': missing '{}'` |QUALIFIES — impl-anchored (where the fix goes); refinement recorded: render the missing member's signature (declaration_labels) |
+| 133 | analyzer.rs:13736 | `this {construct} is `{label}`, but a condition must be `bool` |QUALIFIES — B28 pins (6) |
+| 134 | analyzer.rs:13815 | ``{symbol}` takes `bool` operands; the {side} operand is `{la` |QUALIFIES — B2 names side + type (B24 pins) |
+| 135 | analyzer.rs:13831 | ``bool` has no ordering — `{symbol}` models `PartialOrd`, whi` |QUALIFIES — B6 + compare steer (B24 pins) |
 | 136 | analyzer.rs:13855 | ``{symbol}` compares two values of the same type, but the ` | |
 | 137 | analyzer.rs:13973 | `type '{type_name}' does not implement the `{trait_name}` ope` | |
 | 138 | analyzer.rs:13991 | `cannot find context `{name}` in this scope` |QUALIFIES — context-pass pins |
@@ -156,7 +156,7 @@ audit batch, in the batch's commit.
 | 145 | analyzer.rs:14167 | `type of function call arguments could not be resolved` | |
 | 146 | analyzer.rs:14190 | `cannot index this List: its element type is never determined` | |
 | 147 | analyzer.rs:14210 | `type of match expression could not be resolved (subject: {})` | |
-| 148 | analyzer.rs:14284 | `the type of '{name}' is never fully determined: `{rendered}`` | |
+| 148 | analyzer.rs:14284 | `the type of '{name}' is never fully determined: `{rendered}`` |QUALIFIES — B4 annotate steer (Map-sweep pins) |
 | 149 | analyzer.rs:15270 | `` | |
 | 150 | analyzer.rs:16224 | ``{importer}` imports `pkg::{module}`, but `{module}` is not ` | |
 | 151 | analyzer.rs:16633 | `library at `{}` has no `lib.vl`` | |
