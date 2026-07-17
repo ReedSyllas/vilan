@@ -267,10 +267,10 @@ pub struct PublishedDiagnostic {
     pub span: Span,
     pub message: String,
     pub warning: bool,
-    /// The diagnostic's secondary note (diagnostics-standard.md C3), same
-    /// source file as the primary span in v1 — published as LSP related
-    /// information for entry-attributed diagnostics.
-    pub note: Option<(Span, String)>,
+    /// The diagnostic's secondary note (diagnostics-standard.md C3): span,
+    /// message, and the note's own file when it lives elsewhere (`None` =
+    /// the diagnostic's file) — published as LSP related information.
+    pub note: Option<(Span, String, Option<PathBuf>)>,
 }
 
 /// The span of an entity, flattened from the `&Span` stored in `span_map`.
@@ -400,7 +400,13 @@ impl Document {
                     span: error.span,
                     message: error.msg.clone(),
                     warning: false,
-                    note: error.note.clone(),
+                    note: error.note.as_ref().map(|note| {
+                        let note_path = note
+                            .source
+                            .and_then(|source| self.program.as_ref()?.source_path(source))
+                            .map(Path::to_path_buf);
+                        (note.span, note.msg.clone(), note_path)
+                    }),
                 });
             } else if source == DERIVED_SOURCE {
                 published.push(PublishedDiagnostic {

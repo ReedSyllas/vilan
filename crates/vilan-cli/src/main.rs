@@ -1225,8 +1225,20 @@ fn compile_to_js(
             // `Rich` fold has nowhere to put the secondary location); plain
             // ones keep the shared path.
             match &error.note {
-                Some(_) => {
-                    report_error_with_note(&filename, &src, error);
+                Some(note) => {
+                    // A cross-source note reads its file so the sub-label can
+                    // render in it (the trait's declaration in std, say).
+                    let note_file = note
+                        .source
+                        .and_then(|source| {
+                            let path = program.source_path(source)?;
+                            let text = fs::read_to_string(path).ok()?;
+                            Some((path.display().to_string(), text))
+                        })
+                        // The note's file may BE the entry — same-file
+                        // rendering needs no second source.
+                        .filter(|(name, _)| *name != filename);
+                    report_error_with_note(&filename, &src, error, note_file);
                     noted_errors += 1;
                 }
                 None => errs.push(Rich::custom(error.span, error.msg.as_str())),
@@ -1359,10 +1371,25 @@ fn report<'src>(
 /// (diagnostics-standard.md C3): the primary label at the error's span, the
 /// note as a second label at its own location ("first call here", "generated
 /// by this attribute").
-fn report_error_with_note(filename: &str, src: &str, error: &vilan_core::Error) {
-    let Some((note_span, note_msg)) = &error.note else {
+fn report_error_with_note(
+    filename: &str,
+    src: &str,
+    error: &vilan_core::Error,
+    // The note's own file when it lives elsewhere (name, contents) —
+    // cross-source notes point into std or an imported module.
+    note_file: Option<(String, String)>,
+) {
+    let Some(note) = &error.note else {
         return;
     };
+    let note_filename = note_file
+        .as_ref()
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| filename.to_string());
+    let mut files = vec![(filename.to_string(), src.to_string())];
+    if let Some((name, text)) = note_file {
+        files.push((name, text));
+    }
     Report::build(
         ReportKind::Error,
         (filename.to_string(), error.span.into_range()),
@@ -1375,12 +1402,12 @@ fn report_error_with_note(filename: &str, src: &str, error: &vilan_core::Error) 
             .with_color(Color::Red),
     )
     .with_label(
-        Label::new((filename.to_string(), note_span.into_range()))
-            .with_message(note_msg.clone())
+        Label::new((note_filename, note.span.into_range()))
+            .with_message(note.msg.clone())
             .with_color(Color::Yellow),
     )
     .finish()
-    .print(sources([(filename.to_string(), src.to_string())]))
+    .print(sources(files))
     .unwrap();
 }
 

@@ -205,14 +205,25 @@ async fn publish_document(
                     let mut converted = diagnostic(document.line_index.range(&item.span));
                     // A secondary note (same-file in v1) becomes related
                     // information — "first call here"-style anchors.
-                    if let Some((note_span, note_msg)) = &item.note {
-                        converted.related_information = Some(vec![DiagnosticRelatedInformation {
-                            location: Location {
-                                uri: uri.clone(),
-                                range: document.line_index.range(note_span),
-                            },
-                            message: note_msg.clone(),
-                        }]);
+                    if let Some((note_span, note_msg, note_path)) = &item.note {
+                        // A cross-source note points into ITS file, with a
+                        // fresh index for that file's positions.
+                        let located = match note_path {
+                            None => Some((uri.clone(), document.line_index.range(note_span))),
+                            Some(path) => std::fs::read_to_string(path)
+                                .ok()
+                                .map(|text| LineIndex::new(&text).range(note_span))
+                                .and_then(|range| {
+                                    Url::from_file_path(path).ok().map(|target| (target, range))
+                                }),
+                        };
+                        if let Some((target, range)) = located {
+                            converted.related_information =
+                                Some(vec![DiagnosticRelatedInformation {
+                                    location: Location { uri: target, range },
+                                    message: note_msg.clone(),
+                                }]);
+                        }
                     }
                     entry_group.push(converted);
                 }

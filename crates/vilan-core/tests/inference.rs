@@ -153,7 +153,7 @@ fn failure_diagnostics_with_notes(
 ) -> Vec<(
     String,
     std::ops::Range<usize>,
-    Option<(String, std::ops::Range<usize>)>,
+    Option<(String, std::ops::Range<usize>, bool)>,
 )> {
     let source = source.to_string();
     std::thread::Builder::new()
@@ -174,7 +174,9 @@ fn failure_diagnostics_with_notes(
                     (
                         error.msg,
                         error.span.into_range(),
-                        error.note.map(|(span, msg)| (msg, span.into_range())),
+                        error
+                            .note
+                            .map(|note| (note.msg, note.span.into_range(), note.source.is_some())),
                     )
                 })
                 .collect()
@@ -204,8 +206,33 @@ fn assert_fails_noting(source: &str, message_part: &str, note_spanning: &str, no
     assert!(
         matching.iter().any(|(_, _, note)| note
             .as_ref()
-            .is_some_and(|(msg, range)| msg.contains(note_part) && *range == expected)),
+            .is_some_and(|(msg, range, _)| msg.contains(note_part) && *range == expected)),
         "no {message_part:?} diagnostic notes {note_part:?} at {expected:?} ({note_spanning:?}); got: {matching:#?}"
+    );
+}
+
+/// `assert_fails_spanning`, but targeting the Nth occurrence (0-based) of
+/// `spanning` — for snippets that necessarily appear earlier in another
+/// role (an attribute name also being the macro definition's, a use after
+/// its declaration).
+fn assert_fails_spanning_nth(source: &str, spanning: &str, occurrence: usize, message_part: &str) {
+    let mut start = 0;
+    let mut at = None;
+    for _ in 0..=occurrence {
+        at = source[start..].find(spanning).map(|found| start + found);
+        match at {
+            Some(position) => start = position + 1,
+            None => panic!("occurrence {occurrence} of {spanning:?} not found"),
+        }
+    }
+    let expected_start = at.unwrap();
+    let expected = expected_start..expected_start + spanning.len();
+    let diagnostics = failure_diagnostics(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, range)| message.contains(message_part) && *range == expected),
+        "no {message_part:?} diagnostic spans occurrence {occurrence} of {spanning:?} at {expected:?}; got: {diagnostics:#?}"
     );
 }
 
@@ -14713,6 +14740,68 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
         main();
         "#,
         "a\n",
+    );
+}
+
+// --- Notes finale: cross-source notes + the recorded refinements -------------
+
+#[test]
+fn a_missing_trait_member_renders_the_signature_and_notes_the_trait() {
+    // The conformance error names the member, renders the signature to
+    // write (B4), and its note points INTO std at the trait's own
+    // declaration (the first cross-source note).
+    let diagnostics = failure_diagnostics_with_notes(
+        r#"
+        import std::compare::PartialEq;
+        struct Point { x: i32 }
+        impl Point with PartialEq {}
+        fun main() {
+            let _p = Point { x = 1 };
+        }
+        "#,
+    );
+    let matching: Vec<_> = diagnostics
+        .iter()
+        .filter(|(message, _, _)| message.contains("missing 'eq'"))
+        .collect();
+    assert!(!matching.is_empty(), "{diagnostics:#?}");
+    assert!(
+        matching
+            .iter()
+            .any(|(message, _, _)| message.contains("declare `fun eq(")),
+        "the expected signature must render: {matching:#?}"
+    );
+    assert!(
+        matching.iter().any(
+            |(_, _, note)| note.as_ref().is_some_and(|(msg, _, cross_source)| {
+                msg.contains("the trait declares it here") && *cross_source
+            })
+        ),
+        "the note must point into the trait's file: {matching:#?}"
+    );
+}
+
+#[test]
+fn a_bound_failure_notes_the_bounds_declaration() {
+    // "does not implement trait 'X', required by a generic bound" now notes
+    // WHERE that bound is declared — in the callee's own file (here: this
+    // one; std callees make it cross-source).
+    assert_fails_noting(
+        r#"
+        trait Greet {
+            fun greet(self): str;
+        }
+        struct Cat { name: str }
+        fun welcome<T: Greet>(guest: T): str {
+            guest.greet()
+        }
+        fun main() {
+            let _w = welcome(Cat { name = "tom" });
+        }
+        "#,
+        "does not implement trait 'Greet'",
+        "T",
+        "the bound is declared here",
     );
 }
 

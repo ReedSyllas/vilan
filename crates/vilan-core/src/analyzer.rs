@@ -1669,7 +1669,7 @@ impl<'src> Analyzer<'src> {
     /// explicit `f<Cat>()` arguments, method own-generics, impl-subject and
     /// trait-parameter bindings).
     fn check_generic_bound_satisfaction(&mut self) {
-        let mut errors: Vec<(Span, String)> = Vec::new();
+        let mut errors: Vec<(Span, String, TypeId)> = Vec::new();
         let recorded: Vec<(Id, SubstitutionContext)> = self
             .method_call_substitution
             .iter()
@@ -1731,7 +1731,11 @@ impl<'src> Analyzer<'src> {
                              required by a generic bound of this call"
                         )
                     };
-                    errors.push((**self.span_map.get(&call_id).unwrap_or(&&EMPTY_SPAN), msg));
+                    errors.push((
+                        **self.span_map.get(&call_id).unwrap_or(&&EMPTY_SPAN),
+                        msg,
+                        constraint_id,
+                    ));
                 }
             }
         }
@@ -1889,7 +1893,11 @@ impl<'src> Analyzer<'src> {
                              required by a declared bound of '{owner_name}'"
                         )
                     };
-                    errors.push((**self.span_map.get(&site_id).unwrap_or(&&EMPTY_SPAN), msg));
+                    errors.push((
+                        **self.span_map.get(&site_id).unwrap_or(&&EMPTY_SPAN),
+                        msg,
+                        *constraint_id,
+                    ));
                 }
             }
         }
@@ -1897,14 +1905,37 @@ impl<'src> Analyzer<'src> {
         // The substitution maps iterate in hash order — sort for deterministic
         // diagnostics, and dedup: one call can bind the same constraint along
         // several recorded routes.
-        errors.sort_by_key(|(span, msg)| (span.start, span.end, msg.clone()));
-        errors.dedup();
-        for (span, msg) in errors {
-            self.diagnostics.push(Error {
-                note: None,
-                span,
-                msg,
-            });
+        errors.sort_by_key(|(span, msg, _)| (span.start, span.end, msg.clone()));
+        errors
+            .dedup_by(|(a_span, a_msg, _), (b_span, b_msg, _)| a_span == b_span && a_msg == b_msg);
+        // Note WHERE the failing bound is declared (`T: Feed` in the
+        // callee's signature — cross-file when the callee is std's): the
+        // generic's registration entity carries the declaration's name span.
+        let bound_declarations: Vec<(Span, String, Option<crate::error::Note>)> = errors
+            .into_iter()
+            .map(|(span, msg, constraint_id)| {
+                let note = self
+                    .expr_id_to_expr_map
+                    .iter()
+                    .find(|(_, expr)| {
+                        matches!(expr, Expr::Generic(declared) if *declared == constraint_id)
+                    })
+                    .and_then(|(entity_id, _)| {
+                        let declaration_span = **self.span_map.get(entity_id)?;
+                        if declaration_span.into_range().is_empty() {
+                            return None;
+                        }
+                        Some(crate::error::Note {
+                            span: declaration_span,
+                            msg: "the bound is declared here".to_string(),
+                            source: self.source_of_id(*entity_id),
+                        })
+                    });
+                (span, msg, note)
+            })
+            .collect();
+        for (span, msg, note) in bound_declarations {
+            self.diagnostics.push(Error { note, span, msg });
         }
     }
 
@@ -10633,7 +10664,7 @@ impl<'src> Analyzer<'src> {
                                     " The parameter is unannotated — annotate it \
                                      (e.g. `|x: {expected}|`) to pin the type deliberately."
                                 ),
-                                Some((
+                                Some(crate::error::Note::here(
                                     *fill_span,
                                     format!(
                                         "the parameter's type was inferred from this, \
@@ -11619,7 +11650,7 @@ impl<'src> Analyzer<'src> {
                     // The type the reassignment broke was inferred, not
                     // written — name the origin (B3).
                     let note = inferred_origin.map(|span| {
-                        (
+                        crate::error::Note::here(
                             span,
                             format!(
                                 "the variable's type was inferred from this initializer ({expected_str})"
@@ -13805,12 +13836,36 @@ impl<'src> Analyzer<'src> {
                 if provided_elsewhere {
                     continue;
                 }
+                // Render the signature to write, and point at the trait's own
+                // declaration of it — cross-file when the trait is std's
+                // (standard B4 + C3's cross-source note).
+                let (expected_signature, note) = self
+                    .traits
+                    .get(&declaring_trait_id)
+                    .and_then(|trait_| trait_.declarations.get(member_name).copied())
+                    .and_then(|member_id| {
+                        let function_id = match self.expr_id_to_expr_map.get(&member_id) {
+                            Some(Expr::Function(function_id)) => *function_id,
+                            _ => member_id,
+                        };
+                        let function = self.functions.get(&function_id)?;
+                        let signature = self.function_signature_label(function);
+                        Some((
+                            format!(" — declare `{signature}`"),
+                            Some(crate::error::Note {
+                                span: function.name_span,
+                                msg: "the trait declares it here".to_string(),
+                                source: self.source_of_id(function_id),
+                            }),
+                        ))
+                    })
+                    .unwrap_or((String::new(), None));
                 self.diagnostics.push(Error {
-                    note: None,
+                    note,
                     span: check.span,
                     msg: format!(
-                        "'{}' does not implement trait '{}': missing '{}'",
-                        subject_name, check.trait_name, member_name
+                        "'{}' does not implement trait '{}': missing '{}'{}",
+                        subject_name, check.trait_name, member_name, expected_signature
                     ),
                 });
             }

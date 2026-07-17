@@ -140,7 +140,7 @@ audit batch, in the batch's commit.
 | 129 | analyzer.rs:13466 | `no bound of this type parameter ({}) has a member '{}'` |QUALIFIES — B6 names the bound channel (B12 pins) |
 | 130 | analyzer.rs:13487 | `cannot find trait '{}'` |QUALIFIES — B4 steer added (batch 1); pin: an_unknown_trait_steers… |
 | 131 | analyzer.rs:13499 | `'{}' is not a trait` |QUALIFIES — B2 renders the subject |
-| 132 | analyzer.rs:13567 | `'{}' does not implement trait '{}': missing '{}'` |QUALIFIES — impl-anchored (where the fix goes); refinement recorded: render the missing member's signature (declaration_labels) |
+| 132 | analyzer.rs:13567 | `'{}' does not implement trait '{}': missing '{}'` |QUALIFIES — impl-anchored; REFINEMENT TAKEN (notes finale): renders the signature to declare + a CROSS-SOURCE note at the trait's declaration; pin a_missing_trait_member… |
 | 133 | analyzer.rs:13736 | `this {construct} is `{label}`, but a condition must be `bool` |QUALIFIES — B28 pins (6) |
 | 134 | analyzer.rs:13815 | ``{symbol}` takes `bool` operands; the {side} operand is `{la` |QUALIFIES — B2 names side + type (B24 pins) |
 | 135 | analyzer.rs:13831 | ``bool` has no ordering — `{symbol}` models `PartialOrd`, whi` |QUALIFIES — B6 + compare steer (B24 pins) |
