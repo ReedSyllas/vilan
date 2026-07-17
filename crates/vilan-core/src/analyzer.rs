@@ -2358,11 +2358,27 @@ impl<'src> Analyzer<'src> {
             if parameter.name == "self" {
                 parameters.push("self".to_string());
             } else {
-                parameters.push(format!(
+                let mut label = format!(
                     "{}: {}",
                     parameter.name,
                     self.declaration_type_label(parameter.type_id)
-                ));
+                );
+                // A `context` clause is part of the signature's contract —
+                // render it (E9: hover shows clauses).
+                if let Some(contexts) = self.parameter_contexts.get(parameter_id) {
+                    let names: Vec<&str> = contexts
+                        .iter()
+                        .filter_map(|context_id| {
+                            self.variables.get(context_id).map(|variable| variable.name)
+                        })
+                        .collect();
+                    match names.as_slice() {
+                        [] => {}
+                        [single] => label.push_str(&format!(" context {single}")),
+                        many => label.push_str(&format!(" context ({})", many.join(", "))),
+                    }
+                }
+                parameters.push(label);
             }
         }
         let generics = self.generic_list_label(&function.generic_parameter_constraint_ids);

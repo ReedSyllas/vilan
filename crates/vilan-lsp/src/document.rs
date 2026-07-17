@@ -196,6 +196,10 @@ const KEYWORDS: &[&str] = &[
 pub struct Document {
     pub line_index: LineIndex,
     pub program: Option<Program<'static>>,
+    /// Evaluated `const` results (E9: hover shows a constant's VALUE). The
+    /// evaluation is fuel-capped and skips itself on any diagnostic, so a
+    /// broken document costs nothing.
+    pub const_results: std::collections::HashMap<Id, vilan_core::interpreter::ConstValue>,
     pub diagnostics: Vec<Error>,
     /// The source file each diagnostic belongs to, parallel to `diagnostics`
     /// (`SourceId(0)` = this document; imported modules publish to their own
@@ -348,10 +352,25 @@ impl Document {
             .as_ref()
             .map(vilan_core::platform_color::requirements)
             .unwrap_or_default();
+        // Evaluate `const`s so hover can show their VALUES (E9). `evaluate`
+        // skips itself on any diagnostic and is fuel-capped; its own errors
+        // are already published by the build, so the editor drops them here
+        // (squiggling them is the build's job — same wording, same spans).
+        let const_results = program
+            .as_ref()
+            .map(|program| {
+                vilan_core::const_eval::evaluate(
+                    program,
+                    &vilan_core::options::BuildOptions::default(),
+                )
+                .0
+            })
+            .unwrap_or_default();
 
         Document {
             line_index,
             program,
+            const_results,
             diagnostics,
             diagnostic_sources,
             warnings,
@@ -478,7 +497,13 @@ impl Document {
                 return Some(self.compose_hover(program, definition, declaration, None));
             }
         }
-        let type_label = self.hover_label(program, id);
+        let type_label = self.hover_label(program, id).map(|label| {
+            // A constant shows its VALUE beside its type (E9).
+            match self.const_value_label(program, id) {
+                Some(value) => format!("{label} = {value}"),
+                None => label,
+            }
+        });
         let requirement = self
             .function_target(program, id)
             .and_then(|function| self.platform_requirements.get(&function))
@@ -568,10 +593,12 @@ impl Document {
                 break;
             }
         }
+        // `///` is the doc-comment syntax (user decision, 2026-07-16); a
+        // plain `//` block is an implementation note and never surfaces.
         let mut docs: Vec<String> = Vec::new();
         while let Some(last) = lines.last() {
             let trimmed = last.trim();
-            let Some(comment) = trimmed.strip_prefix("//") else {
+            let Some(comment) = trimmed.strip_prefix("///") else {
                 break;
             };
             docs.push(comment.strip_prefix(' ').unwrap_or(comment).to_string());
@@ -611,6 +638,89 @@ impl Document {
             }
             _ => None,
         }
+    }
+
+    /// A constant's evaluated value for hover (`= 42`), when `id` is (or
+    /// names) a binding whose initializer is a `const` expression the
+    /// evaluation resolved. Rendered compactly and truncated — hover is a
+    /// glance, not a dump.
+    fn const_value_label(&self, program: &Program, id: Id) -> Option<String> {
+        use vilan_core::analyzer::Expr;
+        let binding = match program.entity_map.get(&id)? {
+            Expr::Local(binding) | Expr::Variable(binding) => *binding,
+            _ => id,
+        };
+        let initial = program.variables.get(&binding)?.initial?;
+        let value = self.const_results.get(&initial)?;
+        fn render(value: &vilan_core::interpreter::ConstValue, out: &mut String) {
+            use vilan_core::interpreter::ConstValue;
+            match value {
+                ConstValue::Undefined => out.push_str("undefined"),
+                ConstValue::Null => out.push_str("null"),
+                ConstValue::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+                ConstValue::Number(value) => out.push_str(&value.to_string()),
+                ConstValue::BigInt(value) => {
+                    out.push_str(&value.to_string());
+                    out.push('n');
+                }
+                ConstValue::Str(value) => {
+                    out.push('"');
+                    out.push_str(value);
+                    out.push('"');
+                }
+                ConstValue::Array(items) => {
+                    out.push('[');
+                    for (index, item) in items.iter().enumerate() {
+                        if index > 0 {
+                            out.push_str(", ");
+                        }
+                        render(item, out);
+                        if out.len() > 120 {
+                            out.push('…');
+                            break;
+                        }
+                    }
+                    out.push(']');
+                }
+                ConstValue::Set(items) => {
+                    out.push_str("Set[");
+                    for (index, item) in items.iter().enumerate() {
+                        if index > 0 {
+                            out.push_str(", ");
+                        }
+                        render(item, out);
+                        if out.len() > 120 {
+                            out.push('…');
+                            break;
+                        }
+                    }
+                    out.push(']');
+                }
+                ConstValue::Map(entries) => {
+                    out.push_str("Map[");
+                    for (index, (key, entry)) in entries.iter().enumerate() {
+                        if index > 0 {
+                            out.push_str(", ");
+                        }
+                        render(key, out);
+                        out.push_str(": ");
+                        render(entry, out);
+                        if out.len() > 120 {
+                            out.push('…');
+                            break;
+                        }
+                    }
+                    out.push(']');
+                }
+            }
+        }
+        let mut rendered = String::new();
+        render(value, &mut rendered);
+        if rendered.len() > 160 {
+            rendered.truncate(160);
+            rendered.push('…');
+        }
+        Some(rendered)
     }
 
     fn hover_label(&self, program: &Program, id: Id) -> Option<String> {
@@ -2133,17 +2243,53 @@ mod tests {
         assert!(hover.contains("```vilan\nasync fun warm()\n```"), "{hover}");
     }
 
-    // E9: the declaration's leading `//` block surfaces as prose, and
+    // E9: the declaration's leading `///` block surfaces as prose, and
     // attribute lines between it and the name don't break the chain.
     #[test]
     fn hover_surfaces_the_leading_doc_comment() {
         let hover = hover_at_cursor(
-            "import std::print;\n\n// Renders the badge label.\n// Two lines of docs.\n[must_use]\nfun bad|ge(count: i32): str {\n\t\"b\"\n}\n\nfun main() {\n\tlet _b = badge(1);\n\tprint(\"x\");\n}\n",
+            "import std::print;\n\n/// Renders the badge label.\n/// Two lines of docs.\n[must_use]\nfun bad|ge(count: i32): str {\n\t\"b\"\n}\n\nfun main() {\n\tlet _b = badge(1);\n\tprint(\"x\");\n}\n",
         )
         .expect("hover on the declaration");
         assert!(
             hover.contains("Renders the badge label.\nTwo lines of docs."),
             "{hover}"
+        );
+        assert!(hover.contains("fun badge(count: i32): str"), "{hover}");
+    }
+
+    // E9: hover on a `const` binding shows its evaluated VALUE beside the
+    // type — the LSP evaluation is fuel-capped and skips broken documents.
+    #[test]
+    fn hover_shows_a_constants_value() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\nlet SIZE = const 8 * 8;\n\nfun main() {\n\tprint(SI|ZE);\n}\n",
+        )
+        .expect("hover on the constant");
+        assert!(hover.contains("= 64"), "{hover}");
+    }
+
+    // E9: a parameter's `context` clause renders in the hovered signature.
+    #[test]
+    fn hover_renders_a_parameters_context_clause() {
+        let hover = hover_at_cursor(
+            "import std::reactive::{ owner_scope, Owner };\n\nfun with_o|wner(body: (|| void) context owner_scope) {\n\tlet _b = body;\n}\n\nfun main() {}\n",
+        )
+        .expect("hover on the declaration");
+        assert!(hover.contains("context owner_scope"), "{hover}");
+    }
+
+    // `///` is the doc syntax — a plain `//` block is an implementation note
+    // and must NOT surface (user decision, 2026-07-16).
+    #[test]
+    fn hover_ignores_plain_comment_blocks() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\n// An internal note, not docs.\nfun bad|ge(count: i32): str {\n\t\"b\"\n}\n\nfun main() {\n\tlet _b = badge(1);\n\tprint(\"x\");\n}\n",
+        )
+        .expect("hover on the declaration");
+        assert!(
+            !hover.contains("An internal note"),
+            "plain `//` must not surface: {hover}"
         );
         assert!(hover.contains("fun badge(count: i32): str"), "{hover}");
     }
