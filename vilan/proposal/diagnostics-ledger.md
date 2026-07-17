@@ -56,7 +56,7 @@ audit batch, in the batch's commit.
 | 45 | analyzer.rs:7328 | `an `async` closure type is not valid here (expected an expre` | |
 | 46 | analyzer.rs:7337 | `a mapped tuple type is not valid here (expected an expressio` | |
 | 47 | analyzer.rs:7427 | `a `context` clause is only supported on a closure type` | |
-| 48 | analyzer.rs:7715 | `cannot find '{}' in this scope` | |
+| 48 | analyzer.rs:7715 | `cannot find '{}' in this scope` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 49 | analyzer.rs:7726 | `'{}' is not an enum variant` | |
 | 50 | analyzer.rs:7764 | `variant '{}' does not belong to the matched enum` | |
 | 51 | analyzer.rs:7773 | `cannot match an enum variant against type {}` | |
@@ -70,8 +70,8 @@ audit batch, in the batch's commit.
 | 59 | analyzer.rs:8770 | `Expected {expected} (this literal's element type), but got {` | |
 | 60 | analyzer.rs:8847 | `Expected {expected} (this literal's element type), but got {` | |
 | 61 | analyzer.rs:10184 | ``self` import has no enclosing namespace` | |
-| 62 | analyzer.rs:10204 | `cannot find module '{}' to import` | |
-| 63 | analyzer.rs:10240 | `cannot find '{}' in the imported path` | |
+| 62 | analyzer.rs:10204 | `cannot find module '{}' to import` |QUALIFIES — A4 segment anchor (E7 pass 1 pins) |
+| 63 | analyzer.rs:10240 | `cannot find '{}' in the imported path` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 64 | analyzer.rs:10483 | `Expected {} {}, but got {} instead.` | |
 | 65 | analyzer.rs:10549 | `Expected {}, but got {} instead.{}` | |
 | 66 | analyzer.rs:10577 | `Expected {} {}, but got {} instead.` | |
@@ -125,20 +125,20 @@ audit batch, in the batch's commit.
 | 114 | analyzer.rs:12853 | `cannot index this List: its element type is never determined` | |
 | 115 | analyzer.rs:12874 | `index {literal_index} is out of range for an array of length` | |
 | 116 | analyzer.rs:12894 | `cannot index {} (only a `List` or `[T; n]` array is indexabl` | |
-| 117 | analyzer.rs:12992 | `cannot find '{}' in this scope` | |
+| 117 | analyzer.rs:12992 | `cannot find '{}' in this scope` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 118 | analyzer.rs:13014 | ``use` requires a namespace (a module or an enum)` | |
-| 119 | analyzer.rs:13030 | `cannot find '{}' in the `use` path` | |
+| 119 | analyzer.rs:13030 | `cannot find '{}' in the `use` path` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 120 | analyzer.rs:13083 | `` | |
-| 121 | analyzer.rs:13100 | `cannot find '{}' in this scope` | |
+| 121 | analyzer.rs:13100 | `cannot find '{}' in this scope` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 122 | analyzer.rs:13139 | `cannot assign to this expression` | |
 | 123 | analyzer.rs:13205 | `` | |
-| 124 | analyzer.rs:13230 | `cannot find '{}' in module '{}'` | |
+| 124 | analyzer.rs:13230 | `cannot find '{}' in module '{}'` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 125 | analyzer.rs:13251 | `cannot resolve `{member_name}` here: {subject_str} is not a ` | |
-| 126 | analyzer.rs:13383 | `cannot find '{}' in {}{}` | |
-| 127 | analyzer.rs:13405 | `cannot find '{}' in module '{}'` | |
+| 126 | analyzer.rs:13383 | `cannot find '{}' in {}{}` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
+| 127 | analyzer.rs:13405 | `cannot find '{}' in module '{}'` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 128 | analyzer.rs:13422 | `cannot access '{}' on an unconstrained type parameter` | |
 | 129 | analyzer.rs:13466 | `no bound of this type parameter ({}) has a member '{}'` | |
-| 130 | analyzer.rs:13487 | `cannot find trait '{}'` | |
+| 130 | analyzer.rs:13487 | `cannot find trait '{}'` |QUALIFIES — B4 steer added (batch 1); pin: an_unknown_trait_steers… |
 | 131 | analyzer.rs:13499 | `'{}' is not a trait` | |
 | 132 | analyzer.rs:13567 | `'{}' does not implement trait '{}': missing '{}'` | |
 | 133 | analyzer.rs:13736 | `this {construct} is `{label}`, but a condition must be `bool` | |
@@ -146,7 +146,7 @@ audit batch, in the batch's commit.
 | 135 | analyzer.rs:13831 | ``bool` has no ordering — `{symbol}` models `PartialOrd`, whi` | |
 | 136 | analyzer.rs:13855 | ``{symbol}` compares two values of the same type, but the ` | |
 | 137 | analyzer.rs:13973 | `type '{type_name}' does not implement the `{trait_name}` ope` | |
-| 138 | analyzer.rs:13991 | `cannot find context `{name}` in this scope` | |
+| 138 | analyzer.rs:13991 | `cannot find context `{name}` in this scope` |QUALIFIES — context-pass pins |
 | 139 | analyzer.rs:14006 | `duplicate context `{name}` in this clause` | |
 | 140 | analyzer.rs:14062 | `unknown numeric suffix `{suffix}`{hint}` | |
 | 141 | analyzer.rs:14129 | `the literal `{whole}` is out of range for `{name}` ({range})` | |

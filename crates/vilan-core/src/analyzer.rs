@@ -1031,6 +1031,13 @@ pub struct Analyzer<'src> {
     // `if`/`for` conditions awaiting the post-solve `bool` check (B28), with
     // the construct label the diagnostic names.
     prepped_conditions: Vec<(Id, &'static str)>,
+    // The std package's module files, recorded by `analyze` so the B4 import
+    // steer can consult modules the program never loaded (the classic miss
+    // is precisely an unloaded one). The index is built lazily on the FIRST
+    // failed resolution — a cold path — through the process-global parse
+    // cache, then reused.
+    std_module_files: Vec<(String, String)>,
+    std_export_index: Option<HashMap<String, String>>,
     // Where an unannotated closure parameter's shared type slot was filled
     // from (the FIRST call's argument, B13) — a later conflicting call
     // diagnoses naming that origin instead of a bare mismatch.
@@ -1169,6 +1176,32 @@ static EMPTY_SPAN: Span = Span {
 // `a::{ b, c::d }` becomes `([a], b)` and `([a, c], d)`.
 /// Whether `op` is an arithmetic operator that a type can overload by
 /// implementing the corresponding `std::operators` trait.
+/// The top-level names a module's items declare — what an `import` can name.
+/// Feeds the B4 import steer's std index; wrappers unwrap, variants are not
+/// leaf-importable and stay out.
+fn collect_declared_names<'src>(items: &NodeList<'src>, out: &mut Vec<&'src str>) {
+    for item in items {
+        let mut node = &item.0;
+        loop {
+            match node {
+                Node::Export(inner)
+                | Node::Derive(_, inner)
+                | Node::Service(_, inner)
+                | Node::MacroAttribute(_, _, _, inner) => node = &inner.0,
+                _ => break,
+            }
+        }
+        match node {
+            Node::Func(function) | Node::MacroFun(function) => out.push(function.name.0),
+            Node::Struct(name, ..) | Node::Enum(name, ..) | Node::Trait(name, ..) => {
+                out.push(name.0)
+            }
+            Node::Let(name, ..) => out.push(name.0),
+            _ => {}
+        }
+    }
+}
+
 /// Whether a subtree contains an `expr!` at any depth — the region walk's v1
 /// check that `!` never runs after a `?` inside a lifted expression.
 fn contains_try_assert(node: &Node) -> bool {
@@ -1371,6 +1404,8 @@ impl<'src> Analyzer<'src> {
             wrapped_view_captures: HashMap::new(),
             prepped_binary_ops: Vec::new(),
             prepped_conditions: Vec::new(),
+            std_module_files: Vec::new(),
+            std_export_index: None,
             closure_parameter_fill_sites: HashMap::new(),
             prepped_binder_inheritance: Vec::new(),
             binary_op_dispatch: HashMap::new(),
@@ -11838,6 +11873,90 @@ impl<'src> Analyzer<'src> {
         Resolution::Resolved
     }
 
+    /// A B4 import steer for a name that failed scope resolution
+    /// (diagnostics-standard.md, audit batch 1): when exactly ONE known
+    /// module's scope carries `name`, suggest the import. The std namespace
+    /// scope's members discriminate `std::` from `pkg::`; two modules with
+    /// the SAME name (a layered std twin) keep the steer, genuinely
+    /// different modules make it ambiguous and it stays silent.
+    fn import_steer(&mut self, name: &str) -> Option<String> {
+        // The lazy std-wide index: module files the program never loaded,
+        // scanned for top-level declared names through the process-global
+        // parse cache. Built once, on the first failed resolution.
+        if self.std_export_index.is_none() {
+            let mut index: HashMap<String, String> = HashMap::new();
+            let mut ambiguous: HashSet<String> = HashSet::new();
+            let files = self.std_module_files.clone();
+            for (module_name, path) in &files {
+                let Some(loaded) = load_package_module(path) else {
+                    continue;
+                };
+                let mut names = Vec::new();
+                collect_declared_names(&loaded.ast.0, &mut names);
+                for declared in names {
+                    match index.get(declared) {
+                        Some(existing) if existing == module_name => {}
+                        Some(_) => {
+                            ambiguous.insert(declared.to_string());
+                        }
+                        None => {
+                            index.insert(declared.to_string(), module_name.clone());
+                        }
+                    }
+                }
+            }
+            for name in ambiguous {
+                index.remove(&name);
+            }
+            self.std_export_index = Some(index);
+        }
+        self.import_steer_inner(name)
+    }
+
+    fn import_steer_inner(&self, name: &str) -> Option<String> {
+        let std_members: HashSet<Id> = self
+            .module_id_by_name
+            .get("std")
+            .and_then(|std_id| self.modules.get(std_id))
+            .and_then(|module| self.scopes.get(&module.body.1))
+            .map(|scope| scope.name_to_id_map.values().copied().collect())
+            .unwrap_or_default();
+        let mut hit: Option<(&str, bool)> = None;
+        for module in self.modules.values() {
+            if module.name == "pkg" || module.name == "std" {
+                continue;
+            }
+            let Some(scope) = self.scopes.get(&module.body.1) else {
+                continue;
+            };
+            let Some(entity) = scope.name_to_id_map.get(name).copied() else {
+                continue;
+            };
+            // Only DEFINITIONS steer: an imported name registers into the
+            // importing module's scope too, and would turn every importer
+            // into an ambiguous hit.
+            if self.source_of_id(entity) != self.source_of_id(module.id) {
+                continue;
+            }
+            let is_std = std_members.contains(&module.id);
+            match &hit {
+                None => hit = Some((module.name, is_std)),
+                Some((existing, _)) if *existing == module.name => {}
+                Some(_) => return None,
+            }
+        }
+        if let Some((module, is_std)) = hit {
+            let root = if is_std { "std" } else { "pkg" };
+            return Some(format!(
+                " — import it first (`import {root}::{module}::{name};`)"
+            ));
+        }
+        let module = self.std_export_index.as_ref()?.get(name)?;
+        Some(format!(
+            " — import it first (`import std::{module}::{name};`)"
+        ))
+    }
+
     /// The short name of a std container enum, for region diagnostics.
     fn render_container_name(&self, enum_id: Id) -> &'static str {
         if Some(enum_id) == self.option_enum_id {
@@ -13097,10 +13216,11 @@ impl<'src> Analyzer<'src> {
                 }
                 None => {
                     let diagnostics_before = self.diagnostics.len();
+                    let steer = self.import_steer(name).unwrap_or_default();
                     self.diagnostics.push(Error {
                         note: None,
                         span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
-                        msg: format!("cannot find '{}' in this scope", name),
+                        msg: format!("cannot find '{}' in this scope{}", name, steer),
                     });
                     if let Some(source) = self.source_of_id(id) {
                         self.attribute_new_diagnostics(diagnostics_before, source);
@@ -13200,7 +13320,8 @@ impl<'src> Analyzer<'src> {
                              (`import {name}::…;`) and qualify through its name"
                         )
                     } else {
-                        format!("cannot find type '{}'", name)
+                        let steer = self.import_steer(name).unwrap_or_default();
+                        format!("cannot find type '{}'{}", name, steer)
                     };
                     self.diagnostics.push(Error {
                         note: None,
@@ -13484,10 +13605,11 @@ impl<'src> Analyzer<'src> {
             let trait_id = match self.try_get_expr_id_by_name(check.trait_name, check.scope_id) {
                 Some(trait_id) => trait_id,
                 None => {
+                    let steer = self.import_steer(check.trait_name).unwrap_or_default();
                     self.diagnostics.push(Error {
                         note: None,
                         span: check.span,
-                        msg: format!("cannot find trait '{}'", check.trait_name),
+                        msg: format!("cannot find trait '{}'{}", check.trait_name, steer),
                     });
                     continue;
                 }
@@ -16384,6 +16506,29 @@ pub fn analyze<'src>(
     // `source_ranges` records the entity-id span each file's walk produced.
     let mut sources: Vec<PathBuf> = vec![entry_path.to_path_buf()];
     let mut analyzer = Analyzer::new();
+    // The std module inventory for the B4 import steer (module name, path) —
+    // every layer's `*.vl` except the package surface itself. Recorded
+    // eagerly (a cheap directory walk); parsed lazily, only if a resolution
+    // ever fails.
+    for root in std::iter::once(&std.base_root).chain(std.layers.iter().map(|layer| &layer.root)) {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|extension| extension == "vl")
+                    && path.file_stem().is_some_and(|stem| stem != "lib")
+                {
+                    if let (Some(stem), Some(path_str)) =
+                        (path.file_stem().and_then(|s| s.to_str()), path.to_str())
+                    {
+                        analyzer
+                            .std_module_files
+                            .push((stem.to_string(), path_str.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    analyzer.std_module_files.sort();
     let global_scope = analyzer.create_scope(None);
     let global_scope_id = analyzer.push_scope(global_scope);
     // Every primitive is now migrated to source and captured after its module

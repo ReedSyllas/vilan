@@ -14716,6 +14716,79 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- Diagnostics audit, batch 1: name resolution steers (standard B4) --------
+//
+// "cannot find X" now steers to the import when X uniquely names a known
+// module's export — the common miss after the derive-leak fix made
+// `JsonValue` require its import. Ambiguous or unknown names stay silent
+// (a wrong steer is worse than none).
+
+#[test]
+fn an_unknown_type_steers_to_its_std_import() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let v: JsonValue = 1;
+        }
+        "#,
+        "cannot find type 'JsonValue' — import it first (`import std::json::JsonValue;`)",
+    );
+}
+
+#[test]
+fn an_unknown_value_steers_to_its_std_import() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let text = format(42);
+        }
+        "#,
+        "import std::display::format;",
+    );
+}
+
+#[test]
+fn an_unknown_trait_steers_to_its_std_import() {
+    assert_fails_with(
+        r#"
+        struct Point { x: i32 }
+        impl Point with PartialOrd {
+            fun partial_compare(self, b: Point): Option<Ordering> {
+                None
+            }
+        }
+        fun main() {}
+        "#,
+        "cannot find trait 'PartialOrd' — import it first (`import std::compare::PartialOrd;`)",
+    );
+}
+
+#[test]
+fn an_unknown_name_gets_no_bogus_steer() {
+    // No module exports `zzz_missing`; the message stays plain.
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun main() {
+            let x = zzz_missing;
+        }
+        "#,
+    );
+    let matching: Vec<_> = diagnostics
+        .iter()
+        .filter(|(message, _)| message.contains("cannot find 'zzz_missing'"))
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "expected the plain error: {diagnostics:#?}"
+    );
+    assert!(
+        matching
+            .iter()
+            .all(|(message, _)| !message.contains("import it first")),
+        "an unknown name must not get a steer: {matching:#?}"
+    );
+}
+
 // --- The derive-import leak: expansion imports are scoped (FIXED) ------------
 //
 // A derive expansion self-carries its imports; they used to register into
