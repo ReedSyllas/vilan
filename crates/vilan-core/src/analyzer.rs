@@ -538,6 +538,11 @@ pub struct VariableConstraint {
     pub variable_id: Id,
     pub initial_type_id: TypeId,
     pub value_ids: Vec<Id>,
+    /// Where the variable's type was INFERRED from (the first value's span,
+    /// when there was no annotation) — a reassignment mismatch notes it
+    /// (diagnostics-standard.md B3). Carried through re-queues, which drop
+    /// the first value from `value_ids`.
+    pub inferred_origin: Option<Span>,
 }
 
 /// A constraint that a call subject expression's type must resolve to
@@ -778,6 +783,7 @@ impl VariableConstraint {
             variable_id,
             initial_type_id,
             value_ids,
+            inferred_origin: None,
         }
     }
 }
@@ -11471,6 +11477,11 @@ impl<'src> Analyzer<'src> {
         let mut substitution_context = HashMap::new();
         let mut variable_type = initial_type_id.get_type(self);
 
+        // When the type comes from the first VALUE (no annotation), that
+        // value is the inference origin a later mismatch names (B3).
+        let mut inferred_origin = constraint.inferred_origin;
+        let unannotated = matches!(variable_type, Type::Unknown);
+
         if let Some(&first_value_id) = value_ids.first() {
             let value_type = self.infer_type(first_value_id, &variable_type, &substitution_context);
             match self.reconcile_type(&value_type, &variable_type, &substitution_context) {
@@ -11480,6 +11491,9 @@ impl<'src> Analyzer<'src> {
                     }
                     if let Type::Unknown = variable_type {
                         variable_type = unified;
+                        if unannotated && inferred_origin.is_none() {
+                            inferred_origin = self.span_map.get(&first_value_id).map(|span| **span);
+                        }
                     }
                 }
                 None => {
@@ -11522,8 +11536,18 @@ impl<'src> Analyzer<'src> {
                     let expected_str =
                         self.pretty_print_type(&variable_type, &substitution_context);
                     let got_str = self.pretty_print_type(&value_type, &substitution_context);
+                    // The type the reassignment broke was inferred, not
+                    // written — name the origin (B3).
+                    let note = inferred_origin.map(|span| {
+                        (
+                            span,
+                            format!(
+                                "the variable's type was inferred from this initializer ({expected_str})"
+                            ),
+                        )
+                    });
                     self.diagnostics.push(Error {
-                        note: None,
+                        note,
                         span: **self.span_map.get(&value_id).unwrap(),
                         msg: format!("Expected {}, but got {} instead.", expected_str, got_str),
                     });
@@ -11538,6 +11562,7 @@ impl<'src> Analyzer<'src> {
                     variable_id,
                     initial_type_id: var_type_id,
                     value_ids: deferred_value_ids,
+                    inferred_origin,
                 }));
         }
         Resolution::Resolved

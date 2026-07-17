@@ -73,11 +73,11 @@ audit batch, in the batch's commit.
 | 62 | analyzer.rs:10204 | `cannot find module '{}' to import` |QUALIFIES — A4 segment anchor (E7 pass 1 pins) |
 | 63 | analyzer.rs:10240 | `cannot find '{}' in the imported path` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
 | 64 | analyzer.rs:10483 | `Expected {} {}, but got {} instead.` | |
-| 65 | analyzer.rs:10549 | `Expected {}, but got {} instead.{}` | |
+| 65 | analyzer.rs:10549 | `Expected {}, but got {} instead.{}` |QUALIFIES — B2 + B3 note (B13 first-call origin); pin a_conflicting_later_call… |
 | 66 | analyzer.rs:10577 | `Expected {} {}, but got {} instead.` | |
-| 67 | analyzer.rs:10605 | `Expected {}, but got {} instead.` | |
+| 67 | analyzer.rs:10605 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 68 | analyzer.rs:10644 | `Expected {} {}, but got {} instead.` | |
-| 69 | analyzer.rs:10722 | `Expected {}, but got {} instead.` | |
+| 69 | analyzer.rs:10722 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 70 | analyzer.rs:10776 | `cannot call '{name}': it is a struct, not a function — const` | |
 | 71 | analyzer.rs:10803 | `cannot call a non-function value` | |
 | 72 | analyzer.rs:10886 | `{} has no method '{}'` | |
@@ -85,13 +85,13 @@ audit batch, in the batch's commit.
 | 74 | analyzer.rs:11186 | `{} has no method '{}'{}` | |
 | 75 | analyzer.rs:11200 | `cannot call method '{}' on {}` | |
 | 76 | analyzer.rs:11213 | `cannot call '{member_name}' on a value of bare trait type ` | |
-| 77 | analyzer.rs:11248 | `Expected {}, but got {} instead.` | |
+| 77 | analyzer.rs:11248 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 78 | analyzer.rs:11288 | `Expected {} {}, but got {} instead.` | |
-| 79 | analyzer.rs:11336 | `Expected {}, but got {} instead.` | |
+| 79 | analyzer.rs:11336 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 80 | analyzer.rs:11376 | `a tuple comprehension's source must be a mapped tuple, got {` | |
-| 81 | analyzer.rs:11454 | `Expected {}, but got {} instead.` | |
-| 82 | analyzer.rs:11490 | `Expected {}, but got {} instead.` | |
-| 83 | analyzer.rs:11554 | `Expected {}, but got {} instead.` | |
+| 81 | analyzer.rs:11454 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
+| 82 | analyzer.rs:11490 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
+| 83 | analyzer.rs:11554 | `Expected {}, but got {} instead.` |QUALIFIES — B2; reassignments carry the B3 initializer note; pins a_reassignment_mismatch…, an_annotated_variables… |
 | 84 | analyzer.rs:11642 | ``?.` flattens into the chain's own `Result`, so the error ty` | |
 | 85 | analyzer.rs:11711 | `a bare `?` lifts an `Option` or a `Result` — this is {render` | |
 | 86 | analyzer.rs:11729 | `every `?` in one lifted expression must split the same ` | |
@@ -117,7 +117,7 @@ audit batch, in the batch's commit.
 | 106 | analyzer.rs:12495 | `cannot initialize a non-struct: {}` | |
 | 107 | analyzer.rs:12506 | `Expected {} {}, but got {} instead.` | |
 | 108 | analyzer.rs:12536 | `struct '{}' has no field '{}'` | |
-| 109 | analyzer.rs:12564 | `Expected {}, but got {} instead.` | |
+| 109 | analyzer.rs:12564 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 110 | analyzer.rs:12704 | `` | |
 | 111 | analyzer.rs:12718 | `subject is not a struct: {}` | |
 | 112 | analyzer.rs:12770 | `struct '{}' has no field '{}'` | |

@@ -14716,6 +14716,51 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- Diagnostics audit, batch 2: mismatch origins (standard B3) --------------
+
+#[test]
+fn a_reassignment_mismatch_notes_the_inferring_initializer() {
+    // `mut n = 1` fixed n's type invisibly; the later conflicting write
+    // names the origin as a note at the initializer (B3/C3).
+    assert_fails_noting(
+        r#"
+        fun main() {
+            mut n = 1;
+            n = "two";
+        }
+        "#,
+        "Expected i32, but got str instead.",
+        "1",
+        "the variable's type was inferred from this initializer (i32)",
+    );
+}
+
+#[test]
+fn an_annotated_variables_mismatch_stays_noteless() {
+    // With an annotation the origin is visible — no note (the message
+    // stands alone, exactly as before).
+    let diagnostics = failure_diagnostics_with_notes(
+        r#"
+        fun main() {
+            mut n: i32 = 1;
+            n = "two";
+        }
+        "#,
+    );
+    let matching: Vec<_> = diagnostics
+        .iter()
+        .filter(|(message, _, _)| message.contains("Expected i32, but got str"))
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "expected the mismatch: {diagnostics:#?}"
+    );
+    assert!(
+        matching.iter().all(|(_, _, note)| note.is_none()),
+        "an annotated variable's mismatch must not carry an inference note: {matching:#?}"
+    );
+}
+
 // --- Diagnostics audit, batch 1: name resolution steers (standard B4) --------
 //
 // "cannot find X" now steers to the import when X uniquely names a known
