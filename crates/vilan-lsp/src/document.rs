@@ -2809,3 +2809,72 @@ pub(crate) mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod leak_measurement {
+    use super::*;
+    use crate::document::tests::std_root;
+
+    /// Resident set size in KiB, from /proc/self/statm (Linux pages × 4).
+    fn rss_kib() -> usize {
+        let statm = std::fs::read_to_string("/proc/self/statm").expect("statm");
+        let pages: usize = statm
+            .split_whitespace()
+            .nth(1)
+            .expect("resident field")
+            .parse()
+            .expect("resident pages");
+        pages * 4
+    }
+
+    // Backlog E3 says MEASURE FIRST: every `Document::analyze` leaks its
+    // inputs (`Box::leak`ed source text, macro worlds, AST arenas) by
+    // design — the question is how fast that grows under real typing.
+    // This is a measurement, not a gate: run it explicitly with
+    //   cargo test -p vilan-lsp -- --ignored leak --nocapture
+    // and read the printed bytes/analysis.
+    #[test]
+    #[ignore = "measurement, not a gate — run with --ignored --nocapture"]
+    fn measure_per_analysis_leak() {
+        let dir = std::env::temp_dir().join(format!("vilan_leak_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.vl");
+        let std_dir = std_root();
+        // A medium, std-using document — each iteration's text differs (a
+        // simulated keystroke), so no unchanged-skip or parse-cache hit.
+        let text_at = |i: usize| {
+            format!(
+                "import std::print;\nimport std::option::Option::{{ self, Some, None }};\n\n\
+                 fun describe(value: Option<i32>): str {{\n\
+                 \tmatch value {{\n\t\tSome(n) => \"got \" + n.to_string(),\n\t\tNone => \"empty {i}\",\n\t}}\n}}\n\n\
+                 fun main() {{\n\tlet value = Some({i});\n\tprint(describe(value));\n\tprint(describe(None));\n}}\n"
+            )
+        };
+        let warmup = 20;
+        let measured = 200;
+        for i in 0..warmup {
+            let _ = Document::analyze(&text_at(i), &std_dir, &entry);
+        }
+        let before = rss_kib();
+        for i in warmup..warmup + measured {
+            let _ = Document::analyze(&text_at(i), &std_dir, &entry);
+            if (i - warmup + 1) % 50 == 0 {
+                println!(
+                    "after {:>3} analyses: {} KiB resident",
+                    i - warmup + 1,
+                    rss_kib()
+                );
+            }
+        }
+        let grown = rss_kib().saturating_sub(before);
+        println!(
+            "leak: {} KiB over {} analyses ≈ {:.1} KiB/analysis ({:.1} MiB per 1000 keystrokes)",
+            grown,
+            measured,
+            grown as f64 / measured as f64,
+            grown as f64 / measured as f64 * 1000.0 / 1024.0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

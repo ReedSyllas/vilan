@@ -707,13 +707,29 @@ have gaps.
 
 3. **Fix per-analysis `Box::leak` + incremental analysis** (L; roadmap #12, caching Tier 2/3) —
    the leak grows each keystroke/compile; true incremental is blocked by global
-   `entity_id`/`type_id` counters. Measure first; debounce currently masks it.
+   `entity_id`/`type_id` counters. **MEASURED 2026-07-17** (the `#[ignore]`d
+   `measure_per_analysis_leak` in `vilan-lsp/src/document.rs`; run with
+   `cargo test -p vilan-lsp -- --ignored leak --nocapture`): a medium
+   std-using document leaks **≈43 KiB per analysis** (debug build, 200
+   fresh-text analyses ≈ simulated keystrokes) — ≈42 MiB per 1000
+   keystrokes. With the debounce collapsing bursts, an hour of heavy
+   editing lands in the low hundreds of MiB: real, worth fixing, not
+   urgent. The fix (arena/incremental) stays L-sized and deferred; the
+   measurement is the harness to re-run against it.
 
 4. **LSP sub-file incremental parsing** (L; roadmap #13) — tree-sitter-style reuse; chumsky is a
    batch parser, so this is the largest, lowest-priority LSP item.
 
-5. **Migrate the codegen-snapshot corpus into `vilan test`** (S) — `vilan/test/` is a dev-time
-   `.js` snapshot check, separate from the behavior runner; unify.
+5. ~~**Migrate the codegen-snapshot corpus into `vilan test`**~~ — **DONE
+   2026-07-17**: the byte gate is now `crates/vilan-cli/tests/corpus.rs` —
+   every `vilan/test/*.vl` with a `.js` golden builds through the CURRENT
+   `vilan` binary (`CARGO_BIN_EXE`, exactly the command that generated the
+   goldens, `VILAN_STD` pinned to the repo std) in a temp copy, and the
+   `.js`/`.css` outputs must be byte-identical. Runs in the ordinary
+   `cargo test` suite (~27s, 8-way parallel), so the by-hand loop — rebuild
+   the debug binary, regenerate, `git diff` — is no longer how the gate is
+   *checked*; a stale binary can no longer check goldens. Regenerating after
+   a deliberate output change stays manual (and still wants a fresh binary).
 
 6. **Diagnostics remainder** (M; what E1 left open when it shipped 2026-07-04) —
    - ~~**Buffer overlay for unsaved dependencies**~~ — **FIXED 2026-07-16**: a
