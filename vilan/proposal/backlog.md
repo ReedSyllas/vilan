@@ -206,9 +206,16 @@ have gaps.
 
 3. **Variadic-generics deferred tail** (M–L; `variadic-generics.md` §Deferred) — shipped:
    flat-tuple lowering, mapped tuple types `(U in T: F<U>)`, tuple comprehensions, `combine`.
-   **Not done:** `keyof`; spread parameters (`...items: T`); elision of the flat-tuple
-   construction copy; **enforcement** of arity bounds `T: (2..)` and tuple element bounds
-   `(..: Display)` (parsed, not checked); trait-typed-value dispatch (B4).
+   ~~Enforcement of arity/element bounds~~ — **SHIPPED 2026-07-17**: tuple bounds
+   check wherever trait bounds do (`check_generic_bound_satisfaction`, both call
+   substitutions and construction sites): non-tuple values, arity outside
+   `lo..=hi` (inclusive), element-bound violations per element via
+   `satisfies_trait_bound`, and forwarded generics (satisfied only by a
+   contained own-bound: range containment + same-or-subtrait element bound).
+   Diagnostics carry the B12 "the bound is declared here" note for free (same
+   constraint-id channel); 11 pins; spec §5.9's "parsed but not enforced" note
+   replaced. **Not done:** `keyof`; spread parameters (`...items: T`); elision
+   of the flat-tuple construction copy; trait-typed-value dispatch (B4).
 
 4. **Trait objects / dynamic dispatch** (L; own proposal when demanded) — a value typed as a bare
    trait (`let x: Display = …`) is a clean compile error today (the silent-miscompile half was

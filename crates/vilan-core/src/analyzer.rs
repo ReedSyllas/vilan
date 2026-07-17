@@ -57,6 +57,30 @@ impl Drop for TypeCycleGuard {
     }
 }
 
+/// A generic parameter's tuple bound (`T: (2..: Display)`), recorded at
+/// registration and enforced with the trait bounds: the bound value must be a
+/// tuple, its arity inside `lo..=hi`, and — when `element_bound` is set —
+/// every element must satisfy that trait.
+#[derive(Clone, Debug)]
+struct TupleBoundRequirement {
+    lo: Option<u32>,
+    hi: Option<u32>,
+    element_bound: Option<TypeId>,
+}
+
+impl TupleBoundRequirement {
+    /// The bound as the user wrote it — `(2..)`, `(..10)`, `(..: Display)` —
+    /// for diagnostics. `element` is the rendered element-bound label.
+    fn label(&self, element: Option<&str>) -> String {
+        let lo = self.lo.map(|lo| lo.to_string()).unwrap_or_default();
+        let hi = self.hi.map(|hi| hi.to_string()).unwrap_or_default();
+        match element {
+            Some(element) => format!("({lo}..{hi}: {element})"),
+            None => format!("({lo}..{hi})"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Expr<'src> {
     // An assignment to a local: target accessor and the (possibly desugared,
@@ -934,6 +958,12 @@ pub struct Analyzer<'src> {
     // not during the walk); member resolution on a `T`-typed value searches every
     // bound.
     generic_bounds: HashMap<TypeId, Vec<TypeId>>,
+    // The tuple bound of a generic parameter (`T: (2..)` / `(..: Display)` —
+    // variadic-generics.md §"Arity & element bounds"), keyed by the parameter's
+    // constraint id. Enforced wherever trait bounds are
+    // (`check_generic_bound_satisfaction`); the element bound's type id is
+    // stored unresolved like `generic_bounds` entries.
+    tuple_bounds: HashMap<TypeId, TupleBoundRequirement>,
     // For an impl whose subject is a generic application (`impl Option<(type T,
     // type U)>`), the impl body scope -> (subject type id, the subject's walked
     // generic arguments). Lets `self`'s variant patterns substitute the subject
@@ -1390,6 +1420,7 @@ impl<'src> Analyzer<'src> {
             generic_constraint_names: HashMap::new(),
             generic_dispatch: HashMap::new(),
             generic_bounds: HashMap::new(),
+            tuple_bounds: HashMap::new(),
             impl_subject_args: HashMap::new(),
             implementations: Vec::new(),
             module_id_by_name: HashMap::new(),
@@ -1681,7 +1712,8 @@ impl<'src> Analyzer<'src> {
         for (call_id, substitution) in recorded {
             for (&constraint_id, &value_type_id) in &substitution {
                 let bound_traits = self.generic_bound_traits(constraint_id);
-                if bound_traits.is_empty() {
+                let tuple_requirement = self.tuple_bounds.get(&constraint_id).cloned();
+                if bound_traits.is_empty() && tuple_requirement.is_none() {
                     continue;
                 }
                 let value_type = value_type_id.get_type(self);
@@ -1693,6 +1725,16 @@ impl<'src> Analyzer<'src> {
                     Type::Any | Type::Unknown | Type::Unresolved | Type::Trait(..)
                 ) {
                     continue;
+                }
+                if let Some(requirement) = tuple_requirement {
+                    for msg in self.tuple_bound_violations(&requirement, &value_type, &substitution)
+                    {
+                        errors.push((
+                            **self.span_map.get(&call_id).unwrap_or(&&EMPTY_SPAN),
+                            msg,
+                            constraint_id,
+                        ));
+                    }
                 }
                 for (required_trait_id, required_arguments) in &bound_traits {
                     // A parameterized bound's arguments are written in the
@@ -1852,7 +1894,8 @@ impl<'src> Analyzer<'src> {
                 .collect();
             for (constraint_id, argument_type_id) in declared_constraints.iter().zip(&arguments) {
                 let bound_traits = self.generic_bound_traits(*constraint_id);
-                if bound_traits.is_empty() {
+                let tuple_requirement = self.tuple_bounds.get(constraint_id).cloned();
+                if bound_traits.is_empty() && tuple_requirement.is_none() {
                     continue;
                 }
                 let argument_type = argument_type_id.get_type(self);
@@ -1861,6 +1904,19 @@ impl<'src> Analyzer<'src> {
                     Type::Any | Type::Unknown | Type::Unresolved | Type::Trait(..)
                 ) {
                     continue;
+                }
+                if let Some(requirement) = tuple_requirement {
+                    for msg in self.tuple_bound_violations(
+                        &requirement,
+                        &argument_type,
+                        &declared_bindings,
+                    ) {
+                        errors.push((
+                            **self.span_map.get(&site_id).unwrap_or(&&EMPTY_SPAN),
+                            msg,
+                            *constraint_id,
+                        ));
+                    }
                 }
                 for (required_trait_id, required_arguments) in &bound_traits {
                     let required_arguments: Vec<TypeId> = required_arguments
@@ -1940,6 +1996,150 @@ impl<'src> Analyzer<'src> {
         for (span, msg, note) in bound_declarations {
             self.diagnostics.push(Error { note, span, msg });
         }
+    }
+
+    /// The ways a grounded value violates a tuple bound (`T: (2..: Display)`)
+    /// — empty when satisfied. A non-tuple value is one violation; a tuple
+    /// checks its arity against `lo..=hi` and, when an element bound is
+    /// declared, every element against it (trait arguments grounded through
+    /// `substitution`). A forwarded generic satisfies only through its own
+    /// declared tuple bound: contained range, same-or-subtrait element bound.
+    fn tuple_bound_violations(
+        &mut self,
+        requirement: &TupleBoundRequirement,
+        value_type: &Type,
+        substitution: &SubstitutionContext,
+    ) -> Vec<String> {
+        // Resolve the element bound to its trait (stored unresolved, like
+        // `generic_bounds` entries); a bound that never resolved to a trait
+        // already produced its own diagnostic.
+        let element_trait =
+            requirement
+                .element_bound
+                .and_then(|element_id| match element_id.get_type(self) {
+                    Type::Trait(trait_id, arguments) => Some((trait_id, arguments)),
+                    _ => None,
+                });
+        let element_label = element_trait
+            .as_ref()
+            .and_then(|(trait_id, arguments)| self.bound_trait_label(*trait_id, arguments));
+        let bound_label = requirement.label(element_label.as_deref());
+        let value_label = self.pretty_print_type(value_type, &HashMap::new());
+
+        if let Type::Generic(forwarded_constraint_id) = value_type {
+            let Some(forwarded) = self.tuple_bounds.get(forwarded_constraint_id).cloned() else {
+                return vec![format!(
+                    "generic parameter '{value_label}' is missing the tuple bound \
+                     '{bound_label}' required by this call"
+                )];
+            };
+            // Containment: every arity the forwarded parameter admits must be
+            // admitted here, and its element bound must imply the required one.
+            let lo_contained = requirement
+                .lo
+                .is_none_or(|lo| forwarded.lo.is_some_and(|inner| inner >= lo));
+            let hi_contained = requirement
+                .hi
+                .is_none_or(|hi| forwarded.hi.is_some_and(|inner| inner <= hi));
+            let element_implied = match &element_trait {
+                None => true,
+                Some((required_trait_id, _)) => forwarded
+                    .element_bound
+                    .map(|element_id| element_id.get_type(self))
+                    .is_some_and(|inner| match inner {
+                        Type::Trait(inner_trait_id, _) => self
+                            .trait_with_supertraits(inner_trait_id)
+                            .contains(required_trait_id),
+                        _ => false,
+                    }),
+            };
+            if lo_contained && hi_contained && element_implied {
+                return Vec::new();
+            }
+            let forwarded_element_label = forwarded
+                .element_bound
+                .map(|element_id| element_id.get_type(self))
+                .and_then(|inner| match inner {
+                    Type::Trait(trait_id, arguments) => {
+                        self.bound_trait_label(trait_id, &arguments)
+                    }
+                    _ => None,
+                });
+            let forwarded_label = forwarded.label(forwarded_element_label.as_deref());
+            return vec![format!(
+                "generic parameter '{value_label}' is bound '{forwarded_label}', which does \
+                 not guarantee the tuple bound '{bound_label}' required by this call"
+            )];
+        }
+
+        let Type::Tuple(elements) = value_type else {
+            return vec![format!(
+                "'{value_label}' is not a tuple — this argument's parameter is bound \
+                 '{bound_label}'"
+            )];
+        };
+        let mut violations = Vec::new();
+        let arity = elements.len();
+        let count = |n: usize| {
+            if n == 1 {
+                "1 element".to_string()
+            } else {
+                format!("{n} elements")
+            }
+        };
+        if let Some(lo) = requirement.lo {
+            if arity < lo as usize {
+                violations.push(format!(
+                    "'{value_label}' has {} — the bound '{bound_label}' requires at least {lo}",
+                    count(arity)
+                ));
+            }
+        }
+        if let Some(hi) = requirement.hi {
+            if arity > hi as usize {
+                violations.push(format!(
+                    "'{value_label}' has {} — the bound '{bound_label}' allows at most {hi}",
+                    count(arity)
+                ));
+            }
+        }
+        if let Some((required_trait_id, required_arguments)) = element_trait {
+            let grounded_arguments: Vec<TypeId> = required_arguments
+                .iter()
+                .map(|argument| {
+                    let argument = argument.get_type(self);
+                    self.substitute_type(&argument, substitution)
+                        .get_type_id(self)
+                })
+                .collect();
+            for (index, element_id) in elements.clone().into_iter().enumerate() {
+                let element_type = element_id.get_type(self);
+                if matches!(
+                    element_type,
+                    Type::Any | Type::Unknown | Type::Unresolved | Type::Trait(..)
+                ) {
+                    continue;
+                }
+                if self.satisfies_trait_bound(
+                    &element_type,
+                    required_trait_id,
+                    &grounded_arguments,
+                    0,
+                ) {
+                    continue;
+                }
+                let element_type_label = self.pretty_print_type(&element_type, &HashMap::new());
+                let trait_label = self
+                    .bound_trait_label(required_trait_id, &grounded_arguments)
+                    .unwrap_or_else(|| "the element bound".to_string());
+                violations.push(format!(
+                    "element {index} of '{value_label}' is '{element_type_label}', which does \
+                     not implement trait '{trait_label}' — required by the element bound \
+                     '{bound_label}'"
+                ));
+            }
+        }
+        violations
     }
 
     /// The user-facing label of a bound trait: bare (`Greet`) or with its
@@ -5504,6 +5704,23 @@ impl<'src> Analyzer<'src> {
                     &parameter.bounds,
                     scope_id,
                 );
+                // A tuple bound (`T: (2..: Display)`) records against the same
+                // constraint id; the element bound walks now and resolves at
+                // check time, like trait bounds.
+                if let Some(tuple_bound) = &parameter.tuple_bound {
+                    let element_bound = tuple_bound
+                        .element
+                        .as_deref()
+                        .map(|element| self.walk_type_node(element, scope_id));
+                    self.tuple_bounds.insert(
+                        constraint_type_id,
+                        TupleBoundRequirement {
+                            lo: tuple_bound.lo,
+                            hi: tuple_bound.hi,
+                            element_bound,
+                        },
+                    );
+                }
                 generic_parameter_constraint_ids.push(constraint_type_id);
             }
         }

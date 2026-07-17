@@ -17741,3 +17741,170 @@ fn a_missing_parameter_comma_steers_to_comma_or_close() {
         ),
     }
 }
+
+// --- Tuple bounds on generics (variadic-generics.md "Arity & element
+// --- bounds"; backlog B3) — parsed since the variadic arc, ENFORCED now.
+
+#[test]
+fn an_arity_lower_bound_rejects_a_short_tuple() {
+    assert_fails_with(
+        r#"
+        fun needs_three<T: (3..)>(items: T) {}
+        fun main() {
+            needs_three((1, 2));
+        }
+        "#,
+        "has 2 elements — the bound '(3..)' requires at least 3",
+    );
+}
+
+#[test]
+fn an_arity_upper_bound_rejects_a_long_tuple() {
+    assert_fails_with(
+        r#"
+        fun at_most_two<T: (..2)>(items: T) {}
+        fun main() {
+            at_most_two((1, 2, 3));
+        }
+        "#,
+        "has 3 elements — the bound '(..2)' allows at most 2",
+    );
+}
+
+#[test]
+fn a_non_tuple_argument_names_the_tuple_bound() {
+    assert_fails_with(
+        r#"
+        fun needs_tuple<T: (2..)>(items: T) {}
+        fun main() {
+            needs_tuple(5);
+        }
+        "#,
+        "'i32' is not a tuple — this argument's parameter is bound '(2..)'",
+    );
+}
+
+#[test]
+fn a_satisfying_tuple_passes_its_arity_bound() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun arity_ok<T: (2..)>(items: T): i32 {
+            42
+        }
+        fun main() {
+            print(arity_ok((7, 8, 9)));
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn an_element_bound_rejects_a_non_conforming_element() {
+    assert_fails_with(
+        r#"
+        trait Label {
+            fun label(self): str;
+        }
+        struct Tag {}
+        impl Tag with Label {
+            fun label(self): str {
+                "tag"
+            }
+        }
+        fun all_labels<T: (..: Label)>(items: T) {}
+        fun main() {
+            all_labels((Tag {}, 5));
+        }
+        "#,
+        "element 1 of '(Tag, i32)' is 'i32', which does not implement trait 'Label'",
+    );
+}
+
+#[test]
+fn conforming_elements_pass_their_element_bound() {
+    assert_compiles(
+        r#"
+        trait Label {
+            fun label(self): str;
+        }
+        struct Tag {}
+        impl Tag with Label {
+            fun label(self): str {
+                "tag"
+            }
+        }
+        fun all_labels<T: (2..: Label)>(items: T) {}
+        fun main() {
+            all_labels((Tag {}, Tag {}));
+        }
+        "#,
+    );
+}
+
+// Forwarding a generic into a tuple-bounded position: only the forwarded
+// parameter's OWN tuple bound can guarantee the callee's.
+#[test]
+fn a_forwarded_generic_without_a_tuple_bound_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun needs_two<T: (2..)>(items: T) {}
+        fun outer<U>(x: U) {
+            needs_two(x);
+        }
+        fun main() {
+            outer((1, 2));
+        }
+        "#,
+        "generic parameter 'U' is missing the tuple bound '(2..)'",
+    );
+}
+
+#[test]
+fn a_forwarded_generic_with_a_weaker_range_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun needs_two<T: (2..)>(items: T) {}
+        fun outer<U: (1..)>(x: U) {
+            needs_two(x);
+        }
+        fun main() {
+            outer((1, 2));
+        }
+        "#,
+        "is bound '(1..)', which does not guarantee the tuple bound '(2..)'",
+    );
+}
+
+#[test]
+fn a_forwarded_generic_with_a_contained_bound_is_accepted() {
+    assert_compiles(
+        r#"
+        fun needs_two<T: (2..)>(items: T) {}
+        fun outer<U: (3..)>(x: U) {
+            needs_two(x);
+        }
+        fun main() {
+            outer((1, 2, 3));
+        }
+        "#,
+    );
+}
+
+// Construction sites check the declaration's tuple bound too, independent of
+// any call.
+#[test]
+fn a_struct_construction_checks_its_tuple_bound() {
+    assert_fails_with(
+        r#"
+        struct Pack<T: (..2)> {
+            items: T,
+        }
+        fun main() {
+            let packed = Pack { items = (1, 2, 3) };
+        }
+        "#,
+        "has 3 elements — the bound '(..2)' allows at most 2",
+    );
+}

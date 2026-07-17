@@ -164,9 +164,15 @@ fun combine<T: (2..)>(sources: (U in T: Signal<U>)): Signal<T>
 ```
 
 A **tuple comprehension** `(x in xs => e)` is the value-level mapping
-form. *Implementation note: arity and per-element bounds are parsed but
-not yet enforced (tracked); `keyof` and spread parameters are recorded
-future work.*
+form.
+
+Tuple bounds are **enforced** at every binding site, alongside trait
+bounds: the bound value must be a tuple, its arity must fall inside the
+declared range (endpoints inclusive), and every element must satisfy the
+element bound. A generic parameter forwarded into a tuple-bounded
+position satisfies it only through its own declared tuple bound — a
+contained arity range whose element bound names the same trait or a
+subtrait. *`keyof` and spread parameters are recorded future work.*
 
 **Positional access** `t.0`, `t.1` (chaining as `t.0.1`) types as that
 element and, through a `mut` binding, assigns it. Tuples store flat: a
