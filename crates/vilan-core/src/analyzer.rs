@@ -10814,13 +10814,20 @@ impl<'src> Analyzer<'src> {
                         Expr::Struct(struct_id) => self.structs.get(struct_id).map(|s| s.name),
                         _ => None,
                     };
+                    let non_function_message = {
+                        let subject_type =
+                            self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                        let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
+                        format!("cannot call this as a function — it is {rendered}")
+                    };
                     self.diagnostics.push(Error { note: None,
-                        span: arguments_span,
+                        // The SUBJECT is what isn't callable (A1).
+                        span: **self.span_map.get(&subject_id).unwrap_or(&&EMPTY_SPAN),
                         msg: match struct_name {
                             Some(name) => format!(
                                 "cannot call '{name}': it is a struct, not a function — construct it with `{{ .. }}` or `::new(..)`"
                             ),
-                            None => "cannot call a non-function value".to_string(),
+                            None => non_function_message.clone(),
                         },
                     });
                     Resolution::Failed
@@ -10841,10 +10848,13 @@ impl<'src> Analyzer<'src> {
                 Resolution::Resolved
             }
             _ => {
+                let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
+                let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
                     note: None,
-                    span: arguments_span,
-                    msg: "cannot call a non-function value".to_string(),
+                    // The SUBJECT is what isn't callable (A1) — anchor there.
+                    span: **self.span_map.get(&subject_id).unwrap_or(&&EMPTY_SPAN),
+                    msg: format!("cannot call this as a function — it is {rendered}"),
                 });
                 Resolution::Failed
             }
@@ -10926,7 +10936,13 @@ impl<'src> Analyzer<'src> {
                 let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
                     note: None,
-                    span: arguments_span,
+                    // The method NAME identifies the problem (A1/A4), not
+                    // the argument list.
+                    span: self
+                        .member_name_spans
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(arguments_span),
                     msg: format!("{} has no method '{}'", type_str, member_name),
                 });
                 self.expr_id_to_expr_map.insert(id, Expr::Error);
@@ -11226,7 +11242,11 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or_default();
                 self.diagnostics.push(Error {
                     note: None,
-                    span: arguments_span,
+                    span: self
+                        .member_name_spans
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(arguments_span),
                     msg: format!(
                         "{} has no method '{}'{}",
                         type_str, member_name, trait_only_note
@@ -11240,7 +11260,11 @@ impl<'src> Analyzer<'src> {
                 let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
                     note: None,
-                    span: arguments_span,
+                    span: self
+                        .member_name_spans
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(arguments_span),
                     msg: format!("cannot call method '{}' on {}", member_name, type_str),
                 });
                 Resolution::Failed

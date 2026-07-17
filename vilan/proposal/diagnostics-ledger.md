@@ -72,21 +72,21 @@ audit batch, in the batch's commit.
 | 61 | analyzer.rs:10184 | ``self` import has no enclosing namespace` | |
 | 62 | analyzer.rs:10204 | `cannot find module '{}' to import` |QUALIFIES — A4 segment anchor (E7 pass 1 pins) |
 | 63 | analyzer.rs:10240 | `cannot find '{}' in the imported path` |QUALIFIES — B4 steer added (batch 1); pins: an_unknown_value_steers…, an_unknown_name_gets_no_bogus_steer, B.27 family |
-| 64 | analyzer.rs:10483 | `Expected {} {}, but got {} instead.` | |
+| 64 | analyzer.rs:10483 | `Expected {} {}, but got {} instead.` |QUALIFIES — arity anchors at the arguments (they ARE the problem) |
 | 65 | analyzer.rs:10549 | `Expected {}, but got {} instead.{}` |QUALIFIES — B2 + B3 note (B13 first-call origin); pin a_conflicting_later_call… |
-| 66 | analyzer.rs:10577 | `Expected {} {}, but got {} instead.` | |
+| 66 | analyzer.rs:10577 | `Expected {} {}, but got {} instead.` |QUALIFIES — arity anchors at the arguments (they ARE the problem) |
 | 67 | analyzer.rs:10605 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
-| 68 | analyzer.rs:10644 | `Expected {} {}, but got {} instead.` | |
+| 68 | analyzer.rs:10644 | `Expected {} {}, but got {} instead.` |QUALIFIES — arity anchors at the arguments (they ARE the problem) |
 | 69 | analyzer.rs:10722 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
-| 70 | analyzer.rs:10776 | `cannot call '{name}': it is a struct, not a function — const` | |
-| 71 | analyzer.rs:10803 | `cannot call a non-function value` | |
-| 72 | analyzer.rs:10886 | `{} has no method '{}'` | |
-| 73 | analyzer.rs:10895 | ``len` takes no arguments` | |
-| 74 | analyzer.rs:11186 | `{} has no method '{}'{}` | |
-| 75 | analyzer.rs:11200 | `cannot call method '{}' on {}` | |
-| 76 | analyzer.rs:11213 | `cannot call '{member_name}' on a value of bare trait type ` | |
+| 70 | analyzer.rs:10776 | `cannot call '{name}': it is a struct, not a function — const` |QUALIFIES — B6 steer; subject-anchored (batch 3) |
+| 71 | analyzer.rs:10803 | `cannot call a non-function value` |QUALIFIES — REWORDED to render the type + subject-anchored (batch 3); pin a_non_function_call_names… |
+| 72 | analyzer.rs:10886 | `{} has no method '{}'` |QUALIFIES — RE-ANCHORED to the method name (batch 3); pins a_no_method_error_anchors…, an_array_no_method… |
+| 73 | analyzer.rs:10895 | ``len` takes no arguments` |QUALIFIES — arity anchors at the arguments (they ARE the problem) |
+| 74 | analyzer.rs:11186 | `{} has no method '{}'{}` |QUALIFIES — RE-ANCHORED to the method name (batch 3); pins a_no_method_error_anchors…, an_array_no_method… |
+| 75 | analyzer.rs:11200 | `cannot call method '{}' on {}` |QUALIFIES — RE-ANCHORED to the method name (batch 3) |
+| 76 | analyzer.rs:11213 | `cannot call '{member_name}' on a value of bare trait type ` |QUALIFIES — B6 (B4-family pins) |
 | 77 | analyzer.rs:11248 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
-| 78 | analyzer.rs:11288 | `Expected {} {}, but got {} instead.` | |
+| 78 | analyzer.rs:11288 | `Expected {} {}, but got {} instead.` |QUALIFIES — arity anchors at the arguments (they ARE the problem) |
 | 79 | analyzer.rs:11336 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 80 | analyzer.rs:11376 | `a tuple comprehension's source must be a mapped tuple, got {` | |
 | 81 | analyzer.rs:11454 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
@@ -115,7 +115,7 @@ audit batch, in the batch's commit.
 | 104 | analyzer.rs:12428 | `match legs have mismatched types: expected {}, but got {} in` | |
 | 105 | analyzer.rs:12479 | `unknown struct: {}` | |
 | 106 | analyzer.rs:12495 | `cannot initialize a non-struct: {}` | |
-| 107 | analyzer.rs:12506 | `Expected {} {}, but got {} instead.` | |
+| 107 | analyzer.rs:12506 | `Expected {} {}, but got {} instead.` |QUALIFIES — arity anchors at the arguments (they ARE the problem) |
 | 108 | analyzer.rs:12536 | `struct '{}' has no field '{}'` | |
 | 109 | analyzer.rs:12564 | `Expected {}, but got {} instead.` |QUALIFIES — B2 (both sides rendered), value-anchored (A4) |
 | 110 | analyzer.rs:12704 | `` | |

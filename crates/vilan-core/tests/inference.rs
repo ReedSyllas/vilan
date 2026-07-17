@@ -14716,6 +14716,53 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- Diagnostics audit, batch 3: method/call anchors (standard A1/A4) --------
+
+#[test]
+fn a_no_method_error_anchors_at_the_method_name() {
+    // The NAME identifies the problem, not the argument list it happens to
+    // be called with.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let text = "x";
+            text.launch(1, 2);
+        }
+        "#,
+        "launch",
+        "has no method 'launch'",
+    );
+}
+
+#[test]
+fn an_array_no_method_error_anchors_at_the_method_name() {
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            mut a = [0; 4];
+            a.push(1);
+        }
+        "#,
+        "push",
+        "has no method 'push'",
+    );
+}
+
+#[test]
+fn a_non_function_call_names_the_subjects_type() {
+    // "cannot call a non-function value" said nothing about WHAT the value
+    // was; it now renders the type and anchors at the subject.
+    assert_fails_spanning(
+        r#"
+        fun main() {
+            let x = (42)(1);
+        }
+        "#,
+        "42",
+        "cannot call this as a function — it is i32",
+    );
+}
+
 // --- Diagnostics audit, batch 2: mismatch origins (standard B3) --------------
 
 #[test]
