@@ -12711,6 +12711,17 @@ impl<'src> Analyzer<'src> {
                 return Resolution::Failed;
             }
         };
+        // Record the literal's NAME as a reference (the literal starts with
+        // it, so the name span is the initializer's head) — semantic tokens
+        // and go-to-definition on `Point { .. }`'s name ride this.
+        if let Some(initializer_span) = self.span_map.get(&constraint.initializer_id) {
+            let start = initializer_span.into_range().start;
+            let name_span: Span = (start..start + constraint.struct_name.len()).into();
+            if let Some(source) = self.source_of_id(constraint.initializer_id) {
+                self.record_reference(source, name_span, struct_id);
+            }
+        }
+        let struct_ = self.structs.get(&struct_id).expect("checked above");
         let generic_param_ids = struct_.generic_parameter_constraint_ids.clone();
         let struct_fields = struct_.fields.clone();
         if constraint.fields.len() != struct_fields.len() {

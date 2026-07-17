@@ -219,6 +219,41 @@ pub struct Document {
     platform_requirements: HashMap<Id, String>,
 }
 
+/// A semantic-token classification (E2): precision highlighting from the
+/// ANALYZED program, over TextMate's regex approximations. The discriminant
+/// order IS the LSP legend order (`TOKEN_TYPES`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TokenKind {
+    Namespace,
+    Struct,
+    Enum,
+    Interface,
+    TypeParameter,
+    Parameter,
+    Variable,
+    Function,
+    Method,
+    Property,
+    EnumMember,
+    Macro,
+}
+
+/// The LSP legend, index-aligned with `TokenKind`.
+pub const TOKEN_TYPES: [&str; 12] = [
+    "namespace",
+    "struct",
+    "enum",
+    "interface",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "function",
+    "method",
+    "property",
+    "enumMember",
+    "macro",
+];
+
 /// One diagnostic as the language server publishes it: the file it belongs to
 /// (`None` = the analyzed document itself), its span *in that file's text*, the
 /// message, and the severity. LSP-type-free so the grouping is unit-testable.
@@ -647,6 +682,138 @@ impl Document {
 
     /// The innermost type reference under `offset` in the open file, as
     /// `(definition id, label)`.
+    /// The entry document's semantic tokens (E2), name-sized and
+    /// non-overlapping, sorted by position. Classification comes from the
+    /// ANALYZED program: declaration name spans, identifier-sized reference
+    /// entities, method-call name spans, and type-position references (whose
+    /// definitions also cover macro names — they share trait names by design,
+    /// and only semantics can tell them apart).
+    pub fn semantic_tokens(&self) -> Vec<(Span, TokenKind)> {
+        let Some(program) = &self.program else {
+            return Vec::new();
+        };
+        let entry = |id: Id| program.source_of(id) == Some(SourceId(0));
+        let mut tokens: Vec<(Span, TokenKind)> = Vec::new();
+        let classify_target = |target: Id| -> TokenKind {
+            use vilan_core::analyzer::Expr;
+            match program.entity_map.get(&target) {
+                Some(Expr::Function(_)) | Some(Expr::ExternalFunction(_)) => TokenKind::Function,
+                Some(Expr::Struct(_)) => TokenKind::Struct,
+                Some(Expr::Enum(_)) => TokenKind::Enum,
+                Some(Expr::EnumVariant(_, _)) => TokenKind::EnumMember,
+                Some(Expr::Trait(_)) => TokenKind::Interface,
+                Some(Expr::Module(_)) => TokenKind::Namespace,
+                Some(Expr::Generic(_)) => TokenKind::TypeParameter,
+                Some(Expr::Macro) => TokenKind::Macro,
+                _ => {
+                    if program.parameters.contains_key(&target) {
+                        TokenKind::Parameter
+                    } else {
+                        TokenKind::Variable
+                    }
+                }
+            }
+        };
+        // Declaration names.
+        for (id, function) in &program.functions {
+            if entry(*id) {
+                tokens.push((function.name_span, TokenKind::Function));
+            }
+        }
+        for (id, struct_) in &program.structs {
+            if entry(*id) {
+                tokens.push((struct_.name_span, TokenKind::Struct));
+            }
+        }
+        for (id, enum_) in &program.enums {
+            if entry(*id) {
+                tokens.push((enum_.name_span, TokenKind::Enum));
+            }
+        }
+        for (id, trait_) in &program.traits {
+            if entry(*id) {
+                tokens.push((trait_.name_span, TokenKind::Interface));
+            }
+        }
+        for (id, variable) in &program.variables {
+            if entry(*id) {
+                tokens.push((variable.name_span, TokenKind::Variable));
+            }
+        }
+        for (id, _parameter) in &program.parameters {
+            // A parameter entity's `span_map` entry IS its name.
+            if entry(*id)
+                && let Some(span) = span_of(program, *id)
+            {
+                tokens.push((span, TokenKind::Parameter));
+            }
+        }
+        // Identifier-sized reference entities.
+        {
+            use vilan_core::analyzer::Expr;
+            for (id, expr) in &program.entity_map {
+                if !entry(*id) {
+                    continue;
+                }
+                let Some(span) = span_of(program, *id) else {
+                    continue;
+                };
+                let range = span.into_range();
+                if range.start >= range.end {
+                    continue;
+                }
+                match expr {
+                    Expr::Local(target) => tokens.push((span, classify_target(*target))),
+                    Expr::Generic(_) => tokens.push((span, TokenKind::TypeParameter)),
+                    Expr::Module(_) => tokens.push((span, TokenKind::Namespace)),
+                    _ => {}
+                }
+            }
+        }
+        // Method-call names — a member with a call is a method, a plain
+        // member read is a property (field).
+        for (call_id, span) in &program.member_name_spans {
+            if !entry(*call_id) {
+                continue;
+            }
+            let kind = if program.function_calls.contains_key(call_id) {
+                TokenKind::Method
+            } else {
+                TokenKind::Property
+            };
+            tokens.push((*span, kind));
+        }
+        // Type-position references (macro names arrive here too).
+        for (source, span, definition, _) in &program.type_references {
+            if *source != SourceId(0) {
+                continue;
+            }
+            // A reference with no resolved definition (an unresolved or
+            // synthetic segment) stays untokenized — TextMate's base layer
+            // keeps whatever it had.
+            let Some(kind) = definition.map(classify_target) else {
+                continue;
+            };
+            tokens.push((*span, kind));
+        }
+        // Sort and drop overlaps: narrowest-first at each start, then keep
+        // strictly non-overlapping tokens (the LSP requires it).
+        tokens.sort_by_key(|(span, _)| {
+            let range = span.into_range();
+            (range.start, range.end - range.start)
+        });
+        let mut kept: Vec<(Span, TokenKind)> = Vec::new();
+        let mut last_end = 0usize;
+        for (span, kind) in tokens {
+            let range = span.into_range();
+            if range.start >= last_end && range.start < range.end {
+                last_end = range.end;
+                kept.push((span, kind));
+            }
+        }
+        kept
+    }
+
     fn type_reference_at(&self, program: &Program, offset: usize) -> Option<(Option<Id>, String)> {
         program
             .type_references
@@ -1798,6 +1965,74 @@ mod tests {
             )),
             "{hover:?}"
         );
+    }
+
+    // E2: semantic tokens classify from the ANALYZED program. The cases
+    // TextMate cannot get right: a generic parameter at use, a macro name
+    // (which deliberately shares its trait's name), method vs field on the
+    // same `.name` shape, and module qualifiers.
+    #[test]
+    fn semantic_tokens_classify_the_ambiguous_cases() {
+        let text = "import std::math;\n\nstruct Point {\n\tx: i32,\n}\n\nfun pick<T>(value: T): T {\n\tvalue\n}\n\nfun main() {\n\tlet p = Point { x = 1 };\n\tlet n = p.x;\n\tlet low = math::min(1, 2);\n\tlet chosen = pick(n);\n\tlet size = chosen.abs();\n}\n";
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let tokens = document.semantic_tokens();
+        let kind_of = |snippet: &str, occurrence: usize| -> Option<TokenKind> {
+            let mut start = 0;
+            let mut position = None;
+            for _ in 0..=occurrence {
+                position = text[start..].find(snippet).map(|at| start + at);
+                start = position? + 1;
+            }
+            let at = position?;
+            tokens
+                .iter()
+                .find(|(span, _)| {
+                    let range = span.into_range();
+                    range.start == at && range.end == at + snippet.len()
+                })
+                .map(|(_, kind)| *kind)
+        };
+        // The generic parameter at its USE site (T in `value: T`).
+        assert_eq!(
+            kind_of("T", 1),
+            Some(TokenKind::TypeParameter),
+            "{tokens:?}"
+        );
+        // A struct name in type/constructor position.
+        assert_eq!(kind_of("Point", 1), Some(TokenKind::Struct), "{tokens:?}");
+        // A field read is a property, not a method.
+        assert_eq!(kind_of("x", 2), Some(TokenKind::Property), "{tokens:?}");
+        // A module import name is a namespace.
+        assert_eq!(kind_of("math", 0), Some(TokenKind::Namespace), "{tokens:?}");
+        // Parameters and variables split.
+        assert_eq!(
+            kind_of("value", 0),
+            Some(TokenKind::Parameter),
+            "{tokens:?}"
+        );
+        assert_eq!(
+            kind_of("chosen", 0),
+            Some(TokenKind::Variable),
+            "{tokens:?}"
+        );
+        // A member CALL is a method (the same `.name` shape as the property
+        // read above — only semantics can split them).
+        assert_eq!(kind_of("abs", 0), Some(TokenKind::Method), "{tokens:?}");
+    }
+
+    #[test]
+    fn semantic_tokens_are_sorted_and_non_overlapping() {
+        let text = "import std::option::Option::{ self, Some, None };\n\nfun main() {\n\tlet maybe = Some(2);\n\tlet doubled = maybe? * 2;\n}\n";
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let tokens = document.semantic_tokens();
+        assert!(!tokens.is_empty());
+        let mut last_end = 0;
+        for (span, _) in &tokens {
+            let range = span.into_range();
+            assert!(range.start >= last_end, "overlap at {range:?}: {tokens:?}");
+            assert!(range.end > range.start);
+            last_end = range.end;
+        }
     }
 
     // E6: a dependent's analysis reads an OPEN document's buffer, not the

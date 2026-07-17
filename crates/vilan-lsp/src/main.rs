@@ -387,6 +387,24 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
                     ..Default::default()
                 }),
+                // E2: precision highlighting from the analyzed program. The
+                // legend is index-aligned with `document::TokenKind`.
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: crate::document::TOKEN_TYPES
+                                    .iter()
+                                    .map(|name| SemanticTokenType::new(name))
+                                    .collect(),
+                                token_modifiers: Vec::new(),
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -480,6 +498,47 @@ impl LanguageServer for Backend {
             }
         }
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        // Delta-encode (line delta, char delta, length, type, modifiers) in
+        // position order; identifiers never span lines, so the length is the
+        // span's width.
+        let mut data: Vec<SemanticToken> = Vec::new();
+        let mut previous_line = 0u32;
+        let mut previous_start = 0u32;
+        for (span, kind) in document.semantic_tokens() {
+            let range = document.line_index.range(&span);
+            let line = range.start.line;
+            let start = range.start.character;
+            let length = span.into_range().len() as u32;
+            let delta_line = line - previous_line;
+            let delta_start = if delta_line == 0 {
+                start - previous_start
+            } else {
+                start
+            };
+            data.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type: kind as u32,
+                token_modifiers_bitset: 0,
+            });
+            previous_line = line;
+            previous_start = start;
+        }
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
