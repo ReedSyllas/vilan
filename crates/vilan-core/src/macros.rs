@@ -735,8 +735,11 @@ fn compile_world(
 /// One file's expansion results, ready for `analyze` to fold in.
 #[derive(Default)]
 pub(crate) struct ExpansionOutput {
-    /// Generated ITEM lists — walked after the originating file's items.
-    pub(crate) items: Vec<&'static NodeList<'static>>,
+    /// Generated ITEM lists, each with its ORIGIN — the span of the
+    /// attribute/invocation in the user's file that produced it — walked
+    /// after the originating file's items. The origin is what a diagnostic
+    /// raised INSIDE the generated code re-anchors to (standard A2).
+    pub(crate) items: Vec<(Span, &'static NodeList<'static>)>,
     /// Expression splices: invocation node address → the replacement
     /// expression the walk substitutes.
     pub(crate) expressions: Vec<(usize, &'static Spanned<Node<'static>>)>,
@@ -1050,7 +1053,7 @@ impl Expander<'_, '_> {
         }
         let combined = format!("{prelude}{}", self.rust_source);
         match parse_generated(&combined) {
-            Ok((parsed, _)) => self.output.items.insert(0, parsed),
+            Ok((parsed, _)) => self.output.items.insert(0, ((0..0).into(), parsed)),
             Err(message) => self.diagnostics.push(Error {
                 note: None,
                 span: (0..0).into(),
@@ -1365,7 +1368,7 @@ impl Expander<'_, '_> {
                 });
                 return;
             }
-            self.output.items.push(parsed);
+            self.output.items.push((site, parsed));
             // The generated code may carry derives, services, and further
             // macro uses — the unified item scan handles them all.
             self.expand_list(parsed, parsed_text, depth + 1);

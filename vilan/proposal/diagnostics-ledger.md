@@ -165,27 +165,27 @@ audit batch, in the batch's commit.
 | 154 | analyzer.rs:17062 | `` | |
 | 155 | async_infer.rs:190 | `` | |
 | 156 | async_infer.rs:280 | `` | |
-| 157 | macros.rs:369 | `a `macro { .. }` block cannot appear inside macro code — the` | |
-| 158 | macros.rs:386 | `the `macro_std` package was not found beside `std` — macros ` | |
-| 159 | macros.rs:421 | `a macro named `{name}` is already defined in this module` | |
-| 160 | macros.rs:490 | `a macro body may import only from `macro_std` — the macro wo` | |
-| 161 | macros.rs:876 | ``[service]` expanded before std::rpc's `service` macro was ` | |
-| 162 | macros.rs:957 | `this `macro { .. }` block was not registered — see the file'` | |
-| 163 | macros.rs:1054 | `the built-in derive generators produced invalid vilan ({mess` | |
-| 164 | macros.rs:1073 | `no macro named `{name}` is in scope` | |
-| 165 | macros.rs:1082 | ``{name}` is a macro HELPER (its signature is not a macro sha` | |
-| 166 | macros.rs:1097 | `macro `{name}` is invocation-shaped (it takes no `Item`) — c` | |
-| 167 | macros.rs:1133 | `no macro named `{name}` is in scope` | |
-| 168 | macros.rs:1145 | ``{name}` is a macro HELPER (its signature is not a macro sha` | |
-| 169 | macros.rs:1161 | `macro `{name}` is attribute-shaped (it takes an `Item`) — us` | |
-| 170 | macros.rs:1211 | `macro expansion did not settle after {cap} rounds — the chai` | |
-| 171 | macros.rs:1235 | `{label}'s definition did not compile` | |
-| 172 | macros.rs:1257 | `{label} failed at expansion time: {message}` | |
-| 173 | macros.rs:1284 | `{label} generated invalid vilan ({message}) — the ` | |
-| 174 | macros.rs:1298 | `{label} must generate a single expression here (it is ` | |
-| 175 | macros.rs:1311 | `{label} generated a `macro {{ .. }}` block — macros cannot ` | |
-| 176 | macros.rs:1333 | `{label} generated invalid vilan ({message}) — the ` | |
-| 177 | macros.rs:1346 | `{label} generated a `macro fun` — macros cannot define ` | |
-| 178 | macros.rs:1358 | `{label} generated a `macro {{ .. }}` block — macros cannot ` | |
+| 157 | macros.rs:369 | `a `macro { .. }` block cannot appear inside macro code — the` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 158 | macros.rs:386 | `the `macro_std` package was not found beside `std` — macros ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 159 | macros.rs:421 | `a macro named `{name}` is already defined in this module` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 160 | macros.rs:490 | `a macro body may import only from `macro_std` — the macro wo` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 161 | macros.rs:876 | ``[service]` expanded before std::rpc's `service` macro was ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 162 | macros.rs:957 | `this `macro { .. }` block was not registered — see the file'` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 163 | macros.rs:1054 | `the built-in derive generators produced invalid vilan ({mess` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 164 | macros.rs:1073 | `no macro named `{name}` is in scope` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 165 | macros.rs:1082 | ``{name}` is a macro HELPER (its signature is not a macro sha` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 166 | macros.rs:1097 | `macro `{name}` is invocation-shaped (it takes no `Item`) — c` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 167 | macros.rs:1133 | `no macro named `{name}` is in scope` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 168 | macros.rs:1145 | ``{name}` is a macro HELPER (its signature is not a macro sha` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 169 | macros.rs:1161 | `macro `{name}` is attribute-shaped (it takes an `Item`) — us` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 170 | macros.rs:1211 | `macro expansion did not settle after {cap} rounds — the chai` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 171 | macros.rs:1235 | `{label}'s definition did not compile` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 172 | macros.rs:1257 | `{label} failed at expansion time: {message}` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 173 | macros.rs:1284 | `{label} generated invalid vilan ({message}) — the ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 174 | macros.rs:1298 | `{label} must generate a single expression here (it is ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 175 | macros.rs:1311 | `{label} generated a `macro {{ .. }}` block — macros cannot ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 176 | macros.rs:1333 | `{label} generated invalid vilan ({message}) — the ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 177 | macros.rs:1346 | `{label} generated a `macro fun` — macros cannot define ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
+| 178 | macros.rs:1358 | `{label} generated a `macro {{ .. }}` block — macros cannot ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
 | 179 | platform_color.rs:110 | `unknown platform pattern `{pattern_text}` in `[platform(…)]`` | |
 | 180 | platform_color.rs:232 | `` | |
