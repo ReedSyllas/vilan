@@ -29,6 +29,8 @@ const DEBOUNCE_MS: u64 = 150;
 /// Convert a Vilan completion candidate to an LSP `CompletionItem`.
 fn to_completion_item(completion: Completion) -> CompletionItem {
     let kind = match completion.kind {
+        // The LSP kind set has no macro entry; functions render closest.
+        VilanCompletionKind::Macro => CompletionItemKind::FUNCTION,
         VilanCompletionKind::Function => CompletionItemKind::FUNCTION,
         VilanCompletionKind::Method => CompletionItemKind::METHOD,
         VilanCompletionKind::Field => CompletionItemKind::FIELD,

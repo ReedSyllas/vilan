@@ -174,6 +174,7 @@ pub struct Completion {
 
 /// The category of a completion, for its editor icon.
 pub enum CompletionKind {
+    Macro,
     Function,
     Method,
     Field,
@@ -1313,7 +1314,40 @@ impl Document {
         if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
             return self.path_completions(program, text, start - 2);
         }
+        // `[Na|` at an item position (the line holds only the attribute so
+        // far) and `[derive(Na|` complete registered macro names — the last
+        // piece of the macro-LSP tail.
+        if start >= 1 && bytes[start - 1] == b'[' {
+            let line_start = text[..start - 1].rfind('\n').map(|at| at + 1).unwrap_or(0);
+            if text[line_start..start - 1].trim().is_empty() {
+                return self.macro_name_completions(program);
+            }
+        }
+        if start >= 1 && bytes[start - 1] == b'(' && text[..start - 1].ends_with("[derive") {
+            return self.macro_name_completions(program);
+        }
         self.scope_completions(program, offset)
+    }
+
+    /// Every registered macro name, for attribute-position completion. The
+    /// union over all scopes deliberately over-offers (visibility is
+    /// file-scoped; the expansion engine still gates actual use) — the
+    /// recorded refinement is filtering to this file's macro scope.
+    fn macro_name_completions(&self, program: &Program) -> Vec<Completion> {
+        let mut names: Vec<&str> = program
+            .scopes
+            .values()
+            .flat_map(|scope| scope.macro_name_to_id.keys().copied())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+            .into_iter()
+            .map(|name| Completion {
+                label: name.to_string(),
+                kind: CompletionKind::Macro,
+            })
+            .collect()
     }
 
     /// Fields and methods of the receiver value ending just before the `.` at
@@ -2256,6 +2290,31 @@ mod tests {
             "{hover}"
         );
         assert!(hover.contains("fun badge(count: i32): str"), "{hover}");
+    }
+
+    // The macro-LSP tail's last piece: `[` at an item position offers the
+    // registered macro names — derives included — and `[derive(` offers
+    // them for the derive list.
+    #[test]
+    fn attribute_position_completes_macro_names() {
+        let completions = completions_at_cursor(
+            "import std::print;\n\n[Hash|]\nstruct Point { x: i32 }\n\nfun main() {\n\tprint(1);\n}\n",
+        );
+        assert!(
+            completions.iter().any(|label| label == "Hashable"),
+            "expected the derive prelude: {completions:?}"
+        );
+        assert!(
+            completions.iter().any(|label| label == "Json"),
+            "{completions:?}"
+        );
+        let derive_completions = completions_at_cursor(
+            "import std::print;\n\n[derive(Pa|)]\nstruct Point { x: i32 }\n\nfun main() {\n\tprint(1);\n}\n",
+        );
+        assert!(
+            derive_completions.iter().any(|label| label == "PartialEq"),
+            "{derive_completions:?}"
+        );
     }
 
     // E9: hover on a `const` binding shows its evaluated VALUE beside the
