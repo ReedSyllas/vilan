@@ -400,6 +400,7 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
                     ..Default::default()
                 }),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 // E2: precision highlighting from the analyzed program. The
                 // legend is index-aligned with `document::TokenKind`.
                 semantic_tokens_provider: Some(
@@ -410,7 +411,10 @@ impl LanguageServer for Backend {
                                     .iter()
                                     .map(|name| SemanticTokenType::new(name))
                                     .collect(),
-                                token_modifiers: Vec::new(),
+                                token_modifiers: crate::document::TOKEN_MODIFIERS
+                                    .iter()
+                                    .map(|name| SemanticTokenModifier::new(name))
+                                    .collect(),
                             },
                             full: Some(SemanticTokensFullOptions::Bool(true)),
                             range: None,
@@ -513,6 +517,33 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let range = params.range;
+        let hints = document
+            .inlay_hints()
+            .into_iter()
+            .filter_map(|(offset, label)| {
+                let span = vilan_core::Span::from(offset..offset);
+                let position = document.line_index.range(&span).start;
+                (position >= range.start && position <= range.end).then(|| InlayHint {
+                    position,
+                    label: InlayHintLabel::String(label),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: Some(false),
+                    padding_right: Some(false),
+                    data: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(Some(hints))
+    }
+
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
@@ -527,7 +558,7 @@ impl LanguageServer for Backend {
         let mut data: Vec<SemanticToken> = Vec::new();
         let mut previous_line = 0u32;
         let mut previous_start = 0u32;
-        for (span, kind) in document.semantic_tokens() {
+        for (span, kind, modifiers) in document.semantic_tokens() {
             let range = document.line_index.range(&span);
             let line = range.start.line;
             let start = range.start.character;
@@ -543,7 +574,7 @@ impl LanguageServer for Backend {
                 delta_start,
                 length,
                 token_type: kind as u32,
-                token_modifiers_bitset: 0,
+                token_modifiers_bitset: modifiers,
             });
             previous_line = line;
             previous_start = start;

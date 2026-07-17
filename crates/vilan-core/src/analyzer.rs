@@ -333,6 +333,9 @@ pub struct Variable<'src> {
     pub initial: Option<Id>,
     pub type_id: TypeId,
     pub mutable: bool,
+    /// Whether the binding carries a WRITTEN type annotation — inlay hints
+    /// show inferred types only where nothing is written.
+    pub annotated: bool,
 }
 
 #[derive(Debug)]
@@ -6117,6 +6120,7 @@ impl<'src> Analyzer<'src> {
                             initial: None,
                             type_id: element_type_id,
                             mutable: false,
+                            annotated: false,
                         },
                     );
                     self.expr_id_to_expr_map
@@ -6837,6 +6841,7 @@ impl<'src> Analyzer<'src> {
                         initial,
                         type_id,
                         mutable: *mutable,
+                        annotated: type_.is_some(),
                     },
                 );
                 // Collect a variable constraint for type inference.
@@ -7285,6 +7290,7 @@ impl<'src> Analyzer<'src> {
                         initial: None,
                         type_id: unknown_type_id,
                         mutable: false,
+                        annotated: false,
                     },
                 );
                 self.expr_id_to_expr_map
@@ -7645,6 +7651,7 @@ impl<'src> Analyzer<'src> {
                         initial: None,
                         type_id: unknown_type_id,
                         mutable: *mutable,
+                        annotated: false,
                     },
                 );
                 self.expr_id_to_expr_map

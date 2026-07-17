@@ -243,6 +243,13 @@ pub enum TokenKind {
     Macro,
 }
 
+/// Token-modifier bits, index-aligned with `TOKEN_MODIFIERS`.
+pub const MODIFIER_DECLARATION: u32 = 1 << 0;
+pub const MODIFIER_READONLY: u32 = 1 << 1;
+
+/// The modifier legend.
+pub const TOKEN_MODIFIERS: [&str; 2] = ["declaration", "readonly"];
+
 /// The LSP legend, index-aligned with `TokenKind`.
 pub const TOKEN_TYPES: [&str; 12] = [
     "namespace",
@@ -799,18 +806,46 @@ impl Document {
 
     /// The innermost type reference under `offset` in the open file, as
     /// `(definition id, label)`.
+    /// Inlay type hints: `: T` after each UNANNOTATED binding whose type
+    /// resolved — inference made a decision the source doesn't show, so the
+    /// editor shows it in place. Sorted by position.
+    pub fn inlay_hints(&self) -> Vec<(usize, String)> {
+        let Some(program) = &self.program else {
+            return Vec::new();
+        };
+        let mut hints: Vec<(usize, String)> = Vec::new();
+        for (id, variable) in &program.variables {
+            if variable.annotated || program.source_of(*id) != Some(SourceId(0)) {
+                continue;
+            }
+            let Some(label) = program.expr_types.get(id) else {
+                continue;
+            };
+            if label.is_empty() || label == "?" || label.contains("Unknown") {
+                continue;
+            }
+            let range = variable.name_span.into_range();
+            if range.is_empty() {
+                continue;
+            }
+            hints.push((range.end, format!(": {label}")));
+        }
+        hints.sort();
+        hints
+    }
+
     /// The entry document's semantic tokens (E2), name-sized and
     /// non-overlapping, sorted by position. Classification comes from the
     /// ANALYZED program: declaration name spans, identifier-sized reference
     /// entities, method-call name spans, and type-position references (whose
     /// definitions also cover macro names — they share trait names by design,
     /// and only semantics can tell them apart).
-    pub fn semantic_tokens(&self) -> Vec<(Span, TokenKind)> {
+    pub fn semantic_tokens(&self) -> Vec<(Span, TokenKind, u32)> {
         let Some(program) = &self.program else {
             return Vec::new();
         };
         let entry = |id: Id| program.source_of(id) == Some(SourceId(0));
-        let mut tokens: Vec<(Span, TokenKind)> = Vec::new();
+        let mut tokens: Vec<(Span, TokenKind, u32)> = Vec::new();
         let classify_target = |target: Id| -> TokenKind {
             use vilan_core::analyzer::Expr;
             match program.entity_map.get(&target) {
@@ -834,27 +869,40 @@ impl Document {
         // Declaration names.
         for (id, function) in &program.functions {
             if entry(*id) {
-                tokens.push((function.name_span, TokenKind::Function));
+                tokens.push((
+                    function.name_span,
+                    TokenKind::Function,
+                    MODIFIER_DECLARATION,
+                ));
             }
         }
         for (id, struct_) in &program.structs {
             if entry(*id) {
-                tokens.push((struct_.name_span, TokenKind::Struct));
+                tokens.push((struct_.name_span, TokenKind::Struct, MODIFIER_DECLARATION));
             }
         }
         for (id, enum_) in &program.enums {
             if entry(*id) {
-                tokens.push((enum_.name_span, TokenKind::Enum));
+                tokens.push((enum_.name_span, TokenKind::Enum, MODIFIER_DECLARATION));
             }
         }
         for (id, trait_) in &program.traits {
             if entry(*id) {
-                tokens.push((trait_.name_span, TokenKind::Interface));
+                tokens.push((trait_.name_span, TokenKind::Interface, MODIFIER_DECLARATION));
             }
         }
         for (id, variable) in &program.variables {
             if entry(*id) {
-                tokens.push((variable.name_span, TokenKind::Variable));
+                let readonly = if variable.mutable {
+                    0
+                } else {
+                    MODIFIER_READONLY
+                };
+                tokens.push((
+                    variable.name_span,
+                    TokenKind::Variable,
+                    MODIFIER_DECLARATION | readonly,
+                ));
             }
         }
         for (id, _parameter) in &program.parameters {
@@ -862,7 +910,7 @@ impl Document {
             if entry(*id)
                 && let Some(span) = span_of(program, *id)
             {
-                tokens.push((span, TokenKind::Parameter));
+                tokens.push((span, TokenKind::Parameter, MODIFIER_DECLARATION));
             }
         }
         // Identifier-sized reference entities.
@@ -880,9 +928,15 @@ impl Document {
                     continue;
                 }
                 match expr {
-                    Expr::Local(target) => tokens.push((span, classify_target(*target))),
-                    Expr::Generic(_) => tokens.push((span, TokenKind::TypeParameter)),
-                    Expr::Module(_) => tokens.push((span, TokenKind::Namespace)),
+                    Expr::Local(target) => {
+                        let readonly = match program.variables.get(target) {
+                            Some(variable) if !variable.mutable => MODIFIER_READONLY,
+                            _ => 0,
+                        };
+                        tokens.push((span, classify_target(*target), readonly));
+                    }
+                    Expr::Generic(_) => tokens.push((span, TokenKind::TypeParameter, 0)),
+                    Expr::Module(_) => tokens.push((span, TokenKind::Namespace, 0)),
                     _ => {}
                 }
             }
@@ -898,7 +952,7 @@ impl Document {
             } else {
                 TokenKind::Property
             };
-            tokens.push((*span, kind));
+            tokens.push((*span, kind, 0));
         }
         // Type-position references (macro names arrive here too).
         for (source, span, definition, _) in &program.type_references {
@@ -911,21 +965,21 @@ impl Document {
             let Some(kind) = definition.map(classify_target) else {
                 continue;
             };
-            tokens.push((*span, kind));
+            tokens.push((*span, kind, 0));
         }
         // Sort and drop overlaps: narrowest-first at each start, then keep
         // strictly non-overlapping tokens (the LSP requires it).
-        tokens.sort_by_key(|(span, _)| {
+        tokens.sort_by_key(|(span, _, _)| {
             let range = span.into_range();
             (range.start, range.end - range.start)
         });
-        let mut kept: Vec<(Span, TokenKind)> = Vec::new();
+        let mut kept: Vec<(Span, TokenKind, u32)> = Vec::new();
         let mut last_end = 0usize;
-        for (span, kind) in tokens {
+        for (span, kind, modifiers) in tokens {
             let range = span.into_range();
             if range.start >= last_end && range.start < range.end {
                 last_end = range.end;
-                kept.push((span, kind));
+                kept.push((span, kind, modifiers));
             }
         }
         kept
@@ -2136,11 +2190,11 @@ mod tests {
             let at = position?;
             tokens
                 .iter()
-                .find(|(span, _)| {
+                .find(|(span, _, _)| {
                     let range = span.into_range();
                     range.start == at && range.end == at + snippet.len()
                 })
-                .map(|(_, kind)| *kind)
+                .map(|(_, kind, _)| *kind)
         };
         // The generic parameter at its USE site (T in `value: T`).
         assert_eq!(
@@ -2177,7 +2231,7 @@ mod tests {
         let tokens = document.semantic_tokens();
         assert!(!tokens.is_empty());
         let mut last_end = 0;
-        for (span, _) in &tokens {
+        for (span, _, _) in &tokens {
             let range = span.into_range();
             assert!(range.start >= last_end, "overlap at {range:?}: {tokens:?}");
             assert!(range.end > range.start);
@@ -2321,6 +2375,67 @@ mod tests {
             derive_completions.iter().any(|label| label == "PartialEq"),
             "{derive_completions:?}"
         );
+    }
+
+    // Inlay hints: an UNANNOTATED binding shows its inferred type in
+    // place; an annotated one shows nothing (the source already says it).
+    #[test]
+    fn inlay_hints_show_inferred_types_only() {
+        let text = "import std::option::Option::{ self, Some, None };\n\nfun main() {\n\tlet count = Some(2);\n\tlet doubled = count? * 2;\n\tlet named: i32 = 4;\n}\n";
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let hints = document.inlay_hints();
+        let hint_after = |name: &str| {
+            let at = text.find(name).unwrap() + name.len();
+            hints
+                .iter()
+                .find(|(offset, _)| *offset == at)
+                .map(|(_, label)| label.clone())
+        };
+        assert_eq!(
+            hint_after("doubled"),
+            Some(": Option<i32>".to_string()),
+            "{hints:?}"
+        );
+        assert!(hint_after("count").is_some(), "{hints:?}");
+        assert_eq!(hint_after("named"), None, "{hints:?}");
+    }
+
+    // Token modifiers: declarations carry `declaration`; an immutable
+    // binding and its uses carry `readonly`, a `mut` one does not.
+    #[test]
+    fn semantic_token_modifiers_split_readonly_and_declarations() {
+        let text = "import std::print;\n\nfun main() {\n\tlet fixed = 1;\n\tmut counter = 2;\n\tprint(fixed + counter);\n}\n";
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let tokens = document.semantic_tokens();
+        let modifiers_at = |at: usize, len: usize| {
+            tokens
+                .iter()
+                .find(|(span, _, _)| {
+                    let range = span.into_range();
+                    range.start == at && range.end == at + len
+                })
+                .map(|(_, _, modifiers)| *modifiers)
+        };
+        let fixed_declaration = text.find("fixed").unwrap();
+        let counter_declaration = text.find("counter").unwrap();
+        let fixed_use = text.rfind("fixed").unwrap();
+        let counter_use = text.rfind("counter").unwrap();
+        assert_eq!(
+            modifiers_at(fixed_declaration, 5),
+            Some(MODIFIER_DECLARATION | MODIFIER_READONLY),
+            "{tokens:?}"
+        );
+        assert_eq!(
+            modifiers_at(counter_declaration, 7),
+            Some(MODIFIER_DECLARATION),
+            "{tokens:?}"
+        );
+        assert_eq!(
+            modifiers_at(fixed_use, 5),
+            Some(MODIFIER_READONLY),
+            "{tokens:?}"
+        );
+        assert_eq!(modifiers_at(counter_use, 7), Some(0), "{tokens:?}");
     }
 
     // E9: hover on a `const` binding shows its evaluated VALUE beside the
