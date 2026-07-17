@@ -187,7 +187,11 @@ pub fn infer(program: &mut Program) {
         }
     }
     for (span, msg) in divergences {
-        program.diagnostics.push(crate::error::Error { span, msg });
+        program.diagnostics.push(crate::error::Error {
+            note: None,
+            span,
+            msg,
+        });
     }
 
     // --- Module-level initializers cannot await (backlog §J.3): they run at
@@ -273,7 +277,11 @@ pub fn infer(program: &mut Program) {
         }
     }
     for (span, msg) in initializer_awaits {
-        program.diagnostics.push(crate::error::Error { span, msg });
+        program.diagnostics.push(crate::error::Error {
+            note: None,
+            span,
+            msg,
+        });
     }
 
     program.async_functions = async_set;

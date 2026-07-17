@@ -227,6 +227,10 @@ pub struct PublishedDiagnostic {
     pub span: Span,
     pub message: String,
     pub warning: bool,
+    /// The diagnostic's secondary note (diagnostics-standard.md C3), same
+    /// source file as the primary span in v1 — published as LSP related
+    /// information for entry-attributed diagnostics.
+    pub note: Option<(Span, String)>,
 }
 
 /// The span of an entity, flattened from the `&Span` stored in `span_map`.
@@ -341,6 +345,7 @@ impl Document {
                     span: error.span,
                     message: error.msg.clone(),
                     warning: false,
+                    note: error.note.clone(),
                 });
             } else if source == DERIVED_SOURCE {
                 published.push(PublishedDiagnostic {
@@ -348,6 +353,7 @@ impl Document {
                     span: Span::from(0..0),
                     message: format!("(in generated code) {}", error.msg),
                     warning: false,
+                    note: None,
                 });
             } else {
                 let path = self
@@ -361,6 +367,7 @@ impl Document {
                         span: error.span,
                         message: error.msg.clone(),
                         warning: false,
+                        note: None,
                     }),
                     // An unknown source (shouldn't happen): keep the error
                     // visible on the entry rather than dropping it.
@@ -369,6 +376,7 @@ impl Document {
                         span: Span::from(0..0),
                         message: error.msg.clone(),
                         warning: false,
+                        note: None,
                     }),
                 }
             }
@@ -379,6 +387,7 @@ impl Document {
                 span: warning.span,
                 message: warning.msg.clone(),
                 warning: true,
+                note: None,
             });
         }
         published

@@ -146,6 +146,69 @@ fn failure_diagnostics(source: &str) -> Vec<(String, std::ops::Range<usize>)> {
 /// distinct `spanning` snippet locates the *pertinent* expression, so a
 /// diagnostic that regresses to an enclosing aggregate span fails here.
 #[track_caller]
+/// Like `failure_diagnostics`, but keeps each diagnostic's secondary note
+/// (diagnostics-standard.md C3).
+fn failure_diagnostics_with_notes(
+    source: &str,
+) -> Vec<(
+    String,
+    std::ops::Range<usize>,
+    Option<(String, std::ops::Range<usize>)>,
+)> {
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let leaked: &'static str = Box::leak(source.into_boxed_str());
+            let (_program, errors) = analyze_source(
+                leaked,
+                &std_spec(),
+                Path::new("."),
+                Path::new("test.vl"),
+                Some(Platform::default()),
+                &Workspace::default(),
+            );
+            errors
+                .into_iter()
+                .map(|error| {
+                    (
+                        error.msg,
+                        error.span.into_range(),
+                        error.note.map(|(span, msg)| (msg, span.into_range())),
+                    )
+                })
+                .collect()
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// Asserts a diagnostic whose message contains `message_part` carries a
+/// secondary NOTE anchored at `note_spanning`'s occurrence in the source,
+/// with a note message containing `note_part` (diagnostics-standard.md C2/C3).
+fn assert_fails_noting(source: &str, message_part: &str, note_spanning: &str, note_part: &str) {
+    let expected_start = source
+        .find(note_spanning)
+        .expect("the `note_spanning` snippet must occur in the source");
+    let expected = expected_start..expected_start + note_spanning.len();
+    let diagnostics = failure_diagnostics_with_notes(source);
+    let matching: Vec<_> = diagnostics
+        .iter()
+        .filter(|(message, _, _)| message.contains(message_part))
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "no diagnostic contains {message_part:?}; got: {diagnostics:#?}"
+    );
+    assert!(
+        matching.iter().any(|(_, _, note)| note
+            .as_ref()
+            .is_some_and(|(msg, range)| msg.contains(note_part) && *range == expected)),
+        "no {message_part:?} diagnostic notes {note_part:?} at {expected:?} ({note_spanning:?}); got: {matching:#?}"
+    );
+}
+
 fn assert_fails_spanning(source: &str, spanning: &str, message_part: &str) {
     let expected_start = source
         .find(spanning)
@@ -14707,7 +14770,9 @@ fn a_conflicting_later_call_names_the_first_call_inference() {
     // (`|x| print(x)` would not reproduce: `print`'s `any` parameter makes
     // `x` adopt `any` through the argument-adoption channel before any call
     // — the identity body keeps the parameter open until the first call.)
-    assert_fails_with(
+    // The origin rides as a NOTE anchored at the FIRST call's argument
+    // (diagnostics-standard.md B3/C3); the message keeps the annotate steer.
+    assert_fails_noting(
         r#"
         fun main() {
             let pass = |x| x;
@@ -14715,7 +14780,9 @@ fn a_conflicting_later_call_names_the_first_call_inference() {
             let b = pass("two");
         }
         "#,
-        "inferred from the closure's FIRST call",
+        "The parameter is unannotated — annotate it",
+        "1",
+        "inferred from this, the closure's first call",
     );
 }
 

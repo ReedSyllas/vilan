@@ -98,6 +98,7 @@ impl<'p, 'src> State<'p, 'src> {
         }
         if !self.in_progress.insert(expr_id) {
             self.errors.push(Error {
+                note: None,
                 span: self.span_of(expr_id),
                 msg: "`const` expressions form a dependency cycle".to_string(),
             });
@@ -127,6 +128,7 @@ impl<'p, 'src> State<'p, 'src> {
                 }
                 Known::Runtime(name) => {
                     self.errors.push(Error {
+                        note: None,
                         span: self.span_of(reference_id),
                         msg: format!(
                             "`{name}` is a runtime value; a `const` expression reads only \
@@ -166,6 +168,7 @@ impl<'p, 'src> State<'p, 'src> {
                     }
                     Known::Runtime(name) => {
                         self.errors.push(Error {
+                            note: None,
                             span: self.span_of(expr_id),
                             msg: format!(
                                 "this `const` expression reaches `{name}`, whose value is not \
@@ -191,6 +194,7 @@ impl<'p, 'src> State<'p, 'src> {
                 }
                 Err(failure) => {
                     self.errors.push(Error {
+                        note: None,
                         span: self.span_of(expr_id),
                         msg: format!("const evaluation failed: {}", failure.message),
                     });
@@ -295,6 +299,7 @@ impl<'p, 'src> State<'p, 'src> {
                     .unwrap_or_else(|| "this call".to_string())
             };
             self.errors.push(Error {
+                note: None,
                 span: self.span_of(site),
                 msg: format!(
                     "{name} is compile-time-only — evaluate this call inside a `const` \

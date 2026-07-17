@@ -259,6 +259,7 @@ impl MacroDef {
             None => {
                 let Some(macro_std) = resolve_macro_std(std) else {
                     return Err(vec![Error {
+                        note: None,
                         span: (0..0).into(),
                         msg: "the `macro_std` package was not found beside `std`".to_string(),
                     }]);
@@ -270,6 +271,7 @@ impl MacroDef {
         };
         let Some(entry) = world.entries.get(&self.name).cloned() else {
             return Err(vec![Error {
+                note: None,
                 span: (0..0).into(),
                 msg: format!(
                     "the macro `{}` did not compile to a callable function",
@@ -365,6 +367,7 @@ pub(crate) fn register_file(
     let (blocks, illegal_blocks) = macro_blocks(nodes);
     for span in &illegal_blocks {
         diagnostics.push(Error {
+            note: None,
             span: *span,
             msg: "a `macro { .. }` block cannot appear inside macro code — the enclosing \
                   body already runs at expansion time"
@@ -381,6 +384,7 @@ pub(crate) fn register_file(
         .unwrap_or_else(|| (0..0).into());
     let Some(macro_std) = resolve_macro_std(std) else {
         diagnostics.push(Error {
+            note: None,
             span: first_span,
             msg: "the `macro_std` package was not found beside `std` — macros need the \
                   toolchain's `macro_std`"
@@ -415,6 +419,7 @@ pub(crate) fn register_file(
         let name = function.name.0.to_string();
         if module.contains_key(&name) {
             diagnostics.push(Error {
+                note: None,
                 span: function.name.1,
                 msg: format!("a macro named `{name}` is already defined in this module"),
             });
@@ -483,6 +488,7 @@ fn check_hermetic_imports(node: &Spanned<Node>, diagnostics: &mut Vec<Error>, he
         };
         if root != Some("macro_std") {
             diagnostics.push(Error {
+                note: None,
                 span: node.1,
                 msg: "a macro body may import only from `macro_std` — the macro world is \
                       hermetic (macro-engine.md §4)"
@@ -673,6 +679,7 @@ fn compile_world(
         return Err(errors
             .into_iter()
             .map(|error| Error {
+                note: None,
                 span: error.span,
                 msg: format!("in this macro: {}", error.msg),
             })
@@ -680,6 +687,7 @@ fn compile_world(
     }
     let Some(program) = program else {
         return Err(vec![Error {
+            note: None,
             span: (0..0).into(),
             msg: "the macro world failed to compile".to_string(),
         }]);
@@ -866,6 +874,7 @@ impl Expander<'_, '_> {
                         // this firing again is a compiler bug to report.
                         if self.std.base_root.join("rpc.vl").is_file() {
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: item.1,
                                 msg: "`[service]` expanded before std::rpc's `service` macro was \
                                       loaded — a compiler load-ordering bug (B21's class); please \
@@ -946,6 +955,7 @@ impl Expander<'_, '_> {
     ) {
         let Some(def) = self.scope.block(address) else {
             self.diagnostics.push(Error {
+                note: None,
                 span: site,
                 msg: "this `macro { .. }` block was not registered — see the file's \
                       earlier macro errors"
@@ -1042,6 +1052,7 @@ impl Expander<'_, '_> {
         match parse_generated(&combined) {
             Ok((parsed, _)) => self.output.items.insert(0, parsed),
             Err(message) => self.diagnostics.push(Error {
+                note: None,
                 span: (0..0).into(),
                 msg: format!("the built-in derive generators produced invalid vilan ({message})"),
             }),
@@ -1060,6 +1071,7 @@ impl Expander<'_, '_> {
     ) {
         let Some(def) = self.scope.get(name) else {
             self.diagnostics.push(Error {
+                note: None,
                 span: site,
                 msg: format!("no macro named `{name}` is in scope"),
             });
@@ -1068,6 +1080,7 @@ impl Expander<'_, '_> {
         let call_arguments = match def.shape {
             None => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "`{name}` is a macro HELPER (its signature is not a macro shape or it \
@@ -1082,6 +1095,7 @@ impl Expander<'_, '_> {
             }
             Some(MacroShape::Arguments) | Some(MacroShape::Unit) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "macro `{name}` is invocation-shaped (it takes no `Item`) — call it \
@@ -1117,6 +1131,7 @@ impl Expander<'_, '_> {
     ) {
         let Some(def) = self.scope.get(name) else {
             self.diagnostics.push(Error {
+                note: None,
                 span: site,
                 msg: format!("no macro named `{name}` is in scope"),
             });
@@ -1128,6 +1143,7 @@ impl Expander<'_, '_> {
         let call_arguments = match def.shape {
             None => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "`{name}` is a macro HELPER (its signature is not a macro shape or it \
@@ -1143,6 +1159,7 @@ impl Expander<'_, '_> {
             Some(MacroShape::Unit) => Vec::new(),
             Some(MacroShape::Item) | Some(MacroShape::ItemArguments) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "macro `{name}` is attribute-shaped (it takes an `Item`) — use it \
@@ -1192,6 +1209,7 @@ impl Expander<'_, '_> {
         if depth >= self.limits.depth {
             let cap = self.limits.depth;
             self.diagnostics.push(Error {
+                note: None,
                 span: site,
                 msg: format!(
                     "macro expansion did not settle after {cap} rounds — the chain ends \
@@ -1215,6 +1233,7 @@ impl Expander<'_, '_> {
                     .world_errors
                     .extend(errors.into_iter().map(|error| (def.source, error)));
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!("{label}'s definition did not compile"),
                 });
@@ -1236,6 +1255,7 @@ impl Expander<'_, '_> {
             Ok(raw) => raw,
             Err(message) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!("{label} failed at expansion time: {message}"),
                 });
@@ -1262,6 +1282,7 @@ impl Expander<'_, '_> {
                 Ok(parsed) => parsed,
                 Err(message) => {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: site,
                         msg: format!(
                             "{label} generated invalid vilan ({message}) — the \
@@ -1275,6 +1296,7 @@ impl Expander<'_, '_> {
             };
             let [only] = parsed.as_slice() else {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "{label} must generate a single expression here (it is \
@@ -1287,6 +1309,7 @@ impl Expander<'_, '_> {
             let (generated_blocks, _) = macro_blocks(parsed);
             if !generated_blocks.is_empty() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "{label} generated a `macro {{ .. }}` block — macros cannot \
@@ -1308,6 +1331,7 @@ impl Expander<'_, '_> {
                 Ok(parsed) => parsed,
                 Err(message) => {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: site,
                         msg: format!(
                             "{label} generated invalid vilan ({message}) — the \
@@ -1320,6 +1344,7 @@ impl Expander<'_, '_> {
             };
             if !macro_funs(parsed).is_empty() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "{label} generated a `macro fun` — macros cannot define \
@@ -1331,6 +1356,7 @@ impl Expander<'_, '_> {
             let (generated_blocks, _) = macro_blocks(parsed);
             if !generated_blocks.is_empty() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: site,
                     msg: format!(
                         "{label} generated a `macro {{ .. }}` block — macros cannot \

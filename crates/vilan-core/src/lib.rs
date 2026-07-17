@@ -168,6 +168,7 @@ pub fn analyze_source(
         let mut diagnostics: Vec<Error> = lex_errors
             .iter()
             .map(|error| Error {
+                note: None,
                 span: *error.span(),
                 msg: error.to_string(),
             })
@@ -187,6 +188,7 @@ pub fn analyze_source(
             )
             .into_output_errors();
         diagnostics.extend(parse_errors.iter().map(|error| Error {
+            note: None,
             span: *error.span(),
             msg: error.to_string(),
         }));

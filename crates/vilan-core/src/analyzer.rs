@@ -1853,7 +1853,11 @@ impl<'src> Analyzer<'src> {
         errors.sort_by_key(|(span, msg)| (span.start, span.end, msg.clone()));
         errors.dedup();
         for (span, msg) in errors {
-            self.diagnostics.push(Error { span, msg });
+            self.diagnostics.push(Error {
+                note: None,
+                span,
+                msg,
+            });
         }
     }
 
@@ -1954,6 +1958,7 @@ impl<'src> Analyzer<'src> {
                 if !self.is_wire_type(type_node) {
                     let rendered = render_type(type_node);
                     self.diagnostics.push(Error {
+                        note: None,
                         span: *span,
                         msg: format!(
                             "{label} of `[derive(Wire)]` type `{type_name}` is `{rendered}`, \
@@ -2036,6 +2041,7 @@ impl<'src> Analyzer<'src> {
                 if !self.is_hashable_type(type_node) {
                     let rendered = render_type(type_node);
                     self.diagnostics.push(Error {
+                        note: None,
                         span: *span,
                         msg: format!(
                             "{label} of `[derive(Hashable)]` type `{type_name}` is `{rendered}`, \
@@ -2098,6 +2104,7 @@ impl<'src> Analyzer<'src> {
                     Some(type_node) => {
                         let rendered = render_type(type_node);
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!(
                                 "{label} of `[rpc]` method `{method_name}` is `{rendered}`, \
@@ -2109,6 +2116,7 @@ impl<'src> Analyzer<'src> {
                     }
                     None => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!(
                                 "{label} of `[rpc]` method `{method_name}` must declare a Wire \
@@ -2140,6 +2148,7 @@ impl<'src> Analyzer<'src> {
                 Some(element) => {
                     let rendered = render_type(element);
                     self.diagnostics.push(Error {
+                        note: None,
                         span,
                         msg: format!(
                             "{label} is `[expose]`d, but its element `{rendered}` is not Wire — \
@@ -2154,6 +2163,7 @@ impl<'src> Analyzer<'src> {
                         .map(render_type)
                         .unwrap_or_else(|| "_".to_string());
                     self.diagnostics.push(Error {
+                        note: None,
                         span,
                         msg: format!(
                             "{label} is `[expose]`d, but its type `{rendered}` is not a \
@@ -3154,7 +3164,7 @@ impl<'src> Analyzer<'src> {
             }
         }
         for expr_id in escapes {
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span: **self.span_map.get(&expr_id).unwrap_or(&&EMPTY_SPAN),
                 msg: "a view cannot escape its scope: it may not be returned, stored in a field, placed in a collection, or carried in an enum payload. Return an owned value or a handle instead.".to_string(),
             });
@@ -3859,7 +3869,7 @@ impl<'src> Analyzer<'src> {
                             Convention::RefMut => "'&mut'",
                             _ => "'&'",
                         };
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: **self.span_map.get(parameter_id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
                                 "an async function cannot take {form} parameters: the view would be held across its suspension points. Pass a value, or a Shared/handle."
@@ -3934,6 +3944,7 @@ impl<'src> Analyzer<'src> {
                 }
             };
             self.diagnostics.push(Error {
+                note: None,
                 span: **self.span_map.get(&anchor).unwrap_or(&&EMPTY_SPAN),
                 msg,
             });
@@ -3984,7 +3995,7 @@ impl<'src> Analyzer<'src> {
             }
         }
         for (reference_id, name) in errors {
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span: **self.span_map.get(&reference_id).unwrap_or(&&EMPTY_SPAN),
                 msg: format!(
                     "an async closure cannot capture the view '{name}': the capture would be held across the closure's suspension points. Re-acquire the view inside, or pass a value/handle."
@@ -4406,7 +4417,7 @@ impl<'src> Analyzer<'src> {
             }
         }
         for (reseat_id, name) in violations {
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span: **self.span_map.get(&reseat_id).unwrap_or(&&EMPTY_SPAN),
                 msg: format!(
                     "cannot reseat a view to '{name}', which goes out of scope before the view; the view would dangle. Reseat to a place that outlives the view, or use a handle."
@@ -4687,6 +4698,7 @@ impl<'src> Analyzer<'src> {
                     "declare it `mut`".to_string()
                 };
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!("cannot mutate immutable '{name}'; {advice} to allow mutation."),
                 });
@@ -4744,6 +4756,7 @@ impl<'src> Analyzer<'src> {
                             "declare it `mut`".to_string()
                         };
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(argument_id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
                                 "cannot mutate immutable '{name}'; {advice} to allow mutation."
@@ -4848,7 +4861,7 @@ impl<'src> Analyzer<'src> {
         }
         for leak in leaks {
             let span = **self.span_map.get(&leak).unwrap_or(&&EMPTY_SPAN);
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span,
                 msg: "a view can't be read as a value here; write `*` to copy the value out \
                       (a view's value is explicit — `*v` is the only way to cross from view to value)"
@@ -4878,7 +4891,7 @@ impl<'src> Analyzer<'src> {
                 } else {
                     "declare it `mut`".to_string()
                 };
-                self.diagnostics.push(Error {
+                self.diagnostics.push(Error { note: None,
                     span: **self.span_map.get(&reference_id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!(
                         "cannot take a writable view of immutable '{name}'; {advice} to allow mutation."
@@ -4922,7 +4935,7 @@ impl<'src> Analyzer<'src> {
                 initial.is_some_and(|initial_id| self.assignment_target_is_view(initial_id));
             // R7: a view binding may not be `mut`.
             if mutable && holds_view {
-                self.diagnostics.push(Error {
+                self.diagnostics.push(Error { note: None,
                     span: name_span,
                     msg: format!(
                         "view binding '{name}' cannot be `mut`: a view cannot be rebound. Declare it `let`, and mutate the referent by assigning through it (`{name} = …`)."
@@ -4943,6 +4956,7 @@ impl<'src> Analyzer<'src> {
                     )
                 };
                 self.diagnostics.push(Error {
+                    note: None,
                     span: name_span,
                     msg,
                 });
@@ -5002,7 +5016,7 @@ impl<'src> Analyzer<'src> {
                     None => continue,
                 };
                 if !self.assignment_target_is_view(*argument_id) {
-                    self.diagnostics.push(Error {
+                    self.diagnostics.push(Error { note: None,
                         span: **self.span_map.get(argument_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "a `{kind}` parameter takes a view; pass `{kind} <place>` (there is no implicit borrow)."
@@ -5036,7 +5050,7 @@ impl<'src> Analyzer<'src> {
                 continue;
             };
             if self.call_is_must_use(*call_id) {
-                self.warnings.push(Error {
+                self.warnings.push(Error { note: None,
                     span: **self.span_map.get(&statement_id).unwrap_or(&&EMPTY_SPAN),
                     msg: "unused result of a `[must_use]` call: bind it (e.g. `owner.take(…)`), or `let _ = …` to discard.".to_string(),
                 });
@@ -5672,6 +5686,7 @@ impl<'src> Analyzer<'src> {
             return length;
         }
         self.diagnostics.push(Error {
+            note: None,
             span: node.1,
             msg: "an array length must be a non-negative integer literal \
                   (a `const` length is not supported yet)"
@@ -5694,6 +5709,7 @@ impl<'src> Analyzer<'src> {
     fn reject_lift_region_condition(&mut self, condition: &Spanned<Node<'src>>) {
         if matches!(condition.0, Node::LiftRegion(..)) {
             self.diagnostics.push(Error {
+                note: None,
                 span: condition.1,
                 msg: "the `?` lifts this condition to an `Option`/`Result`, which a \
                       condition cannot take — `match` on the lifted value instead"
@@ -5713,6 +5729,7 @@ impl<'src> Analyzer<'src> {
             // caught here, with the idiom.
             if matches!(&inner.0, Node::Assign(..)) {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "vilan has no const declarations — write `let x = const ..`".to_string(),
                 });
@@ -5753,6 +5770,7 @@ impl<'src> Analyzer<'src> {
                     // 3 bytes into the literal (after the opening delimiter).
                     let base = node.1.start + 3;
                     self.diagnostics.push(Error {
+                        note: None,
                         span: (base + range.start..base + range.end).into(),
                         msg: message,
                     });
@@ -5807,6 +5825,7 @@ impl<'src> Analyzer<'src> {
                     Node::Number(name, fraction, suffix) => {
                         if suffix.is_some() {
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: member.1,
                                 msg: "a tuple position is a bare number (`.0`, `.1`) — drop the \
                                       suffix"
@@ -5864,6 +5883,7 @@ impl<'src> Analyzer<'src> {
                             }
                             _ => {
                                 self.diagnostics.push(Error {
+                                    note: None,
                                     span: call_subject.1,
                                     msg: "expected a method name after `.`".to_string(),
                                 });
@@ -5873,6 +5893,7 @@ impl<'src> Analyzer<'src> {
                     }
                     _ => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: member.1,
                             msg: "expected a field or method name after `.`".to_string(),
                         });
@@ -5936,6 +5957,7 @@ impl<'src> Analyzer<'src> {
                 // `[T; n]` is a TYPE — the type parser produces it in type
                 // position only; in value position it's a stray type annotation.
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "a `[T; n]` array type isn't a value; write an array \
                           literal like `[value; n]`"
@@ -6057,6 +6079,7 @@ impl<'src> Analyzer<'src> {
             Node::MacroFun(function) => {
                 if !self.module_scope_ids.contains(&scope_id) {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: node.1,
                         msg: "a `macro fun` must be a top-level item".to_string(),
                     });
@@ -6130,6 +6153,7 @@ impl<'src> Analyzer<'src> {
                     // Reached only where expansion never runs — a macro body
                     // (the world walks the definition's original text).
                     self.diagnostics.push(Error {
+                        note: None,
                         span: node.1,
                         msg: format!(
                             "the invocation `macro {name}(..)` was not expanded — splice \
@@ -6158,6 +6182,7 @@ impl<'src> Analyzer<'src> {
                 } else {
                     // Reached only where expansion never runs — a macro body.
                     self.diagnostics.push(Error {
+                        note: None,
                         span: node.1,
                         msg: "this `macro { .. }` block was not expanded — a block cannot \
                               appear inside macro code (the enclosing body already runs at \
@@ -6174,6 +6199,7 @@ impl<'src> Analyzer<'src> {
                 // in a body has nothing to attach to.
                 if !self.module_scope_ids.contains(&scope_id) {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: node.1,
                         msg: "`export` is a module-level item and cannot appear inside a body"
                             .to_string(),
@@ -6298,6 +6324,7 @@ impl<'src> Analyzer<'src> {
                     // function with a callable type so calls infer their return.
                     if function.body.is_some() {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: function.name.1,
                             msg: "an `external` function cannot have a body".to_string(),
                         });
@@ -6346,6 +6373,7 @@ impl<'src> Analyzer<'src> {
                             // declared `external`.
                             if !self.walking_trait_body {
                                 self.diagnostics.push(Error {
+                                    note: None,
                                     span: function.name.1,
                                     msg: format!(
                                         "function '{}' must have a body or be declared `external`",
@@ -6502,6 +6530,7 @@ impl<'src> Analyzer<'src> {
                 // mark is never silently dropped, it errors here.
                 self.walk_expr_node(inner, scope_id);
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "a bare `?` (expression lifting) is not supported in this position"
                         .to_string(),
@@ -6517,6 +6546,7 @@ impl<'src> Analyzer<'src> {
                     && steps.get(index).is_some_and(|(_, is_split)| *is_split)
                 {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: node.1,
                         msg: "`?` lifts nothing here — the region is the whole expression; \
                               use `?.` for member access, or remove the `?`"
@@ -6534,6 +6564,7 @@ impl<'src> Analyzer<'src> {
                         || contains_try_assert(&body.0);
                     if after_split_try_assert {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: node.1,
                             msg: "`!` cannot run after a `?` inside a lifted expression — it \
                                   would early-return from inside the region; bind the `!` \
@@ -6602,7 +6633,7 @@ impl<'src> Analyzer<'src> {
                         });
                     }
                     _ => {
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: node.1,
                             msg: "`!` requires the nearest enclosing function to declare an `Option`/`Result`-compatible return type (closures and `async` blocks are not yet supported)"
                                 .to_string(),
@@ -6664,6 +6695,7 @@ impl<'src> Analyzer<'src> {
                     };
                     if !matches!(grouped, Node::ClosureType(..)) {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: clause_span,
                             msg: "a `context` clause is only supported on a closure type"
                                 .to_string(),
@@ -6754,6 +6786,7 @@ impl<'src> Analyzer<'src> {
                     }
                     None => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: node.1,
                             msg: "a destructuring `let` requires a value".to_string(),
                         });
@@ -6766,7 +6799,7 @@ impl<'src> Analyzer<'src> {
                 // rvalue — and may not be an assignment target. A view is written
                 // *through* directly (`x = v`), so `*x = v` is rejected.
                 if matches!(&target.0, Node::Dereference(_)) {
-                    self.diagnostics.push(Error {
+                    self.diagnostics.push(Error { note: None,
                         span: target.1,
                         msg: "cannot assign through `*`: a view is written through directly — write `x = …`, not `*x = …`".to_string(),
                     });
@@ -6781,6 +6814,7 @@ impl<'src> Analyzer<'src> {
                 // assign into a lowering temp (proposal/try-and-lift.md §3).
                 if lift_target_of(target) {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: target.1,
                         msg: "a lifted chain (`?.`) is not an assignment target".to_string(),
                     });
@@ -6824,6 +6858,7 @@ impl<'src> Analyzer<'src> {
                 // empty).
                 if !external && body.is_none() {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: node.1,
                         msg: format!(
                             "struct '{}' must declare a body or be declared `external`",
@@ -7273,6 +7308,7 @@ impl<'src> Analyzer<'src> {
             }
             Node::ClosureType(_, _) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "a closure type is not valid here (expected an expression)".to_string(),
                 });
@@ -7280,6 +7316,7 @@ impl<'src> Analyzer<'src> {
             }
             Node::TypeWithContexts(_, _) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg:
                         "a `context`-typed closure type is not valid here (expected an expression)"
@@ -7289,6 +7326,7 @@ impl<'src> Analyzer<'src> {
             }
             Node::AsyncType(_) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "an `async` closure type is not valid here (expected an expression)"
                         .to_string(),
@@ -7297,6 +7335,7 @@ impl<'src> Analyzer<'src> {
             }
             Node::MappedType { .. } => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "a mapped tuple type is not valid here (expected an expression)"
                         .to_string(),
@@ -7386,6 +7425,7 @@ impl<'src> Analyzer<'src> {
             };
             if !matches!(grouped, Node::ClosureType(..) | Node::AsyncType(..)) {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: clause_span,
                     msg: "a `context` clause is only supported on a closure type".to_string(),
                 });
@@ -7673,6 +7713,7 @@ impl<'src> Analyzer<'src> {
                         Some(entity) => entity,
                         None => {
                             self.diagnostics.push(Error {
+                                note: None,
                                 span,
                                 msg: format!("cannot find '{}' in this scope", name),
                             });
@@ -7683,6 +7724,7 @@ impl<'src> Analyzer<'src> {
                     Some(Expr::EnumVariant(enum_id, variant_index)) => (*enum_id, *variant_index),
                     _ => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!("'{}' is not an enum variant", name),
                         });
@@ -7720,6 +7762,7 @@ impl<'src> Analyzer<'src> {
                     Type::Unknown | Type::Any | Type::Generic(_) => {}
                     Type::Enum(_, _) => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!("variant '{}' does not belong to the matched enum", name),
                         });
@@ -7728,6 +7771,7 @@ impl<'src> Analyzer<'src> {
                     other => {
                         let subject_str = self.pretty_print_type(&other, &HashMap::new());
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!(
                                 "cannot match an enum variant against type {}",
@@ -7761,6 +7805,7 @@ impl<'src> Analyzer<'src> {
                 let payload_patterns: &[WalkPattern] = payload.as_deref().unwrap_or(&[]);
                 if payload_patterns.len() != data_type_ids.len() {
                     self.diagnostics.push(Error {
+                        note: None,
                         span,
                         msg: format!(
                             "variant '{}' carries {} {}, but the pattern has {}",
@@ -7820,6 +7865,7 @@ impl<'src> Analyzer<'src> {
                     Type::Array(element_id, length) => {
                         if length != patterns.len() {
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: *span,
                                 msg: format!(
                                     "this pattern binds {} {}, but the array's length is {}",
@@ -7836,6 +7882,7 @@ impl<'src> Analyzer<'src> {
                     other => {
                         let rendered = self.pretty_print_type(&other, &HashMap::new());
                         self.diagnostics.push(Error {
+                            note: None,
                             span: *span,
                             msg: format!(
                                 "cannot destructure {rendered} as a fixed array — \
@@ -7866,6 +7913,7 @@ impl<'src> Analyzer<'src> {
                     let expected = self.pretty_print_type(&subject_type, &HashMap::new());
                     let got = self.pretty_print_type(&literal_type, &HashMap::new());
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&literal_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "literal pattern of type {} cannot match type {}",
@@ -7974,7 +8022,7 @@ impl<'src> Analyzer<'src> {
             // is the inner closure type; the marker is peeled (and recorded)
             // only at parameters and `let` annotations (J2 v1).
             Node::AsyncType(inner) => {
-                self.diagnostics.push(Error {
+                self.diagnostics.push(Error { note: None,
                     span: node.1,
                     msg: "an `async` closure type is only supported on parameters and `let` annotations"
                         .to_string(),
@@ -7983,6 +8031,7 @@ impl<'src> Analyzer<'src> {
             }
             Node::TypeWithContexts(inner, _) => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
                     msg: "a `context` clause is only supported on a parameter's closure type"
                         .to_string(),
@@ -8688,7 +8737,7 @@ impl<'src> Analyzer<'src> {
                 if let Type::Array(element_type_id, length) = constraint {
                     let element_type = element_type_id.get_type(self);
                     if item_ids.len() != length && self.reported_literal_errors.insert(expr_id) {
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: **self.span_map.get(&expr_id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
                                 "this array literal has {} element{}, but its type is `[_; {length}]`",
@@ -8718,7 +8767,7 @@ impl<'src> Analyzer<'src> {
                         {
                             let expected = self.pretty_print_type(&element_type, &HashMap::new());
                             let got = self.pretty_print_type(&item_type, &HashMap::new());
-                            self.diagnostics.push(Error {
+                            self.diagnostics.push(Error { note: None,
                                 span: **self.span_map.get(item_id).unwrap_or(&&EMPTY_SPAN),
                                 msg: format!(
                                     "Expected {expected} (this literal's element type), but got {got} instead."
@@ -8795,7 +8844,7 @@ impl<'src> Analyzer<'src> {
                                 let expected =
                                     self.pretty_print_type(&element_type, &HashMap::new());
                                 let got = self.pretty_print_type(&item_type, &HashMap::new());
-                                self.diagnostics.push(Error {
+                                self.diagnostics.push(Error { note: None,
                                     span: **self.span_map.get(item_id).unwrap_or(&&EMPTY_SPAN),
                                     msg: format!(
                                         "Expected {expected} (this literal's element type), but got {got} instead."
@@ -10133,6 +10182,7 @@ impl<'src> Analyzer<'src> {
                 None => {
                     if report {
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: "`self` import has no enclosing namespace".to_string(),
                         });
@@ -10152,6 +10202,7 @@ impl<'src> Analyzer<'src> {
             None => {
                 if report {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: root_span,
                         msg: format!("cannot find module '{}' to import", root),
                     });
@@ -10187,6 +10238,7 @@ impl<'src> Analyzer<'src> {
                 None => {
                     if report {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: part_span,
                             msg: format!("cannot find '{}' in the imported path", part),
                         });
@@ -10429,6 +10481,7 @@ impl<'src> Analyzer<'src> {
         if let Type::Closure(parameter_type_ids, _) = &subject_type {
             if argument_ids.len() != parameter_type_ids.len() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: arguments_span,
                     msg: format!(
                         "Expected {} {}, but got {} instead.",
@@ -10473,15 +10526,28 @@ impl<'src> Analyzer<'src> {
                 {
                     let expected = self.pretty_print_type(&parameter_type, &substitution_context);
                     let got = self.pretty_print_type(&argument_type, &substitution_context);
-                    let origin = match self.closure_parameter_fill_sites.get(parameter_type_id) {
-                        Some(_) => format!(
-                            " The parameter is unannotated, so its type was inferred from \
-                             the closure's FIRST call — annotate the parameter \
-                             (e.g. `|x: {expected}|`) to pin the type deliberately."
-                        ),
-                        None => String::new(),
-                    };
+                    // The inference origin rides as a NOTE at the filling
+                    // call's argument (diagnostics-standard.md B3/C3); the
+                    // message keeps the steer.
+                    let (origin, note) =
+                        match self.closure_parameter_fill_sites.get(parameter_type_id) {
+                            Some(fill_span) => (
+                                format!(
+                                    " The parameter is unannotated — annotate it \
+                                     (e.g. `|x: {expected}|`) to pin the type deliberately."
+                                ),
+                                Some((
+                                    *fill_span,
+                                    format!(
+                                        "the parameter's type was inferred from this, \
+                                         the closure's first call ({expected})"
+                                    ),
+                                )),
+                            ),
+                            None => (String::new(), None),
+                        };
                     self.diagnostics.push(Error {
+                        note,
                         span: **self.span_map.get(&argument_id).unwrap(),
                         msg: format!("Expected {}, but got {} instead.{}", expected, got, origin),
                     });
@@ -10509,6 +10575,7 @@ impl<'src> Analyzer<'src> {
                         .clone();
                     if argument_ids.len() != data_type_ids.len() {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: arguments_span,
                             msg: format!(
                                 "Expected {} {}, but got {} instead.",
@@ -10536,6 +10603,7 @@ impl<'src> Analyzer<'src> {
                                 self.pretty_print_type(&data_type, &substitution_context);
                             let got = self.pretty_print_type(&argument_type, &substitution_context);
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: **self.span_map.get(&argument_id).unwrap(),
                                 msg: format!("Expected {}, but got {} instead.", expected, got),
                             });
@@ -10574,6 +10642,7 @@ impl<'src> Analyzer<'src> {
                 if let Some((parameters, generic_parameter_constraint_ids)) = function_data {
                     if argument_ids.len() != parameters.len() {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: arguments_span,
                             msg: format!(
                                 "Expected {} {}, but got {} instead.",
@@ -10651,6 +10720,7 @@ impl<'src> Analyzer<'src> {
                                 let got =
                                     self.pretty_print_type(&argument_type, &substitution_context);
                                 self.diagnostics.push(Error {
+                                    note: None,
                                     span: **self.span_map.get(&argument_id).unwrap(),
                                     msg: format!("Expected {}, but got {} instead.", expected, got),
                                 });
@@ -10703,7 +10773,7 @@ impl<'src> Analyzer<'src> {
                         Expr::Struct(struct_id) => self.structs.get(struct_id).map(|s| s.name),
                         _ => None,
                     };
-                    self.diagnostics.push(Error {
+                    self.diagnostics.push(Error { note: None,
                         span: arguments_span,
                         msg: match struct_name {
                             Some(name) => format!(
@@ -10731,6 +10801,7 @@ impl<'src> Analyzer<'src> {
             }
             _ => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: arguments_span,
                     msg: "cannot call a non-function value".to_string(),
                 });
@@ -10813,6 +10884,7 @@ impl<'src> Analyzer<'src> {
             if member_name != "len" {
                 let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: arguments_span,
                     msg: format!("{} has no method '{}'", type_str, member_name),
                 });
@@ -10821,6 +10893,7 @@ impl<'src> Analyzer<'src> {
             }
             if !argument_ids.is_empty() || !generic_argument_ids.is_empty() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: arguments_span,
                     msg: "`len` takes no arguments".to_string(),
                 });
@@ -11111,6 +11184,7 @@ impl<'src> Analyzer<'src> {
                     })
                     .unwrap_or_default();
                 self.diagnostics.push(Error {
+                    note: None,
                     span: arguments_span,
                     msg: format!(
                         "{} has no method '{}'{}",
@@ -11124,6 +11198,7 @@ impl<'src> Analyzer<'src> {
             MethodLookup::NotCallable => {
                 let type_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: arguments_span,
                     msg: format!("cannot call method '{}' on {}", member_name, type_str),
                 });
@@ -11136,6 +11211,7 @@ impl<'src> Analyzer<'src> {
                     .map(|trait_| trait_.name)
                     .unwrap_or("trait");
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&subject_id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!(
                         "cannot call '{member_name}' on a value of bare trait type \
@@ -11170,6 +11246,7 @@ impl<'src> Analyzer<'src> {
                 let expected = self.pretty_print_type(&slot_type, &HashMap::new());
                 let got = self.pretty_print_type(&argument_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&argument_id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!("Expected {}, but got {} instead.", expected, got),
                 });
@@ -11209,6 +11286,7 @@ impl<'src> Analyzer<'src> {
         let expected = parameter_ids.len().saturating_sub(1);
         if argument_ids.len() != expected {
             self.diagnostics.push(Error {
+                note: None,
                 span: arguments_span,
                 msg: format!(
                     "Expected {} {}, but got {} instead.",
@@ -11256,6 +11334,7 @@ impl<'src> Analyzer<'src> {
                 let expected = self.pretty_print_type(&parameter_type, &HashMap::new());
                 let got = self.pretty_print_type(&argument_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&argument_id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!("Expected {}, but got {} instead.", expected, got),
                 });
@@ -11295,6 +11374,7 @@ impl<'src> Analyzer<'src> {
             other => {
                 let got = self.pretty_print_type(&other, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!(
                         "a tuple comprehension's source must be a mapped tuple, got {got}"
@@ -11372,6 +11452,7 @@ impl<'src> Analyzer<'src> {
                         self.pretty_print_type(&variable_type, &substitution_context);
                     let got_str = self.pretty_print_type(&value_type, &substitution_context);
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&first_value_id).unwrap(),
                         msg: format!("Expected {}, but got {} instead.", expected_str, got_str),
                     });
@@ -11407,6 +11488,7 @@ impl<'src> Analyzer<'src> {
                         self.pretty_print_type(&variable_type, &substitution_context);
                     let got_str = self.pretty_print_type(&value_type, &substitution_context);
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&value_id).unwrap(),
                         msg: format!("Expected {}, but got {} instead.", expected_str, got_str),
                     });
@@ -11470,6 +11552,7 @@ impl<'src> Analyzer<'src> {
             let expected = self.pretty_print_type(&return_type, &substitution_context);
             let got = self.pretty_print_type(&body_type, &substitution_context);
             self.diagnostics.push(Error {
+                note: None,
                 span: **self.span_map.get(&body_id).unwrap_or(&&EMPTY_SPAN),
                 msg: format!("Expected {}, but got {} instead.", expected, got),
             });
@@ -11556,7 +11639,7 @@ impl<'src> Analyzer<'src> {
                         self.pretty_print_type(&subject_error_type, &HashMap::new());
                     let continuation_rendered =
                         self.pretty_print_type(&continuation_error_type, &HashMap::new());
-                    self.diagnostics.push(Error {
+                    self.diagnostics.push(Error { note: None,
                         span,
                         msg: format!(
                             "`?.` flattens into the chain's own `Result`, so the error types must match: the subject's is {subject_rendered}, the chain yields {continuation_rendered}. Convert the error first with `.map_err(…)`."
@@ -11626,6 +11709,7 @@ impl<'src> Analyzer<'src> {
                 other => {
                     let rendered = self.pretty_print_type(other, &HashMap::new());
                     self.diagnostics.push(Error {
+                        note: None,
                         span: step_span,
                         msg: format!(
                             "a bare `?` lifts an `Option` or a `Result` — this is {rendered} \
@@ -11643,6 +11727,7 @@ impl<'src> Analyzer<'src> {
                         let first = self.render_container_name(*family_id);
                         let second = self.render_container_name(enum_id);
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!(
                                 "every `?` in one lifted expression must split the same \
@@ -11668,6 +11753,7 @@ impl<'src> Analyzer<'src> {
                             let first = self.pretty_print_type(&family_error_type, &HashMap::new());
                             let second = self.pretty_print_type(&step_error_type, &HashMap::new());
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: step_span,
                                 msg: format!(
                                     "`?` short-circuits a lifted expression with the first bad \
@@ -11719,6 +11805,7 @@ impl<'src> Analyzer<'src> {
                     let first = self.pretty_print_type(&region_error_type, &HashMap::new());
                     let second = self.pretty_print_type(&body_error_type, &HashMap::new());
                     self.diagnostics.push(Error {
+                        note: None,
                         span,
                         msg: format!(
                             "this lifted expression flattens into its own `Result`, so the \
@@ -11799,7 +11886,7 @@ impl<'src> Analyzer<'src> {
         }
         if !opted_in {
             let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span,
                 msg: format!(
                     "`?.` lifts an `Option`, a `Result`, or a type opting in with `impl .. with Lift` — this is {rendered}"
@@ -11815,6 +11902,7 @@ impl<'src> Analyzer<'src> {
             other => {
                 let rendered = self.pretty_print_type(other, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span,
                     msg: format!(
                         "`?.` needs a container with an element type — this is {rendered}"
@@ -11844,7 +11932,7 @@ impl<'src> Analyzer<'src> {
             self.method_member_impl_subject(&subject_type, member_name)
         else {
             let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span,
                 msg: format!(
                     "`?.` on {rendered} needs a `{member_name}` method — the Lift contract (`map<U>(self, |T| U)`, `and_then<U>(self, |T| Self-of-U)`)"
@@ -11920,7 +12008,7 @@ impl<'src> Analyzer<'src> {
                 None => {
                     if !tail_is_void {
                         let tail_rendered = self.pretty_print_type(&tail_type, &HashMap::new());
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: *span,
                             msg: format!(
                                 "a bare `ret` exits a closure whose body yields {tail_rendered} — return a value"
@@ -11934,7 +12022,7 @@ impl<'src> Analyzer<'src> {
                         return Resolution::Deferred;
                     }
                     if tail_is_void && !matches!(value_type, Type::Void) {
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: *span,
                             msg: "the closure's body ends without a value, but this `ret` returns one — make the ret'd value the body's tail"
                                 .to_string(),
@@ -11945,7 +12033,7 @@ impl<'src> Analyzer<'src> {
                     {
                         let value_rendered = self.pretty_print_type(&value_type, &HashMap::new());
                         let tail_rendered = self.pretty_print_type(&tail_type, &HashMap::new());
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: *span,
                             msg: format!(
                                 "this `ret` returns {value_rendered}, but the closure's body yields {tail_rendered}"
@@ -12023,7 +12111,7 @@ impl<'src> Analyzer<'src> {
                 Type::Enum(return_enum, _) if Some(*return_enum) == self.option_enum_id => {}
                 other => {
                     let rendered = self.pretty_print_type(other, &HashMap::new());
-                    self.diagnostics.push(Error {
+                    self.diagnostics.push(Error { note: None,
                         span,
                         msg: format!(
                             "`!` on an `Option` returns `None` early, so the enclosing function must return `Option` — it returns {rendered}. If it returns `Result`, convert first: `.ok_or(err)` turns `None` into an `Err`."
@@ -12059,7 +12147,7 @@ impl<'src> Analyzer<'src> {
                     {
                         let receiver_rendered = self.pretty_print_type(&bad, &HashMap::new());
                         let return_rendered = self.pretty_print_type(&return_bad, &HashMap::new());
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span,
                             msg: format!(
                                 "`!` returns this `Result`'s error as-is, so the error types must match: the value's is {receiver_rendered}, the function returns {return_rendered}. Convert the error first: `.map_err(…)` before `!`."
@@ -12069,7 +12157,7 @@ impl<'src> Analyzer<'src> {
                 }
                 other => {
                     let rendered = self.pretty_print_type(other, &HashMap::new());
-                    self.diagnostics.push(Error {
+                    self.diagnostics.push(Error { note: None,
                         span,
                         msg: format!(
                             "`!` on a `Result` returns the error early, so the enclosing function must return `Result` — it returns {rendered}"
@@ -12108,7 +12196,7 @@ impl<'src> Analyzer<'src> {
         }
         let Some(impl_index) = try_impl else {
             let rendered = self.pretty_print_type(&receiver_type, &HashMap::new());
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span,
                 msg: format!(
                     "`!` needs a value implementing `Try` (an `Option`, a `Result`, or a type with an `impl .. with Try<..>`) — this is {rendered}"
@@ -12132,6 +12220,7 @@ impl<'src> Analyzer<'src> {
             .unwrap_or_default();
         let (Some(verdict_id), Some(from_bad_id)) = (verdict_id, from_bad_id) else {
             self.diagnostics.push(Error {
+                note: None,
                 span,
                 msg: "the `Try` impl is missing `verdict`/`from_bad`".to_string(),
             });
@@ -12166,7 +12255,7 @@ impl<'src> Analyzer<'src> {
         {
             let receiver_rendered = self.pretty_print_type(&receiver_type, &HashMap::new());
             let return_rendered = self.pretty_print_type(&return_type, &HashMap::new());
-            self.diagnostics.push(Error {
+            self.diagnostics.push(Error { note: None,
                 span,
                 msg: format!(
                     "`!` on a `Try` type returns `from_bad(..)`, which rebuilds {receiver_rendered} — the enclosing function returns {return_rendered} (for user `Try` types the two must match exactly, v1)"
@@ -12230,6 +12319,7 @@ impl<'src> Analyzer<'src> {
                 } else if !self.compare_type(&guard_type, &self.bool_type(), &HashMap::new()) {
                     let got = self.pretty_print_type(&guard_type, &HashMap::new());
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&guard_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!("match guard must be a bool, but got {}", got),
                     });
@@ -12281,6 +12371,7 @@ impl<'src> Analyzer<'src> {
                     .collect::<Vec<_>>();
                 if !missing.is_empty() {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: prepped.span,
                         msg: format!("match is not exhaustive: missing {}", missing.join(", ")),
                     });
@@ -12292,6 +12383,7 @@ impl<'src> Analyzer<'src> {
             Type::Tuple(_) | Type::Unknown | Type::Any | Type::Never | Type::Generic(_) => {}
             _ if !has_catch_all => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: prepped.span,
                     msg: "match is not exhaustive: add a catch-all `_` leg".to_string(),
                 });
@@ -12333,7 +12425,7 @@ impl<'src> Analyzer<'src> {
                             .get(body_id)
                             .map(|span| **span)
                             .unwrap_or(prepped.span);
-                        self.diagnostics.push(Error {
+                        self.diagnostics.push(Error { note: None,
                             span: leg_span,
                             msg: format!(
                                 "match legs have mismatched types: expected {}, but got {} instead.",
@@ -12385,6 +12477,7 @@ impl<'src> Analyzer<'src> {
                         .map(|span| **span)
                         .unwrap_or(constraint.fields_span);
                     self.diagnostics.push(Error {
+                        note: None,
                         span,
                         msg: format!("unknown struct: {}", constraint.struct_name),
                     });
@@ -12400,6 +12493,7 @@ impl<'src> Analyzer<'src> {
                     .map(|span| **span)
                     .unwrap_or(constraint.fields_span);
                 self.diagnostics.push(Error {
+                    note: None,
                     span,
                     msg: format!("cannot initialize a non-struct: {}", constraint.struct_name),
                 });
@@ -12410,6 +12504,7 @@ impl<'src> Analyzer<'src> {
         let struct_fields = struct_.fields.clone();
         if constraint.fields.len() != struct_fields.len() {
             self.diagnostics.push(Error {
+                note: None,
                 span: constraint.fields_span.clone(),
                 msg: format!(
                     "Expected {} {}, but got {} instead.",
@@ -12439,6 +12534,7 @@ impl<'src> Analyzer<'src> {
                 Some(field) => field,
                 None => {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: *field_value_span,
                         msg: format!("struct '{}' has no field '{}'", struct_name, field_name),
                     });
@@ -12466,6 +12562,7 @@ impl<'src> Analyzer<'src> {
                 // value, not the whole `{ .. }` block — E7) but still record
                 // the type for downstream consumers.
                 self.diagnostics.push(Error {
+                    note: None,
                     span: *field_value_span,
                     msg: format!(
                         "Expected {}, but got {} instead.",
@@ -12605,6 +12702,7 @@ impl<'src> Analyzer<'src> {
                             &HashMap::new(),
                         );
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: tuple_access_error(&label, member_name, problem),
                         });
@@ -12618,6 +12716,7 @@ impl<'src> Analyzer<'src> {
                     Some(struct_) => struct_,
                     None => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&id).unwrap(),
                             msg: format!("subject is not a struct: {}", struct_id.0),
                         });
@@ -12669,6 +12768,7 @@ impl<'src> Analyzer<'src> {
                     }
                     None => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!("struct '{}' has no field '{}'", struct_name, member_name),
                         });
@@ -12686,6 +12786,7 @@ impl<'src> Analyzer<'src> {
                 }
                 let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!(
                         "cannot access field '{}' on type {}",
@@ -12750,6 +12851,7 @@ impl<'src> Analyzer<'src> {
             // (only a `List` is indexable)" — say what is actually missing.
             Type::Struct(struct_id, _) if Some(struct_id) == list_id => {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                     msg: "cannot index this List: its element type is never determined \
                           (give the list a type, e.g. `: List<i32>`)"
@@ -12770,6 +12872,7 @@ impl<'src> Analyzer<'src> {
                     && literal_index >= length
                 {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "index {literal_index} is out of range for an array of length {length} \
@@ -12789,6 +12892,7 @@ impl<'src> Analyzer<'src> {
             subject_type => {
                 let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                     msg: format!(
                         "cannot index {} (only a `List` or `[T; n]` array is indexable)",
@@ -12886,6 +12990,7 @@ impl<'src> Analyzer<'src> {
                 Some(entity) => entity,
                 None => {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: root_span,
                         msg: format!("cannot find '{}' in this scope", root),
                     });
@@ -12907,6 +13012,7 @@ impl<'src> Analyzer<'src> {
                 };
                 let Some(namespace_scope_id) = namespace_scope_id else {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: segment_span,
                         msg: "`use` requires a namespace (a module or an enum)".to_string(),
                     });
@@ -12922,6 +13028,7 @@ impl<'src> Analyzer<'src> {
                     Some(entity) => entity,
                     None => {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: segment_span,
                             msg: format!("cannot find '{}' in the `use` path", segment),
                         });
@@ -12974,6 +13081,7 @@ impl<'src> Analyzer<'src> {
                     if let Some(message) = self.bare_name_not_a_value(subject_id, name) {
                         let diagnostics_before = self.diagnostics.len();
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: message,
                         });
@@ -12990,6 +13098,7 @@ impl<'src> Analyzer<'src> {
                 None => {
                     let diagnostics_before = self.diagnostics.len();
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!("cannot find '{}' in this scope", name),
                     });
@@ -13028,6 +13137,7 @@ impl<'src> Analyzer<'src> {
             // `check_readonly_mutation`.
             if self.variables.get(&variable_id).is_none() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&target_id).unwrap_or(&&EMPTY_SPAN),
                     msg: "cannot assign to this expression".to_string(),
                 });
@@ -13092,7 +13202,11 @@ impl<'src> Analyzer<'src> {
                     } else {
                         format!("cannot find type '{}'", name)
                     };
-                    self.diagnostics.push(Error { span, msg: message });
+                    self.diagnostics.push(Error {
+                        note: None,
+                        span,
+                        msg: message,
+                    });
                     self.type_id_to_type_map.insert(type_id, Type::Unknown);
                 }
             }
@@ -13114,6 +13228,7 @@ impl<'src> Analyzer<'src> {
                         }
                         None => {
                             self.diagnostics.push(Error {
+                                note: None,
                                 span,
                                 msg: format!(
                                     "cannot find '{}' in module '{}'",
@@ -13134,6 +13249,7 @@ impl<'src> Analyzer<'src> {
                     if !matches!(subject_type, Type::Unknown | Type::Unresolved) {
                         let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
                         self.diagnostics.push(Error {
+                            note: None,
                             span,
                             msg: format!(
                                 "cannot resolve `{member_name}` here: {subject_str} is not a module"
@@ -13265,6 +13381,7 @@ impl<'src> Analyzer<'src> {
                             })
                             .unwrap_or_default();
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                                 msg: format!(
                                     "cannot find '{}' in {}{}",
@@ -13286,6 +13403,7 @@ impl<'src> Analyzer<'src> {
                         }
                         None => {
                             self.diagnostics.push(Error {
+                                note: None,
                                 span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                                 msg: format!(
                                     "cannot find '{}' in module '{}'",
@@ -13302,6 +13420,7 @@ impl<'src> Analyzer<'src> {
                     let bound_trait_ids = self.generic_bound_trait_ids(constraint_id);
                     if bound_trait_ids.is_empty() {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
                                 "cannot access '{}' on an unconstrained type parameter",
@@ -13345,6 +13464,7 @@ impl<'src> Analyzer<'src> {
                                     .collect::<Vec<_>>()
                                     .join(" + ");
                                 self.diagnostics.push(Error {
+                                    note: None,
                                     span: **self.span_map.get(&id).unwrap_or(&&EMPTY_SPAN),
                                     msg: format!(
                                         "no bound of this type parameter ({}) has a member '{}'",
@@ -13365,6 +13485,7 @@ impl<'src> Analyzer<'src> {
                 Some(trait_id) => trait_id,
                 None => {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: check.span,
                         msg: format!("cannot find trait '{}'", check.trait_name),
                     });
@@ -13376,6 +13497,7 @@ impl<'src> Analyzer<'src> {
             // provide it.
             if !self.traits.contains_key(&trait_id) {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: check.span,
                     msg: format!("'{}' is not a trait", check.trait_name),
                 });
@@ -13443,6 +13565,7 @@ impl<'src> Analyzer<'src> {
                     continue;
                 }
                 self.diagnostics.push(Error {
+                    note: None,
                     span: check.span,
                     msg: format!(
                         "'{}' does not implement trait '{}': missing '{}'",
@@ -13611,6 +13734,7 @@ impl<'src> Analyzer<'src> {
                 {
                     let label = self.pretty_print_type(&condition, &HashMap::new());
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&condition_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "this {construct} is `{label}`, but a condition must be `bool`"
@@ -13688,7 +13812,7 @@ impl<'src> Analyzer<'src> {
                             && !self.compare_type(&bool_type, &operand, &HashMap::new())
                         {
                             let label = self.pretty_print_type(&operand, &HashMap::new());
-                            self.diagnostics.push(Error {
+                            self.diagnostics.push(Error { note: None,
                                 span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
                                 msg: format!(
                                     "`{symbol}` takes `bool` operands; the {side} operand is `{label}`"
@@ -13705,6 +13829,7 @@ impl<'src> Analyzer<'src> {
                 if is_ordering_operator(op) && grounded(&lhs_type) {
                     if is_bool(&lhs_type) {
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
                                 "`bool` has no ordering — `{symbol}` models `PartialOrd`, which \
@@ -13728,6 +13853,7 @@ impl<'src> Analyzer<'src> {
                         let lhs_label = self.pretty_print_type(&lhs_type, &HashMap::new());
                         let rhs_label = self.pretty_print_type(&rhs_type, &HashMap::new());
                         self.diagnostics.push(Error {
+                            note: None,
                             span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
                             msg: format!(
                                 "`{symbol}` compares two values of the same type, but the \
@@ -13845,6 +13971,7 @@ impl<'src> Analyzer<'src> {
                         method_name
                     };
                     self.diagnostics.push(Error {
+                        note: None,
                         span: **self.span_map.get(&binary_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "type '{type_name}' does not implement the `{trait_name}` operator; \
@@ -13862,6 +13989,7 @@ impl<'src> Analyzer<'src> {
             for (name, name_span) in names {
                 let Some(target) = self.try_get_expr_id_by_name(name, scope_id) else {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: name_span,
                         msg: format!("cannot find context `{name}` in this scope"),
                     });
@@ -13876,6 +14004,7 @@ impl<'src> Analyzer<'src> {
                 };
                 if context_ids.contains(&target) {
                     self.diagnostics.push(Error {
+                        note: None,
                         span: name_span,
                         msg: format!("duplicate context `{name}` in this clause"),
                     });
@@ -13931,6 +14060,7 @@ impl<'src> Analyzer<'src> {
                         _ => "",
                     };
                     self.diagnostics.push(Error {
+                        note: None,
                         span,
                         msg: format!("unknown numeric suffix `{suffix}`{hint}"),
                     });
@@ -13997,6 +14127,7 @@ impl<'src> Analyzer<'src> {
             if let Some(span) = self.span_map.get(&literal_id) {
                 let span = **span;
                 self.diagnostics.push(Error {
+                    note: None,
                     span,
                     msg: format!("the literal `{whole}` is out of range for `{name}` ({range})"),
                 });
@@ -14010,14 +14141,17 @@ impl<'src> Analyzer<'src> {
         for constraint in &self.constraints {
             match constraint {
                 Constraint::StructInitializer(constraint) => self.diagnostics.push(Error {
+                    note: None,
                     span: constraint.fields_span,
                     msg: "type of struct initializer could not be resolved".to_string(),
                 }),
                 Constraint::FieldAccessor(constraint) => self.diagnostics.push(Error {
+                    note: None,
                     span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
                     msg: "type of accessor subject could not be resolved".to_string(),
                 }),
                 Constraint::Variable(constraint) => self.diagnostics.push(Error {
+                    note: None,
                     span: **(self
                         .span_map
                         .get(&constraint.variable_id)
@@ -14031,6 +14165,7 @@ impl<'src> Analyzer<'src> {
                     ),
                 }),
                 Constraint::CallSubject(constraint) => self.diagnostics.push(Error {
+                    note: None,
                     span: constraint.arguments_span,
                     msg: "type of function call arguments could not be resolved".to_string(),
                 }),
@@ -14053,6 +14188,7 @@ impl<'src> Analyzer<'src> {
             let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             if self.list_element_slot(&subject_type).is_some() {
                 self.diagnostics.push(Error {
+                    note: None,
                     span: **self.span_map.get(&subscript_id).unwrap_or(&&EMPTY_SPAN),
                     msg: "cannot index this List: its element type is never determined \
                           (give the list a type, e.g. `: List<i32>`)"
@@ -14072,6 +14208,7 @@ impl<'src> Analyzer<'src> {
             let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
             self.diagnostics.push(Error {
+                note: None,
                 span,
                 msg: format!(
                     "type of match expression could not be resolved (subject: {})",
@@ -14145,6 +14282,7 @@ impl<'src> Analyzer<'src> {
                     .unwrap_or("unknown");
                 let rendered = self.pretty_print_type(&variable_type, &HashMap::new());
                 self.diagnostics.push(Error {
+                    note: None,
                     span,
                     msg: format!(
                         "the type of '{name}' is never fully determined: `{rendered}` keeps \
@@ -15130,6 +15268,7 @@ fn report_module_parse_errors(diagnostics: &mut Vec<Error>, path: &str, loaded: 
             continue;
         }
         diagnostics.push(Error {
+            note: None,
             span: EMPTY_SPAN,
             msg,
         });
@@ -16083,6 +16222,7 @@ pub fn check_library_contract(spec: &PackageSpec) -> Vec<Error> {
                     continue;
                 }
                 diagnostics.push(Error {
+                    note: None,
                     span,
                     msg: format!(
                         "`{importer}` imports `pkg::{module}`, but `{module}` is not available for \
@@ -16491,6 +16631,7 @@ pub fn analyze<'src>(
             let lib_path = std_module_path(&spec.base_root, "lib.vl");
             let Some(lib_loaded) = load_package_module(&lib_path) else {
                 analyzer.diagnostics.push(Error {
+                    note: None,
                     span: EMPTY_SPAN,
                     msg: format!("library at `{}` has no `lib.vl`", spec.base_root.display()),
                 });
@@ -16531,6 +16672,7 @@ pub fn analyze<'src>(
                     .is_some()
                 {
                     analyzer.diagnostics.push(Error {
+                        note: None,
                         span: EMPTY_SPAN,
                         msg: format!(
                             "library `{library_name}`'s base `lib.vl` re-exports `{module}`, a \
@@ -16632,6 +16774,7 @@ pub fn analyze<'src>(
             };
             if ambiguous {
                 analyzer.diagnostics.push(Error {
+                    note: None,
                     span: EMPTY_SPAN,
                     msg: format!(
                         "module `{name}` is ambiguous: both `{name}.vl` and `{name}/lib.vl` \

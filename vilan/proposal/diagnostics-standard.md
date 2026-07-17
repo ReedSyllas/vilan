@@ -1,6 +1,9 @@
 # The diagnostics standard — rules, then an audit
 
-Status: **DRAFT (2026-07-16) — rules for review.** The v0.8.0 arc, as set by
+Status: **ACCEPTED 2026-07-16** — all four open questions signed off by the
+user: (1) `Error` gains the secondary note; (2) parser errors stay generated
+until H6, targeted labels only; (3) warnings are in scope, same ledger;
+(4) the ledger is a tracked proposal file. The audit proceeds in batches. The v0.8.0 arc, as set by
 the user: first define the rules for **where** a diagnostic anchors and
 **what** it says; then test every diagnostic against them and fix the ones
 that fail. Survey: **181 `diagnostics.push` sites** (155 analyzer, 22 macro

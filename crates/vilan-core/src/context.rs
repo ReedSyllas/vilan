@@ -230,6 +230,7 @@ fn analyze(
             let (Some(context), Some(&owner)) = (context, owner_of.get(&call_id)) else {
                 let method = if safe { "get_safe" } else { "get" };
                 errors.push(Error {
+                    note: None,
                     span: span_of(program, call_id),
                     msg: format!("`{method}` must be called on a context bound to a name"),
                 });
@@ -269,6 +270,7 @@ fn analyze(
                 (context, value_id, closure_entity)
             else {
                 errors.push(Error {
+                    note: None,
                     span: span_of(program, call_id),
                     msg: "`run` must be called on a named context with a closure literal body"
                         .to_string(),
@@ -276,7 +278,7 @@ fn analyze(
                 continue;
             };
             if closure_id.is_none() && !injected_body {
-                errors.push(Error {
+                errors.push(Error { note: None,
                     span: span_of(program, call_id),
                     msg: "`run` must be called on a named context with a closure literal body, or a closure value whose type is `context`-annotated with exactly this context"
                         .to_string(),
@@ -482,6 +484,7 @@ fn analyze(
                     contexts.insert(context);
                 } else {
                     errors.push(Error {
+                        note: None,
                         span: span_of(program, parameter),
                         msg:
                             "this parameter's `context` clause names a value that is not a context"
@@ -520,7 +523,7 @@ fn analyze(
                     allowed_forwards.insert(initial);
                 }
                 _ => {
-                    errors.push(Error {
+                    errors.push(Error { note: None,
                         span: span_of(program, initial),
                         msg: "a `context`-typed binding takes a closure literal, or a value with the same `context` clause"
                             .to_string(),
@@ -571,7 +574,7 @@ fn analyze(
                         allowed_forwards.insert(*argument);
                     }
                     _ => {
-                        errors.push(Error {
+                        errors.push(Error { note: None,
                             span: span_of(program, *argument),
                             msg: "a `context`-typed parameter takes a closure literal, a value with the same `context` clause, or a local closure binding (which adopts the clause)"
                                 .to_string(),
@@ -620,7 +623,7 @@ fn analyze(
             {
                 continue;
             }
-            errors.push(Error {
+            errors.push(Error { note: None,
                 span: span_of(program, entity),
                 msg: "an injected (`context`-typed) closure can only be called, forwarded to a parameter with the same `context` clause, or passed to `run`"
                     .to_string(),
@@ -826,7 +829,7 @@ fn analyze(
             .filter(|get| get.context == context && !get.safe)
         {
             if !bound.contains(&get.owner.id()) {
-                errors.push(Error {
+                errors.push(Error { note: None,
                     span: span_of(program, get.call_id),
                     msg: format!(
                         "context `{}` is read here, but this code can be reached without an enclosing `run`",
@@ -839,7 +842,7 @@ fn analyze(
         // from the caller, so an unbound caller has nothing to supply.
         for (owner, call_id) in injected_calls.get(&context).into_iter().flatten() {
             if !bound.contains(&owner.id()) {
-                errors.push(Error {
+                errors.push(Error { note: None,
                     span: span_of(program, *call_id),
                     msg: format!(
                         "an injected closure is called here, but this code can be reached without an enclosing `run` for context `{}`",
@@ -865,6 +868,7 @@ fn analyze(
             if let Expr::Local(target) = expr {
                 if needs_functions.contains(target) && !call_subjects.contains(&entity_id) {
                     errors.push(Error {
+                        note: None,
                         span: span_of(program, entity_id),
                         msg: format!(
                             "`{}` reads context `{}`, so it can't be used as a value",
@@ -1085,6 +1089,7 @@ fn analyze(
                 plan.none_variant = Some(none_variant);
             }
             _ => errors.push(Error {
+                note: None,
                 span: crate::span::Span {
                     start: 0,
                     end: 0,

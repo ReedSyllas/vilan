@@ -1167,6 +1167,9 @@ fn compile_to_js(
     };
 
     let mut parse_errs = Vec::new();
+    // Note-carrying analyzer diagnostics render outside the `Rich` fold; they
+    // still count against a clean build.
+    let mut noted_errors = 0usize;
     let root = match clean_root {
         Some(root) => Some(root),
         None => match &tokens {
@@ -1218,7 +1221,16 @@ fn compile_to_js(
         program.diagnostics.extend(const_errors);
 
         for error in &program.diagnostics {
-            errs.push(Rich::custom(error.span, error.msg.as_str()));
+            // A note-carrying diagnostic renders directly (two labels — the
+            // `Rich` fold has nowhere to put the secondary location); plain
+            // ones keep the shared path.
+            match &error.note {
+                Some(_) => {
+                    report_error_with_note(&filename, &src, error);
+                    noted_errors += 1;
+                }
+                None => errs.push(Rich::custom(error.span, error.msg.as_str())),
+            }
         }
         // Warnings are non-fatal: render them, but they do not enter `errs`,
         // so they don't block codegen.
@@ -1232,7 +1244,7 @@ fn compile_to_js(
             write_debug(file, "callgraph.out", &call_graph.debug_dump(&program));
         }
 
-        if errs.is_empty() {
+        if errs.is_empty() && noted_errors == 0 {
             match transform(&program, options) {
                 Ok(javascript) => output = Some((javascript, program.const_assets.clone())),
                 Err(error) => errs.push(Rich::custom(error.span, error.msg)),
@@ -1240,7 +1252,7 @@ fn compile_to_js(
         }
     }
 
-    let clean = errs.is_empty() && parse_errs.is_empty();
+    let clean = errs.is_empty() && parse_errs.is_empty() && noted_errors == 0;
     report(&filename, &src, errs, parse_errs);
 
     match output {
@@ -1341,6 +1353,35 @@ fn report<'src>(
             .print(sources([(filename.to_string(), src.to_string())]))
             .unwrap()
         });
+}
+
+/// Renders one analyzer diagnostic that carries a secondary note
+/// (diagnostics-standard.md C3): the primary label at the error's span, the
+/// note as a second label at its own location ("first call here", "generated
+/// by this attribute").
+fn report_error_with_note(filename: &str, src: &str, error: &vilan_core::Error) {
+    let Some((note_span, note_msg)) = &error.note else {
+        return;
+    };
+    Report::build(
+        ReportKind::Error,
+        (filename.to_string(), error.span.into_range()),
+    )
+    .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
+    .with_message(error.msg.clone())
+    .with_label(
+        Label::new((filename.to_string(), error.span.into_range()))
+            .with_message(error.msg.clone())
+            .with_color(Color::Red),
+    )
+    .with_label(
+        Label::new((filename.to_string(), note_span.into_range()))
+            .with_message(note_msg.clone())
+            .with_color(Color::Yellow),
+    )
+    .finish()
+    .print(sources([(filename.to_string(), src.to_string())]))
+    .unwrap();
 }
 
 /// Renders a single analyzer warning (e.g. an unused `[must_use]` result) — like

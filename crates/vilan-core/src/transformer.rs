@@ -571,6 +571,7 @@ impl<'src> Transformer<'src> {
             .get("main")
             .and_then(|id| self.program.functions.get(id))
             .ok_or_else(|| Error {
+                note: None,
                 msg: "Cannot execute program without a main function".to_string(),
                 span: Span::new((), 0..0),
             })?;

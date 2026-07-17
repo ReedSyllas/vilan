@@ -199,7 +199,21 @@ async fn publish_document(
                 ..Default::default()
             };
             match &item.path {
-                None => entry_group.push(diagnostic(document.line_index.range(&item.span))),
+                None => {
+                    let mut converted = diagnostic(document.line_index.range(&item.span));
+                    // A secondary note (same-file in v1) becomes related
+                    // information — "first call here"-style anchors.
+                    if let Some((note_span, note_msg)) = &item.note {
+                        converted.related_information = Some(vec![DiagnosticRelatedInformation {
+                            location: Location {
+                                uri: uri.clone(),
+                                range: document.line_index.range(note_span),
+                            },
+                            message: note_msg.clone(),
+                        }]);
+                    }
+                    entry_group.push(converted);
+                }
                 Some(path) => {
                     // A fresh (uncached) read: module files change across saves,
                     // so a session-cached index would misplace ranges.

@@ -108,6 +108,7 @@ fn check_fences(program: &Program, graph: &CallGraph) -> Vec<Error> {
         for (pattern_text, pattern_span) in &function.platform_fence {
             let Some(patterns) = crate::target::PlatformPattern::parse(pattern_text) else {
                 diagnostics.push(Error {
+                    note: None,
                     span: *pattern_span,
                     msg: format!(
                         "unknown platform pattern `{pattern_text}` in `[platform(…)]` \
@@ -589,6 +590,7 @@ fn violation(
         }
     };
     Error {
+        note: None,
         span: anchor,
         msg: format!(
             "`{}` requires {} and cannot run on `{}`\n  {}: {}",
