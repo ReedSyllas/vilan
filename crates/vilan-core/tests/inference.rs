@@ -14716,6 +14716,49 @@ fn an_annotated_effect_parameter_destructures_the_signals_payload() {
     );
 }
 
+// --- Diagnostics audit, batch 7: cascades demoted (standard B5) --------------
+
+#[test]
+fn a_root_error_does_not_cascade_into_residual_noise() {
+    // One unknown name used to produce the root error PLUS "type of
+    // variable … could not be resolved" (and friends) for everything
+    // downstream of it — five residuals for one cause in the worst
+    // observed wall. The residuals are near-information-free, so they
+    // surface only as the LONE signal.
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun main() {
+            let text = zzz_missing(42);
+            let doubled = text;
+        }
+        "#,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("cannot find 'zzz_missing'")),
+        "the root error must stand: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|(message, _)| !message.contains("could not be resolved")),
+        "residual cascade noise must be demoted behind the root: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn an_unknown_struct_steers_to_its_import() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            mut table = Map { };
+        }
+        "#,
+        "unknown struct: Map — import it first (`import std::map::Map;`)",
+    );
+}
+
 // --- Diagnostics audit, batch 5: generated-code diagnostics (standard A2) ----
 
 #[test]

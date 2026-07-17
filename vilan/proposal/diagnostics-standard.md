@@ -100,6 +100,18 @@ boundary sketch, and this week's diagnostics (the B13 origin-naming, the
    has a pin. The rules become CLAUDE.md-adjacent policy for new code
    (a new diagnostic cites the rules it satisfies).
 
+**AUDIT COMPLETE 2026-07-16 — 180/180 verdicted across seven batches.**
+Shipped fixes: four import steers (values, types, traits, struct literals —
+loaded-modules + the lazy std-wide index), two inference-origin notes (the
+closure first-call and the variable initializer, on the new C3 mechanism),
+the method/call re-anchors (names and subjects over argument lists), the
+generated-code A2 redirect (diagnostics re-anchor at their attribute —
+E8 closed structurally), and the B5 cascade demotion (post-solve residuals
+surface only as the lone signal). Every fix pinned; every batch
+suite-gated. Recorded refinements live in their ledger rows (the B12
+binding-argument note, conformance signature rendering, the cross-source
+note on C3, an nth-occurrence span helper for the harness).
+
 ## 6. Open questions (for sign-off)
 
 1. **The secondary note (C3)** — add `note: Option<(Span, String)>` to

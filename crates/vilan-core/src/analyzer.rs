@@ -12684,10 +12684,13 @@ impl<'src> Analyzer<'src> {
                         .get(&constraint.initializer_id)
                         .map(|span| **span)
                         .unwrap_or(constraint.fields_span);
+                    let steer = self
+                        .import_steer(constraint.struct_name)
+                        .unwrap_or_default();
                     self.diagnostics.push(Error {
                         note: None,
                         span,
-                        msg: format!("unknown struct: {}", constraint.struct_name),
+                        msg: format!("unknown struct: {}{}", constraint.struct_name, steer),
                     });
                     return Resolution::Failed;
                 }
@@ -14349,38 +14352,48 @@ impl<'src> Analyzer<'src> {
         // Unresolved tasks still on the queue could not be typed (priority order
         // — struct initializers before field accessors — matches the original
         // per-list diagnostic order).
-        for constraint in &self.constraints {
-            match constraint {
-                Constraint::StructInitializer(constraint) => self.diagnostics.push(Error {
-                    note: None,
-                    span: constraint.fields_span,
-                    msg: "type of struct initializer could not be resolved".to_string(),
-                }),
-                Constraint::FieldAccessor(constraint) => self.diagnostics.push(Error {
-                    note: None,
-                    span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
-                    msg: "type of accessor subject could not be resolved".to_string(),
-                }),
-                Constraint::Variable(constraint) => self.diagnostics.push(Error {
-                    note: None,
-                    span: **(self
-                        .span_map
-                        .get(&constraint.variable_id)
-                        .unwrap_or(&&EMPTY_SPAN)),
-                    msg: format!(
-                        "type of variable '{}' could not be resolved",
-                        self.variables
+        //
+        // B5 (diagnostics-standard.md): these residuals are near-information-
+        // free ("could not be resolved"), and when a REAL diagnostic already
+        // exists they are its cascade — the std-missing wall printed five of
+        // them for one root cause. They surface only as the LONE signal
+        // (a genuinely undetermined program); the actionable never-determined
+        // messages below stay unconditional.
+        let residuals_are_cascade = !self.diagnostics.is_empty();
+        if !residuals_are_cascade {
+            for constraint in &self.constraints {
+                match constraint {
+                    Constraint::StructInitializer(constraint) => self.diagnostics.push(Error {
+                        note: None,
+                        span: constraint.fields_span,
+                        msg: "type of struct initializer could not be resolved".to_string(),
+                    }),
+                    Constraint::FieldAccessor(constraint) => self.diagnostics.push(Error {
+                        note: None,
+                        span: **(self.span_map.get(&constraint.id).unwrap_or(&&EMPTY_SPAN)),
+                        msg: "type of accessor subject could not be resolved".to_string(),
+                    }),
+                    Constraint::Variable(constraint) => self.diagnostics.push(Error {
+                        note: None,
+                        span: **(self
+                            .span_map
                             .get(&constraint.variable_id)
-                            .map(|variable| variable.name)
-                            .unwrap_or("unknown")
-                    ),
-                }),
-                Constraint::CallSubject(constraint) => self.diagnostics.push(Error {
-                    note: None,
-                    span: constraint.arguments_span,
-                    msg: "type of function call arguments could not be resolved".to_string(),
-                }),
-                _ => {}
+                            .unwrap_or(&&EMPTY_SPAN)),
+                        msg: format!(
+                            "type of variable '{}' could not be resolved",
+                            self.variables
+                                .get(&constraint.variable_id)
+                                .map(|variable| variable.name)
+                                .unwrap_or("unknown")
+                        ),
+                    }),
+                    Constraint::CallSubject(constraint) => self.diagnostics.push(Error {
+                        note: None,
+                        span: constraint.arguments_span,
+                        msg: "type of function call arguments could not be resolved".to_string(),
+                    }),
+                    _ => {}
+                }
             }
         }
         // A subscript left deferred because its list's element slot never
@@ -14407,14 +14420,17 @@ impl<'src> Analyzer<'src> {
                 });
             }
         }
-        let unresolved_matches: Vec<(Id, Span)> = self
-            .constraints
-            .iter()
-            .filter_map(|constraint| match constraint {
-                Constraint::Match(prepped) => Some((prepped.subject_id, prepped.span)),
-                _ => None,
-            })
-            .collect();
+        let unresolved_matches: Vec<(Id, Span)> = if residuals_are_cascade {
+            Vec::new()
+        } else {
+            self.constraints
+                .iter()
+                .filter_map(|constraint| match constraint {
+                    Constraint::Match(prepped) => Some((prepped.subject_id, prepped.span)),
+                    _ => None,
+                })
+                .collect()
+        };
         for (subject_id, span) in unresolved_matches {
             let subject_type = self.infer_type(subject_id, &Type::Unknown, &HashMap::new());
             let subject_str = self.pretty_print_type(&subject_type, &HashMap::new());
