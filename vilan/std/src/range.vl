@@ -1,8 +1,8 @@
 import pkg::option::Option::{ self, Some, None };
 
-// A half-open integer range `[start, end)`. Iterate it with
-// `for i in Range::new(start, end)`, which yields `start, start + 1, ..., end - 1`
-// lazily — `next` advances the internal cursor rather than materializing a list.
+/// A half-open integer range `[start, end)`. Iterate it with
+/// `for i in Range::new(start, end)`, which yields `start, start + 1, ..., end - 1`
+/// lazily — `next` advances the internal cursor rather than materializing a list.
 struct Range {
 	current: i32,
 	end: i32,

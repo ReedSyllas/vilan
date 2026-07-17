@@ -1,14 +1,14 @@
 import pkg::string::str;
 
-// Convert a value to a string. Implement `Display` for your own types so
-// `value.to_string()` — and generic `T: Display` code — works for them.
+/// Convert a value to a string. Implement `Display` for your own types so
+/// `value.to_string()` — and generic `T: Display` code — works for them.
 trait Display {
 	fun to_string(self): str;
 }
 
-// Render any `Display` value to its string form. Handy for logging a complex
-// value readably: `print(format(id))` shows however `Id` implements `Display`
-// (e.g. `Id { n = 0 }`), where `print(id)` alone shows the raw runtime form.
+/// Render any `Display` value to its string form. Handy for logging a complex
+/// value readably: `print(format(id))` shows however `Id` implements `Display`
+/// (e.g. `Id { n = 0 }`), where `print(id)` alone shows the raw runtime form.
 fun format<T: Display>(value: T): str {
 	value.to_string()
 }

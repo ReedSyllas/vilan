@@ -3,16 +3,16 @@
 
 import pkg::option::Option;
 
-// Terminate the process with `code` (0 = success). Never returns.
+/// Terminate the process with `code` (0 = success). Never returns.
 [extern("process.exit")]
 external fun exit(code: i32): void;
 
-// Reads the next line from standard input (empty string at EOF).
+/// Reads the next line from standard input (empty string at EOF).
 external fun scan(): str;
 
-// The arguments the program was invoked with, excluding the runtime and script
-// path — e.g. `vilan run prog.vl a b` yields `["a", "b"]`.
+/// The arguments the program was invoked with, excluding the runtime and script
+/// path — e.g. `vilan run prog.vl a b` yields `["a", "b"]`.
 external fun args(): List<str>;
 
-// Look up an environment variable, `None` if it is unset.
+/// Look up an environment variable, `None` if it is unset.
 external fun env(key: str): Option<str>;

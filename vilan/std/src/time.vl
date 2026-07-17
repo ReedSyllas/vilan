@@ -15,39 +15,39 @@ import pkg::option::Option::{ self, Some, None };
 
 // --- The clock ---------------------------------------------------------------
 
-// Milliseconds since the Unix epoch, read from the host clock (`Date.now`) —
-// the raw sample, for hot paths that just want float math (benchmarks).
+/// Milliseconds since the Unix epoch, read from the host clock (`Date.now`) —
+/// the raw sample, for hot paths that just want float math (benchmarks).
 [extern("Date.now")]
 external fun now_millis(): f64;
 
-// The current moment, typed.
+/// The current moment, typed.
 fun now(): Instant {
 	Instant { millis = now_millis().as_i53() }
 }
 
 // --- Instants and durations ---------------------------------------------------
 
-// A moment in time: milliseconds since the Unix epoch. Plain data — compare
-// it, ship it over the wire, subtract two for a `Duration`.
+/// A moment in time: milliseconds since the Unix epoch. Plain data — compare
+/// it, ship it over the wire, subtract two for a `Duration`.
 [derive(Wire, PartialEq)]
 struct Instant {
 	millis: i53,
 }
 
-// A signed span of time in milliseconds (`later.since(earlier)` is negative
-// when `later` is actually earlier).
+/// A signed span of time in milliseconds (`later.since(earlier)` is negative
+/// when `later` is actually earlier).
 [derive(Wire, PartialEq)]
 struct Duration {
 	millis: i53,
 }
 
 impl Instant {
-	// The span from `earlier` to `self`.
+	/// The span from `earlier` to `self`.
 	fun since(self, earlier: Instant): Duration {
 		Duration { millis = self.millis - earlier.millis }
 	}
 
-	// ISO-8601 in UTC (`1970-01-01T00:00:00.000Z`), via the host `Date`.
+	/// ISO-8601 in UTC (`1970-01-01T00:00:00.000Z`), via the host `Date`.
 	fun to_iso(self): str {
 		host_date(self.millis).to_iso_string()
 	}
@@ -93,7 +93,7 @@ impl Duration {
 		Duration { millis = count * 86400000i53 }
 	}
 
-	// Whole units, truncated toward zero (i53 division).
+	/// Whole units, truncated toward zero (i53 division).
 	fun as_seconds(self): i53 {
 		self.millis / 1000i53
 	}
@@ -110,8 +110,8 @@ impl Duration {
 		self.millis / 86400000i53
 	}
 
-	// A coarse human rendering: the two largest non-zero units — "2h 3m",
-	// "5m 30s", "980ms", "0ms" — with a leading "-" for a negative span.
+	/// A coarse human rendering: the two largest non-zero units — "2h 3m",
+	/// "5m 30s", "980ms", "0ms" — with a leading "-" for a negative span.
 	fun describe(self): str {
 		let sign = if self.millis < 0i53 { "-" } else { "" };
 		let magnitude = if self.millis < 0i53 { 0i53 - self.millis } else { self.millis };
@@ -181,21 +181,21 @@ impl HostDate {
 [extern("setTimeout")]
 external fun set_timeout(callback: || void, ms: i32);
 
-// The host `Promise` constructor: resolves once the executor calls `resolve`.
-// (The element type is nominal — the resolved value is never read.)
+/// The host `Promise` constructor: resolves once the executor calls `resolve`.
+/// (The element type is nominal — the resolved value is never read.)
 [extern(new, "Promise")]
 external fun timer_promise(executor: |(|| void)| void): Promise<i32>;
 
-// Pause the current async flow for `ms` milliseconds (`setTimeout` as a promise).
-// Async — a caller awaits it implicitly.
+/// Pause the current async flow for `ms` milliseconds (`setTimeout` as a promise).
+/// Async — a caller awaits it implicitly.
 fun sleep(ms: i32) {
 	let _ = await timer_promise(|resolve| {
 		set_timeout(resolve, ms);
 	});
 }
 
-// `sleep`, taking a `Duration` (the K6 backoff shape). Spans beyond i32
-// milliseconds (~24 days) are not supported by the host timer.
+/// `sleep`, taking a `Duration` (the K6 backoff shape). Spans beyond i32
+/// milliseconds (~24 days) are not supported by the host timer.
 fun sleep_for(duration: Duration) {
 	sleep(duration.millis.as_i32());
 }

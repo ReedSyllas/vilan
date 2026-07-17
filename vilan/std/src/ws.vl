@@ -14,7 +14,7 @@ import pkg::bytes::{ Bytes, encode_utf8, decode_utf8 };
 
 // --- Encoding (server → client: FIN set, unmasked) ---------------------------
 
-// One complete frame: FIN | `opcode`, the length ladder, then the payload.
+/// One complete frame: FIN | `opcode`, the length ladder, then the payload.
 fun encode_frame(opcode: i32, payload: Bytes): Bytes {
 	let length = payload.len();
 	mut header = Bytes::alloc(2);
@@ -56,9 +56,9 @@ fun close_frame(): Bytes {
 
 // --- Parsing (client → server) ------------------------------------------------
 
-// What one `feed` can surface. Pongs are consumed silently; a `Ping` asks the
-// caller to write `pong_frame(payload)` back; `Closed` ends the connection
-// (sent close, or a protocol violation).
+/// What one `feed` can surface. Pongs are consumed silently; a `Ping` asks the
+/// caller to write `pong_frame(payload)` back; `Closed` ends the connection
+/// (sent close, or a protocol violation).
 enum WsEvent {
 	Text(str),
 	Binary(Bytes),
@@ -66,9 +66,9 @@ enum WsEvent {
 	Closed,
 }
 
-// A stateful frame parser: feed it raw socket chunks, get complete events.
-// Partial frames wait in `buffer`; fragmented messages accumulate in
-// `fragment_*` until their FIN.
+/// A stateful frame parser: feed it raw socket chunks, get complete events.
+/// Partial frames wait in `buffer`; fragmented messages accumulate in
+/// `fragment_*` until their FIN.
 struct WsParser {
 	buffer: Shared<Bytes>,
 	fragment_opcode: Shared<i32>,
@@ -86,7 +86,7 @@ impl WsParser {
 		}
 	}
 
-	// Consume `chunk`, returning every event completed by it, in order.
+	/// Consume `chunk`, returning every event completed by it, in order.
 	fun feed(self, chunk: Bytes): List<WsEvent> {
 		mut events: List<WsEvent> = [];
 		if self.violated.read() {
@@ -164,8 +164,8 @@ impl WsParser {
 		events
 	}
 
-	// Route one complete frame, reassembling fragments; returns the events it
-	// completed (empty for a fragment start, a pong, or a swallowed frame).
+	/// Route one complete frame, reassembling fragments; returns the events it
+	/// completed (empty for a fragment start, a pong, or a swallowed frame).
 	fun dispatch(self, fin: bool, opcode: i32, payload: Bytes): List<WsEvent> {
 		mut events: List<WsEvent> = [];
 		if opcode == 0x9 {

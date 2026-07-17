@@ -12,18 +12,18 @@
 external struct Shared<T>;
 
 impl Shared<type T> {
-	// Wrap `value` in a fresh shared cell.
+	/// Wrap `value` in a fresh shared cell.
 	external fun new(value: T): Shared<T>;
 
-	// Another handle to the *same* cell (shared, not copied).
+	/// Another handle to the *same* cell (shared, not copied).
 	external fun clone(self): Shared<T>;
 
-	// The cell's value for reading.
+	/// The cell's value for reading.
 	external fun read(self): T;
 
-	// A mutable view of the cell's value, for in-place mutation: `a.write() = x`
-	// rebinds the cell's slot, `a.write().field = …` mutates in place — both
-	// visible through every handle to the cell. `borrows self`: the view projects
-	// the cell, so it cannot outlive this handle.
+	/// A mutable view of the cell's value, for in-place mutation: `a.write() = x`
+	/// rebinds the cell's slot, `a.write().field = …` mutates in place — both
+	/// visible through every handle to the cell. `borrows self`: the view projects
+	/// the cell, so it cannot outlive this handle.
 	external fun write(self): &mut T borrows self;
 }

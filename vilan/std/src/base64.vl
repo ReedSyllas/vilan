@@ -33,7 +33,7 @@ fun encode_url(bytes: Bytes): str {
 	out
 }
 
-// The 6-bit value of a base64url character, or -1 for anything else.
+/// The 6-bit value of a base64url character, or -1 for anything else.
 fun digit(code: u32): i32 {
 	let c = code.as_i32();
 	if c >= 65 && c <= 90 {

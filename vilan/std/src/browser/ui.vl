@@ -27,80 +27,80 @@ import pkg::style::Style;
 import pkg::compare::PartialEq;
 import pkg::option::Option::{ self, Some, None };
 
-// A handle to a DOM element under construction — nothing more: ownership is
-// the enclosing boundary's job.
+/// A handle to a DOM element under construction — nothing more: ownership is
+/// the enclosing boundary's job.
 struct View {
 	element: Element,
 }
 
-// A fresh element of the given tag (`view("div")`, `view("button")`, …).
+/// A fresh element of the given tag (`view("div")`, `view("button")`, …).
 fun view(tag: str): View {
 	View { element = create_element(tag) }
 }
 
 impl View {
-	// Static text content.
+	/// Static text content.
 	fun text(self, content: str): View {
 		self.element.set_text(content);
 		self
 	}
 
-	// Static CSS class.
+	/// Static CSS class.
 	fun class(self, name: str): View {
 		self.element.set_class(name);
 		self
 	}
 
-	// Classes from a compiled `Style` (proposal/ui-styling.md §4). Rendering
-	// is runtime-legal — the rules were emitted when the style was
-	// constructed, inside its `const` expression.
+	/// Classes from a compiled `Style` (proposal/ui-styling.md §4). Rendering
+	/// is runtime-legal — the rules were emitted when the style was
+	/// constructed, inside its `const` expression.
 	fun styled(self, style: Style): View {
 		self.element.set_class(style.class_list());
 		self
 	}
 
-	// A signal-driven CSS custom property: pairs with
-	// `width(Length::var("--w"))` in a style — dynamism through the variable,
-	// never through runtime rule construction.
+	/// A signal-driven CSS custom property: pairs with
+	/// `width(Length::var("--w"))` in a style — dynamism through the variable,
+	/// never through runtime rule construction.
 	fun style_var(self, name: str, source: Signal<str>): View {
 		let element = self.element;
 		let _sub = source.sub(|value| element.set_style_property(name, value));
 		self
 	}
 
-	// A static attribute.
+	/// A static attribute.
 	fun attr(self, name: str, value: str): View {
 		self.element.set_attribute(name, value);
 		self
 	}
 
-	// An event listener (`"click"`, `"input"`, …). A DOM event is a TURN
-	// boundary (proposal/reactive-turns.md §2): the host stores only the
-	// plain adapter below, and each dispatch runs the clause-typed handler
-	// inside a fresh turn — an event's signal writes settle as one wave.
-	// (`AtSuspension` behaves as `AtEnd` until the async hook lands.)
-	// Handlers die with the DOM
-	// node — no registration needed.
+	/// An event listener (`"click"`, `"input"`, …). A DOM event is a TURN
+	/// boundary (proposal/reactive-turns.md §2): the host stores only the
+	/// plain adapter below, and each dispatch runs the clause-typed handler
+	/// inside a fresh turn — an event's signal writes settle as one wave.
+	/// (`AtSuspension` behaves as `AtEnd` until the async hook lands.)
+	/// Handlers die with the DOM
+	/// node — no registration needed.
 	fun on(self, event: str, handler: (|| void) context turn_scope): View {
 		self.element.on(event, || turn(FlushPolicy::AtSuspension, || handler()));
 		self
 	}
 
-	// Like `on`, but the handler receives the DOM `Event` — for
-	// `prevent_default`, modifier keys, key names. The same turn discipline:
-	// each dispatch settles as one wave.
+	/// Like `on`, but the handler receives the DOM `Event` — for
+	/// `prevent_default`, modifier keys, key names. The same turn discipline:
+	/// each dispatch settles as one wave.
 	fun on_event(self, event: str, handler: (|Event| void) context turn_scope): View {
 		self.element.on_event(event, |dispatched| turn(FlushPolicy::AtSuspension, || handler(dispatched)));
 		self
 	}
 
-	// Append a child view — structure only, no ownership bookkeeping.
+	/// Append a child view — structure only, no ownership bookkeeping.
 	fun child(self, child: View): View {
 		self.element.append(child.element);
 		self
 	}
 
-	// Append several child views.
+	/// Append several child views.
 	fun children(self, items: List<View>): View {
 		for item in items {
 			self.element.append(item.element);
@@ -108,8 +108,8 @@ impl View {
 		self
 	}
 
-	// Reactive text content — re-set whenever `source` changes. Registers
-	// with the nearest enclosing boundary (an ambient `effect`).
+	/// Reactive text content — re-set whenever `source` changes. Registers
+	/// with the nearest enclosing boundary (an ambient `effect`).
 	fun bind_text(self, source: Signal<str>): View {
 		let element = self.element;
 		source.effect(|value| {
@@ -118,7 +118,7 @@ impl View {
 		self
 	}
 
-	// Reactive CSS class.
+	/// Reactive CSS class.
 	fun bind_class(self, source: Signal<str>): View {
 		let element = self.element;
 		source.effect(|value| {
@@ -127,7 +127,7 @@ impl View {
 		self
 	}
 
-	// Reactive attribute.
+	/// Reactive attribute.
 	fun bind_attr(self, name: str, source: Signal<str>): View {
 		let element = self.element;
 		source.effect(|value| {
@@ -136,8 +136,8 @@ impl View {
 		self
 	}
 
-	// Two-way bind an `<input>`'s value to a signal: the input shows the
-	// signal, and typing writes it back.
+	/// Two-way bind an `<input>`'s value to a signal: the input shows the
+	/// signal, and typing writes it back.
 	fun bind_value(self, signal: Signal<str>): View {
 		let element = self.element;
 		signal.effect(|value| {
@@ -151,11 +151,11 @@ impl View {
 		self
 	}
 
-	// A local-first editable field: the input shows the draft's local value,
-	// and USER input pushes (locally first, then the draft's commit). An
-	// `adopt`ed remote change writes `local` without passing through here,
-	// so it never re-pushes — and a DIRTY draft ignores adoption entirely,
-	// so an echo never touches a focused input's caret.
+	/// A local-first editable field: the input shows the draft's local value,
+	/// and USER input pushes (locally first, then the draft's commit). An
+	/// `adopt`ed remote change writes `local` without passing through here,
+	/// so it never re-pushes — and a DIRTY draft ignores adoption entirely,
+	/// so an echo never touches a focused input's caret.
 	fun bind_draft(self, draft: Draft<str>): View {
 		let element = self.element;
 		draft.local.effect(|value| {
@@ -171,14 +171,14 @@ impl View {
 		self
 	}
 
-	// A reactive list, KEYED (backlog A3): one child view per element of
-	// `source`, reconciled by `key` on every change. Each row is a DISPOSAL
-	// BOUNDARY: `render` is an injected closure (proposal/ambient-owner.md
-	// §5) run under the row's own fresh owner, so a row's bindings die with
-	// the row — on refresh, on removal, and when the enclosing boundary goes.
-	// A row whose key survives is reused (its element MOVES into the new
-	// order, subscriptions intact); it re-renders only when its item's value
-	// changed (`T: PartialEq`).
+	/// A reactive list, KEYED (backlog A3): one child view per element of
+	/// `source`, reconciled by `key` on every change. Each row is a DISPOSAL
+	/// BOUNDARY: `render` is an injected closure (proposal/ambient-owner.md
+	/// §5) run under the row's own fresh owner, so a row's bindings die with
+	/// the row — on refresh, on removal, and when the enclosing boundary goes.
+	/// A row whose key survives is reused (its element MOVES into the new
+	/// order, subscriptions intact); it re-renders only when its item's value
+	/// changed (`T: PartialEq`).
 	fun bind_each<T: PartialEq, K: PartialEq>(
 		self,
 		source: Signal<List<T>>,
@@ -247,10 +247,10 @@ impl View {
 		self
 	}
 
-	// Conditional CONTENT — the state-dropping boundary: while `condition` is
-	// true the body's view is mounted under a fresh owner; when it turns
-	// false the owner is disposed and the content removed. Toggling back on
-	// re-renders from scratch. (For a state-PRESERVING toggle, use `show`.)
+	/// Conditional CONTENT — the state-dropping boundary: while `condition` is
+	/// true the body's view is mounted under a fresh owner; when it turns
+	/// false the owner is disposed and the content removed. Toggling back on
+	/// re-renders from scratch. (For a state-PRESERVING toggle, use `show`.)
 	fun when(self, condition: Signal<bool>, body: (|| View) context owner_scope): View {
 		let element = self.element;
 		let live_view: Shared<Option<View>> = Shared::new(None);
@@ -286,14 +286,14 @@ impl View {
 		self
 	}
 
-	// The dynamic-subtree SWAP (backlog A10) — `when`, generalized from a
-	// toggle to a VALUE: whenever `source` CHANGES, the previous subtree is
-	// disposed (owner and element) and `render` builds the new one under a
-	// fresh owner. `T: PartialEq` makes an equal value a no-op — navigating to
-	// the current route re-renders nothing. Each rendered subtree is a
-	// disposal boundary like a `bind_each` row; whichever is live when the
-	// enclosing boundary goes is disposed with it. Routing is the first
-	// customer (`std::router`): `swap(route, |current| match current { .. })`.
+	/// The dynamic-subtree SWAP (backlog A10) — `when`, generalized from a
+	/// toggle to a VALUE: whenever `source` CHANGES, the previous subtree is
+	/// disposed (owner and element) and `render` builds the new one under a
+	/// fresh owner. `T: PartialEq` makes an equal value a no-op — navigating to
+	/// the current route re-renders nothing. Each rendered subtree is a
+	/// disposal boundary like a `bind_each` row; whichever is live when the
+	/// enclosing boundary goes is disposed with it. Routing is the first
+	/// customer (`std::router`): `swap(route, |current| match current { .. })`.
 	fun swap<T: PartialEq>(self, source: Signal<T>, render: (|T| View) context owner_scope): View {
 		let element = self.element;
 		let last_value: Shared<Option<T>> = Shared::new(None);
@@ -325,9 +325,9 @@ impl View {
 		self
 	}
 
-	// Show or hide the element on a reactive condition — present when
-	// `condition` is true, hidden otherwise. A pure visibility toggle: the
-	// content stays mounted and its state (bindings, input text) survives.
+	/// Show or hide the element on a reactive condition — present when
+	/// `condition` is true, hidden otherwise. A pure visibility toggle: the
+	/// content stays mounted and its state (bindings, input text) survives.
 	fun show(self, condition: Signal<bool>): View {
 		let element = self.element;
 		condition.effect(|visible| {
@@ -337,14 +337,14 @@ impl View {
 	}
 }
 
-// Attach a view to the page element with the given id.
+/// Attach a view to the page element with the given id.
 fun mount(id: str, view: View) {
 	get_element_by_id(id).append(view.element);
 }
 
-// Mount a component ROOT: the body builds under a fresh ambient owner (the
-// root boundary — every binding inside registers into it) and the view is
-// attached. Returns the root owner; most apps let it live forever.
+/// Mount a component ROOT: the body builds under a fresh ambient owner (the
+/// root boundary — every binding inside registers into it) and the view is
+/// attached. Returns the root owner; most apps let it live forever.
 fun mount_root(id: str, body: (|| View) context owner_scope): Owner {
 	// The initial build is a turn boundary too: bindings created during
 	// mount settle as one wave instead of notifying per-`set`.

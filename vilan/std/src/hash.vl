@@ -5,19 +5,19 @@
 // same way: bound on `K: Hashable`, call `key.hash()`, key a `Map<Hash, ..>`.
 import pkg::option::Option;
 
-// An opaque canonical key. Its runtime form IS its key — a primitive as-is, an
-// aggregate as its JSON string — so it keys a native `Map`/`Set` by value. A
-// `Hash` is itself `Hashable` (a hash is already a canonical key).
+/// An opaque canonical key. Its runtime form IS its key — a primitive as-is, an
+/// aggregate as its JSON string — so it keys a native `Map`/`Set` by value. A
+/// `Hash` is itself `Hashable` (a hash is already a canonical key).
 external struct Hash;
 
 trait Hashable {
 	fun hash(self): Hash;
 }
 
-// The uniform hasher every stock impl delegates to: a primitive keys as itself
-// (JS keys those by value), an aggregate canonicalizes to its JSON string. A
-// hand-written `impl Hashable` may instead hash by a subset of fields — its
-// obligation is consistency with the equality the key is used under.
+/// The uniform hasher every stock impl delegates to: a primitive keys as itself
+/// (JS keys those by value), an aggregate canonicalizes to its JSON string. A
+/// hand-written `impl Hashable` may instead hash by a subset of fields — its
+/// obligation is consistency with the equality the key is used under.
 external fun canonical_hash(value: any): Hash;
 
 impl Hash with Hashable {
@@ -112,9 +112,9 @@ impl List<type T: Hashable> with Hashable {
 	}
 }
 
-// The `[derive(Hashable)]` derive: a struct/enum's canonical key is the JSON
-// string of its value (`canonical_hash`). The analyzer's all-fields-Hashable
-// check (I1) rejects a non-Hashable field, so this stays a uniform one-liner.
+/// The `[derive(Hashable)]` derive: a struct/enum's canonical key is the JSON
+/// string of its value (`canonical_hash`). The analyzer's all-fields-Hashable
+/// check (I1) rejects a non-Hashable field, so this stays a uniform one-liner.
 macro fun Hashable(item: Item): Source {
 	import macro_std::option::Option::{ self, Some, None };
 	import macro_std::build::{ impl_of, fun_of };

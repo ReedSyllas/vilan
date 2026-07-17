@@ -5,20 +5,20 @@ import pkg::result::Result::{ self, Ok, Err };
 import pkg::compare::PartialEq;
 import pkg::context::Context;
 
-// A resource that can be released. An `Owner` collects `Disposable`s and releases
-// them as a group; `Subscription`, `Owner`, and `std::ui`'s `View` are disposable.
+/// A resource that can be released. An `Owner` collects `Disposable`s and releases
+/// them as a group; `Subscription`, `Owner`, and `std::ui`'s `View` are disposable.
 trait Disposable {
 	fun dispose(self);
 }
 
-// A registered observer of a signal: `notify` re-runs it when the signal's value
-// changes; `id` lets a `Subscription` find and remove it.
+/// A registered observer of a signal: `notify` re-runs it when the signal's value
+/// changes; `id` lets a `Subscription` find and remove it.
 struct Subscriber {
 	id: i32,
 	notify: || void,
 }
 
-// Monotonic ids for subscribers — module-level, one counter for the program.
+/// Monotonic ids for subscribers — module-level, one counter for the program.
 let next_subscriber_id: Shared<i32> = Shared::new(0);
 
 fun fresh_id(): i32 {
@@ -52,7 +52,7 @@ enum FlushPolicy {
 // held-across-await `AtEnd` needs a `turn` that can await its body
 // (recorded follow-on); the enum states intent and keeps the API stable.
 
-// The host's microtask queue — the continuation-settling primitive.
+/// The host's microtask queue — the continuation-settling primitive.
 [extern("queueMicrotask")]
 external fun queue_microtask(callback: || void);
 
@@ -76,26 +76,26 @@ impl Turn {
 	}
 }
 
-// The ambient transaction. Established by `turn`/`batch` (and, at the
-// framework boundaries, `std::ui` event dispatch and the RPC server's
-// per-message dispatch); read by `set` via `get_safe`, so unscoped code
-// pays nothing.
+/// The ambient transaction. Established by `turn`/`batch` (and, at the
+/// framework boundaries, `std::ui` event dispatch and the RPC server's
+/// per-message dispatch); read by `set` via `get_safe`, so unscoped code
+/// pays nothing.
 let turn_scope: Context<Turn> = Context::new();
 
-// Drain affinity — the ONE runtime device in the model. A notify fired
-// during a drain may `set` (a derived recomputing), but that notifier is an
-// arbitrary closure created ANYWHERE (usually outside every extent), so
-// compile-time capture cannot hand it the draining turn. A set that sees no
-// ambient turn joins the CURRENTLY DRAINING one instead — which is what
-// keeps cascades coalescing (dedup) inside their own settle. Drains are
-// synchronous, so entries cannot interleave across extents; this never
-// crosses an `await`.
+/// Drain affinity — the ONE runtime device in the model. A notify fired
+/// during a drain may `set` (a derived recomputing), but that notifier is an
+/// arbitrary closure created ANYWHERE (usually outside every extent), so
+/// compile-time capture cannot hand it the draining turn. A set that sees no
+/// ambient turn joins the CURRENTLY DRAINING one instead — which is what
+/// keeps cascades coalescing (dedup) inside their own settle. Drains are
+/// synchronous, so entries cannot interleave across extents; this never
+/// crosses an `await`.
 let draining_turns: Shared<List<Turn>> = Shared::new([]);
 
-// Enqueue subscribers into `turn`'s queue, deduped by id so a subscriber fed
-// by several inputs in one turn fires once — the dedup *is* the
-// glitch-freeness. (A keyed set can replace this linear scan later without
-// changing semantics.)
+/// Enqueue subscribers into `turn`'s queue, deduped by id so a subscriber fed
+/// by several inputs in one turn fires once — the dedup *is* the
+/// glitch-freeness. (A keyed set can replace this linear scan later without
+/// changing semantics.)
 fun enqueue(turn: Turn, subscribers: List<Subscriber>) {
 	for subscriber in subscribers {
 		mut seen = false;
@@ -121,11 +121,11 @@ fun enqueue(turn: Turn, subscribers: List<Subscriber>) {
 	}
 }
 
-// Drain `turn` until quiescent — the "settle now" primitive. A notify may
-// enqueue more (a derived propagating), which this same loop drains.
-// Re-entrancy-guarded per turn (a `set` from inside a notify only enqueues;
-// the running loop picks it up) and budget-bounded (a feedback loop that
-// never converges stops here instead of hanging).
+/// Drain `turn` until quiescent — the "settle now" primitive. A notify may
+/// enqueue more (a derived propagating), which this same loop drains.
+/// Re-entrancy-guarded per turn (a `set` from inside a notify only enqueues;
+/// the running loop picks it up) and budget-bounded (a feedback loop that
+/// never converges stops here instead of hanging).
 fun drain(turn: Turn) {
 	if !turn.draining.read() {
 		turn.draining.write() = true;
@@ -144,8 +144,8 @@ fun drain(turn: Turn) {
 	}
 }
 
-// Settle the AMBIENT turn's pending notifies now. With no ambient turn there
-// is nothing pending by construction (every `set` notified inline).
+/// Settle the AMBIENT turn's pending notifies now. With no ambient turn there
+/// is nothing pending by construction (every `set` notified inline).
 fun flush() {
 	match turn_scope.get_safe() {
 		Some(let turn) => drain(turn),
@@ -153,9 +153,9 @@ fun flush() {
 	}
 }
 
-// Establish a FRESH turn for `body`'s dynamic extent, and settle it when the
-// extent ends. The isolation primitive: `body`'s writes (and those of the
-// closures it creates — capture-at-creation) queue here and nowhere else.
+/// Establish a FRESH turn for `body`'s dynamic extent, and settle it when the
+/// extent ends. The isolation primitive: `body`'s writes (and those of the
+/// closures it creates — capture-at-creation) queue here and nowhere else.
 fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T {
 	// The policies converge for async extents in v1 — see `FlushPolicy`.
 	let _cadence = policy;
@@ -166,15 +166,15 @@ fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T {
 	result
 }
 
-// The TRANSACTIONAL async extent: establish a fresh turn and hold EVERY
-// notification — before the first suspension and in every continuation —
-// until the body has fully completed, then settle once (same-signal writes
-// coalesce to their final value). This is the true held-across-await
-// `AtEnd`; `turn(..)` with a spawn-style body settles per segment instead.
-//
-// The body is `async`-typed (J2), so the (rewritten) call through it is
-// implicitly awaited — the await covers the body's whole chain; a sync body
-// passes fine (awaiting a plain value just resolves).
+/// The TRANSACTIONAL async extent: establish a fresh turn and hold EVERY
+/// notification — before the first suspension and in every continuation —
+/// until the body has fully completed, then settle once (same-signal writes
+/// coalesce to their final value). This is the true held-across-await
+/// `AtEnd`; `turn(..)` with a spawn-style body settles per segment instead.
+///
+/// The body is `async`-typed (J2), so the (rewritten) call through it is
+/// implicitly awaited — the await covers the body's whole chain; a sync body
+/// passes fine (awaiting a plain value just resolves).
 fun turn_async<T>(body: (async || T) context turn_scope): T {
 	let fresh = Turn::new();
 	let result = turn_scope.run(fresh, body);
@@ -183,14 +183,14 @@ fun turn_async<T>(body: (async || T) context turn_scope): T {
 	result
 }
 
-// The optimistic-write → reconcile lifecycle (reactive-turns.md §5.5):
-// paint `value` into `signal` NOW, run `commit` (usually a server call),
-// then reconcile — the confirmed value on success, the previous value
-// rolled back on failure. Returns the outcome for the caller's error UX.
-// Under a UI turn the optimistic paint settles when the handler's sync
-// extent ends (its first suspension); the reconcile settles as its own
-// continuation segment. Inside `turn_async` the whole lifecycle holds —
-// the transaction wins.
+/// The optimistic-write → reconcile lifecycle (reactive-turns.md §5.5):
+/// paint `value` into `signal` NOW, run `commit` (usually a server call),
+/// then reconcile — the confirmed value on success, the previous value
+/// rolled back on failure. Returns the outcome for the caller's error UX.
+/// Under a UI turn the optimistic paint settles when the handler's sync
+/// extent ends (its first suspension); the reconcile settles as its own
+/// continuation segment. Inside `turn_async` the whole lifecycle holds —
+/// the transaction wins.
 fun optimistic<T, E>(signal: Signal<T>, value: T, commit: async || Result<T, E>): Result<T, E> {
 	let previous = signal.get();
 	signal.set(value);
@@ -202,16 +202,16 @@ fun optimistic<T, E>(signal: Signal<T>, value: T, commit: async || Result<T, E>)
 	outcome
 }
 
-// Run `body` with notifications deferred, settled once — joins the ambient
-// turn when one is established (nested batches fold into the outermost, the
-// shipped semantics), else a fresh at-end turn. Returns `body`'s value.
-//
-// The body is INJECTED (`context turn_scope`), not captured: a batch body is
-// a literal at the call site, created BEFORE the batch's extent exists —
-// capture-at-creation would hand it the caller's (often absent) turn. Both
-// arms enter the extent through `run`, which supplies the turn to the
-// deferred literal: the join arm re-establishes the CURRENT turn (same
-// queue; the outer settle fires once), the fresh arm settles at the end.
+/// Run `body` with notifications deferred, settled once — joins the ambient
+/// turn when one is established (nested batches fold into the outermost, the
+/// shipped semantics), else a fresh at-end turn. Returns `body`'s value.
+///
+/// The body is INJECTED (`context turn_scope`), not captured: a batch body is
+/// a literal at the call site, created BEFORE the batch's extent exists —
+/// capture-at-creation would hand it the caller's (often absent) turn. Both
+/// arms enter the extent through `run`, which supplies the turn to the
+/// deferred literal: the join arm re-establishes the CURRENT turn (same
+/// queue; the outer settle fires once), the fresh arm settles at the end.
 fun batch<T>(body: (|| T) context turn_scope): T {
 	match turn_scope.get_safe() {
 		Some(let current) => turn_scope.run(current, body),
@@ -225,8 +225,8 @@ fun batch<T>(body: (|| T) context turn_scope): T {
 	}
 }
 
-// A live subscription. Dropping it does NOT stop it (an owner scope is
-// responsible for that — see the proposal); call `dispose` to stop early.
+/// A live subscription. Dropping it does NOT stop it (an owner scope is
+/// responsible for that — see the proposal); call `dispose` to stop early.
 struct Subscription {
 	subscribers: Shared<List<Subscriber>>,
 	id: i32,
@@ -263,9 +263,9 @@ impl Subscription with Disposable {
 	}
 }
 
-// An owner scope: collects subscriptions (and child owners / views) and disposes
-// them as a group. Ownership is explicit for now — build a value, `take` it into
-// an owner, and `dispose` the owner to release the whole group.
+/// An owner scope: collects subscriptions (and child owners / views) and disposes
+/// them as a group. Ownership is explicit for now — build a value, `take` it into
+/// an owner, and `dispose` the owner to release the whole group.
 struct Owner {
 	cleanups: Shared<List<|| void>>,
 }
@@ -275,8 +275,8 @@ impl Owner {
 		Owner { cleanups = Shared::new([]) }
 	}
 
-	// Take ownership of a disposable (a `Subscription`, a `View`, or a child
-	// `Owner`), returning it for chaining. It is released when this owner is.
+	/// Take ownership of a disposable (a `Subscription`, a `View`, or a child
+	/// `Owner`), returning it for chaining. It is released when this owner is.
 	fun take<T: Disposable>(self, item: T): T {
 		self.cleanups.write().push(|| {
 			item.dispose();
@@ -284,8 +284,8 @@ impl Owner {
 		item
 	}
 
-	// Register a plain cleanup to run at disposal — for teardown that isn't a
-	// single `Disposable` (e.g. `bind_each` disposing whichever rows are live).
+	/// Register a plain cleanup to run at disposal — for teardown that isn't a
+	/// single `Disposable` (e.g. `bind_each` disposing whichever rows are live).
 	fun defer(self, cleanup: || void) {
 		self.cleanups.write().push(cleanup);
 	}
@@ -300,78 +300,78 @@ impl Owner with Disposable {
 	}
 }
 
-// === The ambient owner (proposal/ambient-owner.md, backlog A5) ===
-//
-// A dynamically-scoped `Owner`, carried by `std::context` — compile-time
-// hidden-parameter threading, so it survives stored callbacks and `await`
-// by construction, and reading it outside any `owner_scope.run` extent is a
-// COMPILE error (the context coverage check), never a runtime absence.
-//
-// The extent is entered DIRECTLY on the context:
-//
-//     owner_scope.run(owner, || {
-//         count.effect(|value| ..);   // disposed with `owner`
-//     });
-//
-// A `run_with_owner(owner, body)` wrapper FUNCTION is impossible by the
-// context model's own rules (probed): `run` requires a closure literal at
-// its call site, and a closure captures its context AT CREATION — a body
-// passed to a wrapper is born at the caller's site, outside the extent, so
-// its reads are statically rejected. The literal therefore belongs at the
-// user's site, on the context itself. (Sugar that keeps this shape is
-// possible as a macro, which splices the literal in place — recorded in the
-// proposal.)
+/// === The ambient owner (proposal/ambient-owner.md, backlog A5) ===
+///
+/// A dynamically-scoped `Owner`, carried by `std::context` — compile-time
+/// hidden-parameter threading, so it survives stored callbacks and `await`
+/// by construction, and reading it outside any `owner_scope.run` extent is a
+/// COMPILE error (the context coverage check), never a runtime absence.
+///
+/// The extent is entered DIRECTLY on the context:
+///
+///     owner_scope.run(owner, || {
+///         count.effect(|value| ..);   // disposed with `owner`
+///     });
+///
+/// A `run_with_owner(owner, body)` wrapper FUNCTION is impossible by the
+/// context model's own rules (probed): `run` requires a closure literal at
+/// its call site, and a closure captures its context AT CREATION — a body
+/// passed to a wrapper is born at the caller's site, outside the extent, so
+/// its reads are statically rejected. The literal therefore belongs at the
+/// user's site, on the context itself. (Sugar that keeps this shape is
+/// possible as a macro, which splices the literal in place — recorded in the
+/// proposal.)
 let owner_scope: Context<Owner> = Context::new();
 
-// The ambient owner established by the nearest enclosing `owner_scope.run`.
+/// The ambient owner established by the nearest enclosing `owner_scope.run`.
 fun get_owner(): Owner {
 	owner_scope.get()
 }
 
-// Establish `owner` as the ambient owner for the dynamic extent of `body` —
-// the plain-function wrapper, made possible by the `context` clause
-// (proposal/ambient-owner.md §5): `body` is an INJECTED closure, deferring
-// its ambient reads to call-supplied binding instead of capturing at
-// creation, so the literal may be born at the caller's site. Yields the
-// body's value, like `run` and `batch`.
+/// Establish `owner` as the ambient owner for the dynamic extent of `body` —
+/// the plain-function wrapper, made possible by the `context` clause
+/// (proposal/ambient-owner.md §5): `body` is an INJECTED closure, deferring
+/// its ambient reads to call-supplied binding instead of capturing at
+/// creation, so the literal may be born at the caller's site. Yields the
+/// body's value, like `run` and `batch`.
 fun run_with_owner<T>(owner: Owner, body: (|| T) context owner_scope): T {
 	owner_scope.run(owner, body)
 }
 
-// A component scope in one expression (proposal/ambient-owner.md §4): a
-// fresh owner, the body run under it as the ambient extent, and the body's
-// product PAIRED with the disposal handle — `scope.dispose()` tears down
-// every effect the component registered, stored callbacks and post-`await`
-// registrations included.
+/// A component scope in one expression (proposal/ambient-owner.md §4): a
+/// fresh owner, the body run under it as the ambient extent, and the body's
+/// product PAIRED with the disposal handle — `scope.dispose()` tears down
+/// every effect the component registered, stored callbacks and post-`await`
+/// registrations included.
 fun comp<T>(body: (|| T) context owner_scope): (T, Owner) {
 	let scope = Owner::new();
 	let result = owner_scope.run(scope, body);
 	(result, scope)
 }
 
-// The read-only view of a reactive value: read the current value and subscribe to its
-// changes. `Signal<T>` implements it (and adds `set`/`set_with`); a *remote* handle
-// implements it too (its `sub` flows over a transport), so code that only observes can't
-// tell a local signal from a remote one — the split the reactive north star needs
-// (`proposal/transport-rpc.md` §8).
+/// The read-only view of a reactive value: read the current value and subscribe to its
+/// changes. `Signal<T>` implements it (and adds `set`/`set_with`); a *remote* handle
+/// implements it too (its `sub` flows over a transport), so code that only observes can't
+/// tell a local signal from a remote one — the split the reactive north star needs
+/// (`proposal/transport-rpc.md` §8).
 trait Source<T> {
 	fun get(self): T;
 	[must_use]
 	fun sub(self, observer: |T| void): Subscription;
 
-	// Subscribe and register with the ambient owner (backlog A5): the
-	// scope-tied `sub` — nothing to hold, nothing to drop by hand. Requires
-	// an enclosing `owner_scope.run`, statically. A trait DEFAULT, so every
-	// `Source` gets it (B14 wired the dispatch edges that make a default
-	// body's context read coverable).
+	/// Subscribe and register with the ambient owner (backlog A5): the
+	/// scope-tied `sub` — nothing to hold, nothing to drop by hand. Requires
+	/// an enclosing `owner_scope.run`, statically. A trait DEFAULT, so every
+	/// `Source` gets it (B14 wired the dispatch edges that make a default
+	/// body's context read coverable).
 	fun effect(self, observer: |T| void) {
 		get_owner().take(self.sub(observer));
 	}
 }
 
-// A reactive value: a current value plus the observers to notify when it changes.
-// Both a root `Signal` and every derived value share this representation; the
-// difference is only who may write it (a root, via `Signal::set`).
+/// A reactive value: a current value plus the observers to notify when it changes.
+/// Both a root `Signal` and every derived value share this representation; the
+/// difference is only who may write it (a root, via `Signal::set`).
 struct Signal<T> {
 	value: Shared<T>,
 	subscribers: Shared<List<Subscriber>>,
@@ -441,10 +441,10 @@ impl Signal<type T> {
 	}
 }
 
-// The product combinator: a signal of the tuple of its inputs' current values,
-// recomputed whenever any input changes. Variadic over the inputs' (distinct)
-// types via a mapped-tuple parameter — `combine((a, b, c))` of `Signal<A>`,
-// `Signal<B>`, `Signal<C>` yields `Signal<(A, B, C)>`.
+/// The product combinator: a signal of the tuple of its inputs' current values,
+/// recomputed whenever any input changes. Variadic over the inputs' (distinct)
+/// types via a mapped-tuple parameter — `combine((a, b, c))` of `Signal<A>`,
+/// `Signal<B>`, `Signal<C>` yields `Signal<(A, B, C)>`.
 fun combine<T: (2..)>(sources: (U in T: Signal<U>)): Signal<T> {
 	let snapshot = || (source in sources => source.get());
 	let derived = Signal::new(snapshot());
@@ -486,15 +486,15 @@ impl Signal<Signal<type U>> {
 // Pure logic (no DOM), so its edge cases pin in ordinary node tests; the
 // browser's `bind_each` applies the plan to elements.
 
-// One new-position row's fate. `Keep`/`Refresh` carry the OLD row's index.
+/// One new-position row's fate. `Keep`/`Refresh` carry the OLD row's index.
 enum RowStep {
 	Keep(i32),
 	Refresh(i32),
 	Fresh,
 }
 
-// The plan for one reconcile pass: a step per NEW item (in the new order),
-// then the old indices whose rows are gone entirely.
+/// The plan for one reconcile pass: a step per NEW item (in the new order),
+/// then the old indices whose rows are gone entirely.
 struct ReconcilePlan {
 	steps: List<RowStep>,
 	removed: List<i32>,
@@ -550,7 +550,7 @@ fun reconcile<T: PartialEq, K: PartialEq>(
 // Conflicts are last-write-wins: a dirty local survives remote adoption, and
 // its eventual push overwrites the remote edit.
 
-// The sync status a UI can bind ("saved" / "unsaved" / the failure).
+/// The sync status a UI can bind ("saved" / "unsaved" / the failure).
 [derive(PartialEq, Debug)]
 enum DraftState {
 	// `local` matches the last pushed/adopted value.
@@ -576,10 +576,10 @@ struct Draft<T> {
 	commit: |T| Option<str>,
 }
 
-// A local-first cell seeded with `initial`, committing through `commit`.
-// The parameter is `async`-typed so an rpc-calling closure flows in legally
-// (J2's channel) — a sync commit passes fine too (awaiting a plain value
-// just resolves).
+/// A local-first cell seeded with `initial`, committing through `commit`.
+/// The parameter is `async`-typed so an rpc-calling closure flows in legally
+/// (J2's channel) — a sync commit passes fine too (awaiting a plain value
+/// just resolves).
 fun draft<T: PartialEq>(initial: T, commit: async |T| Option<str>): Draft<T> {
 	Draft {
 		local = Signal::new(initial),
@@ -591,9 +591,9 @@ fun draft<T: PartialEq>(initial: T, commit: async |T| Option<str>): Draft<T> {
 }
 
 impl Draft<type T: PartialEq> {
-	// Set locally and commit — the per-keystroke path. LOCAL-FIRST: the
-	// commit is spawned, never awaited, so `push` (and the input handler
-	// calling it) returns without riding the wire.
+	/// Set locally and commit — the per-keystroke path. LOCAL-FIRST: the
+	/// commit is spawned, never awaited, so `push` (and the input handler
+	/// calling it) returns without riding the wire.
 	fun push(self, value: T) {
 		self.local.set(value);
 		self.state.set(DraftState::Dirty);
@@ -602,10 +602,10 @@ impl Draft<type T: PartialEq> {
 		let _in_flight = async self.settle(value, mine);
 	}
 
-	// The in-flight half of a push: await the commit, then resolve the
-	// draft's state — unless a newer push superseded this one while it was
-	// on the wire (fast typing over a slow commit), in which case that
-	// push's completion owns the state.
+	/// The in-flight half of a push: await the commit, then resolve the
+	/// draft's state — unless a newer push superseded this one while it was
+	/// on the wire (fast typing over a slow commit), in which case that
+	/// push's completion owns the state.
 	fun settle(self, value: T, mine: i32) {
 		// Re-marked so the call awaits (J2's typed channel).
 		let commit: async |T| Option<str> = self.commit;
@@ -621,9 +621,9 @@ impl Draft<type T: PartialEq> {
 		}
 	}
 
-	// A remote value arrived (a mirror update). An echo of our own push is
-	// a no-op; a genuine remote change adopts into `local` — unless local
-	// has unpushed edits, which win until their push lands.
+	/// A remote value arrived (a mirror update). An echo of our own push is
+	/// a no-op; a genuine remote change adopts into `local` — unless local
+	/// has unpushed edits, which win until their push lands.
 	fun adopt(self, remote: T) {
 		if remote == self.synced.read() {
 			// Our own edit reflected back (or nothing changed).

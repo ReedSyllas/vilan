@@ -3,7 +3,7 @@
 // returns null; the helper flattens it) — the client-side home for a session
 // token. Values are strings; encode structured data through a codec.
 
-// `localStorage.getItem(key)` — "" when absent.
+/// `localStorage.getItem(key)` — "" when absent.
 [extern("__local_get")]
 external fun get(key: str): str;
 
@@ -13,7 +13,7 @@ external fun set(key: str, value: str): void;
 [extern("localStorage.removeItem")]
 external fun remove(key: str): void;
 
-// The tab-scoped variant (cleared when the tab closes).
+/// The tab-scoped variant (cleared when the tab closes).
 [extern("__session_get")]
 external fun session_get(key: str): str;
 

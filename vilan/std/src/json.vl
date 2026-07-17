@@ -72,15 +72,15 @@ impl bool with Json {
 
 // --- Parsing (`from_json`) ----------------------------------------------------
 
-// An opaque handle to a host value produced by `JSON.parse` — a number, string,
-// bool, or object. `from_json` parses a document into one of these once, then
-// `from_json_value` walks it, reading named fields and coercing the leaves back
-// to vilan scalars.
+/// An opaque handle to a host value produced by `JSON.parse` — a number, string,
+/// bool, or object. `from_json` parses a document into one of these once, then
+/// `from_json_value` walks it, reading named fields and coercing the leaves back
+/// to vilan scalars.
 external struct JsonValue;
 
-// `JSON.parse(text)` — parse a document into a `JsonValue`. TRUSTING: malformed
-// text is a host exception. The validating decode paths (`decode_json`, the
-// codec's reader) go through `try_parse_json` instead.
+/// `JSON.parse(text)` — parse a document into a `JsonValue`. TRUSTING: malformed
+/// text is a host exception. The validating decode paths (`decode_json`, the
+/// codec's reader) go through `try_parse_json` instead.
 [extern("JSON.parse")]
 external fun parse_json_value(text: str): JsonValue;
 
@@ -92,25 +92,25 @@ impl str {
 }
 
 impl JsonValue {
-	// `self[name]` — the value at a named object field (an intrinsic: there is no
-	// host function for dynamic property access).
+	/// `self[name]` — the value at a named object field (an intrinsic: there is no
+	/// host function for dynamic property access).
 	external fun field(self, name: str): JsonValue;
 
-	// The externally-tagged discriminator of an enum value: the string itself
-	// when this is a bare `"Variant"`, else the single key of a `{"Variant":..}`
-	// object (an intrinsic — `typeof`/`Object.keys` have no plain extern shape).
+	/// The externally-tagged discriminator of an enum value: the string itself
+	/// when this is a bare `"Variant"`, else the single key of a `{"Variant":..}`
+	/// object (an intrinsic — `typeof`/`Object.keys` have no plain extern shape).
 	external fun tag(self): str;
 
-	// The elements of a parsed JSON array, each a `JsonValue`.
+	/// The elements of a parsed JSON array, each a `JsonValue`.
 	external fun elements(self): List<JsonValue>;
 
-	// Whether this value is JSON `null` (the `Option::None` discriminator).
+	/// Whether this value is JSON `null` (the `Option::None` discriminator).
 	external fun is_null(self): bool;
 
-	// The normalized JSON type — `"number"`/`"string"`/`"boolean"`/`"array"`/
-	// `"object"`/`"null"` (an intrinsic: `typeof` mis-buckets arrays and null).
-	// The decode type checks below read it so a leaf refuses a wrong-shaped
-	// value instead of coercing it to garbage.
+	/// The normalized JSON type — `"number"`/`"string"`/`"boolean"`/`"array"`/
+	/// `"object"`/`"null"` (an intrinsic: `typeof` mis-buckets arrays and null).
+	/// The decode type checks below read it so a leaf refuses a wrong-shaped
+	/// value instead of coercing it to garbage.
 	external fun kind(self): str;
 
 	fun is_number(self): bool {
@@ -129,30 +129,30 @@ impl JsonValue {
 		self.kind() == "array"
 	}
 
-	// Whether an object has a named field — the missing-field check the derived
-	// struct decoder reads (a method so it resolves through the value's type in
-	// generated code, like `field`/`tag`).
+	/// Whether an object has a named field — the missing-field check the derived
+	/// struct decoder reads (a method so it resolves through the value's type in
+	/// generated code, like `field`/`tag`).
 	fun has_field(self, name: str): bool {
 		has_json_field(self, name)
 	}
 }
 
-// Decoding is fallible and NEVER crashes: a missing field, a wrong shape, or
-// text that is not JSON at all is a decode error, not `undefined` garbage and
-// not a thrown `JSON.parse` (the same rule the wire codec follows — I3). Both
-// methods return `Result`; `from_json` parses the text (non-crashing) and hands
-// off to `from_json_value`, which validates the value's shape. Callers thread
-// failures with `!` or handle the `Result`.
+/// Decoding is fallible and NEVER crashes: a missing field, a wrong shape, or
+/// text that is not JSON at all is a decode error, not `undefined` garbage and
+/// not a thrown `JSON.parse` (the same rule the wire codec follows — I3). Both
+/// methods return `Result`; `from_json` parses the text (non-crashing) and hands
+/// off to `from_json_value`, which validates the value's shape. Callers thread
+/// failures with `!` or handle the `Result`.
 trait FromJson {
-	// Parse a JSON document into a value of this type.
+	/// Parse a JSON document into a value of this type.
 	fun from_json(text: str): Result<FromJson, str>;
-	// Rebuild this type from an already-parsed value (used when nesting).
+	/// Rebuild this type from an already-parsed value (used when nesting).
 	fun from_json_value(value: JsonValue): Result<FromJson, str>;
 }
 
-// The scalar leaves check the JSON type before coercing (`Number`/`String`/
-// `Boolean` would otherwise turn `undefined`/a wrong type into `NaN`/`"undefined"`
-// /`true`). The raw coercion stays a host extern, now reached only past the check.
+/// The scalar leaves check the JSON type before coercing (`Number`/`String`/
+/// `Boolean` would otherwise turn `undefined`/a wrong type into `NaN`/`"undefined"`
+/// /`true`). The raw coercion stays a host extern, now reached only past the check.
 [extern("String")]
 external fun coerce_str(value: JsonValue): str;
 [extern("Boolean")]
@@ -278,17 +278,17 @@ impl List<type T: FromJson> with FromJson {
 
 // --- The wire visitor's JSON pair (transport-rpc.md §6.1) -----------------------
 
-// Whether a parsed object has a named field (`Object.hasOwn`) — the missing-
-// field check behind the reader's sticky decode errors.
+/// Whether a parsed object has a named field (`Object.hasOwn`) — the missing-
+/// field check behind the reader's sticky decode errors.
 [extern("Object.hasOwn")]
 external fun has_json_field(value: JsonValue, name: str): bool;
 
-// The write side: builds the JSON text as a `Wire` value describes itself.
-// Separator discipline is one flag plus a stack: `pending_comma` says whether
-// the next value at the current level needs a `,` first; opening an aggregate
-// saves the parent's flag and starts fresh, closing restores it. A `field`
-// writes its own separator and glues its value (no comma between `"name":` and
-// the value). Variant arities are tracked so `end_variant` knows what to close.
+/// The write side: builds the JSON text as a `Wire` value describes itself.
+/// Separator discipline is one flag plus a stack: `pending_comma` says whether
+/// the next value at the current level needs a `,` first; opening an aggregate
+/// saves the parent's flag and starts fresh, closing restores it. A `field`
+/// writes its own separator and glues its value (no comma between `"name":` and
+/// the value). Variant arities are tracked so `end_variant` knows what to close.
 struct JsonWriter {
 	out: Shared<str>,
 	pending_comma: Shared<bool>,
@@ -306,8 +306,8 @@ impl JsonWriter {
 		}
 	}
 
-	// Appends `text` as one value at the current level: separator first, and
-	// the NEXT value here will need one too.
+	/// Appends `text` as one value at the current level: separator first, and
+	/// the NEXT value here will need one too.
 	fun value(self, text: str) {
 		if self.pending_comma.read() {
 			self.out.write() = self.out.read() + ",";
@@ -316,15 +316,15 @@ impl JsonWriter {
 		self.pending_comma.write() = true;
 	}
 
-	// Opens an aggregate: the opener is a value at the parent level; inside,
-	// the first item needs no separator.
+	/// Opens an aggregate: the opener is a value at the parent level; inside,
+	/// the first item needs no separator.
 	fun open(self, opener: str) {
 		self.value(opener);
 		self.saved_commas.write().push(true);
 		self.pending_comma.write() = false;
 	}
 
-	// Closes an aggregate and restores the parent level's separator state.
+	/// Closes an aggregate and restores the parent level's separator state.
 	fun close(self, closer: str) {
 		self.out.write() = self.out.read() + closer;
 		self.pending_comma.write() = match self.saved_commas.write().pop() {
@@ -333,13 +333,13 @@ impl JsonWriter {
 		};
 	}
 
-	// The finished document.
+	/// The finished document.
 	fun result(self): str {
 		self.out.read()
 	}
 
-	// The closure record a `Codec` hands out — thin delegates to the trait
-	// methods below (the codec-as-a-value erasure; direct `encode_json` skips it).
+	/// The closure record a `Codec` hands out — thin delegates to the trait
+	/// methods below (the codec-as-a-value erasure; direct `encode_json` skips it).
 	fun serializer(self): Serializer {
 		Serializer {
 			begin_struct = |fields| self.begin_struct(fields),
@@ -421,8 +421,8 @@ impl JsonWriter with Serialize {
 		self.value("null");
 	}
 
-	// JSON has no Some marker — a present Option is its bare value (which
-	// keeps the format's Some(None) ≡ None collapse).
+	/// JSON has no Some marker — a present Option is its bare value (which
+	/// keeps the format's Some(None) ≡ None collapse).
 	fun some_value(self) {}
 
 	fun str_value(self, value: str) {
@@ -437,8 +437,8 @@ impl JsonWriter with Serialize {
 		self.value(i"{value}");
 	}
 
-	// A JSON number; exact for the runtime's whole i53 range (integers to
-	// 2^53 — the f64 representation).
+	/// A JSON number; exact for the runtime's whole i53 range (integers to
+	/// 2^53 — the f64 representation).
 	fun i53_value(self, value: i53) {
 		self.value(i"{value}");
 	}
@@ -452,12 +452,12 @@ impl JsonWriter with Serialize {
 	}
 }
 
-// The read side: walks a parsed `JsonValue` with a value stack. `field(name)`
-// pushes the named member (or fails and pushes a null sentinel); scalar reads
-// pop; `begin_list`/arity>0 variants replace their aggregate with its elements
-// (reversed, so pops come off in order). Errors are sticky: after `fail`, every
-// operation is a no-op returning a zero value, and `decode_json` reports the
-// first reason.
+/// The read side: walks a parsed `JsonValue` with a value stack. `field(name)`
+/// pushes the named member (or fails and pushes a null sentinel); scalar reads
+/// pop; `begin_list`/arity>0 variants replace their aggregate with its elements
+/// (reversed, so pops come off in order). Errors are sticky: after `fail`, every
+/// operation is a no-op returning a zero value, and `decode_json` reports the
+/// first reason.
 struct JsonReader {
 	stack: Shared<List<JsonValue>>,
 	error: Shared<Option<str>>,
@@ -486,8 +486,8 @@ impl JsonReader {
 		}
 	}
 
-	// The current value without consuming it (a null sentinel when poisoned
-	// or unbalanced — reads stay crash-free either way).
+	/// The current value without consuming it (a null sentinel when poisoned
+	/// or unbalanced — reads stay crash-free either way).
 	fun top(self): JsonValue {
 		if !self.ok() || self.stack.read().is_empty() {
 			parse_json_value("null")
@@ -512,8 +512,8 @@ impl JsonReader {
 		}
 	}
 
-	// The closure record a `Codec` hands out — thin delegates to the trait
-	// methods below (direct `decode_json` skips it).
+	/// The closure record a `Codec` hands out — thin delegates to the trait
+	/// methods below (direct `decode_json` skips it).
 	fun deserializer(self): Deserializer {
 		Deserializer {
 			begin_struct = || self.begin_struct(),
@@ -613,10 +613,10 @@ impl JsonReader with Deserialize {
 		let _ = self.take();
 	}
 
-	// The reader has its own sticky-error model (`ok()`/`fail()`), so it reads a
-	// scalar through the raw coercion rather than the validating `from_json_value`
-	// (which now returns a `Result`) — the leaf is already inside the reader's
-	// error discipline.
+	/// The reader has its own sticky-error model (`ok()`/`fail()`), so it reads a
+	/// scalar through the raw coercion rather than the validating `from_json_value`
+	/// (which now returns a `Result`) — the leaf is already inside the reader's
+	/// error discipline.
 	fun str_value(self): str {
 		let value = self.take();
 		if self.ok() { coerce_str(value) } else { "" }
@@ -656,18 +656,18 @@ impl JsonReader with Deserialize {
 	}
 }
 
-// Encode a `Wire` value as JSON text — the direct path: `describe`
-// monomorphizes straight onto `JsonWriter`, no record in between.
+/// Encode a `Wire` value as JSON text — the direct path: `describe`
+/// monomorphizes straight onto `JsonWriter`, no record in between.
 fun encode_json<T: Wire>(value: T): str {
 	let writer = JsonWriter::new();
 	value.describe(writer);
 	writer.result()
 }
 
-// Decode JSON text as a `Wire` value: `Err(reason)` names the first structural
-// failure (missing field, missing variant payload) instead of half-decoding.
-// (Malformed JSON *syntax* still throws at `parse_json_value` — the guarded
-// parse is Q10/`?` territory.)
+/// Decode JSON text as a `Wire` value: `Err(reason)` names the first structural
+/// failure (missing field, missing variant payload) instead of half-decoding.
+/// (Malformed JSON *syntax* still throws at `parse_json_value` — the guarded
+/// parse is Q10/`?` territory.)
 fun decode_json<T: Wire>(text: str): Result<T, str> {
 	let reader = opened_reader(text);
 	let value: T = T::rebuild(reader);
@@ -677,10 +677,10 @@ fun decode_json<T: Wire>(text: str): Result<T, str> {
 	}
 }
 
-// A reader over `text` — pre-poisoned when the text is not JSON at all: the
-// codec contract is a sticky decode error, NEVER a crash (a wire frame is
-// untrusted input; a throwing parse here would let one malformed request kill
-// a server).
+/// A reader over `text` — pre-poisoned when the text is not JSON at all: the
+/// codec contract is a sticky decode error, NEVER a crash (a wire frame is
+/// untrusted input; a throwing parse here would let one malformed request kill
+/// a server).
 fun opened_reader(text: str): JsonReader {
 	match text.try_parse_json() {
 		Some(let root) => JsonReader::new(root),
@@ -692,8 +692,8 @@ fun opened_reader(text: str): JsonReader {
 	}
 }
 
-// The JSON codec (§6.2): text frames over the writer/reader pair. A binary
-// frame poisons the reader — a sticky decode error, never a crash.
+/// The JSON codec (§6.2): text frames over the writer/reader pair. A binary
+/// frame poisons the reader — a sticky decode error, never a crash.
 fun json_codec(): Codec {
 	Codec {
 		writer = || {

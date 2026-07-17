@@ -10,23 +10,23 @@
 
 import pkg::option::Option::{ self, Some, None };
 
-// An open database handle (`node:sqlite`'s DatabaseSync — synchronous, the
-// right shape for a single-threaded server loop over local storage).
+/// An open database handle (`node:sqlite`'s DatabaseSync — synchronous, the
+/// right shape for a single-threaded server loop over local storage).
 external struct Database;
 
-// A prepared statement (reusable; parameters bind per call).
+/// A prepared statement (reusable; parameters bind per call).
 external struct Statement;
 
-// A result row (a host object; read columns through the typed accessors).
+/// A result row (a host object; read columns through the typed accessors).
 external struct Row;
 
 impl Database {
-	// Opens (creating if missing) the database at `path`; ":memory:" for an
-	// ephemeral in-process store.
+	/// Opens (creating if missing) the database at `path`; ":memory:" for an
+	/// ephemeral in-process store.
 	[extern(new, "node:sqlite", "DatabaseSync")]
 	external fun open(path: str): Database;
 
-	// Runs `sql` directly — DDL, pragmas, one-off statements without results.
+	/// Runs `sql` directly — DDL, pragmas, one-off statements without results.
 	[extern(method)]
 	external fun exec(self, sql: str): void;
 
@@ -34,10 +34,10 @@ impl Database {
 	external fun prepare(self, sql: str): Statement;
 }
 
-// Parameter spreads and column reads need host glue (`stmt.run(...params)`,
-// `row[name]`) — the `__db_*` runtime helpers. The three column readers share
-// one helper; the vilan signature supplies the type (trust the schema, and
-// guard NULLABLE columns with `is_null`).
+/// Parameter spreads and column reads need host glue (`stmt.run(...params)`,
+/// `row[name]`) — the `__db_*` runtime helpers. The three column readers share
+/// one helper; the vilan signature supplies the type (trust the schema, and
+/// guard NULLABLE columns with `is_null`).
 [extern("__db_run")]
 external fun statement_run(statement: Statement, parameters: List<any>): i32;
 
@@ -63,9 +63,9 @@ external fun column_real(row: Row, name: str): f64;
 external fun column_is_null(row: Row, name: str): bool;
 
 impl Statement {
-	// Executes with `parameters` bound positionally; returns the inserted
-	// rowid (0 when the statement inserts nothing). Rowids exceed i32 only
-	// past 2^31 rows — revisit alongside real i53 needs.
+	/// Executes with `parameters` bound positionally; returns the inserted
+	/// rowid (0 when the statement inserts nothing). Rowids exceed i32 only
+	/// past 2^31 rows — revisit alongside real i53 needs.
 	fun run(self, parameters: List<any>): i32 {
 		statement_run(self, parameters)
 	}
@@ -74,7 +74,7 @@ impl Statement {
 		statement_all(self, parameters)
 	}
 
-	// The first matching row, or `None` when the query matches nothing.
+	/// The first matching row, or `None` when the query matches nothing.
 	fun first(self, parameters: List<any>): Option<Row> {
 		statement_first(self, parameters)
 	}
@@ -89,9 +89,9 @@ impl Row {
 		column_integer(self, name)
 	}
 
-	// An INTEGER column at i53 width — timestamps (epoch millis), large ids.
-	// Exact for values to 2^53 (the i53 representation); a column beyond that
-	// arrives from `node:sqlite` as a BigInt and is out of v1's reach.
+	/// An INTEGER column at i53 width — timestamps (epoch millis), large ids.
+	/// Exact for values to 2^53 (the i53 representation); a column beyond that
+	/// arrives from `node:sqlite` as a BigInt and is out of v1's reach.
 	fun big_integer(self, name: str): i53 {
 		column_big_integer(self, name)
 	}

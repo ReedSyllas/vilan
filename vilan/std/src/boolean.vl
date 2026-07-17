@@ -1,8 +1,8 @@
-// `bool` is the built-in boolean. It is declared as an enum so it has a nominal
-// type identity (and can carry impls/trait impls), but the compiler lowers it to
-// a native JS boolean: `false`/`true` are the JS literals, comparisons emit
-// `===`, and `if`/`while` use JS truthiness. This module is dependency-free so it
-// can always be loaded as a core primitive without pulling in the rest of std.
+/// `bool` is the built-in boolean. It is declared as an enum so it has a nominal
+/// type identity (and can carry impls/trait impls), but the compiler lowers it to
+/// a native JS boolean: `false`/`true` are the JS literals, comparisons emit
+/// `===`, and `if`/`while` use JS truthiness. This module is dependency-free so it
+/// can always be loaded as a core primitive without pulling in the rest of std.
 enum bool {
 	false,
 	true,

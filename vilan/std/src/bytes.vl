@@ -10,24 +10,24 @@ import pkg::range::Range;
 external struct Bytes;
 
 impl Bytes {
-	// A zero-filled buffer of `size` bytes.
+	/// A zero-filled buffer of `size` bytes.
 	[extern(new, "Uint8Array")]
 	external fun alloc(size: i32): Bytes;
 
-	// The byte count.
+	/// The byte count.
 	[extern(get, "length")]
 	external fun len(self): i32;
 
-	// The byte at `index` (0–255).
+	/// The byte at `index` (0–255).
 	[extern(method, "at")]
 	external fun get(self, index: i32): i32;
 
-	// The same byte `u32`-typed — for unsigned reassembly (`b0 | b1 << 8 …`),
-	// where the operand type selects the unsigned shift/wrap emission.
+	/// The same byte `u32`-typed — for unsigned reassembly (`b0 | b1 << 8 …`),
+	/// where the operand type selects the unsigned shift/wrap emission.
 	[extern(method, "at")]
 	external fun get_u32(self, index: i32): u32;
 
-	// Lowercase hex rendering of the whole buffer.
+	/// Lowercase hex rendering of the whole buffer.
 	fun to_hex(self): str {
 		let digits = "0123456789abcdef";
 		mut out = "";
@@ -39,27 +39,27 @@ impl Bytes {
 		out
 	}
 
-	// Overwrite `from..to` (exclusive) with `value` — host semantics: the
-	// stored byte is `value & 0xFF`.
+	/// Overwrite `from..to` (exclusive) with `value` — host semantics: the
+	/// stored byte is `value & 0xFF`.
 	[extern(method, "fill")]
 	external fun fill(self, value: i32, from: i32, to: i32): Bytes;
 
-	// Copy all of `source` into this buffer starting at `offset` (the host
-	// `TypedArray.set` — errors if it would overflow).
+	/// Copy all of `source` into this buffer starting at `offset` (the host
+	/// `TypedArray.set` — errors if it would overflow).
 	[extern(method, "set")]
 	external fun copy_into(self, source: Bytes, offset: i32);
 
-	// A copy of `from..to` (`to` exclusive).
+	/// A copy of `from..to` (`to` exclusive).
 	[extern(method, "slice")]
 	external fun slice(self, from: i32, to: i32): Bytes;
 
-	// Store one byte (`value & 0xFF`) at `index`.
+	/// Store one byte (`value & 0xFF`) at `index`.
 	fun set(self, index: i32, value: i32) {
 		let _ = self.fill(value, index, index + 1);
 	}
 
-	// The same store `u32`-typed (the host coerces `& 0xFF` either way) — for
-	// byte extraction done in `u32` arithmetic, mirroring `get_u32`.
+	/// The same store `u32`-typed (the host coerces `& 0xFF` either way) — for
+	/// byte extraction done in `u32` arithmetic, mirroring `get_u32`.
 	[extern(method, "fill")]
 	external fun fill_u32(self, value: u32, from: i32, to: i32): Bytes;
 
@@ -67,7 +67,7 @@ impl Bytes {
 		let _ = self.fill_u32(value, index, index + 1);
 	}
 
-	// A new buffer holding `a` then `b`.
+	/// A new buffer holding `a` then `b`.
 	fun concat(a: Bytes, b: Bytes): Bytes {
 		let joined = Bytes::alloc(a.len() + b.len());
 		joined.copy_into(a, 0);
@@ -78,10 +78,10 @@ impl Bytes {
 
 // --- Float access -----------------------------------------------------------
 
-// The buffer under a `Bytes` (the host `ArrayBuffer`) and a `DataView` over it
-// — the standard route to IEEE-754 bytes, used by the binary codec for `f64`.
-// A `Bytes` produced by `slice`/`alloc` owns its whole buffer, so offset 0 of
-// the view is offset 0 of the bytes.
+/// The buffer under a `Bytes` (the host `ArrayBuffer`) and a `DataView` over it
+/// — the standard route to IEEE-754 bytes, used by the binary codec for `f64`.
+/// A `Bytes` produced by `slice`/`alloc` owns its whole buffer, so offset 0 of
+/// the view is offset 0 of the bytes.
 external struct ByteBuffer;
 
 impl Bytes {
@@ -89,8 +89,8 @@ impl Bytes {
 	external fun buffer(self): ByteBuffer;
 }
 
-// A whole `ArrayBuffer` viewed as bytes (`new Uint8Array(buffer)`) — how a
-// binary fetch response body becomes a `Bytes`.
+/// A whole `ArrayBuffer` viewed as bytes (`new Uint8Array(buffer)`) — how a
+/// binary fetch response body becomes a `Bytes`.
 [extern(new, "Uint8Array")]
 external fun bytes_of_buffer(buffer: ByteBuffer): Bytes;
 
@@ -100,8 +100,8 @@ external struct DataView;
 external fun data_view(buffer: ByteBuffer): DataView;
 
 impl DataView {
-	// Read/write an IEEE-754 double at `offset`; `little_endian` selects the
-	// byte order.
+	/// Read/write an IEEE-754 double at `offset`; `little_endian` selects the
+	/// byte order.
 	[extern(method, "getFloat64")]
 	external fun read_f64(self, offset: i32, little_endian: bool): f64;
 
@@ -111,9 +111,9 @@ impl DataView {
 
 // --- UTF-8 ----------------------------------------------------------------
 
-// The host `TextEncoder`/`TextDecoder` classes. The struct + constructor are
-// exposed (not just the `encode_utf8`/`decode_utf8` shorthands) for streaming
-// use — `std::fetch`'s chunked body reads decode with a long-lived decoder.
+/// The host `TextEncoder`/`TextDecoder` classes. The struct + constructor are
+/// exposed (not just the `encode_utf8`/`decode_utf8` shorthands) for streaming
+/// use — `std::fetch`'s chunked body reads decode with a long-lived decoder.
 external struct TextEncoder;
 
 [extern(new, "TextEncoder")]
@@ -134,12 +134,12 @@ impl TextDecoder {
 	external fun decode(self, bytes: Bytes): str;
 }
 
-// `text` as UTF-8 bytes.
+/// `text` as UTF-8 bytes.
 fun encode_utf8(text: str): Bytes {
 	new_text_encoder().encode(text)
 }
 
-// UTF-8 `bytes` as text.
+/// UTF-8 `bytes` as text.
 fun decode_utf8(bytes: Bytes): str {
 	new_text_decoder().decode(bytes)
 }

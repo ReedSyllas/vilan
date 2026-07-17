@@ -54,7 +54,7 @@ impl Result<type T, type E> {
 		}
 	}
 
-	// `Ok(x)` -> `Some(x)`, discarding the error; `Err(_)` -> `None`.
+	/// `Ok(x)` -> `Some(x)`, discarding the error; `Err(_)` -> `None`.
 	fun ok(self): Option<T> {
 		match self {
 			Ok(let x) => Some(x),
@@ -62,7 +62,7 @@ impl Result<type T, type E> {
 		}
 	}
 
-	// `Err(e)` -> `Some(e)`, discarding the value; `Ok(_)` -> `None`.
+	/// `Err(e)` -> `Some(e)`, discarding the value; `Ok(_)` -> `None`.
 	fun err(self): Option<E> {
 		match self {
 			Err(let e) => Some(e),
@@ -195,7 +195,7 @@ impl Result<type T: Default, type E> {
 }
 
 impl Result<Option<type T>, type E> {
-	// `Result<Option<T>, E>` -> `Option<Result<T, E>>`, swapping the layers.
+	/// `Result<Option<T>, E>` -> `Option<Result<T, E>>`, swapping the layers.
 	fun transpose(self): Option<Result<T, E>> {
 		match self {
 			Ok(Some(let x)) => Some(Ok(x)),

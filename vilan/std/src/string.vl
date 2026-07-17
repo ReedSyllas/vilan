@@ -17,20 +17,20 @@ impl str {
 
 	external fun ends_with(self, suffix: str): bool;
 
-	// Replaces every occurrence of `from` with `to`.
+	/// Replaces every occurrence of `from` with `to`.
 	external fun replace(self, from: str, to: str): str;
 
 	external fun repeat(self, count: i32): str;
 
-	// Splits on each occurrence of `separator`, returning the pieces.
+	/// Splits on each occurrence of `separator`, returning the pieces.
 	external fun split(self, separator: str): List<str>;
 
-	// The substring in `[start, end)` (zero-based, by UTF-16 code unit).
+	/// The substring in `[start, end)` (zero-based, by UTF-16 code unit).
 	external fun substring(self, start: i32, end: i32): str;
 
-	// The UTF-16 code unit at `index` (0..len), as its integer value — the
-	// primitive under checksums and parsers. Out of range is NaN-shaped in
-	// the host; index within `len()` is the caller's contract.
+	/// The UTF-16 code unit at `index` (0..len), as its integer value — the
+	/// primitive under checksums and parsers. Out of range is NaN-shaped in
+	/// the host; index within `len()` is the caller's contract.
 	[extern(method, "charCodeAt")]
 	external fun code_at(self, index: i32): u32;
 

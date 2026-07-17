@@ -38,8 +38,8 @@ impl Set<type T: Hashable> {
 		self.len() == 0
 	}
 
-	// A `List` snapshot of the elements, in insertion order (`for x in set`
-	// iterates these).
+	/// A `List` snapshot of the elements, in insertion order (`for x in set`
+	/// iterates these).
 	fun values(self): List<T> {
 		self.table.values()
 	}

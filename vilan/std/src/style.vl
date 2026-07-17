@@ -21,8 +21,8 @@ import pkg::range::Range;
 
 // --- values -------------------------------------------------------------------
 
-// A CSS length: a token's IDENTITY (`var(--space-4)`) or a literal unit.
-// `root` carries the token's `:root` declaration ("" when none).
+/// A CSS length: a token's IDENTITY (`var(--space-4)`) or a literal unit.
+/// `root` carries the token's `:root` declaration ("" when none).
 struct Length {
 	css: str,
 	root: str,
@@ -45,15 +45,15 @@ impl Length {
 		Length { css = "auto", root = "" }
 	}
 
-	// The typed end of the dynamic-value channel: pairs with
-	// `view.style_var(name, signal)` writing the custom property at runtime.
+	/// The typed end of the dynamic-value channel: pairs with
+	/// `view.style_var(name, signal)` writing the custom property at runtime.
 	fun var(name: str): Length {
 		Length { css = i"var({name})", root = "" }
 	}
 }
 
-// The spacing scale (Tailwind's, rem-based). The scale is data; the
-// validation is const evaluation — an unknown step fails the build.
+/// The spacing scale (Tailwind's, rem-based). The scale is data; the
+/// validation is const evaluation — an unknown step fails the build.
 fun space(step: i32): Length {
 	let value = match step {
 		0 => "0px",
@@ -74,7 +74,7 @@ fun space(step: i32): Length {
 	Length { css = i"var(--space-{step})", root = i":root\{--space-{step}:{value}\}" }
 }
 
-// A CSS color: a ramp token's identity (`var(--gray-50)`) or a literal.
+/// A CSS color: a ramp token's identity (`var(--gray-50)`) or a literal.
 struct Color {
 	css: str,
 	root: str,
@@ -97,7 +97,7 @@ impl Color {
 		Color { css = "transparent", root = "" }
 	}
 
-	// The typed arbitrary-value escape.
+	/// The typed arbitrary-value escape.
 	fun hex(value: str): Color {
 		Color { css = value, root = "" }
 	}
@@ -233,9 +233,9 @@ enum Overflow {
 
 // --- the class-name hash --------------------------------------------------------
 
-// djb2 over the slot key and declaration, base36, prefixed for CSS validity.
-// Content-addressed — never a counter — so builds, caching, and reordering
-// all agree on names (the determinism the asset channel's dedup relies on).
+/// djb2 over the slot key and declaration, base36, prefixed for CSS validity.
+/// Content-addressed — never a counter — so builds, caching, and reordering
+/// all agree on names (the determinism the asset channel's dedup relies on).
 fun class_hash(text: str): str {
 	mut hash = 5381u32;
 	for index in Range::new(0, text.len()) {
@@ -273,9 +273,9 @@ struct Style {
 	rules: Map<str, (str, str)>,
 }
 
-// Opens a builder chain. Property methods reach the const-only asset
-// channel, so construction belongs inside a `const` expression; selection
-// and merging (`+`, `class_list`) are ordinary runtime code.
+/// Opens a builder chain. Property methods reach the const-only asset
+/// channel, so construction belongs inside a `const` expression; selection
+/// and merging (`+`, `class_list`) are ordinary runtime code.
 fun style(): Style {
 	Style { rules = Map::new() }
 }
@@ -295,7 +295,7 @@ fun render_rule(media: str, pseudo: str, class: str, declaration: str): str {
 }
 
 impl Style {
-	// The one chokepoint: hash the slot, emit the atomic rule, insert last-wins.
+	/// The one chokepoint: hash the slot, emit the atomic rule, insert last-wins.
 	fun rule(self, media: str, pseudo: str, property: str, declaration: str): Style {
 		let key = media + ":" + pseudo + ":" + property;
 		let class = class_hash(key + "|" + declaration);
@@ -305,7 +305,7 @@ impl Style {
 		Style { rules = rules }
 	}
 
-	// The escape hatch: any property, any value, atomic like the rest.
+	/// The escape hatch: any property, any value, atomic like the rest.
 	fun raw(self, property: str, value: str): Style {
 		self.rule("", "", property, property + ":" + value)
 	}
@@ -523,8 +523,8 @@ impl Style {
 		self.pseudo("last-child", inner)
 	}
 
-	// Dark mode: explicit `:root[data-theme="dark"]` control (SSR-friendly);
-	// combining with pseudo/media in one slot is deferred.
+	/// Dark mode: explicit `:root[data-theme="dark"]` control (SSR-friendly);
+	/// combining with pseudo/media in one slot is deferred.
 	fun dark(self, inner: Style): Style {
 		self.pseudo("dark", inner)
 	}
@@ -550,8 +550,8 @@ impl Style {
 		out
 	}
 
-	// Breakpoints (Tailwind's): min-width media queries. Media may wrap a
-	// pseudo-conditioned style (`md(hover(..))`), never another media.
+	/// Breakpoints (Tailwind's): min-width media queries. Media may wrap a
+	/// pseudo-conditioned style (`md(hover(..))`), never another media.
 	fun sm(self, inner: Style): Style {
 		self.media("640px", inner)
 	}
@@ -586,8 +586,8 @@ impl Style {
 		out
 	}
 
-	// The rendered class attribute: every slot's class, space-joined.
-	// Runtime-legal (no emission) — selection and merging stay ordinary code.
+	/// The rendered class attribute: every slot's class, space-joined.
+	/// Runtime-legal (no emission) — selection and merging stay ordinary code.
 	fun class_list(self): str {
 		mut out = "";
 		for entry in self.rules.values() {

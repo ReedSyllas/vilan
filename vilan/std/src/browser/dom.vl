@@ -8,95 +8,95 @@
 
 external struct Element;
 
-// `document.getElementById(id)` — the element with that id (the mount point a
-// page provides, e.g. `<div id="app">`).
+/// `document.getElementById(id)` — the element with that id (the mount point a
+/// page provides, e.g. `<div id="app">`).
 [extern("document.getElementById")]
 external fun get_element_by_id(id: str): Element;
 
-// `document.createElement(tag)` — a fresh, unattached element of that tag.
+/// `document.createElement(tag)` — a fresh, unattached element of that tag.
 [extern("document.createElement")]
 external fun create_element(tag: str): Element;
 
-// `document.querySelector(selector)` — the first element matching a CSS selector
-// (e.g. `"#name"`, `".item"`, `"input[name=email]"`).
+/// `document.querySelector(selector)` — the first element matching a CSS selector
+/// (e.g. `"#name"`, `".item"`, `"input[name=email]"`).
 [extern("document.querySelector")]
 external fun query_selector(selector: str): Element;
 
-// `document.querySelectorAll(selector)` — every element matching a CSS selector,
-// as a `List` (a real array, so `map`/`for`-in/`len` all work).
+/// `document.querySelectorAll(selector)` — every element matching a CSS selector,
+/// as a `List` (a real array, so `map`/`for`-in/`len` all work).
 external fun query_selector_all(selector: str): List<Element>;
 
 impl Element {
-	// Sets the element's text content (`element.textContent = text`).
+	/// Sets the element's text content (`element.textContent = text`).
 	[extern(set, "textContent")]
 	external fun set_text(self, text: str): void;
 
-	// Sets the element's CSS class (`element.className = name`).
+	/// Sets the element's CSS class (`element.className = name`).
 	[extern(set, "className")]
 	external fun set_class(self, name: str): void;
 
-	// Sets an attribute (`element.setAttribute(name, value)`).
+	/// Sets an attribute (`element.setAttribute(name, value)`).
 	[extern(method, "setAttribute")]
 	external fun set_attribute(self, name: str, value: str): void;
 
-	// Sets a CSS custom property (`element.style.setProperty(name, value)`) —
-	// the DOM end of the styling system's dynamic-value channel
-	// (proposal/ui-styling.md §2.1).
+	/// Sets a CSS custom property (`element.style.setProperty(name, value)`) —
+	/// the DOM end of the styling system's dynamic-value channel
+	/// (proposal/ui-styling.md §2.1).
 	[extern(method, "style.setProperty")]
 	external fun set_style_property(self, name: str, value: str): void;
 
-	// Appends `child` as the element's last child.
+	/// Appends `child` as the element's last child.
 	[extern(method, "appendChild")]
 	external fun append(self, child: Element): void;
 
-	// Removes the element from the document (`element.remove()`).
+	/// Removes the element from the document (`element.remove()`).
 	[extern(method, "remove")]
 	external fun remove(self): void;
 
-	// Removes every child (`element.replaceChildren()`).
+	/// Removes every child (`element.replaceChildren()`).
 	[extern(method, "replaceChildren")]
 	external fun clear(self): void;
 
-	// Shows or hides the element (`element.hidden = hidden`).
+	/// Shows or hides the element (`element.hidden = hidden`).
 	[extern(set, "hidden")]
 	external fun set_hidden(self, hidden: bool): void;
 
-	// The element's current value (`element.value`) — e.g. what the user has
-	// typed into an `<input>`.
+	/// The element's current value (`element.value`) — e.g. what the user has
+	/// typed into an `<input>`.
 	[extern(get, "value")]
 	external fun value(self): str;
 
-	// Sets the element's value (`element.value = value`).
+	/// Sets the element's value (`element.value = value`).
 	[extern(set, "value")]
 	external fun set_value(self, value: str): void;
 
-	// Registers `handler` to run on `event` (e.g. `"click"`, `"input"`).
+	/// Registers `handler` to run on `event` (e.g. `"click"`, `"input"`).
 	[extern(method, "addEventListener")]
 	external fun on(self, event: str, handler: || void): void;
 
-	// Like `on`, but the handler receives the `Event` — for `prevent_default`,
-	// modifier keys, and anything else on the event object. The same
-	// `addEventListener` binding; the host always passes the event, `on` just
-	// ignores it.
+	/// Like `on`, but the handler receives the `Event` — for `prevent_default`,
+	/// modifier keys, and anything else on the event object. The same
+	/// `addEventListener` binding; the host always passes the event, `on` just
+	/// ignores it.
 	[extern(method, "addEventListener")]
 	external fun on_event(self, event: str, handler: |Event| void): void;
 }
 
-// A DOM event, as delivered to an `on_event` handler — an opaque handle like
-// `Element`.
+/// A DOM event, as delivered to an `on_event` handler — an opaque handle like
+/// `Element`.
 external struct Event;
 
 impl Event {
-	// Cancels the event's default action (`event.preventDefault()`) — e.g. stop
-	// an `<a>` from performing a full-page navigation.
+	/// Cancels the event's default action (`event.preventDefault()`) — e.g. stop
+	/// an `<a>` from performing a full-page navigation.
 	[extern(method, "preventDefault")]
 	external fun prevent_default(self): void;
 
-	// The mouse button (`event.button`): 0 is the main button.
+	/// The mouse button (`event.button`): 0 is the main button.
 	[extern(get, "button")]
 	external fun button(self): i32;
 
-	// Modifier-key state at dispatch time.
+	/// Modifier-key state at dispatch time.
 	[extern(get, "metaKey")]
 	external fun meta_key(self): bool;
 
@@ -109,7 +109,7 @@ impl Event {
 	[extern(get, "altKey")]
 	external fun alt_key(self): bool;
 
-	// The key for a keyboard event (`event.key`): `"Enter"`, `"Escape"`, `"a"`, ….
+	/// The key for a keyboard event (`event.key`): `"Enter"`, `"Escape"`, `"a"`, ….
 	[extern(get, "key")]
 	external fun key(self): str;
 }

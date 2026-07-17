@@ -38,8 +38,8 @@ impl i32 {
 		}
 	}
 
-	// Absolute value, exponentiation, and pairwise min/max — thin wrappers over the
-	// host `Math` functions (the receiver is passed as the first argument).
+	/// Absolute value, exponentiation, and pairwise min/max — thin wrappers over the
+	/// host `Math` functions (the receiver is passed as the first argument).
 	[extern("Math.abs")]
 	external fun abs(self): i32;
 
@@ -52,8 +52,8 @@ impl i32 {
 	[extern("Math.max")]
 	external fun max(self, other: i32): i32;
 
-	// Truncated remainder — exact for every integer type (`/` truncates, §F2),
-	// the stopgap spelling until the `%` operator lands (backlog H5).
+	/// Truncated remainder — exact for every integer type (`/` truncates, §F2),
+	/// the stopgap spelling until the `%` operator lands (backlog H5).
 	fun rem(self, m: i32): i32 {
 		self - self / m * m
 	}
@@ -68,7 +68,7 @@ impl i32 with Default {
 external struct f64;
 
 impl f64 {
-	// Floating-point math over the host `Math` functions.
+	/// Floating-point math over the host `Math` functions.
 	[extern("Math.abs")]
 	external fun abs(self): f64;
 
@@ -113,8 +113,8 @@ impl f64 {
 	[extern("Math.atan")]
 	external fun atan(self): f64;
 
-	// The two-argument arctangent: `y.atan2(x)` is the angle of the point
-	// `(x, y)` — the receiver is `y`, matching the host argument order.
+	/// The two-argument arctangent: `y.atan2(x)` is the angle of the point
+	/// `(x, y)` — the receiver is `y`, matching the host argument order.
 	[extern("Math.atan2")]
 	external fun atan2(self, x: f64): f64;
 
@@ -123,8 +123,8 @@ impl f64 {
 	[extern("Math.exp")]
 	external fun exp(self): f64;
 
-	// The natural logarithm (the host names it `log`; `ln` avoids the
-	// base-ambiguity trap).
+	/// The natural logarithm (the host names it `log`; `ln` avoids the
+	/// base-ambiguity trap).
 	[extern("Math.log")]
 	external fun ln(self): f64;
 
@@ -137,22 +137,22 @@ impl f64 {
 	[extern("Math.cbrt")]
 	external fun cbrt(self): f64;
 
-	// `sqrt(x² + y²)` without intermediate overflow.
+	/// `sqrt(x² + y²)` without intermediate overflow.
 	[extern("Math.hypot")]
 	external fun hypot(self, other: f64): f64;
 
 	// --- Shape and structure ---
 
-	// `-1`, `0`, or `1` by sign (`-0` and `NaN` pass through, host semantics).
+	/// `-1`, `0`, or `1` by sign (`-0` and `NaN` pass through, host semantics).
 	[extern("Math.sign")]
 	external fun sign(self): f64;
 
-	// The fractional part, truncation's complement: `x == x.trunc() + x.fract()`.
+	/// The fractional part, truncation's complement: `x == x.trunc() + x.fract()`.
 	fun fract(self): f64 {
 		self - self.trunc()
 	}
 
-	// Linear interpolation: `self` at `t == 0`, `to` at `t == 1`.
+	/// Linear interpolation: `self` at `t == 0`, `to` at `t == 1`.
 	fun lerp(self, to: f64, t: f64): f64 {
 		self + (to - self) * t
 	}
@@ -165,14 +165,14 @@ impl f64 {
 		self * (180f / PI)
 	}
 
-	// Truncated remainder (sign follows the dividend), the method form of `%`.
+	/// Truncated remainder (sign follows the dividend), the method form of `%`.
 	fun rem(self, m: f64): f64 {
 		self % m
 	}
 
 	// --- Classification ---
 
-	// IEEE: NaN is the one value that is not equal to itself.
+	/// IEEE: NaN is the one value that is not equal to itself.
 	fun is_nan(self): bool {
 		self != self
 	}
@@ -475,9 +475,9 @@ impl BigInt with Ord {
 }
 
 impl f64 with PartialOrd {
-	// NaN-honest: unordered comparisons yield `None`. The floats are
-	// deliberately NOT `Ord` — a total order over NaN would be a lie; use
-	// the `Math`-backed `min`/`max` METHODS for float pairs.
+	/// NaN-honest: unordered comparisons yield `None`. The floats are
+	/// deliberately NOT `Ord` — a total order over NaN would be a lie; use
+	/// the `Math`-backed `min`/`max` METHODS for float pairs.
 	fun partial_compare(self, b: f64): Option<Ordering> {
 		if self < b {
 			Some(Ordering::Less)
@@ -496,9 +496,9 @@ impl f64 with PartialOrd {
 }
 
 impl f32 with PartialOrd {
-	// NaN-honest: unordered comparisons yield `None`. The floats are
-	// deliberately NOT `Ord` — a total order over NaN would be a lie; use
-	// the `Math`-backed `min`/`max` METHODS for float pairs.
+	/// NaN-honest: unordered comparisons yield `None`. The floats are
+	/// deliberately NOT `Ord` — a total order over NaN would be a lie; use
+	/// the `Math`-backed `min`/`max` METHODS for float pairs.
 	fun partial_compare(self, b: f32): Option<Ordering> {
 		if self < b {
 			Some(Ordering::Less)
@@ -800,7 +800,7 @@ external fun label_f32(value: f64): f32;
 [extern("Number")]
 external fun label_f64(value: f64): f64;
 
-// `value` truncated toward zero, folded into `0 ..= modulus - 1`.
+/// `value` truncated toward zero, folded into `0 ..= modulus - 1`.
 fun fold_unsigned(value: f64, modulus: f64): f64 {
 	let truncated = value.trunc();
 	let wrapped = truncated % modulus;
@@ -811,7 +811,7 @@ fun fold_unsigned(value: f64, modulus: f64): f64 {
 	}
 }
 
-// The signed fold: two's-complement at `modulus`, so `half ..` goes negative.
+/// The signed fold: two's-complement at `modulus`, so `half ..` goes negative.
 fun fold_signed(value: f64, modulus: f64, half: f64): f64 {
 	let wrapped = fold_unsigned(value, modulus);
 	if wrapped >= half {
@@ -822,8 +822,8 @@ fun fold_signed(value: f64, modulus: f64, half: f64): f64 {
 }
 
 impl f64 {
-	// Truncation toward zero — the integer-division primitive (§2) and the
-	// first step of every narrowing conversion.
+	/// Truncation toward zero — the integer-division primitive (§2) and the
+	/// first step of every narrowing conversion.
 	[extern("Math.trunc")]
 	external fun trunc(self): f64;
 }
@@ -1335,7 +1335,7 @@ impl f32 {
 	[extern("Math.max")]
 	external fun max(self, other: f32): f32;
 
-	// Truncated remainder (sign follows the dividend), the method form of `%`.
+	/// Truncated remainder (sign follows the dividend), the method form of `%`.
 	fun rem(self, m: f32): f32 {
 		self % m
 	}

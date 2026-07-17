@@ -17,26 +17,26 @@ import pkg::reactive::{ Signal, turn, FlushPolicy };
 import pkg::shared::Shared;
 import pkg::ui::{ View, view };
 
-// `history.pushState(state, title, path)` — state and title are unused ("").
+/// `history.pushState(state, title, path)` — state and title are unused ("").
 [extern("history.pushState")]
 external fun history_push(state: str, title: str, path: str): void;
 
-// `location.pathname` (via a helper — a global property has no function form).
+/// `location.pathname` (via a helper — a global property has no function form).
 [extern("__router_path")]
 external fun location_path(): str;
 
-// `window.addEventListener` — the back/forward (`popstate`) subscription.
+/// `window.addEventListener` — the back/forward (`popstate`) subscription.
 [extern("window.addEventListener")]
 external fun window_listen(event: str, handler: || void): void;
 
-// The path-signal singleton (the `std::reactive` module-state pattern) —
-// created empty at load, wired to the real location on first use.
+/// The path-signal singleton (the `std::reactive` module-state pattern) —
+/// created empty at load, wired to the real location on first use.
 let path_signal: Signal<str> = Signal::new("");
 let wired: Shared<bool> = Shared::new(false);
 
-// Wire the singleton once: read the current location and subscribe
-// back/forward. A `popstate` is a DOM event, so it dispatches inside a fresh
-// turn exactly as `View.on` does.
+/// Wire the singleton once: read the current location and subscribe
+/// back/forward. A `popstate` is a DOM event, so it dispatches inside a fresh
+/// turn exactly as `View.on` does.
 fun ensure_wired() {
 	if !wired.read() {
 		wired.write() = true;
@@ -47,25 +47,25 @@ fun ensure_wired() {
 	}
 }
 
-// The current `location.pathname`, live across `navigate` and back/forward.
-// Derive the app's typed route from it: `current_path().map(parse)`.
+/// The current `location.pathname`, live across `navigate` and back/forward.
+/// Derive the app's typed route from it: `current_path().map(parse)`.
 fun current_path(): Signal<str> {
 	ensure_wired();
 	path_signal
 }
 
-// Programmatic navigation: push a history entry and update the path signal.
-// Joins the caller's ambient turn — an event handler's writes, this one
-// included, settle as one wave.
+/// Programmatic navigation: push a history entry and update the path signal.
+/// Joins the caller's ambient turn — an event handler's writes, this one
+/// included, settle as one wave.
 fun navigate(path: str) {
 	ensure_wired();
 	history_push("", "", path);
 	path_signal.set(path);
 }
 
-// A path's non-empty segments: `"/w/acme/tasks"` → `["w", "acme", "tasks"]`.
-// The raw material for an app's `parse` (trailing and duplicate slashes are
-// forgiven — they produce no segment).
+/// A path's non-empty segments: `"/w/acme/tasks"` → `["w", "acme", "tasks"]`.
+/// The raw material for an app's `parse` (trailing and duplicate slashes are
+/// forgiven — they produce no segment).
 fun segments(path: str): List<str> {
 	mut parts: List<str> = [];
 	for part in path.split("/") {
@@ -76,16 +76,16 @@ fun segments(path: str): List<str> {
 	parts
 }
 
-// A value that prints as a history-API path — implement it on the app's
-// route enum (usually delegating to the app's `href`). What `link` accepts.
+/// A value that prints as a history-API path — implement it on the app's
+/// route enum (usually delegating to the app's `href`). What `link` accepts.
 trait Routable {
 	fun to_path(self): str;
 }
 
-// A navigation link: a real `<a href=..>` (middle-click / ctrl-click /
-// copy-link keep native anchor behavior), intercepting only a PLAIN
-// left-click with `prevent_default` + `navigate`. Returns a `View` — chain
-// as usual (`link("Tasks", route).styled(nav_item)`).
+/// A navigation link: a real `<a href=..>` (middle-click / ctrl-click /
+/// copy-link keep native anchor behavior), intercepting only a PLAIN
+/// left-click with `prevent_default` + `navigate`. Returns a `View` — chain
+/// as usual (`link("Tasks", route).styled(nav_item)`).
 fun link<R: Routable>(label: str, route: R): View {
 	let path = route.to_path();
 	view("a")
@@ -99,8 +99,8 @@ fun link<R: Routable>(label: str, route: R): View {
 		})
 }
 
-// A main-button click with no modifier keys — the only click `link`
-// intercepts; anything else keeps the anchor's native behavior.
+/// A main-button click with no modifier keys — the only click `link`
+/// intercepts; anything else keeps the anchor's native behavior.
 fun plain_left_click(event: Event): bool {
 	let no_modifiers = !event.meta_key() && !event.ctrl_key() && !event.shift_key() && !event.alt_key();
 	event.button() == 0 && no_modifiers

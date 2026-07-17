@@ -20,17 +20,17 @@ external struct Context<T>;
 impl Context<type T> {
 	external fun new(): Context<T>;
 
-	// `run` yields its body's value (like `batch`): the threading pass
-	// rewrites the call to `body(value)`, whose result this is.
+	/// `run` yields its body's value (like `batch`): the threading pass
+	/// rewrites the call to `body(value)`, whose result this is.
 	external fun run<U>(self, value: T, body: || U): U;
 
 	external fun get(self): T;
 
-	// The possibly-established read: `Some(value)` under an enclosing `run`,
-	// `None` otherwise — no coverage fence. Code reachable only through
-	// `get_safe` carries the value as an `Option<T>` hidden parameter
-	// (strict `get` regions keep the bare `T` flavor and the static check);
-	// the covered→safe boundary `Some`-wraps, and safe-only roots receive
-	// `None` (proposal/reactive-turns.md §5.1, ambient-owner.md §2.1).
+	/// The possibly-established read: `Some(value)` under an enclosing `run`,
+	/// `None` otherwise — no coverage fence. Code reachable only through
+	/// `get_safe` carries the value as an `Option<T>` hidden parameter
+	/// (strict `get` regions keep the bare `T` flavor and the static check);
+	/// the covered→safe boundary `Some`-wraps, and safe-only roots receive
+	/// `None` (proposal/reactive-turns.md §5.1, ambient-owner.md §2.1).
 	external fun get_safe(self): Option<T>;
 }

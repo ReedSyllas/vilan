@@ -17,8 +17,8 @@ import pkg::bytes::Bytes;
 import pkg::option::Option::{ self, Some, None };
 import pkg::result::Result::{ self, Ok, Err };
 
-// The write half of the visitor: what a codec's writer implements. See
-// `Serializer` (the record) for the call-by-call protocol notes.
+/// The write half of the visitor: what a codec's writer implements. See
+/// `Serializer` (the record) for the call-by-call protocol notes.
 trait Serialize {
 	fun begin_struct(self, fields: i32);
 	fun field(self, name: str);
@@ -37,7 +37,7 @@ trait Serialize {
 	fun bool_value(self, value: bool);
 }
 
-// The read half: pull-based, sticky-erroring (see `Deserializer`).
+/// The read half: pull-based, sticky-erroring (see `Deserializer`).
 trait Deserialize {
 	fun begin_struct(self);
 	fun field(self, name: str);
@@ -59,22 +59,22 @@ trait Deserialize {
 	fun failed(self): Option<str>;
 }
 
-// The self-description contract. `describe` narrates the value's structure to
-// the serializer; `rebuild` pulls the same structure back out of a
-// deserializer — both generic over the codec's own writer/reader, so the
-// calls monomorphize with no indirection. The two must mirror each other
-// exactly: the derive guarantees it; hand-written impls promise it.
+/// The self-description contract. `describe` narrates the value's structure to
+/// the serializer; `rebuild` pulls the same structure back out of a
+/// deserializer — both generic over the codec's own writer/reader, so the
+/// calls monomorphize with no indirection. The two must mirror each other
+/// exactly: the derive guarantees it; hand-written impls promise it.
 trait Wire {
 	fun describe<S: Serialize>(self, serializer: S);
 	fun rebuild<D: Deserialize>(deserializer: D): Wire;
 }
 
-// The write side. Aggregates narrate as: a struct is `begin_struct(n)`, then
-// per field `field(name)` + the value's own describe, then `end_struct`; a
-// list is `begin_list(n)` + one describe per element + `end_list`; an enum
-// variant is `begin_variant(name, arity)` + its payloads + `end_variant`
-// (externally tagged, matching the JSON shape). `Option::None` is `null_value`;
-// `Some` describes its value bare.
+/// The write side. Aggregates narrate as: a struct is `begin_struct(n)`, then
+/// per field `field(name)` + the value's own describe, then `end_struct`; a
+/// list is `begin_list(n)` + one describe per element + `end_list`; an enum
+/// variant is `begin_variant(name, arity)` + its payloads + `end_variant`
+/// (externally tagged, matching the JSON shape). `Option::None` is `null_value`;
+/// `Some` describes its value bare.
 struct Serializer {
 	begin_struct: |i32| void,
 	field: |str| void,
@@ -99,16 +99,16 @@ struct Serializer {
 	bool_value: |bool| void,
 }
 
-// The read side — the mirror, pull-based. `field(name)` positions the cursor
-// (a JSON deserializer looks the name up, order-independent; a binary one
-// advances positionally and ignores it — the shared Wire type IS the schema).
-// `variant_tag` reads the discriminator for the rebuild's match; `begin_list`
-// returns the element count; `is_null` peeks and `null_value` consumes a null.
-//
-// Errors are STICKY: a missing field, wrong shape, or unknown variant calls
-// `fail(reason)` once; every later read returns a zero value without side
-// effects, so rebuild code stays straight-line. The top-level decode checks
-// `failed()` and discards the half-built value on `Some(reason)`.
+/// The read side — the mirror, pull-based. `field(name)` positions the cursor
+/// (a JSON deserializer looks the name up, order-independent; a binary one
+/// advances positionally and ignores it — the shared Wire type IS the schema).
+/// `variant_tag` reads the discriminator for the rebuild's match; `begin_list`
+/// returns the element count; `is_null` peeks and `null_value` consumes a null.
+///
+/// Errors are STICKY: a missing field, wrong shape, or unknown variant calls
+/// `fail(reason)` once; every later read returns a zero value without side
+/// effects, so rebuild code stays straight-line. The top-level decode checks
+/// `failed()` and discards the half-built value on `Some(reason)`.
 struct Deserializer {
 	begin_struct: || void,
 	field: |str| void,
@@ -380,31 +380,31 @@ impl Option<type T: Wire> with Wire {
 
 // --- The codec (§6.2) --------------------------------------------------------
 
-// What a transport moves. JSON rides text transports allocation-free (SSE is
-// text-only, so SplitDuplex's server→client leg requires the `Text` arm);
-// binary rides byte-capable ones (HTTP POST bodies today, WebSocket later).
+/// What a transport moves. JSON rides text transports allocation-free (SSE is
+/// text-only, so SplitDuplex's server→client leg requires the `Text` arm);
+/// binary rides byte-capable ones (HTTP POST bodies today, WebSocket later).
 enum Frame {
 	Text(str),
 	Binary(Bytes),
 }
 
-// A codec is a factory of encoder/decoder records: `writer()` yields a fresh
-// `Serializer` plus the finisher that produces the frame; `reader(frame)`
-// yields the `Deserializer` a value rebuilds from. Handed a frame of the wrong
-// kind, a reader arrives pre-poisoned — a sticky decode error, not a crash.
+/// A codec is a factory of encoder/decoder records: `writer()` yields a fresh
+/// `Serializer` plus the finisher that produces the frame; `reader(frame)`
+/// yields the `Deserializer` a value rebuilds from. Handed a frame of the wrong
+/// kind, a reader arrives pre-poisoned — a sticky decode error, not a crash.
 struct Codec {
 	writer: || (Serializer, || Frame),
 	reader: |Frame| Deserializer,
 }
 
-// One value to one frame.
+/// One value to one frame.
 fun encode<T: Wire>(codec: Codec, value: T): Frame {
 	let (serializer, finish) = (codec.writer)();
 	value.describe(serializer);
 	finish()
 }
 
-// One frame back to a value; `Err(reason)` names the first structural failure.
+/// One frame back to a value; `Err(reason)` names the first structural failure.
 fun decode<T: Wire>(codec: Codec, frame: Frame): Result<T, str> {
 	let deserializer = (codec.reader)(frame);
 	let value = T::rebuild(deserializer);

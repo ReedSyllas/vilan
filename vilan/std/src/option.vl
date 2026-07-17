@@ -244,14 +244,14 @@ impl bool {
 // result is an `Option`, which the core `str` module must not depend on. An
 // `impl` block does not need to share a module with the type it extends.
 impl str {
-	// STRICT: the whole (whitespace-trimmed) text must be a decimal integer in
-	// i32 range — `"1.5"`, `"12x"`, `""`, and out-of-range values are `None`,
-	// never a truncation.
+	/// STRICT: the whole (whitespace-trimmed) text must be a decimal integer in
+	/// i32 range — `"1.5"`, `"12x"`, `""`, and out-of-range values are `None`,
+	/// never a truncation.
 	external fun parse_i32(self): Option<i32>;
 
-	// STRICT on shape (`"3.14x"` is `None`, unlike a liberal parseFloat), but
-	// any full numeric text the host accepts — including `"1e3"` and
-	// `"Infinity"` — parses.
+	/// STRICT on shape (`"3.14x"` is `None`, unlike a liberal parseFloat), but
+	/// any full numeric text the host accepts — including `"1e3"` and
+	/// `"Infinity"` — parses.
 	external fun parse_f64(self): Option<f64>;
 }
 
@@ -267,8 +267,8 @@ impl List<type T> {
 		self.get(0)
 	}
 
-	// `get(len - 1)`: for an empty list `len - 1` is `-1`, which `get` reports as
-	// `None`.
+	/// `get(len - 1)`: for an empty list `len - 1` is `-1`, which `get` reports as
+	/// `None`.
 	fun last(self): Option<T> {
 		self.get(self.len() - 1)
 	}

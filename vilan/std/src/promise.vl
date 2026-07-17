@@ -1,15 +1,15 @@
-// `std::promise` — `Promise<T>`, the value produced by an `async` expression
-// and consumed by `await`. It is an opaque handle to a native JS promise; the
-// compiler types `async e` as `Promise<T>` (T the type of `e`) and `await p` as
-// the unwrapped `T`. There are no Vilan-level fields or constructors — a promise
-// only ever arises from `async`.
+/// `std::promise` — `Promise<T>`, the value produced by an `async` expression
+/// and consumed by `await`. It is an opaque handle to a native JS promise; the
+/// compiler types `async e` as `Promise<T>` (T the type of `e`) and `await p` as
+/// the unwrapped `T`. There are no Vilan-level fields or constructors — a promise
+/// only ever arises from `async`.
 external struct Promise<T>;
 
 impl Promise<type T> {
-	// `Promise.all` — waits for every promise in the list and yields their
-	// results in order. Like any `async` function it is implicitly awaited, so
-	// `let results = Promise::all(promises);` gives a `List<T>`. To keep the
-	// promise instead, spawn it: `let pending = async Promise::all(promises);`.
+	/// `Promise.all` — waits for every promise in the list and yields their
+	/// results in order. Like any `async` function it is implicitly awaited, so
+	/// `let results = Promise::all(promises);` gives a `List<T>`. To keep the
+	/// promise instead, spawn it: `let pending = async Promise::all(promises);`.
 	[extern("Promise.all")]
 	async external fun all(promises: List<Promise<T>>): List<T>;
 }

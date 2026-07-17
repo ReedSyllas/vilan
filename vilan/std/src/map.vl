@@ -22,7 +22,7 @@ impl Map<type K: Hashable, type V> {
 		self.table.insert(key.hash(), (key, value));
 	}
 
-	// A copy of the value stored under `key`, or `None` if absent.
+	/// A copy of the value stored under `key`, or `None` if absent.
 	fun get(self, key: K): Option<V> {
 		match self.table.get(key.hash()) {
 			Some(let entry) => Some(entry.1),
@@ -46,8 +46,8 @@ impl Map<type K: Hashable, type V> {
 		self.len() == 0
 	}
 
-	// `List` snapshots of the keys / values, in insertion order — iterate with
-	// `for key in map.keys()`.
+	/// `List` snapshots of the keys / values, in insertion order — iterate with
+	/// `for key in map.keys()`.
 	fun keys(self): List<K> {
 		mut result: List<K> = [];
 		for entry in self.table.values() {

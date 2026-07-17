@@ -14,8 +14,8 @@ import pkg::result::Result::{ self, Ok, Err };
 
 // --- The write side ----------------------------------------------------------
 
-// A growable byte sink: amortized-doubling buffer, `finish` slices to the
-// written length.
+/// A growable byte sink: amortized-doubling buffer, `finish` slices to the
+/// written length.
 struct BinaryWriter {
 	buffer: Shared<Bytes>,
 	used: Shared<i32>,
@@ -26,7 +26,7 @@ impl BinaryWriter {
 		BinaryWriter { buffer = Shared::new(Bytes::alloc(64)), used = Shared::new(0) }
 	}
 
-	// Grow (doubling) until `extra` more bytes fit.
+	/// Grow (doubling) until `extra` more bytes fit.
 	fun ensure(self, extra: i32) {
 		let needed = self.used.read() + extra;
 		mut capacity = self.buffer.read().len();
@@ -46,8 +46,8 @@ impl BinaryWriter {
 		self.used.write() = self.used.read() + 1;
 	}
 
-	// 4 bytes little-endian (i32 and u32 share the two's-complement bit
-	// pattern; `set` stores `& 0xFF`, so bare shifts suffice).
+	/// 4 bytes little-endian (i32 and u32 share the two's-complement bit
+	/// pattern; `set` stores `& 0xFF`, so bare shifts suffice).
 	fun write_i32(self, value: i32) {
 		self.write_byte(value);
 		self.write_byte(value >> 8);
@@ -68,7 +68,7 @@ impl BinaryWriter {
 		self.write_byte_u32(value >> 24);
 	}
 
-	// 8 bytes IEEE-754 LE, via a DataView over a scratch buffer.
+	/// 8 bytes IEEE-754 LE, via a DataView over a scratch buffer.
 	fun write_f64(self, value: f64) {
 		let scratch = Bytes::alloc(8);
 		data_view(scratch.buffer()).write_f64(0, value, true);
@@ -77,7 +77,7 @@ impl BinaryWriter {
 		self.used.write() = self.used.read() + 8;
 	}
 
-	// `u32` byte length + UTF-8 bytes.
+	/// `u32` byte length + UTF-8 bytes.
 	fun write_str(self, value: str) {
 		let encoded = encode_utf8(value);
 		self.write_i32(encoded.len());
@@ -90,8 +90,8 @@ impl BinaryWriter {
 		self.buffer.read().slice(0, self.used.read())
 	}
 
-	// The closure record a `Codec` hands out — thin delegates to the trait
-	// methods below (direct `encode_binary` skips it).
+	/// The closure record a `Codec` hands out — thin delegates to the trait
+	/// methods below (direct `encode_binary` skips it).
 	fun serializer(self): Serializer {
 		Serializer {
 			begin_struct = |fields| self.begin_struct(fields),
@@ -154,9 +154,9 @@ impl BinaryWriter with Serialize {
 		self.write_u32(value);
 	}
 
-	// Eight bytes, as the f64 bit pattern — the runtime's i53 IS an integral
-	// f64 (exact to 2^53), so the round-trip is lossless for every
-	// representable value.
+	/// Eight bytes, as the f64 bit pattern — the runtime's i53 IS an integral
+	/// f64 (exact to 2^53), so the round-trip is lossless for every
+	/// representable value.
 	fun i53_value(self, value: i53) {
 		self.write_f64(value.as_f64());
 	}
@@ -172,8 +172,8 @@ impl BinaryWriter with Serialize {
 
 // --- The read side -------------------------------------------------------------
 
-// A bounds-checked cursor over one frame, with the sticky error the visitor
-// contract requires: past the first failure every read is a zero-value no-op.
+/// A bounds-checked cursor over one frame, with the sticky error the visitor
+/// contract requires: past the first failure every read is a zero-value no-op.
 struct BinaryReader {
 	bytes: Bytes,
 	cursor: Shared<i32>,
@@ -201,7 +201,7 @@ impl BinaryReader {
 		}
 	}
 
-	// Whether `count` more bytes exist; fails sticky when they don't.
+	/// Whether `count` more bytes exist; fails sticky when they don't.
 	fun expect(self, count: i32): bool {
 		if !self.ok() {
 			ret false;
@@ -258,8 +258,8 @@ impl BinaryReader {
 		data_view(scratch.buffer()).read_f64(0, true)
 	}
 
-	// A length prefix that must fit the remaining frame (each prefixed item is
-	// at least one byte, so a larger claim is hostile or truncated).
+	/// A length prefix that must fit the remaining frame (each prefixed item is
+	/// at least one byte, so a larger claim is hostile or truncated).
 	fun read_length(self): i32 {
 		let length = self.read_i32();
 		if length < 0 || self.cursor.read() + length > self.bytes.len() {
@@ -280,8 +280,8 @@ impl BinaryReader {
 		decode_utf8(piece)
 	}
 
-	// The closure record a `Codec` hands out — thin delegates to the trait
-	// methods below (direct `decode_binary` skips it).
+	/// The closure record a `Codec` hands out — thin delegates to the trait
+	/// methods below (direct `decode_binary` skips it).
 	fun deserializer(self): Deserializer {
 		Deserializer {
 			begin_struct = || self.begin_struct(),
@@ -381,15 +381,15 @@ impl BinaryReader with Deserialize {
 	}
 }
 
-// Encode a `Wire` value as compact bytes — the direct path (no record).
+/// Encode a `Wire` value as compact bytes — the direct path (no record).
 fun encode_binary<T: Wire>(value: T): Bytes {
 	let writer = BinaryWriter::new();
 	value.describe(writer);
 	writer.finish()
 }
 
-// Decode compact bytes as a `Wire` value; `Err(reason)` names the first
-// structural failure (truncation, an over-declared length, unknown variant).
+/// Decode compact bytes as a `Wire` value; `Err(reason)` names the first
+/// structural failure (truncation, an over-declared length, unknown variant).
 fun decode_binary<T: Wire>(bytes: Bytes): Result<T, str> {
 	let reader = BinaryReader::new(bytes);
 	let value: T = T::rebuild(reader);
@@ -399,8 +399,8 @@ fun decode_binary<T: Wire>(bytes: Bytes): Result<T, str> {
 	}
 }
 
-// The binary codec (§6.2): byte frames over the writer/reader pair. A text
-// frame poisons the reader — a sticky decode error, never a crash.
+/// The binary codec (§6.2): byte frames over the writer/reader pair. A text
+/// frame poisons the reader — a sticky decode error, never a crash.
 fun binary_codec(): Codec {
 	Codec {
 		writer = || {

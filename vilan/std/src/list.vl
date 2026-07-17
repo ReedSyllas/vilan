@@ -12,8 +12,8 @@ impl List<type T> {
 
 	external fun push(&mut self, item: T): void;
 
-	// Removes and returns the last element — `None` when empty (an intrinsic:
-	// the compiler lowers it over the native `.pop`).
+	/// Removes and returns the last element — `None` when empty (an intrinsic:
+	/// the compiler lowers it over the native `.pop`).
 	external fun pop(&mut self): Option<T>;
 
 	external fun len(self): i32;
@@ -22,7 +22,7 @@ impl List<type T> {
 		self.len() == 0
 	}
 
-	// A new list with `fn` applied to every element.
+	/// A new list with `fn` applied to every element.
 	fun map<U>(self, fn: |T| U): List<U> {
 		mut result = List::new();
 		for item in self {
@@ -31,7 +31,7 @@ impl List<type T> {
 		result
 	}
 
-	// A new list of the elements for which `predicate` holds.
+	/// A new list of the elements for which `predicate` holds.
 	fun filter(self, predicate: |T| bool): List<T> {
 		mut result = List::new();
 		for item in self {
@@ -42,7 +42,7 @@ impl List<type T> {
 		result
 	}
 
-	// Combines the elements left-to-right, starting from `init`.
+	/// Combines the elements left-to-right, starting from `init`.
 	fun fold<B>(self, init: B, fn: |B, T| B): B {
 		mut accumulator = init;
 		for item in self {

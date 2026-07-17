@@ -42,7 +42,7 @@ impl Hash {
 	external fun digest(self, encoding: str): str;
 }
 
-// RFC 6455 §4.2.2: the `Sec-WebSocket-Accept` proof — base64(SHA-1(key+GUID)).
+/// RFC 6455 §4.2.2: the `Sec-WebSocket-Accept` proof — base64(SHA-1(key+GUID)).
 fun ws_accept_key(key: str): str {
 	create_hash("sha1")
 		.update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
@@ -51,13 +51,13 @@ fun ws_accept_key(key: str): str {
 
 // --- Request/response mount ----------------------------------------------------
 
-// Answer one RPC-over-HTTP request: the POST body is the request frame, and the
-// protocol's reply frame is the response body. The frame is handled in a `batch`
-// — the wire turn (proposal/reactive-batching.md) — so signal writes made while
-// dispatching coalesce. Compose this into a `Server`'s `on_request` alongside
-// other routes, or mount it alone with `serve_rpc`. This mount rides the text
-// `Server` API, so it serves TEXT codecs (JSON); a binary protocol belongs on
-// `serve_connected`'s raw `/rpc` route.
+/// Answer one RPC-over-HTTP request: the POST body is the request frame, and the
+/// protocol's reply frame is the response body. The frame is handled in a `batch`
+/// — the wire turn (proposal/reactive-batching.md) — so signal writes made while
+/// dispatching coalesce. Compose this into a `Server`'s `on_request` alongside
+/// other routes, or mount it alone with `serve_rpc`. This mount rides the text
+/// `Server` API, so it serves TEXT codecs (JSON); a binary protocol belongs on
+/// `serve_connected`'s raw `/rpc` route.
 fun rpc_response(protocol: RpcProtocol, request: Request): Response {
 	let reply = turn_async(|| protocol.respond(Frame::Text(request.body())));
 	match reply {
@@ -72,8 +72,8 @@ fun rpc_response(protocol: RpcProtocol, request: Request): Response {
 	}
 }
 
-// Serve one RPC protocol on `port`: every request is dispatched through it. The
-// client side is `std::rpc`'s `HttpTransport { url = "http://host:port/" }`.
+/// Serve one RPC protocol on `port`: every request is dispatched through it. The
+/// client side is `std::rpc`'s `HttpTransport { url = "http://host:port/" }`.
 fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
 	Server::builder()
 		.port(port)
@@ -83,11 +83,11 @@ fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
 		.start()
 }
 
-// The `Client::connect` server (§4.2): `serve_connected` with the runtime's
-// session registry as its connection lifecycle — every connection gets a
-// reactive session the generated `__attach` route can answer from, disposed
-// on disconnect. Apps needing custom per-connection state (auth identity, an
-// app-written attach) use `serve_connected` directly.
+/// The `Client::connect` server (§4.2): `serve_connected` with the runtime's
+/// session registry as its connection lifecycle — every connection gets a
+/// reactive session the generated `__attach` route can answer from, disposed
+/// on disconnect. Apps needing custom per-connection state (auth identity, an
+/// app-written attach) use `serve_connected` directly.
 fun serve_service(
 	port: i32,
 	protocol: RpcProtocol,
@@ -106,11 +106,11 @@ fun serve_service(
 
 // --- Connected server: RPC + a duplex wire per client ---------------------------
 
-// Live SplitDuplex connections: each client's wire-side `DuplexEnd`, keyed by the
-// connection id announced on its SSE stream.
+/// Live SplitDuplex connections: each client's wire-side `DuplexEnd`, keyed by the
+/// connection id announced on its SSE stream.
 let connections: Shared<List<(i32, DuplexEnd)>> = Shared::new([]);
 
-// Connection ids — module-level, one counter for the program.
+/// Connection ids — module-level, one counter for the program.
 let next_connection: Shared<i32> = Shared::new(0);
 
 fun fresh_connection(): i32 {
@@ -119,20 +119,20 @@ fun fresh_connection(): i32 {
 	id
 }
 
-// The full-stack server (the `SplitDuplex` counterpart — proposal §5): one
-// `node:http` server routing
-//   `GET  /events`     → a long-lived SSE stream; announces `__conn:<id>`, then
-//                        carries server→client frames. Each connection hands the
-//                        app a fresh `DuplexEnd` via `on_connect(id, end)` — give
-//                        it to a `ReactiveServer` to serve signals over the wire.
-//   `POST /send?c=<id>` → one client→server frame for that connection (a turn).
-//   `POST /rpc`         → an RPC request frame (a turn).
-//   everything else     → `fallback` (static files, 404s).
-//
-// A connection ends when its SSE stream closes (tab closed, network gone): the
-// wire is forgotten here, and `on_disconnect(id)` tells the app to drop its own
-// per-connection state (dispose a `ReactiveServer` session, say) — otherwise a
-// long-running server leaks a session per ever-connected client.
+/// The full-stack server (the `SplitDuplex` counterpart — proposal §5): one
+/// `node:http` server routing
+///   `GET  /events`     → a long-lived SSE stream; announces `__conn:<id>`, then
+///                        carries server→client frames. Each connection hands the
+///                        app a fresh `DuplexEnd` via `on_connect(id, end)` — give
+///                        it to a `ReactiveServer` to serve signals over the wire.
+///   `POST /send?c=<id>` → one client→server frame for that connection (a turn).
+///   `POST /rpc`         → an RPC request frame (a turn).
+///   everything else     → `fallback` (static files, 404s).
+///
+/// A connection ends when its SSE stream closes (tab closed, network gone): the
+/// wire is forgotten here, and `on_disconnect(id)` tells the app to drop its own
+/// per-connection state (dispose a `ReactiveServer` session, say) — otherwise a
+/// long-running server leaks a session per ever-connected client.
 fun serve_connected(
 	port: i32,
 	protocol: RpcProtocol,
@@ -217,12 +217,12 @@ fun serve_connected(
 	node_server.listen(port, on_ready);
 }
 
-// Perform the RFC 6455 handshake and wire the socket into the connection
-// registry. Client→server text frames route by channel prefix (§5's
-// multiplex): `r:<id>:<frame>` is an RPC turn answered on the same socket
-// with the same id, `d:<frame>` is a duplex/reactive wire turn. Pings are
-// answered; close (or a protocol violation) tears the session down like an
-// SSE close.
+/// Perform the RFC 6455 handshake and wire the socket into the connection
+/// registry. Client→server text frames route by channel prefix (§5's
+/// multiplex): `r:<id>:<frame>` is an RPC turn answered on the same socket
+/// with the same id, `d:<frame>` is a duplex/reactive wire turn. Pings are
+/// answered; close (or a protocol violation) tears the session down like an
+/// SSE close.
 fun accept_socket(
 	request: NodeRequest,
 	socket: NodeSocket,
@@ -332,8 +332,8 @@ fun accept_socket(
 	on_connect(id, app_end);
 }
 
-// Forget a closed connection's wire (frames already in flight to it are
-// silently dropped by the host — see `NodeResponse.write`).
+/// Forget a closed connection's wire (frames already in flight to it are
+/// silently dropped by the host — see `NodeResponse.write`).
 fun drop_connection(target: i32) {
 	mut kept: List<(i32, DuplexEnd)> = [];
 	for entry in connections.read() {
@@ -345,7 +345,7 @@ fun drop_connection(target: i32) {
 	connections.write() = kept;
 }
 
-// `/send?c=<id>` → `<id>`.
+/// `/send?c=<id>` → `<id>`.
 fun connection_id_of(path: str): str {
 	let parts = path.split("c=");
 	parts[parts.len() - 1]

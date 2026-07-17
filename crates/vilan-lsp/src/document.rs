@@ -2338,6 +2338,18 @@ mod tests {
         assert!(hover.contains("context owner_scope"), "{hover}");
     }
 
+    // std is documented with `///` (user decision): hovering a std function
+    // from user code surfaces its doc line, read cross-file from the std
+    // source.
+    #[test]
+    fn hover_surfaces_std_docs_cross_file() {
+        let hover = hover_at_cursor(
+            "import std::time::{ now, Instant };\n\nfun main() {\n\tlet started = no|w();\n}\n",
+        )
+        .expect("hover on the std function");
+        assert!(hover.contains("The current moment, typed."), "{hover}");
+    }
+
     // `///` is the doc syntax — a plain `//` block is an implementation note
     // and must NOT surface (user decision, 2026-07-16).
     #[test]

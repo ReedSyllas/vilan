@@ -16,19 +16,19 @@ external struct Response;
 async external fun fetch(url: str): Response;
 
 impl Response {
-	// The HTTP status code (e.g. 200).
+	/// The HTTP status code (e.g. 200).
 	[extern(get, "status")]
 	external fun status(self): i32;
 
-	// The response body as text. Async (it awaits the host `Response.text()`).
+	/// The response body as text. Async (it awaits the host `Response.text()`).
 	[extern(method, "text")]
 	async external fun text(self): str;
 
-	// The raw response body (`Response.arrayBuffer()`), for binary frames.
+	/// The raw response body (`Response.arrayBuffer()`), for binary frames.
 	[extern(method, "arrayBuffer")]
 	async external fun raw_body(self): ByteBuffer;
 
-	// The response body as bytes.
+	/// The response body as bytes.
 	fun bytes(self): Bytes {
 		bytes_of_buffer(self.raw_body())
 	}
@@ -41,13 +41,13 @@ impl Response {
 // decoding each with a `std::bytes` `TextDecoder`. Works in the browser and
 // node/deno/bun.
 
-// The host `ReadableStream` (a `Response.body`).
+/// The host `ReadableStream` (a `Response.body`).
 external struct BodyStream;
 
-// A `ReadableStreamDefaultReader` over it.
+/// A `ReadableStreamDefaultReader` over it.
 external struct BodyReader;
 
-// One `reader.read()` result: `{ done, value }`.
+/// One `reader.read()` result: `{ done, value }`.
 external struct ChunkResult;
 
 impl Response {
@@ -61,7 +61,7 @@ impl BodyStream {
 }
 
 impl BodyReader {
-	// Await the next chunk; `finished()` turns true once the stream closes.
+	/// Await the next chunk; `finished()` turns true once the stream closes.
 	[extern(method, "read")]
 	async external fun read_chunk(self): ChunkResult;
 }
@@ -76,19 +76,19 @@ impl ChunkResult {
 
 // --- Configurable requests ---------------------------------------------------
 
-// One request header. A two-field struct lowers to the `[name, value]` array that
-// the host `fetch` accepts as a headers entry, so `List<Header>` is a valid
-// `HeadersInit` with no conversion.
+/// One request header. A two-field struct lowers to the `[name, value]` array that
+/// the host `fetch` accepts as a headers entry, so `List<Header>` is a valid
+/// `HeadersInit` with no conversion.
 struct Header {
 	name: str,
 	value: str,
 }
 
-// The host `fetch` init object — `{ method, headers, body }` — built up via setters.
-// It's an opaque host value (like a DOM node), not a vilan struct.
+/// The host `fetch` init object — `{ method, headers, body }` — built up via setters.
+/// It's an opaque host value (like a DOM node), not a vilan struct.
 external struct RequestInit;
 
-// `Object()` returns a fresh empty `{}` to fill in.
+/// `Object()` returns a fresh empty `{}` to fill in.
 [extern("Object")]
 external fun new_request_init(): RequestInit;
 
@@ -99,7 +99,7 @@ impl RequestInit {
 	[extern(set, "body")]
 	external fun set_body(self, value: str);
 
-	// A binary request body (the host accepts a Uint8Array directly).
+	/// A binary request body (the host accepts a Uint8Array directly).
 	[extern(set, "body")]
 	external fun set_body_bytes(self, value: Bytes);
 
@@ -110,7 +110,7 @@ impl RequestInit {
 [extern("fetch")]
 async external fun fetch_with(url: str, options: RequestInit): Response;
 
-// A request being built: its method + URL, an optional body, and headers.
+/// A request being built: its method + URL, an optional body, and headers.
 struct Request {
 	url: str,
 	method: str,
@@ -118,18 +118,18 @@ struct Request {
 	headers: List<Header>,
 }
 
-// Start a GET request.
+/// Start a GET request.
 fun get(url: str): Request {
 	Request { url = url, method = "GET", body = "", headers = [] }
 }
 
-// Start a POST request carrying `body`.
+/// Start a POST request carrying `body`.
 fun post(url: str, body: str): Request {
 	Request { url = url, method = "POST", body = body, headers = [] }
 }
 
-// A one-shot binary POST (no header chaining): send `body` as bytes and await
-// the response — the byte-capable leg of the RPC transport (§6.2).
+/// A one-shot binary POST (no header chaining): send `body` as bytes and await
+/// the response — the byte-capable leg of the RPC transport (§6.2).
 fun post_bytes(url: str, body: Bytes): Response {
 	let options = new_request_init();
 	options.set_method("POST");
@@ -138,14 +138,14 @@ fun post_bytes(url: str, body: Bytes): Response {
 }
 
 impl Request {
-	// Add a request header (e.g. `Content-Type`, `Authorization`).
+	/// Add a request header (e.g. `Content-Type`, `Authorization`).
 	fun header(own self, name: str, value: str): Request {
 		self.headers.push(Header { name = name, value = value });
 		self
 	}
 
-	// Send the request and await the response. GET can't carry a body, so the body
-	// is attached only for other methods.
+	/// Send the request and await the response. GET can't carry a body, so the body
+	/// is attached only for other methods.
 	fun send(self): Response {
 		let options = new_request_init();
 		options.set_method(self.method);

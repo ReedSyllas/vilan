@@ -18,8 +18,8 @@ impl NodeServer {
 	[extern(method)]
 	external fun listen(self, port: i32, on_ready: || void);
 
-	// Subscribe to the server's `upgrade` event — a WebSocket handshake
-	// arrives as `(request, raw socket, head)` instead of a normal request.
+	/// Subscribe to the server's `upgrade` event — a WebSocket handshake
+	/// arrives as `(request, raw socket, head)` instead of a normal request.
 	[extern(method, "on")]
 	external fun on_upgrade(self, event: str, handler: |NodeRequest, NodeSocket, Bytes| void);
 }
@@ -33,15 +33,15 @@ impl NodeRequest {
 	[extern(get, "method")]
 	external fun method(self): str;
 
-	// The (lowercased) request headers, as an opaque host object — read named
-	// entries with `std::json`'s `JsonValue` accessors (dynamic property access
-	// has no plain extern shape).
+	/// The (lowercased) request headers, as an opaque host object — read named
+	/// entries with `std::json`'s `JsonValue` accessors (dynamic property access
+	/// has no plain extern shape).
 	[extern(get, "headers")]
 	external fun headers(self): JsonValue;
 }
 
-// A raw TCP socket (`net.Socket`), handed over on a protocol upgrade. Frames
-// are written as bytes; the handshake response is plain text.
+/// A raw TCP socket (`net.Socket`), handed over on a protocol upgrade. Frames
+/// are written as bytes; the handshake response is plain text.
 external struct NodeSocket;
 
 impl NodeSocket {
@@ -51,11 +51,11 @@ impl NodeSocket {
 	[extern(method, "write")]
 	external fun write_bytes(self, data: Bytes);
 
-	// Inbound chunks (`"data"` — node hands a Buffer, which IS a Uint8Array).
+	/// Inbound chunks (`"data"` — node hands a Buffer, which IS a Uint8Array).
 	[extern(method, "on")]
 	external fun on_bytes(self, event: str, handler: |Bytes| void);
 
-	// Lifecycle events with no payload (`"close"`, `"error"`).
+	/// Lifecycle events with no payload (`"close"`, `"error"`).
 	[extern(method, "on")]
 	external fun on_signal(self, event: str, handler: || void);
 
@@ -63,13 +63,13 @@ impl NodeSocket {
 	external fun destroy(self);
 }
 
-// Reads a request's full body (a stream) to text. `node:stream/consumers` `text`
-// resolves once the body has fully arrived; for a body-less request it's empty.
+/// Reads a request's full body (a stream) to text. `node:stream/consumers` `text`
+/// resolves once the body has fully arrived; for a body-less request it's empty.
 [extern("node:stream/consumers", "text")]
 async external fun read_request_body(node: NodeRequest): str;
 
-// The same body as raw bytes (a node `Buffer` IS a Uint8Array) — for frames
-// that may be binary (`std::rpc_server`'s `/rpc`).
+/// The same body as raw bytes (a node `Buffer` IS a Uint8Array) — for frames
+/// that may be binary (`std::rpc_server`'s `/rpc`).
 [extern("node:stream/consumers", "buffer")]
 async external fun read_request_bytes(node: NodeRequest): Bytes;
 
@@ -85,18 +85,18 @@ impl NodeResponse {
 	[extern(method, "end")]
 	external fun end(self, body: str);
 
-	// Write a chunk WITHOUT ending the response — a streaming response (SSE).
-	// The host silently drops writes to a destroyed response, so a frame sent
-	// to a just-closed connection is discarded, not an error.
+	/// Write a chunk WITHOUT ending the response — a streaming response (SSE).
+	/// The host silently drops writes to a destroyed response, so a frame sent
+	/// to a just-closed connection is discarded, not an error.
 	[extern(method, "write")]
 	external fun write(self, chunk: str);
 
-	// Subscribe to a response stream event (`"close"` fires when the connection
-	// ends — for a never-`end`ed SSE response that means the client went away).
+	/// Subscribe to a response stream event (`"close"` fires when the connection
+	/// ends — for a never-`end`ed SSE response that means the client went away).
 	[extern(method, "on")]
 	external fun on_event(self, event: str, callback: || void);
 
-	// End the response with a binary body (the host accepts a Uint8Array).
+	/// End the response with a binary body (the host accepts a Uint8Array).
 	[extern(method, "end")]
 	external fun end_bytes(self, body: Bytes);
 }
@@ -109,18 +109,18 @@ struct Request {
 }
 
 impl Request {
-	// The request target (path + query), e.g. `/client.js`.
+	/// The request target (path + query), e.g. `/client.js`.
 	fun path(self): str {
 		self.node.url()
 	}
 
-	// The HTTP method, e.g. `GET`.
+	/// The HTTP method, e.g. `GET`.
 	fun method(self): str {
 		self.node.method()
 	}
 
-	// The full request body as text — empty for a body-less request (e.g. a GET).
-	// Collected eagerly when the request arrives (see `Server::start`).
+	/// The full request body as text — empty for a body-less request (e.g. a GET).
+	/// Collected eagerly when the request arrives (see `Server::start`).
 	fun body(self): str {
 		self.content
 	}

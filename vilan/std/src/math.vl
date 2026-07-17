@@ -35,7 +35,7 @@ fun max<T: Ord>(a: T, b: T): T {
 	a.max(b)
 }
 
-// Both values, ordered — `(smaller, larger)`.
+/// Both values, ordered — `(smaller, larger)`.
 fun minmax<T: Ord>(a: T, b: T): (T, T) {
 	if a <= b {
 		(a, b)

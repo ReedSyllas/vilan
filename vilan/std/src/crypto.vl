@@ -7,26 +7,26 @@
 import pkg::bytes::Bytes;
 import pkg::range::Range;
 
-// HMAC-SHA-512 of `data` under `key`.
+/// HMAC-SHA-512 of `data` under `key`.
 [extern("__hmac_sha512")]
 async external fun hmac_sha512(key: Bytes, data: Bytes): Bytes;
 
-// PBKDF2-HMAC-SHA-512: `bits` derived from `password` and `salt` over
-// `iterations` rounds — the v1 password-hashing primitive. Store the salt
-// beside the derived hash; compare with `equals_constant_time`.
+/// PBKDF2-HMAC-SHA-512: `bits` derived from `password` and `salt` over
+/// `iterations` rounds — the v1 password-hashing primitive. Store the salt
+/// beside the derived hash; compare with `equals_constant_time`.
 [extern("__pbkdf2_sha512")]
 async external fun pbkdf2_sha512(password: Bytes, salt: Bytes, iterations: i32, bits: i32): Bytes;
 
-// `length` cryptographically random bytes.
+/// `length` cryptographically random bytes.
 [extern("__random_bytes")]
 external fun random_bytes(length: i32): Bytes;
 
-// A random UUID string (host `crypto.randomUUID`).
+/// A random UUID string (host `crypto.randomUUID`).
 [extern("crypto.randomUUID")]
 external fun random_uuid(): str;
 
-// Byte equality whose timing is independent of WHERE a mismatch sits — the
-// discipline for comparing signatures and derived hashes.
+/// Byte equality whose timing is independent of WHERE a mismatch sits — the
+/// discipline for comparing signatures and derived hashes.
 fun equals_constant_time(a: Bytes, b: Bytes): bool {
 	if a.len() != b.len() {
 		ret false;

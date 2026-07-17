@@ -2,18 +2,18 @@ import pkg::io::panic;
 
 // === `!` — assert-or-return (proposal/try-and-lift.md) ======================
 
-// The split a `Try` implementation reports: the value is either good (yielding
-// the value `!` unwraps to) or bad (yielding the residual `!` returns early).
+/// The split a `Try` implementation reports: the value is either good (yielding
+/// the value `!` unwraps to) or bad (yielding the residual `!` returns early).
 enum Verdict<T, B> {
 	Good(T),
 	Bad(B),
 }
 
-// The `!` operator's seam: `expr!` asks the receiver's impl for a verdict; a
-// bad one returns early from the nearest enclosing function, rebuilt through
-// `from_bad`. `Option` (residual: `void` — the absence itself) and `Result`
-// (residual: the error) implement it in their own modules; the compiler lowers
-// the std pair inline, semantically identical to these impls.
+/// The `!` operator's seam: `expr!` asks the receiver's impl for a verdict; a
+/// bad one returns early from the nearest enclosing function, rebuilt through
+/// `from_bad`. `Option` (residual: `void` — the absence itself) and `Result`
+/// (residual: the error) implement it in their own modules; the compiler lowers
+/// the std pair inline, semantically identical to these impls.
 trait Try<T, B> {
 	fun verdict(self): Verdict<T, B>;
 
@@ -22,10 +22,10 @@ trait Try<T, B> {
 
 // === `?.` — lifted member chains (proposal/try-and-lift.md §3) ==============
 
-// The opt-in marker for `?.`: a lifted chain applies its continuation INSIDE
-// the container (`a?.b.c` on an `Option` maps — or, when the continuation
-// yields the container's own type, flattens). `Option` and `Result` opt in in
-// their own modules; the compiler lowers the std pair inline.
+/// The opt-in marker for `?.`: a lifted chain applies its continuation INSIDE
+/// the container (`a?.b.c` on an `Option` maps — or, when the continuation
+/// yields the container's own type, flattens). `Option` and `Result` opt in in
+/// their own modules; the compiler lowers the std pair inline.
 trait Lift {}
 
 trait Add<B = Self> {
