@@ -482,6 +482,7 @@ where
             just(Token::Op(":"))
                 .ignore_then(type_.clone().map(|x| Box::new(x)))
                 .labelled("parameter type")
+                .as_context()
                 .or_not(),
         )
         // Closure parameters carry no view convention yet.
@@ -500,6 +501,7 @@ where
             just(Token::Op(":"))
                 .ignore_then(type_.clone().map(|x| Box::new(x)))
                 .labelled("return type")
+                .as_context()
                 .or_not(),
         )
         .then(expression.clone())
@@ -622,6 +624,7 @@ where
             just(Token::Op(":"))
                 .ignore_then(type_.clone())
                 .labelled("type")
+                .as_context()
                 .or_not(),
         )
         .then(
@@ -990,6 +993,7 @@ where
                 just(Token::Op(":"))
                     .ignore_then(type_.clone().map(|x| Box::new(x)))
                     .labelled("parameter type")
+                    .as_context()
                     .or_not(),
             )
             .map(|((prefix, (pattern, pattern_span)), parameter_type)| {
@@ -1016,6 +1020,7 @@ where
             just(Token::Op(":"))
                 .ignore_then(type_.clone().map(|x| Box::new(x)))
                 .labelled("return type")
+                .as_context()
                 .or_not(),
         )
         .then(

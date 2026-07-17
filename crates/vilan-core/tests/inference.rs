@@ -17679,3 +17679,65 @@ fn an_unused_repeat_of_a_side_effectful_value_still_runs() {
         "1\n",
     );
 }
+
+// --- Parser diagnostics (diagnostics-standard.md §4: targeted labels/hints
+// --- for the worst chumsky messages; render_parse_error in lib.rs)
+
+/// The `!=` soup: `a!==b` lexes as `!=` then `=`. The parse error carries the
+/// targeted hint naming the real fix.
+#[test]
+fn the_not_equals_soup_hints_the_postfix_bang_spacing() {
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            let a = Some(1);
+            let bad = a!==None;
+        }
+        "#,
+        "the space is required: `a! == b`",
+    );
+}
+
+/// An unclosed generic argument list steers to `,` or `>` without the
+/// optional-continuation noise (`context clause`, `generic arguments`) chumsky
+/// would offer, and names the type position it failed in.
+#[test]
+fn an_unclosed_generic_steers_to_comma_or_close() {
+    let source = r#"
+        fun main() {
+            let pairs: Map<str, List<i32> = Map::new();
+        }
+        "#;
+    assert_fails_with(source, "expected ',' or '>' in type");
+    match compile(source) {
+        Ok(_) => panic!("expected a parse error"),
+        Err(errors) => {
+            assert!(
+                errors.iter().all(|error| !error.contains("context clause")
+                    && !error.contains("generic arguments")),
+                "optional-continuation noise leaked: {errors:#?}"
+            )
+        }
+    }
+}
+
+/// A missing comma between parameters steers to `,` or `)` — the
+/// grammatically-admissible-but-never-the-fix continuations are dropped.
+#[test]
+fn a_missing_parameter_comma_steers_to_comma_or_close() {
+    let source = r#"
+        fun f(x: i32 y: i32) {}
+        fun main() { f(1, 2); }
+        "#;
+    assert_fails_with(source, "expected ',' or ')'");
+    match compile(source) {
+        Ok(_) => panic!("expected a parse error"),
+        Err(errors) => assert!(
+            errors
+                .iter()
+                .all(|error| !error.contains("generic arguments")),
+            "optional-continuation noise leaked: {errors:#?}"
+        ),
+    }
+}

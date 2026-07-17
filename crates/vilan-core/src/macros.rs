@@ -1514,7 +1514,7 @@ fn parse_generated(source: &str) -> Result<(&'static NodeList<'static>, &'static
         )
         .into_output_errors();
     if let Some(error) = parse_errors.first() {
-        return Err(error.to_string());
+        return Err(crate::render_parse_error(error, source));
     }
     match root {
         Some((mut root, _file_span)) => {

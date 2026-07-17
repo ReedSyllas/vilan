@@ -15545,11 +15545,10 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
                         .map((end..end).into(), |(token, span)| (token, span)),
                 )
                 .into_output_errors();
-            errors.extend(
-                parse_errors
-                    .into_iter()
-                    .map(|error| render_at(source, error.span().start, error.to_string())),
-            );
+            errors.extend(parse_errors.into_iter().map(|error| {
+                let msg = crate::render_parse_error(&error, source);
+                render_at(source, error.span().start, msg)
+            }));
             match root {
                 Some((mut root, _file_span)) => {
                     crate::lift::rewrite_items(&mut root.0);

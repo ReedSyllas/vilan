@@ -1345,15 +1345,16 @@ fn report<'src>(
                 .map(|error| error.map_token(|token| token.to_string())),
         )
         .for_each(|error| {
+            let reason = vilan_core::render_parse_error_reason(&error, src);
             Report::build(
                 ReportKind::Error,
                 (filename.to_string(), error.span().into_range()),
             )
             .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
-            .with_message(error.to_string())
+            .with_message(vilan_core::render_parse_error(&error, src))
             .with_label(
                 Label::new((filename.to_string(), error.span().into_range()))
-                    .with_message(error.reason().to_string())
+                    .with_message(reason)
                     .with_color(Color::Red),
             )
             .with_labels(error.contexts().map(|(label, span)| {

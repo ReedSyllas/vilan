@@ -83,6 +83,24 @@ boundary sketch, and this week's diagnostics (the B13 origin-naming, the
   handwritten parser's territory (H6); this arc records the worst
   offenders (the shift/`>` split, `!=` soup) with targeted `labelled`
   improvements only. **Open question 2.**
+
+  **TAKEN 2026-07-17** — `render_parse_error` in `lib.rs` now renders every
+  parse error (all four fold sites: entry, loaded modules, macro expansion,
+  CLI):
+  - The optional-continuation labels `context clause` and `generic
+    arguments` are dropped whenever a concrete expectation remains — they
+    are admissible after every type, so chumsky offered them at nearly
+    every type-position failure, where they are never the fix. An unclosed
+    generic now reads `found '=' expected ',' or '>' in type`.
+  - Context entries keep their label but lose raw byte offsets
+    (`at 17..46` — B1).
+  - The `!=` soup (`a!==b` lexes as not-equals then `=`) gains a targeted
+    hint: ``the space is required: `a! == b` ``, via `parse_error_hint`.
+  - Type-annotation and function-parameter positions are `as_context`
+    labelled, so failures say `in type` / `in parameter type` /
+    `in function parameters` instead of a bare `in expression`.
+  Pinned in `inference.rs` (`the_not_equals_soup…`, `an_unclosed_generic…`,
+  `a_missing_parameter_comma…`).
 - **Warnings** (`must_use`, unused bindings) follow the same rules; the
   audit covers them in the same ledger.
 

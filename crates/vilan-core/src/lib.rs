@@ -100,6 +100,110 @@ fn infer_platform(root: &NodeList, std: &PackageSpec) -> Platform {
     }
 }
 
+/// A targeted hint for a known-confusing PARSE failure shape
+/// (diagnostics-standard.md §4 — the worst chumsky messages get labels, the
+/// rest wait for the handwritten parser). Today: the `!=` soup — `a!==b`
+/// lexes as `!=` then `=`, and the resulting "expected expression" says
+/// nothing about the real fix.
+pub fn parse_error_hint(source: &str, error_start: usize) -> Option<&'static str> {
+    let head = &source[..error_start.min(source.len())];
+    let trimmed = head.trim_end();
+    if trimmed.ends_with("!=") {
+        return Some(
+            "if this was postfix `!` before a comparison, the space is required: `a! == b` (`!=` always lexes as not-equals)",
+        );
+    }
+    None
+}
+
+/// Renders one parse error as user-facing text — chumsky's format, minus two
+/// kinds of noise (diagnostics-standard.md B4):
+///
+/// - The optional-continuation labels `context clause` and `generic arguments`
+///   are grammatically admissible after every type, so chumsky offers them at
+///   nearly every type-position failure — where they are never the fix. They
+///   are dropped whenever any other expectation remains.
+/// - Context entries keep their label (`in expression`) but lose the raw byte
+///   offsets (`at 17..46`), which mean nothing to a user; the diagnostic's own
+///   span already carries the location.
+///
+/// Known-confusing failure shapes also gain their [`parse_error_hint`].
+pub fn render_parse_error<T: std::fmt::Display>(
+    error: &chumsky::error::Rich<'_, T, Span>,
+    source: &str,
+) -> String {
+    use std::fmt::Write;
+
+    let mut message = render_parse_error_reason(error, source);
+    for (label, _span) in error.contexts() {
+        write!(message, " in {}", render_parse_pattern(label)).unwrap();
+    }
+    if let Some(hint) = parse_error_hint(source, error.span().into_range().start) {
+        write!(message, " — {hint}").unwrap();
+    }
+    message
+}
+
+/// [`render_parse_error`] without the trailing `in <context>` entries — for
+/// renderers that show parse contexts as their own labels (the CLI's ariadne
+/// report) rather than inline.
+pub fn render_parse_error_reason<T: std::fmt::Display>(
+    error: &chumsky::error::Rich<'_, T, Span>,
+    source: &str,
+) -> String {
+    use chumsky::error::{RichPattern, RichReason};
+    use std::fmt::Write;
+
+    match error.reason() {
+        RichReason::Custom(custom) => custom.clone(),
+        RichReason::ExpectedFound { .. } => {
+            let expected: Vec<String> = {
+                let all: Vec<&RichPattern<'_, T>> = error.expected().collect();
+                let noise = |candidate: &&RichPattern<'_, T>| {
+                    matches!(candidate, RichPattern::Label(label)
+                        if *label == "context clause" || *label == "generic arguments")
+                };
+                let kept: Vec<&RichPattern<'_, T>> = all
+                    .iter()
+                    .copied()
+                    .filter(|candidate| !noise(candidate))
+                    .collect();
+                if kept.is_empty() { all } else { kept }
+                    .into_iter()
+                    .map(render_parse_pattern)
+                    .collect()
+            };
+            let found = match error.found() {
+                Some(token) => format!("'{token}'"),
+                None => "end of input".to_string(),
+            };
+            let mut message = format!("found {found} expected ");
+            match expected.as_slice() {
+                [] => message.push_str("something else"),
+                [only] => message.push_str(only),
+                [first, second] => {
+                    write!(message, "{first} or {second}").unwrap();
+                }
+                many => {
+                    for one in &many[..many.len() - 1] {
+                        write!(message, "{one}, ").unwrap();
+                    }
+                    write!(message, "or {}", many[many.len() - 1]).unwrap();
+                }
+            }
+            message
+        }
+    }
+}
+
+/// One expected/context pattern, rendered as chumsky's `Display` renders it
+/// (`'token'`, bare label text, `end of input`).
+fn render_parse_pattern<T: std::fmt::Display>(
+    pattern: &chumsky::error::RichPattern<'_, T>,
+) -> String {
+    pattern.to_string()
+}
+
 /// One fast lex + parse with zero-size errors: `Some(root)` exactly when the
 /// source is completely clean — no lex errors, no parse errors, no recovery.
 /// On any failure the caller re-runs the `Rich` pipeline (`lexer()`/`parser()`)
@@ -190,7 +294,7 @@ pub fn analyze_source(
         diagnostics.extend(parse_errors.iter().map(|error| Error {
             note: None,
             span: *error.span(),
-            msg: error.to_string(),
+            msg: render_parse_error(error, source),
         }));
         let Some((root, _file_span)) = ast else {
             return (None, diagnostics);
