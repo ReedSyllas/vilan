@@ -1224,10 +1224,20 @@ have gaps.
    while void-returning parameters stay legal as SPAWN semantics (fire-and-forget; the
    turns machinery settles the continuations — UI handlers and turn bodies ride this,
    pinned). `turn_async` and `optimistic` dropped the spawn-then-flatten workaround for
-   plain awaited calls. Six pins. REMAINING (recorded): the marker on struct fields and
-   return types; async adoption for unannotated bindings (mirroring B15 adoption); flow
-   tracking beyond literal-or-binding-initial arguments; and asyncness-polymorphic
-   higher-order functions (monomorphize-by-asyncness — the `map` question). Original
+   plain awaited calls. Six pins. **REMAINDER CLOSED 2026-07-17** — the value-flow
+   channels: the marker is accepted on STRUCT FIELDS (`async_fields`, keyed
+   (struct, index)) and FUNCTION RETURN TYPES (`async_returning`); calls
+   through a field read or a returned value await (`awaited_calls` → the
+   transformer's non-Local subjects); unannotated bindings ADOPT asyncness
+   from any held value — initializer or `mut` rebind — including async field
+   reads, async-returning calls, and binding chains (`held_values` in
+   async_infer, depth-capped). The divergence check now covers all three
+   boundaries: parameter, field (literal + assignment), and declared return
+   type — refused when the closure returns a value, spawn-legal when void,
+   skipped when the return is unresolved (no known lie). 9 pins + docs
+   (tour/async.md rewritten — the "re-mark at a `let`" idiom is obsolete;
+   errors appendix). STILL OPEN: asyncness-polymorphic higher-order
+   functions (monomorphize-by-asyncness — the `map` question). Original
    finding follows. — async inference infects through DIRECT calls
    (`f()` awaits when `f` is async), but a call THROUGH a closure value or parameter
    (`body()` where `body: || T`) has no static callee, so it is never inferred async: the

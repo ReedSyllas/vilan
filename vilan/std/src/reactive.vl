@@ -570,10 +570,9 @@ struct Draft<T> {
 	// Discards stale completions when pushes overlap (fast typing over a
 	// slow wire): only the newest push settles the state.
 	generation: Shared<i32>,
-	// `None` = success, `Some(reason)` = failure. Stored plain (an `async`
-	// closure TYPE lives only at parameter/`let` seams); `push` re-marks it
-	// at a `let` so the call awaits.
-	commit: |T| Option<str>,
+	/// `None` = success, `Some(reason)` = failure. Calls through the field
+	/// await (a sync commit just resolves).
+	commit: async |T| Option<str>,
 }
 
 /// A local-first cell seeded with `initial`, committing through `commit`.
@@ -607,9 +606,7 @@ impl Draft<type T: PartialEq> {
 	/// on the wire (fast typing over a slow commit), in which case that
 	/// push's completion owns the state.
 	fun settle(self, value: T, mine: i32) {
-		// Re-marked so the call awaits (J2's typed channel).
-		let commit: async |T| Option<str> = self.commit;
-		let outcome = commit(value);
+		let outcome = (self.commit)(value);
 		if self.generation.read() == mine {
 			match outcome {
 				None => {

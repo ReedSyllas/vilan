@@ -141,13 +141,22 @@ with `let`; assigning through it (`v = …`) already writes the target.
 ## Async
 
 **"`…` receives an async closure, but its type awaits nothing — declare it `async || T` (or return void for spawn semantics)"**
-You passed a closure that suspends into a parameter typed as a plain,
-value-returning closure. Either the parameter should be `async |…| T`,
-or — if fire-and-forget is fine — the parameter's return type should be
-`void`. One common case: a `batch(|| …)` whose body awaits — use
-`turn_async(|| …)` instead, the async-extent flavor that holds the turn
-across the suspension.
+A closure that suspends flowed into a place typed as a plain,
+value-returning closure — a parameter, or (the `field `…` of `…``
+form) a struct field, at the literal or a later assignment. Either the
+declared type should be `async |…| T`, or — if fire-and-forget is fine
+— its return type should be `void`. One common case: a `batch(|| …)`
+whose body awaits — use `turn_async(|| …)` instead, the async-extent
+flavor that holds the turn across the suspension.
 → [Async](../tour/async.md), [Functions & closures](../tour/functions-and-closures.md)
+
+**"`…` returns an async closure, but its declared return type awaits nothing — declare it `async || T` (or return void for spawn semantics)"**
+The function's declared return type is a plain, value-returning closure,
+but a `ret` (or the tail) hands back a closure that suspends. Mark the
+return type `async || T` so calls through the returned value await —
+`make()()` and `let go = make(); go()` both do — or return a
+`void`-returning closure for spawn semantics.
+→ [Async](../tour/async.md)
 
 **"the initializer of `…` calls `…`, which is async — a module-level binding cannot await"**
 A top-level `let` runs when the module loads, and module initialization

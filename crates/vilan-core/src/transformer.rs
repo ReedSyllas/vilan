@@ -1396,7 +1396,14 @@ impl<'src> Transformer<'src> {
                     }
                     _ => {
                         let t_subject = self.walk_entity(function_call.subject_id, block).unwrap();
-                        js::Node::Call(Box::new(t_subject), args)
+                        let call = js::Node::Call(Box::new(t_subject), args);
+                        // A call through an async field or an async-returning
+                        // call awaits (J2) — the inference pass marked it.
+                        if self.program.awaited_calls.contains(id) {
+                            js::Node::Await(Box::new(call))
+                        } else {
+                            call
+                        }
                     }
                 }
             }

@@ -45,16 +45,15 @@ trait Transport {
 /// The in-process request/response transport: runs a handler in the same process, wrapped
 /// as a resolved Promise. `handler` is a protocol's frame handler (an `RpcProtocol`).
 struct LocalTransport {
-	// Stored plain (an `async` closure TYPE lives only at parameter/`let`
-	// seams — J2 v1); `call` re-marks it at a `let` so the call awaits.
-	handler: |Frame| Frame,
+	/// The protocol's frame handler; calls through it await (J2's typed
+	/// channel, directly on the field).
+	handler: async |Frame| Frame,
 }
 
 impl LocalTransport with Transport {
 	fun call(self, request: Frame): Promise<Result<Frame, str>> {
 		async {
-			let handler: async |Frame| Frame = self.handler;
-			Ok(handler(request))
+			Ok((self.handler)(request))
 		}
 	}
 }
@@ -796,19 +795,18 @@ fun encode_reply(codec: Codec, outcome: RpcOutcome): Frame {
 /// `Dispatcher` below is the hand-written form.
 struct RpcProtocol {
 	codec: Codec,
-	// Stored plain; `respond` re-marks it at a `let` (J2 v1, as `Draft`).
-	dispatch: |RpcRequest| RpcOutcome,
+	/// The request handler; an async handler's reply frame is encoded from
+	/// its settled outcome (calls through the field await — a sync one just
+	/// resolves).
+	dispatch: async |RpcRequest| RpcOutcome,
 }
 
 impl RpcProtocol {
 	fun respond(self, frame: Frame): Frame {
 		let request = open_request(self.codec, frame);
-		// Re-marked so the dispatch is awaited — an async handler's reply
-		// frame is encoded from its settled outcome (a sync one just resolves).
-		let dispatch: async |RpcRequest| RpcOutcome = self.dispatch;
 		let outcome = match (request.deserializer.failed)() {
 			Some(let reason) => RpcOutcome::Failure(RpcError::Decode(reason)),
-			None => dispatch(request),
+			None => (self.dispatch)(request),
 		};
 		encode_reply(self.codec, outcome)
 	}
@@ -900,8 +898,8 @@ fun reply<T: Wire>(value: T): RpcOutcome {
 /// and produces an outcome.
 struct Route {
 	method: str,
-	// Stored plain; `handle` re-marks it at a `let` (J2 v1, as `Draft`).
-	handler: |RpcRequest| RpcOutcome,
+	/// The method's handler; calls through the field await.
+	handler: async |RpcRequest| RpcOutcome,
 }
 
 /// The server router: register handlers by method name, then route each request to its match
@@ -924,10 +922,7 @@ impl Dispatcher {
 	/// Route a request to its handler, or fail with `unknown method`.
 	fun handle(self, request: RpcRequest): RpcOutcome {
 		match self.routes.read().filter(|route| route.method == request.method).first() {
-			Some(let route) => {
-				let handler: async |RpcRequest| RpcOutcome = route.handler;
-				handler(request)
-			},
+			Some(let route) => (route.handler)(request),
 			None => RpcOutcome::Failure(RpcError::Remote("unknown method: " + request.method)),
 		}
 	}

@@ -1121,6 +1121,16 @@ pub struct Analyzer<'src> {
     // Parameters and `let` bindings whose declared closure type carries the
     // `async` marker (J2): calls through them are implicitly awaited.
     async_values: HashSet<Id>,
+    // Struct fields declared `async || T` — (struct id, field index); calls
+    // through such a field await (J2).
+    async_fields: HashSet<(Id, usize)>,
+    // Functions whose DECLARED return type is `async || T`: the returned value
+    // is an async closure, so calls through it await (J2).
+    async_returning: HashSet<Id>,
+    // Every return position of every declared-return function — (function id,
+    // value expr id): the tail and each `ret`. Async inference checks returned
+    // closures against the declared return type's (missing) async marker.
+    return_sites: Vec<(Id, Id)>,
     // Method calls (by call id) on a generic impl whose generic parameters bind
     // to concrete types from the receiver (`xs.sum()` on `List<i32>` binds the
     // impl's `T` to `i32`): the resulting substitution, so codegen emits a
@@ -1463,6 +1473,9 @@ impl<'src> Analyzer<'src> {
             parameter_contexts: HashMap::new(),
             prepped_context_clauses: Vec::new(),
             async_values: HashSet::new(),
+            async_fields: HashSet::new(),
+            async_returning: HashSet::new(),
+            return_sites: Vec::new(),
             method_call_substitution: HashMap::new(),
             expected_types: HashMap::new(),
             prepped_static_accessors: Vec::new(),
@@ -6629,9 +6642,15 @@ impl<'src> Analyzer<'src> {
                     self.register_generic_parameters(&function.generic_parameters, body_scope_id);
                 // The return type is resolved in the body scope so it can refer
                 // to the function's own generic parameters (e.g. `(): T`).
-                let return_type_id = function
-                    .return_type
-                    .as_ref()
+                // An `async || T` return type peels its marker first (J2): the
+                // function returns an async closure, so calls THROUGH the
+                // returned value await.
+                let mut return_type_node = function.return_type.as_deref();
+                if let Some(Node::AsyncType(inner)) = return_type_node.map(|node| &node.0) {
+                    self.async_returning.insert(id);
+                    return_type_node = Some(inner);
+                }
+                let return_type_id = return_type_node
                     .map(|return_type| self.walk_type_node(return_type, body_scope_id));
                 if function.external {
                     // An `external` function is an intrinsic: no Vilan body, a
@@ -6671,7 +6690,7 @@ impl<'src> Analyzer<'src> {
                     // return type; an undeclared (void) return checks nothing —
                     // consistent with the tail (proposal/ret-checking.md).
                     self.return_type_stack.push(match return_type_id {
-                        Some(declared) => ReturnFrame::Function(declared),
+                        Some(declared) => ReturnFrame::Function(id, declared),
                         None => ReturnFrame::VoidFunction,
                     });
                     let (ids, expr_id) = match &function.body {
@@ -6716,6 +6735,7 @@ impl<'src> Analyzer<'src> {
                             body_id: expr_id,
                             return_type_id,
                         });
+                        self.return_sites.push((id, expr_id));
                     }
                     self.functions.insert(
                         id,
@@ -6788,7 +6808,8 @@ impl<'src> Analyzer<'src> {
                 // rets collect on the frame and check against the inferred
                 // tail type instead (proposal/ret-checking.md).
                 match self.return_type_stack.last_mut() {
-                    Some(ReturnFrame::Function(declared)) => {
+                    Some(ReturnFrame::Function(function_id, declared)) => {
+                        let function_id = *function_id;
                         let return_type_id = *declared;
                         let checked_id = value_id.unwrap_or_else(|| {
                             let void_id = self.new_entity_id();
@@ -6802,6 +6823,7 @@ impl<'src> Analyzer<'src> {
                             body_id: checked_id,
                             return_type_id,
                         });
+                        self.return_sites.push((function_id, checked_id));
                     }
                     Some(ReturnFrame::Closure { rets }) => {
                         rets.push((node.1, value_id));
@@ -6939,7 +6961,7 @@ impl<'src> Analyzer<'src> {
                 // function has nothing to check against — a clean error (v1;
                 // proposal/try-and-lift.md §2).
                 match self.return_type_stack.last() {
-                    Some(ReturnFrame::Function(declared)) => {
+                    Some(ReturnFrame::Function(_, declared)) => {
                         let return_type_id = *declared;
                         self.constraints.push(Constraint::TryAssert {
                             id,
@@ -7200,10 +7222,14 @@ impl<'src> Analyzer<'src> {
                                 .unwrap_or(child.1),
                         ));
                     }
-                    let type_id = child
-                        .0
-                        .1
-                        .as_ref()
+                    // An `async || T` field peels its marker (J2): calls
+                    // through the field await.
+                    let mut field_type_node = child.0.1.as_ref();
+                    if let Some(Node::AsyncType(inner)) = field_type_node.map(|node| &node.0) {
+                        self.async_fields.insert((id, fields.len()));
+                        field_type_node = Some(inner);
+                    }
+                    let type_id = field_type_node
                         .map(|x| self.walk_type_node(x, body_scope_id))
                         .unwrap_or(Type::Unknown.get_type_id(self));
                     fields.push(Field {
@@ -8340,9 +8366,10 @@ impl<'src> Analyzer<'src> {
             // is the inner closure type; the marker is peeled (and recorded)
             // only at parameters and `let` annotations (J2 v1).
             Node::AsyncType(inner) => {
-                self.diagnostics.push(Error { note: None,
+                self.diagnostics.push(Error {
+                    note: None,
                     span: node.1,
-                    msg: "an `async` closure type is only supported on parameters and `let` annotations"
+                    msg: "an `async` closure type is only supported on parameters, `let` annotations, struct fields, and function return types"
                         .to_string(),
                 });
                 return self.walk_type_node(inner, scope_id);
@@ -15365,8 +15392,10 @@ pub const DERIVED_SOURCE: SourceId = SourceId(u32::MAX);
 /// The innermost callable a `ret`/`!` returns from (proposal/ret-checking.md).
 #[derive(Debug)]
 enum ReturnFrame {
-    /// A function with a declared return type — rets check against it.
-    Function(TypeId),
+    /// A function with a declared return type — rets check against it. Carries
+    /// the function's id so a `ret` site can be attributed to its function
+    /// (async return-divergence checking reads `return_sites`).
+    Function(Id, TypeId),
     /// A function with no declared return type: void, rets unchecked.
     VoidFunction,
     /// A closure or `async` block: rets collect here (span + optional value)
@@ -15548,8 +15577,24 @@ pub struct Program<'src> {
     // calls to them.
     pub async_functions: HashSet<Id>,
     /// Parameters/bindings whose declared closure type is `async || T` (J2):
-    /// calls through them are implicitly awaited.
+    /// calls through them are implicitly awaited. The async inference pass
+    /// ADDS adopted bindings — unannotated ones holding an async closure.
     pub async_values: HashSet<Id>,
+    /// Struct fields declared `async || T` — (struct id, field index): calls
+    /// through such a field await (J2).
+    pub async_fields: HashSet<(Id, usize)>,
+    /// Functions whose declared return type is `async || T`: calls through the
+    /// returned value await (J2).
+    pub async_returning: HashSet<Id>,
+    /// Call sites whose subject is not a plain binding but still awaits — a
+    /// call through an async field (`s.handler()`) or through an
+    /// async-returning call (`make()()`). Filled by the async inference pass;
+    /// the transformer wraps these in `await`.
+    pub awaited_calls: HashSet<Id>,
+    /// Every return position of a declared-return function — (function id,
+    /// value expr id): the tail and each `ret`. Async inference checks
+    /// returned closures against the declared type's (missing) async marker.
+    pub return_sites: Vec<(Id, Id)>,
     // Rule 1 (value semantics): value expressions that the transformer wraps in
     // a deep copy because they bind/assign an aggregate place that would
     // otherwise alias its source. Filled by `compute_clone_sites`.
@@ -18457,6 +18502,10 @@ pub fn analyze<'src>(
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
         async_values: analyzer.async_values.clone(),
+        async_fields: analyzer.async_fields.clone(),
+        async_returning: analyzer.async_returning.clone(),
+        awaited_calls: HashSet::new(),
+        return_sites: analyzer.return_sites.clone(),
         clone_sites,
         boxed_locals,
         generic_referenced_roots,

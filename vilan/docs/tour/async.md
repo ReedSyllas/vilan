@@ -64,30 +64,41 @@ save(entry);`. To wait on many at once, `Promise::all(promises)` from
 This section matters once you store async callbacks. Until then, skim.
 
 A call through a closure *value* can't be seen by the compiler's
-asyncness inference (there's no fixed callee to look at). So for closure
-values, the type carries the information: `async |T| U`. Calls through
-an `async`-typed closure are awaited implicitly, like direct calls.
+asyncness inference (there's no fixed callee to look at). Two things
+close the gap: the type carries the marker — `async |T| U`, written at
+any contract position — and unannotated bindings *adopt* asyncness from
+the closure they hold. Calls through either are awaited implicitly,
+like direct calls.
 
 ```vilan,fragment
 // 1. An async-friendly callback parameter — sync closures pass fine too
 //    (awaiting a plain value just resolves):
 fun draft<T: PartialEq>(initial: T, commit: async |T| Option<str>): Draft<T>
 
-// 2. Stored plain, re-marked at a let when it's time to call:
-let hook: async || void = self.stored_hook;
-hook();   // awaited
+// 2. A struct field storing an async callback — reads await when called:
+struct Poller {
+    tick: async || i32,
+}
+
+// 3. A function handing one back — `make()()` and
+//    `let go = make(); go()` both await:
+fun make(): async || i32
 ```
 
-The marker lives at parameters and `let` bindings only, which is why
-pattern 2 exists: struct fields store the plain type, and you re-mark at
-a `let` before calling. [Functions & closures](functions-and-closures.md)
-covers the same seams from the closure side.
+The marker is accepted at parameters, `let` annotations, struct fields,
+and function return types. An unannotated `let` (or a `mut`, through
+every rebind) holding an async closure needs no marker at all — the
+binding adopts the closure's asyncness.
+[Functions & closures](functions-and-closures.md) covers the same seams
+from the closure side.
 
-One rule protects you here. An async closure passed where a plain
-closure is expected is a compile error if that closure returns a value,
-because the caller would receive a promise disguised as the value. If it
-returns `void`, it's allowed — the call just becomes fire-and-forget.
-That's why UI event handlers can await freely with no ceremony.
+One rule protects you at every one of those boundaries. An async
+closure flowing where a plain closure type is declared — a parameter, a
+struct field, or a function's declared return type — is a compile error
+if that closure returns a value, because the reader would receive a
+promise disguised as the value. If it returns `void`, it's allowed —
+the call just becomes fire-and-forget. That's why UI event handlers can
+await freely with no ceremony.
 
 ## Timers
 

@@ -17908,3 +17908,182 @@ fn a_struct_construction_checks_its_tuple_bound() {
         "has 3 elements — the bound '(..2)' allows at most 2",
     );
 }
+
+// --- J2 value-flow asyncness: the marker on fields and return types,
+// --- adoption for unannotated bindings, and the divergence refusals
+// --- (backlog J2 "REMAINING" channels — closing the static-type/runtime-
+// --- value split for closures that reach a call through a value flow).
+
+#[test]
+fn an_unannotated_binding_adopts_its_async_closure() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun main() {
+            let f = || {
+                sleep(1);
+                1
+            };
+            print(f());
+        }
+        "#,
+        "1\n",
+    );
+}
+
+#[test]
+fn a_mut_rebind_adopts_asyncness() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun main() {
+            mut f = || 1;
+            f = || {
+                sleep(1);
+                3
+            };
+            print(f());
+        }
+        "#,
+        "3\n",
+    );
+}
+
+#[test]
+fn an_async_field_call_awaits() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        struct Holder {
+            handler: async || i32,
+        }
+        fun main() {
+            let holder = Holder { handler = || {
+                sleep(1);
+                2
+            } };
+            print((holder.handler)());
+            let taken = holder.handler;
+            print(taken());
+        }
+        "#,
+        "2\n2\n",
+    );
+}
+
+#[test]
+fn an_async_returning_call_awaits_directly_and_through_a_binding() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun make(): async || i32 {
+            || {
+                sleep(1);
+                7
+            }
+        }
+        fun main() {
+            print(make()());
+            let g = make();
+            print(g());
+        }
+        "#,
+        "7\n7\n",
+    );
+}
+
+#[test]
+fn an_async_closure_into_a_plain_field_is_refused() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        struct Plain {
+            h: || i32,
+        }
+        fun main() {
+            let p = Plain { h = || {
+                sleep(1);
+                2
+            } };
+        }
+        "#,
+        "field `h` of `Plain` receives an async closure, but its type awaits nothing",
+    );
+}
+
+#[test]
+fn an_async_closure_assigned_into_a_plain_field_is_refused() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        struct Plain {
+            h: || i32,
+        }
+        fun main() {
+            mut p = Plain { h = || 1 };
+            p.h = || {
+                sleep(1);
+                9
+            };
+        }
+        "#,
+        "field `h` of `Plain` receives an async closure",
+    );
+}
+
+#[test]
+fn a_plain_declared_return_of_an_async_closure_is_refused() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        fun bad(): || i32 {
+            || {
+                sleep(1);
+                1
+            }
+        }
+        fun main() {
+            bad();
+        }
+        "#,
+        "`bad` returns an async closure, but its declared return type awaits nothing",
+    );
+}
+
+// Spawn-semantics parity: a VOID-returning async closure may flow into a
+// plain void field — nothing is lied about, matching the parameter rule.
+#[test]
+fn a_void_async_closure_into_a_plain_void_field_stays_legal() {
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        struct Plain {
+            run: || ,
+        }
+        fun main() {
+            let p = Plain { run = || {
+                sleep(1);
+                print("later");
+            } };
+        }
+        "#,
+    );
+}
+
+// The stray-position message names every supported position.
+#[test]
+fn a_stray_async_marker_names_the_supported_positions() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let xs: List<async || i32> = List::new();
+        }
+        "#,
+        "only supported on parameters, `let` annotations, struct fields, and function return types",
+    );
+}
