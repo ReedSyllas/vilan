@@ -18087,3 +18087,60 @@ fn a_stray_async_marker_names_the_supported_positions() {
         "only supported on parameters, `let` annotations, struct fields, and function return types",
     );
 }
+
+// --- The `x.field()` steers: method lookup does not fall back to fields,
+// --- so a same-named field redirects to the right syntax (user request
+// --- 2026-07-17; diagnostics-standard B4).
+
+#[test]
+fn a_closure_field_called_as_a_method_steers_to_parens() {
+    assert_fails_with(
+        r#"
+        struct Holder {
+            handler: || i32,
+        }
+        fun main() {
+            let holder = Holder { handler = || 1 };
+            let a = holder.handler();
+        }
+        "#,
+        "parenthesize the field access to call it, `(x.handler)()`",
+    );
+}
+
+#[test]
+fn a_non_closure_field_called_as_a_method_steers_to_plain_access() {
+    assert_fails_with(
+        r#"
+        struct Holder {
+            count: i32,
+        }
+        fun main() {
+            let holder = Holder { count = 3 };
+            let b = holder.count();
+        }
+        "#,
+        "`count` is a field of type `i32`, which is not callable: did you mean the plain access `x.count`?",
+    );
+}
+
+#[test]
+fn a_true_method_miss_keeps_the_bare_message() {
+    let source = r#"
+        struct Holder {
+            count: i32,
+        }
+        fun main() {
+            let holder = Holder { count = 3 };
+            holder.missing();
+        }
+        "#;
+    assert_fails_with(source, "Holder has no method 'missing'");
+    match compile(source) {
+        Ok(_) => panic!("expected a compile error"),
+        Err(errors) => assert!(
+            errors.iter().all(|error| !error.contains("field")),
+            "no field steer should fire without a same-named field: {errors:#?}"
+        ),
+    }
+}

@@ -2558,6 +2558,38 @@ impl<'src> Analyzer<'src> {
             })
     }
 
+    /// If `subject_type` is a struct with a FIELD named `member_name`, the
+    /// steer for a `value.name()` method-call miss (diagnostics-standard B4):
+    /// method lookup does not fall back to fields, so a closure-holding field
+    /// needs the parenthesized call form, and a non-closure field was probably
+    /// meant as a plain access.
+    fn same_named_field_steer(&mut self, subject_type: &Type, member_name: &str) -> Option<String> {
+        let Type::Struct(struct_def_id, _) = subject_type else {
+            return None;
+        };
+        let field_type_id = self.structs.get(struct_def_id).and_then(|struct_| {
+            struct_
+                .fields
+                .iter()
+                .find(|field| field.name == member_name)
+                .map(|field| field.type_id)
+        })?;
+        match field_type_id.get_type(self) {
+            Type::Closure(..) => Some(format!(
+                " — `{member_name}` is a field holding a closure: parenthesize the field \
+                 access to call it, `(x.{member_name})()` (a bare `.{member_name}()` only \
+                 looks up methods)"
+            )),
+            field_type => {
+                let field_label = self.pretty_print_type(&field_type, &HashMap::new());
+                Some(format!(
+                    " — `{member_name}` is a field of type `{field_label}`, which is not \
+                     callable: did you mean the plain access `x.{member_name}`?"
+                ))
+            }
+        }
+    }
+
     /// Whether an operator (`==`, `<`, `+`, ...) on this type lowers to a native JS
     /// operator: the scalar primitives, `bool`, and numeric (C-like) enums (which
     /// lower to their integer discriminant). Such a type needs no trait dispatch
@@ -11578,6 +11610,12 @@ impl<'src> Analyzer<'src> {
                         )
                     })
                     .unwrap_or_default();
+                // If a FIELD of that name exists, the fix is syntax, not a
+                // missing method — method lookup does not fall back to fields
+                // (B4: steer to the one edit that resolves it).
+                let field_steer = self
+                    .same_named_field_steer(&subject_type, member_name)
+                    .unwrap_or_default();
                 self.diagnostics.push(Error {
                     note: None,
                     span: self
@@ -11586,8 +11624,8 @@ impl<'src> Analyzer<'src> {
                         .copied()
                         .unwrap_or(arguments_span),
                     msg: format!(
-                        "{} has no method '{}'{}",
-                        type_str, member_name, trait_only_note
+                        "{} has no method '{}'{}{}",
+                        type_str, member_name, trait_only_note, field_steer
                     ),
                 });
                 self.expr_id_to_expr_map.insert(id, Expr::Error);
