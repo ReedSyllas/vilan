@@ -2,7 +2,7 @@
   "name": "vilan",
   "displayName": "Vilan",
   "description": "Language support for Vilan: syntax highlighting, diagnostics, hover, go-to-definition, find references, and rename.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "vilan",
   "license": "MIT OR Apache-2.0",
   "repository": {
