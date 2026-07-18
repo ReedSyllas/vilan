@@ -428,13 +428,20 @@ struct Transformer<'src> {
     // The active generic-parameter substitution while emitting a monomorphized
     // function body (constraint id -> concrete type id).
     current_substitution: HashMap<TypeId, TypeId>,
+    // The adapted-instance context while emitting a body
+    // (async-polymorphism.md A.1): WHICH parameters are async in the
+    // instance being emitted, and its await/instantiation decisions. Base
+    // (un-adapted) bodies carry their base entry when they instantiate
+    // adapted callees.
+    current_adapted: Vec<Id>,
+    current_instance: Option<crate::analyzer::AdaptedInstance>,
     // Every entity emitted as a VALUE reference (the `Expr::Local` arm) —
     // consulted at assembly to tree-shake module-level bindings (F6): a
     // binding emits only if something reachable referenced it.
     referenced_globals: HashSet<Id>,
     // Monomorphized function variants, keyed by (generic function, concrete
     // type arguments) so each distinct instantiation is emitted exactly once.
-    instances: HashMap<(Id, Vec<String>), String>,
+    instances: HashMap<(Id, Vec<String>, Vec<Id>), String>,
     // The concrete type a trait default method is currently being specialized
     // for, so `self.method()` calls in its body re-dispatch to that type's impl.
     current_self_type: Option<TypeId>,
@@ -518,6 +525,8 @@ impl<'src> Transformer<'src> {
             required_functions: IndexMap::new(),
             emitting: HashSet::new(),
             current_substitution: HashMap::new(),
+            current_adapted: Vec::new(),
+            current_instance: None,
             referenced_globals: HashSet::new(),
             instances: HashMap::new(),
             current_self_type: None,
@@ -599,6 +608,7 @@ impl<'src> Transformer<'src> {
             .map(|&binding| (binding, self.walk_list(&vec![binding])))
             .collect();
 
+        let saved_instance = self.enter_instance(main_fn.id, Vec::new());
         let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
 
         // Emit main's trailing expression (and any statements it expands to). On
@@ -625,6 +635,8 @@ impl<'src> Transformer<'src> {
                 t_main_fn_body.push(statement);
             }
         }
+
+        self.restore_instance(saved_instance);
 
         // An async `main` (it awaits) runs inside an invoked async arrow, since
         // top-level `await` isn't assumed: `(async () => { .. })()`.
@@ -1380,26 +1392,59 @@ impl<'src> Transformer<'src> {
                         // channel carries it (see `call_substitution`); all feed the
                         // one `emit_instance` path. A non-generic call (no binding)
                         // is emitted as a plain function.
+                        // Adaptation (async-polymorphism.md A.1): the
+                        // analysis routed this call to an adapted instance
+                        // (async closure arguments) — emit that instance,
+                        // and await it when the instance is async.
+                        let adapted_bits = self
+                            .current_instance
+                            .as_ref()
+                            .and_then(|instance| instance.callee_bits.get(id))
+                            .cloned()
+                            .unwrap_or_default();
                         let name = match self.call_substitution(
                             *id,
                             target_id,
                             &function_call.generic_argument_ids,
                         ) {
-                            Some(substitution) => self.emit_instance(target_id, &substitution),
-                            None => {
+                            Some(substitution) => self.emit_instance_with_bits(
+                                target_id,
+                                &substitution,
+                                &adapted_bits,
+                            ),
+                            None if adapted_bits.is_empty() => {
                                 self.ensure_function_emitted(target_id);
                                 self.ng.name_for(target_id)
                             }
+                            None => {
+                                let inherited = self.inherited_substitution(target_id);
+                                self.emit_instance_with_bits(target_id, &inherited, &adapted_bits)
+                            }
                         };
                         let call = js::Node::Call(Box::new(js::Node::Local(name)), args);
-                        self.maybe_await(target_id, call)
+                        if self
+                            .current_instance
+                            .as_ref()
+                            .is_some_and(|instance| instance.awaited_calls.contains(id))
+                        {
+                            js::Node::Await(Box::new(call))
+                        } else {
+                            self.maybe_await(target_id, call)
+                        }
                     }
                     _ => {
                         let t_subject = self.walk_entity(function_call.subject_id, block).unwrap();
                         let call = js::Node::Call(Box::new(t_subject), args);
                         // A call through an async field or an async-returning
-                        // call awaits (J2) — the inference pass marked it.
-                        if self.program.awaited_calls.contains(id) {
+                        // call awaits (J2), as does a call through an ADAPTED
+                        // parameter or an instance-async held closure
+                        // (async-polymorphism.md A.1).
+                        if self.program.awaited_calls.contains(id)
+                            || self
+                                .current_instance
+                                .as_ref()
+                                .is_some_and(|instance| instance.awaited_calls.contains(id))
+                        {
                             js::Node::Await(Box::new(call))
                         } else {
                             call
@@ -1429,7 +1474,11 @@ impl<'src> Transformer<'src> {
                 js::Node::Closure(js::Closure {
                     parameters,
                     body,
-                    is_async: self.program.async_functions.contains(closure_id),
+                    is_async: self.program.async_functions.contains(closure_id)
+                        || self
+                            .current_instance
+                            .as_ref()
+                            .is_some_and(|instance| instance.async_closures.contains(closure_id)),
                 })
             }
             // `async <body>` — the async-block closure invoked with no
@@ -2021,6 +2070,22 @@ impl<'src> Transformer<'src> {
                         Box::new(js::Node::Local("__set_iter".to_string())),
                         vec![t_iterable],
                     )
+                } else {
+                    t_iterable
+                };
+                // Snapshot semantics (async-polymorphism.md A.5): inside an
+                // ASYNC adapted instance, the loop's awaits admit arbitrary
+                // interleaved code, so the traversal iterates a shallow copy
+                // taken at entry — the receiver as of the call. Element
+                // aliasing doesn't exist under value semantics, so a shallow
+                // copy is a sound snapshot. Sync instances are untouched.
+                let t_iterable = if !self.current_adapted.is_empty()
+                    && self
+                        .current_instance
+                        .as_ref()
+                        .is_some_and(|instance| instance.is_async)
+                {
+                    js::Node::Array(vec![js::Node::Spread(Box::new(t_iterable))])
                 } else {
                     t_iterable
                 };
@@ -3027,7 +3092,11 @@ impl<'src> Transformer<'src> {
             name,
             parameters,
             body,
-            is_async: self.program.async_functions.contains(&function.id),
+            is_async: self.program.async_functions.contains(&function.id)
+                || self
+                    .current_instance
+                    .as_ref()
+                    .is_some_and(|instance| instance.is_async),
         })
     }
 
@@ -3048,7 +3117,9 @@ impl<'src> Transformer<'src> {
         if let Some(function) = self.program.functions.get(&function_id) {
             let saved = std::mem::take(&mut self.current_substitution);
             let saved_self = self.current_self_type.take();
+            let saved_instance = self.enter_instance(function_id, Vec::new());
             let js_function = self.function(function);
+            self.restore_instance(saved_instance);
             self.current_substitution = saved;
             self.current_self_type = saved_self;
             self.required_functions.insert(function_id, js_function);
@@ -3357,6 +3428,20 @@ impl<'src> Transformer<'src> {
     /// `current_substitution` is the binding, so `T::default()` and `T`-typed
     /// values resolve concretely.
     fn emit_instance(&mut self, function_id: Id, substitution: &HashMap<TypeId, TypeId>) -> String {
+        self.emit_instance_with_bits(function_id, substitution, &[])
+    }
+
+    /// Emits one monomorphized instance: a type substitution plus the
+    /// adapted-asyncness bits (async-polymorphism.md A.1 — which closure
+    /// parameters are async in this instance). The bits join the memo key,
+    /// so `map` over a sync closure and over an async one are distinct
+    /// emissions; they are independent of the type substitution.
+    fn emit_instance_with_bits(
+        &mut self,
+        function_id: Id,
+        substitution: &HashMap<TypeId, TypeId>,
+        bits: &[Id],
+    ) -> String {
         // Resolve each bound type under the active substitution (so a nested
         // instantiation composes) and order by constraint id for a stable key.
         let mut entries: Vec<(TypeId, TypeId)> = substitution
@@ -3370,6 +3455,7 @@ impl<'src> Transformer<'src> {
                 .iter()
                 .map(|(_, type_id)| self.type_key(*type_id))
                 .collect::<Vec<_>>(),
+            bits.to_vec(),
         );
         if let Some(name) = self.instances.get(&key) {
             return name.clone();
@@ -3379,11 +3465,36 @@ impl<'src> Transformer<'src> {
         self.instances.insert(key, name.clone());
         if let Some(function) = self.program.functions.get(&function_id) {
             let saved = std::mem::replace(&mut self.current_substitution, substitution);
+            let saved_instance = self.enter_instance(function_id, bits.to_vec());
             let js_function = self.function_with_name(function, name.clone());
+            self.restore_instance(saved_instance);
             self.current_substitution = saved;
             self.monomorphized.push(js_function);
         }
         name
+    }
+
+    /// Swap in the adapted-instance context for a body about to be emitted;
+    /// returns the previous context for `restore_instance`.
+    fn enter_instance(
+        &mut self,
+        function_id: Id,
+        bits: Vec<Id>,
+    ) -> (Vec<Id>, Option<crate::analyzer::AdaptedInstance>) {
+        let info = self
+            .program
+            .adapted_instances
+            .get(&(function_id, bits.clone()))
+            .cloned();
+        (
+            std::mem::replace(&mut self.current_adapted, bits),
+            std::mem::replace(&mut self.current_instance, info),
+        )
+    }
+
+    fn restore_instance(&mut self, saved: (Vec<Id>, Option<crate::analyzer::AdaptedInstance>)) {
+        self.current_adapted = saved.0;
+        self.current_instance = saved.1;
     }
 
     /// The bindings the active substitution provides for the generics a callee's

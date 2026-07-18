@@ -1,0 +1,33 @@
+// Adaptation (proposal/async-polymorphism.md A.1): an async closure argument
+// instantiates an ASYNC instance of the callee — awaited sequentially, over a
+// snapshot of the receiver — while sync call sites keep the plain instance.
+import std::print;
+import std::time::sleep;
+
+fun run(f: || i32): i32 {
+	f() + 100
+}
+
+fun helper(urls: List<str>, f: |str| i32): List<i32> {
+	urls.map(f)
+}
+
+fun main() {
+	let urls = ["ab", "cdef"];
+	let ids = urls.map(|url| {
+		let length = url.len();
+		sleep(1);
+		length
+	});
+	print(ids);
+	print(urls.map(|url| url.len()));
+	print(run(|| {
+		sleep(1);
+		7
+	}));
+	print(run(|| 1));
+	print(helper(urls, |url| {
+		sleep(1);
+		url.len() + 10
+	}));
+}

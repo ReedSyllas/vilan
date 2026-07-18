@@ -79,54 +79,27 @@ pub fn infer(program: &mut Program) {
         }
     }
 
-    // --- Fixpoint: a node that calls an async function/extern implicitly awaits
-    // it, so it is async too. A trait/generic-bounded call propagates through its
-    // candidate impls (see the module doc). ---
-    loop {
-        let mut changed = false;
-        for node in graph.nodes() {
-            let id = node.id();
-            if async_set.contains(&id) {
-                continue;
-            }
-            let calls_async = graph.calls_of(id).iter().any(|call| match call.target {
-                CallTarget::Function(callee) | CallTarget::External(callee) => {
-                    async_set.contains(&callee)
-                }
-                // A trait/generic-bounded dispatch: async if any candidate impl is.
-                CallTarget::Indirect(
-                    IndirectReason::GenericMember | IndirectReason::TraitDispatch,
-                ) => dispatch_candidates(program, call.call_id)
-                    .iter()
-                    .any(|member| async_set.contains(member)),
-                // A call through an `async || T`-typed value IS an await
-                // point — asyncness rides the type (J2), or the VALUE FLOW:
-                // a binding holding an async closure, an async field read, an
-                // async-returning call. Other higher-order calls stay
-                // conservative (the concrete target isn't recoverable), as do
-                // variant constructors and immediately-applied closures.
-                _ => program
-                    .function_calls
-                    .get(&call.call_id)
-                    .is_some_and(|function_call| {
-                        subject_awaits(
-                            program,
-                            function_call.subject_id,
-                            &held_values,
-                            &async_set,
-                            0,
-                        )
-                    }),
-            });
-            if calls_async {
-                async_set.insert(id);
-                changed = true;
-            }
+    // --- Fixpoint: a node that calls an async function/extern implicitly
+    // awaits it, so it is async too — interleaved with the ADAPTATION
+    // worklist (async-polymorphism.md A.1) until both are stable: adaptation
+    // can flip a base function async (it calls an adapted async instance),
+    // which the plain fixpoint must then propagate to ITS callers, which can
+    // in turn create new adapted instances. Both are monotone over
+    // `async_set`, so this terminates.
+    let adaptation = loop {
+        base_fixpoint(program, &graph, &held_values, &mut async_set);
+        let before = async_set.len();
+        let adaptation = compute_adaptation(program, &graph, &held_values, &mut async_set);
+        if async_set.len() == before {
+            break adaptation;
         }
-        if !changed {
-            break;
-        }
+    };
+    for (span, msg, note) in adaptation.diagnostics {
+        program
+            .diagnostics
+            .push(crate::error::Error { note, span, msg });
     }
+    program.adapted_instances = adaptation.instances;
 
     // --- Materialize the value-flow channels for emission (J2): adopted
     // bindings — unannotated ones holding an async closure — join
@@ -160,11 +133,11 @@ pub fn infer(program: &mut Program) {
         .collect();
     program.awaited_calls.extend(awaited);
 
-    // --- The J2 divergence check: an async closure flowing into a PLAIN
-    // closure parameter with a non-void return would hand its caller a
-    // promise typed as `T`. Void-returning parameters stay legal — that is
-    // spawn semantics (fire-and-forget; the turns machinery settles the
-    // continuations), and no value is lied about.
+    // --- The J2 divergence check, post-adaptation: an async closure into a
+    // `sync`-contract parameter, or into a host (`external`) callback that
+    // cannot await it, is refused. (A PLAIN value-returning parameter now
+    // ADAPTS instead of erroring — the worklist above; void-returning
+    // parameters stay legal as spawn semantics.)
     let mut divergences: Vec<(crate::span::Span, String)> = Vec::new();
     for function_call in program.function_calls.values() {
         let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id) else {
@@ -213,20 +186,71 @@ pub fn infer(program: &mut Program) {
                     context: (),
                 });
             // A `sync`-marked parameter is a deliberate contract
-            // (async-polymorphism.md A.2) — say so, and steer to the async
-            // seams instead of suggesting a marker change.
-            let msg = if program.sync_values.contains(parameter) {
+            // (async-polymorphism.md A.2) — refused, with the contract's
+            // steer. A PLAIN value-returning parameter ADAPTS (the instance
+            // worklist handled it), so it no longer errors here.
+            if !program.sync_values.contains(parameter) {
+                continue;
+            }
+            divergences.push((
+                span,
                 format!(
                     "`{}` requires a synchronous closure (`sync`): its completion is part of the declaring function's synchronous protocol — move the async work outside the callback (e.g. `turn_async`, `Draft`, or a spawned `async` block)",
                     parameter_record.name
-                )
-            } else {
-                format!(
-                    "`{}` receives an async closure, but its type awaits nothing — declare it `async || T` (or return void for spawn semantics)",
-                    parameter_record.name
-                )
+                ),
+            ));
+        }
+    }
+    // Host boundary: an `external` function cannot await a vilan closure —
+    // its value-returning closure parameters are implicitly `sync`
+    // (async-polymorphism.md A.4); void ones keep spawn semantics.
+    for function_call in program.function_calls.values() {
+        let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id) else {
+            continue;
+        };
+        let Some(external) = program.external_functions.get(target) else {
+            continue;
+        };
+        for (argument, parameter) in function_call.argument_ids.iter().zip(&external.parameters) {
+            let Some(parameter_record) = program.parameters.get(parameter) else {
+                continue;
             };
-            divergences.push((span, msg));
+            let Some(Type::Closure(_, return_type)) = program
+                .type_id_to_type_map
+                .get(&parameter_record.type_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if matches!(
+                program.type_id_to_type_map.get(&return_type),
+                Some(Type::Void) | Some(Type::Unknown) | Some(Type::Unresolved) | None
+            ) {
+                continue;
+            }
+            let Some(closure_id) = held_closure(program, *argument) else {
+                continue;
+            };
+            if !async_set.contains(&closure_id) {
+                continue;
+            }
+            let span =
+                program
+                    .span_map
+                    .get(argument)
+                    .map(|span| **span)
+                    .unwrap_or(crate::span::Span {
+                        start: 0,
+                        end: 0,
+                        context: (),
+                    });
+            divergences.push((
+                span,
+                format!(
+                    "`{}` is a host (`external`) function — it cannot await a vilan closure, so this parameter only accepts synchronous closures (or a void-returning one for spawn semantics)",
+                    external.name
+                ),
+            ));
         }
     }
     // The same divergence through the FIELD channel: an async closure stored
@@ -373,6 +397,7 @@ pub fn infer(program: &mut Program) {
     // since each runs in some dependent program.
     let running_bindings = crate::platform_color::entry_function(program)
         .map(|entry| crate::platform_color::reachable_bindings(program, &graph, entry));
+    let initializer_adaptive = adaptive_params_of(program);
     let mut initializer_awaits: Vec<(crate::span::Span, String)> = Vec::new();
     for binding in program.module_level_bindings() {
         if running_bindings
@@ -383,6 +408,30 @@ pub fn infer(program: &mut Program) {
         }
         for call in graph.initializer_calls_of(binding) {
             let async_target = match call.target {
+                // A call whose async closure arguments ADAPT the callee
+                // (async-polymorphism.md A.1) awaits like any async call —
+                // and a module initializer cannot.
+                CallTarget::Function(callee)
+                    if {
+                        let bits = bits_for_call(
+                            program,
+                            &held_values,
+                            &async_set,
+                            &initializer_adaptive,
+                            &HashMap::new(),
+                            &[],
+                            callee,
+                            call.call_id,
+                        );
+                        !bits.is_empty()
+                            && program
+                                .adapted_instances
+                                .get(&(callee, bits))
+                                .is_some_and(|instance| instance.is_async)
+                    } =>
+                {
+                    Some(callee)
+                }
                 CallTarget::Function(callee) | CallTarget::External(callee) => {
                     async_set.contains(&callee).then_some(callee)
                 }
@@ -688,4 +737,750 @@ fn members_named(program: &Program, member: &str) -> Vec<Id> {
         }
     }
     candidates
+}
+
+// ---------------------------------------------------------------------------
+// Adaptation (async-polymorphism.md A.1): the instance worklist.
+// ---------------------------------------------------------------------------
+
+/// The worklist's output: the per-instance emission decisions and the
+/// diagnostics it found (transitive `sync` violations, dispatch refusals).
+struct Adaptation {
+    instances: HashMap<(Id, Vec<Id>), crate::analyzer::AdaptedInstance>,
+    diagnostics: Vec<(crate::span::Span, String, Option<crate::error::Note>)>,
+}
+
+/// One instance's identity: the function and WHICH of its closure parameters
+/// are async, sorted for a stable key.
+type InstanceKey = (Id, Vec<Id>);
+
+fn compute_adaptation(
+    program: &Program,
+    graph: &CallGraph,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &mut HashSet<Id>,
+) -> Adaptation {
+    let adaptive = adaptive_params_of(program);
+
+    // The component of a root function: itself plus its transitively nested
+    // closures — they share the instance's bits context.
+    let component = |root: Id| -> Vec<Id> {
+        let mut members = vec![root];
+        let mut cursor = 0;
+        while cursor < members.len() {
+            if let Some(children) = graph.closure_children_of(members[cursor]) {
+                members.extend(children.iter().copied());
+            }
+            cursor += 1;
+        }
+        members
+    };
+
+    let mut instance_async: HashMap<InstanceKey, bool> = HashMap::new();
+    let mut origins: HashMap<InstanceKey, Id> = HashMap::new();
+    let mut dependents: HashMap<InstanceKey, HashSet<InstanceKey>> = HashMap::new();
+    let mut pending: Vec<InstanceKey> = program
+        .functions
+        .keys()
+        .map(|function_id| (*function_id, Vec::new()))
+        .collect();
+    let mut queued: HashSet<InstanceKey> = pending.iter().cloned().collect();
+
+    // Module initializers can also instantiate adapted callees (a top-level
+    // `let ids = xs.map(async)`); discover those instances up front so the
+    // module-initializer check can refuse the await (an initializer cannot).
+    for binding in program.module_level_bindings() {
+        for call in graph.initializer_calls_of(binding) {
+            if let CallTarget::Function(callee) = call.target {
+                let bits = bits_for_call(
+                    program,
+                    held_values,
+                    async_set,
+                    &adaptive,
+                    &HashMap::new(),
+                    &[],
+                    callee,
+                    call.call_id,
+                );
+                if !bits.is_empty() {
+                    let key = (callee, bits);
+                    instance_async.entry(key.clone()).or_insert(false);
+                    origins.entry(key.clone()).or_insert(call.call_id);
+                    if queued.insert(key.clone()) {
+                        pending.push(key);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- The worklist: process instances until every async flag is stable.
+    // Flags only move false -> true, so this terminates. Every call of every
+    // member is enumerated on every pass — even members already known async
+    // — because enumeration is also DISCOVERY: a call with async closure
+    // arguments mints the callee's adapted instance.
+    while let Some(key) = pending.pop() {
+        queued.remove(&key);
+        let (root, ref bits) = key;
+        let members = component(root);
+        let mut flags: HashMap<Id, bool> = members
+            .iter()
+            .map(|member| (*member, async_set.contains(member)))
+            .collect();
+        loop {
+            let mut changed = false;
+            for member in &members {
+                for call in graph.calls_of(*member) {
+                    let awaits = match call.target {
+                        CallTarget::Function(callee) => {
+                            let callee_bits = bits_for_call(
+                                program,
+                                held_values,
+                                async_set,
+                                &adaptive,
+                                &flags,
+                                bits,
+                                callee,
+                                call.call_id,
+                            );
+                            if callee_bits.is_empty() {
+                                async_set.contains(&callee)
+                            } else {
+                                let callee_key = (callee, callee_bits);
+                                dependents
+                                    .entry(callee_key.clone())
+                                    .or_default()
+                                    .insert(key.clone());
+                                match instance_async.get(&callee_key) {
+                                    Some(flag) => *flag,
+                                    None => {
+                                        // Discover the callee instance;
+                                        // re-run this one when its flag
+                                        // lands.
+                                        instance_async.insert(callee_key.clone(), false);
+                                        origins.insert(callee_key.clone(), call.call_id);
+                                        if queued.insert(callee_key.clone()) {
+                                            pending.push(callee_key);
+                                        }
+                                        false
+                                    }
+                                }
+                            }
+                        }
+                        CallTarget::External(callee) => async_set.contains(&callee),
+                        CallTarget::Indirect(
+                            IndirectReason::GenericMember | IndirectReason::TraitDispatch,
+                        ) => dispatch_candidates(program, call.call_id)
+                            .iter()
+                            .any(|candidate| async_set.contains(candidate)),
+                        _ => {
+                            subject_adapted_here(program, held_values, &flags, bits, call.call_id)
+                                || program.function_calls.get(&call.call_id).is_some_and(
+                                    |function_call| {
+                                        subject_awaits(
+                                            program,
+                                            function_call.subject_id,
+                                            held_values,
+                                            async_set,
+                                            0,
+                                        )
+                                    },
+                                )
+                        }
+                    };
+                    if awaits && !flags[member] {
+                        flags.insert(*member, true);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let root_flag = flags[&root];
+        let previous = instance_async.insert(key.clone(), root_flag);
+        if root_flag && previous != Some(true) {
+            // The flag flipped on: dependents must re-evaluate.
+            for dependent in dependents.get(&key).cloned().unwrap_or_default() {
+                if queued.insert(dependent.clone()) {
+                    pending.push(dependent);
+                }
+            }
+        }
+        // A base instance's flips are ordinary coloring: the plain emission
+        // of this function/those closures is async.
+        if bits.is_empty() {
+            for (member, flag) in &flags {
+                if *flag {
+                    async_set.insert(*member);
+                }
+            }
+        }
+    }
+
+    // --- Final pass: with every flag stable, collect each instance's
+    // emission decisions and the context-dependent diagnostics.
+    let mut instances: HashMap<InstanceKey, crate::analyzer::AdaptedInstance> = HashMap::new();
+    let mut diagnostics: Vec<(crate::span::Span, String, Option<crate::error::Note>)> = Vec::new();
+    let mut reported: HashSet<(Id, Id)> = HashSet::new();
+    let keys: Vec<InstanceKey> = instance_async.keys().cloned().collect();
+    for key in keys {
+        let (root, ref bits) = key;
+        let members = component(root);
+        // Recompute the stable flags for this context (cheap; flags are
+        // final so one pass over the loop from the worklist would converge
+        // identically — reuse the same evaluation by seeding from the
+        // global set and iterating).
+        let mut flags: HashMap<Id, bool> = members
+            .iter()
+            .map(|member| (*member, async_set.contains(member)))
+            .collect();
+        loop {
+            let mut changed = false;
+            for member in &members {
+                if flags[member] {
+                    continue;
+                }
+                let awaits = graph
+                    .calls_of(*member)
+                    .iter()
+                    .any(|call| match call.target {
+                        CallTarget::Function(callee) => {
+                            async_set.contains(&callee) || {
+                                let callee_bits = bits_for_call(
+                                    program,
+                                    held_values,
+                                    async_set,
+                                    &adaptive,
+                                    &flags,
+                                    bits,
+                                    callee,
+                                    call.call_id,
+                                );
+                                !callee_bits.is_empty()
+                                    && instance_async.get(&(callee, callee_bits)).copied()
+                                        == Some(true)
+                            }
+                        }
+                        CallTarget::External(callee) => async_set.contains(&callee),
+                        CallTarget::Indirect(
+                            IndirectReason::GenericMember | IndirectReason::TraitDispatch,
+                        ) => dispatch_candidates(program, call.call_id)
+                            .iter()
+                            .any(|candidate| async_set.contains(candidate)),
+                        _ => {
+                            subject_adapted_here(program, held_values, &flags, bits, call.call_id)
+                                || program.function_calls.get(&call.call_id).is_some_and(
+                                    |function_call| {
+                                        subject_awaits(
+                                            program,
+                                            function_call.subject_id,
+                                            held_values,
+                                            async_set,
+                                            0,
+                                        )
+                                    },
+                                )
+                        }
+                    });
+                if awaits {
+                    flags.insert(*member, true);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut info = crate::analyzer::AdaptedInstance {
+            is_async: flags[&root],
+            ..Default::default()
+        };
+        for member in &members {
+            if *flags.get(member).unwrap_or(&false) && !bits.is_empty() && *member != root {
+                info.async_closures.insert(*member);
+            }
+            for call in graph.calls_of(*member) {
+                match call.target {
+                    CallTarget::Function(callee) => {
+                        let callee_bits = bits_for_call(
+                            program,
+                            held_values,
+                            async_set,
+                            &adaptive,
+                            &flags,
+                            bits,
+                            callee,
+                            call.call_id,
+                        );
+                        if !callee_bits.is_empty() {
+                            let callee_async =
+                                instance_async.get(&(callee, callee_bits.clone())).copied()
+                                    == Some(true);
+                            if callee_async {
+                                info.awaited_calls.insert(call.call_id);
+                            }
+                            info.callee_bits.insert(call.call_id, callee_bits);
+                        }
+                        // Transitive `sync`/host violations: an argument
+                        // that is async ONLY through this instance's bits,
+                        // flowing into a refusing position.
+                        sync_violations_at(
+                            program,
+                            held_values,
+                            async_set,
+                            &flags,
+                            bits,
+                            callee,
+                            call.call_id,
+                            origins.get(&key).copied(),
+                            &mut reported,
+                            &mut diagnostics,
+                        );
+                    }
+                    CallTarget::External(callee) => {
+                        extern_violations_at(
+                            program,
+                            held_values,
+                            async_set,
+                            &flags,
+                            bits,
+                            callee,
+                            call.call_id,
+                            origins.get(&key).copied(),
+                            &mut reported,
+                            &mut diagnostics,
+                        );
+                    }
+                    CallTarget::Indirect(
+                        IndirectReason::GenericMember | IndirectReason::TraitDispatch,
+                    ) => {
+                        dispatch_refusals_at(
+                            program,
+                            held_values,
+                            async_set,
+                            &flags,
+                            bits,
+                            call.call_id,
+                            &mut reported,
+                            &mut diagnostics,
+                        );
+                    }
+                    _ => {}
+                }
+                if subject_adapted_here(program, held_values, &flags, bits, call.call_id) {
+                    info.awaited_calls.insert(call.call_id);
+                }
+            }
+        }
+        // Base instances only earn an entry when they carry emission data;
+        // adapted instances always do (the caller emits them by key).
+        if !bits.is_empty()
+            || !info.awaited_calls.is_empty()
+            || !info.callee_bits.is_empty()
+            || !info.async_closures.is_empty()
+        {
+            instances.insert(key, info);
+        }
+    }
+
+    Adaptation {
+        instances,
+        diagnostics,
+    }
+}
+
+/// Whether the call's subject is async THROUGH this instance's context: a
+/// call through an adapted parameter, or through a binding holding a closure
+/// that is async under these bits.
+fn subject_adapted_here(
+    program: &Program,
+    held_values: &HashMap<Id, Vec<Id>>,
+    flags: &HashMap<Id, bool>,
+    bits: &[Id],
+    call_id: Id,
+) -> bool {
+    program
+        .function_calls
+        .get(&call_id)
+        .and_then(|function_call| program.entity_map.get(&function_call.subject_id))
+        .is_some_and(|subject| match subject {
+            Expr::Local(target) => {
+                bits.contains(target)
+                    || held_values.get(target).is_some_and(|held| {
+                        held.iter().any(|held_id| {
+                            matches!(
+                                program.entity_map.get(held_id),
+                                Some(Expr::Closure(closure_id))
+                                    if flags.get(closure_id).copied().unwrap_or(false)
+                            )
+                        })
+                    })
+            }
+            _ => false,
+        })
+}
+
+/// Whether the parameter's type is a closure with a RESOLVED, non-void
+/// return — the shape that adapts (or, marked, contracts).
+fn closure_return_is_value(program: &Program, parameter_id: Id) -> bool {
+    let Some(parameter) = program.parameters.get(&parameter_id) else {
+        return false;
+    };
+    let Some(Type::Closure(_, return_type)) =
+        program.type_id_to_type_map.get(&parameter.type_id).cloned()
+    else {
+        return false;
+    };
+    !matches!(
+        program.type_id_to_type_map.get(&return_type),
+        Some(Type::Void) | Some(Type::Unknown) | Some(Type::Unresolved) | None
+    )
+}
+
+/// The span of an entity, or an empty fallback.
+fn span_of(program: &Program, id: Id) -> crate::span::Span {
+    program
+        .span_map
+        .get(&id)
+        .map(|span| **span)
+        .unwrap_or(crate::span::Span {
+            start: 0,
+            end: 0,
+            context: (),
+        })
+}
+
+/// Transitive `sync` violations at one call: an argument async ONLY through
+/// the instance's bits flowing into a `sync`-contract parameter. (The direct
+/// case — async at the call site itself — is the global divergence check's.)
+#[allow(clippy::too_many_arguments)]
+fn sync_violations_at(
+    program: &Program,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &HashSet<Id>,
+    flags: &HashMap<Id, bool>,
+    bits: &[Id],
+    callee: Id,
+    call_id: Id,
+    origin: Option<Id>,
+    reported: &mut HashSet<(Id, Id)>,
+    diagnostics: &mut Vec<(crate::span::Span, String, Option<crate::error::Note>)>,
+) {
+    let Some(function) = program.functions.get(&callee) else {
+        return;
+    };
+    let Some(function_call) = program.function_calls.get(&call_id) else {
+        return;
+    };
+    let empty_flags = HashMap::new();
+    for (argument, parameter) in function_call.argument_ids.iter().zip(&function.parameters) {
+        if !program.sync_values.contains(parameter) || !closure_return_is_value(program, *parameter)
+        {
+            continue;
+        }
+        if !value_async_in(program, held_values, async_set, flags, bits, *argument) {
+            continue;
+        }
+        // Direct violations report at the global check with the plain steer.
+        if value_async_in(
+            program,
+            held_values,
+            async_set,
+            &empty_flags,
+            &[],
+            *argument,
+        ) {
+            continue;
+        }
+        if !reported.insert((call_id, *parameter)) {
+            continue;
+        }
+        let parameter_name = program
+            .parameters
+            .get(parameter)
+            .map(|parameter| parameter.name)
+            .unwrap_or("the parameter");
+        let primary = origin.unwrap_or(call_id);
+        let note = (primary != call_id).then(|| crate::error::Note {
+            span: span_of(program, call_id),
+            msg: format!("forwarded into the `sync` parameter `{parameter_name}` here"),
+            source: program.source_of(call_id),
+        });
+        diagnostics.push((
+            span_of(program, primary),
+            format!(
+                "this call passes an async closure that reaches `{parameter_name}`, which requires a synchronous closure (`sync`) — move the async work outside the callback (e.g. `turn_async`, `Draft`, or a spawned `async` block)"
+            ),
+            note,
+        ));
+    }
+}
+
+/// Transitive host-boundary violations: an argument async only through the
+/// instance's bits flowing into an `external` function's value-returning
+/// closure parameter.
+#[allow(clippy::too_many_arguments)]
+fn extern_violations_at(
+    program: &Program,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &HashSet<Id>,
+    flags: &HashMap<Id, bool>,
+    bits: &[Id],
+    callee: Id,
+    call_id: Id,
+    origin: Option<Id>,
+    reported: &mut HashSet<(Id, Id)>,
+    diagnostics: &mut Vec<(crate::span::Span, String, Option<crate::error::Note>)>,
+) {
+    let Some(external) = program.external_functions.get(&callee) else {
+        return;
+    };
+    let Some(function_call) = program.function_calls.get(&call_id) else {
+        return;
+    };
+    let empty_flags = HashMap::new();
+    for (argument, parameter) in function_call.argument_ids.iter().zip(&external.parameters) {
+        if !closure_return_is_value(program, *parameter) {
+            continue;
+        }
+        if !value_async_in(program, held_values, async_set, flags, bits, *argument) {
+            continue;
+        }
+        if value_async_in(
+            program,
+            held_values,
+            async_set,
+            &empty_flags,
+            &[],
+            *argument,
+        ) {
+            continue;
+        }
+        if !reported.insert((call_id, *parameter)) {
+            continue;
+        }
+        let primary = origin.unwrap_or(call_id);
+        let note = (primary != call_id).then(|| crate::error::Note {
+            span: span_of(program, call_id),
+            msg: format!("forwarded to the host function `{}` here", external.name),
+            source: program.source_of(call_id),
+        });
+        diagnostics.push((
+            span_of(program, primary),
+            format!(
+                "this call passes an async closure that reaches the host (`external`) function `{}`, which cannot await a vilan closure — only synchronous closures can cross",
+                external.name
+            ),
+            note,
+        ));
+    }
+}
+
+/// Adaptation cannot ride a trait/generic dispatch (the callee varies per
+/// instantiation) — an async closure argument at such a call is refused
+/// unless every candidate's parameter at that position is `async`-declared
+/// (the typed channel, which works today).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_refusals_at(
+    program: &Program,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &HashSet<Id>,
+    flags: &HashMap<Id, bool>,
+    bits: &[Id],
+    call_id: Id,
+    reported: &mut HashSet<(Id, Id)>,
+    diagnostics: &mut Vec<(crate::span::Span, String, Option<crate::error::Note>)>,
+) {
+    let Some(function_call) = program.function_calls.get(&call_id) else {
+        return;
+    };
+    let candidates = dispatch_candidates(program, call_id);
+    if candidates.is_empty() {
+        return;
+    }
+    for (position, argument) in function_call.argument_ids.iter().enumerate() {
+        if !value_async_in(program, held_values, async_set, flags, bits, *argument) {
+            continue;
+        }
+        // Refuse only where a candidate would need ADAPTATION: a plain,
+        // value-returning closure parameter at this position. All-`async`
+        // candidates are the typed channel and work as-is.
+        let needs_adaptation = candidates.iter().any(|candidate| {
+            program
+                .functions
+                .get(candidate)
+                .and_then(|function| function.parameters.get(position))
+                .is_some_and(|parameter| {
+                    !program.async_values.contains(parameter)
+                        && !program.sync_values.contains(parameter)
+                        && closure_return_is_value(program, *parameter)
+                })
+        });
+        if !needs_adaptation {
+            continue;
+        }
+        if !reported.insert((call_id, Id(position as u32))) {
+            continue;
+        }
+        diagnostics.push((
+            span_of(program, call_id),
+            "an async closure cannot adapt a trait/generic-dispatched call (the concrete callee varies per instantiation) — bind the callee concretely, or declare the trait parameter `async || T`".to_string(),
+            None,
+        ));
+    }
+}
+
+/// Whether `value_id` is an async closure VALUE in an instance's context:
+/// the global channels (typed, adopted holds, fields, returning calls), an
+/// adapted parameter of the enclosing instance, or a closure literal whose
+/// flag (component-local or global) is set.
+fn value_async_in(
+    program: &Program,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &HashSet<Id>,
+    flags: &HashMap<Id, bool>,
+    bits: &[Id],
+    value_id: Id,
+) -> bool {
+    match program.entity_map.get(&value_id) {
+        Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id)) => flags
+            .get(closure_id)
+            .copied()
+            .unwrap_or_else(|| async_set.contains(closure_id)),
+        Some(Expr::Local(target)) => {
+            bits.contains(target)
+                || program.async_values.contains(target)
+                || held_values.get(target).is_some_and(|held| {
+                    held.iter()
+                        .any(|held_id| match program.entity_map.get(held_id) {
+                            Some(Expr::Closure(closure_id)) => flags
+                                .get(closure_id)
+                                .copied()
+                                .unwrap_or_else(|| async_set.contains(closure_id)),
+                            Some(Expr::Field(_, struct_id, index)) => {
+                                program.async_fields.contains(&(*struct_id, *index))
+                            }
+                            Some(Expr::Call(inner)) => call_returns_async_closure(program, *inner),
+                            _ => false,
+                        })
+                })
+        }
+        Some(Expr::Field(_, struct_id, index)) => {
+            program.async_fields.contains(&(*struct_id, *index))
+        }
+        Some(Expr::Call(inner)) => call_returns_async_closure(program, *inner),
+        _ => false,
+    }
+}
+
+/// The callee's adapted-parameter set for one call, in an instance's
+/// context — empty when nothing adapts.
+#[allow(clippy::too_many_arguments)]
+fn bits_for_call(
+    program: &Program,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &HashSet<Id>,
+    adaptive: &HashMap<Id, HashSet<Id>>,
+    flags: &HashMap<Id, bool>,
+    bits: &[Id],
+    callee: Id,
+    call_id: Id,
+) -> Vec<Id> {
+    let Some(adaptive_params) = adaptive.get(&callee) else {
+        return Vec::new();
+    };
+    let Some(function) = program.functions.get(&callee) else {
+        return Vec::new();
+    };
+    let Some(function_call) = program.function_calls.get(&call_id) else {
+        return Vec::new();
+    };
+    let mut callee_bits: Vec<Id> = function_call
+        .argument_ids
+        .iter()
+        .zip(&function.parameters)
+        .filter(|(argument, parameter)| {
+            adaptive_params.contains(*parameter)
+                && value_async_in(program, held_values, async_set, flags, bits, **argument)
+        })
+        .map(|(_, parameter)| *parameter)
+        .collect();
+    callee_bits.sort_by_key(|parameter| parameter.0);
+    callee_bits
+}
+
+/// The plain (single-bit) async fixpoint: a node that calls an async
+/// function/extern/value implicitly awaits it, so it is async too. Run to
+/// stability; interleaved with the adaptation worklist by `infer`.
+fn base_fixpoint(
+    program: &Program,
+    graph: &CallGraph,
+    held_values: &HashMap<Id, Vec<Id>>,
+    async_set: &mut HashSet<Id>,
+) {
+    loop {
+        let mut changed = false;
+        for node in graph.nodes() {
+            let id = node.id();
+            if async_set.contains(&id) {
+                continue;
+            }
+            let calls_async = graph.calls_of(id).iter().any(|call| match call.target {
+                CallTarget::Function(callee) | CallTarget::External(callee) => {
+                    async_set.contains(&callee)
+                }
+                // A trait/generic-bounded dispatch: async if any candidate impl is.
+                CallTarget::Indirect(
+                    IndirectReason::GenericMember | IndirectReason::TraitDispatch,
+                ) => dispatch_candidates(program, call.call_id)
+                    .iter()
+                    .any(|member| async_set.contains(member)),
+                // A call through an `async || T`-typed value IS an await
+                // point — asyncness rides the type (J2), or the VALUE FLOW:
+                // a binding holding an async closure, an async field read, an
+                // async-returning call. Other higher-order calls stay
+                // conservative (the concrete target isn't recoverable), as do
+                // variant constructors and immediately-applied closures.
+                _ => program
+                    .function_calls
+                    .get(&call.call_id)
+                    .is_some_and(|function_call| {
+                        subject_awaits(program, function_call.subject_id, held_values, async_set, 0)
+                    }),
+            });
+            if calls_async {
+                async_set.insert(id);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// A function's ADAPTIVE parameters: plain (unmarked), closure-typed, with a
+/// RESOLVED non-void return. `sync`/`async`-marked and void/unresolved ones
+/// never adapt (contract, spawn, or no known lie).
+fn adaptive_params_of(program: &Program) -> HashMap<Id, HashSet<Id>> {
+    let mut adaptive: HashMap<Id, HashSet<Id>> = HashMap::new();
+    for (function_id, function) in &program.functions {
+        let params: HashSet<Id> = function
+            .parameters
+            .iter()
+            .filter(|parameter| {
+                !program.sync_values.contains(parameter)
+                    && !program.async_values.contains(parameter)
+                    && closure_return_is_value(program, **parameter)
+            })
+            .copied()
+            .collect();
+        if !params.is_empty() {
+            adaptive.insert(*function_id, params);
+        }
+    }
+    adaptive
 }

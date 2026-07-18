@@ -15311,6 +15311,27 @@ impl Type {
     }
 }
 
+/// One adapted instance's emission decisions (async-polymorphism.md A.1):
+/// a function specialized by WHICH of its closure parameters are async.
+/// Keyed in `Program::adapted_instances` by (function id, sorted async
+/// parameter ids) — the bits are independent of type substitution, so one
+/// entry serves every type instantiation.
+#[derive(Debug, Clone, Default)]
+pub struct AdaptedInstance {
+    /// Whether this instance compiles to an async function (it awaits —
+    /// through an adapted parameter, an async callee instance, or any of
+    /// the base channels).
+    pub is_async: bool,
+    /// Call exprs inside this instance (its body and nested closures) that
+    /// the transformer wraps in `await`.
+    pub awaited_calls: HashSet<Id>,
+    /// Call expr -> the callee's async parameter ids: the callee must be
+    /// emitted as THAT adapted instance.
+    pub callee_bits: HashMap<Id, Vec<Id>>,
+    /// Nested closures that are async under this instance's bits.
+    pub async_closures: HashSet<Id>,
+}
+
 /// A call or accessor that dispatches generically: the analyzer can't pin the
 /// concrete callee, so it records how codegen should re-resolve it at each
 /// monomorphization. Unifies the static-accessor, generic-method, and
@@ -15664,6 +15685,12 @@ pub struct Program<'src> {
     /// async-returning call (`make()()`). Filled by the async inference pass;
     /// the transformer wraps these in `await`.
     pub awaited_calls: HashSet<Id>,
+    /// Adaptation (async-polymorphism.md A.1): per (function, async closure
+    /// parameters) instance, the awaits and callee instantiations the
+    /// transformer must emit. Filled by the async inference pass's instance
+    /// worklist; empty for programs that never pass an async closure to an
+    /// adaptive position.
+    pub adapted_instances: HashMap<(Id, Vec<Id>), AdaptedInstance>,
     /// Every return position of a declared-return function — (function id,
     /// value expr id): the tail and each `ret`. Async inference checks
     /// returned closures against the declared type's (missing) async marker.
@@ -18579,6 +18606,7 @@ pub fn analyze<'src>(
         async_fields: analyzer.async_fields.clone(),
         async_returning: analyzer.async_returning.clone(),
         awaited_calls: HashSet::new(),
+        adapted_instances: HashMap::new(),
         return_sites: analyzer.return_sites.clone(),
         clone_sites,
         boxed_locals,

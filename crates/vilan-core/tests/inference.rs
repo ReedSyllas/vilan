@@ -10316,9 +10316,14 @@ fn an_async_closure_into_a_plain_void_parameter_is_spawn_semantics() {
 }
 
 #[test]
-fn an_async_closure_into_a_plain_valued_parameter_is_rejected() {
-    // The J2 divergence, killed: the result would be a promise typing as T.
-    let source = r#"
+fn an_async_closure_into_a_plain_valued_parameter_adapts() {
+    // Once the J2 divergence (the result would be a promise typing as T) —
+    // now the adaptation seam (async-polymorphism.md A.1): the async
+    // argument instantiates an async `compute`, the call through `producer`
+    // awaits, and the caller receives the settled value.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
         async fun tick() {
             let _beat = 1;
         }
@@ -10328,14 +10333,14 @@ fn an_async_closure_into_a_plain_valued_parameter_is_rejected() {
         }
 
         fun main() {
-            let _x = compute(|| {
+            print(compute(|| {
                 tick();
                 7
-            });
+            }));
         }
-        main();
-        "#;
-    assert_fails_spanning(source, "producer", "async closure");
+        "#,
+        "7\n",
+    );
 }
 
 #[test]
@@ -18221,5 +18226,163 @@ fn sync_stays_a_legal_name() {
         }
         "#,
         "9\n",
+    );
+}
+
+// --- Adaptation (proposal/async-polymorphism.md A.1): plain value-returning
+// --- closure parameters are asyncness-polymorphic — an async argument
+// --- instantiates an ASYNC instance of the callee (calls through the
+// --- parameter await, sequentially); sync call sites are untouched.
+
+#[test]
+fn an_async_closure_adapts_map_and_runs_sequentially() {
+    // The callbacks' side effects land in SOURCE ORDER (the sequential
+    // contract), and the mapped values are settled — not promises.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun main() {
+            let urls = ["ab", "cdef"];
+            let ids = urls.map(|url| {
+                let length = url.len();
+                sleep(1);
+                print(length);
+                length
+            });
+            print(ids);
+        }
+        "#,
+        "2\n4\n[ 2, 4 ]\n",
+    );
+}
+
+#[test]
+fn a_non_generic_function_adapts() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun run(f: || i32): i32 {
+            f() + 100
+        }
+        fun main() {
+            print(run(|| {
+                sleep(1);
+                7
+            }));
+            print(run(|| 1));
+        }
+        "#,
+        "107\n101\n",
+    );
+}
+
+#[test]
+fn adaptation_rides_through_a_forwarding_helper() {
+    // Transitive: helper's plain parameter forwards into map — helper and
+    // map both instantiate adapted, and the caller awaits the chain.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun helper(urls: List<str>, f: |str| i32): List<i32> {
+            urls.map(f)
+        }
+        fun main() {
+            print(helper(["ab", "cdef"], |url| {
+                sleep(1);
+                url.len() + 10
+            }));
+        }
+        "#,
+        "[ 12, 14 ]\n",
+    );
+}
+
+#[test]
+fn a_forwarded_async_closure_into_a_sync_contract_is_refused() {
+    assert_fails_noting(
+        r#"
+        import std::time::sleep;
+        fun run_sync(g: sync || i32): i32 {
+            g()
+        }
+        fun forwards(f: || i32): i32 {
+            run_sync(f)
+        }
+        fun main() {
+            forwards(|| {
+                sleep(1);
+                2
+            });
+        }
+        "#,
+        "passes an async closure that reaches `g`, which requires a synchronous closure (`sync`)",
+        "run_sync(f)",
+        "forwarded into the `sync` parameter `g` here",
+    );
+}
+
+#[test]
+fn an_async_closure_into_an_extern_callback_is_refused() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        external fun host_transform(f: |i32| i32): i32;
+        fun main() {
+            host_transform(|n| {
+                sleep(1);
+                n
+            });
+        }
+        "#,
+        "`host_transform` is a host (`external`) function — it cannot await a vilan closure",
+    );
+}
+
+#[test]
+fn adaptation_cannot_ride_a_trait_dispatch() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        trait Runner {
+            fun run_with(self, f: || i32): i32;
+        }
+        struct Fast {}
+        impl Fast with Runner {
+            fun run_with(self, f: || i32): i32 {
+                f()
+            }
+        }
+        fun go<R: Runner>(runner: R): i32 {
+            runner.run_with(|| {
+                sleep(1);
+                1
+            })
+        }
+        fun main() {
+            go(Fast {});
+        }
+        "#,
+        "an async closure cannot adapt a trait/generic-dispatched call",
+    );
+}
+
+#[test]
+fn a_module_initializer_cannot_adapt_await() {
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        let ids = ["ab"].map(|s| {
+            sleep(1);
+            s.len()
+        });
+        fun main() {
+            print(ids);
+        }
+        "#,
+        "a module-level binding cannot await",
     );
 }

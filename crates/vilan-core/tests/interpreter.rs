@@ -23,6 +23,7 @@ fn std_spec() -> PackageSpec {
 /// Corpus files outside the interpreter's subset, with the capability that
 /// excludes them. Everything not listed here must pass the equivalence check.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("adapt.vl", "async (adapted instances await)"),
     ("async-await.vl", "async"),
     ("async-promise-all.vl", "async"),
     (
