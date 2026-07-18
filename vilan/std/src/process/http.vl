@@ -174,13 +174,15 @@ impl ResponseBuilder {
 
 struct Server {
 	port: i32,
-	request_handler: |Request| Response,
+	request_handler: async |Request| Response,
 	on_start: |Server| void,
 }
 
 struct ServerBuilder {
 	port: i32,
-	request_handler: |Request| Response,
+	// Declared `async` (J2's typed channel): the handler may suspend, and
+	// `start()` awaits its response before writing.
+	request_handler: async |Request| Response,
 	on_start: |Server| void,
 	on_stop: |Server| void,
 }
@@ -195,8 +197,9 @@ impl Server {
 	}
 
 	fun start(self) {
-		// Re-marked (J2 v1): an async handler's response is awaited before writing.
-		let request_handler: async |Request| Response = self.request_handler;
+		// Adopts asyncness from the `async` field read: the call below
+		// awaits the handler's response before writing.
+		let request_handler = self.request_handler;
 		let on_start = self.on_start;
 		let server = self;
 		let port = self.port;

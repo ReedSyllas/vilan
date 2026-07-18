@@ -19133,3 +19133,140 @@ fn a_module_initializer_cannot_run_an_awaiting_context_body() {
         "the initializer of `banner` runs a closure that awaits",
     );
 }
+
+// --- J2 laundering (the divergence channels on the full VALUE oracle): an
+// --- async value reaches a plain field / sync contract / host callback /
+// --- declared return through ANY channel — a declared parameter, a field
+// --- read, a returning call — not just a held literal.
+
+#[test]
+fn an_async_parameter_cannot_launder_into_a_plain_field() {
+    // The http.vl shape: a declared-async parameter stored into a plain
+    // value-returning closure field escaped the old literal-only check.
+    assert_fails_with(
+        r#"
+        struct Holder {
+            hook: |i32| i32,
+        }
+        fun install(f: async |i32| i32): Holder {
+            Holder { hook = f }
+        }
+        fun main() {
+            let _ = install(|n| n + 1);
+        }
+        "#,
+        "field `hook` of `Holder` receives an async closure",
+    );
+}
+
+#[test]
+fn an_async_field_read_cannot_launder_into_a_plain_field() {
+    assert_fails_with(
+        r#"
+        struct A {
+            hook: async |i32| i32,
+        }
+        struct B {
+            hook: |i32| i32,
+        }
+        fun copy(a: A): B {
+            B { hook = a.hook }
+        }
+        fun main() {
+            let _ = copy(A { hook = |n| n });
+        }
+        "#,
+        "field `hook` of `B` receives an async closure",
+    );
+}
+
+#[test]
+fn an_async_returning_call_cannot_launder_into_a_plain_field() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        struct Holder {
+            hook: || i32,
+        }
+        fun make(): async || i32 {
+            || {
+                sleep(1);
+                2
+            }
+        }
+        fun main() {
+            let _ = Holder { hook = make() };
+        }
+        "#,
+        "field `hook` of `Holder` receives an async closure",
+    );
+}
+
+#[test]
+fn an_async_parameter_cannot_launder_into_a_sync_contract() {
+    assert_fails_with(
+        r#"
+        fun apply(f: sync |i32| i32): i32 {
+            f(2)
+        }
+        fun outer(f: async |i32| i32): i32 {
+            apply(f)
+        }
+        fun main() {
+            let _ = outer(|n| n + 1);
+        }
+        "#,
+        "requires a synchronous closure",
+    );
+}
+
+#[test]
+fn an_async_parameter_cannot_launder_into_a_host_callback() {
+    assert_fails_with(
+        r#"
+        [extern("hostApply")]
+        external fun host_apply(f: |i32| i32): i32;
+        fun outer(f: async |i32| i32): i32 {
+            host_apply(f)
+        }
+        fun main() {
+            let _ = outer(|n| n + 1);
+        }
+        "#,
+        "cannot await a vilan closure",
+    );
+}
+
+#[test]
+fn an_async_parameter_cannot_launder_through_a_declared_return() {
+    assert_fails_with(
+        r#"
+        fun make(f: async |i32| i32): |i32| i32 {
+            f
+        }
+        fun main() {
+            let _ = make(|n| n + 1);
+        }
+        "#,
+        "returns an async closure, but its declared return type awaits nothing",
+    );
+}
+
+#[test]
+fn a_void_async_parameter_still_stores_as_spawn() {
+    // Void positions keep spawn semantics at every boundary — storing a
+    // void-returning async handler in a plain void field stays legal.
+    assert_compiles(
+        r#"
+        struct Holder {
+            on_done: |i32| void,
+        }
+        fun install(f: async |i32| void): Holder {
+            Holder { on_done = f }
+        }
+        fun main() {
+            let _ = install(|n| {});
+        }
+        "#,
+    );
+}

@@ -142,6 +142,7 @@ pub fn infer(program: &mut Program) {
     // ADAPTS instead of erroring — the worklist above; void-returning
     // parameters stay legal as spawn semantics.)
     let mut divergences: Vec<(crate::span::Span, String)> = Vec::new();
+    let no_flags: HashMap<Id, bool> = HashMap::new();
     for function_call in program.function_calls.values() {
         let Some(Expr::Local(target)) = program.entity_map.get(&function_call.subject_id) else {
             continue;
@@ -172,11 +173,11 @@ pub fn infer(program: &mut Program) {
             if indeterminate {
                 continue;
             }
-            // The argument's closure: a literal, or a binding holding one.
-            let Some(closure_id) = held_closure(program, *argument) else {
-                continue;
-            };
-            if !async_set.contains(&closure_id) {
+            // The argument VALUE is async through any channel — a literal, a
+            // declared/adopted binding or parameter, an `async` field read,
+            // an async-returning call (the same shapes that make a call
+            // through it await).
+            if !value_async_in(program, &held_values, &async_set, &no_flags, &[], *argument) {
                 continue;
             }
             let span = program
@@ -198,7 +199,7 @@ pub fn infer(program: &mut Program) {
             divergences.push((
                 span,
                 format!(
-                    "`{}` requires a synchronous closure (`sync`): its completion is part of the declaring function's synchronous protocol — move the async work outside the callback (e.g. `turn_async`, `Draft`, or a spawned `async` block)",
+                    "`{}` requires a synchronous closure (`sync`): its completion is part of the declaring function's synchronous protocol — move the async work outside the callback (e.g. a `turn` with an awaiting body, `Draft`, or a spawned `async` block)",
                     parameter_record.name
                 ),
             ));
@@ -237,10 +238,7 @@ pub fn infer(program: &mut Program) {
             ) {
                 continue;
             }
-            let Some(closure_id) = held_closure(program, *argument) else {
-                continue;
-            };
-            if !async_set.contains(&closure_id) {
+            if !value_async_in(program, &held_values, &async_set, &no_flags, &[], *argument) {
                 continue;
             }
             let span =
@@ -311,10 +309,7 @@ pub fn infer(program: &mut Program) {
         ) {
             continue;
         }
-        let Some(closure_id) = held_closure(program, value_id) else {
-            continue;
-        };
-        if !async_set.contains(&closure_id) {
+        if !value_async_in(program, &held_values, &async_set, &no_flags, &[], value_id) {
             continue;
         }
         let span = program
@@ -360,10 +355,7 @@ pub fn infer(program: &mut Program) {
         ) {
             continue;
         }
-        let Some(closure_id) = held_closure(program, *value_id) else {
-            continue;
-        };
-        if !async_set.contains(&closure_id) {
+        if !value_async_in(program, &held_values, &async_set, &no_flags, &[], *value_id) {
             continue;
         }
         let span = program
@@ -593,25 +585,6 @@ fn call_returns_async_closure(program: &Program, call_id: Id) -> bool {
                 Some(Expr::Local(target)) if program.async_returning.contains(target)
             )
         })
-}
-
-/// The closure a value resolves to for divergence checking: a closure/`async`
-/// literal, or a binding whose initializer is one.
-fn held_closure(program: &Program, value_id: Id) -> Option<Id> {
-    match program.entity_map.get(&value_id) {
-        Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id)) => Some(*closure_id),
-        Some(Expr::Local(source)) => program
-            .variables
-            .get(source)
-            .and_then(|variable| variable.initial)
-            .and_then(|initial| match program.entity_map.get(&initial) {
-                Some(Expr::Closure(closure_id)) | Some(Expr::Async(closure_id)) => {
-                    Some(*closure_id)
-                }
-                _ => None,
-            }),
-        _ => None,
-    }
 }
 
 /// The concrete member ids a trait/generic-bounded dispatch at `call_id` could
@@ -1235,7 +1208,7 @@ fn sync_violations_at(
         diagnostics.push((
             span_of(program, primary),
             format!(
-                "this call passes an async closure that reaches `{parameter_name}`, which requires a synchronous closure (`sync`) — move the async work outside the callback (e.g. `turn_async`, `Draft`, or a spawned `async` block)"
+                "this call passes an async closure that reaches `{parameter_name}`, which requires a synchronous closure (`sync`) — move the async work outside the callback (e.g. a `turn` with an awaiting body, `Draft`, or a spawned `async` block)"
             ),
             note,
         ));
