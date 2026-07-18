@@ -280,7 +280,7 @@ recognized between two operands.
 ```text
 type = "&" [ "mut" ] type                       (* view type *)
      | "type" IDENT [ ":" bound-list ]          (* impl-subject binder *)
-     | [ "async" ] closure-type [ context-clause ]
+     | [ "async" | "sync" ] closure-type [ context-clause ]
      | IDENT generic-args                        (* nominal, generic *)
      | IDENT                                     (* nominal *)
      | "(" IDENT "in" type ":" type ")"          (* mapped tuple, §5.9 *)
@@ -292,9 +292,10 @@ context-clause = "context" ( IDENT | "(" IDENT { "," IDENT } [ "," ] ")" ) ;
 ```
 
 `context` here is the contextual keyword (§2.2); the clause is only valid
-on closure types, checked semantically. A closure type's parameters may
-carry documentation names (`|value: T| U`); only the types are
-significant.
+on closure types, checked semantically (§8.5). `sync` is likewise
+contextual (§7.4: the synchronous contract; parameters only). A closure
+type's parameters may carry documentation names (`|value: T| U`); only
+the types are significant.
 
 ## 3.10 Patterns (match)
 

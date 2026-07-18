@@ -52,6 +52,7 @@
 - [§5 The type system](spec/types.md)
 - [§6 The memory model](spec/memory.md)
 - [§7 Execution & async](spec/execution.md)
+- [§8 Contexts](spec/contexts.md)
 - [§A Appendix](spec/appendix.md)
 
 # Appendix

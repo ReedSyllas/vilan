@@ -155,8 +155,8 @@ function's declared **return type** is:
 
 At every suspension point the enclosing function's live state is
 captured and restored on resumption — with one carve-out: **views may
-not be live across a suspension** (§6.6). Ambient context values (§8,
-Phase B) are captured at closure creation and are therefore stable
+not be live across a suspension** (§6.6). Ambient context values (§8)
+are captured at closure creation and are therefore stable
 across suspensions by construction.
 
 Concurrency is cooperative and single-threaded per program: between a

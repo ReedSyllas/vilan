@@ -16,7 +16,7 @@ The type forms (grammar §3.9) denote:
   `T`; the unit is `void`).
 - **Closure types** — `|T, U| R`, `|| R`, `|| void`; structural in their
   parameter and return types. An `async` closure type (§7.4) and a
-  `context`-claused type (§8, Phase B) are distinct from their plain
+  `context`-claused type (§8.5) are distinct from their plain
   counterparts.
 - **View types** — `&T`, `&mut T` (§6). Views are second-class: these
   types appear in parameter and return positions and in short-lived

@@ -38,7 +38,7 @@ next. A **conforming program** passes all of them.
 4. **Name resolution** (§4) — names to declarations.
 5. **Type checking** (§5) — types, generic binding, bound checking.
 6. **Memory checking** (§6) — view confinement, the aliasing rules.
-7. **Context checking** (Phase B) — ambient-value coverage.
+7. **Context checking** (§8) — ambient-value coverage.
 8. **Async inference** (§7) — asyncness, seam checking.
 9. **Emission** (§7.1 for the observable guarantees).
 

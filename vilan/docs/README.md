@@ -97,6 +97,7 @@ to GitHub Pages automatically. Everything also reads fine as plain files
 | [§5 The type system](spec/types.md) | types, generics & inference, traits, coercions, `!`/`?.` |
 | [§6 The memory model](spec/memory.md) | the four rules, views, projections, the await rule |
 | [§7 Execution & async](spec/execution.md) | entrypoint, evaluation order, the async model |
+| [§8 Contexts](spec/contexts.md) | ambient values: `run`/`get`, coverage, injected closures |
 | [§A Appendix](spec/appendix.md) | precedence & keyword tables, lang items |
 
 *(Spec Phase B — contexts, const, macros, the platform model — pending.)*
