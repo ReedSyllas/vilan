@@ -8,10 +8,10 @@
 // types are wire-able: a timestamp is plain data (one i53), so it can ride
 // rpc payloads and mirrors.
 
-import pkg::promise::Promise;
 import pkg::operators::{ Add, Sub };
 import pkg::compare::{ PartialEq, PartialOrd, Ordering };
 import pkg::option::Option::{ self, Some, None };
+import pkg::task::{ ambient_signal, CancelSignal };
 
 // --- The clock ---------------------------------------------------------------
 
@@ -178,20 +178,18 @@ impl HostDate {
 
 // --- Sleeping ------------------------------------------------------------------
 
-[extern("setTimeout")]
-external fun set_timeout(callback: || void, ms: i32);
+/// The abortable host timer: resolves after `ms`, or rejects with the abort
+/// reason if the signal fires first (the runtime helper clears the timer).
+[extern("__sleep")]
+async external fun __sleep(ms: i32, signal: Option<CancelSignal>): void;
 
-/// The host `Promise` constructor: resolves once the executor calls `resolve`.
-/// (The element type is nominal — the resolved value is never read.)
-[extern(new, "Promise")]
-external fun timer_promise(executor: |(|| void)| void): Promise<i32>;
-
-/// Pause the current async flow for `ms` milliseconds (`setTimeout` as a promise).
-/// Async — a caller awaits it implicitly.
+/// Pause the current async flow for `ms` milliseconds (`setTimeout` as a
+/// promise). Async — a caller awaits it implicitly. Inside a nursery's
+/// dynamic extent the sleep carries the ambient cancel signal (the
+/// structural bridge), so cancellation cuts it short instead of waiting the
+/// timer out.
 fun sleep(ms: i32) {
-	let _ = await timer_promise(|resolve| {
-		set_timeout(resolve, ms);
-	});
+	__sleep(ms, ambient_signal());
 }
 
 /// `sleep`, taking a `Duration` (the K6 backoff shape). Spans beyond i32

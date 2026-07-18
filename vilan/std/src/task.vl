@@ -12,6 +12,7 @@
 /// console with the task's spawn origin, and the program continues.
 
 import pkg::context::Context;
+import pkg::option::Option::{ self, Some, None };
 
 external struct Task<T>;
 
@@ -24,13 +25,54 @@ impl Task<type T> {
 	/// task fails, the first failure panics here once it settles.
 	[extern("Promise.all")]
 	async external fun settle_all(tasks: List<Task<T>>): List<T>;
+
+	/// First settled wins: yields the first task to settle — its value, or
+	/// its failure. The losers keep running; inside a nursery, follow with
+	/// `n.cancel()` to abort their in-flight work (the race idiom).
+	[extern("Promise.race")]
+	async external fun race(tasks: List<Task<T>>): T;
 }
 
 // === Nurseries (structured concurrency) =====================================
 
-/// The handle a `nursery` body receives — opaque; cancellation arrives here
-/// (Part B slice 3).
+/// The handle a `nursery` body receives: cancel the whole extent, or check
+/// for cancellation from a compute loop.
 external struct Nursery;
+
+/// A host `AbortSignal` that fires when a nursery cancels. std's IO wrappers
+/// (`sleep`, `fetch`) pass the ambient one to the host operation, so
+/// cancellation genuinely aborts in-flight IO — the structural bridge.
+external struct CancelSignal;
+
+impl Nursery {
+	/// Cancel the nursery: aborts its signal, so every in-flight host
+	/// operation in the extent rejects promptly and pending children die at
+	/// their next IO. Cancellation is absorbed at the join — it never wins
+	/// as the nursery's error. The body's own execution is not preempted:
+	/// code after `cancel()` runs, and the body's value is still returned.
+	[extern(method, "cancel")]
+	external fun cancel(self);
+
+	/// Whether this nursery has been cancelled (its own `cancel`, a parent
+	/// nursery's, or the first error's abort) — the check for pure-compute
+	/// loops that never touch IO.
+	[extern(method, "is_cancelled")]
+	external fun is_cancelled(self): bool;
+
+	/// The nursery's cancel signal, for handing to abortable host APIs
+	/// directly. std's IO wrappers already do (`ambient_signal`).
+	[extern(method, "signal_of")]
+	external fun signal(self): CancelSignal;
+}
+
+/// The ambient nursery's cancel signal, if any — read this to bridge an
+/// abortable host API that std doesn't wrap.
+fun ambient_signal(): Option<CancelSignal> {
+	match ambient_nursery.get_safe() {
+		Some(let n) => Some(n.signal()),
+		None => None,
+	}
+}
 
 /// The ambient nursery: established for the dynamic extent of a `nursery`
 /// body, read by the spawn machinery — every `async` expression evaluated
@@ -39,8 +81,11 @@ external struct Nursery;
 /// the name exists for the compiler and the IO wrappers, not for user code.
 let ambient_nursery: Context<Nursery> = Context::new();
 
+/// Creation chains cancellation: a child nursery's signal fires when its
+/// parent's does, so cancelling an outer nursery reaches the IO of every
+/// nursery nested in its extent.
 [extern("__nursery_new")]
-external fun __nursery_new(): Nursery;
+external fun __nursery_new(parent: Option<Nursery>): Nursery;
 
 /// The join machinery (a runtime helper): runs the body, then waits for every
 /// registered task — the list may keep growing while it drains (children may
@@ -59,6 +104,6 @@ async external fun __nursery_run<T>(n: Nursery, body: async || T): T;
 /// the rest are absorbed. Free-floating spawns outside any nursery keep
 /// their unstructured behavior.
 fun nursery<T>(body: (|Nursery| T) context ambient_nursery): T {
-	let n = __nursery_new();
+	let n = __nursery_new(ambient_nursery.get_safe());
 	ambient_nursery.run(n, || __nursery_run(n, || body(n)))
 }

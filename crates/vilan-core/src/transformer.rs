@@ -149,6 +149,7 @@ fn extern_helper(symbol: &str) -> Option<&'static str> {
         "__router_path",
         "__nursery_new",
         "__nursery_run",
+        "__sleep",
     ];
     EXTERN_HELPERS.iter().find(|name| **name == symbol).copied()
 }
@@ -373,24 +374,25 @@ fn helper_source(name: &str) -> &'static str {
         // copying a task refers to the same task (handle semantics).
         // `globalThis.setTimeout`: a module importing `setTimeout` (e.g. from
         // "node:timers/promises") shadows the global in the whole module
-        // scope, helper included. Rejections stamp a global settle sequence
-        // (`seq`) so a nursery can pick the earliest-SETTLED failure; a spawn
-        // inside a nursery's dynamic extent registers via the third argument.
+        // scope, helper included. A spawn inside a nursery's dynamic extent
+        // registers via the third argument; an OWNED task that fails with a
+        // real (non-cancellation) error notifies its nursery AT SETTLE TIME
+        // (`__fail`: latch the earliest, abort the signal, wake the drain),
+        // and never default-reports — the nursery observes it.
         "__task" => {
-            "let __task_seq = 0;\n\
-             class __Task {\n\
+            "class __Task {\n\
              \tconstructor(run, origin, nursery) {\n\
              \t\tthis.origin = origin;\n\
              \t\tthis.observed = false;\n\
+             \t\tthis.nursery = nursery;\n\
              \t\tthis.owned = !!nursery;\n\
              \t\tthis.rejected = false;\n\
              \t\tthis.error = undefined;\n\
-             \t\tthis.seq = 0;\n\
              \t\tthis.promise = run();\n\
              \t\tthis.promise.then(null, (error) => {\n\
              \t\t\tthis.rejected = true;\n\
              \t\t\tthis.error = error;\n\
-             \t\t\tthis.seq = ++__task_seq;\n\
+             \t\t\tif (this.owned && !__nursery_is_cancel(error)) this.nursery.__fail(this);\n\
              \t\t\tif (!this.observed && !this.owned) {\n\
              \t\t\t\tglobalThis.setTimeout(() => {\n\
              \t\t\t\t\tif (!this.observed) console.error(\"unhandled task error (spawned in \" + this.origin + \"): \" + String(error));\n\
@@ -408,17 +410,63 @@ fn helper_source(name: &str) -> &'static str {
              \treturn new __Task(run, origin, nursery);\n\
              }"
         }
-        "__nursery_new" => "function __nursery_new() {\n\treturn { children: [] };\n}",
+        // The nursery handle: children + an AbortController. `cancel()` (and
+        // the join's first-error abort) fires the signal std IO listens on;
+        // a child nursery chains to its parent's signal at creation, so an
+        // outer cancel reaches every nested extent. The vilan-side methods
+        // (`cancel`/`is_cancelled`/`signal_of`) bind via `[extern(method)]`.
+        "__nursery_new" => {
+            "class __Nursery {\n\
+             \tconstructor(parent) {\n\
+             \t\tthis.children = [];\n\
+             \t\tthis.failedTask = undefined;\n\
+             \t\tthis.failWake = undefined;\n\
+             \t\tthis.controller = new AbortController();\n\
+             \t\tif (parent) {\n\
+             \t\t\tconst signal = parent.controller.signal;\n\
+             \t\t\tif (signal.aborted) this.controller.abort(signal.reason);\n\
+             \t\t\telse signal.addEventListener(\"abort\", () => this.controller.abort(signal.reason), { once: true });\n\
+             \t\t}\n\
+             \t}\n\
+             \tcancel() {\n\
+             \t\tthis.controller.abort();\n\
+             \t}\n\
+             \t__fail(task) {\n\
+             \t\tif (this.failedTask === undefined) {\n\
+             \t\t\tthis.failedTask = task;\n\
+             \t\t\tthis.controller.abort();\n\
+             \t\t\tif (this.failWake) this.failWake();\n\
+             \t\t}\n\
+             \t}\n\
+             \tis_cancelled() {\n\
+             \t\treturn this.controller.signal.aborted;\n\
+             \t}\n\
+             \tsignal_of() {\n\
+             \t\treturn this.controller.signal;\n\
+             \t}\n\
+             }\n\
+             function __nursery_new(parent) {\n\
+             \treturn new __Nursery(parent && parent[0] === 0 ? parent[1] : undefined);\n\
+             }"
+        }
         // The nursery join (async-polymorphism.md Part B): run the body, then
         // drain the children — the list may grow while draining (children
-        // spawn grandchildren). On failure, the first-OBSERVED rule: a body
-        // throw wins (it always happens before the join); otherwise the
-        // earliest-settled child rejection (the `seq` stamp). Every child is
-        // absorbed before re-raising — observed, so no unobserved-failure
-        // reports; results discarded — and a string winner (a vilan panic)
-        // carries its spawn origin into the message.
+        // spawn grandchildren). Failure reaction is AT SETTLE TIME: a failing
+        // owned task latched itself via `__fail` (earliest-settled by
+        // construction) and aborted the signal, and the drain races every
+        // child against the wake so a fast failure behind a slow healthy
+        // sibling is seen immediately. Cancellation-classified rejections
+        // (`AbortError`) are echoes, never winners. On failure every child
+        // is absorbed — observed, so no unobserved-failure reports; results
+        // discarded — the body's throw wins (it always happens before the
+        // join, and a cancellation interrupting the body propagates as the
+        // nursery's outcome), and a string winner (a vilan panic) carries
+        // its spawn origin into the message.
         "__nursery_run" => {
-            "async function __nursery_run(n, body) {\n\
+            "function __nursery_is_cancel(error) {\n\
+             \treturn !!error && error.name === \"AbortError\";\n\
+             }\n\
+             async function __nursery_run(n, body) {\n\
              \tlet result;\n\
              \tlet bodyError;\n\
              \tlet bodyFailed = false;\n\
@@ -428,24 +476,43 @@ fn helper_source(name: &str) -> &'static str {
              \t\tbodyFailed = true;\n\
              \t\tbodyError = error;\n\
              \t}\n\
+             \tif (bodyFailed) n.controller.abort();\n\
+             \tconst failed = new Promise((resolve) => {\n\
+             \t\tn.failWake = resolve;\n\
+             \t\tif (n.failedTask !== undefined) resolve();\n\
+             \t});\n\
              \tlet index = 0;\n\
-             \tlet childFailed = false;\n\
-             \twhile (!bodyFailed && !childFailed && index < n.children.length) {\n\
+             \twhile (!bodyFailed && n.failedTask === undefined && index < n.children.length) {\n\
              \t\ttry {\n\
-             \t\t\tawait n.children[index++];\n\
-             \t\t} catch (error) {\n\
-             \t\t\tchildFailed = true;\n\
-             \t\t}\n\
+             \t\t\tawait Promise.race([n.children[index], failed]);\n\
+             \t\t} catch (error) {}\n\
+             \t\tif (n.failedTask === undefined) index += 1;\n\
              \t}\n\
-             \tif (!bodyFailed && !childFailed) return result;\n\
+             \tif (!bodyFailed && n.failedTask === undefined) return result;\n\
              \tfor (const task of n.children) task.then(null, () => {});\n\
              \tif (bodyFailed) throw bodyError;\n\
-             \tlet winner;\n\
-             \tfor (const task of n.children) {\n\
-             \t\tif (task.rejected && (winner === undefined || task.seq < winner.seq)) winner = task;\n\
-             \t}\n\
-             \tif (winner === undefined) throw new Error(\"nursery: lost the failing task\");\n\
+             \tconst winner = n.failedTask;\n\
              \tthrow typeof winner.error === \"string\" ? winner.error + \" (in task spawned in \" + winner.origin + \")\" : winner.error;\n\
+             }"
+        }
+        // The abortable timer behind `std::time::sleep`: resolve after `ms`,
+        // or reject with the abort reason (clearing the timer) when the
+        // ambient cancel signal — an `Option<CancelSignal>` in the [0, s] /
+        // [1] array form — fires first.
+        "__sleep" => {
+            "function __sleep(ms, signal) {\n\
+             \tconst sig = signal && signal[0] === 0 ? signal[1] : undefined;\n\
+             \treturn new Promise((resolve, reject) => {\n\
+             \t\tif (sig && sig.aborted) {\n\
+             \t\t\treject(sig.reason);\n\
+             \t\t\treturn;\n\
+             \t\t}\n\
+             \t\tconst timer = setTimeout(() => resolve(), ms);\n\
+             \t\tif (sig) sig.addEventListener(\"abort\", () => {\n\
+             \t\t\tclearTimeout(timer);\n\
+             \t\t\treject(sig.reason);\n\
+             \t\t}, { once: true });\n\
+             \t});\n\
              }"
         }
         // Reads `__task`'s third argument out of a safe holder's
@@ -4602,6 +4669,9 @@ const RESERVED_NAMES: &[&str] = &[
     "__nursery_new",
     "__nursery_run",
     "__nursery_of",
+    "__nursery_is_cancel",
+    "__Nursery",
+    "__sleep",
 ];
 
 /// The free identifiers a program's `[extern]`s introduce — an imported symbol

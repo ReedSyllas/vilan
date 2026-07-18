@@ -18873,3 +18873,172 @@ fn spawn_then_settle_composes_with_a_nursery() {
         "[ 10, 20, 30 ]\n",
     );
 }
+
+// --- Cancellation (Part B slice 3): n.cancel(), the AbortSignal bridge into
+// --- std IO (sleep/fetch carry the ambient signal), settle-time failure
+// --- reaction, nested chaining, and the race idiom.
+
+#[test]
+fn cancel_cuts_a_sleeping_child_short_and_keeps_the_value() {
+    // The child's 5000ms sleep aborts when the body cancels; its AbortError
+    // is a cancellation echo (absorbed, not a winner) and the body's value
+    // comes back. The elapsed bound is what pins the abort — without it the
+    // join would wait out the timer.
+    let started = std::time::Instant::now();
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            let v = nursery(|n| {
+                let _ = async {
+                    sleep(5000);
+                    print("never");
+                };
+                sleep(30);
+                n.cancel();
+                print("cancelled");
+                1
+            });
+            print(v);
+        }
+        "#,
+        "cancelled\n1\n",
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the cancelled sleep should not run out its timer"
+    );
+}
+
+#[test]
+fn a_fast_failure_behind_a_slow_sibling_reacts_at_settle_time() {
+    // children[0] sleeps 5000ms; children[1] fails at 20ms. The failure
+    // latches AT SETTLE (not at drain order), aborts the sibling's sleep,
+    // and wins with its origin — promptly.
+    let started = std::time::Instant::now();
+    match compile_and_run(
+        r#"
+        import std::print;
+        import std::io::panic;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            nursery(|n| {
+                let _ = async {
+                    sleep(5000);
+                    print("never-b");
+                };
+                let _ = async {
+                    sleep(20);
+                    panic("boom-a")
+                };
+                0
+            });
+            print("unreachable");
+        }
+        "#,
+    ) {
+        Ok(stdout) => panic!("expected the nursery failure to propagate, got: {stdout:?}"),
+        Err(errors) => {
+            let stderr = errors.join("\n");
+            assert!(
+                stderr.contains("boom-a (in task spawned in main)"),
+                "stderr was: {stderr:?}"
+            );
+            assert!(!stderr.contains("never-b"), "stderr was: {stderr:?}");
+        }
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the first error should abort the slow sibling, not wait it out"
+    );
+}
+
+#[test]
+fn outer_cancel_chains_into_nested_nurseries() {
+    // The inner nursery chains to the outer's signal at creation: the outer
+    // cancel aborts the inner's sleeping child, the echo absorbs, and the
+    // inner nursery still returns its value.
+    let started = std::time::Instant::now();
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            nursery(|outer| {
+                let _ = async {
+                    sleep(20);
+                    outer.cancel();
+                };
+                let v = nursery(|inner| {
+                    let _ = async {
+                        sleep(5000);
+                        print("never");
+                    };
+                    3
+                });
+                print("inner-returned");
+                print(v);
+                0
+            });
+            print("done");
+        }
+        "#,
+        "inner-returned\n3\ndone\n",
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the outer cancel should reach the inner nursery's child"
+    );
+}
+
+#[test]
+fn is_cancelled_reads_and_an_explicit_cancel_keeps_the_value() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::task::nursery;
+        fun main() {
+            let v = nursery(|n| {
+                print(n.is_cancelled());
+                n.cancel();
+                print(n.is_cancelled());
+                5
+            });
+            print(v);
+        }
+        "#,
+        "false\ntrue\n5\n",
+    );
+}
+
+#[test]
+fn the_race_idiom_yields_the_first_settled_and_aborts_the_losers() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::{ nursery, Task };
+        fun main() {
+            let winner = nursery(|n| {
+                let a = async {
+                    sleep(300);
+                    "slow"
+                };
+                let b = async {
+                    sleep(10);
+                    "fast"
+                };
+                let w = Task::race([a, b]);
+                n.cancel();
+                w
+            });
+            print(winner);
+        }
+        "#,
+        "fast\n",
+    );
+}

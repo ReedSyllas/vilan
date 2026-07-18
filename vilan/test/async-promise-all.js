@@ -1,18 +1,17 @@
 import { setTimeout } from "node:timers/promises";
-let __task_seq = 0;
 class __Task {
 	constructor(run, origin, nursery) {
 		this.origin = origin;
 		this.observed = false;
+		this.nursery = nursery;
 		this.owned = !!nursery;
 		this.rejected = false;
 		this.error = undefined;
-		this.seq = 0;
 		this.promise = run();
 		this.promise.then(null, (error) => {
 			this.rejected = true;
 			this.error = error;
-			this.seq = ++__task_seq;
+			if (this.owned && !__nursery_is_cancel(error)) this.nursery.__fail(this);
 			if (!this.observed && !this.owned) {
 				globalThis.setTimeout(() => {
 					if (!this.observed) console.error("unhandled task error (spawned in " + this.origin + "): " + String(error));

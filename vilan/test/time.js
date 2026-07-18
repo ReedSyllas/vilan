@@ -11,6 +11,20 @@ function __list_pop(list) {
 function __shared_new(value) {
 	return { v: value };
 }
+function __sleep(ms, signal) {
+	const sig = signal && signal[0] === 0 ? signal[1] : undefined;
+	return new Promise((resolve, reject) => {
+		if (sig && sig.aborted) {
+			reject(sig.reason);
+			return;
+		}
+		const timer = setTimeout(() => resolve(), ms);
+		if (sig) sig.addEventListener("abort", () => {
+			clearTimeout(timer);
+			reject(sig.reason);
+		}, { once: true });
+	});
+}
 function __try_parse_json(text) {
 	try {
 		return [ 0, JSON.parse(text) ];
@@ -920,17 +934,25 @@ function sub2(self, b) {
 function partial_compare2(self, b) {
 	return partial_compare3(self[0], b[0]);
 }
-async function sleep(ms) {
-	await (new Promise((resolve) => {
-		setTimeout(resolve, ms);
-		return;
-	}));
+async function sleep(ms, $ay) {
+	await (__sleep(ms, ambient_signal($ay)));
 }
-async function sleep_for(duration) {
-	await (sleep(as_i32(duration[0])));
+async function sleep_for(duration, $av) {
+	await (sleep(as_i32(duration[0]), $av));
 }
 function eq(self, other) {
 	return self[0] === other[0];
+}
+function ambient_signal($az) {
+	const $aA = $az;
+	let $aB = null;
+	if ($aA[0] === 0) {
+		const n = $aA[1];
+		$aB = [ 0, n.signal_of() ];
+	} else {
+		$aB = [ 1 ];
+	}
+	return $aB;
 }
 function partial_compare3(self, b) {
 	let $b = null;
@@ -950,23 +972,23 @@ function partial_compare3(self, b) {
 function fold_unsigned(value2, modulus) {
 	const truncated = Math.trunc(value2);
 	const wrapped = truncated % modulus;
-	let $av = null;
-	if (wrapped < 0) {
-		$av = wrapped + modulus;
-	} else {
-		$av = wrapped;
-	}
-	return $av;
-}
-function fold_signed(value2, modulus, half) {
-	const wrapped = fold_unsigned(value2, modulus);
 	let $aw = null;
-	if (wrapped >= half) {
-		$aw = wrapped - modulus;
+	if (wrapped < 0) {
+		$aw = wrapped + modulus;
 	} else {
 		$aw = wrapped;
 	}
 	return $aw;
+}
+function fold_signed(value2, modulus, half) {
+	const wrapped = fold_unsigned(value2, modulus);
+	let $ax = null;
+	if (wrapped >= half) {
+		$ax = wrapped - modulus;
+	} else {
+		$ax = wrapped;
+	}
+	return $ax;
 }
 function as_i32(self) {
 	const widened = Number(self);
@@ -1130,6 +1152,6 @@ function $ap(codec, frame) {
 		$au = console.log(reason3);
 	}
 	$au;
-	await (sleep_for(millis(10)));
+	await (sleep_for(millis(10), [ 1 ]));
 	console.log("slept");
 })();
