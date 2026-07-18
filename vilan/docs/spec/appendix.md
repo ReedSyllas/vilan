@@ -61,9 +61,3 @@ Std declarations the language itself depends on:
 | `Context<T>` | `std::context` | contexts (§8) |
 | `panic`, `assert` | `std::io` | divergence, `vilan test` |
 
-## A.5 Phase B (pending chapters)
-
-§9 Const evaluation · §10 Macros · §11 The platform model & manifests.
-Until they land, the corresponding tour chapters
-([macros & const](../tour/macros-and-const.md),
-[platforms](../tour/platforms.md)) are the best available descriptions.

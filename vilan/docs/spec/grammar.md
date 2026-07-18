@@ -140,7 +140,7 @@ macro-block      = "macro" block ;
 ```
 
 A macro attribute's arguments are captured as **source spans** — the
-macro receives their text, not their values (§10, Phase B). The built-in
+macro receives their text, not their values (§10). The built-in
 attribute names (`derive`, `service`, `extern`, `must_use`, `rpc`,
 `trait_only`, `doc`, `expose`) are not available as user macro-attribute
 names.
@@ -269,7 +269,7 @@ Two consequences of the tier split are normative:
   condition (`if p == (Point { x = 1 }) { … }`).
 - `const` captures **weakly**: everything to the end of the expression
   (up to the enclosing bracket or comma) folds; parenthesize to narrow
-  (§9, Phase B).
+  (§9).
 
 A closure's body is one expression (commonly a block). `||` in operand
 position always begins a zero-parameter closure; logical-or is only

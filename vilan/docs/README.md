@@ -98,6 +98,8 @@ to GitHub Pages automatically. Everything also reads fine as plain files
 | [§6 The memory model](spec/memory.md) | the four rules, views, projections, the await rule |
 | [§7 Execution & async](spec/execution.md) | entrypoint, evaluation order, the async model |
 | [§8 Contexts](spec/contexts.md) | ambient values: `run`/`get`, coverage, injected closures |
+| [§9 Const evaluation](spec/const.md) | compile-time values, the const environment, assets |
+| [§10 Macros](spec/macros.md) | attribute/derive/block macros, macro_std, splicing |
+| [§11 Platform model & manifests](spec/platform.md) | layers, coloring, fences, vilan.toml |
 | [§A Appendix](spec/appendix.md) | precedence & keyword tables, lang items |
 
-*(Spec Phase B — contexts, const, macros, the platform model — pending.)*

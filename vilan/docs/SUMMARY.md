@@ -53,6 +53,9 @@
 - [§6 The memory model](spec/memory.md)
 - [§7 Execution & async](spec/execution.md)
 - [§8 Contexts](spec/contexts.md)
+- [§9 Const evaluation](spec/const.md)
+- [§10 Macros](spec/macros.md)
+- [§11 The platform model & manifests](spec/platform.md)
 - [§A Appendix](spec/appendix.md)
 
 # Appendix

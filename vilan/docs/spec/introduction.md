@@ -33,7 +33,7 @@ next. A **conforming program** passes all of them.
 
 1. **Lexing** (§2) — source text to tokens.
 2. **Parsing** (§3) — tokens to the syntax tree.
-3. **Macro expansion & loading** (Phase B) — module loading, attribute/
+3. **Macro expansion & loading** (§10) — module loading, attribute/
    derive/block expansion, splicing. Generated code re-enters phases 1–2.
 4. **Name resolution** (§4) — names to declarations.
 5. **Type checking** (§5) — types, generic binding, bound checking.
@@ -69,7 +69,7 @@ surrounding prose.
 A **module** is one source file (`.vl`, UTF-8). A **package** is a directory
 with a `vilan.toml` manifest declaring `[package]` (an application) or
 `[library]`; a `[project]` manifest groups packages into a workspace
-(normative manifest schema: §11, Phase B). A **program** is an application
+(normative manifest schema: §11). A **program** is an application
 package compiled for a **platform** (§11): its entry module, the modules it
 transitively imports, its dependencies' modules, and the standard library
 subset they reach.
