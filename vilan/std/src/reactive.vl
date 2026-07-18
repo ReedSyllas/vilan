@@ -156,26 +156,18 @@ fun flush() {
 /// Establish a FRESH turn for `body`'s dynamic extent, and settle it when the
 /// extent ends. The isolation primitive: `body`'s writes (and those of the
 /// closures it creates — capture-at-creation) queue here and nowhere else.
-fun turn<T>(policy: FlushPolicy, body: (sync || T) context turn_scope): T {
+///
+/// The body is a plain closure parameter, so it is asyncness-polymorphic
+/// (spec §7.4): a synchronous body drains at the end of its synchronous
+/// extent — the atomic turn — and an AWAITING body adapts, holding EVERY
+/// notification — before the first suspension and in every continuation —
+/// until the body has fully completed, then settling once (same-signal
+/// writes coalesce to their final value). The held form is the wire turn:
+/// an RPC handler that reads, awaits, and writes publishes one coherent
+/// wave. (`turn_async` was the pre-adaptation spelling of the held form.)
+fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T {
 	// The policies converge for async extents in v1 — see `FlushPolicy`.
 	let _cadence = policy;
-	let fresh = Turn::new();
-	let result = turn_scope.run(fresh, body);
-	drain(fresh);
-	fresh.settled.write() = true;
-	result
-}
-
-/// The TRANSACTIONAL async extent: establish a fresh turn and hold EVERY
-/// notification — before the first suspension and in every continuation —
-/// until the body has fully completed, then settle once (same-signal writes
-/// coalesce to their final value). This is the true held-across-await
-/// `AtEnd`; `turn(..)` with a spawn-style body settles per segment instead.
-///
-/// The body is `async`-typed (J2), so the (rewritten) call through it is
-/// implicitly awaited — the await covers the body's whole chain; a sync body
-/// passes fine (awaiting a plain value just resolves).
-fun turn_async<T>(body: (async || T) context turn_scope): T {
 	let fresh = Turn::new();
 	let result = turn_scope.run(fresh, body);
 	drain(fresh);
@@ -189,8 +181,8 @@ fun turn_async<T>(body: (async || T) context turn_scope): T {
 /// rolled back on failure. Returns the outcome for the caller's error UX.
 /// Under a UI turn the optimistic paint settles when the handler's sync
 /// extent ends (its first suspension); the reconcile settles as its own
-/// continuation segment. Inside `turn_async` the whole lifecycle holds —
-/// the transaction wins.
+/// continuation segment. Inside a held turn (a `turn` with an awaiting
+/// body) the whole lifecycle holds — the transaction wins.
 fun optimistic<T, E>(signal: Signal<T>, value: T, commit: async || Result<T, E>): Result<T, E> {
 	let previous = signal.get();
 	signal.set(value);

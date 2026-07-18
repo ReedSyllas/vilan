@@ -20,7 +20,22 @@ early), and settles once — same-signal writes coalesce to their final value.
 `optimistic(signal, value, commit)` is the reconcile lifecycle: paint now,
 await the commit, then confirm or roll back, returning the outcome. **A6 is
 COMPLETE**; the cadence split for directly-awaiting `turn` bodies remains
-the one recorded refinement. Three implementation findings amended the design:
+the one recorded refinement.
+
+**2026-07-18 — `turn_async` MERGED INTO `turn`** (post-v0.9.0, user's call):
+adaptation (async-polymorphism.md Part A) made the pair redundant — `turn`'s
+body is now a plain `(|| T) context turn_scope` parameter, so a synchronous
+body selects the atomic instance and an awaiting body adapts into exactly
+the old `turn_async` semantics (the drain awaits the body's whole chain).
+The split existed only because (a) pre-adaptation, asyncness had to be
+declared on the parameter type, and (b) the directly-applied-closure await
+hole (fixed in Part B slice 2) made an async body through `turn` mis-drain.
+`batch` keeps its `sync` fence deliberately: its join-the-ambient arm has
+unresolved semantics for async bodies (the outer extent would settle while
+the joined body still runs — drain-affinity territory). The generic-void
+edge (a `|| T` body at `T = void` must adapt, not spawn) is pinned.
+
+Three implementation findings amended the design:
 
 1. **Injected bodies, not captured** (`turn` AND `batch`): a batch body is a
    literal at the call site, created BEFORE the extent exists —

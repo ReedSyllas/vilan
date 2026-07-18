@@ -153,8 +153,8 @@ that awaits the callback.)
 The parameter is a `sync` contract position — `Signal::map`,
 `set_with`, `turn`/`batch` bodies, the UI render callbacks — where the
 callback must finish inside a synchronous protocol, so it cannot adapt.
-Move the async work outside the callback: `turn_async(|| …)` for a turn
-held across awaits, `Draft`/`optimistic` for local-first commits, or a
+Move the async work outside the callback: an explicit `turn(…)` whose
+awaiting body holds one turn across its awaits, `Draft`/`optimistic` for local-first commits, or a
 spawned `async { … }` block. The transitive form ("this call passes an
 async closure that reaches `…`") points at the call that made the
 closure async and notes where it was forwarded.

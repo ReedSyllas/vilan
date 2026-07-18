@@ -3233,7 +3233,7 @@ fn service_contract_verify_matches_and_catches_drift() {
 fn an_async_rpc_method_replies_after_its_await() {
     // The user-shaped case: a `[rpc]` method that awaits (here `sleep_for`)
     // compiles, and its reply carries the value computed AFTER the suspension.
-    // The `[service]` macro wraps each route in `turn_async`, and every seam
+    // The `[service]` macro wraps each route in a held `turn`, and every seam
     // of the spine (`Dispatcher.handle` → `RpcProtocol.respond` →
     // `LocalTransport.call`) awaits through a re-marked `let` (J2 v1).
     assert_compiles_and_runs(
@@ -3321,7 +3321,7 @@ fn sync_and_async_rpc_methods_coexist_on_one_service() {
 
 #[test]
 fn an_async_rpc_methods_writes_settle_as_one_wave_with_its_reply() {
-    // The wire turn HOLDS across the handler's await (`turn_async`, the true
+    // The wire turn HOLDS across the handler's await (an awaiting `turn` body, the true
     // at-end cadence): a write before and a write after the suspension
     // coalesce, so the mirror sees ONE update — the final value — alongside
     // the reply. (Per-segment settling would leak "working" as its own
@@ -10137,19 +10137,19 @@ fn at_end_holds_writes_across_the_await_inside_the_extent() {
     );
 }
 
-// --- reactive-turns follow-ons: `turn_async` (the true held-across-await ---
-// --- transaction) and the optimistic-write → reconcile lifecycle.        ---
+// --- reactive-turns follow-ons: the held turn (an awaiting `turn` body   ---
+// --- adapts — the pre-merge `turn_async`) and the optimistic lifecycle.  ---
 
 #[test]
-fn turn_async_holds_writes_until_the_body_completes() {
-    // The transactional extent: NOTHING publishes during the body — not
-    // before the await, not in continuations — and the single settle
-    // coalesces same-signal writes to the final value ("working" never
-    // fires).
+fn an_awaiting_turn_body_holds_writes_until_it_completes() {
+    // The transactional extent, through ADAPTATION (the body is a plain
+    // closure parameter): NOTHING publishes during the body — not before
+    // the await, not in continuations — and the single settle coalesces
+    // same-signal writes to the final value ("working" never fires).
     assert_compiles_and_runs(
         r#"
         import std::print;
-        import std::reactive::{ Signal, turn_async, turn_scope };
+        import std::reactive::{ Signal, turn, FlushPolicy, turn_scope };
 
         async fun tick() {
             let _beat = 1;
@@ -10158,7 +10158,7 @@ fn turn_async_holds_writes_until_the_body_completes() {
         fun main() {
             let status = Signal::new("idle");
             let _watch = status.sub(|value| print(i"status {value}"));
-            turn_async(|| {
+            turn(FlushPolicy::AtEnd, || {
                 status.set("working");
                 tick();
                 status.set("done");
@@ -10172,18 +10172,18 @@ fn turn_async_holds_writes_until_the_body_completes() {
 }
 
 #[test]
-fn turn_async_returns_the_body_value() {
+fn an_awaiting_turn_returns_the_body_value() {
     assert_compiles_and_runs(
         r#"
         import std::print;
-        import std::reactive::{ turn_async, turn_scope };
+        import std::reactive::{ turn, FlushPolicy, turn_scope };
 
         async fun tick() {
             let _beat = 1;
         }
 
         fun main() {
-            let answer = turn_async(|| {
+            let answer = turn(FlushPolicy::AtEnd, || {
                 tick();
                 42
             });
@@ -10192,6 +10192,56 @@ fn turn_async_returns_the_body_value() {
         main();
         "#,
         "42\n",
+    );
+}
+
+#[test]
+fn a_sync_turn_body_stays_atomic_and_keeps_its_emission() {
+    // The other adaptation instance: a synchronous body drains at the end
+    // of its synchronous extent — subscribers fire before the next
+    // statement runs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::reactive::{ Signal, turn, FlushPolicy, turn_scope };
+
+        fun main() {
+            let counter = Signal::new(0);
+            let _watch = counter.sub(|value| print(i"saw {value}"));
+            turn(FlushPolicy::AtEnd, || {
+                counter.set(1);
+                counter.set(2);
+            });
+            print("after");
+        }
+        main();
+        "#,
+        "saw 0\nsaw 2\nafter\n",
+    );
+}
+
+#[test]
+fn an_async_void_body_through_a_generic_return_parameter_adapts() {
+    // The merge's load-bearing edge: `turn`'s body is `|| T`, and T = void
+    // instantiations must ADAPT (await — the sequential contract), not take
+    // the declared-void spawn semantics. Spawning here would drain a turn
+    // while its body still runs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun run_it<T>(body: || T): T {
+            body()
+        }
+        fun main() {
+            run_it(|| {
+                sleep(10);
+                print("inside");
+            });
+            print("after");
+        }
+        "#,
+        "inside\nafter\n",
     );
 }
 

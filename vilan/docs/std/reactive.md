@@ -9,7 +9,7 @@ Import what you use:
 import std::reactive::{
 	Signal, Source, Subscription, Disposable, combine,
 	Owner, owner_scope, get_owner, run_with_owner, comp,
-	Turn, FlushPolicy, turn_scope, turn, turn_async, batch, flush,
+	Turn, FlushPolicy, turn_scope, turn, batch, flush,
 	optimistic, draft, Draft, DraftState,
 	reconcile, ReconcilePlan, RowStep,
 };
@@ -25,7 +25,7 @@ import std::reactive::{
 | `combine` | fn | tuple-signal over 2+ signals |
 | `Owner` | struct | disposal bag; the lifetime unit |
 | `run_with_owner`, `comp`, `get_owner`, `owner_scope` | fns/context | establish/read the ambient owner |
-| `turn`, `turn_async`, `batch`, `flush`, `FlushPolicy`, `turn_scope` | fns/context | write batching |
+| `turn`, `batch`, `flush`, `FlushPolicy`, `turn_scope` | fns/context | write batching |
 | `optimistic` | fn | paint → commit → confirm-or-rollback |
 | `draft`, `Draft<T>`, `DraftState` | fn/struct/enum | local-first editing cell |
 | `reconcile`, `ReconcilePlan`, `RowStep` | fn/structs | keyed list diffing engine |
@@ -124,19 +124,18 @@ not per object; in UI code the framework's boundaries (`mount_root`,
 enum FlushPolicy { AtEnd, AtSuspension }
 let turn_scope: Context<Turn>
 
-fun turn<T>(policy: FlushPolicy, body: (sync || T) context turn_scope): T
-fun turn_async<T>(body: (async || T) context turn_scope): T   // held across awaits
-fun batch<T>(body: (sync || T) context turn_scope): T         // join or create
-fun flush()                                                   // drain the ambient turn now
+fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T
+fun batch<T>(body: (sync || T) context turn_scope): T   // join or create
+fun flush()                                             // drain the ambient turn now
 ```
 
 Inside a turn, signal writes are recorded and each subscriber runs once with
-final values when the turn settles. `turn` settles at the end of the body's
-synchronous extent; `turn_async` holds every notification until the async
-body fully completes (a transaction). Framework boundaries establish turns
-for you: UI event handlers and `mount_root` (`AtSuspension`), RPC service
-handlers (`AtEnd`). Writes landing after a settle (from spawned work) drain
-in per-segment microtasks.
+final values when the turn settles. The body is asyncness-polymorphic (spec
+§7.4): a synchronous body settles at the end of its synchronous extent, and
+an awaiting body holds every notification until it fully completes — a
+transaction. Framework boundaries establish turns for you: UI event handlers
+and `mount_root` (`AtSuspension`), RPC service handlers (`AtEnd`). Writes
+landing after a settle (from spawned work) drain in per-segment microtasks.
 
 ## optimistic
 

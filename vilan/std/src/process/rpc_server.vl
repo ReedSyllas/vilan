@@ -12,7 +12,7 @@
 
 import pkg::option::Option::{ Some, None };
 import pkg::shared::Shared;
-import pkg::reactive::{ batch, turn_async };
+import pkg::reactive::{ batch, turn, FlushPolicy };
 import pkg::wire::Frame;
 import pkg::bytes::Bytes;
 import pkg::json::{ JsonValue, FromJson, has_json_field };
@@ -59,7 +59,7 @@ fun ws_accept_key(key: str): str {
 /// `Server` API, so it serves TEXT codecs (JSON); a binary protocol belongs on
 /// `serve_connected`'s raw `/rpc` route.
 fun rpc_response(protocol: RpcProtocol, request: Request): Response {
-	let reply = turn_async(|| protocol.respond(Frame::Text(request.body())));
+	let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Text(request.body())));
 	match reply {
 		Frame::Text(let frame) => Response::builder()
 			.set_header("Content-Type", "application/json")
@@ -185,7 +185,7 @@ fun serve_connected(
 			// Read the body as bytes, no sniffing: the JSON codec's reader
 			// accepts a binary frame as UTF-8 (both sides run one codec, Q6).
 			let content = read_request_bytes(node_request);
-			let reply = turn_async(|| protocol.respond(Frame::Binary(content)));
+			let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Binary(content)));
 			match reply {
 				Frame::Text(let frame) => {
 					node_response.set_status_code(200);
@@ -272,7 +272,7 @@ fun accept_socket(
 						let parts = rest.split(":");
 						let id_text = parts[0];
 						let payload = rest.substring(id_text.len() + 1, rest.len());
-						let reply = turn_async(|| protocol.respond(Frame::Text(payload)));
+						let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Text(payload)));
 						match reply {
 							Frame::Text(let answer) => {
 								socket.write_bytes(text_frame(i"r:{id_text}:{answer}"));
@@ -308,7 +308,7 @@ fun accept_socket(
 							| bytes.get(3) << 16
 							| bytes.get(4) << 24;
 						let payload = bytes.slice(5, bytes.len());
-						let reply = turn_async(|| protocol.respond(Frame::Binary(payload)));
+						let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Binary(payload)));
 						match reply {
 							Frame::Binary(let answer) => {
 								socket.write_bytes(binary_frame(tag_rpc_bytes(id, answer)));

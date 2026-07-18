@@ -185,25 +185,28 @@ like React's automatic batching, generalized.
 For the rare explicit cases:
 
 ```vilan,fragment
-turn(policy, || …)       // run a block in a fresh turn
-turn_async(async || …)   // a turn HELD across awaits — a true transaction
-batch(|| …)              // join the current turn, or create one
-flush()                  // drain the ambient turn early
+turn(policy, || …)   // run a block in a fresh turn; an awaiting body HOLDS it
+batch(|| …)          // join the current turn, or create one
+flush()              // drain the ambient turn early
 ```
 
-> **Going deeper.** Suspension is where the two turn flavors differ. A
-> plain turn settles at the end of each synchronous stretch, so an async
-> handler publishes one wave per segment; `turn_async` holds everything
-> until the whole body finishes:
+> **Going deeper.** Suspension is where the shapes differ. An explicit
+> `turn` adapts to its body: a synchronous body settles when it ends
+> (the atomic turn), and an awaiting body holds every notification —
+> before the first await and in every continuation — until the whole
+> body finishes, then settles once: a true transaction. A *boundary*
+> turn around a fire-and-forget handler (a UI event) can't wait for the
+> handler's continuations, so it settles at the end of each synchronous
+> stretch — one wave per segment:
 >
 > ```text
-> handler:      |── writes ──|─── await ───|── writes ──|
+> handler:              |── writes ──|─── await ───|── writes ──|
 >
-> turn:                    settle ▲              settle ▲
->                          (wave 1)              (wave 2)
+> boundary turn:                   settle ▲              settle ▲
+> (a UI event)                     (wave 1)              (wave 2)
 >
-> turn_async:                                    settle ▲
->                                              (one wave)
+> turn, awaiting body:                                   settle ▲
+>                                                      (one wave)
 > ```
 >
 > Writes that land after a turn already settled (from spawned work) are

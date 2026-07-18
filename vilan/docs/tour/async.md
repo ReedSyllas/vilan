@@ -157,7 +157,8 @@ fun map<U>(self, transform: sync |T| U): Signal<U>
 ```
 
 `Signal::map`, `turn`, `batch`, and the UI render callbacks are `sync`
-positions: move async work into `turn_async`, `Draft`, or a spawned
+positions: move async work into a `turn` of its own (an awaiting
+body holds the turn), `Draft`, or a spawned
 `async` block instead.
 
 The remaining boundaries keep the refusal rule. An async closure
@@ -293,5 +294,6 @@ reads the clock. Details in the [time reference](../std/time.md).
 > **Going deeper.** The reactive layer batches signal writes into
 > "turns", and turns interact with suspension: a UI turn settles at the
 > handler's first await, and writes after it land in later waves unless
-> you use `turn_async`. That's a [reactive guide](../guide/reactive.md)
+> an explicit `turn` with an awaiting body holds them. That's a
+> [reactive guide](../guide/reactive.md)
 > topic, not a language rule.
