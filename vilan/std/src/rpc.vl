@@ -245,7 +245,10 @@ fun connect_split(base_url: str): SplitDuplex {
 			}
 		});
 	}
-	// Pump the rest of the stream for the connection's lifetime.
+	// Pump the rest of the stream for the connection's lifetime. Deliberately
+	// unstructured (no nursery): the pump is owned by the CONNECTION, which
+	// outlives this function — it ends when the stream closes. A teardown
+	// error surfaces as an origin-stamped task report, not a crash.
 	let leftover = buffer;
 	let _ = async {
 		mut rest = leftover;

@@ -598,6 +598,10 @@ impl Draft<type T: PartialEq> {
 		self.state.set(DraftState::Dirty);
 		let mine = self.generation.read() + 1;
 		self.generation.write() = mine;
+		// Deliberately unstructured (no nursery): the in-flight commit is
+		// owned by the draft CELL, not by any function's extent — `push`
+		// returning is the point. `settle` resolves every outcome into the
+		// draft's state; a panic escaping it surfaces as the task report.
 		let _in_flight = async self.settle(value, mine);
 	}
 

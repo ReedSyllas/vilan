@@ -297,13 +297,16 @@ Implementation deltas from the design below:
   with no `get_safe` in the program); spec §7.1's exit claim corrected
   (the host exits when no live handles remain, not "when `main`
   completes").
-- **Still open**: a live abort-in-flight `fetch` e2e (the signal
-  attachment is compile-verified and the sleep pins prove the bridge; a
-  hanging-endpoint e2e would pin the fetch leg); `Task<Task<T>>`
-  assimilation (JS thenables flatten — same divergence Promise always
-  had, typed one level deeper than runtime); per-task cancel handles
-  (race composes from nursery-scoped cancel, so deferred until a real
-  need); the free-spawn lint once std itself is scoped.
+- **Still open**: `Task<Task<T>>` assimilation (JS thenables flatten —
+  same divergence Promise always had, typed one level deeper than
+  runtime); per-task cancel handles (race composes from nursery-scoped
+  cancel, so deferred until a real need); the free-spawn lint (std's own
+  audit found NOTHING to migrate — every std spawn is either a returned
+  `Task` or object-lifetime work a function-scoped nursery cannot own,
+  each now comment-marked as deliberate; the lint waits on the
+  resource-owner story). The abort-in-flight `fetch` e2e is CLOSED:
+  `crates/vilan-cli/tests/cancellation.rs` cancels a fetch against a
+  hanging endpoint and joins in ~3s instead of 60.
 
 Original direction (decisions recorded 2026-07-18, all implemented):
 
