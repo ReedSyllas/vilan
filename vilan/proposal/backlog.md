@@ -1210,7 +1210,12 @@ have gaps.
 
 1. **Async/await remaining phases** (L; see the `context-async-plan` memory) — `context` (scoped
    value) landed and threads as a hidden parameter; the shared call-graph (Phase 0) is in
-   `call_graph.rs`. The async/await execution-model phases remain.
+   `call_graph.rs`. The async/await execution-model phases remain. **Direction set
+   2026-07-17**: `proposal/async-polymorphism.md` Part B — structured `scope`
+   blocks (dynamic extent via `context`, join-at-exit, first-error-wins with
+   absorbed rejections, cooperative cancellation honest about JS); Part C
+   records the parallelism spine (sendability via value semantics + Wire,
+   workers, future native fork-join) that the scopes must not foreclose.
 
 2. ~~**Indirect calls are not async-inferred — no implicit await through closure values**~~ —
    **SHIPPED 2026-07-10**: `async || T` closure types. The marker is written at contract
@@ -1236,9 +1241,15 @@ have gaps.
    type — refused when the closure returns a value, spawn-legal when void,
    skipped when the return is unresolved (no known lie). 9 pins + docs
    (tour/async.md rewritten — the "re-mark at a `let`" idiom is obsolete;
-   errors appendix). STILL OPEN: asyncness-polymorphic higher-order
-   functions (monomorphize-by-asyncness — the `map` question). Original
-   finding follows. — async inference infects through DIRECT calls
+   errors appendix). The asyncness-polymorphic remainder is now **DESIGNED —
+   `proposal/async-polymorphism.md` (2026-07-17), ready to build**: plain
+   non-void closure parameters adapt per instantiation
+   (monomorphize-by-asyncness, sequential contract), `sync |T| U` is the
+   opt-out contract marker (reactive/`turn` positions), void keeps spawn,
+   adapted std receivers get snapshot semantics, effect-dependent returns
+   excluded in v1, concurrency = the spawn-then-settle idiom (Part B seeds
+   J1's scopes; Part C records the parallelism spine). Original finding
+   follows. — async inference infects through DIRECT calls
    (`f()` awaits when `f` is async), but a call THROUGH a closure value or parameter
    (`body()` where `body: || T`) has no static callee, so it is never inferred async: the
    call returns the host promise at runtime while typing as plain `T` — the static type
