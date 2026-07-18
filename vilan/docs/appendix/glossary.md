@@ -123,7 +123,7 @@ whose `[expose]`d signals clients [mirror](#mirror).
 reactive state. [Reactive state](../guide/reactive.md).
 
 **spawn** — starting async work without waiting for it: `async expr`.
-Gives you a `Promise<T>`. [Async](../tour/async.md).
+Gives you a `Task<T>`. [Async](../tour/async.md).
 
 **subscription** — one live "call me on change" registration on a
 signal. Effects manage theirs through [owners](#owner); manual `sub`

@@ -59,14 +59,18 @@ The explicit forms:
 
 - `async expr` — **spawn**: evaluate `expr`'s suspending computation
   concurrently; the spawn expression itself does not suspend and yields
-  `Promise<T>` where `T` is `expr`'s type. `async { … }` spawns a block.
-- `await expr` — suspend until the `Promise<T>` operand resolves; yields
-  `T`.
+  `Task<T>` where `T` is `expr`'s type (the task handle is opaque, and
+  copying it refers to the same task). `async { … }` spawns a block.
+- `await expr` — suspend until the `Task<T>` (or raw host `Promise<T>`)
+  operand settles; yields `T`.
 
 A spawned computation runs to its first suspension synchronously, then
-interleaves with its spawner per the host event loop. Dropping a promise
+interleaves with its spawner per the host event loop. Dropping a task
 abandons nothing — the computation still runs; only its result is
-discarded.
+discarded. A task's failure is **absorbed at the spawn**: it is
+delivered to whichever `await` observes the task, and a failed task
+that is never observed is reported to the host console with its spawn
+origin — it does not terminate the program.
 
 ```vilan
 import std::print;

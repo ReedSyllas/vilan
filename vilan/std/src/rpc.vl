@@ -18,6 +18,7 @@
 // protocols.
 
 import pkg::promise::Promise;
+import pkg::task::Task;
 import pkg::shared::Shared;
 import pkg::io::panic;
 import pkg::option::Option::{ self, Some, None };
@@ -31,7 +32,7 @@ import pkg::time::{ sleep_for, Duration };
 
 // === Transport: request/response ============================================
 
-/// Send an encoded request frame, get the encoded reply. The explicit `Promise` marks the
+/// Send an encoded request frame, get the encoded reply. The explicit `Task` marks the
 /// round-trip as a place the caller `await`s deliberately. Frames carry either
 /// format (§6.2) — the codec is chosen at wiring time, not here. A transport
 /// can FAIL (a dropped socket, an unreachable host) — `Err(reason)` is the
@@ -39,11 +40,11 @@ import pkg::time::{ sleep_for, Duration };
 /// (proposal/transport-robustness.md §2.4: failure is representable, never a
 /// dangling promise).
 trait Transport {
-	fun call(self, request: Frame): Promise<Result<Frame, str>>;
+	fun call(self, request: Frame): Task<Result<Frame, str>>;
 }
 
 /// The in-process request/response transport: runs a handler in the same process, wrapped
-/// as a resolved Promise. `handler` is a protocol's frame handler (an `RpcProtocol`).
+/// as a settled Task. `handler` is a protocol's frame handler (an `RpcProtocol`).
 struct LocalTransport {
 	/// The protocol's frame handler; calls through it await (J2's typed
 	/// channel, directly on the field).
@@ -51,7 +52,7 @@ struct LocalTransport {
 }
 
 impl LocalTransport with Transport {
-	fun call(self, request: Frame): Promise<Result<Frame, str>> {
+	fun call(self, request: Frame): Task<Result<Frame, str>> {
 		async {
 			Ok((self.handler)(request))
 		}
@@ -76,7 +77,7 @@ impl HttpTransport with Transport {
 	/// (deployment-wide, Q6), so the kinds always match. (An unreachable host
 	/// still surfaces as the host fetch's rejection — HTTP-level robustness is
 	/// recorded beyond-v1; the reconnecting transport is `SocketTransport`.)
-	fun call(self, request: Frame): Promise<Result<Frame, str>> {
+	fun call(self, request: Frame): Task<Result<Frame, str>> {
 		async {
 			match request {
 				Frame::Text(let body) => {
@@ -492,7 +493,7 @@ struct SocketTransport {
 }
 
 impl SocketTransport with Transport {
-	fun call(self, request: Frame): Promise<Result<Frame, str>> {
+	fun call(self, request: Frame): Task<Result<Frame, str>> {
 		async {
 			if self.duplex.state.get() == ConnectionState::Connected {
 				let id = self.duplex.next_request.read();

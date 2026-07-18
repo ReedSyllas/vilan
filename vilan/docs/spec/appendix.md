@@ -56,7 +56,8 @@ Std declarations the language itself depends on:
 | `Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor` | `std::operators` | operators (§5.7) |
 | `PartialEq`, `PartialOrd` | `std::compare` | `==`/ordering (§5.7) |
 | `Iterator`/`Iterable` | `std::iterator` | `for … in` |
-| `Promise<T>` | `std::promise` | `async`/`await` (§7.3) |
+| `Task<T>` | `std::task` | `async`/`await` (§7.3) |
+| `Promise<T>` | `std::promise` | host-interop promises (§7.3) |
 | `Context<T>` | `std::context` | context clauses (§8, Phase B) |
 | `panic`, `assert` | `std::io` | divergence, `vilan test` |
 

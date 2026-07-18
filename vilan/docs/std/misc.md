@@ -15,6 +15,23 @@ fun assert(condition: bool, message: str)   // panic when false
 `panic` arm in a `match` diverges — the other arms decide the match's
 type. `assert` is the `vilan test` failure mechanism.
 
+## std::task
+
+```vilan,fragment
+external struct Task<T>;
+impl Task<type T> {
+	fun settle_all(tasks: List<Task<T>>): List<T>   // async; implicitly awaited
+}
+```
+
+Tasks only arise from spawning (`async expr`); see the
+[async tour](../tour/async.md). The handle is opaque and copying it
+refers to the same task. Every task absorbs its own failure: a later
+`await` receives it, and a task nobody awaits reports the error (with
+its spawn origin) instead of crashing the program. Keep the task instead
+of the results by spawning the `settle_all` itself:
+`let pending = async Task::settle_all(tasks);`.
+
 ## std::promise
 
 ```vilan,fragment
@@ -24,9 +41,10 @@ impl Promise<type T> {
 }
 ```
 
-Promises only arise from spawning (`async expr`); see the
-[async tour](../tour/async.md). Keep the promise instead of the result by
-spawning the `all` itself: `let pending = async Promise::all(promises);`.
+The raw host promise, for direct host interop: an
+`[extern(new, "Promise")]` constructor or a promise-returning host API
+is typed `Promise<T>`, and `await` unwraps it exactly like a task. Code
+that only spawns never sees this type.
 
 ## std::context
 

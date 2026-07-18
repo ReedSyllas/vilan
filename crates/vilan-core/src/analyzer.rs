@@ -1220,9 +1220,13 @@ pub struct Analyzer<'src> {
     try_dispatch: HashMap<Id, TryDispatch>,
     // Per `?.` site: the lowering (std pair inline; flatten or map).
     lift_dispatch: HashMap<Id, LiftDispatch>,
-    // The `std::promise` `Promise<T>` struct, if loaded. `async e` types as
-    // `Promise<type of e>`, and `await p` unwraps a `Promise<T>` to `T`.
+    // The `std::promise` `Promise<T>` struct, if loaded: the raw host-interop
+    // promise type. `await p` unwraps a `Promise<T>` to `T`.
     promise_struct_id: Option<Id>,
+    // The `std::task` `Task<T>` struct, if loaded. `async e` types as
+    // `Task<type of e>` (falling back to `Promise<T>` against an older std),
+    // and `await t` unwraps a `Task<T>` to `T`.
+    task_struct_id: Option<Id>,
 }
 
 static EMPTY_SPAN: Span = Span {
@@ -1517,6 +1521,7 @@ impl<'src> Analyzer<'src> {
             try_dispatch: HashMap::new(),
             lift_dispatch: HashMap::new(),
             promise_struct_id: None,
+            task_struct_id: None,
         }
     }
 
@@ -9005,15 +9010,22 @@ impl<'src> Analyzer<'src> {
             Expr::Bool(_) => self.bool_type(),
             // `subject is pattern` is a boolean test.
             Expr::Is(_, _) => self.bool_type(),
-            // `async <body>` is a `Promise<T>`, T the type of the body. If the
-            // expected type is itself `Promise<U>`, the body is checked against U.
+            // `async <body>` is a `Task<T>`, T the type of the body (falling
+            // back to `Promise<T>` against an older std without `std::task`).
+            // If the expected type is itself `Task<U>` (or `Promise<U>`), the
+            // body is checked against U.
             Expr::Async(closure_id) => {
                 let body_id = self.closures.get(closure_id).map(|closure| closure.return_);
                 let inner_constraint = match &constraint {
-                    Type::Struct(id, arguments) if Some(*id) == self.promise_struct_id => arguments
-                        .first()
-                        .map(|type_id| type_id.get_type(self))
-                        .unwrap_or(Type::Unknown),
+                    Type::Struct(id, arguments)
+                        if Some(*id) == self.task_struct_id
+                            || Some(*id) == self.promise_struct_id =>
+                    {
+                        arguments
+                            .first()
+                            .map(|type_id| type_id.get_type(self))
+                            .unwrap_or(Type::Unknown)
+                    }
                     _ => Type::Unknown,
                 };
                 let body_type = body_id
@@ -9027,20 +9039,20 @@ impl<'src> Analyzer<'src> {
                     })
                     .unwrap_or(Type::Unknown);
                 // Defer while the body type is still settling, so the wrapped
-                // `Promise<unresolved>` isn't compared against and rejected.
+                // `Task<unresolved>` isn't compared against and rejected.
                 if matches!(body_type, Type::Unresolved) {
                     return Type::Unresolved;
                 }
-                match self.promise_struct_id {
-                    Some(promise_id) => {
+                match self.task_struct_id.or(self.promise_struct_id) {
+                    Some(handle_id) => {
                         let body_type_id = body_type.get_type_id(self);
-                        Type::Struct(promise_id, vec![body_type_id])
+                        Type::Struct(handle_id, vec![body_type_id])
                     }
                     None => Type::Any,
                 }
             }
-            // `await <inner>` unwraps a `Promise<T>` to `T` (and is the identity
-            // on a non-promise).
+            // `await <inner>` unwraps a `Task<T>` or raw `Promise<T>` to `T`
+            // (and is the identity on a non-task).
             Expr::Await(inner_id) => {
                 let inner = self.infer_type_inner(
                     *inner_id,
@@ -9050,10 +9062,15 @@ impl<'src> Analyzer<'src> {
                 );
                 match &inner {
                     Type::Unresolved => Type::Unresolved,
-                    Type::Struct(id, arguments) if Some(*id) == self.promise_struct_id => arguments
-                        .first()
-                        .map(|type_id| type_id.get_type(self))
-                        .unwrap_or(Type::Any),
+                    Type::Struct(id, arguments)
+                        if Some(*id) == self.task_struct_id
+                            || Some(*id) == self.promise_struct_id =>
+                    {
+                        arguments
+                            .first()
+                            .map(|type_id| type_id.get_type(self))
+                            .unwrap_or(Type::Any)
+                    }
                     _ => inner,
                 }
             }
@@ -18085,6 +18102,20 @@ pub fn analyze<'src>(
             .mut_scope_for_scope_id(global_scope_id)
             .name_to_id_map
             .insert("Promise", promise_struct_id);
+    }
+
+    // The `std::task` `Task<T>` struct — the handle `async e` yields.
+    analyzer.task_struct_id = module_scopes
+        .get("task")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Task").copied());
+    // Bind `Task` into the global scope so a bare `Task<T>` annotation
+    // resolves (alongside `std::task::Task` by path).
+    if let Some(task_struct_id) = analyzer.task_struct_id {
+        analyzer
+            .mut_scope_for_scope_id(global_scope_id)
+            .name_to_id_map
+            .insert("Task", task_struct_id);
     }
 
     // A normal entry is walked here in the global scope. When the entry is a std

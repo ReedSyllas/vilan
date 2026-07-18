@@ -360,6 +360,41 @@ fn helper_source(name: &str) -> &'static str {
              \t\t: new Array(n).fill(value);\n\
              }"
         }
+        // The `Task<T>` handle an `async` spawn yields (async-polymorphism.md
+        // Part B). Eager: the body closure runs to its first suspension inside
+        // the constructor. The rejection handler attached AT CONSTRUCTION
+        // absorbs the failure (it can never surface as a host unhandled
+        // rejection); if nothing observes the task — `await` and every other
+        // consumer go through `then`, the thenable protocol — the failure is
+        // reported one macrotask later with the spawn origin, and the program
+        // continues. A class instance passes through `__clone` untouched, so
+        // copying a task refers to the same task (handle semantics).
+        // `globalThis.setTimeout`: a module importing `setTimeout` (e.g. from
+        // "node:timers/promises") shadows the global in the whole module
+        // scope, helper included.
+        "__task" => {
+            "class __Task {\n\
+             \tconstructor(run, origin) {\n\
+             \t\tthis.origin = origin;\n\
+             \t\tthis.observed = false;\n\
+             \t\tthis.promise = run();\n\
+             \t\tthis.promise.then(null, (error) => {\n\
+             \t\t\tif (!this.observed) {\n\
+             \t\t\t\tglobalThis.setTimeout(() => {\n\
+             \t\t\t\t\tif (!this.observed) console.error(\"unhandled task error (spawned in \" + this.origin + \"): \" + String(error));\n\
+             \t\t\t\t}, 0);\n\
+             \t\t\t}\n\
+             \t\t});\n\
+             \t}\n\
+             \tthen(onFulfilled, onRejected) {\n\
+             \t\tthis.observed = true;\n\
+             \t\treturn this.promise.then(onFulfilled, onRejected);\n\
+             \t}\n\
+             }\n\
+             function __task(run, origin) {\n\
+             \treturn new __Task(run, origin);\n\
+             }"
+        }
         "__clone" => {
             "function __clone(value) {\n\
              \tif (Array.isArray(value)) return value.map(__clone);\n\
@@ -435,6 +470,10 @@ struct Transformer<'src> {
     // adapted callees.
     current_adapted: Vec<Id>,
     current_instance: Option<crate::analyzer::AdaptedInstance>,
+    // The source name of the function whose body is being emitted — the spawn
+    // ORIGIN stamped into `__task` calls, so an unobserved task failure can
+    // name where it was spawned. `None` at module level ("top level").
+    current_origin: Option<&'src str>,
     // Every entity emitted as a VALUE reference (the `Expr::Local` arm) —
     // consulted at assembly to tree-shake module-level bindings (F6): a
     // binding emits only if something reachable referenced it.
@@ -527,6 +566,7 @@ impl<'src> Transformer<'src> {
             current_substitution: HashMap::new(),
             current_adapted: Vec::new(),
             current_instance: None,
+            current_origin: None,
             referenced_globals: HashSet::new(),
             instances: HashMap::new(),
             current_self_type: None,
@@ -1481,13 +1521,26 @@ impl<'src> Transformer<'src> {
                             .is_some_and(|instance| instance.async_closures.contains(closure_id)),
                 })
             }
-            // `async <body>` — the async-block closure invoked with no
-            // arguments, yielding a promise: `(async () => { <body> })()`.
+            // `async <body>` — the spawn: `__task(async () => { <body> },
+            // "<origin>")` constructs the `Task` handle
+            // (async-polymorphism.md Part B). `__task` invokes the body
+            // closure immediately (eager — it runs to its first suspension at
+            // the spawn expression, as before), attaches the absorption
+            // handler so the rejection can never surface as a host unhandled
+            // rejection, and records the spawn origin for the
+            // unobserved-failure report.
             Expr::Async(closure_id) => {
+                self.used_helpers.insert("__task");
                 let closure = self
                     .walk_entity(*closure_id, block)
                     .unwrap_or(js::Node::Void);
-                js::Node::Call(Box::new(closure), Vec::new())
+                js::Node::Call(
+                    Box::new(js::Node::Local("__task".to_string())),
+                    vec![
+                        closure,
+                        js::Node::String(Cow::Borrowed(self.current_origin.unwrap_or("top level"))),
+                    ],
+                )
             }
             // `await <inner>`.
             Expr::Await(inner) => {
@@ -3475,26 +3528,45 @@ impl<'src> Transformer<'src> {
     }
 
     /// Swap in the adapted-instance context for a body about to be emitted;
-    /// returns the previous context for `restore_instance`.
+    /// returns the previous context for `restore_instance`. Also tracks the
+    /// function's source name as the spawn origin for `__task` calls.
     fn enter_instance(
         &mut self,
         function_id: Id,
         bits: Vec<Id>,
-    ) -> (Vec<Id>, Option<crate::analyzer::AdaptedInstance>) {
+    ) -> (
+        Vec<Id>,
+        Option<crate::analyzer::AdaptedInstance>,
+        Option<&'src str>,
+    ) {
         let info = self
             .program
             .adapted_instances
             .get(&(function_id, bits.clone()))
             .cloned();
+        let origin = self
+            .program
+            .functions
+            .get(&function_id)
+            .map(|function| function.name);
         (
             std::mem::replace(&mut self.current_adapted, bits),
             std::mem::replace(&mut self.current_instance, info),
+            std::mem::replace(&mut self.current_origin, origin),
         )
     }
 
-    fn restore_instance(&mut self, saved: (Vec<Id>, Option<crate::analyzer::AdaptedInstance>)) {
+    fn restore_instance(
+        &mut self,
+        saved: (
+            Vec<Id>,
+            Option<crate::analyzer::AdaptedInstance>,
+            Option<&'src str>,
+        ),
+    ) {
         self.current_adapted = saved.0;
         self.current_instance = saved.1;
+        self.current_origin = saved.2;
     }
 
     /// The bindings the active substitution provides for the generics a callee's
@@ -4449,6 +4521,8 @@ const RESERVED_NAMES: &[&str] = &[
     "__map_get",
     "__map_keys",
     "__map_values",
+    "__task",
+    "__Task",
 ];
 
 /// The free identifiers a program's `[extern]`s introduce — an imported symbol

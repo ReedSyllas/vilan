@@ -1,8 +1,9 @@
-// `Promise::all` waits for every promise concurrently and preserves order, so
-// the output is a, b, c regardless of each promise's delay. It is `async`, so
-// the call is implicitly awaited to a `List<str>` — no explicit `await`.
+// `Task::settle_all` waits for every spawned task concurrently and preserves
+// order, so the output is a, b, c regardless of each task's delay. It is
+// `async`, so the call is implicitly awaited to a `List<str>` — no explicit
+// `await`.
 import std::{ print };
-import std::promise::Promise;
+import std::task::Task;
 
 [extern("node:timers/promises", "setTimeout")]
 async external fun sleep(ms: i32): void;
@@ -13,11 +14,11 @@ fun delayed(label: str, ms: i32): str {
 }
 
 fun main() {
-	mut promises: List<Promise<str>> = List::new();
-	promises.push(async delayed("a", 20));
-	promises.push(async delayed("b", 10));
-	promises.push(async delayed("c", 30));
-	let results: List<str> = Promise::all(promises);
+	mut tasks: List<Task<str>> = List::new();
+	tasks.push(async delayed("a", 20));
+	tasks.push(async delayed("b", 10));
+	tasks.push(async delayed("c", 30));
+	let results: List<str> = Task::settle_all(tasks);
 	for result in results {
 		print(result);
 	}

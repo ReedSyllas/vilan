@@ -1,0 +1,23 @@
+/// `std::task` — `Task<T>`, the handle an `async` expression yields. A task is
+/// eager: the spawned computation runs to its first suspension at the `async`
+/// expression itself, and `await task` suspends until it settles. The handle
+/// is opaque and copying it refers to the same task — there are no Vilan-level
+/// fields or constructors; a task only ever arises from `async`.
+///
+/// Every task absorbs its own failure at construction: a task whose
+/// computation panics never becomes a host "unhandled rejection". A later
+/// `await` still receives the failure; if nothing ever observes the task —
+/// no `await`, no enclosing nursery — the error is reported to the host
+/// console with the task's spawn origin, and the program continues.
+external struct Task<T>;
+
+impl Task<type T> {
+	/// Waits for every task in the list and yields their results in order —
+	/// the join half of the spawn-then-settle idiom
+	/// (`items.map(|x| async work(x))`, then `Task::settle_all(tasks)`).
+	/// Like any `async` function it is implicitly awaited, so
+	/// `let results = Task::settle_all(tasks);` gives a `List<T>`. If any
+	/// task fails, the first failure panics here once it settles.
+	[extern("Promise.all")]
+	async external fun settle_all(tasks: List<Task<T>>): List<T>;
+}

@@ -23,8 +23,8 @@ independent diagnostics are reported.
 The standard library's API is specified by the [std reference](../std/) and
 is not part of this document, except for the **lang items** the language
 itself depends on (appendix §A.4): `Option`, the `Try`/`Lift` traits, the
-operator traits, `PartialEq`/`PartialOrd`, `Context`, `Promise`, `List`,
-and the primitive types' declarations.
+operator traits, `PartialEq`/`PartialOrd`, `Context`, `Task`, `Promise`,
+`List`, and the primitive types' declarations.
 
 ## 1.2 Program processing phases
 

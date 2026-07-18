@@ -64,7 +64,7 @@ retried — retry is the app's decision.
 
 ```vilan,fragment
 trait Transport {
-	fun call(self, request: Frame): Promise<Result<Frame, str>>;
+	fun call(self, request: Frame): Task<Result<Frame, str>>;
 }
 ```
 

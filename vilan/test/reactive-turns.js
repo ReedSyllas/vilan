@@ -13,6 +13,27 @@ function __list_pop(list) {
 function __shared_new(value) {
 	return { v: value };
 }
+class __Task {
+	constructor(run, origin) {
+		this.origin = origin;
+		this.observed = false;
+		this.promise = run();
+		this.promise.then(null, (error) => {
+			if (!this.observed) {
+				globalThis.setTimeout(() => {
+					if (!this.observed) console.error("unhandled task error (spawned in " + this.origin + "): " + String(error));
+				}, 0);
+			}
+		});
+	}
+	then(onFulfilled, onRejected) {
+		this.observed = true;
+		return this.promise.then(onFulfilled, onRejected);
+	}
+}
+function __task(run, origin) {
+	return new __Task(run, origin);
+}
 function fresh_id() {
 	const id = next_subscriber_id.v;
 	next_subscriber_id.v = id + 1;
@@ -186,12 +207,12 @@ $s([ 0 ], ($y) => {
 });
 const turn_c = new2();
 (($A) => {
-	(async () => {
+	__task(async () => {
 		await (await (tick()));
 		$e(a, 5, [ 0, $A ]);
 		flush([ 0, $A ]);
 		return;
-	})();
+	}, "main");
 	return;
 })(turn_c);
 console.log("end-sync");

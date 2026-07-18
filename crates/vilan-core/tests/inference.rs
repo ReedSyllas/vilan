@@ -380,6 +380,29 @@ fn assert_compiles_and_runs(source: &str, expected_stdout: &str) {
     }
 }
 
+/// Like `compile_and_run`, but a ZERO-exit run yields `(stdout, stderr)` — for
+/// pinning what a program reports while CONTINUING (the unobserved
+/// task-failure report goes to stderr; the process does not crash).
+fn compile_and_run_capturing_stderr(source: &str) -> Result<(String, String), Vec<String>> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let js = compile(source)?;
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("vilan_task_{}_{unique}.js", std::process::id()));
+    std::fs::write(&path, js).map_err(|error| vec![error.to_string()])?;
+    let output = std::process::Command::new("node").arg(&path).output();
+    let _ = std::fs::remove_file(&path);
+    match output {
+        Ok(output) if output.status.success() => Ok((
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )),
+        Ok(output) => Err(vec![String::from_utf8_lossy(&output.stderr).into_owned()]),
+        Err(error) => Err(vec![format!("could not run node: {error}")]),
+    }
+}
+
 // --- Regression guards (must keep passing) ----------------------------------
 
 #[test]
@@ -18385,4 +18408,216 @@ fn a_module_initializer_cannot_adapt_await() {
         "#,
         "a module-level binding cannot await",
     );
+}
+
+// --- The Task<T> substrate (proposal/async-polymorphism.md Part B): `async e`
+// --- yields a `Task<T>` handle — eager, absorbed-at-construction, copy =
+// --- same task. `await` unwraps a Task or a raw host Promise.
+
+#[test]
+fn a_spawn_types_as_task_and_await_unwraps_it() {
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::task::Task;
+        fun label(): str { "ready" }
+        fun main() {
+            let t: Task<str> = async label();
+            let s: str = await t;
+            print(s);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_task_is_not_a_promise() {
+    // The raw host-interop promise and the spawn handle are distinct types.
+    assert_fails_with(
+        r#"
+        import std::task::Task;
+        import std::promise::Promise;
+        fun label(): str { "ready" }
+        fun main() {
+            let p: Promise<str> = async label();
+            let _ = await p;
+        }
+        "#,
+        "Expected Promise<str>, but got Task<str>",
+    );
+}
+
+#[test]
+fn spawn_typing_falls_back_to_promise_without_std_task() {
+    // Compat: a program that loads `std::promise` but never `std::task`
+    // keeps the old `Promise<T>` spawn typing (an older std has no task.vl).
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::promise::Promise;
+        fun label(): str { "ready" }
+        fun main() {
+            let p: Promise<str> = async label();
+            print(await p);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_raw_host_promise_still_types_and_awaits() {
+    // `[extern(new, "Promise")]` — the host-interop seam stays `Promise<T>`,
+    // and `await` unwraps it exactly like a task.
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::promise::Promise;
+        import std::task::Task;
+        [extern(new, "Promise")]
+        external fun ticket(executor: |(|i32| void)| void): Promise<i32>;
+        fun main() {
+            let p: Promise<i32> = ticket(|resolve| { resolve(7); });
+            let n: i32 = await p;
+            print(n);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn settle_all_preserves_order() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::Task;
+        fun delayed(label: str, ms: i32): str {
+            sleep(ms);
+            label
+        }
+        fun main() {
+            mut tasks: List<Task<str>> = List::new();
+            tasks.push(async delayed("a", 20));
+            tasks.push(async delayed("b", 10));
+            tasks.push(async delayed("c", 30));
+            let results: List<str> = Task::settle_all(tasks);
+            for result in results {
+                print(result);
+            }
+        }
+        "#,
+        "a\nb\nc\n",
+    );
+}
+
+#[test]
+fn a_task_is_a_handle_copies_observe_the_same_run() {
+    // Copying the handle refers to the SAME task: the body runs once, and
+    // both copies observe its (single) result.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        fun work(): i32 {
+            sleep(1);
+            print("ran");
+            7
+        }
+        fun main() {
+            let t = async work();
+            let copy = t;
+            print(await copy);
+            print(await t);
+        }
+        "#,
+        "ran\n7\n7\n",
+    );
+}
+
+#[test]
+fn an_unobserved_task_failure_reports_and_the_program_continues() {
+    // Absorption: the failed spawn never becomes a host unhandled rejection
+    // (which would crash node). One macrotask after it settles unobserved,
+    // it is reported to stderr with the spawn origin — and main still runs
+    // to completion with exit 0.
+    match compile_and_run_capturing_stderr(
+        r#"
+        import std::print;
+        import std::io::panic;
+        import std::time::sleep;
+        fun doomed(): i32 {
+            panic("boom")
+        }
+        fun main() {
+            let _ = async doomed();
+            sleep(10);
+            print("alive");
+        }
+        "#,
+    ) {
+        Ok((stdout, stderr)) => {
+            assert_eq!(stdout, "alive\n", "stdout mismatch");
+            assert!(
+                stderr.contains("unhandled task error (spawned in main): boom"),
+                "missing the origin-stamped report, stderr was: {stderr:?}"
+            );
+        }
+        Err(errors) => panic!("expected a clean (exit 0) run, got: {errors:#?}"),
+    }
+}
+
+#[test]
+fn a_promptly_awaited_failure_delivers_without_a_report() {
+    // The awaiting side receives the panic (the process fails with it), and
+    // no unobserved-failure report fires for an observed task.
+    match compile_and_run(
+        r#"
+        import std::print;
+        import std::io::panic;
+        fun doomed(): i32 {
+            panic("boom")
+        }
+        fun main() {
+            let t = async doomed();
+            print(await t);
+        }
+        "#,
+    ) {
+        Ok(stdout) => panic!("expected the run to fail with the panic, got: {stdout:?}"),
+        Err(errors) => {
+            let stderr = errors.join("\n");
+            assert!(stderr.contains("boom"), "stderr was: {stderr:?}");
+            assert!(
+                !stderr.contains("unhandled task error"),
+                "an observed task must not also report, stderr was: {stderr:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_late_await_still_receives_an_absorbed_failure() {
+    // Absorption is not loss: even after the unobserved report has fired,
+    // awaiting the task delivers the original failure.
+    match compile_and_run(
+        r#"
+        import std::print;
+        import std::io::panic;
+        import std::time::sleep;
+        fun doomed(): i32 {
+            panic("boom")
+        }
+        fun main() {
+            let t = async doomed();
+            sleep(10);
+            print(await t);
+        }
+        "#,
+    ) {
+        Ok(stdout) => panic!("expected the run to fail with the panic, got: {stdout:?}"),
+        Err(errors) => {
+            let stderr = errors.join("\n");
+            assert!(stderr.contains("boom"), "stderr was: {stderr:?}");
+        }
+    }
 }

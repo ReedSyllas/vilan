@@ -33,9 +33,9 @@ The explicit keywords exist for the one thing implicit awaiting can't
 express: *not* waiting.
 
 - `async expr` **spawns**: start the work, don't wait for it. It gives
-  you a `Promise<T>`.
+  you a `Task<T>` — a handle to the running work.
 - `async { … }` spawns a block.
-- `await promise` collects a promise you spawned earlier.
+- `await task` collects a task you spawned earlier.
 
 ```vilan
 import std::print;
@@ -55,9 +55,14 @@ fun main() {
 
 So in JS you mark the async case and waiting is explicit. In vilan you
 mark the *concurrent* case and waiting is the default. Fire-and-forget
-is just spawning and dropping the promise: `let _done = async
-save(entry);`. To wait on many at once, `Promise::all(promises)` from
-`std::promise`.
+is just spawning and dropping the task: `let _done = async
+save(entry);`. To wait on many at once, `Task::settle_all(tasks)` from
+`std::task`.
+
+A task's failure can't crash the program from the outside: if the
+spawned work panics, a later `await` receives the panic, and a task
+nobody ever awaits reports the error to the console — with the name of
+the function that spawned it — and execution continues.
 
 ## Async closures
 
@@ -132,8 +137,8 @@ fun fetch_len(url: str): i32 {
 
 fun main() {
 	let lens = ["ab", "cdef"]
-		.map(|url| async fetch_len(url))   // all in flight (List of promises)
-		.map(|p| await p);                 // settle in order: total ≈ max
+		.map(|url| async fetch_len(url))   // all in flight (List of tasks)
+		.map(|t| await t);                 // settle in order: total ≈ max
 	print(lens);
 }
 ```
@@ -173,7 +178,7 @@ reads the clock. Details in the [time reference](../std/time.md).
 ## What async does NOT do
 
 - **No promise-colored signatures.** Return types are the plain values.
-  Promises appear only where you spawned and kept one.
+  A `Task<T>` appears only where you spawned and kept one.
 - **No hidden concurrency.** Everything waits, in order, unless you
   spawn. Same single-threaded event loop as JS underneath.
 - **No views across a suspension.** A `&`/`&mut` view held across an
