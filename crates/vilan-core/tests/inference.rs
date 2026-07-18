@@ -18621,3 +18621,255 @@ fn a_late_await_still_receives_an_absorbed_failure() {
         }
     }
 }
+
+// --- Nurseries (proposal/async-polymorphism.md Part B): `nursery(body)` joins
+// --- every task spawned in its dynamic extent; failures follow the
+// --- first-observed rule with absorption; the extent rides the context pass.
+
+#[test]
+fn nursery_returns_its_body_value_after_joining() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            let value = nursery(|n| {
+                let _ = async {
+                    sleep(20);
+                    print("child");
+                };
+                print("body");
+                7
+            });
+            print(value);
+            print("after");
+        }
+        "#,
+        "body\nchild\n7\nafter\n",
+    );
+}
+
+#[test]
+fn nursery_extent_reaches_helpers_and_grandchildren() {
+    // Dynamic extent: a helper CALLED from the body spawns into the nursery
+    // (no plumbing), and a task spawned by a running child (a grandchild,
+    // registered while the join is already draining) is joined too.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun spawn_step(label: str, ms: i32) {
+            let _ = async {
+                sleep(ms);
+                print(label);
+            };
+        }
+        fun main() {
+            nursery(|n| {
+                spawn_step("helper-spawned", 15);
+                let _ = async {
+                    sleep(5);
+                    spawn_step("grandchild", 20);
+                    print("child");
+                };
+                0
+            });
+            print("joined");
+        }
+        "#,
+        "child\nhelper-spawned\ngrandchild\njoined\n",
+    );
+}
+
+#[test]
+fn a_spawn_outside_the_nursery_extent_stays_free_floating() {
+    // The SAME helper registers when called inside the extent and stays
+    // free-floating outside it (the safe flavor's absent value): "inside"
+    // is joined before the nursery returns and prints BEFORE "mid";
+    // "outside" is not joined by anything, so it floats past "end" and only
+    // prints when its own timer fires.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun work(label: str) {
+            let _ = async {
+                sleep(10);
+                print(label);
+            };
+        }
+        fun main() {
+            nursery(|n| {
+                work("inside");
+                0
+            });
+            print("mid");
+            work("outside");
+            print("end");
+        }
+        "#,
+        "inside\nmid\nend\noutside\n",
+    );
+}
+
+#[test]
+fn a_body_throw_wins_and_children_absorb_silently() {
+    match compile_and_run(
+        r#"
+        import std::print;
+        import std::io::panic;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            nursery(|n| {
+                let _ = async {
+                    sleep(30);
+                    panic("late-child")
+                };
+                panic("body-first")
+            });
+            print("unreachable");
+        }
+        "#,
+    ) {
+        Ok(stdout) => panic!("expected the nursery failure to propagate, got: {stdout:?}"),
+        Err(errors) => {
+            let stderr = errors.join("\n");
+            assert!(stderr.contains("body-first"), "stderr was: {stderr:?}");
+            assert!(
+                !stderr.contains("late-child"),
+                "the losing child must be absorbed silently, stderr was: {stderr:?}"
+            );
+            assert!(
+                !stderr.contains("unhandled task error"),
+                "absorbed children must not default-report, stderr was: {stderr:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_earliest_settled_child_failure_wins_with_origin() {
+    match compile_and_run(
+        r#"
+        import std::print;
+        import std::io::panic;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun fail_after(ms: i32, message: str): i32 {
+            sleep(ms);
+            panic(message)
+        }
+        fun main() {
+            nursery(|n| {
+                let _ = async fail_after(25, "slow-loser");
+                let _ = async fail_after(5, "fast-winner");
+                0
+            });
+            print("unreachable");
+        }
+        "#,
+    ) {
+        Ok(stdout) => panic!("expected the nursery failure to propagate, got: {stdout:?}"),
+        Err(errors) => {
+            let stderr = errors.join("\n");
+            assert!(
+                stderr.contains("fast-winner (in task spawned in main)"),
+                "the earliest-settled failure wins, origin-stamped; stderr was: {stderr:?}"
+            );
+            assert!(
+                !stderr.contains("slow-loser"),
+                "the later failure must be absorbed silently, stderr was: {stderr:?}"
+            );
+            assert!(
+                !stderr.contains("unhandled task error"),
+                "nursery-owned tasks must never default-report, stderr was: {stderr:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_nurseries_join_inside_out() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            let total = nursery(|outer| {
+                let _ = async {
+                    sleep(25);
+                    print("outer-child");
+                };
+                let inner_value = nursery(|inner| {
+                    let _ = async {
+                        sleep(10);
+                        print("inner-child");
+                    };
+                    print("inner-body");
+                    2
+                });
+                print("inner-done");
+                inner_value + 1
+            });
+            print(total);
+        }
+        "#,
+        "inner-body\ninner-child\ninner-done\nouter-child\n3\n",
+    );
+}
+
+#[test]
+fn an_async_nursery_body_adapts() {
+    // The body parameter is a plain closure parameter, so an awaiting body
+    // rides adaptation (Part A) into the nursery machinery.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        fun main() {
+            let v = nursery(|n| {
+                sleep(5);
+                let _ = async {
+                    sleep(10);
+                    print("child");
+                };
+                print("async-body");
+                9
+            });
+            print(v);
+        }
+        "#,
+        "async-body\nchild\n9\n",
+    );
+}
+
+#[test]
+fn spawn_then_settle_composes_with_a_nursery() {
+    // `settle_all` observes the tasks first; the join then re-awaits the
+    // already-settled children instantly. Both idioms coexist.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::{ nursery, Task };
+        fun delayed(value: i32): i32 {
+            sleep(5);
+            value * 10
+        }
+        fun main() {
+            let results = nursery(|n| {
+                let tasks = [1, 2, 3].map(|value| async delayed(value));
+                Task::settle_all(tasks)
+            });
+            print(results);
+        }
+        "#,
+        "[ 10, 20, 30 ]\n",
+    );
+}

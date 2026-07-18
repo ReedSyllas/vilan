@@ -126,6 +126,9 @@ pub fn infer(program: &mut Program) {
                     program.async_fields.contains(&(*struct_id, *index))
                 }
                 Some(Expr::Call(inner)) => call_returns_async_closure(program, *inner),
+                // A directly-applied async closure literal (the lowered
+                // `run` body): a statically-known await point.
+                Some(Expr::Closure(closure_id)) => async_set.contains(closure_id),
                 _ => false,
             },
         )
@@ -212,6 +215,12 @@ pub fn infer(program: &mut Program) {
             continue;
         };
         for (argument, parameter) in function_call.argument_ids.iter().zip(&external.parameters) {
+            // A DECLARED `async |…| T` parameter is the typed channel: the
+            // host explicitly contracts to await the closure (it receives an
+            // async function — `__nursery_run` awaits its body this way).
+            if program.async_values.contains(parameter) {
+                continue;
+            }
             let Some(parameter_record) = program.parameters.get(parameter) else {
                 continue;
             };
@@ -440,17 +449,22 @@ pub fn infer(program: &mut Program) {
                 ) => dispatch_candidates(program, call.call_id)
                     .into_iter()
                     .find(|member| async_set.contains(member)),
-                // A call through an `async || T`-typed value awaits too.
-                _ => program
-                    .function_calls
-                    .get(&call.call_id)
-                    .and_then(|function_call| {
-                        match program.entity_map.get(&function_call.subject_id) {
-                            Some(Expr::Local(target)) => Some(*target),
+                // A call through an `async || T`-typed value awaits too — as
+                // does a directly-applied async closure literal (the lowered
+                // `run` body).
+                _ => {
+                    program.function_calls.get(&call.call_id).and_then(
+                        |function_call| match program.entity_map.get(&function_call.subject_id) {
+                            Some(Expr::Local(target)) if program.async_values.contains(target) => {
+                                Some(*target)
+                            }
+                            Some(Expr::Closure(closure_id)) if async_set.contains(closure_id) => {
+                                Some(*closure_id)
+                            }
                             _ => None,
-                        }
-                    })
-                    .filter(|target| program.async_values.contains(target)),
+                        },
+                    )
+                }
             };
             let Some(target) = async_target else {
                 continue;
@@ -503,8 +517,10 @@ pub fn infer(program: &mut Program) {
 
 /// Whether a call THROUGH `subject_id` is an await point (J2): the subject is
 /// an `async || T`-typed value (declared), a binding HOLDING an async closure
-/// (adoption), a read of an `async || T` field, or a call to a function whose
-/// declared return type carries the marker.
+/// (adoption), a read of an `async || T` field, a call to a function whose
+/// declared return type carries the marker, or an async closure LITERAL
+/// applied directly (the `context` pass lowers `run(value, body)` to
+/// `body(value)` — a statically-known callee, awaited like a direct call).
 fn subject_awaits(
     program: &Program,
     subject_id: Id,
@@ -521,6 +537,7 @@ fn subject_awaits(
             program.async_fields.contains(&(*struct_id, *index))
         }
         Some(Expr::Call(inner)) => call_returns_async_closure(program, *inner),
+        Some(Expr::Closure(closure_id)) => async_set.contains(closure_id),
         _ => false,
     }
 }
@@ -1243,6 +1260,11 @@ fn extern_violations_at(
     };
     let empty_flags = HashMap::new();
     for (argument, parameter) in function_call.argument_ids.iter().zip(&external.parameters) {
+        // The typed channel: a declared `async |…| T` parameter means the
+        // host awaits the closure itself (`__nursery_run`'s body parameter).
+        if program.async_values.contains(parameter) {
+            continue;
+        }
         if !closure_return_is_value(program, *parameter) {
             continue;
         }
@@ -1441,9 +1463,10 @@ fn base_fixpoint(
                 // A call through an `async || T`-typed value IS an await
                 // point — asyncness rides the type (J2), or the VALUE FLOW:
                 // a binding holding an async closure, an async field read, an
-                // async-returning call. Other higher-order calls stay
-                // conservative (the concrete target isn't recoverable), as do
-                // variant constructors and immediately-applied closures.
+                // async-returning call, a directly-applied async closure
+                // literal (the lowered `run` body). Other higher-order calls
+                // stay conservative (the concrete target isn't recoverable),
+                // as do variant constructors.
                 _ => program
                     .function_calls
                     .get(&call.call_id)

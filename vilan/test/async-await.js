@@ -1,24 +1,33 @@
 import { setTimeout } from "node:timers/promises";
+let __task_seq = 0;
 class __Task {
-	constructor(run, origin) {
+	constructor(run, origin, nursery) {
 		this.origin = origin;
 		this.observed = false;
+		this.owned = !!nursery;
+		this.rejected = false;
+		this.error = undefined;
+		this.seq = 0;
 		this.promise = run();
 		this.promise.then(null, (error) => {
-			if (!this.observed) {
+			this.rejected = true;
+			this.error = error;
+			this.seq = ++__task_seq;
+			if (!this.observed && !this.owned) {
 				globalThis.setTimeout(() => {
 					if (!this.observed) console.error("unhandled task error (spawned in " + this.origin + "): " + String(error));
 				}, 0);
 			}
 		});
+		if (nursery) nursery.children.push(this);
 	}
 	then(onFulfilled, onRejected) {
 		this.observed = true;
 		return this.promise.then(onFulfilled, onRejected);
 	}
 }
-function __task(run, origin) {
-	return new __Task(run, origin);
+function __task(run, origin, nursery) {
+	return new __Task(run, origin, nursery);
 }
 async function labelled(label) {
 	await (setTimeout(0));

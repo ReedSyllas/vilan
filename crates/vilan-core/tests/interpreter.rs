@@ -26,6 +26,7 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("adapt.vl", "async (adapted instances await)"),
     ("async-await.vl", "async"),
     ("async-promise-all.vl", "async"),
+    ("nursery.vl", "async (the nursery join awaits)"),
     (
         "reactive-turns.vl",
         "async (the turn-follows-continuation section)",

@@ -15627,6 +15627,18 @@ pub struct Program<'src> {
     pub context_run_fn_id: Option<Id>,
     pub context_get_fn_id: Option<Id>,
     pub context_get_safe_fn_id: Option<Id>,
+    // The `std::task` nursery machinery (if `task.vl` loaded): the
+    // `ambient_nursery` context binding and the `nursery` function. The
+    // context threading pass treats every spawn (`Expr::Async`) as a SAFE
+    // read of `ambient_nursery` — engaged only when some call to `nursery`
+    // exists — so a spawn inside a nursery's dynamic extent can register its
+    // task (async-polymorphism.md Part B).
+    pub nursery_ambient_id: Option<Id>,
+    pub nursery_fn_id: Option<Id>,
+    // Filled by the context pass: spawn entity -> (the entity that reads the
+    // ambient nursery in the spawn's scope, whether it is `Option`-wrapped).
+    // The transformer passes the value as `__task`'s third argument.
+    pub spawn_nursery_sources: HashMap<Id, (Id, bool)>,
     // `external` std functions the transformer lowers to native JS or a runtime
     // helper (`str.trim()`, `scan()`, `random::range_i32(..)`, ...), keyed by fn id.
     // (The per-type `range_*` are forwarded to by the `Random` trait impls.)
@@ -18109,6 +18121,18 @@ pub fn analyze<'src>(
         .get("task")
         .and_then(|scope_id| analyzer.scopes.get(scope_id))
         .and_then(|scope| scope.name_to_id_map.get("Task").copied());
+    // The nursery machinery in the same module: the `ambient_nursery` context
+    // binding (spawn registration reads it) and the `nursery` function (the
+    // spawn-demand channel engages only when it is called somewhere).
+    let task_module_scope = module_scopes
+        .get("task")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id));
+    let nursery_ambient_id = task_module_scope
+        .and_then(|scope| scope.name_to_id_map.get("ambient_nursery").copied())
+        .filter(|id| analyzer.variables.contains_key(id));
+    let nursery_fn_id = task_module_scope
+        .and_then(|scope| scope.name_to_id_map.get("nursery").copied())
+        .filter(|id| analyzer.functions.contains_key(id));
     // Bind `Task` into the global scope so a bare `Task<T>` annotation
     // resolves (alongside `std::task::Task` by path).
     if let Some(task_struct_id) = analyzer.task_struct_id {
@@ -18610,6 +18634,9 @@ pub fn analyze<'src>(
         context_run_fn_id,
         context_get_fn_id,
         context_get_safe_fn_id,
+        nursery_ambient_id,
+        nursery_fn_id,
+        spawn_nursery_sources: HashMap::new(),
         bool_enum_id: analyzer.bool_enum_id,
         module_id_by_name: analyzer.module_id_by_name,
         modules: analyzer.modules,

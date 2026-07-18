@@ -1,14 +1,18 @@
-/// `std::task` — `Task<T>`, the handle an `async` expression yields. A task is
-/// eager: the spawned computation runs to its first suspension at the `async`
-/// expression itself, and `await task` suspends until it settles. The handle
-/// is opaque and copying it refers to the same task — there are no Vilan-level
-/// fields or constructors; a task only ever arises from `async`.
+/// `std::task` — `Task<T>`, the handle an `async` expression yields, and
+/// `nursery`, the structured way to spawn. A task is eager: the spawned
+/// computation runs to its first suspension at the `async` expression itself,
+/// and `await task` suspends until it settles. The handle is opaque and
+/// copying it refers to the same task — there are no Vilan-level fields or
+/// constructors; a task only ever arises from `async`.
 ///
 /// Every task absorbs its own failure at construction: a task whose
 /// computation panics never becomes a host "unhandled rejection". A later
 /// `await` still receives the failure; if nothing ever observes the task —
 /// no `await`, no enclosing nursery — the error is reported to the host
 /// console with the task's spawn origin, and the program continues.
+
+import pkg::context::Context;
+
 external struct Task<T>;
 
 impl Task<type T> {
@@ -20,4 +24,41 @@ impl Task<type T> {
 	/// task fails, the first failure panics here once it settles.
 	[extern("Promise.all")]
 	async external fun settle_all(tasks: List<Task<T>>): List<T>;
+}
+
+// === Nurseries (structured concurrency) =====================================
+
+/// The handle a `nursery` body receives — opaque; cancellation arrives here
+/// (Part B slice 3).
+external struct Nursery;
+
+/// The ambient nursery: established for the dynamic extent of a `nursery`
+/// body, read by the spawn machinery — every `async` expression evaluated
+/// within the extent (the body itself, and every function it calls) registers
+/// its task with the nursery. Compiled away by the `context` threading pass;
+/// the name exists for the compiler and the IO wrappers, not for user code.
+let ambient_nursery: Context<Nursery> = Context::new();
+
+[extern("__nursery_new")]
+external fun __nursery_new(): Nursery;
+
+/// The join machinery (a runtime helper): runs the body, then waits for every
+/// registered task — the list may keep growing while it drains (children may
+/// spawn grandchildren). On a failure it applies the first-observed rule: a
+/// body throw wins; otherwise the earliest-settled child rejection. The
+/// remaining children are absorbed (observed, results discarded — no late
+/// reports), and the winner re-raises here with its spawn origin.
+[extern("__nursery_run")]
+async external fun __nursery_run<T>(n: Nursery, body: async || T): T;
+
+/// Run `body` with a nursery: every task spawned in its dynamic extent —
+/// directly or by anything it calls — is joined before `nursery` returns.
+/// The nursery's value is the body's value; it returns only when the body
+/// AND every spawned task have settled. If the body throws, or any task
+/// fails, the first-observed failure re-raises from the `nursery` call once
+/// the rest are absorbed. Free-floating spawns outside any nursery keep
+/// their unstructured behavior.
+fun nursery<T>(body: (|Nursery| T) context ambient_nursery): T {
+	let n = __nursery_new();
+	ambient_nursery.run(n, || __nursery_run(n, || body(n)))
 }

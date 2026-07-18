@@ -13,26 +13,35 @@ function __list_pop(list) {
 function __shared_new(value) {
 	return { v: value };
 }
+let __task_seq = 0;
 class __Task {
-	constructor(run, origin) {
+	constructor(run, origin, nursery) {
 		this.origin = origin;
 		this.observed = false;
+		this.owned = !!nursery;
+		this.rejected = false;
+		this.error = undefined;
+		this.seq = 0;
 		this.promise = run();
 		this.promise.then(null, (error) => {
-			if (!this.observed) {
+			this.rejected = true;
+			this.error = error;
+			this.seq = ++__task_seq;
+			if (!this.observed && !this.owned) {
 				globalThis.setTimeout(() => {
 					if (!this.observed) console.error("unhandled task error (spawned in " + this.origin + "): " + String(error));
 				}, 0);
 			}
 		});
+		if (nursery) nursery.children.push(this);
 	}
 	then(onFulfilled, onRejected) {
 		this.observed = true;
 		return this.promise.then(onFulfilled, onRejected);
 	}
 }
-function __task(run, origin) {
-	return new __Task(run, origin);
+function __task(run, origin, nursery) {
+	return new __Task(run, origin, nursery);
 }
 function fresh_id() {
 	const id = next_subscriber_id.v;

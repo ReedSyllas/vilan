@@ -1,0 +1,27 @@
+// Structured concurrency (`std::task::nursery`): every task spawned in the
+// body's dynamic extent — its own, a helper's, and a grandchild spawned by a
+// running child — is joined before `nursery` returns its body's value.
+import std::print;
+import std::time::sleep;
+import std::task::nursery;
+
+fun spawn_step(label: str, ms: i32) {
+	let _ = async {
+		sleep(ms);
+		print(label);
+	};
+}
+
+fun main() {
+	let value = nursery(|n| {
+		spawn_step("helper", 15);
+		let _ = async {
+			sleep(5);
+			spawn_step("grandchild", 20);
+			print("child");
+		};
+		print("body");
+		7
+	});
+	print(value);
+}

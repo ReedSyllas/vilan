@@ -147,6 +147,8 @@ fn extern_helper(symbol: &str) -> Option<&'static str> {
         "__local_get",
         "__session_get",
         "__router_path",
+        "__nursery_new",
+        "__nursery_run",
     ];
     EXTERN_HELPERS.iter().find(|name| **name == symbol).copied()
 }
@@ -371,29 +373,85 @@ fn helper_source(name: &str) -> &'static str {
         // copying a task refers to the same task (handle semantics).
         // `globalThis.setTimeout`: a module importing `setTimeout` (e.g. from
         // "node:timers/promises") shadows the global in the whole module
-        // scope, helper included.
+        // scope, helper included. Rejections stamp a global settle sequence
+        // (`seq`) so a nursery can pick the earliest-SETTLED failure; a spawn
+        // inside a nursery's dynamic extent registers via the third argument.
         "__task" => {
-            "class __Task {\n\
-             \tconstructor(run, origin) {\n\
+            "let __task_seq = 0;\n\
+             class __Task {\n\
+             \tconstructor(run, origin, nursery) {\n\
              \t\tthis.origin = origin;\n\
              \t\tthis.observed = false;\n\
+             \t\tthis.owned = !!nursery;\n\
+             \t\tthis.rejected = false;\n\
+             \t\tthis.error = undefined;\n\
+             \t\tthis.seq = 0;\n\
              \t\tthis.promise = run();\n\
              \t\tthis.promise.then(null, (error) => {\n\
-             \t\t\tif (!this.observed) {\n\
+             \t\t\tthis.rejected = true;\n\
+             \t\t\tthis.error = error;\n\
+             \t\t\tthis.seq = ++__task_seq;\n\
+             \t\t\tif (!this.observed && !this.owned) {\n\
              \t\t\t\tglobalThis.setTimeout(() => {\n\
              \t\t\t\t\tif (!this.observed) console.error(\"unhandled task error (spawned in \" + this.origin + \"): \" + String(error));\n\
              \t\t\t\t}, 0);\n\
              \t\t\t}\n\
              \t\t});\n\
+             \t\tif (nursery) nursery.children.push(this);\n\
              \t}\n\
              \tthen(onFulfilled, onRejected) {\n\
              \t\tthis.observed = true;\n\
              \t\treturn this.promise.then(onFulfilled, onRejected);\n\
              \t}\n\
              }\n\
-             function __task(run, origin) {\n\
-             \treturn new __Task(run, origin);\n\
+             function __task(run, origin, nursery) {\n\
+             \treturn new __Task(run, origin, nursery);\n\
              }"
+        }
+        "__nursery_new" => "function __nursery_new() {\n\treturn { children: [] };\n}",
+        // The nursery join (async-polymorphism.md Part B): run the body, then
+        // drain the children — the list may grow while draining (children
+        // spawn grandchildren). On failure, the first-OBSERVED rule: a body
+        // throw wins (it always happens before the join); otherwise the
+        // earliest-settled child rejection (the `seq` stamp). Every child is
+        // absorbed before re-raising — observed, so no unobserved-failure
+        // reports; results discarded — and a string winner (a vilan panic)
+        // carries its spawn origin into the message.
+        "__nursery_run" => {
+            "async function __nursery_run(n, body) {\n\
+             \tlet result;\n\
+             \tlet bodyError;\n\
+             \tlet bodyFailed = false;\n\
+             \ttry {\n\
+             \t\tresult = await body();\n\
+             \t} catch (error) {\n\
+             \t\tbodyFailed = true;\n\
+             \t\tbodyError = error;\n\
+             \t}\n\
+             \tlet index = 0;\n\
+             \tlet childFailed = false;\n\
+             \twhile (!bodyFailed && !childFailed && index < n.children.length) {\n\
+             \t\ttry {\n\
+             \t\t\tawait n.children[index++];\n\
+             \t\t} catch (error) {\n\
+             \t\t\tchildFailed = true;\n\
+             \t\t}\n\
+             \t}\n\
+             \tif (!bodyFailed && !childFailed) return result;\n\
+             \tfor (const task of n.children) task.then(null, () => {});\n\
+             \tif (bodyFailed) throw bodyError;\n\
+             \tlet winner;\n\
+             \tfor (const task of n.children) {\n\
+             \t\tif (task.rejected && (winner === undefined || task.seq < winner.seq)) winner = task;\n\
+             \t}\n\
+             \tif (winner === undefined) throw new Error(\"nursery: lost the failing task\");\n\
+             \tthrow typeof winner.error === \"string\" ? winner.error + \" (in task spawned in \" + winner.origin + \")\" : winner.error;\n\
+             }"
+        }
+        // Reads `__task`'s third argument out of a safe holder's
+        // `Option<Nursery>` ([0, n] = Some, [1] = None).
+        "__nursery_of" => {
+            "function __nursery_of(option) {\n\treturn option[0] === 0 ? option[1] : undefined;\n}"
         }
         "__clone" => {
             "function __clone(value) {\n\
@@ -1528,19 +1586,37 @@ impl<'src> Transformer<'src> {
             // the spawn expression, as before), attaches the absorption
             // handler so the rejection can never surface as a host unhandled
             // rejection, and records the spawn origin for the
-            // unobserved-failure report.
+            // unobserved-failure report. A spawn the context pass connected
+            // to an ambient nursery passes it as the third argument (read
+            // from the threaded parameter — unwrapped when the holder is
+            // safe-flavored and carries `Option<Nursery>`), registering the
+            // task for the nursery's join.
             Expr::Async(closure_id) => {
                 self.used_helpers.insert("__task");
                 let closure = self
                     .walk_entity(*closure_id, block)
                     .unwrap_or(js::Node::Void);
-                js::Node::Call(
-                    Box::new(js::Node::Local("__task".to_string())),
-                    vec![
-                        closure,
-                        js::Node::String(Cow::Borrowed(self.current_origin.unwrap_or("top level"))),
-                    ],
-                )
+                let mut arguments = vec![
+                    closure,
+                    js::Node::String(Cow::Borrowed(self.current_origin.unwrap_or("top level"))),
+                ];
+                if let Some(&(source_entity, is_option)) =
+                    self.program.spawn_nursery_sources.get(&id)
+                {
+                    let source = self
+                        .walk_entity(source_entity, block)
+                        .unwrap_or(js::Node::Void);
+                    arguments.push(if is_option {
+                        self.used_helpers.insert("__nursery_of");
+                        js::Node::Call(
+                            Box::new(js::Node::Local("__nursery_of".to_string())),
+                            vec![source],
+                        )
+                    } else {
+                        source
+                    });
+                }
+                js::Node::Call(Box::new(js::Node::Local("__task".to_string())), arguments)
             }
             // `await <inner>`.
             Expr::Await(inner) => {
@@ -4523,6 +4599,9 @@ const RESERVED_NAMES: &[&str] = &[
     "__map_values",
     "__task",
     "__Task",
+    "__nursery_new",
+    "__nursery_run",
+    "__nursery_of",
 ];
 
 /// The free identifiers a program's `[extern]`s introduce — an imported symbol

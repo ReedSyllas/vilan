@@ -132,11 +132,20 @@ struct Plan {
     runs: Vec<RunSite>,
     /// `Context::new()` calls to lower to an opaque value.
     news: Vec<Id>,
+    /// Spawn registration (async-polymorphism.md Part B): each `async` spawn
+    /// entity that can see the ambient nursery, as `(spawn entity, context,
+    /// owner, owner holds the bare value)`. The rewrite records a read of the
+    /// owner's parameter into `Program::spawn_nursery_sources`; the
+    /// transformer passes it as `__task`'s third argument.
+    spawns: Vec<(Id, Id, Node, bool)>,
 }
 
 impl Plan {
     fn is_empty(&self) -> bool {
-        self.gets.is_empty() && self.runs.is_empty() && self.news.is_empty()
+        self.gets.is_empty()
+            && self.runs.is_empty()
+            && self.news.is_empty()
+            && self.spawns.is_empty()
     }
 }
 
@@ -293,6 +302,39 @@ fn analyze(
                 closure_id,
             });
         }
+    }
+
+    // --- Spawn registration (async-polymorphism.md Part B): every `async`
+    // spawn is a SAFE read of the `std::task` ambient nursery, so a spawn in
+    // a nursery's dynamic extent registers its task. Engaged only when some
+    // call to `nursery` exists — a program that merely loads `std::task`
+    // (say, for `settle_all`) compiles untouched. The spawn's owner is the
+    // node containing the spawn expression (the spawn closure's parent); a
+    // module-level spawn has none and stays free-floating.
+    let nursery_engaged = program.nursery_fn_id.is_some_and(|nursery_fn| {
+        program
+            .function_calls
+            .values()
+            .any(|call| local_target(program, call.subject_id) == Some(nursery_fn))
+    });
+    let nursery_context: Option<Id> = program.nursery_ambient_id.filter(|_| nursery_engaged);
+    let mut spawn_sites: Vec<(Id, Node)> = Vec::new();
+    if let Some(context) = nursery_context {
+        contexts.insert(context);
+        for (&entity_id, expr) in &program.entity_map {
+            let Expr::Async(closure_id) = expr else {
+                continue;
+            };
+            let Some(parent) = graph.closure_parent_of(*closure_id) else {
+                continue;
+            };
+            let Some(&owner) = graph.nodes().iter().find(|node| node.id() == parent) else {
+                continue;
+            };
+            spawn_sites.push((entity_id, owner));
+        }
+        // Deterministic plan order (entity_map iteration is not).
+        spawn_sites.sort_by_key(|(entity_id, _)| entity_id.0);
     }
 
     if contexts.is_empty() && program.parameter_contexts.is_empty() {
@@ -653,6 +695,16 @@ fn analyze(
                 worklist.push(owner.id());
             }
         }
+        // A spawn demands the ambient nursery on its owner — SAFE (a
+        // free-floating spawn is legal, its read is simply absent), so it
+        // joins `needs` but never the strict set.
+        if Some(context) == nursery_context {
+            for (_, owner) in &spawn_sites {
+                if needs.insert(owner.id()) {
+                    worklist.push(owner.id());
+                }
+            }
+        }
         // A closure that RECEIVES the value as its own parameter — a `run`
         // body for this context, or a deferred (injected) literal — does not
         // capture from its creator, so needs must not leak to its parent.
@@ -970,6 +1022,20 @@ fn analyze(
             plan.gets.push((get.call_id, context, get.owner, wrap_some));
         }
 
+        // Spawn registration: a spawn whose owner has a value source reads it
+        // (bare, or `Option`-wrapped in a safe holder). A none-rooted owner —
+        // the inlined entry `main`, or a closure rooted there — has no value:
+        // its spawns stay free-floating, no entry recorded.
+        if Some(context) == nursery_context {
+            for &(spawn_entity, owner) in &spawn_sites {
+                if none_rooted.contains(&owner.id()) {
+                    continue;
+                }
+                plan.spawns
+                    .push((spawn_entity, context, owner, holds_bare(owner.id())));
+            }
+        }
+
         // Thread the value into every call from a needs-context node to a
         // needs-context function — direct calls, and dispatch sites whose
         // candidate callees include a needy one (B14; a candidate that does
@@ -1065,13 +1131,16 @@ fn analyze(
 
     // Safe reads synthesize `Some`/`None` — resolve the `Option` variant
     // entities once. Missing `Option` with safe sites in play is a hard
-    // error rather than a miscompile.
+    // error rather than a miscompile. Spawn demand can create WrapSome
+    // boundaries (a covered holder feeding a safe spawn-owning helper)
+    // without any `get_safe` in the program, so every synthesizing thread
+    // form counts, not just the literal `None`s.
     let any_safe = gets.iter().any(|get| get.safe);
-    let any_none = plan
+    let any_synthesized = plan
         .thread_calls
         .iter()
-        .any(|(_, _, form)| matches!(form, ThreadForm::NoneLiteral));
-    if any_safe || any_none {
+        .any(|(_, _, form)| matches!(form, ThreadForm::NoneLiteral | ThreadForm::WrapSome { .. }));
+    if any_safe || any_synthesized {
         let variants = program
             .enums
             .values()
@@ -1137,6 +1206,19 @@ fn apply(program: &mut Program, plan: Plan) {
     for &(context, closure, provider) in &plan.captures {
         if let Some(&parameter) = source.get(&(context, provider)) {
             source.insert((context, closure), parameter);
+        }
+    }
+
+    // Spawn registration: each spawn reads the ambient nursery from its
+    // owner's in-scope parameter. The transformer passes the value as
+    // `__task`'s third argument (unwrapping the `Option` of a safe holder).
+    for &(spawn_entity, context, owner, bare) in &plan.spawns {
+        if let Some(&parameter) = source.get(&(context, owner.id())) {
+            let reference = fresh();
+            program.entity_map.insert(reference, Expr::Local(parameter));
+            program
+                .spawn_nursery_sources
+                .insert(spawn_entity, (reference, !bare));
         }
     }
 
