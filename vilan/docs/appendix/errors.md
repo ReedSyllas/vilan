@@ -141,14 +141,38 @@ with `let`; assigning through it (`v = …`) already writes the target.
 ## Async
 
 **"`…` receives an async closure, but its type awaits nothing — declare it `async || T` (or return void for spawn semantics)"**
-A closure that suspends flowed into a place typed as a plain,
-value-returning closure — a parameter, or (the `field `…` of `…``
-form) a struct field, at the literal or a later assignment. Either the
-declared type should be `async |…| T`, or — if fire-and-forget is fine
-— its return type should be `void`. One common case: a `batch(|| …)`
-whose body awaits — use `turn_async(|| …)` instead, the async-extent
-flavor that holds the turn across the suspension.
+A closure that suspends was stored into a struct field typed as a
+plain, value-returning closure (at the literal or a later assignment).
+Either the field should be `async |…| T`, or — if fire-and-forget is
+fine — its return type should be `void`. (A plain *parameter* no longer
+produces this error: it adapts — the callee instantiates an async copy
+that awaits the callback.)
 → [Async](../tour/async.md), [Functions & closures](../tour/functions-and-closures.md)
+
+**"`…` requires a synchronous closure (`sync`): its completion is part of the declaring function's synchronous protocol …"**
+The parameter is a `sync` contract position — `Signal::map`,
+`set_with`, `turn`/`batch` bodies, the UI render callbacks — where the
+callback must finish inside a synchronous protocol, so it cannot adapt.
+Move the async work outside the callback: `turn_async(|| …)` for a turn
+held across awaits, `Draft`/`optimistic` for local-first commits, or a
+spawned `async { … }` block. The transitive form ("this call passes an
+async closure that reaches `…`") points at the call that made the
+closure async and notes where it was forwarded.
+→ [Async](../tour/async.md), [Reactivity](../guide/reactive.md)
+
+**"`…` is a host (`external`) function — it cannot await a vilan closure …"**
+Host code can't await your callback, so an `external` function's
+value-returning closure parameters only accept synchronous closures
+(void-returning ones spawn, as everywhere).
+→ [Async](../tour/async.md)
+
+**"an async closure cannot adapt a trait/generic-dispatched call …"**
+Adaptation instantiates a statically-known callee, and a
+trait/generic-dispatched call doesn't have one — the concrete method
+varies per instantiation. Bind the receiver concretely before the call,
+or declare the trait method's parameter `async || T` so every impl
+takes the typed channel.
+→ [Async](../tour/async.md)
 
 **"`…` returns an async closure, but its declared return type awaits nothing — declare it `async || T` (or return void for spawn semantics)"**
 The function's declared return type is a plain, value-returning closure,

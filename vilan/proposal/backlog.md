@@ -1241,15 +1241,18 @@ have gaps.
    type — refused when the closure returns a value, spawn-legal when void,
    skipped when the return is unresolved (no known lie). 9 pins + docs
    (tour/async.md rewritten — the "re-mark at a `let`" idiom is obsolete;
-   errors appendix). The asyncness-polymorphic remainder is now **DESIGNED —
-   `proposal/async-polymorphism.md` (2026-07-17), ready to build**: plain
-   non-void closure parameters adapt per instantiation
-   (monomorphize-by-asyncness, sequential contract), `sync |T| U` is the
-   opt-out contract marker (reactive/`turn` positions), void keeps spawn,
-   adapted std receivers get snapshot semantics, effect-dependent returns
-   excluded in v1, concurrency = the spawn-then-settle idiom (Part B seeds
-   J1's scopes; Part C records the parallelism spine). Original finding
-   follows. — async inference infects through DIRECT calls
+   errors appendix). The asyncness-polymorphic remainder **SHIPPED
+   2026-07-17** (`proposal/async-polymorphism.md` Part A, four slices
+   ending 176fe8a): plain non-void closure parameters adapt per
+   instantiation (the async_infer instance worklist +
+   Program::adapted_instances; bits join the monomorphization key;
+   sequential contract pinned), `sync |T| U` contract marker (contextual
+   keyword; 11 std positions marked), void keeps spawn, async adapted
+   instances iterate snapshots (`[...iterable]`), transitive adaptation
+   works, refusals hold at `sync`/extern/dispatch/initializer boundaries,
+   spec §7.4 rewritten. Concurrency = the spawn-then-settle idiom (helper
+   surface still open). Part B seeds J1's scopes; Part C records the
+   parallelism spine. Original finding follows. — async inference infects through DIRECT calls
    (`f()` awaits when `f` is async), but a call THROUGH a closure value or parameter
    (`body()` where `body: || T`) has no static callee, so it is never inferred async: the
    call returns the host promise at runtime while typing as plain `T` — the static type

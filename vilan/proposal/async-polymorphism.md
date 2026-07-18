@@ -1,7 +1,14 @@
 # Async polymorphism: adaptation, `sync` contracts, scopes, and the parallelism spine
 
-**Status: DESIGN — Part A settled enough to build; Part B is the seed of the
-J1 execution-model phases; Part C is a design record, explicitly not v1.**
+**Status: Part A SHIPPED 2026-07-17** (four slices: `sync` marker 3b5e1db,
+std audit 5fb9eb8, adaptation + snapshot 176fe8a, docs — spec §7.4 rewritten).
+Deltas from the design, all recorded in place: the snapshot is implemented as
+shallow-copy iteration inside async adapted instances (sound because element
+aliasing doesn't exist under value semantics — A.5); dual lowering (A.6)
+collapsed to nothing because the List combinators are vilan source, not
+intrinsics; `settle_all` is not yet minted (the two-`map` idiom works today —
+open question stands). **Part B is the seed of the J1 execution-model phases;
+Part C is a design record, explicitly not v1.**
 
 Decisions in this document were made 2026-07-17 (backlog J2's last open
 channel). The headline calls are the user's: adaptation is the default and

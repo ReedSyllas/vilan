@@ -92,13 +92,77 @@ binding adopts the closure's asyncness.
 [Functions & closures](functions-and-closures.md) covers the same seams
 from the closure side.
 
-One rule protects you at every one of those boundaries. An async
-closure flowing where a plain closure type is declared — a parameter, a
-struct field, or a function's declared return type — is a compile error
-if that closure returns a value, because the reader would receive a
-promise disguised as the value. If it returns `void`, it's allowed —
-the call just becomes fire-and-forget. That's why UI event handlers can
-await freely with no ceremony.
+### Higher-order functions adapt
+
+A plain, value-returning closure **parameter** does something better
+than refuse: it *adapts*. Passing an async closure instantiates an
+async copy of the function — its calls through the parameter are
+awaited — while every sync call site keeps the untouched original.
+`map` is one function, not two:
+
+```vilan,norun
+import std::print;
+import std::time::sleep;
+
+fun fetch_len(url: str): i32 {
+	sleep(1);
+	url.len()
+}
+
+fun main() {
+	let urls = ["ab", "cdef"];
+	print(urls.map(|url| fetch_len(url)));   // awaited per element: [2, 4]
+	print(urls.map(|url| url.len()));        // the plain instance, no awaits
+}
+```
+
+The contract is **sequential**: each callback settles before the next
+begins — a 100-element `map` whose callback takes a second takes a
+hundred seconds. When the elements are independent, opt into
+concurrency by starting them all first:
+
+```vilan,norun
+import std::print;
+import std::time::sleep;
+
+fun fetch_len(url: str): i32 {
+	sleep(1);
+	url.len()
+}
+
+fun main() {
+	let lens = ["ab", "cdef"]
+		.map(|url| async fetch_len(url))   // all in flight (List of promises)
+		.map(|p| await p);                 // settle in order: total ≈ max
+	print(lens);
+}
+```
+
+An adapting function traverses a *snapshot* of its receiver — the list
+as of the call — so work interleaved during the awaits can't tear the
+iteration. Adaptation follows the closure through plain parameters
+(`fun helper(xs, f) { xs.map(f) }` adapts end-to-end), but it cannot
+cross a host (`external`) boundary or a trait/generic dispatch, and it
+never touches a parameter marked **`sync`**:
+
+```vilan,fragment
+// The callback completes inside the reactive graph's synchronous
+// protocol — an async closure here is refused, not adapted:
+fun map<U>(self, transform: sync |T| U): Signal<U>
+```
+
+`Signal::map`, `turn`, `batch`, and the UI render callbacks are `sync`
+positions: move async work into `turn_async`, `Draft`, or a spawned
+`async` block instead.
+
+The remaining boundaries keep the refusal rule. An async closure
+flowing where a plain closure type is declared on a struct **field** or
+a function's declared **return type** is a compile error if that
+closure returns a value, because the reader would receive a promise
+disguised as the value (declare the field or return `async || T`
+instead). If it returns `void`, it's allowed anywhere — the call just
+becomes fire-and-forget. That's why UI event handlers can await freely
+with no ceremony.
 
 ## Timers
 

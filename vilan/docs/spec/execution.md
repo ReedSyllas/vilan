@@ -84,37 +84,64 @@ fun main() {
 }
 ```
 
-## 7.4 Async closure types
+## 7.4 Async closure types, adoption, and adaptation
 
 `async |T| U` marks a closure **value** whose calls are implicitly
-awaited (and are suspension points in the caller). The marker is legal at
-two seams only: **parameter types** and **`let` annotations**. It does
-not exist on struct fields or return types; the standard pattern stores
-the closure plain and re-marks it at a `let`:
+awaited (suspension points in the caller). The marker is legal on
+**parameter types**, **`let` annotations**, **struct fields**, and
+**function return types**; calls through a marked field read
+(`(self.hook)()`) and through a returned value (`make()()`, or via a
+binding) await like any other. An **unannotated binding adopts**
+asyncness from any value it holds — its initializer or any `mut`
+rebind — so a `let f = || { …await… };` needs no marker at all.
 
-```vilan,fragment
-let commit: async |T| Option<str> = self.commit;   // re-marked
-let outcome = commit(value);                        // awaited
-```
+A synchronous closure flowing into an async-typed position is fine
+(awaiting a non-promise yields it unchanged).
 
-Assigning between the plain and async-marked types is permitted in both
-directions at those seams; the marker governs only how calls through the
-*binding* behave. A synchronous closure flowing into an async-typed
-position is fine (awaiting a non-promise yields it unchanged).
+`sync |T| U` on a **parameter** declares the opposite contract: the
+callback completes inside the declaring function's synchronous
+protocol, and an async closure argument is an error. (`sync` is a
+contextual keyword — it only means the contract directly before a
+closure type.) `std::reactive`'s recompute positions (`Signal::map`,
+`set_with`, `turn`/`batch` bodies, the UI render callbacks) are `sync`.
 
-**The divergence rule.** An async closure (a literal whose body suspends,
-or an async-typed value) flowing into a **plain** closure parameter is:
+**Adaptation.** A **plain**, value-returning closure parameter is
+*asyncness-polymorphic*: each call instantiates the function with the
+actual asyncness of its closure arguments —
 
-- an **error** when the parameter's return type is non-void — the callee
-  would receive a live promise typed as `T`;
-- **legal** when the parameter returns `void` — *spawn semantics*: the
-  call fires the closure and nobody awaits it. This is what allows UI
-  event handlers and other void callbacks to suspend freely.
+- an async argument instantiates an **async instance**: calls through
+  the parameter are awaited **sequentially** (each callback settles
+  before the next begins; effects are ordered exactly as the sync body
+  orders them), the instance is async, and the caller awaits it;
+- sync arguments select the untouched plain instance — no awaits, no
+  coloring, identical emission.
 
-*Implementation note: divergence checking currently tracks
-literal-or-binding-initialized arguments; flow through further
-indirection is tracked future work, as are async markers on fields and
-returns and asyncness-polymorphic higher-order functions.*
+An async adapted instance traverses a **snapshot** of any value it
+iterates (the receiver as of the call): its awaits admit interleaved
+work, which must not tear the traversal. Adaptation follows a closure
+through plain parameters transitively (`helper(xs, f)` forwarding `f`
+into `map` adapts both), and never crosses these boundaries:
+
+- a `sync` parameter (error, including transitively — the diagnostic
+  names the call that made the closure async);
+- a host (`external`) function's value-returning closure parameter —
+  host code cannot await a vilan closure;
+- a trait/generic-dispatched call — there is no statically-known callee
+  to instantiate (bind the receiver concretely, or declare the trait
+  parameter `async`);
+- a module-level initializer — it cannot await (§7.6's J.3 rule).
+
+**The divergence rule** (the remaining stores). An async closure flowing
+where a plain closure type is declared on a struct **field** or a
+function's declared **return type** is:
+
+- an **error** when that closure returns a value — the reader would
+  receive a live promise typed as `T`; declare the field or return type
+  `async |…| T` instead;
+- **legal** when it returns `void` — *spawn semantics*: the call fires
+  the closure and nobody awaits it. This is what allows UI event
+  handlers and other void callbacks to suspend freely, and it applies
+  to parameters as well (a void parameter spawns rather than adapts).
 
 ## 7.5 Suspension and state
 
