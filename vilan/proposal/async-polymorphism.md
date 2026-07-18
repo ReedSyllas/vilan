@@ -262,31 +262,56 @@ closure-parameter arity (one async, one sync); `Promise<T>` never cloned.
 
 ---
 
-## Part B — Structured scopes (the J1 execution-model seed)
+## Part B — Nurseries (the J1 execution-model seed)
 
 The coloring model is done; what's missing is lifetime, error, and
-cancellation structure for spawns. Direction (its own arc; open questions
-below are part of that arc, not blockers for Part A):
+cancellation structure for spawns. Direction (its own arc; decisions below
+recorded 2026-07-18):
 
-- **`scope { … }`**: spawns created within the scope are joined at scope
-  exit; the scope's value is its body's value; the scope exits only when all
-  children settle. Registration is **dynamic-extent via `context`** (the
-  scope handle threads as a scoped value, like the reactive ambient owner) —
-  a helper called inside the scope spawns into it without plumbing.
-- **Errors**: first child failure wins; the scope stops awaiting remaining
-  children, **absorbs** their eventual rejections (no late unhandled
-  rejections), and re-raises the first failure at the join with an origin
-  chain.
-- **Cancellation is cooperative and honest about JS**: the host cannot
-  preempt a task. v1 semantics = join-abandonment with absorption (above),
-  plus a `Cancelled` context token user code may consult at natural points.
-  Instrumenting every implicit await with a token check is recorded as the
-  possible v2 (cost measured first); native targets can do better later.
-- Spawns outside any scope keep today's free-floating behavior (compat); a
-  lint nudging toward scopes can come once std itself is scoped.
+- **`nursery(body)`** — a `std::nursery` FUNCTION, not syntax (adaptation
+  makes an awaiting body just work): spawns created within its dynamic
+  extent are joined at exit; the nursery's value is its body's value; it
+  returns only when all children settle. Registration is **dynamic-extent
+  via `context`** (the handle threads as a scoped value, like the reactive
+  ambient owner) — a helper called inside spawns into it without plumbing.
+  **DECIDED: the name is `nursery`** (`scope` has too many meanings), and
+  **v1 is explicit** — `main` is NOT an implicit root; free-floating spawns
+  keep today's behavior, with a lint later once std itself is scoped.
+- **Errors — DECIDED, first-observed**: a body throw wins if it happens
+  before the join; otherwise the earliest-settled rejection. The nursery
+  stops awaiting the rest, **absorbs** their eventual rejections (no late
+  unhandled rejections), and re-raises the winner at the join with an
+  origin chain naming the spawn site. Abort-caused rejections classify as
+  CANCELLATION (absorbed), never as a competing first error.
+- **Cancellation is cooperative and honest about JS — with the AbortSignal
+  bridge**: the nursery owns a host `AbortController`; its signal rides the
+  same context value as the token, and std's host-IO wrappers (`fetch`,
+  `sleep`, sockets) pass it to the host op. First error (or an explicit
+  `n.cancel()`) aborts the controller, so in-flight HOST IO genuinely
+  cancels and the join is fast; pure-compute loops still check
+  `cancelled.get()` at their own points. Nested nurseries chain signals.
+  Instrumenting every implicit await is the possible v2 (cost measured
+  first); native targets can preempt better later.
+- **`Task<T>` as the substrate** (2026-07-18): `async expr` lowers to a
+  std `Task<T>` — a HANDLE (like `Shared`; copy = same task; never
+  `__clone`d, dissolving Part A's Promise-under-value-semantics pin) that
+  wraps the host promise plus its abort handle and spawn-site origin, and
+  **attaches the absorption handler at construction** — unhandled
+  rejections become structurally impossible program-wide, not just inside
+  nurseries (an abandoned task outside any nursery gets an orderly default
+  report). Host promises wrap at the std extern seam; raw `Promise<T>`
+  remains for direct host interop. Tasks stay EAGER (run to first
+  suspension synchronously, as §7.3 specifies) — a cold task would be a
+  semantic break for no benefit. NOTE: a global `Promise` polyfill is NOT
+  viable — JS async functions return the intrinsic %Promise% regardless of
+  the patched global, and species games don't capture it; owning the
+  lowering and the std boundary replaces it.
 
-Open: the keyword (`scope` vs `nursery` vs `group`), whether `main` is an
-implicit root scope, token-check ergonomics.
+Open: token ergonomics (leaning: the structural AbortSignal bridge + the
+`nursery(|n| …)` handle variant for cancel-from-within, e.g. a `race` that
+kills the loser's IO; the bare `cancelled.get()` read exists either way —
+more examples wanted before deciding); the exact `Task` surface
+(`settle_all` / `race` helpers live here).
 
 ---
 
