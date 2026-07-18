@@ -262,11 +262,50 @@ closure-parameter arity (one async, one sync); `Promise<T>` never cloned.
 
 ---
 
-## Part B — Nurseries (the J1 execution-model seed)
+## Part B — Nurseries (the J1 execution-model seed) — **SHIPPED 2026-07-18**
 
-The coloring model is done; what's missing is lifetime, error, and
-cancellation structure for spawns. Direction (its own arc; decisions below
-recorded 2026-07-18):
+Shipped in four slices: `Task<T>` (ae2d675), the nursery core (9b85534),
+cancellation + the AbortSignal bridge (24e4dd7), docs (this commit).
+Implementation deltas from the design below:
+
+- **Settle-time failure reaction**: a failing owned task notifies its
+  nursery AT SETTLE (`__fail`: latch, abort, wake the drain) and the join
+  races each child against the wake — a fast failure behind a slow healthy
+  sibling reacts immediately, and "earliest-settled wins" is structural
+  (the latch), no sequence stamps needed.
+- **Owned tasks never default-report** — the nursery observes them; the
+  unobserved-failure report is for free-floating tasks only. Post-failure
+  stragglers spawned into a dead nursery are silently absorbed (owned).
+- **Body-cancellation semantics** (was unrecorded): `cancel()` kills
+  children, not the body — code after it runs and the value returns; a
+  body SUSPENDED on cancellable IO when the signal fires observes the
+  rejection, which propagates as the nursery's outcome (body-throw rule).
+- **Registration mechanics**: spawns are SAFE reads of `ambient_nursery`
+  in the context pass (a new demand kind riding the whole strict/safe
+  apparatus), engaged only when `nursery` is called somewhere — loading
+  `std::task` alone keeps every program byte-identical. The body parameter
+  is an injected-clause closure (`context ambient_nursery`), so the
+  literal takes its own hidden parameter; an awaiting body rides Part A
+  adaptation into the machinery.
+- **Holes this forced open and closed**: a directly-applied async closure
+  literal (the lowered `run` body) never counted as an await point —
+  latent miscompile for ANY async run body, fixed in subject_awaits /
+  awaited_calls / the J3 initializer check; extern refusals now honor the
+  typed channel (a DECLARED `async |…| T` extern parameter is the host's
+  contract to await — `__nursery_run`); WrapSome thread forms now trigger
+  Option variant resolution (spawn demand creates covered→safe boundaries
+  with no `get_safe` in the program); spec §7.1's exit claim corrected
+  (the host exits when no live handles remain, not "when `main`
+  completes").
+- **Still open**: a live abort-in-flight `fetch` e2e (the signal
+  attachment is compile-verified and the sleep pins prove the bridge; a
+  hanging-endpoint e2e would pin the fetch leg); `Task<Task<T>>`
+  assimilation (JS thenables flatten — same divergence Promise always
+  had, typed one level deeper than runtime); per-task cancel handles
+  (race composes from nursery-scoped cancel, so deferred until a real
+  need); the free-spawn lint once std itself is scoped.
+
+Original direction (decisions recorded 2026-07-18, all implemented):
 
 - **`nursery(body)`** — a `std::nursery` FUNCTION, not syntax (adaptation
   makes an awaiting body just work): spawns created within its dynamic
@@ -307,11 +346,12 @@ recorded 2026-07-18):
   the patched global, and species games don't capture it; owning the
   lowering and the std boundary replaces it.
 
-Open: token ergonomics (leaning: the structural AbortSignal bridge + the
-`nursery(|n| …)` handle variant for cancel-from-within, e.g. a `race` that
-kills the loser's IO; the bare `cancelled.get()` read exists either way —
-more examples wanted before deciding); the exact `Task` surface
-(`settle_all` / `race` helpers live here).
+Token ergonomics — **DECIDED as recommended (user delegated 2026-07-18)**:
+the structural AbortSignal bridge (std IO reads the ambient signal, no
+token threading) + the `nursery(|n| …)` handle variant for
+cancel-from-within. The `Task` surface shipped as `Task::settle_all` +
+`Task::race`; the race idiom is `race` + `n.cancel()` (cancel-after-settle
+is a no-op for the winner, so nursery-scoped cancel suffices).
 
 ---
 
@@ -342,9 +382,13 @@ void = spawn preserved; snapshot semantics for adapted std receivers;
 effect-dependent returns excluded in v1; externs implicitly `sync`
 (non-void); concurrency via the spawn-then-settle idiom + one helper.
 
-**Open, Part A (settle at implementation):** the helper's surface
-(`settle_all` vs method); `sort_by` inclusion; `Promise<T>` handle pin;
-`sync` steer wording per std site.
+**Open, Part A (settle at implementation):** ~~the helper's surface~~
+(SHIPPED: `Task::settle_all` + `Task::race`, statics on the handle);
+`sort_by` inclusion; ~~`Promise<T>` handle pin~~ (dissolved — `Task<T>` is
+a class-instance handle, `__clone` passes it through); `sync` steer
+wording per std site.
 
-**Open, Part B (own arc):** scope keyword; implicit root scope; token
-ergonomics; await-point check cost.
+**Part B (SHIPPED 2026-07-18):** ~~scope keyword~~ (`nursery`, a std
+function); ~~implicit root scope~~ (explicit v1); ~~token ergonomics~~
+(structural bridge + handle variant); await-point instrumentation stays
+NOT taken (the bridge covers IO; compute loops poll `is_cancelled`).

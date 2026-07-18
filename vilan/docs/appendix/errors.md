@@ -163,7 +163,9 @@ closure async and notes where it was forwarded.
 **"`…` is a host (`external`) function — it cannot await a vilan closure …"**
 Host code can't await your callback, so an `external` function's
 value-returning closure parameters only accept synchronous closures
-(void-returning ones spawn, as everywhere).
+(void-returning ones spawn, as everywhere). A parameter *declared*
+`async |…| T` is exempt — that is the host's explicit contract to await
+the closure itself.
 → [Async](../tour/async.md)
 
 **"an async closure cannot adapt a trait/generic-dispatched call …"**
@@ -186,8 +188,12 @@ return type `async || T` so calls through the returned value await —
 A top-level `let` runs when the module loads, and module initialization
 is synchronous — there is no enclosing function to become async, so the
 value would be a live promise wearing the wrong type. Wrap the work in
-a function and call it from `main`. (Creating an async closure at top
-level is fine; it awaits nothing until called.)
+a function and call it from `main`. The variant "the initializer of
+`…` runs a closure that awaits" is the same rule when the awaiting
+thing has no name — an adopted async closure applied directly, a
+`run(value, body)` whose body suspends, or a `nursery` at top level.
+(Creating an async closure at top level is fine; it awaits nothing
+until called.)
 → [Async](../tour/async.md)
 
 **"`!` requires the nearest enclosing function to declare an `Option`/`Result`-compatible return type …"**

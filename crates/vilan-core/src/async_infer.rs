@@ -478,8 +478,7 @@ pub fn infer(program: &mut Program) {
                         .external_functions
                         .get(&target)
                         .map(|external| external.name)
-                })
-                .unwrap_or("an async value");
+                });
             let binding_name = program
                 .variables
                 .get(&binding)
@@ -494,12 +493,19 @@ pub fn infer(program: &mut Program) {
                     end: 0,
                     context: (),
                 });
+            // A nameless target is an awaiting closure applied directly (an
+            // adopted value, or a lowered `run` body) — phrase it as what it
+            // is rather than backticking a description.
+            let culprit = match target_name {
+                Some(name) => format!("calls `{name}`, which is async"),
+                None => "runs a closure that awaits".to_string(),
+            };
             initializer_awaits.push((
                 span,
                 format!(
-                    "the initializer of `{binding_name}` calls `{target_name}`, which is \
-                     async — a module-level binding cannot await (module initialization \
-                     is synchronous); wrap the work in a function and call it from `main`"
+                    "the initializer of `{binding_name}` {culprit} — a module-level \
+                     binding cannot await (module initialization is synchronous); wrap \
+                     the work in a function and call it from `main`"
                 ),
             ));
         }

@@ -8,12 +8,16 @@ function named `main` at the entry module's top level is the
 statements. (An explicit top-level `main();` call is redundant — the
 program still runs `main` once.)
 
-On process platforms (node/deno/bun), the process **exits when `main`
-completes** — including when async work it spawned is still pending. A
-long-lived program must keep `main` open (a listening server does so
-inherently; a socket-holding client must await something that ends with
-the app). On the browser platform, `main`'s completion leaves installed
-handlers and subscriptions live.
+On process platforms (node/deno/bun), the process **exits when no live
+work remains**: after `main` completes, only live host handles — a
+running timer, an open socket, a listening server — keep it alive, per
+the host event loop. Pending tasks holding such a handle run to
+completion; pending work that holds none is abandoned at exit. A
+program must therefore not rely on a dropped spawn completing (join it
+— §7.7 — to guarantee that), and a long-lived program must keep `main`
+open (a listening server does so inherently; a socket-holding client
+must await something that ends with the app). On the browser platform,
+`main`'s completion leaves installed handlers and subscriptions live.
 
 `panic(message)` aborts execution with the message; it types as `any`
 (§5.1). Failed `assert`s panic.
@@ -172,3 +176,49 @@ two's-complement `as_*` folds (overflow excepted — §7.2a); and `i53`
 exactness over the wire across its whole range. Everything
 else about the emitted code — names, formatting, module layout, the
 `[build]` knobs — is implementation-defined.
+
+## 7.7 Nurseries
+
+`std::task::nursery(body)` runs `body` with a **nursery** established
+for its **dynamic extent** — the body's execution and everything it
+calls, under the ambient-value rules of §8 (in particular, closures
+capture the extent at creation). Within the extent, every spawn
+(§7.3's `async expr`) **registers** its task with the nursery; spawns
+outside any nursery are unaffected. There is no implicit root nursery:
+a program's free spawns keep §7.3's unstructured behavior.
+
+**Join.** The `nursery` call returns the body's value, and returns only
+when the body and every registered task have settled — including tasks
+registered while draining (a running task's own spawns register with
+the same nursery). The call is async (its callers await it), and the
+body parameter is a plain closure parameter, so an awaiting body
+selects an adapted instance per §7.4.
+
+**Failure.** The nursery's outcome is the **first-observed** failure:
+
+- a body throw wins (it always happens before the join);
+- otherwise the earliest-settled task failure wins, re-raised from the
+  `nursery` call; a failure that is a vilan panic carries the spawn's
+  origin (the spawning function's name) in its message.
+
+On the first failure the nursery cancels (below). Every other
+registered task is **absorbed**: observed — so it neither becomes a
+host unhandled rejection nor triggers §7.3's unobserved-failure report
+— with its result discarded.
+
+**Cancellation** is cooperative. Each nursery owns a host abort signal,
+fired by the body handle's `cancel()` or by the first failure; a
+nursery created inside another's extent chains to its parent's signal
+at creation. The standard library's IO primitives pass the ambient
+nursery's signal to the host operation, so cancellation rejects
+in-flight IO promptly; those rejections — and any rejection classified
+as a host abort — are **cancellation echoes**: absorbed at the join,
+never selected as the failure. Execution is never preempted: code runs
+until its next cancellable suspension (`is_cancelled()` is the check
+for compute loops). After an explicit `cancel()` the body continues and
+its value is still returned; a body *suspended on* cancellable IO when
+the signal fires observes the rejection, which then propagates as the
+nursery's outcome under the body-throw rule.
+
+A `nursery` call in a module initializer is rejected (§7.4's
+initializer rule: an initializer cannot await).

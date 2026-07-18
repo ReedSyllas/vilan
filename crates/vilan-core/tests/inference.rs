@@ -19042,3 +19042,44 @@ fn the_race_idiom_yields_the_first_settled_and_aborts_the_losers() {
         "fast\n",
     );
 }
+
+#[test]
+fn a_module_initializer_cannot_run_a_nursery() {
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::task::nursery;
+        let banner = nursery(|n| {
+            sleep(1);
+            "ready"
+        });
+        fun main() {
+            print(banner);
+        }
+        "#,
+        "the initializer of `banner` calls `nursery`, which is async",
+    );
+}
+
+#[test]
+fn a_module_initializer_cannot_run_an_awaiting_context_body() {
+    // The lowered `run(value, body)` is a directly-applied closure — the J3
+    // check names the shape instead of a function.
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::time::sleep;
+        import std::context::Context;
+        let flavor: Context<i32> = Context::new();
+        let banner = flavor.run(7, || {
+            sleep(1);
+            "ready"
+        });
+        fun main() {
+            print(banner);
+        }
+        "#,
+        "the initializer of `banner` runs a closure that awaits",
+    );
+}

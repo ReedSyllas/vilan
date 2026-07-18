@@ -125,6 +125,16 @@ reactive state. [Reactive state](../guide/reactive.md).
 **spawn** — starting async work without waiting for it: `async expr`.
 Gives you a `Task<T>`. [Async](../tour/async.md).
 
+**task** — the handle a spawn yields: eager, opaque, copy-refers-to-the-
+same-task. A task's failure is absorbed at the spawn — a later `await`
+receives it; an unobserved failure is reported, not crashed on.
+[Async](../tour/async.md).
+
+**nursery** — the structured way to spawn: `nursery(body)` joins every
+task spawned in the body's dynamic extent before returning the body's
+value, applies the first-observed error rule, and owns the cancellation
+signal std IO listens on. [Async](../tour/async.md).
+
 **subscription** — one live "call me on change" registration on a
 signal. Effects manage theirs through [owners](#owner); manual `sub`
 hands you the object to dispose. [Reactive state](../guide/reactive.md).

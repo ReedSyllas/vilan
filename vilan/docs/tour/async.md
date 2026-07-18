@@ -169,6 +169,97 @@ instead). If it returns `void`, it's allowed anywhere — the call just
 becomes fire-and-forget. That's why UI event handlers can await freely
 with no ceremony.
 
+## Nurseries: structured spawning
+
+A dropped task keeps running with nobody responsible for it. When every
+spawn should be accounted for, run the work in a **nursery** from
+`std::task`:
+
+```vilan,norun
+import std::print;
+import std::time::sleep;
+import std::task::nursery;
+
+fun announce(label: str, ms: i32) {
+	let _ = async {
+		sleep(ms);
+		print(label);
+	};
+}
+
+fun main() {
+	let value = nursery(|n| {
+		announce("slow", 20);   // a helper's spawn is still inside the extent
+		announce("quick", 10);
+		print("body");
+		7
+	});
+	print(value);   // body, quick, slow, 7 — nothing outlives the nursery
+}
+```
+
+The contract:
+
+- **Everything joins.** `nursery(body)` returns only when the body *and
+  every task spawned in its dynamic extent* have settled — spawns made
+  by the body, by functions it calls, and by the tasks themselves
+  (grandchildren). No plumbing: the extent is ambient, like a context.
+- **The value passes through.** The nursery's value is the body's
+  value. Spawns outside any nursery keep their free-floating behavior.
+- **First failure wins, the rest are absorbed.** If the body throws,
+  that failure is the nursery's; otherwise the earliest-settled task
+  failure is, re-raised from the `nursery` call with the name of the
+  function that spawned the task. Either way the other tasks are
+  observed and their failures discarded — a losing task can never crash
+  the program later.
+
+### Cancellation
+
+The body's handle cancels the whole extent:
+
+```vilan,norun
+import std::print;
+import std::time::sleep;
+import std::task::{ nursery, Task };
+
+fun fetch_from(source: str, ms: i32): str {
+	sleep(ms);   // stands in for a real request
+	source
+}
+
+fun main() {
+	let winner = nursery(|n| {
+		let a = async fetch_from("mirror-a", 300);
+		let b = async fetch_from("mirror-b", 10);
+		let first = Task::race([a, b]);   // first settled wins
+		n.cancel();                       // abort the loser's IO
+		first
+	});
+	print(winner);   // mirror-b — and mirror-a's sleep was cut short
+}
+```
+
+`n.cancel()` fires the nursery's host `AbortSignal`. std's IO carries
+that signal automatically — a `sleep` or an in-flight `fetch` inside
+the extent rejects promptly instead of running out — and those
+cancellation rejections are *echoes*, absorbed at the join rather than
+treated as failures. The first real failure cancels the same way, so
+one task's error stops its siblings' work early. Details:
+
+- Cancellation doesn't preempt: your code runs until its next
+  (cancellable) suspension. Pure-compute loops can poll
+  `n.is_cancelled()` between chunks.
+- Code after `n.cancel()` in the body still runs, and the body's value
+  is still returned — cancel kills the *children*, not the body. (If
+  the body itself is suspended on IO when cancellation lands, that IO
+  rejects and the cancellation becomes the nursery's outcome.)
+- Nurseries nest: an outer cancel reaches every inner nursery's IO.
+- To hand the signal to a host API std doesn't wrap, read
+  `std::task::ambient_signal()`.
+
+Prefer a nursery whenever spawned work has an owner that should wait
+for it; keep bare spawns for genuine fire-and-forget.
+
 ## Timers
 
 From `std::time`: `sleep_for(duration)` and `sleep(millis)` suspend.
@@ -187,10 +278,14 @@ reads the clock. Details in the [time reference](../std/time.md).
 
 ## Traps
 
-- On node, **the process exits when `main` finishes** — even if spawned
-  work is still pending. A long-lived client (holding a socket, waiting
-  for pushes) must keep `main` open: await something that ends with the
-  app, or `sleep_for` a long duration.
+- On node, **the process exits when nothing is left to do**: once
+  `main` finishes, only live host handles (a running timer, a socket, a
+  listening server) keep it alive. A dropped task that is merely
+  *pending* — awaiting something that will never wake — is silently
+  abandoned at exit, and whether a spawn outlives `main` depends on
+  what it holds. Joining spawns in a nursery makes the question moot; a
+  long-lived client must keep `main` open by awaiting something that
+  ends with the app.
 - Don't expect a spawned write to be visible immediately after the
   spawn. Spawned work interleaves with yours per the event loop, like
   any promise.

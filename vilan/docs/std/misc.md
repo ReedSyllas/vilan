@@ -21,7 +21,19 @@ type. `assert` is the `vilan test` failure mechanism.
 external struct Task<T>;
 impl Task<type T> {
 	fun settle_all(tasks: List<Task<T>>): List<T>   // async; implicitly awaited
+	fun race(tasks: List<Task<T>>): T               // async; first settled wins
 }
+
+fun nursery<T>(body: (|Nursery| T) context ambient_nursery): T
+
+external struct Nursery;
+impl Nursery {
+	fun cancel(self)                 // abort the extent's signal
+	fun is_cancelled(self): bool     // the compute-loop check
+	fun signal(self): CancelSignal   // the raw host AbortSignal
+}
+
+fun ambient_signal(): Option<CancelSignal>   // the enclosing nursery's, if any
 ```
 
 Tasks only arise from spawning (`async expr`); see the
@@ -31,6 +43,16 @@ refers to the same task. Every task absorbs its own failure: a later
 its spawn origin) instead of crashing the program. Keep the task instead
 of the results by spawning the `settle_all` itself:
 `let pending = async Task::settle_all(tasks);`.
+
+`nursery(body)` joins every task spawned in the body's dynamic extent —
+the body's value passes through, the first-observed failure re-raises
+with its spawn origin, and everything else is absorbed. `cancel()`
+aborts the nursery's signal; `sleep` and `fetch` carry the ambient
+signal automatically, so in-flight IO in the extent rejects promptly,
+and those rejections absorb as cancellation echoes. `Task::race` +
+`cancel()` is the race idiom: first settled wins, the losers' IO stops.
+Spec: [§7.7](../spec/execution.md). `ambient_signal()` bridges host
+APIs std doesn't wrap.
 
 ## std::promise
 
