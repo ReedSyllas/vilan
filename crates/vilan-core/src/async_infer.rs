@@ -212,13 +212,21 @@ pub fn infer(program: &mut Program) {
                     end: 0,
                     context: (),
                 });
-            divergences.push((
-                span,
+            // A `sync`-marked parameter is a deliberate contract
+            // (async-polymorphism.md A.2) — say so, and steer to the async
+            // seams instead of suggesting a marker change.
+            let msg = if program.sync_values.contains(parameter) {
+                format!(
+                    "`{}` requires a synchronous closure (`sync`): its completion is part of the declaring function's synchronous protocol — move the async work outside the callback (e.g. `turn_async`, `Draft`, or a spawned `async` block)",
+                    parameter_record.name
+                )
+            } else {
                 format!(
                     "`{}` receives an async closure, but its type awaits nothing — declare it `async || T` (or return void for spawn semantics)",
                     parameter_record.name
-                ),
-            ));
+                )
+            };
+            divergences.push((span, msg));
         }
     }
     // The same divergence through the FIELD channel: an async closure stored

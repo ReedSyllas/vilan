@@ -200,6 +200,13 @@ pub enum Node<'src> {
     // value of this type are implicitly awaited, like direct calls to an
     // async function (backlog J2). Wraps the closure type it marks.
     AsyncType(Box<Spanned<Node<'src>>>),
+    // `sync |A| B` — the synchronous-contract marker on a closure type
+    // (proposal/async-polymorphism.md A.2): the callback's completion is part
+    // of the declaring function's synchronous protocol, so an async closure
+    // argument is refused rather than adapted. `sync` is a CONTEXTUAL
+    // keyword (lexes as an identifier; only means the contract directly
+    // before a closure type). Wraps the closure type it marks.
+    SyncType(Box<Spanned<Node<'src>>>),
     // `(|| void) context owner_scope` / `context (a, b)` — a closure type
     // carrying a context requirement (proposal/ambient-owner.md §5): the
     // closure defers those contexts' bindings to its CALL sites instead of
@@ -586,6 +593,7 @@ impl<'src> Node<'src> {
                 }
             }
             Node::AsyncType(inner) => visit(inner),
+            Node::SyncType(inner) => visit(inner),
             Node::Const(inner) => visit(inner),
             Node::MappedType {
                 source, template, ..

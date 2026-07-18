@@ -18144,3 +18144,82 @@ fn a_true_method_miss_keeps_the_bare_message() {
         ),
     }
 }
+
+// --- The `sync` closure contract (proposal/async-polymorphism.md A.2):
+// --- a contextual marker on parameters — async arguments are refused with
+// --- the contract steer; plain names stay legal.
+
+#[test]
+fn a_sync_parameter_accepts_a_sync_closure_and_runs() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun run_now(body: sync || i32): i32 {
+            body()
+        }
+        fun main() {
+            print(run_now(|| 5));
+        }
+        "#,
+        "5\n",
+    );
+}
+
+#[test]
+fn a_sync_parameter_refuses_an_async_closure() {
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        fun run_now(body: sync || i32): i32 {
+            body()
+        }
+        fun main() {
+            run_now(|| {
+                sleep(1);
+                1
+            });
+        }
+        "#,
+        "requires a synchronous closure (`sync`): its completion is part of the declaring function's synchronous protocol",
+    );
+}
+
+#[test]
+fn a_stray_sync_marker_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            let x: sync || i32 = || 1;
+        }
+        "#,
+        "a `sync` closure contract is only supported on parameters",
+    );
+}
+
+// `sync` is contextual: types and values named `sync` stay legal.
+#[test]
+fn sync_stays_a_legal_name() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct sync {
+            n: i32,
+        }
+        fun main() {
+            let named: sync = sync { n = 2 };
+            print(named.n);
+        }
+        "#,
+        "2\n",
+    );
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun main() {
+            let sync = 9;
+            print(sync);
+        }
+        "#,
+        "9\n",
+    );
+}

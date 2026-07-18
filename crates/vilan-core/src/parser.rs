@@ -1547,14 +1547,22 @@ where
         .labelled("closure type")
         .boxed();
     // `async || T`: calls through the value are implicitly awaited (J2).
-    let closure_type = just(Token::Async)
-        .or_not()
-        .then(closure_type)
-        .map_with(|(asyncness, inner), e| match asyncness {
-            Some(_) => (Node::AsyncType(Box::new(inner)), e.span()),
-            None => inner,
-        })
-        .boxed();
+    // `sync || T`: the synchronous-contract marker (async-polymorphism.md
+    // A.2) — `sync` is CONTEXTUAL (an identifier that only means the
+    // contract directly before a closure type; a bare `sync` still parses
+    // as a type name via the later alternatives).
+    let closure_type = choice((
+        just(Token::Async).to(ClosureMarker::Async),
+        select! { Token::Ident("sync") => ClosureMarker::Sync },
+    ))
+    .or_not()
+    .then(closure_type)
+    .map_with(|(marker, inner), e| match marker {
+        Some(ClosureMarker::Async) => (Node::AsyncType(Box::new(inner)), e.span()),
+        Some(ClosureMarker::Sync) => (Node::SyncType(Box::new(inner)), e.span()),
+        None => inner,
+    })
+    .boxed();
 
     // A `type X` generic binder in type position, with optional `: A + B`
     // bounds. Only meaningful in an impl subject pattern (`impl Option<type T>`,
@@ -1649,6 +1657,14 @@ where
         .repeated()
         .collect::<Vec<_>>()
         .map_with(|children, e| (children, e.span()))
+}
+
+/// Which contract marker prefixes a closure type: `async` (awaited channel)
+/// or the contextual `sync` (synchronous contract, async-polymorphism.md A.2).
+#[derive(Clone, Copy)]
+enum ClosureMarker {
+    Async,
+    Sync,
 }
 
 /// The operator tower above the postfix/precedence chain: the `is` pattern

@@ -1121,6 +1121,11 @@ pub struct Analyzer<'src> {
     // Parameters and `let` bindings whose declared closure type carries the
     // `async` marker (J2): calls through them are implicitly awaited.
     async_values: HashSet<Id>,
+    // Parameters declared `sync |T| U` (async-polymorphism.md A.2): the
+    // callback is part of the function's synchronous protocol — an async
+    // closure argument is refused (with the sync-contract steer) rather
+    // than adapted.
+    sync_values: HashSet<Id>,
     // Struct fields declared `async || T` — (struct id, field index); calls
     // through such a field await (J2).
     async_fields: HashSet<(Id, usize)>,
@@ -1473,6 +1478,7 @@ impl<'src> Analyzer<'src> {
             parameter_contexts: HashMap::new(),
             prepped_context_clauses: Vec::new(),
             async_values: HashSet::new(),
+            sync_values: HashSet::new(),
             async_fields: HashSet::new(),
             async_returning: HashSet::new(),
             return_sites: Vec::new(),
@@ -7699,11 +7705,11 @@ impl<'src> Analyzer<'src> {
                 });
                 Some(Expr::Error)
             }
-            Node::AsyncType(_) => {
+            Node::AsyncType(_) | Node::SyncType(_) => {
                 self.diagnostics.push(Error {
                     note: None,
                     span: node.1,
-                    msg: "an `async` closure type is not valid here (expected an expression)"
+                    msg: "a closure-type marker is not valid here (expected an expression)"
                         .to_string(),
                 });
                 Some(Expr::Error)
@@ -7815,19 +7821,30 @@ impl<'src> Analyzer<'src> {
             ));
             declared_type = Some(inner);
         }
-        // Peel the `async` marker (J2): `async || T`, or `(async || T)` after
-        // the clause peel's grouping. The marked value's calls await.
+        // Peel the `async` / `sync` marker (J2 / async-polymorphism.md A.2):
+        // `async || T`, `sync || T`, or the parenthesized forms after the
+        // clause peel's grouping. `async` = calls through the value await;
+        // `sync` = the synchronous contract (async arguments refused).
         match declared_type.map(|node| &node.0) {
             Some(Node::AsyncType(inner)) => {
                 self.async_values.insert(parameter_id);
                 declared_type = Some(inner);
             }
-            Some(Node::Tuple(elements)) if elements.len() == 1 => {
-                if let Node::AsyncType(inner) = &elements[0].0 {
+            Some(Node::SyncType(inner)) => {
+                self.sync_values.insert(parameter_id);
+                declared_type = Some(inner);
+            }
+            Some(Node::Tuple(elements)) if elements.len() == 1 => match &elements[0].0 {
+                Node::AsyncType(inner) => {
                     self.async_values.insert(parameter_id);
                     declared_type = Some(inner);
                 }
-            }
+                Node::SyncType(inner) => {
+                    self.sync_values.insert(parameter_id);
+                    declared_type = Some(inner);
+                }
+                _ => {}
+            },
             _ => {}
         }
         let type_id = match (pattern, declared_type) {
@@ -8403,6 +8420,18 @@ impl<'src> Analyzer<'src> {
                     span: node.1,
                     msg: "an `async` closure type is only supported on parameters, `let` annotations, struct fields, and function return types"
                         .to_string(),
+                });
+                return self.walk_type_node(inner, scope_id);
+            }
+            // The `sync` contract only means something where an async
+            // closure could otherwise be accepted — a parameter
+            // (async-polymorphism.md A.2). Elsewhere the plain closure type
+            // already refuses async stores.
+            Node::SyncType(inner) => {
+                self.diagnostics.push(Error {
+                    note: None,
+                    span: node.1,
+                    msg: "a `sync` closure contract is only supported on parameters".to_string(),
                 });
                 return self.walk_type_node(inner, scope_id);
             }
@@ -15618,6 +15647,9 @@ pub struct Program<'src> {
     /// calls through them are implicitly awaited. The async inference pass
     /// ADDS adopted bindings — unannotated ones holding an async closure.
     pub async_values: HashSet<Id>,
+    /// Parameters declared `sync |T| U` (async-polymorphism.md A.2): async
+    /// closure arguments are refused with the sync-contract steer.
+    pub sync_values: HashSet<Id>,
     /// Struct fields declared `async || T` — (struct id, field index): calls
     /// through such a field await (J2).
     pub async_fields: HashSet<(Id, usize)>,
@@ -18540,6 +18572,7 @@ pub fn analyze<'src>(
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
         async_values: analyzer.async_values.clone(),
+        sync_values: analyzer.sync_values.clone(),
         async_fields: analyzer.async_fields.clone(),
         async_returning: analyzer.async_returning.clone(),
         awaited_calls: HashSet::new(),

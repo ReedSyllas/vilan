@@ -452,6 +452,15 @@ impl<'src> Printer<'src> {
                 }
                 self.print_type(&inner.0);
             }
+            // `async |A| B` / `sync |A| B` — closure-type contract markers.
+            Node::AsyncType(inner) => {
+                self.out.push_str("async ");
+                self.print_type(&inner.0);
+            }
+            Node::SyncType(inner) => {
+                self.out.push_str("sync ");
+                self.print_type(&inner.0);
+            }
             // `|A, B| Ret` (or `||` for no parameters) — a closure type.
             Node::ClosureType(parameters, return_type) => {
                 if parameters.0.is_empty() {
@@ -1355,6 +1364,15 @@ mod reformats {
         assert_eq!(format(source), expected);
         // The output must be a fixed point — formatting it again is a no-op.
         assert_eq!(format(expected), expected, "output is not idempotent");
+    }
+
+    // `async`/`sync` closure-type markers round-trip (they used to BAIL,
+    // leaving marker-bearing files unformattable).
+    #[test]
+    fn closure_type_markers_round_trip() {
+        let source =
+            "fun take(f: async || i32, g: sync |i32| bool) {\n\tlet h: async || void = f;\n}\n";
+        assert_formats(source, source);
     }
 
     #[test]
