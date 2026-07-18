@@ -36,8 +36,8 @@ import std::reactive::{
 impl Signal<type T> {
 	fun new(value: T): Signal<T>
 	fun set(self, value: T)                 // write + notify
-	fun set_with(self, transform: |T| T)    // read-modify-write
-	fun map<U>(self, transform: |T| U): Signal<U>
+	fun set_with(self, transform: sync |T| T)    // read-modify-write
+	fun map<U>(self, transform: sync |T| U): Signal<U>
 }
 impl Signal<type T> with Source<T> {
 	fun get(self): T
@@ -108,8 +108,8 @@ impl Owner with Disposable {
 
 let owner_scope: Context<Owner>
 fun get_owner(): Owner                                        // read the ambient owner
-fun run_with_owner<T>(owner: Owner, body: (|| T) context owner_scope): T
-fun comp<T>(body: (|| T) context owner_scope): (T, Owner)     // fresh owner + result
+fun run_with_owner<T>(owner: Owner, body: (sync || T) context owner_scope): T
+fun comp<T>(body: (sync || T) context owner_scope): (T, Owner)     // fresh owner + result
 ```
 
 `body` parameters marked `context owner_scope` receive the ambient owner
@@ -124,9 +124,9 @@ not per object; in UI code the framework's boundaries (`mount_root`,
 enum FlushPolicy { AtEnd, AtSuspension }
 let turn_scope: Context<Turn>
 
-fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T
+fun turn<T>(policy: FlushPolicy, body: (sync || T) context turn_scope): T
 fun turn_async<T>(body: (async || T) context turn_scope): T   // held across awaits
-fun batch<T>(body: (|| T) context turn_scope): T              // join or create
+fun batch<T>(body: (sync || T) context turn_scope): T         // join or create
 fun flush()                                                   // drain the ambient turn now
 ```
 
@@ -200,7 +200,7 @@ struct ReconcilePlan {
 	removed: List<i32>,    // old indices gone entirely
 }
 fun reconcile<T: PartialEq, K: PartialEq>(
-	old_keys: List<K>, old_items: List<T>, items: List<T>, key_of: |T| K,
+	old_keys: List<K>, old_items: List<T>, items: List<T>, key_of: sync |T| K,
 ): ReconcilePlan
 ```
 

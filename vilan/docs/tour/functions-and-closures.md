@@ -130,8 +130,8 @@ A parameter's closure type can declare that the closure reads an ambient
 **context**:
 
 ```vilan,fragment
-fun mount_root(id: str, body: (|| View) context owner_scope): Owner
-fun turn<T>(policy: FlushPolicy, body: (|| T) context turn_scope): T
+fun mount_root(id: str, body: (sync || View) context owner_scope): Owner
+fun turn<T>(policy: FlushPolicy, body: (sync || T) context turn_scope): T
 ```
 
 When you pass a closure literal into such a parameter, the ambient value

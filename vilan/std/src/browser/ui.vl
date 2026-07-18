@@ -182,8 +182,8 @@ impl View {
 	fun bind_each<T: PartialEq, K: PartialEq>(
 		self,
 		source: Signal<List<T>>,
-		key: |T| K,
-		render: (|T| View) context owner_scope,
+		key: sync |T| K,
+		render: (sync |T| View) context owner_scope,
 	): View {
 		let element = self.element;
 		let row_keys: Shared<List<K>> = Shared::new([]);
@@ -251,7 +251,7 @@ impl View {
 	/// true the body's view is mounted under a fresh owner; when it turns
 	/// false the owner is disposed and the content removed. Toggling back on
 	/// re-renders from scratch. (For a state-PRESERVING toggle, use `show`.)
-	fun when(self, condition: Signal<bool>, body: (|| View) context owner_scope): View {
+	fun when(self, condition: Signal<bool>, body: (sync || View) context owner_scope): View {
 		let element = self.element;
 		let live_view: Shared<Option<View>> = Shared::new(None);
 		let live_owner: Shared<Option<Owner>> = Shared::new(None);
@@ -294,7 +294,7 @@ impl View {
 	/// disposal boundary like a `bind_each` row; whichever is live when the
 	/// enclosing boundary goes is disposed with it. Routing is the first
 	/// customer (`std::router`): `swap(route, |current| match current { .. })`.
-	fun swap<T: PartialEq>(self, source: Signal<T>, render: (|T| View) context owner_scope): View {
+	fun swap<T: PartialEq>(self, source: Signal<T>, render: (sync |T| View) context owner_scope): View {
 		let element = self.element;
 		let last_value: Shared<Option<T>> = Shared::new(None);
 		let live_view: Shared<Option<View>> = Shared::new(None);
@@ -345,7 +345,7 @@ fun mount(id: str, view: View) {
 /// Mount a component ROOT: the body builds under a fresh ambient owner (the
 /// root boundary — every binding inside registers into it) and the view is
 /// attached. Returns the root owner; most apps let it live forever.
-fun mount_root(id: str, body: (|| View) context owner_scope): Owner {
+fun mount_root(id: str, body: (sync || View) context owner_scope): Owner {
 	// The initial build is a turn boundary too: bindings created during
 	// mount settle as one wave instead of notifying per-`set`.
 	let (built, root) = turn(FlushPolicy::AtSuspension, || comp(body));

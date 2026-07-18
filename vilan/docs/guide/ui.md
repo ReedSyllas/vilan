@@ -164,8 +164,8 @@ fun main() {
 fun bind_each<T: PartialEq, K: PartialEq>(
 	self,
 	source: Signal<List<T>>,
-	key: |T| K,
-	render: (|T| View) context owner_scope,
+	key: sync |T| K,
+	render: (sync |T| View) context owner_scope,
 ): View
 ```
 

@@ -39,7 +39,7 @@ A `Signal<T>` is a mutable cell whose readers can subscribe to changes.
 Signal::new(value: T): Signal<T>       // a fresh signal
 signal.get(): T                        // current value
 signal.set(value: T)                   // write + notify subscribers
-signal.set_with(transform: |T| T)      // read-modify-write in one step
+signal.set_with(transform: sync |T| T) // read-modify-write in one step
 ```
 
 Signals hold **values**. vilan copies, so `get` hands you a copy, and the

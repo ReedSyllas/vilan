@@ -7804,7 +7804,10 @@ impl<'src> Analyzer<'src> {
                 Node::Tuple(elements) if elements.len() == 1 => &elements[0].0,
                 other => other,
             };
-            if !matches!(grouped, Node::ClosureType(..) | Node::AsyncType(..)) {
+            if !matches!(
+                grouped,
+                Node::ClosureType(..) | Node::AsyncType(..) | Node::SyncType(..)
+            ) {
                 self.diagnostics.push(Error {
                     note: None,
                     span: clause_span,
