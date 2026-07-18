@@ -4,8 +4,9 @@
 // writes for SSE); everything else is ordinary Vilan. This module is pure HTTP —
 // protocol mounts (RPC, the connected server) live in `std::rpc_server`.
 
-import pkg::bytes::Bytes;
+import pkg::bytes::{ Bytes, new_text_decoder };
 import pkg::json::JsonValue;
+import pkg::option::Option::{ self, Some, None };
 
 // --- Raw node:http bindings ---
 
@@ -105,7 +106,7 @@ impl NodeResponse {
 
 struct Request {
 	node: NodeRequest,
-	content: str,
+	content: Bytes,
 }
 
 impl Request {
@@ -122,6 +123,12 @@ impl Request {
 	/// The full request body as text — empty for a body-less request (e.g. a GET).
 	/// Collected eagerly when the request arrives (see `Server::start`).
 	fun body(self): str {
+		new_text_decoder().decode(self.content)
+	}
+
+	/// The same body as raw bytes, for frames that may be binary (an RPC
+	/// codec's POST).
+	fun bytes(self): Bytes {
 		self.content
 	}
 }
@@ -130,21 +137,56 @@ impl Request {
 
 struct Response {
 	status: i32,
-	header_name: str,
-	header_value: str,
-	body: str,
+	/// `(name, value)` pairs, written in order. An empty list gets the
+	/// default `Content-Type: text/plain`.
+	headers: List<(str, str)>,
+	body: ResponseBody,
+}
+
+/// What a response carries: a buffered text or binary body, or a live
+/// STREAM — the closure receives the open stream once the status and
+/// headers are written, and the response stays open until closed.
+enum ResponseBody {
+	Text(str),
+	Bytes(Bytes),
+	Stream(|ResponseStream| void),
+}
+
+/// A live streaming response (SSE and friends): `send` chunks over time;
+/// the response stays open until `close` — or until the client goes away
+/// (`on_close`). The host silently drops writes to a gone connection, so a
+/// chunk sent to a just-closed client is discarded, not an error.
+struct ResponseStream {
+	node: NodeResponse,
+}
+
+impl ResponseStream {
+	/// Write one chunk without ending the response.
+	fun send(self, chunk: str) {
+		self.node.write(chunk);
+	}
+
+	/// End the response.
+	fun close(self) {
+		self.node.end("");
+	}
+
+	/// The connection ended (tab closed, network gone) — release
+	/// per-connection state here.
+	fun on_close(self, handler: || void) {
+		self.node.on_event("close", handler);
+	}
 }
 
 struct ResponseBuilder {
 	status: i32,
-	header_name: str,
-	header_value: str,
-	body: str,
+	headers: List<(str, str)>,
+	body: ResponseBody,
 }
 
 impl Response {
 	fun builder(): ResponseBuilder {
-		ResponseBuilder { status = 200, header_name = "Content-Type", header_value = "text/plain", body = "" }
+		ResponseBuilder { status = 200, headers = [], body = ResponseBody::Text("") }
 	}
 }
 
@@ -154,19 +196,33 @@ impl ResponseBuilder {
 		self
 	}
 
+	/// Add one header — repeatable; each call appends a `(name, value)` pair.
 	fun set_header(own self, name: str, value: str): ResponseBuilder {
-		self.header_name = name;
-		self.header_value = value;
+		self.headers.push((name, value));
 		self
 	}
 
 	fun body(own self, body: str): ResponseBuilder {
-		self.body = body;
+		self.body = ResponseBody::Text(body);
+		self
+	}
+
+	/// A binary body.
+	fun body_bytes(own self, body: Bytes): ResponseBuilder {
+		self.body = ResponseBody::Bytes(body);
+		self
+	}
+
+	/// A STREAMING response: `on_open` receives the live stream once the
+	/// status and headers are written (a suspending `on_open` runs as
+	/// spawned work — the response is already open). SSE's shape.
+	fun streaming(own self, on_open: |ResponseStream| void): ResponseBuilder {
+		self.body = ResponseBody::Stream(on_open);
 		self
 	}
 
 	fun build(self): Response {
-		Response { status = self.status, header_name = self.header_name, header_value = self.header_value, body = self.body }
+		Response { status = self.status, headers = self.headers, body = self.body }
 	}
 }
 
@@ -176,6 +232,9 @@ struct Server {
 	port: i32,
 	request_handler: async |Request| Response,
 	on_start: |Server| void,
+	/// A WebSocket-style protocol upgrade handler, when the app mounted one
+	/// (`ServerBuilder::on_upgrade`): `(request, raw socket, head bytes)`.
+	upgrade_handler: Option<|NodeRequest, NodeSocket, Bytes| void>,
 }
 
 struct ServerBuilder {
@@ -185,11 +244,12 @@ struct ServerBuilder {
 	request_handler: async |Request| Response,
 	on_start: |Server| void,
 	on_stop: |Server| void,
+	upgrade_handler: Option<|NodeRequest, NodeSocket, Bytes| void>,
 }
 
 impl Server {
 	fun builder(): ServerBuilder {
-		ServerBuilder { port = 3000, request_handler = |request| Response::builder().code(404).body("Not Found").build(), on_start = |server| {}, on_stop = |server| {} }
+		ServerBuilder { port = 3000, request_handler = |request| Response::builder().code(404).body("Not Found").build(), on_start = |server| {}, on_stop = |server| {}, upgrade_handler = None }
 	}
 
 	fun url(self): str {
@@ -203,16 +263,34 @@ impl Server {
 		let on_start = self.on_start;
 		let server = self;
 		let port = self.port;
+		let upgrade_handler = self.upgrade_handler;
 		let node_server = node_create_server(|node_request, node_response| {
-			// Collect the full request body before dispatching: the handler is
-			// called indirectly and so can't suspend, so it receives the body as a
-			// ready string (`request.body()`) rather than a stream.
-			let content = read_request_body(node_request);
+			// Collect the full request body (as BYTES — it may be binary)
+			// before dispatching: the handler is called indirectly and so
+			// can't suspend, so it receives the body ready rather than as a
+			// stream.
+			let content = read_request_bytes(node_request);
 			let response = request_handler(Request { node = node_request, content = content });
 			node_response.set_status_code(response.status);
-			node_response.set_header_raw(response.header_name, response.header_value);
-			node_response.end(response.body);
+			if response.headers.len() == 0 {
+				node_response.set_header_raw("Content-Type", "text/plain");
+			}
+			for header in response.headers {
+				let (name, value) = header;
+				node_response.set_header_raw(name, value);
+			}
+			match response.body {
+				ResponseBody::Text(let text) => node_response.end(text),
+				ResponseBody::Bytes(let bytes) => node_response.end_bytes(bytes),
+				// The stream response: status and headers are written; hand
+				// the live stream to the app and leave the response open.
+				ResponseBody::Stream(let on_open) => on_open(ResponseStream { node = node_response }),
+			}
 		});
+		match upgrade_handler {
+			Some(let handler) => node_server.on_upgrade("upgrade", handler),
+			None => {},
+		}
 		node_server.listen(port, || {
 			on_start(server);
 		});
@@ -230,6 +308,13 @@ impl ServerBuilder {
 		self
 	}
 
+	/// Mount a protocol-upgrade handler (a WebSocket handshake arrives here
+	/// instead of `on_request`): `(request, raw socket, head bytes)`.
+	fun on_upgrade(own self, handler: |NodeRequest, NodeSocket, Bytes| void): ServerBuilder {
+		self.upgrade_handler = Some(handler);
+		self
+	}
+
 	fun on_start(own self, callback: |Server| void): ServerBuilder {
 		self.on_start = callback;
 		self
@@ -241,7 +326,7 @@ impl ServerBuilder {
 	}
 
 	fun build(self): Server {
-		Server { port = self.port, request_handler = self.request_handler, on_start = self.on_start }
+		Server { port = self.port, request_handler = self.request_handler, on_start = self.on_start, upgrade_handler = self.upgrade_handler }
 	}
 }
 

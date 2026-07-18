@@ -5,10 +5,10 @@
 // wire format (the SSE `data:` framing, the `__conn:<id>` handshake, and the
 // `/send?c=<id>` addressing that `SplitDuplex` speaks).
 //
-// `serve_connected` builds on `std::http`'s raw `node:http` bindings rather than
-// its `Server`, because an SSE stream needs partial writes (`NodeResponse.write`)
-// and `Server`'s request→`Response` model is fully buffered. When `Server` grows
-// streaming-response support, this module can move onto its public surface.
+// `serve_connected` rides `Server`'s public surface: the SSE stream is a
+// STREAMING response (`ResponseBuilder::streaming` — partial writes over a
+// held-open response), the binary RPC reply is a bytes body, and the
+// WebSocket handshake mounts through `ServerBuilder::on_upgrade`.
 
 import pkg::option::Option::{ Some, None };
 import pkg::shared::Shared;
@@ -22,7 +22,6 @@ import pkg::rpc::{
 	tag_duplex_bytes, tag_rpc_bytes,
 };
 import pkg::http::{
-	node_create_server, read_request_body, read_request_bytes,
 	NodeRequest, NodeSocket,
 	Request, Response, Server,
 };
@@ -141,80 +140,88 @@ fun serve_connected(
 	fallback: |Request| Response,
 	on_ready: || void,
 ) {
-	let node_server = node_create_server(|node_request, node_response| {
-		let path = node_request.url();
-		if path.starts_with("/events") {
-			node_response.set_status_code(200);
-			node_response.set_header_raw("Content-Type", "text/event-stream");
-			node_response.set_header_raw("Cache-Control", "no-cache");
-			let id = fresh_connection();
-			node_response.write(i"data: __conn:{id}\n\n");
-			let (app_end, wire_end) = duplex_pair();
-			wire_end.on_frame(|frame| {
-				match frame {
-					Frame::Text(let body) => node_response.write(i"data: {body}\n\n"),
-					// SSE can't carry bytes. Unreachable when both sides run one
-					// codec: a binary codec's client panics on its first send,
-					// before the server ever pushes.
-					Frame::Binary(let _bytes) => {},
-				}
-			});
-			connections.write().push((id, wire_end));
-			node_response.on_event("close", || {
-				drop_connection(id);
-				on_disconnect(id);
-			});
-			on_connect(id, app_end);
-		} else if path.starts_with("/send") {
-			let content = read_request_body(node_request);
-			// A garbled id parses to -1, which matches no connection — the
-			// frame is dropped, same as an unknown id.
-			let target = connection_id_of(path).parse_i32().unwrap_or(0 - 1);
-			for entry in connections.read() {
-				let (id, wire) = entry;
-				if id == target {
-					// the wire turn: the frame's signal writes coalesce
-					batch(|| {
-						wire.send(Frame::Text(content));
-					});
-				}
+	Server::builder()
+		.port(port)
+		.on_request(|request| connected_response(protocol, on_connect, on_disconnect, fallback, request))
+		// A WebSocket upgrade is the same connection contract over the true
+		// duplex wire (§5): handshake, then the socket joins `connections`
+		// exactly like an SSE stream — same `__conn` announcement, same
+		// `on_connect`/`on_disconnect`, same app code. Clients pick the
+		// transport (`connect_socket` here, `connect_split` for SSE).
+		.on_upgrade(|request, socket, head| {
+			accept_socket(request, socket, head, protocol, on_connect, on_disconnect);
+		})
+		.on_start(|server| on_ready())
+		.build()
+		.start()
+}
+
+/// Route one request of the connected server (see `serve_connected`).
+fun connected_response(
+	protocol: RpcProtocol,
+	on_connect: |i32, DuplexEnd| void,
+	on_disconnect: |i32| void,
+	fallback: |Request| Response,
+	request: Request,
+): Response {
+	let path = request.path();
+	if path.starts_with("/events") {
+		let id = fresh_connection();
+		Response::builder()
+			.set_header("Content-Type", "text/event-stream")
+			.set_header("Cache-Control", "no-cache")
+			.streaming(|stream| {
+				stream.send(i"data: __conn:{id}\n\n");
+				let (app_end, wire_end) = duplex_pair();
+				wire_end.on_frame(|frame| {
+					match frame {
+						Frame::Text(let body) => stream.send(i"data: {body}\n\n"),
+						// SSE can't carry bytes. Unreachable when both sides
+						// run one codec: a binary codec's client panics on its
+						// first send, before the server ever pushes.
+						Frame::Binary(let _bytes) => {},
+					}
+				});
+				connections.write().push((id, wire_end));
+				stream.on_close(|| {
+					drop_connection(id);
+					on_disconnect(id);
+				});
+				on_connect(id, app_end);
+			})
+			.build()
+	} else if path.starts_with("/send") {
+		let content = request.body();
+		// A garbled id parses to -1, which matches no connection — the
+		// frame is dropped, same as an unknown id.
+		let target = connection_id_of(path).parse_i32().unwrap_or(0 - 1);
+		for entry in connections.read() {
+			let (id, wire) = entry;
+			if id == target {
+				// the wire turn: the frame's signal writes coalesce
+				batch(|| {
+					wire.send(Frame::Text(content));
+				});
 			}
-			node_response.set_status_code(204);
-			node_response.end("");
-		} else if path.starts_with("/rpc") {
-			// Read the body as bytes, no sniffing: the JSON codec's reader
-			// accepts a binary frame as UTF-8 (both sides run one codec, Q6).
-			let content = read_request_bytes(node_request);
-			let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Binary(content)));
-			match reply {
-				Frame::Text(let frame) => {
-					node_response.set_status_code(200);
-					node_response.set_header_raw("Content-Type", "application/json");
-					node_response.end(frame);
-				},
-				Frame::Binary(let frame) => {
-					node_response.set_status_code(200);
-					node_response.set_header_raw("Content-Type", "application/octet-stream");
-					node_response.end_bytes(frame);
-				},
-			}
-		} else {
-			let content = read_request_body(node_request);
-			let response = fallback(Request { node = node_request, content = content });
-			node_response.set_status_code(response.status);
-			node_response.set_header_raw(response.header_name, response.header_value);
-			node_response.end(response.body);
 		}
-	});
-	// A WebSocket upgrade is the same connection contract over the true duplex
-	// wire (§5): handshake, then the socket joins `connections` exactly like an
-	// SSE stream — same `__conn` announcement, same `on_connect`/`on_disconnect`,
-	// same app code. Clients pick the transport (`connect_socket` here,
-	// `connect_split` for SSE).
-	node_server.on_upgrade("upgrade", |request, socket, head| {
-		accept_socket(request, socket, head, protocol, on_connect, on_disconnect);
-	});
-	node_server.listen(port, on_ready);
+		Response::builder().code(204).body("").build()
+	} else if path.starts_with("/rpc") {
+		// The body as bytes, no sniffing: the JSON codec's reader accepts a
+		// binary frame as UTF-8 (both sides run one codec, Q6).
+		let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Binary(request.bytes())));
+		match reply {
+			Frame::Text(let frame) => Response::builder()
+				.set_header("Content-Type", "application/json")
+				.body(frame)
+				.build(),
+			Frame::Binary(let frame) => Response::builder()
+				.set_header("Content-Type", "application/octet-stream")
+				.body_bytes(frame)
+				.build(),
+		}
+	} else {
+		fallback(request)
+	}
 }
 
 /// Perform the RFC 6455 handshake and wire the socket into the connection

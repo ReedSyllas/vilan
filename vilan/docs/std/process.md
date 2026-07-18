@@ -35,7 +35,8 @@ dispatch path). `desc` and other SQL keywords fail as column names.
 impl Server { fun builder(): ServerBuilder }
 impl ServerBuilder {
 	fun port(own self, port: i32): ServerBuilder
-	fun on_request(own self, handler: |Request| Response): ServerBuilder
+	fun on_request(own self, handler: async |Request| Response): ServerBuilder
+	fun on_upgrade(own self, handler: |NodeRequest, NodeSocket, Bytes| void): ServerBuilder
 	fun on_start(own self, callback: |Server| void): ServerBuilder
 	fun on_stop(own self, callback: |Server| void): ServerBuilder
 	fun build(self): Server
@@ -48,23 +49,34 @@ impl Server {
 impl Request {
 	fun path(self): str
 	fun method(self): str
-	fun body(self): str
+	fun body(self): str      // the body as text
+	fun bytes(self): Bytes   // the same body raw (binary POSTs)
 }
 impl Response {
 	fun builder(): ResponseBuilder
 }
 impl ResponseBuilder {
 	fun code(own self, code: i32): ResponseBuilder          // default 200
-	fun set_header(own self, name: str, value: str): ResponseBuilder
+	fun set_header(own self, name: str, value: str): ResponseBuilder   // repeatable
 	fun body(own self, body: str): ResponseBuilder
+	fun body_bytes(own self, body: Bytes): ResponseBuilder  // binary body
+	fun streaming(own self, on_open: |ResponseStream| void): ResponseBuilder
 	fun build(self): Response
+}
+impl ResponseStream {
+	fun send(self, chunk: str)          // write without ending
+	fun close(self)                     // end the response
+	fun on_close(self, handler: || void)   // the client went away
 }
 ```
 
-For an rpc-serving app you won't touch this directly — `serve_service`
-wraps it (below). Underneath sit the raw node bindings
-(`NodeRequest`/`NodeResponse`/`NodeSocket`) — upgrade handling and
-streaming live there.
+A **streaming** response holds the connection open: once the status and
+headers are written, `on_open` receives the live `ResponseStream` and
+writes chunks over time (SSE's shape — a suspending `on_open` runs as
+spawned work). `on_upgrade` mounts a WebSocket-style handshake handler
+over the raw bindings (`NodeRequest`/`NodeSocket`). For an rpc-serving
+app you won't touch any of this directly — `serve_service` wraps it
+(below), and `serve_connected` itself now rides this surface.
 
 ## std::rpc_server
 

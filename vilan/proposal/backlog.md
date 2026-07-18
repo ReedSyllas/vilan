@@ -1285,11 +1285,21 @@ have gaps.
 
 ## K. Std runtime
 
-1. **`Server` streaming responses** (M) — `serve_connected` builds on `std::http`'s raw
-   `node:http` bindings because an SSE stream needs partial writes and `Server`'s
-   request→`Response` model is fully buffered (the seam is documented in
-   `std/src/process/rpc_server.vl`'s header). Give `Server` streaming-response support and move
-   `serve_connected` onto its public surface.
+1. ~~**`Server` streaming responses**~~ — **SHIPPED 2026-07-18**: `Response` grew a
+   body KIND (`Text`/`Bytes`/`Stream`) and a headers LIST (`set_header` is
+   repeatable; empty = the old text/plain default), `ResponseBuilder` gained
+   `body_bytes` + `streaming(on_open)` — `on_open` receives a live
+   `ResponseStream` (`send`/`close`/`on_close`) once status+headers are
+   written, and a suspending `on_open` runs as spawned work.
+   `ServerBuilder::on_upgrade` mounts the WebSocket handshake. `Request` now
+   pre-reads BYTES (`bytes()` for binary POSTs; `body()` decodes text on
+   demand), so the binary `/rpc` leg fits the abstract surface.
+   `serve_connected` moved fully onto `Server` (`connected_response` routes
+   /events as a streaming response); the raw `node:http` seam note is gone.
+   E2e: `tests/streaming.rs` pins the public surface (chunks over a held
+   response, read back through fetch's body stream); the realtime-SSE +
+   socket-robustness suites gate the moved mount. Also fixed en route: the
+   J2-era single-header limitation (a response can now carry several).
 
 2. ~~**Expand the std math surface**~~ — **SHIPPED 2026-07-09**: `std::math` (constants
    `PI`/`TAU`/`E`/`EPSILON`/`INFINITY`/`NAN` — EPSILON computed, the lexer has no exponent
