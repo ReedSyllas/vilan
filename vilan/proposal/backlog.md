@@ -1,5 +1,10 @@
 # Vilan Backlog — everything outstanding
 
+> **Superseded 2026-07-18** — open work now lives in
+> [`backlog-2026-07-18.md`](backlog-2026-07-18.md) (distilled, open items only, same
+> stable ids). This file stays as the historical record: shipped items, their full
+> context, and the lessons recorded alongside them. Don't add new items here.
+
 A running capture of work that is *known but not done*, so nothing is lost to conversation. This
 is the tactical companion to [`roadmap.md`](roadmap.md) (the ranked strategic view); items that
 `roadmap.md` already tracks are cross-referenced by number rather than duplicated in full.
