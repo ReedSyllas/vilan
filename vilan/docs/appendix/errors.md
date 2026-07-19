@@ -138,6 +138,34 @@ could change during the pause. Re-derive the view after the await
 with `let`; assigning through it (`v = …`) already writes the target.
 → [The memory model](../tour/memory-model.md)
 
+## Resources
+
+A `resource` type has a single owner and moves rather than copies; a
+struct, enum, or tuple holding one is a resource too, inferred by
+containment (`Option<Database>` is a resource, `Option<i32>` is not).
+These errors are that classification made observable — the full move and
+destructor rules land in later work.
+
+**"the resource `…` cannot be used where `any` is expected — …"**
+`any` is a data sink, and a resource must keep its single owner: passing
+one to `print`, binding it to `let x: any`, or returning it as `any`
+would launder the discipline away. Debug-print the resource's fields
+instead.
+→ [The memory model](../tour/memory-model.md)
+
+**"`…` cannot hold the resource `…` — a native container's internals are host code …"**
+`List`, `Map`, `Set`, and the external generics (`Shared`, `Task`,
+`Promise`, `Context`) can't hold a resource in v1 — the move checker
+can't see inside host storage. `Option` is the sanctioned resource
+container; or keep the resource in a struct field.
+→ [The memory model](../tour/memory-model.md)
+
+**"field `…` of `[derive(Wire)]` / `[derive(Hashable)]` / `[derive(PartialEq)]` type `…` is the resource `…` — …"**
+A resource is not plain data: it cannot be sent over the wire, hashed by
+value, or compared by copy. Drop it from the derived type, or carry a
+plain-data handle (an id, a key) in its place.
+→ [The memory model](../tour/memory-model.md)
+
 ## Async
 
 **"`…` receives an async closure, but its type awaits nothing — declare it `async || T` (or return void for spawn semantics)"**

@@ -69,8 +69,8 @@ Nothing in Tier 1 forecloses Tier 2.
   }
   ```
 
-- **Containment infers.** An aggregate (struct, enum, tuple) with a resource field,
-  payload, or element type *is* a resource — recursively, the `Wire`/`Hashable`
+- **Containment infers.** An aggregate (struct, enum, tuple, fixed array) with a
+  resource field, payload, or element type *is* a resource — recursively, the `Wire`/`Hashable`
   all-fields machinery with the polarity flipped (any resource member marks the whole).
   `Session` above needs no modifier; writing it is legal and checked (declaring
   `resource` on a type is always allowed — intent: "will gain teardown / must not be

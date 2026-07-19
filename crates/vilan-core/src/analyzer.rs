@@ -370,6 +370,10 @@ pub struct Struct<'src> {
     pub name_span: Span,
     pub generic_parameter_constraint_ids: Vec<TypeId>,
     pub fields: Vec<Field<'src>>,
+    /// Declared `resource` (destruction.md §3): an explicitly-rooted owned
+    /// resource. Containment then infers the class transitively — see
+    /// `type_is_resource`.
+    pub resource: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +396,10 @@ pub struct Enum<'src> {
     // The namespace scope holding the variant entities by name, reachable
     // through `use Enum::{ ... }` or `Enum::Variant`.
     pub variants_scope_id: Id,
+    /// Declared `resource` (destruction.md §3): an owned-resource enum.
+    /// Containment infers the class for aggregates holding a resource payload —
+    /// see `type_is_resource`.
+    pub resource: bool,
     // A C-like enum: every variant is data-less and at least one has an explicit
     // discriminant (`enum Ordering { Less = -1, Equal = 0, Greater = 1 }`). Such
     // enums lower to their integer discriminant rather than the `[index, ..data]`
@@ -846,8 +854,12 @@ pub struct Scope<'src> {
 }
 
 /// A `[derive(Wire)]` type awaiting the all-fields-Wire check: its name, plus each
-/// member as `(label, type node, span)` (see `check_wire_boundary`).
-type WireTypeCheck<'src> = (&'src str, Vec<(String, &'src Node<'src>, Span)>);
+/// member as `(label, type node, resolved field TypeId, span)` (see
+/// `check_wire_boundary`). The resolved `TypeId` lets the same member be tested
+/// for resource-ness (destruction.md §8 — a resource field is rejected with a
+/// resource-specific steer, taking precedence over the not-Wire message) without
+/// re-walking the syntactic node.
+type WireTypeCheck<'src> = (&'src str, Vec<(String, &'src Node<'src>, TypeId, Span)>);
 
 /// An `[rpc]` method awaiting its Wire-signature check: its name, plus each
 /// parameter and the return as `(label, declared type node, span)` — `None` for
@@ -878,6 +890,24 @@ pub struct Analyzer<'src> {
     /// (JSON.stringify) would silently mangle it into a broken key.
     hashable_names: HashSet<&'src str>,
     hashable_types_to_check: Vec<WireTypeCheck<'src>>,
+    /// `[derive(PartialEq)]` types awaiting the resource-field reject
+    /// (destruction.md §8) — same member shape as the Wire/Hashable pair, but
+    /// the only rule enforced here is R12's sibling: a resource cannot be
+    /// compared by value (equality copies). Ordinary data fields need no
+    /// all-fields gate, so this list feeds only the resource check.
+    partialeq_types_to_check: Vec<WireTypeCheck<'src>>,
+    /// Per-instantiation resource classification memo (`type_is_resource`,
+    /// destruction.md §3): keyed by the interned instantiation `TypeId`, so
+    /// `Option<Database>` and `Option<i32>` cache independently. Holds only
+    /// COMPLETE results — a value computed while a containment cycle was cut back
+    /// to an in-progress ancestor is correct for that query root but is not
+    /// cached (a later query rooted elsewhere could reach the cut node acyclically).
+    resource_classification: HashMap<TypeId, bool>,
+    /// Every written generic type application (`List<Database>`, `Option<i32>`,
+    /// …) as `(resolved TypeId, span)`, collected at `walk_type_node` and checked
+    /// once types resolve: R10 (destruction.md §4) rejects a resource type
+    /// argument to a native container / external generic.
+    generic_type_applications: Vec<(TypeId, Span)>,
     /// `[rpc]` methods awaiting the Wire-signature check (`check_rpc_signatures`),
     /// collected as each is walked, validated once `wire_names` is complete.
     rpc_signatures_to_check: Vec<RpcSignatureCheck<'src>>,
@@ -1416,6 +1446,9 @@ impl<'src> Analyzer<'src> {
             wire_types_to_check: Vec::new(),
             hashable_names: HashSet::new(),
             hashable_types_to_check: Vec::new(),
+            partialeq_types_to_check: Vec::new(),
+            resource_classification: HashMap::new(),
+            generic_type_applications: Vec::new(),
             rpc_signatures_to_check: Vec::new(),
             expose_fields_to_check: Vec::new(),
             return_type_stack: Vec::new(),
@@ -2197,39 +2230,101 @@ impl<'src> Analyzer<'src> {
         })
     }
 
-    /// Record a `[derive(Wire)]` struct/enum for the all-fields-Wire check: mark its
-    /// name Wire, and stash each field (struct) or variant payload (enum) with its
-    /// type node + span, validated once every module's Wire names are collected.
-    fn collect_wire_type(&mut self, item: &'src Node<'src>) {
+    /// The declared name of a derivable struct/enum item (a struct needs a body —
+    /// a bodyless `external struct` has no fields to check), or `None` for
+    /// anything else. Shared by the derive collectors.
+    fn derivable_type_name(item: &Node<'src>) -> Option<&'src str> {
         match item {
-            Node::Struct(name, _generics, _external, _resource, Some(body)) => {
-                self.wire_names.insert(name.0);
-                let mut members = Vec::new();
+            Node::Struct(name, _generics, _external, _resource, Some(_body)) => Some(name.0),
+            Node::Enum(name, _generics, _resource, _variants) => Some(name.0),
+            _ => None,
+        }
+    }
+
+    /// Gather a derived struct/enum's members as `(label, type node, resolved
+    /// field TypeId, span)` for the all-fields derive checks. Runs AFTER the
+    /// item's own walk (`declaration_id` is its entity id), so each member's
+    /// resolved field type is read from `structs`/`enums` — matched by field name
+    /// / variant-payload index — and carried alongside the syntactic node. The
+    /// resolved id feeds the resource-field reject; the node feeds the existing
+    /// syntactic Wire/Hashable predicate.
+    fn collect_derived_members(
+        &mut self,
+        item: &'src Node<'src>,
+        declaration_id: Id,
+    ) -> Vec<(String, &'src Node<'src>, TypeId, Span)> {
+        let unknown = Type::Unknown.get_type_id(self);
+        let mut members = Vec::new();
+        match item {
+            Node::Struct(_name, _generics, _external, _resource, Some(body)) => {
+                let field_types: HashMap<&str, TypeId> = self
+                    .structs
+                    .get(&declaration_id)
+                    .map(|struct_| {
+                        struct_
+                            .fields
+                            .iter()
+                            .map(|field| (field.name, field.type_id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for field in &body.0 {
                     let field_name = field.0.0.0;
                     if let Some((type_node, type_span)) = field.0.1.as_ref() {
-                        members.push((format!("field `{field_name}`"), type_node, *type_span));
+                        let field_type_id = field_types.get(field_name).copied().unwrap_or(unknown);
+                        members.push((
+                            format!("field `{field_name}`"),
+                            type_node,
+                            field_type_id,
+                            *type_span,
+                        ));
                     }
                 }
-                self.wire_types_to_check.push((name.0, members));
             }
-            Node::Enum(name, _generics, _resource, variants) => {
-                self.wire_names.insert(name.0);
-                let mut members = Vec::new();
+            Node::Enum(_name, _generics, _resource, variants) => {
+                let payload_types: HashMap<&str, Vec<TypeId>> = self
+                    .enums
+                    .get(&declaration_id)
+                    .map(|enum_| {
+                        enum_
+                            .variants
+                            .iter()
+                            .map(|variant| (variant.name, variant.data_type_ids.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for variant in &variants.0 {
                     let variant_name = variant.0.0;
                     for (index, payload) in variant.0.1.iter().enumerate() {
+                        let payload_type_id = payload_types
+                            .get(variant_name)
+                            .and_then(|types| types.get(index).copied())
+                            .unwrap_or(unknown);
                         members.push((
                             format!("variant `{variant_name}` payload {index}"),
                             &payload.0,
+                            payload_type_id,
                             payload.1,
                         ));
                     }
                 }
-                self.wire_types_to_check.push((name.0, members));
             }
             _ => {}
         }
+        members
+    }
+
+    /// Record a `[derive(Wire)]` struct/enum for the all-fields-Wire check: mark its
+    /// name Wire, and stash each field (struct) or variant payload (enum) with its
+    /// type node + resolved type + span, validated once every module's Wire names
+    /// are collected.
+    fn collect_wire_type(&mut self, item: &'src Node<'src>, declaration_id: Id) {
+        let Some(name) = Self::derivable_type_name(item) else {
+            return;
+        };
+        self.wire_names.insert(name);
+        let members = self.collect_derived_members(item, declaration_id);
+        self.wire_types_to_check.push((name, members));
     }
 
     /// A field type is Wire iff it is a Wire scalar
@@ -2259,7 +2354,23 @@ impl<'src> Analyzer<'src> {
     fn check_wire_boundary(&mut self) {
         let checks = std::mem::take(&mut self.wire_types_to_check);
         for (type_name, members) in &checks {
-            for (label, type_node, span) in members {
+            for (label, type_node, field_type_id, span) in members {
+                // A resource field is rejected with a resource-specific steer,
+                // taking precedence over the not-Wire message: a resource is not
+                // plain data, so it cannot cross the wire (destruction.md §8).
+                if self.type_is_resource(*field_type_id) {
+                    let rendered = render_type(type_node);
+                    self.diagnostics.push(Error {
+                        note: None,
+                        span: *span,
+                        msg: format!(
+                            "{label} of `[derive(Wire)]` type `{type_name}` is the resource \
+                             `{rendered}` — a resource is not plain data and cannot be sent over \
+                             the wire; carry a plain-data handle (an id, a key) instead"
+                        ),
+                    });
+                    continue;
+                }
                 if !self.is_wire_type(type_node) {
                     let rendered = render_type(type_node);
                     self.diagnostics.push(Error {
@@ -2279,36 +2390,25 @@ impl<'src> Analyzer<'src> {
 
     /// Record a `[derive(Hashable)]` struct/enum for the all-fields-Hashable
     /// check (I1) — the same collection as `collect_wire_type`.
-    fn collect_hashable_type(&mut self, item: &'src Node<'src>) {
-        match item {
-            Node::Struct(name, _generics, _external, _resource, Some(body)) => {
-                self.hashable_names.insert(name.0);
-                let mut members = Vec::new();
-                for field in &body.0 {
-                    let field_name = field.0.0.0;
-                    if let Some((type_node, type_span)) = field.0.1.as_ref() {
-                        members.push((format!("field `{field_name}`"), type_node, *type_span));
-                    }
-                }
-                self.hashable_types_to_check.push((name.0, members));
-            }
-            Node::Enum(name, _generics, _resource, variants) => {
-                self.hashable_names.insert(name.0);
-                let mut members = Vec::new();
-                for variant in &variants.0 {
-                    let variant_name = variant.0.0;
-                    for (index, payload) in variant.0.1.iter().enumerate() {
-                        members.push((
-                            format!("variant `{variant_name}` payload {index}"),
-                            &payload.0,
-                            payload.1,
-                        ));
-                    }
-                }
-                self.hashable_types_to_check.push((name.0, members));
-            }
-            _ => {}
-        }
+    fn collect_hashable_type(&mut self, item: &'src Node<'src>, declaration_id: Id) {
+        let Some(name) = Self::derivable_type_name(item) else {
+            return;
+        };
+        self.hashable_names.insert(name);
+        let members = self.collect_derived_members(item, declaration_id);
+        self.hashable_types_to_check.push((name, members));
+    }
+
+    /// Record a `[derive(PartialEq)]` struct/enum for the resource-field reject
+    /// (destruction.md §8). Data fields need no all-fields gate (any two values
+    /// compare), so — unlike Wire/Hashable — there is no name set and no
+    /// syntactic recursion; the members feed only `check_partialeq_boundary`.
+    fn collect_partialeq_type(&mut self, item: &'src Node<'src>, declaration_id: Id) {
+        let Some(name) = Self::derivable_type_name(item) else {
+            return;
+        };
+        let members = self.collect_derived_members(item, declaration_id);
+        self.partialeq_types_to_check.push((name, members));
     }
 
     /// A field type is Hashable iff it is a scalar (any numeric, `str`, `bool`), a
@@ -2342,7 +2442,23 @@ impl<'src> Analyzer<'src> {
     fn check_hashable_boundary(&mut self) {
         let checks = std::mem::take(&mut self.hashable_types_to_check);
         for (type_name, members) in &checks {
-            for (label, type_node, span) in members {
+            for (label, type_node, field_type_id, span) in members {
+                // A resource field is rejected with a resource-specific steer,
+                // taking precedence over the not-Hashable message: a resource
+                // cannot be hashed by value (destruction.md §8).
+                if self.type_is_resource(*field_type_id) {
+                    let rendered = render_type(type_node);
+                    self.diagnostics.push(Error {
+                        note: None,
+                        span: *span,
+                        msg: format!(
+                            "{label} of `[derive(Hashable)]` type `{type_name}` is the resource \
+                             `{rendered}` — a resource cannot be hashed by value; hash a plain-data \
+                             projection (an id, a key) instead"
+                        ),
+                    });
+                    continue;
+                }
                 if !self.is_hashable_type(type_node) {
                     let rendered = render_type(type_node);
                     self.diagnostics.push(Error {
@@ -2357,6 +2473,358 @@ impl<'src> Analyzer<'src> {
                     });
                 }
             }
+        }
+    }
+
+    /// Enforce the `[derive(PartialEq)]` resource reject (destruction.md §8): a
+    /// resource field is rejected — a resource cannot be compared by value, since
+    /// equality would copy it. Ordinary data fields impose no requirement. Runs
+    /// after all modules are walked (so resource-ness is fully known).
+    fn check_partialeq_boundary(&mut self) {
+        let checks = std::mem::take(&mut self.partialeq_types_to_check);
+        for (type_name, members) in &checks {
+            for (label, type_node, field_type_id, span) in members {
+                if self.type_is_resource(*field_type_id) {
+                    let rendered = render_type(type_node);
+                    self.diagnostics.push(Error {
+                        note: None,
+                        span: *span,
+                        msg: format!(
+                            "{label} of `[derive(PartialEq)]` type `{type_name}` is the resource \
+                             `{rendered}` — a resource cannot be compared by value (equality would \
+                             copy it); compare a plain-data projection instead"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Whether `type_id` is a resource (destruction.md §3): declared `resource`,
+    /// or — recursively — any struct field, enum payload, tuple member, or fixed-
+    /// array element is a resource. The `Wire`/`Hashable` all-fields shape with the
+    /// polarity flipped (any resource member marks the whole), decided
+    /// PER-INSTANTIATION: `Option<Database>` is a resource, `Option<i32>` is not,
+    /// because the memo keys off the interned instantiation `TypeId` and generic
+    /// fields are substituted before they are classified. Memoized and
+    /// cycle-guarded (a recursive type — `struct Node { next: Option<Node> }` —
+    /// terminates: the cycle edge contributes no resource-ness).
+    fn type_is_resource(&mut self, type_id: TypeId) -> bool {
+        let mut visiting = HashSet::new();
+        self.classify_resource(type_id, &mut visiting).0
+    }
+
+    /// The memoized, cycle-guarded core of `type_is_resource`. Returns
+    /// `(is_resource, complete)`: `complete` is `false` when the result relied on
+    /// cutting a containment cycle back to an ancestor still on the stack — such a
+    /// result is correct for THIS query root but is not memoized, since a later
+    /// query rooted elsewhere could reach the cut node by an acyclic path (a
+    /// `true` result always has an acyclic witness, so it is always complete).
+    fn classify_resource(
+        &mut self,
+        type_id: TypeId,
+        visiting: &mut HashSet<TypeId>,
+    ) -> (bool, bool) {
+        if let Some(&cached) = self.resource_classification.get(&type_id) {
+            return (cached, true);
+        }
+        // A pathological (infinitely-instantiating) generic graph must degrade to
+        // a graceful bail rather than overflow the stack (the house `RecursionGuard`
+        // convention); a provisional `false` is safe — real types are finite.
+        let Some(_guard) = crate::util::RecursionGuard::enter() else {
+            return (false, false);
+        };
+        if !visiting.insert(type_id) {
+            return (false, false);
+        }
+        let (result, complete) = self.compute_resource(type_id, visiting);
+        visiting.remove(&type_id);
+        if complete {
+            self.resource_classification.insert(type_id, result);
+        }
+        (result, complete)
+    }
+
+    /// One classification step: the declared-`resource` base case, then
+    /// containment over the (substituted) members. Non-aggregate types are never
+    /// resources by containment (a closure that captures a resource is R9's
+    /// concern, not the type's).
+    fn compute_resource(
+        &mut self,
+        type_id: TypeId,
+        visiting: &mut HashSet<TypeId>,
+    ) -> (bool, bool) {
+        match type_id.get_type(self) {
+            Type::Struct(id, arguments) => {
+                if self
+                    .structs
+                    .get(&id)
+                    .is_some_and(|struct_| struct_.resource)
+                {
+                    return (true, true);
+                }
+                let Some(struct_) = self.structs.get(&id) else {
+                    return (false, true);
+                };
+                let parameters = struct_.generic_parameter_constraint_ids.clone();
+                let members: Vec<TypeId> =
+                    struct_.fields.iter().map(|field| field.type_id).collect();
+                let context = Self::instantiation_context(&parameters, &arguments);
+                self.any_member_resource(&members, &context, visiting)
+            }
+            Type::Enum(id, arguments) => {
+                if self.enums.get(&id).is_some_and(|enum_| enum_.resource) {
+                    return (true, true);
+                }
+                let Some(enum_) = self.enums.get(&id) else {
+                    return (false, true);
+                };
+                let parameters = enum_.generic_parameter_constraint_ids.clone();
+                let members: Vec<TypeId> = enum_
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.data_type_ids.clone())
+                    .collect();
+                let context = Self::instantiation_context(&parameters, &arguments);
+                self.any_member_resource(&members, &context, visiting)
+            }
+            // A tuple / fixed-array is a value aggregate: any resource element
+            // marks the whole (destruction.md §3, "element type").
+            Type::Tuple(elements) => {
+                self.any_member_resource(&elements, &SubstitutionContext::new(), visiting)
+            }
+            Type::Array(element, _length) => {
+                self.any_member_resource(&[element], &SubstitutionContext::new(), visiting)
+            }
+            // An abstract type parameter is not (yet) a resource — resource-ness is
+            // per-instantiation, and substitution replaces the parameter with its
+            // concrete argument before this point. Everything else is a non-value
+            // or a scalar: never a resource by containment.
+            Type::Generic(_)
+            | Type::Any
+            | Type::Never
+            | Type::Void
+            | Type::Unknown
+            | Type::Unresolved
+            | Type::Closure(_, _)
+            | Type::Function(_)
+            | Type::Module(_)
+            | Type::Trait(_, _)
+            | Type::Mapped(_, _, _) => (false, true),
+        }
+    }
+
+    /// Zip a nominal type's declared generic parameters with an instantiation's
+    /// arguments into a substitution context (`Option`'s `T` -> `Database` for
+    /// `Option<Database>`). Empty when the type is non-generic or its arguments
+    /// are erased — the members then classify in their own (abstract) terms.
+    fn instantiation_context(parameters: &[TypeId], arguments: &[TypeId]) -> SubstitutionContext {
+        parameters
+            .iter()
+            .copied()
+            .zip(arguments.iter().copied())
+            .collect()
+    }
+
+    /// Whether any member (substituted through `context`) is a resource. Returns
+    /// `(found, complete)`: finding a resource is definitive and complete; a
+    /// negative result is complete only if every member's classification was.
+    fn any_member_resource(
+        &mut self,
+        members: &[TypeId],
+        context: &SubstitutionContext,
+        visiting: &mut HashSet<TypeId>,
+    ) -> (bool, bool) {
+        let mut all_complete = true;
+        for member in members {
+            let member_type = member.get_type(self);
+            let member_type_id = if context.is_empty() {
+                *member
+            } else {
+                self.substitute_type(&member_type, context)
+                    .get_type_id(self)
+            };
+            let (is_resource, complete) = self.classify_resource(member_type_id, visiting);
+            if is_resource {
+                return (true, true);
+            }
+            all_complete &= complete;
+        }
+        (false, all_complete)
+    }
+
+    /// R10 (destruction.md §4): a native container (`List`/`Map`/`Set`) or
+    /// external generic (`Shared`/`Task`/`Promise`/`Context`) rejects a resource
+    /// type argument — their internals are host code the move checker cannot see
+    /// in v1. `Option` (a vilan enum, checkable under the affine rules) is the
+    /// sanctioned resource container, so it is deliberately absent from the reject
+    /// set. Checks every written generic type application collected at
+    /// `walk_type_node`, once types resolve.
+    fn check_container_resource_arguments(&mut self) {
+        let applications = std::mem::take(&mut self.generic_type_applications);
+        // The resource-rejecting heads, by entity id -> display name.
+        let mut containers: Vec<(Id, &'static str)> = Vec::new();
+        for name in ["List", "Map", "Set", "Shared", "Context"] {
+            if let Some(id) = self.primitive_struct_ids.get(name).copied() {
+                containers.push((id, name));
+            }
+        }
+        if let Some(id) = self.promise_struct_id {
+            containers.push((id, "Promise"));
+        }
+        if let Some(id) = self.task_struct_id {
+            containers.push((id, "Task"));
+        }
+        for (type_id, span) in applications {
+            let (head_id, arguments) = match type_id.get_type(self) {
+                Type::Struct(id, arguments) | Type::Enum(id, arguments) => (id, arguments),
+                _ => continue,
+            };
+            let Some((_, container_name)) =
+                containers.iter().copied().find(|(id, _)| *id == head_id)
+            else {
+                continue;
+            };
+            for argument in arguments {
+                if self.type_is_resource(argument) {
+                    let rendered =
+                        self.pretty_print_type(&argument.get_type(self), &HashMap::new());
+                    self.diagnostics.push(Error {
+                        note: None,
+                        span,
+                        msg: format!(
+                            "`{container_name}` cannot hold the resource `{rendered}` — a native \
+                             container's internals are host code the move checker cannot see (v1); \
+                             `Option` is the sanctioned resource container, or hold the resource in \
+                             a struct field"
+                        ),
+                    });
+                    // One diagnostic per application; the first resource argument
+                    // is enough to steer.
+                    break;
+                }
+            }
+        }
+    }
+
+    /// R12 (destruction.md §4): a resource cannot coerce to `any` — `any` is a
+    /// data sink, so the affine discipline must not launder away through it. The
+    /// three coercion positions: a call argument to an `any` parameter (`print(db)`
+    /// included), a binding annotated `any`, and a return whose declared type is
+    /// `any`. Debug-print the resource's fields instead.
+    fn check_resource_any_coercion(&mut self) {
+        // Value expression ids that meet an `any` slot; filtered to resources
+        // below (the classification query is `&mut self`, so it cannot run inside
+        // the read-only collection loops).
+        let mut sites: Vec<Id> = Vec::new();
+        // 1. Arguments to an `any` parameter. Only direct `Local(callee)` calls
+        //    are resolved — dispatched / generic callees are conservatively
+        //    skipped, as in the view-argument checks.
+        for expr in self.expr_id_to_expr_map.values() {
+            let Expr::Call(call_id) = expr else {
+                continue;
+            };
+            let Some(function_call) = self.function_calls.get(call_id) else {
+                continue;
+            };
+            let callee_id = match self.expr_id_to_expr_map.get(&function_call.subject_id) {
+                Some(Expr::Local(callee_id)) => *callee_id,
+                _ => continue,
+            };
+            let parameter_ids = self
+                .functions
+                .get(&callee_id)
+                .map(|function| &function.parameters)
+                .or_else(|| {
+                    self.external_functions
+                        .get(&callee_id)
+                        .map(|external| &external.parameters)
+                });
+            let Some(parameter_ids) = parameter_ids else {
+                continue;
+            };
+            for (parameter_id, argument_id) in
+                parameter_ids.iter().zip(function_call.argument_ids.iter())
+            {
+                if self.parameter_type_is_any(*parameter_id) {
+                    sites.push(*argument_id);
+                }
+            }
+        }
+        // 2. A binding annotated `any` (an inferred `any` is not a coercion —
+        //    an unannotated `let x = db` infers the resource type, which R1's
+        //    move rules police, not R12).
+        for variable in self.variables.values() {
+            if variable.annotated
+                && matches!(variable.type_id.get_type(self), Type::Any)
+                && let Some(initial) = variable.initial
+            {
+                sites.push(initial);
+            }
+        }
+        // 3. A return position whose declared type is `any` (the tail and each
+        //    `ret`, recorded as `return_sites`).
+        for (function_id, value_id) in &self.return_sites {
+            if let Some(return_type_id) = self
+                .functions
+                .get(function_id)
+                .and_then(|f| f.return_type_id)
+                && matches!(return_type_id.get_type(self), Type::Any)
+            {
+                sites.push(*value_id);
+            }
+        }
+        let mut seen = HashSet::new();
+        sites.retain(|site| seen.insert(*site));
+        for site in sites {
+            let Some(type_id) = self.resolved_type_id_of(site) else {
+                continue;
+            };
+            if self.type_is_resource(type_id) {
+                let rendered = self.pretty_print_type(&type_id.get_type(self), &HashMap::new());
+                let span = **self.span_map.get(&site).unwrap_or(&&EMPTY_SPAN);
+                self.diagnostics.push(Error {
+                    note: None,
+                    span,
+                    msg: format!(
+                        "the resource `{rendered}` cannot be used where `any` is expected — `any` \
+                         is a data sink, and a resource must keep its single owner (it cannot be \
+                         copied into one); debug-print its fields instead"
+                    ),
+                });
+            }
+        }
+    }
+
+    /// Whether a parameter's declared type is exactly `any` (R12's target slot).
+    fn parameter_type_is_any(&self, parameter_id: Id) -> bool {
+        self.parameters
+            .get(&parameter_id)
+            .is_some_and(|parameter| matches!(parameter.type_id.get_type(self), Type::Any))
+    }
+
+    /// The resolved `TypeId` of an expression, falling back to a bare place's
+    /// binding type (a `Local` usually carries no type entry of its own — the
+    /// type lives on the variable/parameter it names). The `TypeId` twin of
+    /// `place_value_type`, for the resource queries.
+    fn resolved_type_id_of(&self, expr_id: Id) -> Option<TypeId> {
+        if let Some(type_id) = self.expr_id_to_type_id_map.get(&expr_id) {
+            return Some(*type_id);
+        }
+        if let Some(type_id) = self.resolved_types.get(&expr_id) {
+            return Some(*type_id);
+        }
+        match self.expr_id_to_expr_map.get(&expr_id)? {
+            Expr::Local(binding_id) => self
+                .variables
+                .get(binding_id)
+                .map(|variable| variable.type_id)
+                .or_else(|| {
+                    self.parameters
+                        .get(binding_id)
+                        .map(|parameter| parameter.type_id)
+                }),
+            _ => None,
         }
     }
 
@@ -6582,18 +7050,24 @@ impl<'src> Analyzer<'src> {
             // `[derive(..)]` is transparent: walk the wrapped item; the synthesized
             // trait impls are appended separately (see `derive_impl_source`).
             Node::Derive(derives, inner) => {
-                // Collect `[derive(Wire)]` types for the all-fields-Wire check
-                // (`check_wire_boundary`), which runs once every module is walked.
-                if derives.iter().any(|(name, _)| *name == "Wire") {
-                    self.collect_wire_type(&inner.0);
-                }
-                if derives.iter().any(|(name, _)| *name == "Hashable") {
-                    self.collect_hashable_type(&inner.0);
-                }
                 for (name, name_span) in derives {
                     self.record_macro_reference(name, *name_span, scope_id);
                 }
-                self.walk_expr_node(inner, scope_id);
+                // Walk the wrapped item FIRST, so its fields resolve to type ids
+                // before the derive collectors read them (the all-fields checks
+                // — Wire/Hashable/PartialEq — carry each member's resolved type to
+                // test it for resource-ness). `walk_expr_node` returns the
+                // struct/enum entity id.
+                let declaration_id = self.walk_expr_node(inner, scope_id);
+                if derives.iter().any(|(name, _)| *name == "Wire") {
+                    self.collect_wire_type(&inner.0, declaration_id);
+                }
+                if derives.iter().any(|(name, _)| *name == "Hashable") {
+                    self.collect_hashable_type(&inner.0, declaration_id);
+                }
+                if derives.iter().any(|(name, _)| *name == "PartialEq") {
+                    self.collect_partialeq_type(&inner.0, declaration_id);
+                }
                 None
             }
             // `[service(..)]` is transparent to analysis: walk the wrapped
@@ -7224,9 +7698,10 @@ impl<'src> Analyzer<'src> {
                 self.prepped_assignments.push((target_id, stored_value_id));
                 Some(Expr::Assignment(target_id, stored_value_id))
             }
-            Node::Struct(name, generic_parameters, external, _resource, body) => {
+            Node::Struct(name, generic_parameters, external, resource, body) => {
                 let name_span = name.1;
                 let name = name.0;
+                let resource = *resource;
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -7289,13 +7764,15 @@ impl<'src> Analyzer<'src> {
                         name_span,
                         generic_parameter_constraint_ids,
                         fields,
+                        resource,
                     },
                 );
                 Some(Expr::Struct(id))
             }
-            Node::Enum(name, generic_parameters, _resource, variants) => {
+            Node::Enum(name, generic_parameters, resource, variants) => {
                 let name_span = name.1;
                 let name = name.0;
+                let resource = *resource;
                 let scope = self.mut_scope_for_scope_id(scope_id);
                 scope.name_to_id_map.insert(name, id);
                 self.reference_count.entry(id).or_insert(0);
@@ -7353,6 +7830,7 @@ impl<'src> Analyzer<'src> {
                         variants: variant_declarations,
                         variants_scope_id,
                         is_numeric: all_data_less && any_explicit_discriminant,
+                        resource,
                     },
                 );
                 Some(Expr::Enum(id))
@@ -8359,6 +8837,13 @@ impl<'src> Analyzer<'src> {
                     .iter()
                     .map(|argument| self.walk_type_node(argument, scope_id))
                     .collect();
+                // R10 (destruction.md §4): a written generic type application is a
+                // candidate for the native-container / external-generic resource
+                // reject. Record the resulting (still-unresolved) type id + span;
+                // once types resolve, `check_container_resource_arguments` inspects
+                // the head and arguments. Recording every application keeps the
+                // check total (an inferred instantiation is R11's concern, later).
+                self.generic_type_applications.push((type_id, node.1));
                 self.prepped_type_locals.push((
                     type_id,
                     name,
@@ -18050,6 +18535,18 @@ pub fn analyze<'src>(
         analyzer.primitive_struct_ids.insert("Set", set_struct_id);
     }
 
+    // The `std::map` `Map` struct, if `map.vl` loaded — captured so R10
+    // (destruction.md §4) can reject a resource type argument (`Map<str,
+    // Database>`). `Map` is a vilan wrapper over `NativeMap`, so its element
+    // still lands in host-opaque storage.
+    let map_struct_id = module_scopes
+        .get("map")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Map").copied());
+    if let Some(map_struct_id) = map_struct_id {
+        analyzer.primitive_struct_ids.insert("Map", map_struct_id);
+    }
+
     // The raw `std::native_map` `NativeMap` struct, if loaded (imported by the
     // public `Map`/`Set` wrappers). It carries the map intrinsics; the public
     // `Map`/`Set` are ordinary vilan structs over it (I1).
@@ -18198,9 +18695,15 @@ pub fn analyze<'src>(
     analyzer.check_reseat_escape();
     analyzer.check_wire_boundary();
     analyzer.check_hashable_boundary();
+    analyzer.check_partialeq_boundary();
     analyzer.check_rpc_signatures();
     analyzer.check_expose_fields();
     analyzer.check_generic_bound_satisfaction();
+    // The observable half of C4 resource classification (destruction.md §4):
+    // R10 (container/external-generic resource arguments) and R12 (no coercion
+    // to `any`). Move/loan machinery (R1–R9, R11) and destructors come later.
+    analyzer.check_container_resource_arguments();
+    analyzer.check_resource_any_coercion();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

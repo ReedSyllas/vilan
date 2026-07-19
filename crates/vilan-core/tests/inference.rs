@@ -19410,3 +19410,371 @@ fn resource_after_external_is_rejected() {
     // program (destruction.md §3 fixes the order).
     assert_fails("external resource struct Database;\n");
 }
+
+// === C4 S1 chunk 2: resource CLASSIFICATION + its cheap consumers ===============
+// (destruction.md §3 classification, §4 R10/R12, §8 derive interaction). No move/
+// loan machinery (R1–R9, R11) and no destructors yet — this chunk only makes
+// classification observable through the three cheap checks.
+
+// --- Classification: `type_is_resource` across the containment shapes ----------
+// Each shape is observed through a consumer (R10/R12), since classification is
+// internal; the point is that the QUERY marks the whole from any resource member.
+
+#[test]
+fn resource_classification_direct_declared() {
+    // A leaf declared `resource` is a resource — observed via R12 (`print`).
+    assert_fails_with(
+        r#"
+        import std::io::print;
+        resource struct Db { handle: i32 }
+        fun main() {
+            let d = Db { handle = 1 };
+            print(d);
+        }
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn resource_classification_nested_struct_containment() {
+    // A struct with a resource FIELD is a resource, with no `resource` modifier
+    // of its own (containment infers — the Wire/Hashable shape, polarity flipped).
+    assert_fails_with(
+        r#"
+        import std::io::print;
+        resource struct Db { handle: i32 }
+        struct Session { db: Db }
+        fun main() {
+            let s = Session { db = Db { handle = 1 } };
+            print(s);
+        }
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn resource_classification_enum_payload_containment() {
+    // An enum with a resource PAYLOAD is a resource — observed via R10 (a
+    // `List<Holder>` argument is rejected because `Holder` is a resource).
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        enum Holder { Has(Db), Empty }
+        fun sink(items: List<Holder>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn resource_classification_tuple_member_containment() {
+    // A tuple with a resource MEMBER is a resource — observed via R10.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(items: List<(Db, i32)>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn resource_classification_non_resource_control() {
+    // The control: a plain aggregate with no resource anywhere is NOT a resource —
+    // it flows into `any` and into a native container freely.
+    assert_compiles(
+        r#"
+        import std::io::print;
+        struct Plain { x: i32 }
+        fun sink(items: List<Plain>) {}
+        fun main() {
+            let p = Plain { x = 1 };
+            print(p);
+        }
+        "#,
+    );
+}
+
+// --- Per-instantiation classification: `Option<Db>` yes, `Option<i32>` no ------
+
+#[test]
+fn resource_classification_option_of_resource_is_a_resource() {
+    // `Option<Database>` is a resource INSTANTIATION (per-instantiation, like
+    // async/platform bits) — observed via R12: an `Option<Db>` value cannot
+    // coerce to `any`.
+    assert_fails_with(
+        r#"
+        import std::io::print;
+        import std::option::Option::{ self, None };
+        resource struct Db { handle: i32 }
+        fun main() {
+            let o: Option<Db> = None;
+            print(o);
+        }
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn resource_classification_option_of_data_is_not_a_resource() {
+    // The same shape at `i32` stays data — `Option<i32>` coerces to `any` freely,
+    // proving classification is decided per substituted instantiation.
+    assert_compiles(
+        r#"
+        import std::io::print;
+        import std::option::Option::{ self, None };
+        fun main() {
+            let o: Option<i32> = None;
+            print(o);
+        }
+        "#,
+    );
+}
+
+// --- R10: native containers / external generics reject resource arguments ------
+// `Option` is the sanctioned container; List/Map/Set and Shared/Task/Promise/
+// Context reject (destruction.md §4 R10).
+
+#[test]
+fn r10_list_rejects_a_resource_argument() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(items: List<Db>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r10_map_rejects_a_resource_argument() {
+    assert_fails_with(
+        r#"
+        import std::map::Map;
+        resource struct Db { handle: i32 }
+        fun sink(table: Map<str, Db>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r10_set_rejects_a_resource_argument() {
+    assert_fails_with(
+        r#"
+        import std::set::Set;
+        resource struct Db { handle: i32 }
+        fun sink(items: Set<Db>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r10_shared_rejects_a_resource_argument() {
+    assert_fails_with(
+        r#"
+        import std::shared::Shared;
+        resource struct Db { handle: i32 }
+        fun sink(cell: Shared<Db>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r10_task_rejects_a_resource_argument() {
+    // One of the external generics (Task/Promise/Context) — the same reject path.
+    assert_fails_with(
+        r#"
+        import std::task::Task;
+        resource struct Db { handle: i32 }
+        fun sink(handle: Task<Db>) {}
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r10_option_accepts_a_resource_argument() {
+    // `Option` is the sanctioned resource container — never flagged by R10.
+    assert_compiles(
+        r#"
+        import std::option::Option;
+        resource struct Db { handle: i32 }
+        fun sink(item: Option<Db>) {}
+        fun main() {}
+        "#,
+    );
+}
+
+// --- R12: a resource cannot coerce to `any` (argument, binding, return) --------
+
+#[test]
+fn r12_rejects_a_resource_argument_to_any() {
+    // The `print(db)` case named in the proposal — `any` is a data sink.
+    assert_fails_with(
+        r#"
+        import std::io::print;
+        resource struct Db { handle: i32 }
+        fun main() {
+            let d = Db { handle = 1 };
+            print(d);
+        }
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r12_rejects_a_resource_bound_to_any() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun main() {
+            let d = Db { handle = 1 };
+            let sink: any = d;
+        }
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r12_rejects_a_resource_returned_as_any() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun leak(): any {
+            let d = Db { handle = 1 };
+            d
+        }
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn r12_accepts_a_data_value_in_all_three_positions() {
+    // The control: a plain value flows into `any` in every position.
+    assert_compiles(
+        r#"
+        import std::io::print;
+        struct Plain { x: i32 }
+        fun echo(): any {
+            let p = Plain { x = 1 };
+            print(p);
+            let sink: any = Plain { x = 2 };
+            Plain { x = 3 }
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+// --- Derives: Wire / Hashable / PartialEq reject a resource field --------------
+// A resource is not plain data: it cannot be sent, hashed by value, or compared
+// by copy (destruction.md §8). The resource message takes precedence over the
+// generic not-Wire / not-Hashable one.
+
+#[test]
+fn derive_wire_rejects_a_resource_field() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        [derive(Wire)]
+        struct Envelope { db: Db }
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn derive_hashable_rejects_a_resource_field() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        [derive(Hashable)]
+        struct Key { db: Db }
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn derive_partialeq_rejects_a_resource_field() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        [derive(PartialEq)]
+        struct Pair { db: Db }
+        fun main() {}
+        "#,
+        "resource",
+    );
+}
+
+#[test]
+fn derive_accepts_a_data_type() {
+    // The control: the same three derives on a plain-data struct compile.
+    assert_compiles(
+        r#"
+        [derive(Wire, Hashable, PartialEq)]
+        struct Point { x: i32, y: i32 }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn resource_classification_fixed_array_containment() {
+    // A fixed array of resources is a resource (destruction.md §3: any resource
+    // element marks the whole aggregate) — observed via R12 on an annotated
+    // `any` binding.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun main() {
+            let pair: [Db; 2] = [Db { handle = 1 }, Db { handle = 2 }];
+            let laundered: any = pair;
+        }
+        "#,
+        "resource",
+    );
+}
+
+// A METHOD's `any` parameter is covered too: a concrete-receiver method call
+// resolves through the same `subject -> Local(callee)` path as the convention
+// checks, so R12 sees its parameters. (The residue is dispatched callees —
+// recorded in destruction-impl-plan.md §2.)
+#[test]
+fn r12_rejects_a_resource_method_argument_to_any() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        struct Sink { count: i32 }
+        impl Sink {
+            fun swallow(self, value: any) {}
+        }
+        fun main() {
+            let db = Db { handle = 1 };
+            let sink = Sink { count = 0 };
+            sink.swallow(db);
+        }
+        "#,
+        "resource",
+    );
+}

@@ -108,6 +108,11 @@ From `claims-and-epochs.md` §8:
   bless `Option`'s surface first, ship the general rule as the immediate follow-up —
   but the general rule is the design.
 - **R12** no coercion to `any` (arguments, bindings, returns; `print(db)` included).
+  Recorded conservatism (shipped with the chunk): argument coverage resolves callees
+  via `subject -> Local(callee)` — free functions *and* concrete-receiver methods are
+  both seen (pinned); the residue is *dispatched* callees (trait-typed receivers),
+  skipped like the existing convention checks skip them — R11's per-instantiation
+  re-check is the recorded net under that residue.
 
 **Diagnostics**: the §11 vocabulary verbatim, each with its steer, per the diagnostics
 standard.
