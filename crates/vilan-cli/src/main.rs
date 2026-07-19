@@ -1211,6 +1211,10 @@ fn compile_to_js(
         // (destruction.md §5): teardown must be synchronous in v1. An awaiting
         // body is async only by inference, so this runs after `async_infer`.
         vilan_core::analyzer::check_async_drops(&mut program);
+        // Teardown must be context-free (destruction.md §8): a `drop` body whose
+        // call sites (scope exits) can thread no context is rejected. Runs after
+        // `thread_contexts` fills `context_dependent_functions`.
+        vilan_core::analyzer::check_context_drops(&mut program);
         vilan_core::platform_color::check(&mut program, platform);
 
         // Evaluate `const` expressions (proposal/const-eval.md); the results

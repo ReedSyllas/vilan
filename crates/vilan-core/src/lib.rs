@@ -380,6 +380,10 @@ pub fn analyze_source(
         // body now that `async_functions` is settled — an awaiting body is async
         // only by inference, so this cannot run inside `analyze`.
         analyzer::check_async_drops(&mut program);
+        // And teardown must be context-free (destruction.md §8): a `drop` body
+        // whose call sites (scope exits) can thread no context is rejected. Runs
+        // after `thread_contexts` fills `context_dependent_functions`.
+        analyzer::check_context_drops(&mut program);
         platform_color::check(&mut program, platform);
         // The const pass (proposal/const-eval.md): evaluate `const`-marked
         // expressions in dependency order; results serialize in place at

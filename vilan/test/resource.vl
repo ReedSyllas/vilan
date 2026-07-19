@@ -1,0 +1,76 @@
+// Deterministic destruction (destruction.md §5/§7, C4 S2 chunk b): resource
+// locals drop at their scope's end, and every drop body prints so the ORDER is
+// visible. Exercises locals-reverse, early `ret`, R2 overwrite, a `Drop` body
+// before its fields (reverse field order), and a containment-only resource
+// (no `Drop` impl) still freeing its fields. Synchronous + host-free, so the
+// interpreter equivalence gate checks it against `node` too.
+import std::print;
+import std::drop::Drop;
+
+// A leaf resource that announces its teardown.
+resource struct Res { tag: str }
+impl Res with Drop {
+	fun drop(&mut self) { print(self.tag); }
+}
+
+// A resource that OWNS resources and has its own `Drop`: the body runs first,
+// then the fields drop in reverse declaration order.
+resource struct Pair { first: Res, second: Res }
+impl Pair with Drop {
+	fun drop(&mut self) { print("pair-body"); }
+}
+
+// A resource by containment only (no `Drop` impl) still drops its field.
+resource struct Bag { item: Res }
+
+// Two locals drop in reverse declaration order at the scope end.
+fun locals() {
+	let a = Res { tag = "a" };
+	let b = Res { tag = "b" };
+	print("locals-body");
+}
+
+// A resource owned at an early `ret` drops on the way out — and also on the
+// fall-through path.
+fun early(stop: bool) {
+	let r = Res { tag = "early" };
+	if stop {
+		print("stopping");
+		ret;
+	}
+	print("continuing");
+}
+
+// R2: assigning onto a still-owning binding drops the OLD value first; the new
+// value drops at the scope end.
+fun overwrite() {
+	mut r = Res { tag = "old" };
+	r = Res { tag = "new" };
+	print("overwrite-body");
+}
+
+// The `Drop` body runs before the fields, which drop in reverse order.
+fun nested() {
+	let pair = Pair { first = Res { tag = "first" }, second = Res { tag = "second" } };
+	print("nested-body");
+}
+
+// Containment-only: no `Drop` impl, but the field still drops.
+fun containment() {
+	let bag = Bag { item = Res { tag = "bagged" } };
+	print("containment-body");
+}
+
+fun main() {
+	locals();
+	print("--");
+	early(true);
+	print("--");
+	early(false);
+	print("--");
+	overwrite();
+	print("--");
+	nested();
+	print("--");
+	containment();
+}

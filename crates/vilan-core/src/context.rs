@@ -60,6 +60,11 @@ pub fn thread_contexts(program: &mut Program) {
         }
     };
 
+    // Publish the context-dependent nodes (functions / `run` closures that take a
+    // hidden context parameter) so `check_context_drops` can reject a `drop` body
+    // that requires an ambient context (destruction.md §8).
+    program.context_dependent_functions = plan.param_nodes.iter().map(|(_, node)| *node).collect();
+
     if !plan.is_empty() {
         apply(program, plan);
     }

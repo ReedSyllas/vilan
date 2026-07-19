@@ -224,10 +224,20 @@ idiom R7 pushes toward.
 - **Views / rule 4:** loans are views; E1/E2/E3 apply unchanged. Scope-end drop coincides
   with lexical view death, so no new event kind is needed; a `borrows` projection of a
   resource cannot outlive it (second-class already).
-- **Turns:** drops are ordinary statements at scope exits — they run inside whatever turn
-  is ambient; a drop that writes signals joins the current wave. Documented, not special.
-- **Platform coloring:** a drop body colors like any function; a resource whose drop needs
-  `@process` makes owning scopes `@process` — reachability sees the inserted call.
+- **Turns / contexts** *(amended 2026-07-19 — S2b implementation finding)*: drops are
+  synchronous statements at scope exits. The draft's "a drop that writes signals joins
+  the current wave — documented, not special" was wrong about its own lowering: a
+  context-requiring `drop` compiles to `drop(self, $ctx)`, and scope-exit insertion
+  points neither thread contexts nor statically guarantee one. **v1 rejects a `drop`
+  body that requires an ambient context** ("teardown must be context-free — hand
+  turn-joining work to an owner inside the turn"); context-threading into teardown is
+  recorded future work if a real driver appears. Neither std driver (`Database`,
+  `OwnedNursery`) needs it.
+- **Platform coloring** *(amended 2026-07-19 — same finding's sibling)*: a drop body
+  colors like any function, but the inserted call is transformer-side — reachability
+  cannot see it. The mechanism is a **synthetic ownership edge**: a scope owning a
+  droppable resource of type `T` reaches `T`'s drop impl in the call graph, so a
+  `@process`-needing drop colors its owning scopes.
 - **Wire / Hashable / PartialEq derives:** the all-fields checks reject resource fields
   (a resource is not plain data; it cannot be sent, hashed by value, or compared by copy).
 - **`const`:** resources are not plain data — const evaluation already rejects them.

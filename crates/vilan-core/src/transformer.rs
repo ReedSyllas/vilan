@@ -612,6 +612,10 @@ struct Transformer<'src> {
     // Trait default methods specialized per concrete type, keyed by
     // (default function, concrete type) so each is emitted once.
     default_instances: HashMap<(Id, String), String>,
+    // Per-type `__drop` helpers (destruction.md §7), keyed by `type_key`. `None`
+    // records a type whose destruction is a complete no-op (no `Drop` impl, no
+    // resource members) so callers skip it; `Some(name)` is the emitted helper.
+    drop_helpers: HashMap<String, Option<String>>,
     monomorphized: Vec<js::Node<'src>>,
     // Captures introduced by an `is` test, aliased to the subject's payload
     // slots (e.g. `t[1]`) since they can't be JS bindings in expression position.
@@ -622,6 +626,28 @@ struct Transformer<'src> {
     // Host imports an `[extern]` call needs, as module -> imported symbols;
     // emitted as `import { a, b } from "module";` lines at the top.
     used_imports: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// How a resource-owning scope's tail value is used when it is restructured into
+/// `try`/`finally` (destruction.md §7).
+#[derive(Clone)]
+enum TailDisposition {
+    /// A function body: the tail is `return`ed, flowing out through the finallys.
+    Return,
+    /// A statement-position scope (a `{}` block used as a statement, a loop body,
+    /// a discarded branch): the tail runs for effect, its value dropped.
+    Discard,
+    /// A value-position `{}` block: the tail is assigned to this temp (declared
+    /// before the tries), so the block's value survives the finallys.
+    AssignTo(String),
+    /// A value-position `if`/`match` arm: the tail assigns to the result temp, or
+    /// — if it diverges (`ret`/`jump`) — runs as-is (`push_result_or_divergence`),
+    /// inside the drop scope so teardown precedes the branch's result.
+    ResultOrDivergence(String),
+    /// The entry `main`: a non-void tail forwards to `process.exit` on a host that
+    /// has one (the exit code), else runs as a plain statement — INSIDE the drop
+    /// scope so teardown precedes exit.
+    MainExit,
 }
 
 impl<'src> Transformer<'src> {
@@ -696,6 +722,7 @@ impl<'src> Transformer<'src> {
             instances: HashMap::new(),
             current_self_type: None,
             default_instances: HashMap::new(),
+            drop_helpers: HashMap::new(),
             monomorphized: Vec::new(),
             is_bindings: HashMap::new(),
             used_helpers: BTreeSet::new(),
@@ -774,32 +801,45 @@ impl<'src> Transformer<'src> {
             .collect();
 
         let saved_instance = self.enter_instance(main_fn.id, Vec::new());
-        let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
+        // A `main` owning resource locals is restructured into `try`/`finally`
+        // teardown (destruction.md §7), its exit-code tail handled inside the drop
+        // scope so teardown precedes exit; one owning none emits exactly as before.
+        let mut t_main_fn_body = if self.scope_needs_drops(&main_fn.body.0) {
+            self.walk_scope_body(
+                &main_fn.body.0,
+                0,
+                main_fn.body.1,
+                TailDisposition::MainExit,
+            )
+        } else {
+            let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
 
-        // Emit main's trailing expression (and any statements it expands to). On
-        // Node a non-void result is forwarded to `process.exit` (the exit code); a
-        // void tail (e.g. a block ending in a loop) exits normally. The browser has
-        // no exit code, so the tail is emitted as a plain statement — its side
-        // effects still run (a `main` that ends in `render()`), the value discarded.
-        if let Some(value) = self.walk_entity(main_fn.body.1, &mut t_main_fn_body) {
-            if !matches!(value, js::Node::Void) {
-                // A host with `process.exit` (Node) forwards `main`'s result as the
-                // exit code; the browser (and the host-less `none`, which the CLI
-                // refuses to *build*) has none, so the tail is a plain statement.
-                let statement = if self.program.platform.has_process_exit() {
-                    js::Node::Call(
-                        Box::new(js::Node::Property(
-                            Box::new(js::Node::Local("process".to_string())),
-                            "exit".to_string(),
-                        )),
-                        vec![value],
-                    )
-                } else {
-                    value
-                };
-                t_main_fn_body.push(statement);
+            // Emit main's trailing expression (and any statements it expands to). On
+            // Node a non-void result is forwarded to `process.exit` (the exit code); a
+            // void tail (e.g. a block ending in a loop) exits normally. The browser has
+            // no exit code, so the tail is emitted as a plain statement — its side
+            // effects still run (a `main` that ends in `render()`), the value discarded.
+            if let Some(value) = self.walk_entity(main_fn.body.1, &mut t_main_fn_body) {
+                if !matches!(value, js::Node::Void) {
+                    // A host with `process.exit` (Node) forwards `main`'s result as the
+                    // exit code; the browser (and the host-less `none`, which the CLI
+                    // refuses to *build*) has none, so the tail is a plain statement.
+                    let statement = if self.program.platform.has_process_exit() {
+                        js::Node::Call(
+                            Box::new(js::Node::Property(
+                                Box::new(js::Node::Local("process".to_string())),
+                                "exit".to_string(),
+                            )),
+                            vec![value],
+                        )
+                    } else {
+                        value
+                    };
+                    t_main_fn_body.push(statement);
+                }
             }
-        }
+            t_main_fn_body
+        };
 
         self.restore_instance(saved_instance);
 
@@ -885,13 +925,13 @@ impl<'src> Transformer<'src> {
         }
     }
 
-    fn walk_list(&mut self, list: &Vec<Id>) -> Vec<js::Node<'src>> {
+    fn walk_list(&mut self, list: &[Id]) -> Vec<js::Node<'src>> {
         let mut block = Vec::new();
         self.walk_entities(list, &mut block);
         block
     }
 
-    fn walk_entities(&mut self, ids: &Vec<Id>, mut block: &mut Vec<js::Node<'src>>) {
+    fn walk_entities(&mut self, ids: &[Id], mut block: &mut Vec<js::Node<'src>>) {
         for id in ids {
             if let Some(node) = self.walk_entity(*id, &mut block) {
                 // A statement whose value is discarded and is `undefined` (e.g.
@@ -2098,12 +2138,15 @@ impl<'src> Transformer<'src> {
                 return value;
             }
             Expr::Variable(id) => {
-                if self
-                    .program
-                    .reference_count
-                    .get(id)
-                    .map(|x| *x < 1)
-                    .unwrap_or(true)
+                // A dropped resource local must keep its binding even if otherwise
+                // unused — the scope's `finally` reads it (destruction.md §7).
+                if !self.program.dropped_bindings.contains(id)
+                    && self
+                        .program
+                        .reference_count
+                        .get(id)
+                        .map(|x| *x < 1)
+                        .unwrap_or(true)
                 {
                     // An unused binding is dropped — but a side-effecting
                     // initializer (a call mutating through `&mut`, say) must still
@@ -2142,6 +2185,26 @@ impl<'src> Transformer<'src> {
                 }
             }
             Expr::Assignment(target_id, value_id) => {
+                // R2 (destruction.md §5): assigning onto a binding that still owns
+                // a resource drops the OLD value first, then moves the new one in.
+                // The analyzer flagged the assignment; the target is a resource
+                // `Local` (only those are recorded).
+                if self.program.overwrite_drops.contains(&id) {
+                    let overwrite = match self.program.entity_map.get(target_id) {
+                        Some(Expr::Local(binding)) => self
+                            .program
+                            .variables
+                            .get(binding)
+                            .map(|variable| (*binding, variable.type_id)),
+                        _ => None,
+                    };
+                    if let Some((binding, type_id)) = overwrite {
+                        let target = js::Node::Local(self.ng.name_for(binding));
+                        if let Some(drop) = self.resource_drop_of(type_id, target) {
+                            block.push(drop);
+                        }
+                    }
+                }
                 let value = self.walk_entity(*value_id, block).unwrap_or(js::Node::Void);
                 let value = self.maybe_clone(*value_id, value);
                 // Writing a *whole value* through a view. A `Shared` write is a
@@ -2220,6 +2283,35 @@ impl<'src> Transformer<'src> {
                 return None;
             }
             Expr::Block(body) => {
+                // A block owning resource locals is restructured into `try`/
+                // `finally` (destruction.md §7). A value-position block captures
+                // its tail into a temp declared before the tries, so the value
+                // survives the finallys; a void-tail block just discards.
+                if self.scope_needs_drops(&body.0) {
+                    let tail_is_void = matches!(
+                        self.program.entity_map.get(&body.1),
+                        Some(Expr::Void) | None
+                    );
+                    if tail_is_void {
+                        let wrapped =
+                            self.walk_scope_body(&body.0, 0, body.1, TailDisposition::Discard);
+                        block.extend(wrapped);
+                        return Some(js::Node::Void);
+                    }
+                    let temp = self.ng.next_name();
+                    block.push(js::Node::LetVariable(js::Variable {
+                        name: temp.clone(),
+                        value: Box::new(js::Node::Void),
+                    }));
+                    let wrapped = self.walk_scope_body(
+                        &body.0,
+                        0,
+                        body.1,
+                        TailDisposition::AssignTo(temp.clone()),
+                    );
+                    block.extend(wrapped);
+                    return Some(js::Node::Local(temp));
+                }
                 for statement in &body.0 {
                     if let Some(node) = self.walk_entity(*statement, block) {
                         // A statement that lowered to nothing (a void tail, a
@@ -2237,17 +2329,10 @@ impl<'src> Transformer<'src> {
                 let t_condition = condition
                     .and_then(|condition| self.walk_entity(condition, block))
                     .unwrap_or(js::Node::Bool(true));
-                let mut t_body = self.walk_list(&body.0);
-                match self.program.entity_map.get(&body.1) {
-                    Some(Expr::Void) | None => {}
-                    Some(_) => {
-                        if let Some(node) = self.walk_entity(body.1, &mut t_body) {
-                            if !matches!(node, js::Node::Void) {
-                                t_body.push(node);
-                            }
-                        }
-                    }
-                }
+                // A loop body owning resource locals drops them each iteration
+                // (destruction.md §7); `jump break`/`continue` leave through the
+                // finally natively. A resource-free body emits as before.
+                let t_body = self.walk_loop_body_nodes(&body.0, body.1);
                 // A loop is a statement with no value: emit it into the block
                 // and yield void, so a loop as a block's tail isn't treated as
                 // the block's result.
@@ -2328,13 +2413,7 @@ impl<'src> Transformer<'src> {
                             )),
                         }));
                     }
-                    loop_body.extend(self.walk_list(&body.0));
-                    if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
-                    } else if let Some(node) = self.walk_entity(body.1, &mut loop_body) {
-                        if !matches!(node, js::Node::Void) {
-                            loop_body.push(node);
-                        }
-                    }
+                    loop_body.extend(self.walk_loop_body_nodes(&body.0, body.1));
                     block.push(js::Node::While(Box::new(js::Node::Bool(true)), loop_body));
                     return Some(js::Node::Void);
                 }
@@ -2367,13 +2446,7 @@ impl<'src> Transformer<'src> {
                         name: self.ng.name_for(item_id),
                         value: Box::new(element),
                     })];
-                    loop_body.extend(self.walk_list(&body.0));
-                    if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
-                    } else if let Some(node) = self.walk_entity(body.1, &mut loop_body)
-                        && !matches!(node, js::Node::Void)
-                    {
-                        loop_body.push(node);
-                    }
+                    loop_body.extend(self.walk_loop_body_nodes(&body.0, body.1));
                     let keys = js::Node::Call(
                         Box::new(js::Node::Property(
                             Box::new(js::Node::Local(list_name)),
@@ -2389,13 +2462,7 @@ impl<'src> Transformer<'src> {
                 let binding = item_id
                     .map(|item_id| self.ng.name_for(item_id))
                     .unwrap_or_else(|| "_".to_string());
-                let mut t_body = self.walk_list(&body.0);
-                if let Some(Expr::Void) | None = self.program.entity_map.get(&body.1) {
-                } else if let Some(node) = self.walk_entity(body.1, &mut t_body) {
-                    if !matches!(node, js::Node::Void) {
-                        t_body.push(node);
-                    }
-                }
+                let t_body = self.walk_loop_body_nodes(&body.0, body.1);
                 block.push(js::Node::ForOf(binding, Box::new(t_iterable), t_body));
                 js::Node::Void
             }
@@ -2416,20 +2483,7 @@ impl<'src> Transformer<'src> {
                             let t_condition = t
                                 .walk_entity(*condition, block)
                                 .unwrap_or(js::Node::Bool(false));
-                            let mut t_body = t.walk_list(&body.0);
-                            let body_expr = t.program.entity_map.get(&body.1);
-                            match body_expr {
-                                None => {}
-                                Some(Expr::Void) => {}
-                                Some(_) => {
-                                    let t_block_expr = t.walk_entity(body.1, &mut t_body);
-                                    let variable_name =
-                                        expr_variable_name.get_or_insert_with(|| t.ng.next_name());
-                                    let value = t_block_expr.unwrap_or(js::Node::Null);
-                                    let variable_name = variable_name.clone();
-                                    t.push_result_or_divergence(&variable_name, value, &mut t_body);
-                                }
-                            }
+                            let t_body = t.walk_branch_body(&body.0, body.1, expr_variable_name);
                             js::IfBranch::If(
                                 Box::new(t_condition),
                                 t_body,
@@ -2439,20 +2493,7 @@ impl<'src> Transformer<'src> {
                             )
                         }
                         ExprIfBranch::Else(body) => {
-                            let mut t_body = t.walk_list(&body.0);
-                            let body_expr = t.program.entity_map.get(&body.1);
-                            match body_expr {
-                                None => {}
-                                Some(Expr::Void) => {}
-                                Some(_) => {
-                                    let t_block_expr = t.walk_entity(body.1, &mut t_body);
-                                    let variable_name =
-                                        expr_variable_name.get_or_insert_with(|| t.ng.next_name());
-                                    let value = t_block_expr.unwrap_or(js::Node::Null);
-                                    let variable_name = variable_name.clone();
-                                    t.push_result_or_divergence(&variable_name, value, &mut t_body);
-                                }
-                            }
+                            let t_body = t.walk_branch_body(&body.0, body.1, expr_variable_name);
                             js::IfBranch::Else(t_body)
                         }
                     }
@@ -3275,15 +3316,28 @@ impl<'src> Transformer<'src> {
                 name: self.ng.name_for(*parameter_id),
             })
             .collect::<Vec<_>>();
-        let mut body = self.walk_list(&function.body.0);
-        if let Some(return_expr) = self.walk_entity(function.body.1, &mut body) {
-            match return_expr {
-                js::Node::Void => {}
-                _ => {
-                    body.push(js::Node::Return(Box::new(return_expr)));
+        // A body owning resource locals is restructured into per-resource
+        // `try`/`finally` teardown (destruction.md §7); one owning none emits
+        // exactly as before (byte-identical corpus gate).
+        let body = if self.scope_needs_drops(&function.body.0) {
+            self.walk_scope_body(
+                &function.body.0,
+                0,
+                function.body.1,
+                TailDisposition::Return,
+            )
+        } else {
+            let mut body = self.walk_list(&function.body.0);
+            if let Some(return_expr) = self.walk_entity(function.body.1, &mut body) {
+                match return_expr {
+                    js::Node::Void => {}
+                    _ => {
+                        body.push(js::Node::Return(Box::new(return_expr)));
+                    }
                 }
             }
-        }
+            body
+        };
         js::Node::Function(js::Function {
             name,
             parameters,
@@ -3512,6 +3566,300 @@ impl<'src> Transformer<'src> {
             self.monomorphized.push(js_function);
         }
         name
+    }
+
+    /// Whether a scope needs `try`/`finally` teardown: some direct statement
+    /// declares a resource local that is dropped here (destruction.md §7) and
+    /// whose destruction is not a complete no-op. A resource-free program never
+    /// hits this (empty `dropped_bindings`), so its output stays byte-identical.
+    fn scope_needs_drops(&self, statements: &[Id]) -> bool {
+        statements.iter().any(|statement| {
+            matches!(
+                self.program.entity_map.get(statement),
+                Some(Expr::Variable(variable_id))
+                    if self.program.dropped_bindings.contains(variable_id)
+                        && self.binding_drops_nontrivially(*variable_id)
+            )
+        })
+    }
+
+    /// Whether a dropped binding's type actually destroys something (a `Drop` impl
+    /// or a resource member) — as opposed to a bare `resource external` leaf with
+    /// no destructor, whose scope-end drop is a no-op.
+    fn binding_drops_nontrivially(&self, variable_id: Id) -> bool {
+        self.program
+            .variables
+            .get(&variable_id)
+            .is_some_and(|variable| self.type_drops_nontrivially(variable.type_id))
+    }
+
+    fn type_drops_nontrivially(&self, type_id: TypeId) -> bool {
+        self.program
+            .drop_glue
+            .get(&type_id)
+            .is_some_and(|glue| glue.drop_method.is_some() || !glue.members.is_empty())
+    }
+
+    /// Emit a scope body (statements + tail) with per-resource `try`/`finally`
+    /// teardown (destruction.md §7). Each owned resource declaration is emitted,
+    /// then everything after it is wrapped in a `try` whose `finally` drops it —
+    /// declarations stay OUTSIDE their own `try` (a panic mid-acquisition never
+    /// drops an unacquired value), and the nested tries drop in reverse
+    /// declaration order. `ret` / `break` / `continue` / a thrown panic all leave
+    /// through the finallys natively.
+    fn walk_scope_body(
+        &mut self,
+        statements: &[Id],
+        start: usize,
+        tail: Id,
+        disposition: TailDisposition,
+    ) -> Vec<js::Node<'src>> {
+        let mut out: Vec<js::Node<'src>> = Vec::new();
+        let mut index = start;
+        while index < statements.len() {
+            let statement = statements[index];
+            let drop_binding = match self.program.entity_map.get(&statement) {
+                Some(Expr::Variable(variable_id))
+                    if self.program.dropped_bindings.contains(variable_id)
+                        && self.binding_drops_nontrivially(*variable_id) =>
+                {
+                    Some(*variable_id)
+                }
+                _ => None,
+            };
+            if let Some(variable_id) = drop_binding {
+                // Emit the declaration (outside its own `try`).
+                if let Some(node) = self.walk_entity(statement, &mut out) {
+                    if !matches!(node, js::Node::Void) {
+                        out.push(node);
+                    }
+                }
+                // Wrap the rest of the scope in a `try` whose `finally` drops it.
+                let inner = self.walk_scope_body(statements, index + 1, tail, disposition.clone());
+                let type_id = self.program.variables.get(&variable_id).unwrap().type_id;
+                let value = js::Node::Local(self.ng.name_for(variable_id));
+                let finally = self
+                    .resource_drop_of(type_id, value)
+                    .map(|node| vec![node])
+                    .unwrap_or_default();
+                out.push(js::Node::Try(inner, finally));
+                return out;
+            }
+            if let Some(node) = self.walk_entity(statement, &mut out) {
+                if !matches!(node, js::Node::Void) {
+                    out.push(node);
+                }
+            }
+            index += 1;
+        }
+        self.emit_scope_tail(tail, disposition, &mut out);
+        out
+    }
+
+    /// Emit a loop body's nodes (statements + discarded tail), with per-resource
+    /// `try`/`finally` teardown when it owns resource locals (destruction.md §7)
+    /// so they drop each iteration and `jump break`/`continue` leave through the
+    /// finally; a resource-free body emits exactly as before.
+    fn walk_loop_body_nodes(&mut self, statements: &[Id], tail: Id) -> Vec<js::Node<'src>> {
+        if self.scope_needs_drops(statements) {
+            self.walk_scope_body(statements, 0, tail, TailDisposition::Discard)
+        } else {
+            let mut body = self.walk_list(statements);
+            match self.program.entity_map.get(&tail) {
+                Some(Expr::Void) | None => {}
+                Some(_) => {
+                    if let Some(node) = self.walk_entity(tail, &mut body) {
+                        if !matches!(node, js::Node::Void) {
+                            body.push(node);
+                        }
+                    }
+                }
+            }
+            body
+        }
+    }
+
+    /// Emit an `if`/`match` arm body (statements + value tail), with per-resource
+    /// `try`/`finally` teardown when it owns resource locals (destruction.md §7).
+    /// A value-producing arm assigns its result to the shared result temp inside
+    /// the drop scope (so teardown precedes the branch value); a resource-free arm
+    /// emits exactly as before.
+    fn walk_branch_body(
+        &mut self,
+        statements: &[Id],
+        tail: Id,
+        result_name: &mut Option<String>,
+    ) -> Vec<js::Node<'src>> {
+        let has_value = !matches!(self.program.entity_map.get(&tail), None | Some(Expr::Void));
+        if self.scope_needs_drops(statements) {
+            if has_value {
+                let name = result_name
+                    .get_or_insert_with(|| self.ng.next_name())
+                    .clone();
+                self.walk_scope_body(
+                    statements,
+                    0,
+                    tail,
+                    TailDisposition::ResultOrDivergence(name),
+                )
+            } else {
+                self.walk_scope_body(statements, 0, tail, TailDisposition::Discard)
+            }
+        } else {
+            let mut body = self.walk_list(statements);
+            if has_value {
+                let value = self.walk_entity(tail, &mut body).unwrap_or(js::Node::Null);
+                let name = result_name
+                    .get_or_insert_with(|| self.ng.next_name())
+                    .clone();
+                self.push_result_or_divergence(&name, value, &mut body);
+            }
+            body
+        }
+    }
+
+    /// Emit a restructured scope's tail into `out` per its disposition — the same
+    /// handling the un-restructured paths use, so a scope that ends up wrapping
+    /// nothing stays byte-identical.
+    fn emit_scope_tail(
+        &mut self,
+        tail: Id,
+        disposition: TailDisposition,
+        out: &mut Vec<js::Node<'src>>,
+    ) {
+        let Some(node) = self.walk_entity(tail, out) else {
+            return;
+        };
+        if matches!(node, js::Node::Void) {
+            return;
+        }
+        match disposition {
+            TailDisposition::Return => out.push(js::Node::Return(Box::new(node))),
+            TailDisposition::Discard => out.push(node),
+            TailDisposition::AssignTo(name) => out.push(js::Node::Assignment(
+                Box::new(js::Node::Local(name)),
+                Box::new(node),
+            )),
+            TailDisposition::ResultOrDivergence(name) => {
+                self.push_result_or_divergence(&name, node, out)
+            }
+            TailDisposition::MainExit => {
+                let statement = if self.program.platform.has_process_exit() {
+                    js::Node::Call(
+                        Box::new(js::Node::Property(
+                            Box::new(js::Node::Local("process".to_string())),
+                            "exit".to_string(),
+                        )),
+                        vec![node],
+                    )
+                } else {
+                    node
+                };
+                out.push(statement);
+            }
+        }
+    }
+
+    /// The drop statement for a value of `type_id` (destruction.md §5/§7), or
+    /// `None` when destruction is a no-op. A direct call to the type's `__drop`
+    /// helper, which runs the impl's `drop` then destroys the fields.
+    fn resource_drop_of(
+        &mut self,
+        type_id: TypeId,
+        value: js::Node<'src>,
+    ) -> Option<js::Node<'src>> {
+        let helper = self.ensure_drop_helper(type_id)?;
+        Some(js::Node::Call(
+            Box::new(js::Node::Local(helper)),
+            vec![value],
+        ))
+    }
+
+    /// Emit (once) the per-type `__drop` helper for `type_id` and return its name,
+    /// or `None` if the type destroys nothing. The helper runs the value's own
+    /// `drop(&mut self)` first (so it cannot resurrect itself), then destroys each
+    /// resource member in reverse order (destruction.md §5): struct/tuple/array
+    /// slots directly, enum payloads under a tag test.
+    fn ensure_drop_helper(&mut self, type_id: TypeId) -> Option<String> {
+        let key = self.type_key(type_id);
+        if let Some(existing) = self.drop_helpers.get(&key) {
+            return existing.clone();
+        }
+        let Some(glue) = self.program.drop_glue.get(&type_id).cloned() else {
+            self.drop_helpers.insert(key, None);
+            return None;
+        };
+        if glue.drop_method.is_none() && glue.members.is_empty() {
+            self.drop_helpers.insert(key, None);
+            return None;
+        }
+        // Register the name BEFORE building the body, so a self-referential
+        // resource (`struct Node { next: Option<Node> }`) terminates.
+        let name = self.ng.next_name();
+        self.drop_helpers.insert(key, Some(name.clone()));
+        let value_name = self.ng.next_name();
+        let value = || js::Node::Local(value_name.clone());
+        let mut body: Vec<js::Node<'src>> = Vec::new();
+        // 1. The value's own destructor, before its fields. The receiver is the
+        //    only argument. LIMITATION (destruction.md §8 Turns): a `drop` body
+        //    that requires an ambient context — writing a `Signal` threads the
+        //    turn as a hidden context argument — needs that context forwarded
+        //    here, which this generated helper does not do. Such a drop is
+        //    unsupported in this slice; std's resource drops (Database close,
+        //    OwnedNursery cancel) need no context, so nothing here hits it.
+        if let Some(drop_method) = glue.drop_method {
+            self.ensure_function_emitted(drop_method);
+            body.push(js::Node::Call(
+                Box::new(js::Node::Local(self.ng.name_for(drop_method))),
+                vec![value()],
+            ));
+        }
+        // 2. The resource members, in reverse declaration order.
+        match &glue.members {
+            crate::analyzer::DropMembers::Fields(fields) => {
+                for (index, member_type) in fields.iter().rev() {
+                    let slot = js::Node::PropertyIndex(
+                        Box::new(value()),
+                        Box::new(js::Node::Number(index.to_string(), None)),
+                    );
+                    if let Some(drop) = self.resource_drop_of(*member_type, slot) {
+                        body.push(drop);
+                    }
+                }
+            }
+            crate::analyzer::DropMembers::Variants(variants) => {
+                for (variant_index, slots) in variants {
+                    let mut arm: Vec<js::Node<'src>> = Vec::new();
+                    for (slot, member_type) in slots.iter().rev() {
+                        let payload = js::Node::PropertyIndex(
+                            Box::new(value()),
+                            Box::new(js::Node::Number(slot.to_string(), None)),
+                        );
+                        if let Some(drop) = self.resource_drop_of(*member_type, payload) {
+                            arm.push(drop);
+                        }
+                    }
+                    if !arm.is_empty() {
+                        let test = js::Node::Binary(
+                            BinaryOp::Eq,
+                            Box::new(js::Node::PropertyIndex(
+                                Box::new(value()),
+                                Box::new(js::Node::Number("0".to_string(), None)),
+                            )),
+                            Box::new(js::Node::Number(variant_index.to_string(), None)),
+                        );
+                        body.push(js::Node::If(js::IfBranch::If(Box::new(test), arm, None)));
+                    }
+                }
+            }
+        }
+        self.monomorphized.push(js::Node::Function(js::Function {
+            name: name.clone(),
+            parameters: vec![js::Parameter { name: value_name }],
+            body,
+            is_async: false,
+        }));
+        Some(name)
     }
 
     /// Resolves `member` as an inherited trait *default* on a concrete type — a
@@ -4279,6 +4627,24 @@ impl Formatter {
                     self.indentation.repeat(level),
                 )
             }
+            js::Node::Try(body, finally) => {
+                let s_body = self.sequence(body, ";", level + 1);
+                let s_finally = self.sequence(finally, ";", level + 1);
+                format!(
+                    "try{}{{{}{}{}{}}}{}finally{}{{{}{}{}{}}}",
+                    self.space,
+                    self.line_break,
+                    s_body,
+                    self.line_break,
+                    self.indentation.repeat(level),
+                    self.space,
+                    self.space,
+                    self.line_break,
+                    s_finally,
+                    self.line_break,
+                    self.indentation.repeat(level),
+                )
+            }
             js::Node::Break => format!("break{}", terminator),
             js::Node::Continue => format!("continue{}", terminator),
             js::Node::Closure(closure) => {
@@ -4528,6 +4894,12 @@ pub mod js {
         Return(Box<Self>),
         String(Cow<'src, str>),
         Throw(Box<Self>),
+        // `try { <body> } finally { <finally> }` — scope-end destruction
+        // (destruction.md §7): the `finally` drops the scope's still-owned
+        // resources, so `ret` / `break` / `continue` / a thrown panic all run it
+        // on the way out. A resource declaration stays OUTSIDE its own `try`, so a
+        // panic mid-acquisition never drops an unacquired value.
+        Try(Vec<Self>, Vec<Self>),
         Void,
     }
 
@@ -4963,6 +5335,10 @@ fn collect_node(
             collect_declarations(body, renameable, declarations, children);
         }
         js::Node::If(branch) => collect_if(branch, renameable, declarations, children),
+        js::Node::Try(body, finally) => {
+            collect_declarations(body, renameable, declarations, children);
+            collect_declarations(finally, renameable, declarations, children);
+        }
         js::Node::Call(subject, arguments) => {
             collect_node(subject, renameable, declarations, children);
             collect_declarations(arguments, renameable, declarations, children);
@@ -5082,6 +5458,10 @@ fn rename_node(node: &mut js::Node, rename: &HashMap<String, String>) {
             rename_nodes(body, rename);
         }
         js::Node::If(branch) => rename_if(branch, rename),
+        js::Node::Try(body, finally) => {
+            rename_nodes(body, rename);
+            rename_nodes(finally, rename);
+        }
         js::Node::Call(subject, arguments) => {
             rename_node(subject, rename);
             rename_nodes(arguments, rename);

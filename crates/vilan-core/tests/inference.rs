@@ -20906,9 +20906,11 @@ fn drop_on_a_data_enum_is_rejected() {
 }
 
 #[test]
-fn drop_on_a_resource_compiles_and_is_inert() {
-    // The Drop impl compiles AND the destructor does not run: the program prints
-    // only `main-done`, never `DROPPED` — nothing inserts the call until S2b.
+fn drop_runs_at_scope_end() {
+    // S2b makes destruction real (destruction.md §5): the still-owned resource
+    // local drops at `main`'s end, AFTER the body runs — `main-done` then
+    // `DROPPED`. (This pinned the INERT S2a behavior; S2b flips it, as its
+    // comment then anticipated.)
     assert_compiles_and_runs(
         r#"
         import std::print;
@@ -20922,7 +20924,7 @@ fn drop_on_a_resource_compiles_and_is_inert() {
             print("main-done");
         }
         "#,
-        "main-done\n",
+        "main-done\nDROPPED\n",
     );
 }
 
@@ -20978,6 +20980,27 @@ fn an_awaiting_drop_body_is_rejected() {
 }
 
 #[test]
+fn a_context_requiring_drop_body_is_rejected() {
+    // destruction.md §8: a `drop` that writes a `Signal` threads the turn as a
+    // hidden context argument, but a destructor's call sites are scope exits that
+    // thread none — so a context-requiring `drop` is rejected. Runs after
+    // `thread_contexts` records the context-dependent functions.
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        import std::reactive::Signal;
+        let counter = Signal::new(0);
+        resource struct Bump { x: i32 }
+        impl Bump with Drop {
+            fun drop(&mut self) { counter.set(counter.get() + 1); }
+        }
+        fun main() {}
+        "#,
+        "teardown must be context-free",
+    );
+}
+
+#[test]
 fn a_resource_without_a_drop_impl_is_accepted() {
     // Containment alone is enough (§5): a resource needs no `Drop` impl to be
     // legal — its move discipline stands, and (from S2b) its fields drop.
@@ -21026,16 +21049,17 @@ fn drop_on_a_containment_inferred_resource_is_accepted() {
     );
 }
 
-// KNOWN GAP (destruction.md §5, restriction 4): the receiver must be `&mut self`
-// exactly, but trait conformance checks member-NAME presence, NOT signatures — so
-// a `Drop` impl declaring `fun drop(self)` or `fun drop(&self)` is accepted today.
-// Signature conformance is general machinery (not Drop-specific) and out of this
-// chunk's scope; S2b's inserted teardown assumes `&mut self`. Un-ignore when
-// receiver conformance lands.
+// destruction.md §5, restriction 4: a `Drop` impl must declare exactly
+// `fun drop(&mut self)` — a `&mut self` receiver, no other parameters, void
+// return. S2b's targeted signature check (keyed on the std `Drop` entity; the
+// general per-member conformance is backlog B29) rejects the four ways to get it
+// wrong. The inserted teardown loans `self` mutably and discards the result.
+
 #[test]
-#[ignore]
 fn a_drop_impl_with_a_by_value_receiver_is_rejected() {
-    assert_fails(
+    // A by-value `self` could move `self` out and keep it alive (resurrection),
+    // and would need to suppress its own re-drop — rejected.
+    assert_fails_with(
         r#"
         import std::drop::Drop;
         resource struct Res { x: i32 }
@@ -21044,5 +21068,375 @@ fn a_drop_impl_with_a_by_value_receiver_is_rejected() {
         }
         fun main() {}
         "#,
+        "must declare `fun drop(&mut self)`",
+    );
+}
+
+#[test]
+fn a_drop_impl_with_a_shared_receiver_is_rejected() {
+    // `&self` cannot run the mutating teardown the destructor needs.
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(&self) {}
+        }
+        fun main() {}
+        "#,
+        "must declare `fun drop(&mut self)`",
+    );
+}
+
+#[test]
+fn a_drop_impl_with_an_extra_parameter_is_rejected() {
+    // The compiler calls `drop` with only the receiver; an extra parameter has
+    // nothing to bind.
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(&mut self, extra: i32) {}
+        }
+        fun main() {}
+        "#,
+        "must declare `fun drop(&mut self)`",
+    );
+}
+
+#[test]
+fn a_drop_impl_with_a_non_void_return_is_rejected() {
+    // Teardown produces nothing; a declared non-void return is rejected (the
+    // inserted call discards the result).
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(&mut self): i32 { 0 }
+        }
+        fun main() {}
+        "#,
+        "must declare `fun drop(&mut self)`",
+    );
+}
+
+#[test]
+fn a_drop_impl_with_the_exact_signature_is_accepted() {
+    // The one legal shape compiles.
+    assert_compiles(
+        r#"
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+// destruction.md §5/§7 — the inserted teardown, observed through prints from the
+// drop bodies (C4 S2 chunk b). Each pin runs the emitted JS and checks the drop
+// ORDER. (The corpus `resource.vl` bundles the same behaviors as a byte-checked
+// golden AND runs them through the interpreter equivalence gate.)
+
+#[test]
+fn drop_locals_drop_in_reverse_declaration_order() {
+    // At the scope end, still-owned resource locals drop in REVERSE declaration
+    // order: `b` before `a`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            let a = Res { tag = "a" };
+            let b = Res { tag = "b" };
+            print("body");
+        }
+        "#,
+        "body\nb\na\n",
+    );
+}
+
+#[test]
+fn drop_body_runs_before_fields_which_drop_in_reverse() {
+    // A value's own `drop` body runs BEFORE its fields, and the fields drop in
+    // reverse declaration order: `owner-body`, then `second`, then `first`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Leaf { tag: str }
+        impl Leaf with Drop { fun drop(&mut self) { print(self.tag); } }
+        resource struct Owner { first: Leaf, second: Leaf }
+        impl Owner with Drop { fun drop(&mut self) { print("owner-body"); } }
+        fun main() {
+            let o = Owner { first = Leaf { tag = "first" }, second = Leaf { tag = "second" } };
+            print("body");
+        }
+        "#,
+        "body\nowner-body\nsecond\nfirst\n",
+    );
+}
+
+#[test]
+fn drop_enum_payload_drops_with_the_value() {
+    // An enum value drops its payload with it: `Some(Res)` at scope end drops the
+    // contained `Res`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        import std::option::Option::{ self, Some, None };
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            let opt = Some(Res { tag = "payload" });
+            print("body");
+        }
+        "#,
+        "body\npayload\n",
+    );
+}
+
+#[test]
+fn containment_only_resource_drops_its_fields() {
+    // A resource with NO `Drop` impl (a resource only by containment) still frees
+    // its resource field at scope end.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Leaf { tag: str }
+        impl Leaf with Drop { fun drop(&mut self) { print(self.tag); } }
+        resource struct Bag { item: Leaf }
+        fun main() {
+            let bag = Bag { item = Leaf { tag = "item" } };
+            print("body");
+        }
+        "#,
+        "body\nitem\n",
+    );
+}
+
+#[test]
+fn drop_runs_on_early_ret() {
+    // A resource owned at an early `ret` drops on the way out — and on the
+    // fall-through path too (both exits run the teardown).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun run(stop: bool) {
+            let r = Res { tag = "r" };
+            if stop { print("stopping"); ret; }
+            print("continuing");
+        }
+        fun main() {
+            run(true);
+            print("--");
+            run(false);
+        }
+        "#,
+        "stopping\nr\n--\ncontinuing\nr\n",
+    );
+}
+
+#[test]
+fn drop_runs_on_jump_break_leaving_only_the_loop_scope() {
+    // `jump break` drops the loop-body local it leaves (`inner`) but NOT the
+    // function local (`outer`), which drops at the function's end.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            let outer = Res { tag = "outer" };
+            for {
+                let inner = Res { tag = "inner" };
+                print("loop");
+                jump break;
+            }
+            print("after-loop");
+        }
+        "#,
+        "loop\ninner\nafter-loop\nouter\n",
+    );
+}
+
+#[test]
+fn drop_runs_on_jump_continue_each_iteration() {
+    // `jump continue` drops the loop-body local it leaves, every iteration.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            mut i = 0;
+            for i < 2 {
+                let r = Res { tag = "iter" };
+                i = i + 1;
+                print("body");
+                jump continue;
+            }
+            print("done");
+        }
+        "#,
+        "body\niter\nbody\niter\ndone\n",
+    );
+}
+
+#[test]
+fn overwrite_drops_the_old_value_then_the_new_at_scope_end() {
+    // R2: assigning onto a still-owning binding drops the OLD value first
+    // (`old`), then the NEW value drops at the scope end (`new`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            mut r = Res { tag = "old" };
+            r = Res { tag = "new" };
+            print("body");
+        }
+        "#,
+        "old\nbody\nnew\n",
+    );
+}
+
+#[test]
+fn a_module_level_resource_never_drops() {
+    // A module-level resource lives for the process (destruction.md §5): its
+    // `drop` never runs — only `main` prints.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        let global = Res { tag = "global" };
+        fun main() {
+            print("main");
+        }
+        "#,
+        "main\n",
+    );
+}
+
+#[test]
+fn a_resource_owned_across_an_await_drops_at_scope_end() {
+    // Owning a resource across a suspension is legal (destruction.md §5): the
+    // frame owns its locals, so the resource drops at the async fn's scope end,
+    // after the await.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        import std::time::sleep;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        async fun work() {
+            let r = Res { tag = "res" };
+            print("before");
+            await sleep(1);
+            print("after");
+        }
+        async fun main() {
+            await work();
+            print("done");
+        }
+        "#,
+        "before\nafter\nres\ndone\n",
+    );
+}
+
+#[test]
+fn a_process_needing_drop_colors_its_owning_scope() {
+    // destruction.md §8: a resource whose ONLY `@process` surface is its `Drop`
+    // impl, owned in an otherwise-uncolored function, colors that function
+    // `@process` — the compiler inserts the drop at the scope exit, and the
+    // synthetic reachability edge makes coloring see it. A browser build reaching
+    // the owner is therefore rejected. (Without the edge the drop is invisible to
+    // reachability and this would wrongly compile.)
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+        import std::drop::Drop;
+        resource struct Logger { path: str }
+        impl Logger with Drop {
+            fun drop(&mut self) { write_file(self.path, "closing"); }
+        }
+        fun use_it() {
+            let logger = Logger { path = "log.txt" };
+            print_marker();
+        }
+        fun print_marker() {}
+        fun main() {
+            use_it();
+        }
+        "#,
+        "requires the `process` layer of `std`",
+    );
+}
+
+#[test]
+fn a_platform_free_drop_adds_no_coloring() {
+    // The inverse control: a context-free, platform-free `drop` (just `print`,
+    // which runs on every host) adds NO coloring — the owning function stays
+    // neutral, so a browser build compiles cleanly.
+    assert_compiles_browser(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun use_it() {
+            let r = Res { tag = "r" };
+            print("used");
+        }
+        fun main() {
+            use_it();
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_drop_runs_synchronously_at_the_scope_exit() {
+    // §8 Turns: drops are ordinary statements at scope exits — they run
+    // synchronously, in program order, so a nested scope's drop precedes code
+    // after that scope. This is the property the §8 turn interaction rests on (a
+    // signal-writing drop joins the ambient wave BECAUSE the write is a plain
+    // synchronous statement inside the turn). The full turn observation is NOT
+    // pinned here: a signal write threads the ambient turn as a hidden CONTEXT
+    // argument, and the generated `__drop` helper does not forward it — so a
+    // context-requiring drop body is unsupported in this slice (see the report).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            {
+                let r = Res { tag = "dropped" };
+                print("in-scope");
+            }
+            print("after-scope");
+        }
+        "#,
+        "in-scope\ndropped\nafter-scope\n",
     );
 }

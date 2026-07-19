@@ -994,12 +994,43 @@ pub struct Analyzer<'src> {
     /// NEVER marked a clone (R1: resources move, they do not copy). Empty when no
     /// resource is declared (std/corpus), so clone-site behavior is unchanged there.
     resource_value_places: HashSet<Id>,
+    /// Drop planning (destruction.md §5/§7): resource-typed local bindings still
+    /// owned at their declaring scope's fall-through end — dropped there in
+    /// reverse declaration order. Ownership at a program point is single-valued
+    /// (R7 forbids conditional moves), so this is static: the transformer emits an
+    /// unconditional per-scope `try`/`finally` teardown, no runtime drop flags.
+    /// Empty on resource-free programs, so their output stays byte-identical.
+    dropped_bindings: HashSet<Id>,
+    /// Assignment expression ids that overwrite a still-owned resource binding —
+    /// the old value drops first, then the new one moves in (R2). Filled by
+    /// `plan_resource_drops`; read by the transformer.
+    overwrite_drops: HashSet<Id>,
     /// `impl Subject with Drop` sites (destruction.md §5), recorded during the
     /// conformance check (where the std `Drop` trait id resolves) and validated
     /// post-build, once resource classification is complete: `(subject TypeId,
     /// the `with Drop` span, the impl's `drop` method id)`. `Drop` is
     /// implementable only for a resource, and `drop` must be synchronous.
     drop_impls_to_check: Vec<(TypeId, Span, Option<Id>)>,
+    /// A resource type's own `drop(&mut self)` method (destruction.md §5), keyed
+    /// on the subject's NOMINAL id (struct/enum id, not `TypeId` — the same
+    /// nominal type interns to several `TypeId`s, and generics share one `drop`
+    /// across instantiations). Recorded in `check_drop_impls`, read by
+    /// `build_drop_glue`. The stored id is the emittable function id.
+    drop_methods: HashMap<Id, Id>,
+    /// Per-type destruction glue (destruction.md §5/§7): for every resource type
+    /// reachable from a dropped local, its own `drop` method (if any) and its
+    /// resource members (with substituted types), so the transformer can emit a
+    /// per-type drop helper. Built by `build_drop_glue`, moved onto the `Program`.
+    drop_glue: HashMap<TypeId, DropGlue>,
+    /// Per scan-root (function / closure node), the resource TYPES its body drops.
+    /// Filled by `plan_resource_drops`, consumed by `build_drop_glue` to synthesize
+    /// the drop reachability edges (destruction.md §8 platform coloring).
+    drop_owned_types_by_root: HashMap<Id, HashSet<TypeId>>,
+    /// Synthetic reachability edges (destruction.md §8): a scan root → the drop
+    /// impl functions its owned resources reach (transitively through their
+    /// members). `CallGraph::successors` appends them so platform coloring flows a
+    /// `@process`-needing drop to its owning scopes. Built by `build_drop_glue`.
+    drop_call_edges: HashMap<Id, Vec<Id>>,
     /// The `drop` methods awaiting the synchronous-teardown check
     /// (`check_async_drops`, destruction.md §5): `(the drop function id, the
     /// `with Drop` span, the rendered subject name)`. Moved onto the `Program`
@@ -1555,6 +1586,12 @@ impl<'src> Analyzer<'src> {
             resource_classification: HashMap::new(),
             generic_type_applications: Vec::new(),
             resource_value_places: HashSet::new(),
+            dropped_bindings: HashSet::new(),
+            overwrite_drops: HashSet::new(),
+            drop_methods: HashMap::new(),
+            drop_glue: HashMap::new(),
+            drop_owned_types_by_root: HashMap::new(),
+            drop_call_edges: HashMap::new(),
             rpc_signatures_to_check: Vec::new(),
             expose_fields_to_check: Vec::new(),
             return_type_stack: Vec::new(),
@@ -2641,9 +2678,57 @@ impl<'src> Analyzer<'src> {
                     Some(Expr::Function(function_id)) => *function_id,
                     _ => member_id,
                 };
+                self.check_drop_signature(function_id, span, &rendered);
+                // Record the resource's own destructor so the inserted teardown
+                // (`build_drop_glue`) calls it before destroying the fields. Keyed
+                // on the NOMINAL id — the subject type interns to several
+                // `TypeId`s, and a generic resource shares one `drop`.
+                if let Some(nominal) = self.nominal_id(subject_type_id) {
+                    self.drop_methods.insert(nominal, function_id);
+                }
                 self.drop_method_checks.push((function_id, span, rendered));
             }
         }
+    }
+
+    /// Restriction 4 (destruction.md §5): a `Drop` impl must declare exactly
+    /// `fun drop(&mut self)` — a `&mut self` receiver, no other parameters, and a
+    /// void return. The inserted teardown (S2b) loans `self` mutably at scope end
+    /// and discards the result, and reverse-field destruction assumes the body
+    /// cannot move `self` out; a by-value or `&self` receiver, an extra parameter,
+    /// or a value-returning body all break that contract. This is a TARGETED
+    /// check keyed on `Drop` — general per-member signature conformance (which
+    /// trait conformance does not do yet, checking member-NAME presence only) is
+    /// backlog B29, not built here.
+    fn check_drop_signature(&mut self, function_id: Id, span: Span, rendered: &str) {
+        let Some(function) = self.functions.get(&function_id) else {
+            return;
+        };
+        let receiver = function
+            .parameters
+            .first()
+            .and_then(|parameter_id| self.parameters.get(parameter_id));
+        let receiver_is_ref_mut_self = receiver.is_some_and(|parameter| {
+            parameter.name == "self" && parameter.convention == Convention::RefMut
+        });
+        let only_self = function.parameters.len() == 1;
+        let returns_void = match function.return_type_id {
+            Some(return_type_id) => matches!(return_type_id.get_type(self), Type::Void),
+            None => true,
+        };
+        if receiver_is_ref_mut_self && only_self && returns_void {
+            return;
+        }
+        self.diagnostics.push(Error {
+            note: None,
+            span,
+            msg: format!(
+                "`Drop` for `{rendered}` must declare `fun drop(&mut self)` — a \
+                 destructor takes `&mut self` and no other parameters and returns \
+                 void; the compiler loans `self` mutably at scope end, then destroys \
+                 its fields"
+            ),
+        });
     }
 
     /// Whether `type_id` is a resource (destruction.md §3): declared `resource`,
@@ -3112,6 +3197,696 @@ impl<'src> Analyzer<'src> {
         };
         let violations = self.scan_bodies_for_moves(&scan);
         self.emit_resource_move_violations(violations);
+    }
+
+    /// Drop planning (destruction.md §5, §7). Computes, for the whole program:
+    /// `dropped_bindings` — the resource locals still owned at their declaring
+    /// scope's fall-through end (dropped there, reverse declaration order) — and
+    /// `overwrite_drops` — the assignments that overwrite a still-owned resource
+    /// (R2: the old value drops first). A forward per-path walk over each function
+    /// and closure body mirrors the affine move scan's control flow, tracking the
+    /// set of currently-owned resource bindings; because R7 forbids conditional
+    /// moves, ownership at any program point is single-valued, so both outputs are
+    /// static. The transformer turns them into per-scope `try`/`finally` teardown
+    /// and the overwrite drops. A resource-free program plans nothing, keeping its
+    /// output byte-identical.
+    fn plan_resource_drops(&mut self) {
+        let resources = self.collect_resource_bindings();
+        if resources.is_empty() {
+            return;
+        }
+        let mut dropped: HashSet<Id> = HashSet::new();
+        let mut overwrites: HashSet<Id> = HashSet::new();
+        // Per scan-root, the resource types it drops (for the §8 coloring edges).
+        let mut owned_by_root: HashMap<Id, HashSet<TypeId>> = HashMap::new();
+        // Function bodies: the tail is the return value, so it is consuming — a
+        // resource returned out of the body is moved, not dropped. (`own`
+        // resource PARAMETERS that survive would drop at the body end too, but
+        // that surface — `drop<T>(own)` and friends — is S3; a loan parameter is
+        // never owned, so seeding nothing here is correct for this slice.) Each
+        // root is scanned into its OWN drop/overwrite sets so the types attribute
+        // to the owning node.
+        let bodies: Vec<(Id, Vec<Id>, Id)> = self
+            .functions
+            .values()
+            .filter(|function| function.has_body)
+            .map(|function| (function.id, function.body.0.clone(), function.body.1))
+            .collect();
+        for (root, statements, tail) in &bodies {
+            let mut owned: HashSet<Id> = HashSet::new();
+            let mut root_dropped: HashSet<Id> = HashSet::new();
+            let mut root_overwrites: HashSet<Id> = HashSet::new();
+            self.plan_scope(
+                statements,
+                *tail,
+                true,
+                &resources,
+                &mut owned,
+                &mut root_dropped,
+                &mut root_overwrites,
+            );
+            self.record_root_drop_types(*root, &root_dropped, &root_overwrites, &mut owned_by_root);
+            dropped.extend(root_dropped);
+            overwrites.extend(root_overwrites);
+        }
+        // Closure bodies are their own scan roots (the return value is consuming);
+        // the root is the closure's own node id.
+        let closures: Vec<(Id, Id)> = self
+            .closures
+            .iter()
+            .map(|(id, closure)| (*id, closure.return_))
+            .collect();
+        for (root, return_id) in closures {
+            let mut owned: HashSet<Id> = HashSet::new();
+            let mut root_dropped: HashSet<Id> = HashSet::new();
+            let mut root_overwrites: HashSet<Id> = HashSet::new();
+            self.plan_expr(
+                return_id,
+                true,
+                &resources,
+                &mut owned,
+                &mut root_dropped,
+                &mut root_overwrites,
+            );
+            self.record_root_drop_types(root, &root_dropped, &root_overwrites, &mut owned_by_root);
+            dropped.extend(root_dropped);
+            overwrites.extend(root_overwrites);
+        }
+        self.dropped_bindings = dropped;
+        self.overwrite_drops = overwrites;
+        self.drop_owned_types_by_root = owned_by_root;
+    }
+
+    /// Record the resource TYPES a scan root drops — a dropped local's type and an
+    /// overwrite target's type — for the §8 drop reachability edges. Skips a root
+    /// that drops nothing.
+    fn record_root_drop_types(
+        &self,
+        root: Id,
+        dropped: &HashSet<Id>,
+        overwrites: &HashSet<Id>,
+        out: &mut HashMap<Id, HashSet<TypeId>>,
+    ) {
+        let mut types: HashSet<TypeId> = HashSet::new();
+        for binding in dropped {
+            if let Some(variable) = self.variables.get(binding) {
+                types.insert(variable.type_id);
+            }
+        }
+        for assignment in overwrites {
+            if let Some(Expr::Assignment(target_id, _)) = self.expr_id_to_expr_map.get(assignment)
+                && let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(target_id)
+                && let Some(variable) = self.variables.get(binding)
+            {
+                types.insert(variable.type_id);
+            }
+        }
+        if !types.is_empty() {
+            out.entry(root).or_default().extend(types);
+        }
+    }
+
+    /// Plan one lexical scope (a block / branch / loop / function body). Resource
+    /// locals declared as direct statements here that are still owned once the
+    /// tail has been walked drop at this scope's end (recorded in `dropped`).
+    #[allow(clippy::too_many_arguments)]
+    fn plan_scope(
+        &self,
+        statements: &[Id],
+        tail: Id,
+        consuming: bool,
+        resources: &HashSet<Id>,
+        owned: &mut HashSet<Id>,
+        dropped: &mut HashSet<Id>,
+        overwrites: &mut HashSet<Id>,
+    ) {
+        let mut declared_here: Vec<Id> = Vec::new();
+        for statement in statements {
+            if let Some(Expr::Variable(variable_id)) = self.expr_id_to_expr_map.get(statement)
+                && resources.contains(variable_id)
+            {
+                declared_here.push(*variable_id);
+            }
+            self.plan_expr(*statement, false, resources, owned, dropped, overwrites);
+        }
+        self.plan_expr(tail, consuming, resources, owned, dropped, overwrites);
+        // Scope end: a resource local declared here and still owning its value
+        // drops here. Either way it leaves scope, so it no longer counts as owned
+        // for any enclosing scope.
+        for variable_id in &declared_here {
+            if owned.remove(variable_id) {
+                dropped.insert(*variable_id);
+            }
+        }
+    }
+
+    /// The forward ownership walk for one expression, the drop-planning twin of
+    /// `scan_move`. `consuming` = the value is moved into an owner, so a resource
+    /// `Local` leaf here is a move-out (its binding stops being owned).
+    #[allow(clippy::too_many_arguments)]
+    fn plan_expr(
+        &self,
+        expr_id: Id,
+        consuming: bool,
+        resources: &HashSet<Id>,
+        owned: &mut HashSet<Id>,
+        dropped: &mut HashSet<Id>,
+        overwrites: &mut HashSet<Id>,
+    ) {
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        match expr {
+            // A resource binding moved (consuming use) stops being owned here.
+            Expr::Local(binding) => {
+                if consuming && resources.contains(&binding) {
+                    owned.remove(&binding);
+                }
+            }
+            // Reading a field / element / view loans the root — never a move of
+            // the root binding (a consuming field read is R5's rejected partial
+            // move, already diagnosed; treat it as a loan for planning).
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => {
+                self.plan_expr(subject, false, resources, owned, dropped, overwrites);
+            }
+            Expr::Index(subject, index) => {
+                self.plan_expr(subject, false, resources, owned, dropped, overwrites);
+                self.plan_expr(index, false, resources, owned, dropped, overwrites);
+            }
+            Expr::Reference(operand, _) | Expr::Dereference(operand) => {
+                self.plan_expr(operand, false, resources, owned, dropped, overwrites);
+            }
+            // `let b = init` moves the initializer in; `b` then owns its value.
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    self.plan_expr(initial, true, resources, owned, dropped, overwrites);
+                }
+                if resources.contains(&variable_id) {
+                    owned.insert(variable_id);
+                }
+            }
+            // `let (a, b) = value` consumes the value. Captures that bind resource
+            // payloads become owned locals; seeding them is S3's match/destructure
+            // move work — a captured resource that is never re-moved leaks in v1
+            // (recorded), never double-drops.
+            Expr::Destructure(value_id, _pattern) => {
+                self.plan_expr(value_id, true, resources, owned, dropped, overwrites);
+            }
+            // R2: assigning onto a binding that still owns a resource drops the
+            // old value first (recorded here), then the new value moves in.
+            Expr::Assignment(target_id, value_id) => {
+                self.plan_expr(value_id, true, resources, owned, dropped, overwrites);
+                match self.expr_id_to_expr_map.get(&target_id) {
+                    Some(Expr::Local(binding)) if resources.contains(binding) => {
+                        if owned.contains(binding) {
+                            overwrites.insert(expr_id);
+                        }
+                        owned.insert(*binding);
+                    }
+                    _ => {
+                        self.plan_expr(target_id, false, resources, owned, dropped, overwrites);
+                    }
+                }
+            }
+            // An `own` argument moves; every other convention loans. Variant
+            // constructors move each payload in.
+            Expr::Call(call_id) => {
+                let Some(function_call) = self.function_calls.get(&call_id).cloned() else {
+                    return;
+                };
+                let subject_id = function_call.subject_id;
+                let argument_ids = function_call.argument_ids;
+                if self.call_is_variant_constructor(call_id) {
+                    for argument_id in &argument_ids {
+                        self.plan_expr(*argument_id, true, resources, owned, dropped, overwrites);
+                    }
+                } else if let Some(conventions) = self.callee_conventions(subject_id) {
+                    for (index, argument_id) in argument_ids.iter().enumerate() {
+                        let is_own = conventions.get(index).copied() == Some(Convention::Own);
+                        self.plan_expr(*argument_id, is_own, resources, owned, dropped, overwrites);
+                    }
+                } else {
+                    for argument_id in &argument_ids {
+                        self.plan_expr(*argument_id, false, resources, owned, dropped, overwrites);
+                    }
+                }
+                if !matches!(
+                    self.expr_id_to_expr_map.get(&subject_id),
+                    Some(Expr::Local(_))
+                ) {
+                    self.plan_expr(subject_id, false, resources, owned, dropped, overwrites);
+                }
+            }
+            // A return moves its value out (consuming).
+            Expr::FunctionReturn(Some(value_id)) => {
+                self.plan_expr(value_id, true, resources, owned, dropped, overwrites);
+            }
+            Expr::FunctionReturn(None) => {}
+            // Constructors move their operands in.
+            Expr::StructInitializer(_, fields) => {
+                for value_id in fields.values() {
+                    self.plan_expr(*value_id, true, resources, owned, dropped, overwrites);
+                }
+            }
+            Expr::Tuple(ids) | Expr::List(ids) => {
+                for id in &ids {
+                    self.plan_expr(*id, true, resources, owned, dropped, overwrites);
+                }
+            }
+            Expr::Repeat(value_id, _length) => {
+                self.plan_expr(value_id, true, resources, owned, dropped, overwrites);
+            }
+            // Control flow.
+            Expr::Block((statements, tail)) => {
+                self.plan_scope(
+                    &statements,
+                    tail,
+                    consuming,
+                    resources,
+                    owned,
+                    dropped,
+                    overwrites,
+                );
+            }
+            Expr::If(branch) => {
+                self.plan_if(&branch, consuming, resources, owned, dropped, overwrites);
+            }
+            Expr::Match(subject_id, legs) => {
+                self.plan_match(
+                    subject_id, &legs, consuming, resources, owned, dropped, overwrites,
+                );
+            }
+            Expr::For(condition, (statements, tail)) => {
+                self.plan_loop(
+                    condition,
+                    &statements,
+                    tail,
+                    resources,
+                    owned,
+                    dropped,
+                    overwrites,
+                );
+            }
+            Expr::ForEach(iterable, _item, (statements, tail)) => {
+                self.plan_expr(iterable, false, resources, owned, dropped, overwrites);
+                self.plan_loop(
+                    None,
+                    &statements,
+                    tail,
+                    resources,
+                    owned,
+                    dropped,
+                    overwrites,
+                );
+            }
+            // Pass-through: the value's role flows to the inner expression.
+            Expr::Await(inner) | Expr::TryAssert(inner) => {
+                self.plan_expr(inner, consuming, resources, owned, dropped, overwrites);
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.plan_expr(lhs, false, resources, owned, dropped, overwrites);
+                self.plan_expr(rhs, false, resources, owned, dropped, overwrites);
+            }
+            Expr::Unary(_, operand) => {
+                self.plan_expr(operand, false, resources, owned, dropped, overwrites);
+            }
+            Expr::Is(subject, _pattern) => {
+                self.plan_expr(subject, false, resources, owned, dropped, overwrites);
+            }
+            Expr::Lift(subject, _binder, continuation) => {
+                self.plan_expr(subject, false, resources, owned, dropped, overwrites);
+                self.plan_expr(
+                    continuation,
+                    consuming,
+                    resources,
+                    owned,
+                    dropped,
+                    overwrites,
+                );
+            }
+            Expr::LiftRegion(steps, body) => {
+                for (step_id, _binder, _is_split) in &steps {
+                    self.plan_expr(*step_id, false, resources, owned, dropped, overwrites);
+                }
+                self.plan_expr(body, consuming, resources, owned, dropped, overwrites);
+            }
+            Expr::TupleComprehension(_binder, source, body) => {
+                self.plan_expr(source, false, resources, owned, dropped, overwrites);
+                self.plan_expr(body, false, resources, owned, dropped, overwrites);
+            }
+            // Closures / spawns are their own scan roots (walked from
+            // `plan_resource_drops`); the rest are leaves with no resource move.
+            Expr::Closure(_)
+            | Expr::Async(_)
+            | Expr::Bool(_)
+            | Expr::Number(_, _, _)
+            | Expr::String(_)
+            | Expr::MultilineString(_)
+            | Expr::Null
+            | Expr::Void
+            | Expr::Error
+            | Expr::Jump(_)
+            | Expr::LiftBinder
+            | Expr::EnumVariant(_, _)
+            | Expr::ArrayLen(_, _)
+            | Expr::Generic(_)
+            | Expr::Struct(_)
+            | Expr::Enum(_)
+            | Expr::Impl(_)
+            | Expr::Function(_)
+            | Expr::Module(_)
+            | Expr::Trait(_)
+            | Expr::Macro
+            | Expr::Parameter(_)
+            | Expr::ExternalFunction(_) => {}
+        }
+    }
+
+    /// Plan an `if`: each arm is a scope, walked from a fork of the entry
+    /// ownership; an outer binding survives owned only if it is owned on every
+    /// non-diverging path (a diverging arm never reaches the merge). R7 already
+    /// rejected any split where an outer binding is moved on some paths but not
+    /// others, so in a compiling program the arms agree.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_if(
+        &self,
+        branch: &ExprIfBranch,
+        consuming: bool,
+        resources: &HashSet<Id>,
+        owned: &mut HashSet<Id>,
+        dropped: &mut HashSet<Id>,
+        overwrites: &mut HashSet<Id>,
+    ) {
+        let mut conditions: Vec<Id> = Vec::new();
+        let mut arms: Vec<(Vec<Id>, Id)> = Vec::new();
+        let mut has_else = false;
+        let mut current = branch;
+        loop {
+            match current {
+                ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                    conditions.push(*condition);
+                    arms.push((statements.clone(), *tail));
+                    match else_branch {
+                        Some(next) => current = next,
+                        None => break,
+                    }
+                }
+                ExprIfBranch::Else((statements, tail)) => {
+                    has_else = true;
+                    arms.push((statements.clone(), *tail));
+                    break;
+                }
+            }
+        }
+        for condition in &conditions {
+            self.plan_expr(*condition, false, resources, owned, dropped, overwrites);
+        }
+        self.plan_branches(
+            &arms, !has_else, consuming, resources, owned, dropped, overwrites,
+        );
+    }
+
+    /// Plan a `match`: by-value matching consumes the subject; `match &x` loans
+    /// it. Each leg body is an arm (its captures are S3's move work, not seeded
+    /// here — see `plan_expr`'s `Destructure`).
+    #[allow(clippy::too_many_arguments)]
+    fn plan_match(
+        &self,
+        subject_id: Id,
+        legs: &[ExprMatchLeg],
+        consuming: bool,
+        resources: &HashSet<Id>,
+        owned: &mut HashSet<Id>,
+        dropped: &mut HashSet<Id>,
+        overwrites: &mut HashSet<Id>,
+    ) {
+        let subject_is_loan = matches!(
+            self.expr_id_to_expr_map.get(&subject_id),
+            Some(Expr::Reference(_, _))
+        );
+        self.plan_expr(
+            subject_id,
+            !subject_is_loan,
+            resources,
+            owned,
+            dropped,
+            overwrites,
+        );
+        let mut arms: Vec<(Vec<Id>, Id)> = Vec::new();
+        for leg in legs {
+            if let Some(guard) = leg.guard {
+                self.plan_expr(guard, false, resources, owned, dropped, overwrites);
+            }
+            arms.push((Vec::new(), leg.body));
+        }
+        self.plan_branches(
+            &arms, false, consuming, resources, owned, dropped, overwrites,
+        );
+    }
+
+    /// The shared arm merge for `if`/`match` drop planning: fork the entry
+    /// ownership per arm, plan each as a scope, then keep an outer binding owned
+    /// only if every non-diverging arm still owns it (the implicit empty arm of a
+    /// bare `if` owns exactly the entry set, so it removes nothing an arm did not).
+    #[allow(clippy::too_many_arguments)]
+    fn plan_branches(
+        &self,
+        arms: &[(Vec<Id>, Id)],
+        _has_implicit_else: bool,
+        consuming: bool,
+        resources: &HashSet<Id>,
+        owned: &mut HashSet<Id>,
+        dropped: &mut HashSet<Id>,
+        overwrites: &mut HashSet<Id>,
+    ) {
+        let entry = owned.clone();
+        let mut live_arms: Vec<HashSet<Id>> = Vec::new();
+        for (statements, tail) in arms {
+            let mut arm_owned = entry.clone();
+            self.plan_scope(
+                statements,
+                *tail,
+                consuming,
+                resources,
+                &mut arm_owned,
+                dropped,
+                overwrites,
+            );
+            if !self.block_diverges(statements, *tail) {
+                live_arms.push(arm_owned);
+            }
+        }
+        // An outer binding survives owned iff owned on every non-diverging arm. A
+        // bare `if` (no `else`) has an implicit empty arm that keeps the entry set
+        // intact, so an outer binding moved only in the real arm falls out here —
+        // but R7 already rejected that split, so compiling programs are unaffected.
+        owned.clear();
+        for binding in &entry {
+            if live_arms.iter().all(|arm| arm.contains(binding)) {
+                owned.insert(*binding);
+            }
+        }
+    }
+
+    /// Plan a loop body. A loop may run zero-to-many times, so it cannot change
+    /// the outer ownership state (R8 forbids moving an outer binding from the
+    /// interior); snapshot and restore around the body. Resource locals declared
+    /// inside drop at the body's end — i.e. every iteration.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_loop(
+        &self,
+        condition: Option<Id>,
+        statements: &[Id],
+        tail: Id,
+        resources: &HashSet<Id>,
+        owned: &mut HashSet<Id>,
+        dropped: &mut HashSet<Id>,
+        overwrites: &mut HashSet<Id>,
+    ) {
+        if let Some(condition) = condition {
+            self.plan_expr(condition, false, resources, owned, dropped, overwrites);
+        }
+        let snapshot = owned.clone();
+        self.plan_scope(
+            statements, tail, false, resources, owned, dropped, overwrites,
+        );
+        *owned = snapshot;
+    }
+
+    /// Build the per-type destruction glue (destruction.md §5/§7) for every
+    /// resource type reachable from a dropped local or an overwritten binding: its
+    /// own `drop` method (if any) and its resource members, generics substituted
+    /// per instantiation. Runs after `check_drop_impls` (which records
+    /// `drop_methods`) and `plan_resource_drops` (the dropped bindings). Empty on a
+    /// resource-free program, so nothing new emits there.
+    fn build_drop_glue(&mut self) {
+        let mut worklist: Vec<TypeId> = Vec::new();
+        for binding in &self.dropped_bindings {
+            if let Some(variable) = self.variables.get(binding) {
+                worklist.push(variable.type_id);
+            }
+        }
+        // An overwrite (R2) drops the binding's OLD value in place — the same
+        // binding type. Seed those too, in case the binding is overwritten but
+        // later moved out (so it is not in `dropped_bindings`).
+        let overwrites: Vec<Id> = self.overwrite_drops.iter().copied().collect();
+        for assignment_id in overwrites {
+            if let Some(Expr::Assignment(target_id, _)) =
+                self.expr_id_to_expr_map.get(&assignment_id)
+                && let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(target_id)
+                && let Some(variable) = self.variables.get(binding)
+            {
+                worklist.push(variable.type_id);
+            }
+        }
+        let mut glue: HashMap<TypeId, DropGlue> = HashMap::new();
+        let mut seen: HashSet<TypeId> = HashSet::new();
+        while let Some(type_id) = worklist.pop() {
+            if !seen.insert(type_id) {
+                continue;
+            }
+            if !self.type_is_resource(type_id) {
+                continue;
+            }
+            let members = self.drop_members(type_id);
+            worklist.extend(members.member_type_ids());
+            let drop_method = self
+                .nominal_id(type_id)
+                .and_then(|nominal| self.drop_methods.get(&nominal).copied());
+            glue.insert(
+                type_id,
+                DropGlue {
+                    drop_method,
+                    members,
+                },
+            );
+        }
+        self.drop_glue = glue;
+
+        // Synthetic drop reachability edges (destruction.md §8 platform coloring):
+        // a scan root that drops a resource reaches that resource's `drop` impl —
+        // and, transitively through the glue, its members' `drop` impls — so a
+        // `@process`-needing drop colors the owning scope. `CallGraph::successors`
+        // appends these. Empty on a resource-free program.
+        let owned_by_root = std::mem::take(&mut self.drop_owned_types_by_root);
+        let mut edges: HashMap<Id, Vec<Id>> = HashMap::new();
+        for (root, types) in owned_by_root {
+            let mut methods: Vec<Id> = Vec::new();
+            let mut seen: HashSet<TypeId> = HashSet::new();
+            let mut worklist: Vec<TypeId> = types.into_iter().collect();
+            while let Some(type_id) = worklist.pop() {
+                if !seen.insert(type_id) {
+                    continue;
+                }
+                if let Some(glue) = self.drop_glue.get(&type_id) {
+                    if let Some(method) = glue.drop_method
+                        && !methods.contains(&method)
+                    {
+                        methods.push(method);
+                    }
+                    worklist.extend(glue.members.member_type_ids());
+                }
+            }
+            if !methods.is_empty() {
+                edges.insert(root, methods);
+            }
+        }
+        self.drop_call_edges = edges;
+    }
+
+    /// The resource members of a type, in runtime layout, for `build_drop_glue`.
+    /// A positional aggregate (struct / tuple / fixed array) yields its resource
+    /// slots; an enum yields, per variant, its resource payload slots (offset past
+    /// the `[0]` tag). Member types are substituted through the instantiation, so
+    /// `Option<Database>` reports its `Database` payload and `Option<i32>` reports
+    /// nothing.
+    fn drop_members(&mut self, type_id: TypeId) -> DropMembers {
+        match type_id.get_type(self) {
+            Type::Struct(id, arguments) => {
+                let Some(struct_) = self.structs.get(&id) else {
+                    return DropMembers::Fields(Vec::new());
+                };
+                let parameters = struct_.generic_parameter_constraint_ids.clone();
+                let field_types: Vec<TypeId> =
+                    struct_.fields.iter().map(|field| field.type_id).collect();
+                let context = Self::instantiation_context(&parameters, &arguments);
+                let mut fields = Vec::new();
+                for (index, field_type) in field_types.into_iter().enumerate() {
+                    let member = self.substitute_member(field_type, &context);
+                    if self.type_is_resource(member) {
+                        fields.push((index, member));
+                    }
+                }
+                DropMembers::Fields(fields)
+            }
+            Type::Tuple(elements) => {
+                let mut fields = Vec::new();
+                for (index, element) in elements.into_iter().enumerate() {
+                    if self.type_is_resource(element) {
+                        fields.push((index, element));
+                    }
+                }
+                DropMembers::Fields(fields)
+            }
+            Type::Array(element, length) => {
+                let mut fields = Vec::new();
+                if self.type_is_resource(element) {
+                    for index in 0..length {
+                        fields.push((index, element));
+                    }
+                }
+                DropMembers::Fields(fields)
+            }
+            Type::Enum(id, arguments) => {
+                let Some(enum_) = self.enums.get(&id) else {
+                    return DropMembers::Variants(Vec::new());
+                };
+                let parameters = enum_.generic_parameter_constraint_ids.clone();
+                let variant_payloads: Vec<Vec<TypeId>> = enum_
+                    .variants
+                    .iter()
+                    .map(|variant| variant.data_type_ids.clone())
+                    .collect();
+                let context = Self::instantiation_context(&parameters, &arguments);
+                let mut variants = Vec::new();
+                for (variant_index, payload_types) in variant_payloads.into_iter().enumerate() {
+                    let mut slots = Vec::new();
+                    for (position, payload_type) in payload_types.into_iter().enumerate() {
+                        let member = self.substitute_member(payload_type, &context);
+                        if self.type_is_resource(member) {
+                            // Runtime layout `[tag, ...payload]`: slot past the tag.
+                            slots.push((1 + position, member));
+                        }
+                    }
+                    if !slots.is_empty() {
+                        variants.push((variant_index, slots));
+                    }
+                }
+                DropMembers::Variants(variants)
+            }
+            _ => DropMembers::Fields(Vec::new()),
+        }
+    }
+
+    /// The nominal (struct / enum) id behind a type, for keying drop resolution —
+    /// the same nominal type interns to several `TypeId`s.
+    fn nominal_id(&self, type_id: TypeId) -> Option<Id> {
+        match type_id.get_type(self) {
+            Type::Struct(id, _) => Some(id),
+            Type::Enum(id, _) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Substitute a member type through an instantiation context (empty context =
+    /// the member as-is), the same rewrite `any_member_resource` uses.
+    fn substitute_member(&mut self, type_id: TypeId, context: &SubstitutionContext) -> TypeId {
+        if context.is_empty() {
+            return type_id;
+        }
+        let member_type = type_id.get_type(self);
+        self.substitute_type(&member_type, context)
+            .get_type_id(self)
     }
 
     /// Scan every function and closure body under `scan`, then the R9 capture
@@ -18164,6 +18939,54 @@ pub struct SourceRange {
     pub source: SourceId,
 }
 
+/// Per-type destruction glue (destruction.md §5/§7). The transformer emits it as
+/// a `__drop_<type>` helper: run the value's own `drop(&mut self)` first (if the
+/// type has a `Drop` impl), then destroy its resource members — so a value cannot
+/// resurrect itself, and containment-only types (no `Drop`) still free their
+/// fields.
+#[derive(Debug, Clone)]
+pub struct DropGlue {
+    /// The emittable function id of the impl's `drop`, if the type has a `Drop`
+    /// impl. Called on the value before its members are destroyed.
+    pub drop_method: Option<Id>,
+    /// The type's resource members, by runtime layout.
+    pub members: DropMembers,
+}
+
+/// How a resource type's members are reached at runtime for destruction.
+#[derive(Debug, Clone)]
+pub enum DropMembers {
+    /// A positional aggregate (struct / tuple / fixed array) stored as an array:
+    /// the resource slots `[index]` and their types, dropped in REVERSE
+    /// declaration order (destruction.md §5).
+    Fields(Vec<(usize, TypeId)>),
+    /// An enum `[tag, ...payload]`: for each variant index that carries a resource
+    /// payload, the payload slots (including the `[0]` tag offset) and their
+    /// types. The value's payload drops with it (destruction.md §5).
+    Variants(Vec<(usize, Vec<(usize, TypeId)>)>),
+}
+
+impl DropMembers {
+    /// The member type ids (for the drop-glue closure worklist).
+    fn member_type_ids(&self) -> Vec<TypeId> {
+        match self {
+            DropMembers::Fields(fields) => fields.iter().map(|(_, type_id)| *type_id).collect(),
+            DropMembers::Variants(variants) => variants
+                .iter()
+                .flat_map(|(_, slots)| slots.iter().map(|(_, type_id)| *type_id))
+                .collect(),
+        }
+    }
+
+    /// Whether the type has any resource member to destroy.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            DropMembers::Fields(fields) => fields.is_empty(),
+            DropMembers::Variants(variants) => variants.is_empty(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Program<'src> {
     /// The platform the program builds for — gates which library layers are
@@ -18202,6 +19025,12 @@ pub struct Program<'src> {
     /// `context`-typed closure parameters (proposal/ambient-owner.md §5):
     /// parameter entity -> the named context bindings, in clause order.
     pub parameter_contexts: HashMap<Id, Vec<Id>>,
+    /// Functions and `run` closures that received a hidden context parameter —
+    /// i.e. their body requires an ambient context (`context::thread_contexts`'
+    /// `param_nodes`). Read by `check_context_drops` (destruction.md §8): a `drop`
+    /// body cannot require a context, since its call sites are scope exits that
+    /// thread none.
+    pub context_dependent_functions: HashSet<Id>,
     pub method_call_substitution: HashMap<Id, SubstitutionContext>,
     pub global_scope_id: Id,
     pub implementations: Vec<Implementation<'src>>,
@@ -18337,6 +19166,23 @@ pub struct Program<'src> {
     // a deep copy because they bind/assign an aggregate place that would
     // otherwise alias its source. Filled by `compute_clone_sites`.
     pub clone_sites: HashSet<Id>,
+    /// Destruction (destruction.md §5/§7): resource-typed locals still owned at
+    /// their declaring scope's fall-through end. The transformer wraps the owning
+    /// scope in `try`/`finally`, dropping them in reverse declaration order.
+    /// Filled by `plan_resource_drops`; empty on resource-free programs.
+    pub dropped_bindings: HashSet<Id>,
+    /// Destruction (R2): assignment expression ids that overwrite a still-owned
+    /// resource binding — the old value drops before the new one moves in.
+    pub overwrite_drops: HashSet<Id>,
+    /// Destruction glue per resource type id (destruction.md §5/§7): the impl's
+    /// `drop` method (if any) and the resource members to destroy. The transformer
+    /// emits one `__drop_<type>` helper per entry.
+    pub drop_glue: HashMap<TypeId, DropGlue>,
+    /// Synthetic drop reachability edges (destruction.md §8): a function / closure
+    /// node → the `drop` impl functions its owned resources reach. Appended by
+    /// `CallGraph::successors` so platform coloring flows a `@process`-needing drop
+    /// to its owning scopes. Empty on a resource-free program.
+    pub drop_call_edges: HashMap<Id, Vec<Id>>,
     // Slice 4: scalar locals boxed into a `[value]` cell because a view is taken
     // of them; their reads/writes lower through `[0]`.
     pub boxed_locals: HashSet<Id>,
@@ -20840,10 +21686,19 @@ pub fn analyze<'src>(
     analyzer.check_resource_any_coercion();
     analyzer.check_resource_moves();
     analyzer.check_resource_generic_instantiations();
+    // Drop planning (destruction.md §5/§7): which resource locals are owned at
+    // their scope's end (dropped there, reverse order) and which assignments
+    // overwrite a still-owned resource (R2). Static by R7; the transformer emits
+    // the per-scope `try`/`finally` teardown from it. After the move checker so
+    // it shares the resource classification.
+    analyzer.plan_resource_drops();
     // The `Drop` restrictions (destruction.md §5): implementable only for a
     // resource, and synchronous. Runs after classification so subject
     // resource-ness is settled.
     analyzer.check_drop_impls();
+    // With `drop_methods` recorded, build the per-type destruction glue the
+    // transformer emits as `__drop_<type>` helpers (destruction.md §5/§7).
+    analyzer.build_drop_glue();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.
@@ -21261,6 +22116,8 @@ pub fn analyze<'src>(
         integer_division: analyzer.integer_division,
         division_generic_lhs: analyzer.division_generic_lhs,
         parameter_contexts: analyzer.parameter_contexts,
+        // Filled by `context::thread_contexts` from its `param_nodes`.
+        context_dependent_functions: HashSet::new(),
         bitwise_generic_lhs: analyzer.bitwise_generic_lhs,
         method_call_substitution: analyzer.method_call_substitution,
         intrinsics,
@@ -21311,6 +22168,10 @@ pub fn analyze<'src>(
         adapted_instances: HashMap::new(),
         return_sites: analyzer.return_sites.clone(),
         clone_sites,
+        dropped_bindings: std::mem::take(&mut analyzer.dropped_bindings),
+        overwrite_drops: std::mem::take(&mut analyzer.overwrite_drops),
+        drop_glue: std::mem::take(&mut analyzer.drop_glue),
+        drop_call_edges: std::mem::take(&mut analyzer.drop_call_edges),
         boxed_locals,
         generic_referenced_roots,
         primitive_views,
@@ -21339,6 +22200,34 @@ pub fn check_async_drops(program: &mut Program) {
             msg: format!(
                 "`drop` for `{subject}` is async — teardown must be synchronous; cancel \
                  owned tasks via an `OwnedNursery`. Awaited teardown is a future design"
+            ),
+        });
+    }
+}
+
+/// Reject a `drop` body that requires an ambient context (destruction.md §8):
+/// writing a `Signal` threads the turn as a hidden context argument, but a
+/// destructor's call sites are scope exits — they thread no context — so a
+/// context-requiring `drop` could not receive one. Runs AFTER
+/// `context::thread_contexts` fills `context_dependent_functions` (the nodes it
+/// gave a hidden context parameter). Keyed on the std `Drop` entity via
+/// `drop_method_checks`, so a user's own `trait Drop` never reaches here.
+pub fn check_context_drops(program: &mut Program) {
+    let violations: Vec<(Span, String)> = program
+        .drop_method_checks
+        .iter()
+        .filter(|(function_id, _, _)| program.context_dependent_functions.contains(function_id))
+        .map(|(_, span, subject)| (*span, subject.clone()))
+        .collect();
+    for (span, subject) in violations {
+        program.diagnostics.push(Error {
+            note: None,
+            span,
+            msg: format!(
+                "`drop` for `{subject}` requires an ambient context — teardown must be \
+                 context-free; a `drop` body cannot require an ambient context (its call \
+                 sites are scope exits, which do not thread contexts). Hand turn-joining \
+                 work to an owner inside the turn"
             ),
         });
     }

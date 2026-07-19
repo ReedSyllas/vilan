@@ -294,6 +294,17 @@ impl<'a, 'src> Traversal<'a, 'src> {
         for closure in self.graph.initializer_closures_of(node).to_vec() {
             self.walk(closure, &SubstitutionContext::new(), None);
         }
+        // Synthetic destruction edges (destruction.md §8): the transformer inserts
+        // the teardown at each scope exit, so this walk can't see the call
+        // otherwise. Walking to the resource's `drop` impl(s) here colors the
+        // owning scope by a `@process`-needing drop. Context-free (the drop impl's
+        // platform requirement is on its own body, not the owner's `T`), no call
+        // site — like a created closure.
+        if let Some(drop_methods) = self.program.drop_call_edges.get(&node) {
+            for drop_method in drop_methods.clone() {
+                self.walk(drop_method, &SubstitutionContext::new(), None);
+            }
+        }
 
         self.trail.pop();
     }

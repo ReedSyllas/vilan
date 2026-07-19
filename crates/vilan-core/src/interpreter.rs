@@ -511,6 +511,20 @@ impl Interpreter {
                 })
             }
             js::Node::If(branch) => self.exec_if(branch, env),
+            // `try { <body> } finally { <finally> }` — scope-end destruction
+            // (destruction.md §7). The body's completion (a value, a `Flow`, or a
+            // thrown `Failure`) is held while the `finally` runs; the `finally`'s
+            // own abnormal completion REPLACES the in-flight one, matching JS —
+            // and §5's "a drop that panics during unwind replaces the in-flight
+            // error". `ret` / `break` / `continue` / a throw in the body all run
+            // the `finally` on the way out.
+            js::Node::Try(body, finally) => {
+                let body_result = self.exec_body(body, env);
+                match self.exec_body(finally, env)? {
+                    Flow::Normal => body_result,
+                    other => Ok(other),
+                }
+            }
             js::Node::While(condition, body) => {
                 loop {
                     self.charge()?;

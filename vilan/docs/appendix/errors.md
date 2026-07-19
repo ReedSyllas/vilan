@@ -145,9 +145,13 @@ struct, enum, or tuple holding one is a resource too, inferred by
 containment (`Option<Database>` is a resource, `Option<i32>` is not). A
 resource *moves* on binding (`let b = a`), on `own`-passing, on return, and
 into a constructor; it is *loaned* — no ownership change — through `self`,
-`&`, and `&mut`. The `Drop` destructor trait and its restrictions are below;
-the compiler-inserted teardown that runs `drop` at each scope end lands in
-later work.
+`&`, and `&mut`. The `Drop` destructor trait and its restrictions are below.
+At each scope end the compiler runs the destructor on the still-owned resource
+locals, in reverse declaration order — through `try`/`finally`, so `ret`,
+`jump`, and a thrown panic all run it on the way out; a resource without a
+`Drop` impl still has its fields destroyed. A module-level resource lives for
+the process and never drops. A drop that panics while a panic is already
+unwinding replaces the in-flight error (JS `finally` semantics).
 
 **"use of `…` after it was moved — a resource has a single owner"**
 The binding was moved (bound to another name, passed to an `own`
@@ -231,6 +235,15 @@ A `drop` body may not be `async`, nor await (call an async function): a
 destructor runs synchronously in v1. Cancel owned tasks through an
 `OwnedNursery` — whose own `drop` cancels them — rather than awaiting them.
 Awaited teardown is a future design.
+→ [The memory model](../tour/memory-model.md)
+
+**"`Drop` for `…` must declare `fun drop(&mut self)` — a destructor takes `&mut self` …"**
+A `Drop` impl's `drop` must be exactly `fun drop(&mut self)`: a `&mut self`
+receiver, no other parameters, a void return. The compiler loans `self`
+mutably at each scope end and then destroys the fields, so a by-value `self`
+(which could move the value out and keep it alive), a `&self` receiver (which
+can't run the mutating teardown), an extra parameter (the inserted call
+supplies only the receiver), or a value-returning body are each rejected.
 → [The memory model](../tour/memory-model.md)
 
 ## Async

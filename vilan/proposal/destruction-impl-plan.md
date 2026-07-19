@@ -153,6 +153,11 @@ resources yet).
   panicking during unwind replaces the in-flight error (JS `finally` semantics —
   document).
 - **Corpus**: new `test/resource.vl` (+ golden, debug binary rebuilt first).
+- **S2b implementation findings (settled 2026-07-19, §8 amended):** a context-requiring
+  `drop` body is REJECTED in v1 (the helper cannot thread `$ctx`; the "joins the wave"
+  sentence was unimplementable as written); platform coloring of drops needs a
+  **synthetic ownership edge** (owner scope → drop impl) because the inserted call is
+  transformer-side and invisible to reachability. Both ship with S2b, pinned.
 - **Pins**: drop order (locals reverse; fields reverse; body-before-fields), early
   `ret`/`jump` drops, panic-unwind drops, overwrite drops (R2), enum payloads drop with
   the value, containment-only type
@@ -161,6 +166,20 @@ resources yet).
   ambient turn's wave (§8 Turns sentence, pinned).
 
 ## 4. S3 — `Option.take`/`replace` + `drop<T>(own)` + match-move (S–M)
+
+- **Settled before building (2026-07-19, forced by S2b's findings):** S2b left `own`
+  resource parameters un-dropped (a recorded safe leak). S3 closes it — with a fork
+  forced by generic erasure: a generic body is EMITTED ONCE, so a `T`-typed `own`
+  parameter cannot get instantiation-conditional drop insertion (and drop flags are
+  ratified out, R7/(c)). Therefore: **concrete-typed `own` resource parameters drop at
+  scope end like locals; under a resource instantiation an `own T` parameter must be
+  moved on EVERY path** — R11 tightens from at-most-once to exactly-once for `own T`
+  parameters (zero-move = the leak the shared body cannot drop), spanned at the
+  instantiation. `drop<T>(own value)` itself satisfies exactly-once… by moving into
+  its own scope — the compiler treats the std `drop` sink's parameter as consumed
+  (it IS the drop site; special-known like the `Shared` intrinsics). Pins: concrete
+  own-param drops (runtime order), generic zero-move rejected at a resource
+  instantiation + accepted at data, `drop(db)` early teardown order.
 
 - **Intrinsics** `take(&mut self): Option<T>` / `replace(&mut self, value: T):
   Option<T>` — compiler-known (the `Shared` intrinsics pattern): analyzer registration,
