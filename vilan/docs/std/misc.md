@@ -33,6 +33,14 @@ impl Nursery {
 	fun signal(self): CancelSignal   // the raw host AbortSignal
 }
 
+resource struct OwnedNursery { nursery: Nursery }
+impl OwnedNursery {
+	fun new(): OwnedNursery                                       // a detached owner
+	fun enter<T>(&self, body: (|| T) context ambient_nursery): T  // spawns inside → owned
+	fun cancel(&self)                                             // early, idempotent
+}
+// `impl OwnedNursery with Drop` cancels the owned nursery at scope end.
+
 fun ambient_signal(): Option<CancelSignal>   // the enclosing nursery's, if any
 ```
 
@@ -53,6 +61,21 @@ and those rejections absorb as cancellation echoes. `Task::race` +
 `cancel()` is the race idiom: first settled wins, the losers' IO stops.
 Spec: [§7.7](../spec/execution.md). `ambient_signal()` bridges host
 APIs std doesn't wrap.
+
+`OwnedNursery` is the owner for background work no function-scoped
+`nursery` can hold — a task whose lifetime is an object's, not a call's.
+It is a `resource`: it has a single owner, moves, and is destroyed
+deterministically. `new()` makes a detached owner; `enter(body)` runs
+`body` with the owner's nursery ambient, so every task spawned inside
+registers with it — but, unlike `nursery`, `enter` does NOT join: it
+returns as soon as the body settles, leaving the tasks running.
+Dropping the owner (at scope end, or `drop(owner)`) cancels them, so
+in-flight bridged IO aborts. Because the owner's nursery is never joined
+it runs **detached**: a child's REAL failure reports to the console with
+its spawn origin — as a free-floating task would — instead of being
+absorbed for a join, and children do not cancel their siblings
+(ownership is lifetime, not fate-sharing). Cancellation echoes, from the
+owner's `cancel` or drop, stay silent.
 
 ## std::promise
 

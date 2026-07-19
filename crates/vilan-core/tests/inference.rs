@@ -20328,6 +20328,86 @@ fn r9_closure_capturing_an_outer_resource_beside_its_param_is_rejected() {
     );
 }
 
+// --- OwnedNursery: the resource-owner story (destruction.md §9) ----------------
+
+#[test]
+fn owned_nursery_is_a_resource_use_after_move_is_rejected() {
+    // `OwnedNursery` is a `resource` — moving it consumes it, and a use after
+    // the move is an error. Pinned against the REAL std type, not a stand-in.
+    assert_fails_with(
+        r#"
+        import std::task::OwnedNursery;
+        fun take(own owner: OwnedNursery) {}
+        fun main() {
+            let owner = OwnedNursery::new();
+            take(owner);
+            take(owner);
+        }
+        "#,
+        "after it was moved",
+    );
+}
+
+#[test]
+fn owned_nursery_enter_loans_the_owner_and_accepts_a_spawning_body() {
+    // `enter(&self, ..)` LOANS the owner (it survives the call, so `cancel`
+    // afterward is legal), and its injected `context ambient_nursery` body may
+    // spawn — the registration path — and is accepted (R9 exempts the injected
+    // clause). The real `OwnedNursery`, exercising the §9 API end to end.
+    assert_compiles(
+        r#"
+        import std::task::OwnedNursery;
+        import std::time::sleep;
+        fun main() {
+            let owner = OwnedNursery::new();
+            let _ = owner.enter(|| {
+                let _ = async sleep(10);
+                0
+            });
+            owner.cancel();
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_spawn_capturing_an_owned_nursery_is_rejected() {
+    // R9 with the real type: a spawn that captures the owner is rejected. This
+    // is exactly why `Draft`/the SSE pump cannot make their cell a resource and
+    // let a handler closure capture it — the migration deferred with C4 S4b.
+    assert_fails_with(
+        r#"
+        import std::task::OwnedNursery;
+        fun main() {
+            let owner = OwnedNursery::new();
+            let _ = async owner.cancel();
+        }
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+#[test]
+fn owned_nursery_enter_runs_its_body_then_drops_clean() {
+    // End to end at unit scale: `enter` runs the body (sync here), yields its
+    // value, and the owner's `Drop` (cancel) runs at scope end without error.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::task::OwnedNursery;
+        fun main() {
+            let owner = OwnedNursery::new();
+            let value = owner.enter(|| {
+                print("in-body");
+                7
+            });
+            print(value);
+        }
+        "#,
+        "in-body\n7\n",
+    );
+}
+
 // --- Ordering-sensitive edges -------------------------------------------------
 
 #[test]

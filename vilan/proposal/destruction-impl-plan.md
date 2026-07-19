@@ -153,6 +153,13 @@ resources yet).
   panicking during unwind replaces the in-flight error (JS `finally` semantics —
   document).
 - **Corpus**: new `test/resource.vl` (+ golden, debug binary rebuilt first).
+- **S4b findings (recorded 2026-07-19, §9 amended):** the free-spawn migration is
+  **Tier-2-blocked**, not merely deferred — all three std free spawns (`Draft.commit`,
+  the SSE pump, streaming `on_open`) have capture-based or host-lifecycle owners, which
+  R9 forbids from holding Tier-1 resources; J4's lint waits with them (backlog J4).
+  Follow-up recorded: extracting `__nursery_is_cancel` from `__nursery_run` (an
+  OwnedNursery-only program co-emits the unused join) is a legitimate cleanup blocked
+  on `nursery.js` byte-identity — do it at the next deliberate-golden moment.
 - **S4a residue (recorded 2026-07-19):** the §5 loan-only check covers every
   function-body consuming use of a module-level resource; a module-*initializer*
   global→global move (`let b: Res = a` at module scope) is not scanned — benign

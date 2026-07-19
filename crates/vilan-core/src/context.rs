@@ -312,16 +312,20 @@ fn analyze(
     // --- Spawn registration (async-polymorphism.md Part B): every `async`
     // spawn is a SAFE read of the `std::task` ambient nursery, so a spawn in
     // a nursery's dynamic extent registers its task. Engaged only when some
-    // call to `nursery` exists — a program that merely loads `std::task`
-    // (say, for `settle_all`) compiles untouched. The spawn's owner is the
-    // node containing the spawn expression (the spawn closure's parent); a
-    // module-level spawn has none and stays free-floating.
-    let nursery_engaged = program.nursery_fn_id.is_some_and(|nursery_fn| {
-        program
-            .function_calls
-            .values()
-            .any(|call| local_target(program, call.subject_id) == Some(nursery_fn))
-    });
+    // call to a nursery-establishing construct exists — `nursery`, or
+    // `OwnedNursery.enter` (destruction.md §9) — so a program that merely loads
+    // `std::task` (say, for `settle_all`) compiles untouched. The spawn's owner
+    // is the node containing the spawn expression (the spawn closure's parent);
+    // a module-level spawn has none and stays free-floating.
+    let nursery_engaged = [program.nursery_fn_id, program.owned_nursery_enter_fn_id]
+        .into_iter()
+        .flatten()
+        .any(|establishing_fn| {
+            program
+                .function_calls
+                .values()
+                .any(|call| local_target(program, call.subject_id) == Some(establishing_fn))
+        });
     let nursery_context: Option<Id> = program.nursery_ambient_id.filter(|_| nursery_engaged);
     let mut spawn_sites: Vec<(Id, Node)> = Vec::new();
     if let Some(context) = nursery_context {

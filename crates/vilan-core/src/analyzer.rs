@@ -19548,6 +19548,11 @@ pub struct Program<'src> {
     // task (async-polymorphism.md Part B).
     pub nursery_ambient_id: Option<Id>,
     pub nursery_fn_id: Option<Id>,
+    // `OwnedNursery.enter` (destruction.md §9): the second construct that
+    // establishes the ambient nursery, so calling it engages the spawn-demand
+    // channel exactly like a `nursery` call — tasks spawned in an owner's
+    // extent register with it. `None` until `OwnedNursery` is declared/used.
+    pub owned_nursery_enter_fn_id: Option<Id>,
     // Filled by the context pass: spawn entity -> (the entity that reads the
     // ambient nursery in the spawn's scope, whether it is `Option`-wrapped).
     // The transformer passes the value as `__task`'s third argument.
@@ -22099,6 +22104,10 @@ pub fn analyze<'src>(
     let nursery_fn_id = task_module_scope
         .and_then(|scope| scope.name_to_id_map.get("nursery").copied())
         .filter(|id| analyzer.functions.contains_key(id));
+    // The `OwnedNursery` struct id, copied out now (its `enter` method id is
+    // resolved from the impl further down, once impl subjects have resolved).
+    let owned_nursery_struct_id =
+        task_module_scope.and_then(|scope| scope.name_to_id_map.get("OwnedNursery").copied());
     // Bind `Task` into the global scope so a bare `Task<T>` annotation
     // resolves (alongside `std::task::Task` by path).
     if let Some(task_struct_id) = analyzer.task_struct_id {
@@ -22226,6 +22235,21 @@ pub fn analyze<'src>(
             }
         }
     }
+
+    // `OwnedNursery.enter` — a method, so its id lives in the impl, resolved
+    // here now that impl subjects have. A call to it engages spawn registration
+    // alongside `nursery` (destruction.md §9); `owned_nursery_struct_id` was
+    // copied out of the task module scope above.
+    let owned_nursery_enter_fn_id = owned_nursery_struct_id.and_then(|struct_id| {
+        analyzer.implementations.iter().find_map(|implementation| {
+            matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Struct(id, _)) if *id == struct_id
+            )
+            .then(|| implementation.declarations.get("enter").copied())
+            .flatten()
+        })
+    });
 
     // Find `List`'s `new`/`push` (special-cased by the transformer to `[]` /
     // `.push`) now that impl subjects have resolved.
@@ -22650,6 +22674,7 @@ pub fn analyze<'src>(
         context_get_safe_fn_id,
         nursery_ambient_id,
         nursery_fn_id,
+        owned_nursery_enter_fn_id,
         spawn_nursery_sources: HashMap::new(),
         bool_enum_id: analyzer.bool_enum_id,
         module_id_by_name: analyzer.module_id_by_name,

@@ -149,6 +149,7 @@ fn extern_helper(symbol: &str) -> Option<&'static str> {
         "__session_get",
         "__router_path",
         "__nursery_new",
+        "__nursery_new_detached",
         "__nursery_run",
         "__sleep",
     ];
@@ -474,6 +475,31 @@ fn helper_source(name: &str) -> &'static str {
              }\n\
              function __nursery_new(parent) {\n\
              \treturn new __Nursery(parent && parent[0] === 0 ? parent[1] : undefined);\n\
+             }"
+        }
+        // A DETACHED nursery — the one an `OwnedNursery` owns (destruction.md
+        // §9). It is never joined, so it must not silently absorb a child's
+        // failure the way the join does. `detached` marks the mode, and the
+        // per-instance `__fail` override reopens the free-task reporting path:
+        // a real (non-cancellation) child failure reports to the console with
+        // its spawn origin and does NOT abort the controller, so siblings keep
+        // running (ownership is lifetime, not fate-sharing). `__task` only
+        // calls `__fail` for non-cancellation errors, so cancellation echoes
+        // (an owner's `cancel`/`drop`) never reach here and stay silent. Reuses
+        // the base `__Nursery` (co-emitted) untouched — so a plain `nursery`
+        // program stays byte-identical.
+        "__nursery_new_detached" => {
+            "function __nursery_new_detached() {\n\
+             \tconst n = __nursery_new(undefined);\n\
+             \tn.detached = true;\n\
+             \tn.__fail = function (task) {\n\
+             \t\tif (!task.observed) {\n\
+             \t\t\tglobalThis.setTimeout(() => {\n\
+             \t\t\t\tif (!task.observed) console.error(\"unhandled task error (spawned in \" + task.origin + \"): \" + String(task.error));\n\
+             \t\t\t}, 0);\n\
+             \t\t}\n\
+             \t};\n\
+             \treturn n;\n\
              }"
         }
         // The nursery join (async-polymorphism.md Part B): run the body, then
@@ -2988,6 +3014,19 @@ impl<'src> Transformer<'src> {
                 // flattening, global property reads).
                 if let Some(helper) = extern_helper(symbol) {
                     self.used_helpers.insert(helper);
+                    // `__nursery_new_detached` builds on the base `__Nursery`
+                    // class + `__nursery_new` factory (it makes a detached
+                    // nursery and overrides its failure path), and its owned
+                    // tasks make `__task` reach `__nursery_is_cancel` — which
+                    // lives in the `__nursery_run` helper (a free/awaited task
+                    // short-circuits that call, so a plain spawn never needs
+                    // it, but an OWNED task does). There is no transitive helper
+                    // resolver, so co-emit both — the `__repeat` -> `__clone`
+                    // precedent.
+                    if helper == "__nursery_new_detached" {
+                        self.used_helpers.insert("__nursery_new");
+                        self.used_helpers.insert("__nursery_run");
+                    }
                 }
                 js::Node::Call(Box::new(js::Node::Local(symbol.to_string())), args)
             }
@@ -5171,6 +5210,7 @@ const RESERVED_NAMES: &[&str] = &[
     "__task",
     "__Task",
     "__nursery_new",
+    "__nursery_new_detached",
     "__nursery_run",
     "__nursery_of",
     "__nursery_is_cancel",

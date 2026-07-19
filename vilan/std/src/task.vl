@@ -13,6 +13,7 @@
 
 import pkg::context::Context;
 import pkg::option::Option::{ self, Some, None };
+import pkg::drop::Drop;
 
 external struct Task<T>;
 
@@ -106,4 +107,58 @@ async external fun __nursery_run<T>(n: Nursery, body: async || T): T;
 fun nursery<T>(body: (|Nursery| T) context ambient_nursery): T {
 	let n = __nursery_new(ambient_nursery.get_safe());
 	ambient_nursery.run(n, || __nursery_run(n, || body(n)))
+}
+
+// === `OwnedNursery` — a resource that owns its spawns (destruction.md §9) ====
+
+/// A DETACHED nursery: a never-joining owner. Its children register as usual,
+/// but because nothing ever joins them, a real (non-cancellation) child
+/// failure takes the free-task reporting path (console, with the spawn origin)
+/// rather than being stored for a join, and children do NOT cancel their
+/// siblings — ownership is lifetime, not fate-sharing. Cancellation echoes stay
+/// silent. Created only by `OwnedNursery`.
+[extern("__nursery_new_detached")]
+external fun __nursery_new_detached(): Nursery;
+
+/// `OwnedNursery` — the resource-owner story for background work. It owns the
+/// tasks spawned inside `enter` for as long as it lives; dropping it (at scope
+/// end, or via `drop(owner)`) cancels them, so in-flight bridged IO aborts and
+/// pending children die at their next suspension. This is the owner for
+/// object-lifetime spawns that no function-scoped `nursery` can hold. The
+/// wrapped `Nursery` stays data (it is the ambient handle); ownership lives
+/// only in this wrapper.
+resource struct OwnedNursery {
+	nursery: Nursery,
+}
+
+impl OwnedNursery {
+	/// A fresh owner with no in-flight tasks. Its nursery is detached — never
+	/// joined; the owner's lifetime is the structure.
+	fun new(): OwnedNursery {
+		OwnedNursery { nursery = __nursery_new_detached() }
+	}
+
+	/// Run `body` with this owner's nursery established as ambient: every task
+	/// spawned in `body`'s dynamic extent — directly or by anything it calls —
+	/// registers with the owner. Unlike `nursery`, `enter` does NOT join; it
+	/// returns `body`'s value as soon as the body itself settles, leaving the
+	/// spawned tasks running under the owner until it is dropped or cancelled.
+	fun enter<T>(&self, body: (|| T) context ambient_nursery): T {
+		ambient_nursery.run(self.nursery, body)
+	}
+
+	/// Cancel every in-flight owned task now — early, idempotent teardown.
+	/// `drop` does the same at scope end; calling both is safe (the second
+	/// abort is a no-op).
+	fun cancel(&self) {
+		self.nursery.cancel();
+	}
+}
+
+impl OwnedNursery with Drop {
+	/// Teardown: cancel the owned nursery so in-flight bridged IO aborts.
+	/// Synchronous and context-free (destruction.md §5/§8).
+	fun drop(&mut self) {
+		self.nursery.cancel();
+	}
 }

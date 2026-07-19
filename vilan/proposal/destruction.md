@@ -284,10 +284,17 @@ idiom R7 pushes toward.
   therefore runs in **detached mode**: a child failure that is not a cancellation echo
   takes the free-task reporting path (console, spawn origin) instead of being stored for
   a join, and does not cancel its siblings — children are independent; ownership is
-  lifetime, not fate-sharing. Cancellation echoes stay silent. This is what the SSE
-  pump and `Draft.commit` become owned by, and what lets J4's **free-spawn lint** finally
-  state its rule: *a spawn happens inside a `nursery` extent or an `OwnedNursery.enter` —
-  anything else is a lint.*
+  lifetime, not fate-sharing. Cancellation echoes stay silent. *(Amended 2026-07-19 —
+  S4b finding.)* The draft claimed the SSE pump and `Draft.commit` become owned here;
+  **they cannot in v1**: their real owners are capture-based (the `Draft` cell lives in
+  UI handler closures — R9 forbids a capture-based owner from being a resource) or
+  host-lifecycle (connections; `ResponseStream` is this section's own "deliberately
+  unchanged" entry). They stay free spawns until **Tier 2's counted closure
+  environments** (§10 — capture-with-release is precisely this) or a
+  connection-lifetime owner design. Consequently J4's **free-spawn lint** cannot state
+  its rule (*a spawn happens inside a `nursery` extent or an `OwnedNursery.enter` —
+  anything else is a lint*) without std exceptions yet; it waits with them (backlog
+  J4).
 - **Deliberately unchanged in v1:** `Shared` (stays a copyable data handle on JS — §10
   owns its counted future), `Owner`/`Disposable`/subscriptions (cooperative data-world
   teardown, framework-driven, capture-based — R9 is exactly why they must not be
