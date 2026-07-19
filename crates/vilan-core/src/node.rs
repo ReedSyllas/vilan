@@ -229,12 +229,14 @@ pub enum Node<'src> {
         source: Box<Spanned<Node<'src>>>,
         body: Box<Spanned<Node<'src>>>,
     },
-    // An enum declaration: name, generics, and the variants — each a name,
-    // the types of its optional data, and an optional explicit discriminant
-    // (`Less = -1`).
+    // An enum declaration: name, generics, the `resource` flag (the
+    // owned-resource modifier, destruction.md §3 — SURFACE ONLY, carried but
+    // not yet classified on), and the variants — each a name, the types of its
+    // optional data, and an optional explicit discriminant (`Less = -1`).
     Enum(
         Spanned<&'src str>,
         Option<GenericParameters<'src>>,
+        bool,
         Spanned<Vec<Spanned<EnumVariant<'src>>>>,
     ),
     Error,
@@ -378,12 +380,18 @@ pub enum Node<'src> {
     // analyzer marks the inner expression and FORWARDS to it (no wrapper
     // entity), so downstream passes see a plain subtree.
     Const(Box<Spanned<Node<'src>>>),
-    // A struct declaration. The `bool` marks an `external` (intrinsic) struct.
-    // The body is `Some(fields)` for `{ .. }` and `None` for a bodyless `;`
-    // declaration (only valid when `external`).
+    // A struct declaration. The first `bool` marks an `external` (intrinsic)
+    // struct; the second marks a `resource` — the owned-resource declaration
+    // modifier (destruction.md §3), SURFACE ONLY for now: parsed, carried, and
+    // formatted, with no classification or affine checking yet. In source the
+    // modifiers read `resource external struct`; the node keeps `external` in
+    // its original slot (so existing reads are undisturbed) and appends
+    // `resource` after it. The body is `Some(fields)` for `{ .. }` and `None`
+    // for a bodyless `;` declaration (only valid when `external`).
     Struct(
         Spanned<&'src str>,
         Option<GenericParameters<'src>>,
+        bool,
         bool,
         Option<Spanned<Vec<Spanned<StructField<'src>>>>>,
     ),
@@ -605,7 +613,7 @@ impl<'src> Node<'src> {
                 visit(source);
                 visit(body);
             }
-            Node::Enum(_, generic_parameters, variants) => {
+            Node::Enum(_, generic_parameters, _resource, variants) => {
                 visit_generic_parameters(generic_parameters, visit);
                 for (_, data, _) in variants.0.iter().map(|variant| &variant.0) {
                     for type_ in data {
@@ -704,7 +712,7 @@ impl<'src> Node<'src> {
                     visit(statement);
                 }
             }
-            Node::Struct(_, generic_parameters, _, fields) => {
+            Node::Struct(_, generic_parameters, _, _resource, fields) => {
                 visit_generic_parameters(generic_parameters, visit);
                 for (_, type_, _) in fields
                     .iter()

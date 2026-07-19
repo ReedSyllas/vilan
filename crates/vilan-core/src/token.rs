@@ -32,6 +32,10 @@ pub enum Token<'src> {
     Own,
     Borrows,
     Ret,
+    // `resource` — the owned-resource declaration modifier (destruction.md §3),
+    // in `external`'s position: `resource struct`, `resource external struct`,
+    // `resource enum`.
+    Resource,
     String(&'src str),
     // A triple-quoted string's raw inner text (between the `\"\"\"` delimiters),
     // trimmed by `util::trim_multiline_string` past the parser.
@@ -83,6 +87,7 @@ impl std::fmt::Display for Token<'_> {
             Token::Own => write!(f, "own"),
             Token::Borrows => write!(f, "borrows"),
             Token::Ret => write!(f, "ret"),
+            Token::Resource => write!(f, "resource"),
             Token::String(s) => write!(f, "{s}"),
             Token::MultilineString(s) => write!(f, "\"\"\"{s}\"\"\""),
             Token::Struct => write!(f, "struct"),

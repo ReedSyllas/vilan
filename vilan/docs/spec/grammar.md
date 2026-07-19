@@ -84,11 +84,11 @@ clause names the parameter the returned view projects (§6.5).
 ### Structs and enums
 
 ```text
-struct = [ "external" ] "struct" (IDENT | "null") [ generic-params ]
+struct = [ "resource" ] [ "external" ] "struct" (IDENT | "null") [ generic-params ]
          ( "{" [ field { "," field } [ "," ] ] "}" | ";" ) ;
 field  = [ "[" "expose" "]" ] IDENT [ ":" type ] ;
 
-enum    = "enum" IDENT [ generic-params ]
+enum    = [ "resource" ] "enum" IDENT [ generic-params ]
           "{" [ variant { "," variant } [ "," ] ] "}" ;
 variant = NAME [ "(" [ type { "," type } [ "," ] ] ")" ]
           [ "=" [ "-" ] NUMBER ] ;
@@ -97,6 +97,13 @@ variant = NAME [ "(" [ type { "," type } [ "," ] ] ")" ]
 A `;`-bodied struct is legal only for `external` structs (host types). An
 explicit variant discriminant (`= 0`, `= -1`) fixes the variant's integer
 tag.
+
+The leading `resource` modifier marks a type declaration as a *resource* —
+the owned-resource class, whose semantics are specified in the resources
+chapter (forthcoming; the modifier currently reserves the surface). It
+precedes `external`, so the full modifier order is `resource external
+struct`, and it is accepted only on `struct` and `enum` declarations —
+`resource` before any other item is a parse error.
 
 ### Impls and traits
 

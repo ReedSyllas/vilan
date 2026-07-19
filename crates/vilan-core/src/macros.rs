@@ -1578,7 +1578,7 @@ fn void_type_expr() -> js::Node<'static> {
 /// or `[2, FunctionItem]` — the variant order declared in `meta.vl`.
 fn construct_item(item: &Spanned<Node>, text: &str) -> js::Node<'static> {
     match &item.0 {
-        Node::Struct(name, _generics, _external, fields) => {
+        Node::Struct(name, _generics, _external, _resource, fields) => {
             let fields = fields
                 .iter()
                 .flat_map(|fields| &fields.0)
@@ -1599,7 +1599,7 @@ fn construct_item(item: &Spanned<Node>, text: &str) -> js::Node<'static> {
                 array(vec![string_literal(name.0), array(fields)]),
             ])
         }
-        Node::Enum(name, _generics, variants) => {
+        Node::Enum(name, _generics, _resource, variants) => {
             let variants = variants
                 .0
                 .iter()
@@ -1679,7 +1679,7 @@ pub(crate) fn construct_service(
     nodes: &NodeList,
     text: &str,
 ) -> Option<(js::Node<'static>, String)> {
-    let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
+    let Node::Struct(name, _generics, _external, _resource, Some(fields)) = &item.0 else {
         return None;
     };
     let service_name = name.0;

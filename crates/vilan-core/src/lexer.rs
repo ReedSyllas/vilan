@@ -123,6 +123,7 @@ where
         "own" => Token::Own,
         "borrows" => Token::Borrows,
         "ret" => Token::Ret,
+        "resource" => Token::Resource,
         "struct" => Token::Struct,
         "trait" => Token::Trait,
         "type" => Token::Type,

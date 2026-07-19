@@ -19270,3 +19270,143 @@ fn a_void_async_parameter_still_stores_as_spawn() {
         "#,
     );
 }
+
+// --- C4 S1 chunk 1: the `resource` declaration modifier (surface only) -------
+//
+// destruction.md §3: `resource` is a declaration modifier in `external`'s
+// position, canonical order `resource external struct`. This chunk parses,
+// carries, and formats the flag with NO classification or affine checking yet,
+// so a `resource` type still compiles and runs exactly like its data
+// counterpart. (Formatter round-trip is pinned beside its neighbours in
+// `formatter.rs`'s `mod reformats`.)
+
+#[test]
+fn resource_struct_parses_and_is_inert() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        resource struct Session {
+            id: i32,
+            name: str,
+        }
+        fun main() {
+            let s = Session { id = 1, name = "a" };
+            print(s.name);
+        }
+        "#,
+        "a\n",
+    );
+}
+
+#[test]
+fn resource_struct_with_generics_parses() {
+    // Generics on a resource declaration parse and carry through — the flag is
+    // independent of the generic parameters.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        resource struct Wrapper<T> {
+            value: T,
+        }
+        fun main() {
+            let w = Wrapper { value = 42 };
+            print(w.value);
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn resource_enum_parses_and_is_inert() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        resource enum Color {
+            Red,
+            Green,
+            Blue,
+        }
+        fun main() {
+            let c = Color::Green;
+            match c {
+                Color::Red => print("red"),
+                Color::Green => print("green"),
+                Color::Blue => print("blue"),
+            }
+        }
+        "#,
+        "green\n",
+    );
+}
+
+#[test]
+fn resource_external_struct_parses() {
+    // The leaf case: an opaque host resource declares its own resource-ness,
+    // in canonical order `resource external struct` (destruction.md §3).
+    assert_compiles(
+        r#"
+        resource external struct Database;
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn resource_struct_carries_a_derive_through_expansion() {
+    // The flag survives macro expansion: a `[derive(..)]` on a `resource struct`
+    // still synthesizes, and the derived `==` works — expansion keeps the
+    // modifier (the item is boxed, not rebuilt).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        [derive(PartialEq, Debug)]
+        resource struct Session {
+            id: i32,
+            name: str,
+        }
+        fun main() {
+            let a = Session { id = 1, name = "x" };
+            let b = Session { id = 1, name = "x" };
+            print(a == b);
+        }
+        "#,
+        "true\n",
+    );
+}
+
+#[test]
+fn resource_on_a_function_is_rejected() {
+    // `resource` is a type-declaration modifier — anywhere but a struct/enum it
+    // steers (destruction.md §3's classification role).
+    assert_fails_with("resource fun foo() {}\n", "type-declaration modifier");
+}
+
+#[test]
+fn resource_on_an_impl_is_rejected() {
+    assert_fails_with("resource impl Foo {}\n", "type-declaration modifier");
+}
+
+#[test]
+fn resource_on_a_let_is_rejected() {
+    assert_fails_with(
+        r#"
+        fun main() {
+            resource let x = 1;
+        }
+        "#,
+        "type-declaration modifier",
+    );
+}
+
+#[test]
+fn resource_on_a_trait_is_rejected() {
+    assert_fails_with("resource trait Foo {}\n", "type-declaration modifier");
+}
+
+#[test]
+fn resource_after_external_is_rejected() {
+    // Canonical order is `resource external struct`; the reverse is not a
+    // program (destruction.md §3 fixes the order).
+    assert_fails("external resource struct Database;\n");
+}

@@ -240,8 +240,8 @@ impl<'src> Printer<'src> {
                 | Node::Match(_, _)
                 | Node::Block(_)
                 | Node::Func(_)
-                | Node::Struct(_, _, _, _)
-                | Node::Enum(_, _, _)
+                | Node::Struct(_, _, _, _, _)
+                | Node::Enum(_, _, _, _)
                 | Node::Impl(_, _, _)
                 | Node::Trait(_, _, _, _)
                 | Node::Module(_, _)
@@ -257,8 +257,12 @@ impl<'src> Printer<'src> {
     /// handled, so `format` falls back to the original source.
     fn print_item(&mut self, item: &Spanned<Node<'src>>) {
         match &item.0 {
-            // `[external ]struct Name[<…>][;|{ fields }]`.
-            Node::Struct(name, generics, external, body) => {
+            // `[resource ][external ]struct Name[<…>][;|{ fields }]` — canonical
+            // modifier order is `resource external struct` (destruction.md §3).
+            Node::Struct(name, generics, external, resource, body) => {
+                if *resource {
+                    self.out.push_str("resource ");
+                }
                 if *external {
                     self.out.push_str("external ");
                 }
@@ -298,8 +302,11 @@ impl<'src> Printer<'src> {
                     }
                 }
             }
-            // `enum Name[<…>] { Variant[(payload)][ = discriminant], … }`.
-            Node::Enum(name, generics, variants) => {
+            // `[resource ]enum Name[<…>] { Variant[(payload)][ = discriminant], … }`.
+            Node::Enum(name, generics, resource, variants) => {
+                if *resource {
+                    self.out.push_str("resource ");
+                }
                 self.out.push_str("enum ");
                 self.out.push_str(name.0);
                 self.print_generic_parameters(generics);
@@ -1416,6 +1423,33 @@ mod reformats {
         assert_formats(
             "enum Option<T>{Some(T),None}\n",
             "enum Option<T> {\n\tSome(T),\n\tNone,\n}\n",
+        );
+    }
+
+    // C4 S1 (destruction.md §3): the `resource` declaration modifier prints back
+    // in canonical position — `resource` before `struct`/`enum`, `resource
+    // external struct` for the leaf host case — and re-formats to a fixed point.
+    #[test]
+    fn resource_struct_modifier_round_trips() {
+        assert_formats(
+            "resource struct S{x:i32}\n",
+            "resource struct S {\n\tx: i32,\n}\n",
+        );
+    }
+
+    #[test]
+    fn resource_external_struct_keeps_canonical_order() {
+        assert_formats(
+            "resource external struct Database;\n",
+            "resource external struct Database;\n",
+        );
+    }
+
+    #[test]
+    fn resource_enum_modifier_round_trips() {
+        assert_formats(
+            "resource enum E{A,B}\n",
+            "resource enum E {\n\tA,\n\tB,\n}\n",
         );
     }
 

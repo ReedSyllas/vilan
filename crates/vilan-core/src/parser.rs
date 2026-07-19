@@ -748,8 +748,14 @@ where
             ((name, data.unwrap_or_default(), discriminant), e.span())
         });
 
-    let enum_ = just(Token::Enum)
-        .ignore_then(
+    // `[ "resource" ] "enum" …` — the owned-resource modifier (destruction.md
+    // §3), mirroring `struct_`. There is no `external enum`, so `resource` is
+    // the only leading modifier here.
+    let enum_ = just(Token::Resource)
+        .or_not()
+        .map(|resource| resource.is_some())
+        .then_ignore(just(Token::Enum))
+        .then(
             identifier
                 .labelled("enum name")
                 .map_with(|name, e| (name, e.span())),
@@ -763,8 +769,11 @@ where
                 .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
                 .map_with(|variants, e| (variants, e.span())),
         )
-        .map_with(|((name, generic_parameters), variants), e| {
-            (Node::Enum(name, generic_parameters, variants), e.span())
+        .map_with(|(((resource, name), generic_parameters), variants), e| {
+            (
+                Node::Enum(name, generic_parameters, resource, variants),
+                e.span(),
+            )
         })
         .labelled("enum")
         .boxed();
@@ -1118,9 +1127,19 @@ where
         .then(just(Token::Op(":")).ignore_then(type_.clone()).or_not())
         .map_with(|((exposed, name), type_), e| ((name, type_, exposed), e.span()));
 
-    let struct_ = just(Token::External)
+    // `[ "resource" ] [ "external" ] "struct" …` — the owned-resource modifier
+    // sits in `external`'s position, canonical order `resource external struct`
+    // (destruction.md §3). Fusing it into `struct_` (rather than a wrapper)
+    // makes it compose with `[derive(..)]` / `[service(..)]` / macro attributes
+    // for free, exactly as `external` already does.
+    let struct_ = just(Token::Resource)
         .or_not()
-        .map(|external| external.is_some())
+        .map(|resource| resource.is_some())
+        .then(
+            just(Token::External)
+                .or_not()
+                .map(|external| external.is_some()),
+        )
         .then_ignore(just(Token::Struct))
         // `null` is a keyword but also the name of the built-in `external struct
         // null`, so the struct name accepts it alongside ordinary identifiers.
@@ -1152,12 +1171,14 @@ where
             // `external` struct, e.g. a primitive like `external struct str;`).
             just(Token::Ctrl(';')).map(|_| None),
         )))
-        .map_with(|(((external, name), generic_parameters), body), e| {
-            (
-                Node::Struct(name, generic_parameters, external, body),
-                e.span(),
-            )
-        })
+        .map_with(
+            |((((resource, external), name), generic_parameters), body), e| {
+                (
+                    Node::Struct(name, generic_parameters, external, resource, body),
+                    e.span(),
+                )
+            },
+        )
         .labelled("struct")
         .boxed();
 
@@ -1455,6 +1476,38 @@ where
         .labelled("macro attribute")
         .boxed();
 
+    // `resource` is only ever a leading modifier on a `struct` / `enum`
+    // declaration (consumed inside `struct_` / `enum_` above). Anywhere else —
+    // `resource fun`, `resource impl`, `resource let`, `resource trait` — catch
+    // it here and steer, instead of leaking the bare "expected struct" that
+    // `struct_` would raise after consuming the keyword. The `.not()` guard
+    // fires only when a non-declaration token follows, so this never shadows a
+    // valid `resource struct` / `resource external struct` / `resource enum`.
+    let misplaced_resource = just(Token::Resource)
+        .then_ignore(
+            choice((
+                just(Token::External),
+                just(Token::Struct),
+                just(Token::Enum),
+            ))
+            .not(),
+        )
+        // Emit-and-recover rather than fail: succeeding here stops `choice` at
+        // this alternative, so `struct_`'s bare "expected struct" never competes
+        // (chumsky prefers the further-right error and would bury the steer).
+        // The `Node::Error` is a recovery placeholder; the offending token is
+        // left unconsumed, so `fun` / `impl` / `let` / `trait` still parse as
+        // themselves on the next statement.
+        .validate(|_token, extra, emitter| {
+            emitter.emit(<E::Error as CustomParseError<'tokens, I>>::custom(
+                extra.span(),
+                "`resource` is a type-declaration modifier — it may appear only \
+                 before a `struct` or `enum` declaration",
+            ));
+            (Node::Error, extra.span())
+        })
+        .boxed();
+
     statement.define(choice((
         derived_item,
         service_item,
@@ -1474,6 +1527,7 @@ where
         function,
         struct_,
         enum_,
+        misplaced_resource,
         impl_,
         trait_,
         module,

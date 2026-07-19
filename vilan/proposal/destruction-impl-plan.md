@@ -118,8 +118,9 @@ match-consume vs match-loan (the static half — the runtime alias-as-move pin i
 conditional-move reject, loop-interior reject,
 closure-capture reject, spawn-capture reject, injected-body loan accept,
 container-element reject, `Context<R>` reject, generic move-clean accept
-(`Option::unwrap`, `map`-shape) + dirty reject, `any` reject, `Drop`-on-data reject,
-derive-rejects-resource-field.
+(`Option::unwrap`, `map`-shape) + dirty reject, `any` reject,
+derive-rejects-resource-field. (The `Drop`-on-data reject pin rides S2 — the trait only
+exists from S2, so keying the check on a bare trait name earlier would be fragile.)
 
 **Acceptance**: suite green, corpus byte-identical, no std fallout (std declares no
 resources yet).
@@ -127,7 +128,9 @@ resources yet).
 ## 3. S2 — `Drop`, insertion, lowering (M–L)
 
 - **The trait** in std (`Drop { fun drop(&mut self) }`; home: a small `drop.vl` beside
-  `option.vl`, or `lib.vl` — decide at impl). S1's impl restriction already guards it.
+  `option.vl`, or `lib.vl` — decide at impl), plus its restriction: `Drop` implemented
+  on a data type errors, steering to add `resource` (the pin moved here from S1 — the
+  check keys on the real std trait, which exists only from this slice).
 - **Analyzer drop planning**: per scope, the still-owned resource locals at each exit
   (static by R7) in reverse declaration order; R2 overwrite-drop points; per-type field
   order (body before fields, fields reversed); enum payloads with the value.

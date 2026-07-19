@@ -2202,7 +2202,7 @@ impl<'src> Analyzer<'src> {
     /// type node + span, validated once every module's Wire names are collected.
     fn collect_wire_type(&mut self, item: &'src Node<'src>) {
         match item {
-            Node::Struct(name, _generics, _external, Some(body)) => {
+            Node::Struct(name, _generics, _external, _resource, Some(body)) => {
                 self.wire_names.insert(name.0);
                 let mut members = Vec::new();
                 for field in &body.0 {
@@ -2213,7 +2213,7 @@ impl<'src> Analyzer<'src> {
                 }
                 self.wire_types_to_check.push((name.0, members));
             }
-            Node::Enum(name, _generics, variants) => {
+            Node::Enum(name, _generics, _resource, variants) => {
                 self.wire_names.insert(name.0);
                 let mut members = Vec::new();
                 for variant in &variants.0 {
@@ -2281,7 +2281,7 @@ impl<'src> Analyzer<'src> {
     /// check (I1) — the same collection as `collect_wire_type`.
     fn collect_hashable_type(&mut self, item: &'src Node<'src>) {
         match item {
-            Node::Struct(name, _generics, _external, Some(body)) => {
+            Node::Struct(name, _generics, _external, _resource, Some(body)) => {
                 self.hashable_names.insert(name.0);
                 let mut members = Vec::new();
                 for field in &body.0 {
@@ -2292,7 +2292,7 @@ impl<'src> Analyzer<'src> {
                 }
                 self.hashable_types_to_check.push((name.0, members));
             }
-            Node::Enum(name, _generics, variants) => {
+            Node::Enum(name, _generics, _resource, variants) => {
                 self.hashable_names.insert(name.0);
                 let mut members = Vec::new();
                 for variant in &variants.0 {
@@ -2995,7 +2995,7 @@ impl<'src> Analyzer<'src> {
                 }
             }
             Node::Struct(name, ..) | Node::Trait(name, ..) => move_name(self, name.0),
-            Node::Enum(name, _, variants) => {
+            Node::Enum(name, _, _resource, variants) => {
                 move_name(self, name.0);
                 // Variant constructor names registered by the enum walk (if
                 // any) belong with the enum — a missing name is a no-op.
@@ -7224,7 +7224,7 @@ impl<'src> Analyzer<'src> {
                 self.prepped_assignments.push((target_id, stored_value_id));
                 Some(Expr::Assignment(target_id, stored_value_id))
             }
-            Node::Struct(name, generic_parameters, external, body) => {
+            Node::Struct(name, generic_parameters, external, _resource, body) => {
                 let name_span = name.1;
                 let name = name.0;
                 let scope = self.mut_scope_for_scope_id(scope_id);
@@ -7293,7 +7293,7 @@ impl<'src> Analyzer<'src> {
                 );
                 Some(Expr::Struct(id))
             }
-            Node::Enum(name, generic_parameters, variants) => {
+            Node::Enum(name, generic_parameters, _resource, variants) => {
                 let name_span = name.1;
                 let name = name.0;
                 let scope = self.mut_scope_for_scope_id(scope_id);
@@ -16236,7 +16236,7 @@ pub(crate) fn service_impl_source(
     item: &Spanned<Node<'_>>,
     nodes: &NodeList<'_>,
 ) -> String {
-    let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
+    let Node::Struct(name, _generics, _external, _resource, Some(fields)) = &item.0 else {
         return String::new();
     };
     let service_name = name.0;
@@ -16486,10 +16486,10 @@ pub(crate) fn service_impl_source(
 }
 
 pub(crate) fn derive_impl_source(derives: &[&str], item: &Spanned<Node<'_>>) -> String {
-    if let Node::Enum(name, _generics, variants) = &item.0 {
+    if let Node::Enum(name, _generics, _resource, variants) = &item.0 {
         return derive_enum_impls(derives, name.0, variants);
     }
-    let Node::Struct(name, _generics, _external, Some(fields)) = &item.0 else {
+    let Node::Struct(name, _generics, _external, _resource, Some(fields)) = &item.0 else {
         return String::new();
     };
     let struct_name = name.0;
