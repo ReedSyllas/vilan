@@ -142,9 +142,47 @@ with `let`; assigning through it (`v = …`) already writes the target.
 
 A `resource` type has a single owner and moves rather than copies; a
 struct, enum, or tuple holding one is a resource too, inferred by
-containment (`Option<Database>` is a resource, `Option<i32>` is not).
-These errors are that classification made observable — the full move and
-destructor rules land in later work.
+containment (`Option<Database>` is a resource, `Option<i32>` is not). A
+resource *moves* on binding (`let b = a`), on `own`-passing, on return, and
+into a constructor; it is *loaned* — no ownership change — through `self`,
+`&`, and `&mut`. The destructor rules land in later work; these are the
+static move rules.
+
+**"use of `…` after it was moved — a resource has a single owner"**
+The binding was moved (bound to another name, passed to an `own`
+parameter, returned, or matched by value) and then used again. The note
+points at the move. Loan it instead (`&x` / `&mut x`, or a method call),
+or, if you really need two owners, restructure with `Option` + `take`.
+→ [The memory model](../tour/memory-model.md)
+
+**"cannot move a resource field out of a live aggregate — … no partial moves …"**
+`let x = s.db`, or passing / returning `s.db` by value, would move a
+resource out of a struct that is still alive — v1 has no partial moves.
+Loan the field (`&s.db`, `&mut s.db`, `s.db.method(…)`), or make the field
+an `Option<…>` and `take()` it out.
+→ [The memory model](../tour/memory-model.md)
+
+**"`…` is moved on one path through this branch but not another — …"**
+An `if`/`match` moves the binding on some paths and not others, so its
+end-of-scope ownership isn't static (v1 has no runtime drop flags). Move it
+on *every* path, or on none — or hold it in an `Option` and `take()` on the
+path that consumes it. A diverging leg (one that `ret`s or `jump`s out) is
+exempt: it never reaches the merge.
+→ [The memory model](../tour/memory-model.md)
+
+**"`…` is declared outside this loop and moved inside it — …"**
+Moving a binding from a loop body would move it again on the next
+iteration. Move a value declared *inside* the loop, or loan the outer one
+(`&x` / `&mut x`).
+→ [The memory model](../tour/memory-model.md)
+
+**"a closure cannot capture the resource `…` — …"**
+A closure or `async`/spawn body referenced a resource from an enclosing
+scope; capturing it would give the closure a second owner. Pass a loan into
+the call, or give ownership to the struct that owns the closure's lifetime.
+(A closure's own *parameter* is per-call, not a capture — injected
+`context`-clause bodies are unaffected.)
+→ [The memory model](../tour/memory-model.md)
 
 **"the resource `…` cannot be used where `any` is expected — …"**
 `any` is a data sink, and a resource must keep its single owner: passing

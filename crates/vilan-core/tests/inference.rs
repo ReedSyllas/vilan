@@ -19778,3 +19778,648 @@ fn r12_rejects_a_resource_method_argument_to_any() {
         "resource",
     );
 }
+
+// === C4 S1 chunk 3: the affine move checker (destruction.md §4, R1–R9) ==========
+// Static validation only — no `Drop`, no lowering, no `take`/`replace`. A resource
+// has a single owner: it MOVES on binding / `own`-passing / return / construction,
+// and is LOANED through `self`/`&`/`&mut`. Each rule gets its own reject AND accept
+// pins, plus the ordering-sensitive edges (nested blocks, cross-arm, shadowing).
+
+/// Pins a use-after-move: a primary "after it was moved" diagnostic whose
+/// secondary NOTE ("was moved here") is anchored at the `move_occurrence`-th
+/// (0-based) occurrence of `name` — the move site, distinct from the use.
+#[track_caller]
+fn assert_use_after_move_noting(source: &str, name: &str, move_occurrence: usize) {
+    let mut start = 0;
+    let mut at = None;
+    for _ in 0..=move_occurrence {
+        at = source[start..].find(name).map(|found| start + found);
+        match at {
+            Some(position) => start = position + 1,
+            None => panic!("occurrence {move_occurrence} of {name:?} not found"),
+        }
+    }
+    let expected = at.unwrap()..at.unwrap() + name.len();
+    let diagnostics = failure_diagnostics_with_notes(source);
+    let matching: Vec<_> = diagnostics
+        .iter()
+        .filter(|(message, _, _)| message.contains("after it was moved"))
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "no use-after-move diagnostic; got: {diagnostics:#?}"
+    );
+    assert!(
+        matching.iter().any(|(_, _, note)| note
+            .as_ref()
+            .is_some_and(|(msg, range, _)| msg.contains("was moved here") && *range == expected)),
+        "no use-after-move notes 'was moved here' at occurrence {move_occurrence} of {name:?} \
+         ({expected:?}); got: {matching:#?}"
+    );
+}
+
+// --- R1: `let b = a` moves; a later use of `a` is use-after-move (with note) ----
+
+#[test]
+fn r1_let_move_then_use_is_use_after_move_with_note() {
+    // The note points at the MOVE site (`let heir = donor`, occurrence 1 of
+    // "donor"), the primary at the later use (`&donor`, occurrence 2).
+    assert_use_after_move_noting(
+        r#"
+        resource struct Db { handle: i32 }
+        fun peek(d: &Db) {}
+        fun main() {
+            let donor = Db { handle = 1 };
+            let heir = donor;
+            peek(&donor);
+        }
+        "#,
+        "donor",
+        1,
+    );
+}
+
+#[test]
+fn r1_let_move_without_later_use_compiles() {
+    // The move alone is fine — a resource may be re-bound; only a LATER use errors.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun main() {
+            let donor = Db { handle = 1 };
+            let heir = donor;
+            sink(heir);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r1_double_let_move_is_use_after_move() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun main() {
+            let a = Db { handle = 1 };
+            let b = a;
+            let c = a;
+        }
+        "#,
+        "after it was moved",
+    );
+}
+
+// --- R3: `own` moves; `self`/`&`/`&mut`/bare are loans -------------------------
+
+#[test]
+fn r3_own_argument_at_last_use_compiles() {
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun peek(d: &Db) {}
+        fun main() {
+            let a = Db { handle = 1 };
+            peek(&a);
+            sink(a);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r3_own_argument_not_last_use_is_rejected() {
+    // `sink(a)` moves `a`; the later `peek(&a)` — even a loan — is use-after-move.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun peek(d: &Db) {}
+        fun main() {
+            let a = Db { handle = 1 };
+            sink(a);
+            peek(&a);
+        }
+        "#,
+        "after it was moved",
+    );
+}
+
+#[test]
+fn r3_loans_never_move_a_resource() {
+    // `&`, `&mut`, a method receiver, and repeated loans all leave the binding
+    // owned — a later move is fine.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        impl Db { fun ping(&self) {} }
+        fun peek(d: &Db) {}
+        fun poke(d: &mut Db) {}
+        fun sink(own d: Db) {}
+        fun main() {
+            mut a = Db { handle = 1 };
+            peek(&a);
+            poke(&mut a);
+            a.ping();
+            peek(&a);
+            sink(a);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r3_method_loan_after_a_later_use_compiles() {
+    // Calling a method through a loan, then using the binding again, is fine —
+    // the receiver loan does not consume it.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        impl Db { fun ping(&self) {} }
+        fun sink(own d: Db) {}
+        fun main() {
+            let a = Db { handle = 1 };
+            a.ping();
+            a.ping();
+            sink(a);
+        }
+        "#,
+    );
+}
+
+// --- R4: returns move out, through `if`/`match` tails; a diverging leg exempt ---
+
+#[test]
+fn r4_return_moves_a_binding_out() {
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun give(own d: Db): Db { d }
+        fun main() { let x = give(Db { handle = 1 }); }
+        "#,
+    );
+}
+
+#[test]
+fn r4_return_through_if_tails_moves_each_branch() {
+    // Each branch tail produces the returned resource — an R4 move-out per branch,
+    // not a conditional move (the branches do not rejoin into continuing code).
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun pick(c: bool): Db {
+            if c { Db { handle = 1 } } else { Db { handle = 2 } }
+        }
+        fun main() { let x = pick(true); }
+        "#,
+    );
+}
+
+#[test]
+fn r4_return_same_binding_through_both_if_tails_compiles() {
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun pick(c: bool): Db {
+            let d = Db { handle = 1 };
+            if c { d } else { d }
+        }
+        fun main() { let x = pick(true); }
+        "#,
+    );
+}
+
+#[test]
+fn r4_diverging_leg_is_exempt_from_every_path() {
+    // `d` is moved on the `then` path; the `else` diverges (`ret`) and never
+    // reaches the merge, so the every-path requirement is satisfied.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f(c: bool) {
+            let d = Db { handle = 1 };
+            if c { sink(d); } else { ret; }
+        }
+        fun main() { f(true); }
+        "#,
+    );
+}
+
+// --- R5: struct literals move in; a resource field is loan-only ----------------
+
+#[test]
+fn r5_struct_literal_moves_a_resource_in_then_use_after() {
+    assert_use_after_move_noting(
+        r#"
+        resource struct Db { handle: i32 }
+        resource struct Session { db: Db }
+        fun peek(d: &Db) {}
+        fun main() {
+            let conn = Db { handle = 1 };
+            let session = Session { db = conn };
+            peek(&conn);
+        }
+        "#,
+        "conn",
+        1,
+    );
+}
+
+#[test]
+fn r5_field_copy_out_is_rejected() {
+    // `let x = s.db` would copy a resource out of a live aggregate — R5 reject.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        resource struct Session { db: Db }
+        fun main() {
+            let s = Session { db = Db { handle = 1 } };
+            let x = s.db;
+        }
+        "#,
+        "no partial moves",
+    );
+}
+
+#[test]
+fn r5_partial_move_out_via_own_argument_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        resource struct Session { db: Db }
+        fun sink(own d: Db) {}
+        fun f(own s: Session) {
+            sink(s.db);
+        }
+        fun main() {}
+        "#,
+        "no partial moves",
+    );
+}
+
+#[test]
+fn r5_field_loans_are_accepted() {
+    // `&self.db`, `&mut self.db`, and a method through the field are all loans.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        impl Db { fun ping(&self) {} }
+        resource struct Session { db: Db }
+        fun peek(d: &Db) {}
+        fun poke(d: &mut Db) {}
+        fun main() {
+            mut s = Session { db = Db { handle = 1 } };
+            peek(&s.db);
+            poke(&mut s.db);
+            s.db.ping();
+        }
+        "#,
+    );
+}
+
+// --- R6: match by value consumes the subject; `match &x` inspects --------------
+
+#[test]
+fn r6_match_by_value_consumes_the_subject() {
+    // After a by-value match the subject is dead; a second by-value match is
+    // use-after-move.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        enum Holder { Has(Db), Empty }
+        fun sink(own d: Db) {}
+        fun f(own h: Holder) {
+            match h { Holder::Has(let d) => sink(d), Holder::Empty => {}, }
+            match h { Holder::Empty => {}, Holder::Has(let d) => sink(d), }
+        }
+        fun main() {}
+        "#,
+        "after it was moved",
+    );
+}
+
+#[test]
+fn r6_match_captures_move_the_payload() {
+    // The `Some(let d)` capture moves the payload into the arm, where it is moved
+    // on once — clean.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        enum Holder { Has(Db), Empty }
+        fun sink(own d: Db) {}
+        fun f(own h: Holder) {
+            match h { Holder::Has(let d) => sink(d), Holder::Empty => {}, }
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn r6_match_on_a_loan_inspects_without_consuming() {
+    // `match &h` is a loan — the subject stays alive, so a second inspection and a
+    // later loan both work.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        enum Holder { Has(Db), Empty }
+        fun peek(h: &Holder) {}
+        fun f(h: &Holder) {
+            match &h { Holder::Has(let d) => {}, Holder::Empty => {}, }
+            match &h { Holder::Empty => {}, Holder::Has(let d) => {}, }
+            peek(h);
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+// --- R7: a binding must be moved on every path through a scope, or none --------
+
+#[test]
+fn r7_conditional_move_on_one_path_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f(c: bool) {
+            let d = Db { handle = 1 };
+            if c { sink(d); }
+        }
+        fun main() { f(true); }
+        "#,
+        "moved on one path",
+    );
+}
+
+#[test]
+fn r7_move_on_both_paths_compiles() {
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f(c: bool) {
+            let d = Db { handle = 1 };
+            if c { sink(d); } else { sink(d); }
+        }
+        fun main() { f(true); }
+        "#,
+    );
+}
+
+#[test]
+fn r7_move_on_neither_path_compiles() {
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun other() {}
+        fun f(c: bool) {
+            let d = Db { handle = 1 };
+            if c { other(); } else { other(); }
+            sink(d);
+        }
+        fun main() { f(true); }
+        "#,
+    );
+}
+
+#[test]
+fn r7_move_in_one_match_arm_and_loan_in_another_is_rejected() {
+    // Across arms: `d` is moved in `A`, loaned in `B` — divergent state at the
+    // merge, so R7 rejects (a use follows to make the divergence observable).
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        enum Sig { A, B }
+        fun sink(own d: Db) {}
+        fun peek(d: &Db) {}
+        fun f(s: Sig) {
+            let d = Db { handle = 1 };
+            match s { Sig::A => sink(d), Sig::B => peek(&d), }
+            peek(&d);
+        }
+        fun main() {}
+        "#,
+        "moved on one path",
+    );
+}
+
+// --- R8: no moves of an outer binding inside a repeatable interior -------------
+
+#[test]
+fn r8_moving_an_outer_binding_inside_a_loop_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f() {
+            let d = Db { handle = 1 };
+            for { sink(d); }
+        }
+        fun main() { f(); }
+        "#,
+        "declared outside this loop",
+    );
+}
+
+#[test]
+fn r8_moving_a_loop_local_binding_compiles() {
+    // A binding declared INSIDE the loop is fresh each iteration — moving it is
+    // fine.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f() {
+            for { let d = Db { handle = 1 }; sink(d); }
+        }
+        fun main() { f(); }
+        "#,
+    );
+}
+
+// --- R9: closures / spawns cannot capture a resource; params are exempt --------
+
+#[test]
+fn r9_closure_capturing_a_resource_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun run_it(body: || void) { body(); }
+        fun f() {
+            let d = Db { handle = 1 };
+            run_it(|| sink(d));
+        }
+        fun main() { f(); }
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+#[test]
+fn r9_spawn_capturing_a_resource_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f() {
+            let d = Db { handle = 1 };
+            async { sink(d); }
+        }
+        fun main() { f(); }
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+#[test]
+fn r9_closure_resource_parameter_is_not_a_capture() {
+    // A closure's OWN resource parameter is per-call, not a capture — the
+    // `nursery(|n| ..)` shape. Using it via a method loan is clean.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        impl Db { fun ping(&self) {} }
+        fun with_db(body: (|Db| void)) {}
+        fun main() {
+            with_db(|d| d.ping());
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_injected_context_clause_body_is_exempt() {
+    // The spec's canonical injected body: a `context`-clause closure whose
+    // resource parameter is a per-call loan, not a capture.
+    assert_compiles(
+        r#"
+        import std::context::Context;
+        resource struct Db { handle: i32 }
+        impl Db { fun ping(&self) {} }
+        let flag: Context<i32> = Context::new();
+        fun with_db(body: (|Db| void) context flag) {}
+        fun main() {
+            with_db(|d| d.ping());
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_closure_capturing_an_outer_resource_beside_its_param_is_rejected() {
+    // Seeding the closure's parameter must NOT exempt a genuine outer capture.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun with_db(body: (|Db| void)) {}
+        fun f() {
+            let outer = Db { handle = 1 };
+            with_db(|d| sink(outer));
+        }
+        fun main() { f(); }
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+// --- Ordering-sensitive edges -------------------------------------------------
+
+#[test]
+fn edge_move_in_a_nested_block_kills_the_outer_binding() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f() {
+            let d = Db { handle = 1 };
+            { sink(d); }
+            sink(d);
+        }
+        fun main() { f(); }
+        "#,
+        "after it was moved",
+    );
+}
+
+#[test]
+fn edge_shadowing_rebinds_a_fresh_owner() {
+    // `let d = ..; let d = ..` — the second `d` is a distinct owner, so moving the
+    // first and then the second is clean.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f() {
+            let d = Db { handle = 1 };
+            sink(d);
+            let d = Db { handle = 2 };
+            sink(d);
+        }
+        fun main() { f(); }
+        "#,
+    );
+}
+
+#[test]
+fn edge_reassignment_re_owns_a_resource_binding() {
+    // R2: assigning onto a `mut` binding that still owns a resource re-owns it
+    // (the old value's drop lands in S2); a later use of the new value is fine.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun f() {
+            mut d = Db { handle = 1 };
+            d = Db { handle = 2 };
+            sink(d);
+        }
+        fun main() { f(); }
+        "#,
+    );
+}
+
+#[test]
+fn r7_non_terminal_if_tail_move_is_rejected() {
+    // The R7/R4 boundary: a branch tail producing a resource is a move-out only
+    // in TERMINAL position. Bound to a `let` (the branches rejoin into
+    // continuing code), an arm that yields an outer binding while the other
+    // yields a fresh value is a conditional move of `d` — rejected.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun open(): Db { Db { handle = 2 } }
+        fun f(condition: bool) {
+            let d = Db { handle = 1 };
+            let r = if condition { d } else { open() };
+            let again = &d;
+        }
+        fun main() { f(true); }
+        "#,
+        "one path",
+    );
+}
+
+#[test]
+fn r5_variant_construction_moves_the_payload() {
+    // `Some(db)` is a constructor move (R5 for enum payloads): the payload
+    // leaves `db`, so a later use of `db` is use-after-move.
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some };
+        resource struct Db { handle: i32 }
+        fun f() {
+            let db = Db { handle = 1 };
+            let stored: Option<Db> = Some(db);
+            let again = &db;
+        }
+        fun main() { f(); }
+        "#,
+        "moved",
+    );
+}

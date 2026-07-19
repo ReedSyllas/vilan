@@ -348,6 +348,71 @@ enum InvalidationViolation<'src> {
     },
 }
 
+/// The precomputed resource sets the affine move scan matches against
+/// (destruction.md §4, R1–R9): the resource-typed binding entities (variables
+/// and parameters), and the resource-typed *place* expressions (a `Field` /
+/// `Index` / `TupleIndex` whose value is itself a resource — R5's partial-move
+/// targets). Both are computed once (per-instantiation, memoized) so the scan
+/// itself is `&self`.
+struct MoveScan<'a> {
+    resource_bindings: &'a HashSet<Id>,
+    resource_value_places: &'a HashSet<Id>,
+}
+
+/// A resource binding's move state on the path currently being scanned
+/// (destruction.md §4). Absence from the flow map = still owned. The span
+/// locates a representative move site — the use-after-move note points here.
+#[derive(Clone, Copy)]
+enum MoveState {
+    /// Moved on every path reaching this point: a later use is use-after-move.
+    Moved(Span),
+    /// Moved on some path and live on another — the R7 territory. A merge that
+    /// produced this already reported (or the merge was a terminal tail move, so
+    /// no continuation observes it); a later use is therefore left to the R7
+    /// diagnostic rather than reported again.
+    MaybeMoved(Span),
+}
+
+/// The mutable per-path state threaded through the affine scan: which resource
+/// bindings are moved (`moved`), and the loop-nesting depth at each binding's
+/// declaration (`decl_loop_depth`, for R8 — a move at a deeper loop depth than a
+/// binding's declaration repeats). `decl_loop_depth` accumulates monotonically
+/// (a declaration is seen once, in program order); `moved` forks and merges at
+/// `if`/`match`.
+struct MoveFlow {
+    moved: HashMap<Id, MoveState>,
+    decl_loop_depth: HashMap<Id, u32>,
+}
+
+impl MoveFlow {
+    fn new() -> Self {
+        MoveFlow {
+            moved: HashMap::new(),
+            decl_loop_depth: HashMap::new(),
+        }
+    }
+}
+
+/// One affine-rule violation (destruction.md §4), collected by the `&self` scan
+/// and rendered to a diagnostic by the `&mut self` driver.
+enum ResourceMoveViolation {
+    /// R1/R3/R4/R6: a resource binding used after it was moved. Primary at the
+    /// use, note ("moved here") at the move site.
+    UseAfterMove {
+        use_id: Id,
+        binding: Id,
+        move_span: Span,
+    },
+    /// R5: moving a resource field out of a live aggregate (no partial moves).
+    PartialMove { at: Id },
+    /// R7: a binding moved on some paths through an `if`/`match` but not all.
+    ConditionalMove { at: Id, binding: Id },
+    /// R8: moving a binding declared outside a loop from inside its body.
+    LoopMove { at: Id, binding: Id },
+    /// R9: a closure / spawn capturing a resource binding or parameter.
+    Capture { reference_id: Id, binding: Id },
+}
+
 #[derive(Debug)]
 pub struct Variable<'src> {
     pub id: Id,
@@ -908,6 +973,13 @@ pub struct Analyzer<'src> {
     /// once types resolve: R10 (destruction.md §4) rejects a resource type
     /// argument to a native container / external generic.
     generic_type_applications: Vec<(TypeId, Span)>,
+    /// Every place expression (`Local`, `Field`, `Index`, `TupleIndex`) whose
+    /// resolved type is a resource — computed by the affine move checker
+    /// (`check_resource_moves`, destruction.md §4). Read afterwards by
+    /// `compute_clone_sites` so a resource binding / field / `own`-argument is
+    /// NEVER marked a clone (R1: resources move, they do not copy). Empty when no
+    /// resource is declared (std/corpus), so clone-site behavior is unchanged there.
+    resource_value_places: HashSet<Id>,
     /// `[rpc]` methods awaiting the Wire-signature check (`check_rpc_signatures`),
     /// collected as each is walked, validated once `wire_names` is complete.
     rpc_signatures_to_check: Vec<RpcSignatureCheck<'src>>,
@@ -1449,6 +1521,7 @@ impl<'src> Analyzer<'src> {
             partialeq_types_to_check: Vec::new(),
             resource_classification: HashMap::new(),
             generic_type_applications: Vec::new(),
+            resource_value_places: HashSet::new(),
             rpc_signatures_to_check: Vec::new(),
             expose_fields_to_check: Vec::new(),
             return_type_stack: Vec::new(),
@@ -2825,6 +2898,1260 @@ impl<'src> Analyzer<'src> {
                         .map(|parameter| parameter.type_id)
                 }),
             _ => None,
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The affine move checker (destruction.md §4, R1–R9). Static validation
+    // only: no `Drop`, no lowering, no `take`/`replace`. A resource value has a
+    // single owner; it MOVES on binding, `own`-passing, return, and construction,
+    // and is LOANED through the existing `self`/`&`/`&mut` view conventions. A
+    // block-structured forward scan (the rule-4 `scan_invalidation` shape) tracks
+    // which resource bindings are moved on the current path; any later use of a
+    // moved binding is use-after-move.
+    // ---------------------------------------------------------------------
+
+    /// The resource-typed binding entities (variables + parameters), by
+    /// per-instantiation classification. `&mut` because `type_is_resource`
+    /// memoizes; the scan then runs against the returned (owned) set as `&self`.
+    fn collect_resource_bindings(&mut self) -> HashSet<Id> {
+        let mut bindings = HashSet::new();
+        let variables: Vec<(Id, TypeId)> =
+            self.variables.values().map(|v| (v.id, v.type_id)).collect();
+        for (id, type_id) in variables {
+            if self.type_is_resource(type_id) {
+                bindings.insert(id);
+            }
+        }
+        let parameters: Vec<(Id, TypeId)> = self
+            .parameters
+            .values()
+            .map(|p| (p.id, p.type_id))
+            .collect();
+        for (id, type_id) in parameters {
+            if self.type_is_resource(type_id) {
+                bindings.insert(id);
+            }
+        }
+        bindings
+    }
+
+    /// Every place expression (`Local`, `Field`, `Index`, `TupleIndex`) whose
+    /// value type is a resource. Feeds R5 (a `Field`/element consume is a
+    /// partial move) and — stored on the analyzer — `compute_clone_sites`, which
+    /// must never mark a resource place a clone (R1: resources move, not copy).
+    fn collect_resource_value_places(&mut self) -> HashSet<Id> {
+        let mut places = HashSet::new();
+        let place_ids: Vec<Id> = self
+            .expr_id_to_expr_map
+            .iter()
+            .filter(|(_, expr)| {
+                matches!(
+                    expr,
+                    Expr::Local(_)
+                        | Expr::Field(_, _, _)
+                        | Expr::TupleIndex(_, _, _)
+                        | Expr::Index(_, _)
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in place_ids {
+            if let Some(place_type) = self.place_value_type(id) {
+                let type_id = place_type.get_type_id(self);
+                if self.type_is_resource(type_id) {
+                    places.insert(id);
+                }
+            }
+        }
+        places
+    }
+
+    /// R1–R9 (destruction.md §4): the affine move checker. Classifies resource
+    /// bindings once, scans every function and closure body for moves, then runs
+    /// the R9 capture check and emits the collected violations.
+    fn check_resource_moves(&mut self) {
+        let resource_bindings = self.collect_resource_bindings();
+        // No resource binding => no resource place (a resource-typed field lives
+        // only on a resource aggregate, which any owner binds as a resource). Skip
+        // the whole-program place scan on resource-free programs (std / corpus).
+        if resource_bindings.is_empty() {
+            return;
+        }
+        let resource_value_places = self.collect_resource_value_places();
+        // Published for `compute_clone_sites` (R1: a resource never clones).
+        self.resource_value_places = resource_value_places.clone();
+        let scan = MoveScan {
+            resource_bindings: &resource_bindings,
+            resource_value_places: &resource_value_places,
+        };
+        let mut violations: Vec<ResourceMoveViolation> = Vec::new();
+
+        // Function bodies: the body tail is returned, so it is consuming AND
+        // terminal (R4 — a returned `if`/`match` tail moves out per branch).
+        let bodies: Vec<(Vec<Id>, Id, Vec<Id>)> = self
+            .functions
+            .values()
+            .filter(|function| function.has_body)
+            .map(|function| {
+                (
+                    function.body.0.clone(),
+                    function.body.1,
+                    function.parameters.clone(),
+                )
+            })
+            .collect();
+        for (statements, tail, parameters) in &bodies {
+            let mut flow = MoveFlow::new();
+            for parameter in parameters {
+                if resource_bindings.contains(parameter) {
+                    flow.decl_loop_depth.insert(*parameter, 0);
+                }
+            }
+            self.scan_move_block(
+                statements,
+                *tail,
+                true,
+                true,
+                &scan,
+                &mut flow,
+                0,
+                &mut violations,
+            );
+        }
+
+        // Closure bodies are their own roots (a fresh function-like boundary — an
+        // enclosing loop does not repeat a closure invocation, so loop depth
+        // resets to 0). Captures of OUTER resources are R9's business, below.
+        let closures: Vec<(Vec<Id>, Vec<Id>, Id)> = self
+            .closures
+            .values()
+            .map(|closure| {
+                (
+                    closure.parameters.clone(),
+                    closure.parameter_destructures.clone(),
+                    closure.return_,
+                )
+            })
+            .collect();
+        for (parameters, destructures, return_id) in &closures {
+            let mut flow = MoveFlow::new();
+            for binding in parameters.iter().chain(destructures) {
+                if resource_bindings.contains(binding) {
+                    flow.decl_loop_depth.insert(*binding, 0);
+                }
+            }
+            self.scan_move(*return_id, true, true, &scan, &mut flow, 0, &mut violations);
+        }
+
+        // R9: no closure / spawn captures a resource.
+        self.scan_resource_captures(&resource_bindings, &mut violations);
+
+        self.emit_resource_move_violations(violations);
+    }
+
+    /// Scan a block: statements are effect positions (their values discarded);
+    /// the tail inherits the block's `consuming`/`terminal` role.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_move_block(
+        &self,
+        statements: &[Id],
+        tail: Id,
+        consuming: bool,
+        terminal: bool,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        for statement in statements {
+            self.scan_move(*statement, false, false, scan, flow, loop_depth, violations);
+        }
+        self.scan_move(
+            tail, consuming, terminal, scan, flow, loop_depth, violations,
+        );
+    }
+
+    /// The forward move scan for one expression. `consuming` = the value is moved
+    /// into an owner (so a leaf resource place is a move, not a loan). `terminal`
+    /// = the value flows to the function's return with no continuation, which
+    /// exempts a branch's direct place-tail move from R7 (it is the produced
+    /// value — an R4 move-out — not a conditional move of a surviving binding).
+    #[allow(clippy::too_many_arguments)]
+    fn scan_move(
+        &self,
+        expr_id: Id,
+        consuming: bool,
+        terminal: bool,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        match expr {
+            // --- resource places (leaves) ---
+            Expr::Local(binding) => {
+                if scan.resource_bindings.contains(&binding) {
+                    self.scan_move_touch(binding, expr_id, consuming, flow, loop_depth, violations);
+                }
+            }
+            // R5: a resource field/element access. Consuming it moves a resource
+            // out of a live aggregate — rejected (no partial moves in v1). Either
+            // way, reading it loans the subject (a live-owner check on the root).
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => {
+                if consuming && scan.resource_value_places.contains(&expr_id) {
+                    violations.push(ResourceMoveViolation::PartialMove { at: expr_id });
+                }
+                self.scan_move(subject, false, false, scan, flow, loop_depth, violations);
+            }
+            Expr::Index(subject, index) => {
+                if consuming && scan.resource_value_places.contains(&expr_id) {
+                    violations.push(ResourceMoveViolation::PartialMove { at: expr_id });
+                }
+                self.scan_move(subject, false, false, scan, flow, loop_depth, violations);
+                self.scan_move(index, false, false, scan, flow, loop_depth, violations);
+            }
+            // R3: `&x` / `&mut x` is a loan; `*v` reads through a view — both loan
+            // their operand's root, never move it.
+            Expr::Reference(operand, _) | Expr::Dereference(operand) => {
+                self.scan_move(operand, false, false, scan, flow, loop_depth, violations);
+            }
+
+            // --- declarations ---
+            // R1: `let b = a` moves the initializer in. The new binding is a fresh
+            // owner (a re-binding / shadow starts clean).
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    self.scan_move(initial, true, false, scan, flow, loop_depth, violations);
+                }
+                if scan.resource_bindings.contains(&variable_id) {
+                    flow.moved.remove(&variable_id);
+                    flow.decl_loop_depth.insert(variable_id, loop_depth);
+                }
+            }
+            // `let (a, b) = value` — the value is consumed; the captures are fresh
+            // owners (seeded so an R8/R7 query sees them as loop-/branch-local).
+            Expr::Destructure(value_id, pattern) => {
+                self.scan_move(value_id, true, false, scan, flow, loop_depth, violations);
+                self.seed_pattern_bindings(&pattern, scan, flow, loop_depth);
+            }
+
+            // R2: assigning onto a binding that still owns a resource is legal —
+            // the old value drops (S2), the binding re-owns the new one. The
+            // overwritten binding must not stay marked moved.
+            Expr::Assignment(target_id, value_id) => {
+                self.scan_move(value_id, true, false, scan, flow, loop_depth, violations);
+                match self.expr_id_to_expr_map.get(&target_id) {
+                    Some(Expr::Local(binding)) if scan.resource_bindings.contains(binding) => {
+                        flow.moved.remove(binding);
+                        flow.decl_loop_depth.entry(*binding).or_insert(loop_depth);
+                    }
+                    _ => {
+                        self.scan_move(target_id, false, false, scan, flow, loop_depth, violations);
+                    }
+                }
+            }
+
+            // R3: call arguments. An `own` parameter moves its argument; every
+            // other convention (`self`, bare, `&`, `&mut`) loans it. A resource
+            // `own` argument that is not the binding's last use surfaces as a
+            // use-after-move on the later use (the scan is forward).
+            Expr::Call(call_id) => {
+                let Some(function_call) = self.function_calls.get(&call_id).cloned() else {
+                    return;
+                };
+                let subject_id = function_call.subject_id;
+                let argument_ids = function_call.argument_ids;
+                if self.call_is_variant_constructor(call_id) {
+                    // `Some(db)` / `Ok(db)` moves each payload into the enum value.
+                    for argument_id in &argument_ids {
+                        self.scan_move(
+                            *argument_id,
+                            true,
+                            false,
+                            scan,
+                            flow,
+                            loop_depth,
+                            violations,
+                        );
+                    }
+                } else if let Some(conventions) = self.callee_conventions(subject_id) {
+                    for (index, argument_id) in argument_ids.iter().enumerate() {
+                        let is_own = conventions.get(index).copied() == Some(Convention::Own);
+                        self.scan_move(
+                            *argument_id,
+                            is_own,
+                            false,
+                            scan,
+                            flow,
+                            loop_depth,
+                            violations,
+                        );
+                    }
+                } else {
+                    // Unresolved (dispatched / generic) callee: loan every argument.
+                    // A use-after-move is still caught (a moved resource passed
+                    // anywhere is an error) and nothing is over-rejected; the
+                    // move-marking of a genuine `own` argument is R11's recorded net.
+                    for argument_id in &argument_ids {
+                        self.scan_move(
+                            *argument_id,
+                            false,
+                            false,
+                            scan,
+                            flow,
+                            loop_depth,
+                            violations,
+                        );
+                    }
+                }
+                // A computed callee (`get_fn()(x)`) may read a resource; a plain
+                // `Local(callee)` is a function reference, not a value use.
+                if !matches!(
+                    self.expr_id_to_expr_map.get(&subject_id),
+                    Some(Expr::Local(_))
+                ) {
+                    self.scan_move(subject_id, false, false, scan, flow, loop_depth, violations);
+                }
+            }
+
+            // R4: a return moves its value out — terminal (a returned `if`/`match`
+            // tail moves per branch; a diverging leg is exempt).
+            Expr::FunctionReturn(Some(value_id)) => {
+                self.scan_move(value_id, true, true, scan, flow, loop_depth, violations);
+            }
+            Expr::FunctionReturn(None) => {}
+
+            // R5: constructors move their operands in.
+            Expr::StructInitializer(_, fields) => {
+                for value_id in fields.values() {
+                    self.scan_move(*value_id, true, false, scan, flow, loop_depth, violations);
+                }
+            }
+            Expr::Tuple(ids) | Expr::List(ids) => {
+                for id in &ids {
+                    self.scan_move(*id, true, false, scan, flow, loop_depth, violations);
+                }
+            }
+            Expr::Repeat(value_id, _length) => {
+                self.scan_move(value_id, true, false, scan, flow, loop_depth, violations);
+            }
+
+            // --- control flow ---
+            Expr::Block((statements, tail)) => {
+                self.scan_move_block(
+                    &statements,
+                    tail,
+                    consuming,
+                    terminal,
+                    scan,
+                    flow,
+                    loop_depth,
+                    violations,
+                );
+            }
+            Expr::If(branch) => {
+                self.scan_move_if(
+                    expr_id, &branch, consuming, terminal, scan, flow, loop_depth, violations,
+                );
+            }
+            Expr::Match(subject_id, legs) => {
+                self.scan_move_match(
+                    expr_id, subject_id, &legs, consuming, terminal, scan, flow, loop_depth,
+                    violations,
+                );
+            }
+            Expr::For(condition, (statements, tail)) => {
+                self.scan_move_loop(
+                    condition,
+                    None,
+                    &statements,
+                    tail,
+                    scan,
+                    flow,
+                    loop_depth,
+                    violations,
+                );
+            }
+            Expr::ForEach(iterable, item, (statements, tail)) => {
+                self.scan_move(iterable, false, false, scan, flow, loop_depth, violations);
+                self.scan_move_loop(
+                    None,
+                    item,
+                    &statements,
+                    tail,
+                    scan,
+                    flow,
+                    loop_depth,
+                    violations,
+                );
+            }
+
+            // --- transparent / pass-through ---
+            Expr::Await(inner) | Expr::TryAssert(inner) => {
+                self.scan_move(
+                    inner, consuming, terminal, scan, flow, loop_depth, violations,
+                );
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.scan_move(lhs, false, false, scan, flow, loop_depth, violations);
+                self.scan_move(rhs, false, false, scan, flow, loop_depth, violations);
+            }
+            Expr::Unary(_, operand) => {
+                self.scan_move(operand, false, false, scan, flow, loop_depth, violations);
+            }
+            Expr::Is(subject, _pattern) => {
+                self.scan_move(subject, false, false, scan, flow, loop_depth, violations);
+            }
+            Expr::Lift(subject, _binder, continuation) => {
+                self.scan_move(subject, false, false, scan, flow, loop_depth, violations);
+                self.scan_move(
+                    continuation,
+                    consuming,
+                    terminal,
+                    scan,
+                    flow,
+                    loop_depth,
+                    violations,
+                );
+            }
+            Expr::LiftRegion(steps, body) => {
+                for (step_id, _binder, _is_split) in &steps {
+                    self.scan_move(*step_id, false, false, scan, flow, loop_depth, violations);
+                }
+                self.scan_move(
+                    body, consuming, terminal, scan, flow, loop_depth, violations,
+                );
+            }
+            Expr::TupleComprehension(_binder, source, body) => {
+                self.scan_move(source, false, false, scan, flow, loop_depth, violations);
+                self.scan_move(body, false, false, scan, flow, loop_depth, violations);
+            }
+
+            // Closures / spawns are their own scan roots; their captures are R9's
+            // (`scan_resource_captures`). Everything else is a leaf with no
+            // resource-bearing sub-expression (literals, declarations, jumps).
+            Expr::Closure(_)
+            | Expr::Async(_)
+            | Expr::Bool(_)
+            | Expr::Number(_, _, _)
+            | Expr::String(_)
+            | Expr::MultilineString(_)
+            | Expr::Null
+            | Expr::Void
+            | Expr::Error
+            | Expr::Jump(_)
+            | Expr::LiftBinder
+            | Expr::EnumVariant(_, _)
+            | Expr::ArrayLen(_, _)
+            | Expr::Generic(_)
+            | Expr::Struct(_)
+            | Expr::Enum(_)
+            | Expr::Impl(_)
+            | Expr::Function(_)
+            | Expr::Module(_)
+            | Expr::Trait(_)
+            | Expr::Macro
+            | Expr::Parameter(_)
+            | Expr::ExternalFunction(_) => {}
+        }
+    }
+
+    /// A resource binding referenced at `use_id`. Reports a use-after-move on a
+    /// definitely-moved binding (the note points at the move), and for a
+    /// consuming use records the move — flagging R8 when the move is inside a
+    /// loop the binding is not local to.
+    fn scan_move_touch(
+        &self,
+        binding: Id,
+        use_id: Id,
+        consuming: bool,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        if let Some(state) = flow.moved.get(&binding) {
+            // A DEFINITE move => use-after-move. A `MaybeMoved` came from an
+            // already-reported R7 divergence (or a terminal tail with no
+            // continuation), so it is left to that diagnostic.
+            if let MoveState::Moved(move_span) = state {
+                violations.push(ResourceMoveViolation::UseAfterMove {
+                    use_id,
+                    binding,
+                    move_span: *move_span,
+                });
+            }
+            return;
+        }
+        if consuming {
+            let declared_depth = flow.decl_loop_depth.get(&binding).copied().unwrap_or(0);
+            if loop_depth > declared_depth {
+                violations.push(ResourceMoveViolation::LoopMove {
+                    at: use_id,
+                    binding,
+                });
+            }
+            let span = **self.span_map.get(&use_id).unwrap_or(&&EMPTY_SPAN);
+            flow.moved.insert(binding, MoveState::Moved(span));
+        }
+    }
+
+    /// The declared parameter conventions of a directly-resolved callee
+    /// (`subject -> Local(callee)`), including the `self` receiver at index 0.
+    /// `None` for a dispatched / generic / closure-valued callee.
+    fn callee_conventions(&self, subject_id: Id) -> Option<Vec<Convention>> {
+        let Some(Expr::Local(callee_id)) = self.expr_id_to_expr_map.get(&subject_id) else {
+            return None;
+        };
+        let parameter_ids = self
+            .functions
+            .get(callee_id)
+            .map(|function| &function.parameters)
+            .or_else(|| {
+                self.external_functions
+                    .get(callee_id)
+                    .map(|external| &external.parameters)
+            })?;
+        Some(
+            parameter_ids
+                .iter()
+                .map(|parameter_id| {
+                    self.parameters
+                        .get(parameter_id)
+                        .map(|parameter| parameter.convention)
+                        .unwrap_or(Convention::Bare)
+                })
+                .collect(),
+        )
+    }
+
+    /// R7 (destruction.md §4): a conditional move. An `if`'s arms are scanned as
+    /// forked paths; a resource binding moved on some non-diverging arms but not
+    /// all is rejected. The tail's direct place-move is the branch's produced
+    /// value (R4) and is exempt in terminal position.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_move_if(
+        &self,
+        anchor_id: Id,
+        branch: &ExprIfBranch,
+        consuming: bool,
+        terminal: bool,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        let mut conditions: Vec<Id> = Vec::new();
+        let mut arms: Vec<(Vec<Id>, Id)> = Vec::new();
+        let mut has_else = false;
+        let mut current = branch;
+        loop {
+            match current {
+                ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                    conditions.push(*condition);
+                    arms.push((statements.clone(), *tail));
+                    match else_branch {
+                        Some(next) => current = next,
+                        None => break,
+                    }
+                }
+                ExprIfBranch::Else((statements, tail)) => {
+                    has_else = true;
+                    arms.push((statements.clone(), *tail));
+                    break;
+                }
+            }
+        }
+        // Conditions run before branching — loans in the entry state (a condition
+        // is a `bool`, never a resource move, so path-order is immaterial).
+        for condition in &conditions {
+            self.scan_move(*condition, false, false, scan, flow, loop_depth, violations);
+        }
+        let outer_bindings: HashSet<Id> = flow.decl_loop_depth.keys().copied().collect();
+        self.scan_move_branches(
+            anchor_id,
+            &arms,
+            !has_else,
+            &outer_bindings,
+            consuming,
+            terminal,
+            scan,
+            flow,
+            loop_depth,
+            violations,
+        );
+    }
+
+    /// R6 + R7 (destruction.md §4): a `match`. By-value matching consumes the
+    /// subject (a later use is use-after-move); `match &x` inspects a loan. Each
+    /// leg body is an arm for the R7 conditional-move comparison.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_move_match(
+        &self,
+        anchor_id: Id,
+        subject_id: Id,
+        legs: &[ExprMatchLeg],
+        consuming: bool,
+        terminal: bool,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        // R6: `match &x` is a loan (the `Reference` arm of `scan_move` never
+        // moves); any other subject is consumed by value.
+        let subject_is_loan = matches!(
+            self.expr_id_to_expr_map.get(&subject_id),
+            Some(Expr::Reference(_, _))
+        );
+        self.scan_move(
+            subject_id,
+            !subject_is_loan,
+            false,
+            scan,
+            flow,
+            loop_depth,
+            violations,
+        );
+        // The outer bindings for R7 are fixed BEFORE the (arm-local) captures are
+        // seeded, so a leg's own capture is never a conditional-move candidate.
+        let outer_bindings: HashSet<Id> = flow.decl_loop_depth.keys().copied().collect();
+        let mut arms: Vec<(Vec<Id>, Id)> = Vec::new();
+        for leg in legs {
+            if let Some(guard) = leg.guard {
+                self.scan_move(guard, false, false, scan, flow, loop_depth, violations);
+            }
+            self.seed_pattern_bindings(&leg.pattern, scan, flow, loop_depth);
+            arms.push((Vec::new(), leg.body));
+        }
+        // A `match` is exhaustive (checked elsewhere) — no implicit fall-through.
+        self.scan_move_branches(
+            anchor_id,
+            &arms,
+            false,
+            &outer_bindings,
+            consuming,
+            terminal,
+            scan,
+            flow,
+            loop_depth,
+            violations,
+        );
+    }
+
+    /// The shared arm merge for `if`/`match` (R7). Forks the move state per arm,
+    /// compares the pre-tail state of non-diverging arms for conditional moves,
+    /// and joins the arms into the continuation state.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_move_branches(
+        &self,
+        anchor_id: Id,
+        arms: &[(Vec<Id>, Id)],
+        has_implicit_else: bool,
+        outer_bindings: &HashSet<Id>,
+        consuming: bool,
+        terminal: bool,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        let entry = flow.moved.clone();
+        // Per arm: (post-arm state, R7-comparison state, diverges).
+        let mut arm_states: Vec<(HashMap<Id, MoveState>, HashMap<Id, MoveState>, bool)> =
+            Vec::new();
+        for (statements, tail) in arms {
+            flow.moved = entry.clone();
+            for statement in statements {
+                self.scan_move(*statement, false, false, scan, flow, loop_depth, violations);
+            }
+            // A bare resource place as the tail is the branch's produced value —
+            // an R4 move-out, exempt from R7 in TERMINAL position (the branches do
+            // not rejoin into continuing code). A move via a call/statement is not.
+            let tail_place = if consuming && terminal {
+                self.direct_place_binding(*tail, scan)
+            } else {
+                None
+            };
+            self.scan_move(
+                *tail, consuming, terminal, scan, flow, loop_depth, violations,
+            );
+            let diverges = self.block_diverges(statements, *tail);
+            let mut r7_state = flow.moved.clone();
+            if let Some(binding) = tail_place {
+                r7_state.remove(&binding);
+            }
+            arm_states.push((flow.moved.clone(), r7_state, diverges));
+        }
+        // An `if` without `else` has an implicit empty arm: it moves nothing, so
+        // any binding moved on a real arm is conditionally moved.
+        if has_implicit_else {
+            arm_states.push((entry.clone(), entry.clone(), false));
+        }
+
+        // R7: over the NON-DIVERGING arms (a diverging leg never reaches the
+        // merge — R4/R7 exemption), an outer binding moved on some but not all is
+        // a conditional move.
+        let live: Vec<&(HashMap<Id, MoveState>, HashMap<Id, MoveState>, bool)> = arm_states
+            .iter()
+            .filter(|(_, _, diverges)| !diverges)
+            .collect();
+        let mut candidates: HashSet<Id> = HashSet::new();
+        for (_, r7_state, _) in &live {
+            for binding in r7_state.keys() {
+                if outer_bindings.contains(binding) {
+                    candidates.insert(*binding);
+                }
+            }
+        }
+        for binding in candidates {
+            let moved_count = live
+                .iter()
+                .filter(|(_, r7_state, _)| r7_state.contains_key(&binding))
+                .count();
+            if moved_count != 0 && moved_count != live.len() {
+                violations.push(ResourceMoveViolation::ConditionalMove {
+                    at: anchor_id,
+                    binding,
+                });
+            }
+        }
+
+        // Merge: the continuation state is the lattice join of the post-arm
+        // states over non-diverging arms (all diverge => the continuation is dead;
+        // keep the entry state).
+        flow.moved = self.merge_arm_states(&entry, &live, outer_bindings);
+    }
+
+    /// Join the post-arm move states of the non-diverging arms into the state
+    /// that flows past the branch. A binding moved on every arm stays moved; one
+    /// moved on some (or already `MaybeMoved`) becomes `MaybeMoved`; one moved on
+    /// none is owned. Restricted to bindings that outlive the branch.
+    fn merge_arm_states(
+        &self,
+        entry: &HashMap<Id, MoveState>,
+        live: &[&(HashMap<Id, MoveState>, HashMap<Id, MoveState>, bool)],
+        outer_bindings: &HashSet<Id>,
+    ) -> HashMap<Id, MoveState> {
+        if live.is_empty() {
+            return entry.clone();
+        }
+        let mut keys: HashSet<Id> = entry.keys().copied().collect();
+        for (post, _, _) in live {
+            for binding in post.keys() {
+                if outer_bindings.contains(binding) {
+                    keys.insert(*binding);
+                }
+            }
+        }
+        let mut merged = HashMap::new();
+        for binding in keys {
+            let mut any_moved = false;
+            let mut any_absent = false;
+            let mut any_maybe = false;
+            let mut span = EMPTY_SPAN;
+            for (post, _, _) in live {
+                match post.get(&binding) {
+                    Some(MoveState::Moved(move_span)) => {
+                        any_moved = true;
+                        span = *move_span;
+                    }
+                    Some(MoveState::MaybeMoved(move_span)) => {
+                        any_maybe = true;
+                        span = *move_span;
+                    }
+                    None => any_absent = true,
+                }
+            }
+            let state = if any_maybe || (any_moved && any_absent) {
+                Some(MoveState::MaybeMoved(span))
+            } else if any_moved {
+                Some(MoveState::Moved(span))
+            } else {
+                None
+            };
+            if let Some(state) = state {
+                merged.insert(binding, state);
+            }
+        }
+        merged
+    }
+
+    /// R8 (destruction.md §4): a loop body. A loop may run zero times and repeats,
+    /// so the outer move state is unchanged by it (snapshot + restore); a move of
+    /// an outer binding inside is caught by `scan_move_touch` (deeper loop depth
+    /// than the binding's declaration). The for-each element is fresh per iteration.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_move_loop(
+        &self,
+        condition: Option<Id>,
+        item: Option<Id>,
+        statements: &[Id],
+        tail: Id,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        let snapshot = flow.moved.clone();
+        let inner_depth = loop_depth + 1;
+        if let Some(item) = item {
+            if scan.resource_bindings.contains(&item) {
+                flow.decl_loop_depth.insert(item, inner_depth);
+            }
+        }
+        if let Some(condition) = condition {
+            self.scan_move(condition, false, false, scan, flow, inner_depth, violations);
+        }
+        for statement in statements {
+            self.scan_move(
+                *statement,
+                false,
+                false,
+                scan,
+                flow,
+                inner_depth,
+                violations,
+            );
+        }
+        self.scan_move(tail, false, false, scan, flow, inner_depth, violations);
+        flow.moved = snapshot;
+    }
+
+    /// A tail expression that is directly a resource binding (`Local`) — the
+    /// branch's produced value (R4 move-out), for the R7 terminal exemption.
+    fn direct_place_binding(&self, expr_id: Id, scan: &MoveScan<'_>) -> Option<Id> {
+        match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::Local(binding)) if scan.resource_bindings.contains(binding) => {
+                Some(*binding)
+            }
+            _ => None,
+        }
+    }
+
+    /// Seed the resource bindings a pattern introduces (`Some(let c)`, tuple /
+    /// array destructures) as fresh owners at the current loop depth — so an R7
+    /// query treats them as branch-local and an R8 query as loop-local.
+    fn seed_pattern_bindings(
+        &self,
+        pattern: &ExprPattern,
+        scan: &MoveScan<'_>,
+        flow: &mut MoveFlow,
+        loop_depth: u32,
+    ) {
+        match pattern {
+            ExprPattern::Binding(binding_id) => {
+                if scan.resource_bindings.contains(binding_id) {
+                    flow.decl_loop_depth.insert(*binding_id, loop_depth);
+                }
+            }
+            ExprPattern::Variant(_, _, sub_patterns) | ExprPattern::Array(sub_patterns) => {
+                for sub_pattern in sub_patterns {
+                    self.seed_pattern_bindings(sub_pattern, scan, flow, loop_depth);
+                }
+            }
+            ExprPattern::Tuple(sub_patterns) => {
+                for (sub_pattern, _width) in sub_patterns {
+                    self.seed_pattern_bindings(sub_pattern, scan, flow, loop_depth);
+                }
+            }
+            ExprPattern::Wildcard | ExprPattern::Literal(_) => {}
+        }
+    }
+
+    /// Whether a block definitely diverges (every path returns / jumps out), so
+    /// it never reaches an enclosing merge — the R4/R7 diverging-leg exemption.
+    fn block_diverges(&self, statements: &[Id], tail: Id) -> bool {
+        statements.iter().any(|s| self.expr_diverges(*s)) || self.expr_diverges(tail)
+    }
+
+    /// Whether an expression definitely diverges. `ret`/`jump` are the leaves; a
+    /// block/`if`/`match` diverges when all of its continuations do.
+    fn expr_diverges(&self, expr_id: Id) -> bool {
+        match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::FunctionReturn(_)) | Some(Expr::Jump(_)) => true,
+            Some(Expr::Block((statements, tail))) => self.block_diverges(statements, *tail),
+            Some(Expr::If(branch)) => self.if_diverges(branch),
+            Some(Expr::Match(_, legs)) => {
+                !legs.is_empty() && legs.iter().all(|leg| self.expr_diverges(leg.body))
+            }
+            _ => false,
+        }
+    }
+
+    /// An `if` diverges iff every arm diverges AND an `else` exists (without one,
+    /// the implicit fall-through continues).
+    fn if_diverges(&self, branch: &ExprIfBranch) -> bool {
+        match branch {
+            ExprIfBranch::If(_, (statements, tail), Some(else_branch)) => {
+                self.block_diverges(statements, *tail) && self.if_diverges(else_branch)
+            }
+            ExprIfBranch::If(_, _, None) => false,
+            ExprIfBranch::Else((statements, tail)) => self.block_diverges(statements, *tail),
+        }
+    }
+
+    /// R9 (destruction.md §4): no closure or spawn captures a resource. A closure
+    /// body's reference to a resource binding declared OUTSIDE it (not one of its
+    /// own parameters, and not a local declared inside) is a capture. Injected
+    /// (`context`-clause) bodies receive resource *parameters* — per-call, not
+    /// captures — so seeding the closure's own parameters exempts them.
+    fn scan_resource_captures(
+        &self,
+        resource_bindings: &HashSet<Id>,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        for closure in self.closures.values() {
+            let mut declared_inside: HashSet<Id> = HashSet::new();
+            for parameter in closure
+                .parameters
+                .iter()
+                .chain(&closure.parameter_destructures)
+            {
+                declared_inside.insert(*parameter);
+            }
+            let mut captured: Vec<Id> = Vec::new();
+            let mut visited: HashSet<Id> = HashSet::new();
+            self.scan_capture_body(
+                closure.return_,
+                resource_bindings,
+                &mut declared_inside,
+                &mut captured,
+                &mut visited,
+            );
+            for reference_id in captured {
+                if let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(&reference_id) {
+                    if !declared_inside.contains(binding) {
+                        violations.push(ResourceMoveViolation::Capture {
+                            reference_id,
+                            binding: *binding,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Walk a closure body accumulating resource-binding references (`captured`)
+    /// and the bindings declared inside it (`declared_inside`) — parameters seeded
+    /// by the caller, `let`s and pattern captures added here, nested closures'
+    /// parameters seeded on descent. Membership is resolved after the full walk.
+    fn scan_capture_body(
+        &self,
+        expr_id: Id,
+        resource_bindings: &HashSet<Id>,
+        declared_inside: &mut HashSet<Id>,
+        captured: &mut Vec<Id>,
+        visited: &mut HashSet<Id>,
+    ) {
+        if !visited.insert(expr_id) {
+            return;
+        }
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        macro_rules! recurse {
+            ($id:expr) => {
+                self.scan_capture_body($id, resource_bindings, declared_inside, captured, visited)
+            };
+        }
+        match expr {
+            Expr::Local(binding) => {
+                if resource_bindings.contains(&binding) {
+                    captured.push(expr_id);
+                }
+            }
+            Expr::Variable(variable_id) => {
+                declared_inside.insert(variable_id);
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    recurse!(initial);
+                }
+            }
+            Expr::Destructure(value_id, pattern) => {
+                self.collect_pattern_binding_ids(&pattern, declared_inside);
+                recurse!(value_id);
+            }
+            Expr::Closure(inner_id) | Expr::Async(inner_id) => {
+                if let Some(inner) = self.closures.get(&inner_id) {
+                    for parameter in inner.parameters.iter().chain(&inner.parameter_destructures) {
+                        declared_inside.insert(*parameter);
+                    }
+                    recurse!(inner.return_);
+                }
+            }
+            Expr::Reference(operand, _)
+            | Expr::Dereference(operand)
+            | Expr::Unary(_, operand)
+            | Expr::Await(operand)
+            | Expr::TryAssert(operand) => recurse!(operand),
+            Expr::Binary(_, lhs, rhs) => {
+                recurse!(lhs);
+                recurse!(rhs);
+            }
+            Expr::Assignment(target, value) => {
+                recurse!(target);
+                recurse!(value);
+            }
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => recurse!(subject),
+            Expr::Index(subject, index) => {
+                recurse!(subject);
+                recurse!(index);
+            }
+            Expr::FunctionReturn(Some(value)) => recurse!(value),
+            Expr::Call(call_id) => {
+                if let Some(function_call) = self.function_calls.get(&call_id) {
+                    recurse!(function_call.subject_id);
+                    for argument in function_call.argument_ids.clone() {
+                        recurse!(argument);
+                    }
+                }
+            }
+            Expr::Block((statements, tail)) => {
+                for statement in statements {
+                    recurse!(statement);
+                }
+                recurse!(tail);
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    recurse!(condition);
+                }
+                for statement in statements {
+                    recurse!(statement);
+                }
+                recurse!(tail);
+            }
+            Expr::ForEach(iterable, item, (statements, tail)) => {
+                recurse!(iterable);
+                if let Some(item) = item {
+                    declared_inside.insert(item);
+                }
+                for statement in statements {
+                    recurse!(statement);
+                }
+                recurse!(tail);
+            }
+            Expr::Match(subject, legs) => {
+                recurse!(subject);
+                for leg in legs {
+                    self.collect_pattern_binding_ids(&leg.pattern, declared_inside);
+                    if let Some(guard) = leg.guard {
+                        recurse!(guard);
+                    }
+                    recurse!(leg.body);
+                }
+            }
+            Expr::List(ids) | Expr::Tuple(ids) => {
+                for id in ids {
+                    recurse!(id);
+                }
+            }
+            Expr::Repeat(value, _length) => recurse!(value),
+            Expr::StructInitializer(_, fields) => {
+                for value in fields.values() {
+                    recurse!(*value);
+                }
+            }
+            Expr::Is(subject, _pattern) => recurse!(subject),
+            Expr::Lift(subject, _binder, continuation) => {
+                recurse!(subject);
+                recurse!(continuation);
+            }
+            Expr::LiftRegion(steps, body) => {
+                for (step_id, _binder, _is_split) in &steps {
+                    recurse!(*step_id);
+                }
+                recurse!(body);
+            }
+            Expr::TupleComprehension(_binder, source, body) => {
+                recurse!(source);
+                recurse!(body);
+            }
+            Expr::If(branch) => self.scan_capture_if(
+                &branch,
+                resource_bindings,
+                declared_inside,
+                captured,
+                visited,
+            ),
+            _ => {}
+        }
+    }
+
+    fn scan_capture_if(
+        &self,
+        branch: &ExprIfBranch,
+        resource_bindings: &HashSet<Id>,
+        declared_inside: &mut HashSet<Id>,
+        captured: &mut Vec<Id>,
+        visited: &mut HashSet<Id>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.scan_capture_body(
+                    *condition,
+                    resource_bindings,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                for statement in statements {
+                    self.scan_capture_body(
+                        *statement,
+                        resource_bindings,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_capture_body(
+                    *tail,
+                    resource_bindings,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+                if let Some(else_branch) = else_branch {
+                    self.scan_capture_if(
+                        else_branch,
+                        resource_bindings,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                for statement in statements {
+                    self.scan_capture_body(
+                        *statement,
+                        resource_bindings,
+                        declared_inside,
+                        captured,
+                        visited,
+                    );
+                }
+                self.scan_capture_body(
+                    *tail,
+                    resource_bindings,
+                    declared_inside,
+                    captured,
+                    visited,
+                );
+            }
+        }
+    }
+
+    /// All binding entity ids a pattern introduces — the declared-inside set for
+    /// the R9 capture walk.
+    fn collect_pattern_binding_ids(&self, pattern: &ExprPattern, out: &mut HashSet<Id>) {
+        match pattern {
+            ExprPattern::Binding(binding_id) => {
+                out.insert(*binding_id);
+            }
+            ExprPattern::Variant(_, _, sub_patterns) | ExprPattern::Array(sub_patterns) => {
+                for sub_pattern in sub_patterns {
+                    self.collect_pattern_binding_ids(sub_pattern, out);
+                }
+            }
+            ExprPattern::Tuple(sub_patterns) => {
+                for (sub_pattern, _width) in sub_patterns {
+                    self.collect_pattern_binding_ids(sub_pattern, out);
+                }
+            }
+            ExprPattern::Wildcard | ExprPattern::Literal(_) => {}
+        }
+    }
+
+    /// The name of a binding entity (variable or parameter), for diagnostics.
+    fn binding_name(&self, binding_id: Id) -> &'src str {
+        self.variables
+            .get(&binding_id)
+            .map(|variable| variable.name)
+            .or_else(|| {
+                self.parameters
+                    .get(&binding_id)
+                    .map(|parameter| parameter.name)
+            })
+            .unwrap_or("value")
+    }
+
+    /// Render the collected affine-rule violations (destruction.md §4/§11 —
+    /// the diagnostics vocabulary, with the use-after-move note channel).
+    fn emit_resource_move_violations(&mut self, violations: Vec<ResourceMoveViolation>) {
+        for violation in violations {
+            let error = match violation {
+                ResourceMoveViolation::UseAfterMove {
+                    use_id,
+                    binding,
+                    move_span,
+                } => {
+                    let name = self.binding_name(binding);
+                    Error {
+                        span: **self.span_map.get(&use_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "use of `{name}` after it was moved — a resource has a single owner"
+                        ),
+                        note: Some(crate::error::Note::here(
+                            move_span,
+                            format!(
+                                "`{name}` was moved here — a resource has one owner; loan it with \
+                                 `&{name}` / `&mut {name}`, or restructure with `Option` + `take`"
+                            ),
+                        )),
+                    }
+                }
+                ResourceMoveViolation::PartialMove { at } => Error {
+                    span: **self.span_map.get(&at).unwrap_or(&&EMPTY_SPAN),
+                    msg: "cannot move a resource field out of a live aggregate — a resource has \
+                          one owner and v1 has no partial moves; loan it with `&` / `&mut`, or make \
+                          the field an `Option` and use `take`"
+                        .to_string(),
+                    note: None,
+                },
+                ResourceMoveViolation::ConditionalMove { at, binding } => {
+                    let name = self.binding_name(binding);
+                    Error {
+                        span: **self.span_map.get(&at).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "`{name}` is moved on one path through this branch but not another — a \
+                             resource's end-of-scope ownership must be static; move it on every path, \
+                             or restructure with `Option` + `take`"
+                        ),
+                        note: None,
+                    }
+                }
+                ResourceMoveViolation::LoopMove { at, binding } => {
+                    let name = self.binding_name(binding);
+                    Error {
+                        span: **self.span_map.get(&at).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "`{name}` is declared outside this loop and moved inside it — the move \
+                             would repeat on the next iteration; move a value declared inside the \
+                             loop, or loan `{name}` with `&` / `&mut`"
+                        ),
+                        note: None,
+                    }
+                }
+                ResourceMoveViolation::Capture {
+                    reference_id,
+                    binding,
+                } => {
+                    let name = self.binding_name(binding);
+                    Error {
+                        span: **self.span_map.get(&reference_id).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "a closure cannot capture the resource `{name}` — pass a loan into the \
+                             call, or give ownership to the struct that owns this closure's lifetime"
+                        ),
+                        note: None,
+                    }
+                }
+            };
+            self.diagnostics.push(error);
         }
     }
 
@@ -5917,6 +7244,7 @@ impl<'src> Analyzer<'src> {
             };
             if self.is_place_expr(value_id)
                 && self.is_cloneable_aggregate(&value_type)
+                && !self.resource_value_places.contains(&value_id)
                 && !self.is_elidable_copy(value_id, &repeatable)
             {
                 sites.insert(value_id);
@@ -5956,6 +7284,7 @@ impl<'src> Analyzer<'src> {
                     .is_some_and(|parameter| parameter.convention == Convention::Own);
                 if is_own
                     && self.is_place_expr(*argument_id)
+                    && !self.resource_value_places.contains(argument_id)
                     && self
                         .place_value_type(*argument_id)
                         .is_some_and(|value_type| self.is_cloneable_aggregate(&value_type))
@@ -18701,9 +20030,11 @@ pub fn analyze<'src>(
     analyzer.check_generic_bound_satisfaction();
     // The observable half of C4 resource classification (destruction.md §4):
     // R10 (container/external-generic resource arguments) and R12 (no coercion
-    // to `any`). Move/loan machinery (R1–R9, R11) and destructors come later.
+    // to `any`). R1–R9 (moves, loans, conditional/loop moves, captures) follow;
+    // R11 (per-instantiation move-clean generics) and destructors come later.
     analyzer.check_container_resource_arguments();
     analyzer.check_resource_any_coercion();
+    analyzer.check_resource_moves();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.
