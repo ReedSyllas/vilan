@@ -82,6 +82,10 @@ Rust workspace, four crates, plus the language's own tree:
   `let` binding.
 - **Numerics:** the JS-backed integers are `i53`/`u53` (a ±2^53 contract); unknown
   numeric suffixes are hard errors.
+- **A post-`analyze()` pass must be wired into BOTH pipelines** — `lib.rs`'s
+  `analyze_source` (tests + LSP) *and* the CLI's duplicated sequence in
+  `crates/vilan-cli/src/main.rs` — and verified with a CLI probe, not only an
+  inference pin. A pass added to one place ships a check the other silently skips.
 - **Mutating git is not yours.** Do not commit, push, tag, or regenerate published
   artifacts. (House rule for everyone: mutating git always names the repo via
   `git -C`, and never shares a compound command with `cd`.)

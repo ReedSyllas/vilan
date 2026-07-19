@@ -1207,6 +1207,10 @@ fn compile_to_js(
         // Infer which functions/closures are async (drives `async`/`await`
         // code generation).
         async_infer::infer(&mut program);
+        // Reject an async `drop` body now that asyncness is settled
+        // (destruction.md §5): teardown must be synchronous in v1. An awaiting
+        // body is async only by inference, so this runs after `async_infer`.
+        vilan_core::analyzer::check_async_drops(&mut program);
         vilan_core::platform_color::check(&mut program, platform);
 
         // Evaluate `const` expressions (proposal/const-eval.md); the results

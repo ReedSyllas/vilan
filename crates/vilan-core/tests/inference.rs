@@ -20864,3 +20864,185 @@ fn r11_nested_closure_internal_double_move_is_rejected() {
         "moved",
     );
 }
+
+// destruction.md §5 — the `Drop` trait and its restrictions (C4 S2 chunk a).
+// `Drop` (std `std::drop`) declares `fun drop(&mut self)` and is INERT this
+// slice: no scope-end insertion, no lowering. The analyzer enforces two
+// restrictions, keyed on the RESOLVED std `Drop` entity (never the bare name):
+// it is implementable only for a resource, and its `drop` body is synchronous.
+
+#[test]
+fn drop_on_a_data_struct_is_rejected() {
+    // A destructor on plain data errors, steering to add `resource` — teardown
+    // without move discipline is exactly the double-close bug (§3, §11).
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        struct Data { x: i32 }
+        impl Data with Drop {
+            fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+        "declare it a `resource`",
+    );
+}
+
+#[test]
+fn drop_on_a_data_enum_is_rejected() {
+    // The reject spans enums too — classification is by `type_is_resource`, not
+    // the declared modifier alone.
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        enum Color { Red, Blue }
+        impl Color with Drop {
+            fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+        "is not a resource",
+    );
+}
+
+#[test]
+fn drop_on_a_resource_compiles_and_is_inert() {
+    // The Drop impl compiles AND the destructor does not run: the program prints
+    // only `main-done`, never `DROPPED` — nothing inserts the call until S2b.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(&mut self) { print("DROPPED"); }
+        }
+        fun main() {
+            let r = Res { x = 1 };
+            print("main-done");
+        }
+        "#,
+        "main-done\n",
+    );
+}
+
+#[test]
+fn a_user_defined_trait_named_drop_on_data_is_accepted() {
+    // The check keys on the std `Drop` entity, not the bare name: a user's own
+    // `trait Drop` (std::drop never imported) is a different trait and must not
+    // trip the resource restriction.
+    assert_compiles(
+        r#"
+        trait Drop { fun drop(&mut self); }
+        struct Data { x: i32 }
+        impl Data with Drop {
+            fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn a_declared_async_drop_body_is_rejected() {
+    // `drop` is synchronous in v1 (§5): a declared-`async` body is rejected.
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            async fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+        "teardown must be synchronous",
+    );
+}
+
+#[test]
+fn an_awaiting_drop_body_is_rejected() {
+    // The other async shape: a declared-sync body that AWAITS (calls an async
+    // function) is async only by inference, and is rejected after `async_infer`.
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        async fun teardown() {}
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(&mut self) { teardown(); }
+        }
+        fun main() {}
+        "#,
+        "teardown must be synchronous",
+    );
+}
+
+#[test]
+fn a_resource_without_a_drop_impl_is_accepted() {
+    // Containment alone is enough (§5): a resource needs no `Drop` impl to be
+    // legal — its move discipline stands, and (from S2b) its fields drop.
+    assert_compiles(
+        r#"
+        resource struct Res { x: i32 }
+        fun main() {
+            let r = Res { x = 1 };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn drop_on_a_resource_with_contained_resource_fields_is_accepted() {
+    // The realistic S4 shape: a resource that OWNS resources (a contained
+    // `resource external` leaf) may carry a `Drop` impl.
+    assert_compiles(
+        r#"
+        import std::drop::Drop;
+        resource external struct Handle;
+        resource struct Session { handle: Handle }
+        impl Session with Drop {
+            fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+#[test]
+fn drop_on_a_containment_inferred_resource_is_accepted() {
+    // A struct that is a resource ONLY by containment (no `resource` modifier of
+    // its own, but a resource field) is still a resource, so a `Drop` impl on it
+    // is accepted — the check consults `type_is_resource`, which sees inference.
+    assert_compiles(
+        r#"
+        import std::drop::Drop;
+        resource external struct Handle;
+        struct Wrapper { handle: Handle }
+        impl Wrapper with Drop {
+            fun drop(&mut self) {}
+        }
+        fun main() {}
+        "#,
+    );
+}
+
+// KNOWN GAP (destruction.md §5, restriction 4): the receiver must be `&mut self`
+// exactly, but trait conformance checks member-NAME presence, NOT signatures — so
+// a `Drop` impl declaring `fun drop(self)` or `fun drop(&self)` is accepted today.
+// Signature conformance is general machinery (not Drop-specific) and out of this
+// chunk's scope; S2b's inserted teardown assumes `&mut self`. Un-ignore when
+// receiver conformance lands.
+#[test]
+#[ignore]
+fn a_drop_impl_with_a_by_value_receiver_is_rejected() {
+    assert_fails(
+        r#"
+        import std::drop::Drop;
+        resource struct Res { x: i32 }
+        impl Res with Drop {
+            fun drop(self) {}
+        }
+        fun main() {}
+        "#,
+    );
+}

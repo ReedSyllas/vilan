@@ -376,6 +376,10 @@ pub fn analyze_source(
         let mut program = analyze(root, source, std, pkg_root, entry_path, platform, workspace);
         context::thread_contexts(&mut program);
         async_infer::infer(&mut program);
+        // `drop` must be synchronous (destruction.md §5): reject an async drop
+        // body now that `async_functions` is settled — an awaiting body is async
+        // only by inference, so this cannot run inside `analyze`.
+        analyzer::check_async_drops(&mut program);
         platform_color::check(&mut program, platform);
         // The const pass (proposal/const-eval.md): evaluate `const`-marked
         // expressions in dependency order; results serialize in place at

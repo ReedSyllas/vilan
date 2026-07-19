@@ -145,8 +145,9 @@ struct, enum, or tuple holding one is a resource too, inferred by
 containment (`Option<Database>` is a resource, `Option<i32>` is not). A
 resource *moves* on binding (`let b = a`), on `own`-passing, on return, and
 into a constructor; it is *loaned* — no ownership change — through `self`,
-`&`, and `&mut`. The destructor rules land in later work; these are the
-static move rules.
+`&`, and `&mut`. The `Drop` destructor trait and its restrictions are below;
+the compiler-inserted teardown that runs `drop` at each scope end lands in
+later work.
 
 **"use of `…` after it was moved — a resource has a single owner"**
 The binding was moved (bound to another name, passed to an `own`
@@ -215,6 +216,21 @@ container; or keep the resource in a struct field.
 A resource is not plain data: it cannot be sent over the wire, hashed by
 value, or compared by copy. Drop it from the derived type, or carry a
 plain-data handle (an id, a key) in its place.
+→ [The memory model](../tour/memory-model.md)
+
+**"`…` implements `Drop` but is not a resource — … declare it a `resource` …"**
+`Drop` — the destruction hook — may be implemented only for a `resource`
+type. A destructor without move discipline is exactly the double-close bug:
+copy the value and each copy would run `drop`. Declare the type `resource`
+so it moves instead of being copied. (Plain-data, framework-driven teardown
+uses the cooperative `Disposable` protocol, not `Drop`.)
+→ [The memory model](../tour/memory-model.md)
+
+**"`drop` for `…` is async — teardown must be synchronous …"**
+A `drop` body may not be `async`, nor await (call an async function): a
+destructor runs synchronously in v1. Cancel owned tasks through an
+`OwnedNursery` — whose own `drop` cancels them — rather than awaiting them.
+Awaited teardown is a future design.
 → [The memory model](../tour/memory-model.md)
 
 ## Async

@@ -994,6 +994,18 @@ pub struct Analyzer<'src> {
     /// NEVER marked a clone (R1: resources move, they do not copy). Empty when no
     /// resource is declared (std/corpus), so clone-site behavior is unchanged there.
     resource_value_places: HashSet<Id>,
+    /// `impl Subject with Drop` sites (destruction.md §5), recorded during the
+    /// conformance check (where the std `Drop` trait id resolves) and validated
+    /// post-build, once resource classification is complete: `(subject TypeId,
+    /// the `with Drop` span, the impl's `drop` method id)`. `Drop` is
+    /// implementable only for a resource, and `drop` must be synchronous.
+    drop_impls_to_check: Vec<(TypeId, Span, Option<Id>)>,
+    /// The `drop` methods awaiting the synchronous-teardown check
+    /// (`check_async_drops`, destruction.md §5): `(the drop function id, the
+    /// `with Drop` span, the rendered subject name)`. Moved onto the `Program`
+    /// so the check can run AFTER `async_infer` — an awaiting drop body is
+    /// async only by inference. Populated by `check_drop_impls`.
+    drop_method_checks: Vec<(Id, Span, String)>,
     /// `[rpc]` methods awaiting the Wire-signature check (`check_rpc_signatures`),
     /// collected as each is walked, validated once `wire_names` is complete.
     rpc_signatures_to_check: Vec<RpcSignatureCheck<'src>>,
@@ -1325,6 +1337,11 @@ pub struct Analyzer<'src> {
     result_enum_id: Option<Id>,
     try_trait_id: Option<Id>,
     lift_trait_id: Option<Id>,
+    // The std `Drop` trait (destruction.md §5), resolved by identity from
+    // `std::drop` after loading — so the `Drop`-on-data and async-drop rejects
+    // key on the real std entity, never a user-defined `trait Drop` of the same
+    // name. `None` until `std::drop` is reachable (loaded on import).
+    drop_trait_id: Option<Id>,
     // The enclosing `Lift` continuations' binder entities, innermost last —
     // what a walked `LiftBinder` node resolves to.
     lift_binder_stack: Vec<Id>,
@@ -1529,6 +1546,8 @@ impl<'src> Analyzer<'src> {
             closures: IndexMap::new(),
             diagnostics: Vec::new(),
             wire_names: HashSet::new(),
+            drop_impls_to_check: Vec::new(),
+            drop_method_checks: Vec::new(),
             wire_types_to_check: Vec::new(),
             hashable_names: HashSet::new(),
             hashable_types_to_check: Vec::new(),
@@ -1636,6 +1655,7 @@ impl<'src> Analyzer<'src> {
             result_enum_id: None,
             try_trait_id: None,
             lift_trait_id: None,
+            drop_trait_id: None,
             lift_binder_stack: Vec::new(),
             lift_region_frames: Vec::new(),
             try_dispatch: HashMap::new(),
@@ -2583,6 +2603,45 @@ impl<'src> Analyzer<'src> {
                         ),
                     });
                 }
+            }
+        }
+    }
+
+    /// Enforce the `Drop` restrictions (destruction.md §5), post-build so
+    /// resource classification is complete. `Drop` — the destruction hook — is
+    /// implementable ONLY for a resource type: destruction without move
+    /// discipline is exactly the double-close bug. And in v1 `drop` must be
+    /// synchronous: teardown cannot await (cancel owned tasks via an
+    /// `OwnedNursery` instead). Both sites were recorded during conformance,
+    /// keyed on the resolved std `Drop` entity, so a user-defined `trait Drop`
+    /// (a different id) never reaches here.
+    fn check_drop_impls(&mut self) {
+        let checks = std::mem::take(&mut self.drop_impls_to_check);
+        for (subject_type_id, span, drop_method_id) in checks {
+            let subject_type = subject_type_id.get_type(self);
+            let rendered = self.pretty_print_type(&subject_type, &HashMap::new());
+            // `Drop` is implementable only for a resource.
+            if !self.type_is_resource(subject_type_id) {
+                self.diagnostics.push(Error {
+                    note: None,
+                    span,
+                    msg: format!(
+                        "`{rendered}` implements `Drop` but is not a resource — \
+                         destruction without move discipline is exactly the double-close \
+                         bug; declare it a `resource` so it moves instead of being copied"
+                    ),
+                });
+            }
+            // Record the `drop` method for the synchronous-teardown check
+            // (`check_async_drops`). It runs after `async_infer`, because a body
+            // that awaits becomes async only by inference — a declared-sync
+            // `drop` that awaits would slip past a check made here.
+            if let Some(member_id) = drop_method_id {
+                let function_id = match self.expr_id_to_expr_map.get(&member_id) {
+                    Some(Expr::Function(function_id)) => *function_id,
+                    _ => member_id,
+                };
+                self.drop_method_checks.push((function_id, span, rendered));
             }
         }
     }
@@ -16647,6 +16706,18 @@ impl<'src> Analyzer<'src> {
             }
             // (The trait was already recorded on its impl — and the `with`
             // reference indexed — in the pre-static pass above.)
+            // Record `impl … with Drop` for the post-build destruction-hook
+            // rejects (destruction.md §5). Keyed on the resolved std `Drop`
+            // entity, so a user's own `trait Drop` (a different id) never trips
+            // it. The subject's resource-ness is not yet known here (types are
+            // still solving), so classify in `check_drop_impls` afterward.
+            if Some(trait_id) == self.drop_trait_id {
+                self.drop_impls_to_check.push((
+                    check.subject_type_id,
+                    check.span,
+                    check.declarations.get("drop").copied(),
+                ));
+            }
             // Required members are the signature-only declarations of the trait
             // AND its supertraits (a member with a default body is inherited, so
             // an impl need not provide it). Implementing `X with Ord` thus
@@ -18228,6 +18299,12 @@ pub struct Program<'src> {
     // async inference pass; the transformer emits these as `async` and awaits
     // calls to them.
     pub async_functions: HashSet<Id>,
+    /// `impl … with Drop` methods awaiting the synchronous-teardown check
+    /// (destruction.md §5), keyed on the std `Drop` entity in the analyzer:
+    /// `(the drop function id, the `with Drop` span, the rendered subject
+    /// name)`. Read by `check_async_drops` AFTER `async_infer` fills
+    /// `async_functions` — an awaiting drop body is async only by inference.
+    pub drop_method_checks: Vec<(Id, Span, String)>,
     /// Parameters/bindings whose declared closure type is `async || T` (J2):
     /// calls through them are implicitly awaited. The async inference pass
     /// ADDS adopted bindings — unannotated ones holding an async closure.
@@ -20510,6 +20587,15 @@ pub fn analyze<'src>(
             .get(scope_id)
             .and_then(|scope| scope.name_to_id_map.get("Lift").copied())
     });
+    // The std `Drop` trait, by identity (destruction.md §5) — set only when
+    // `std::drop` is reachable, so the destruction-hook rejects key on the real
+    // entity rather than the bare name `Drop`.
+    analyzer.drop_trait_id = module_scopes.get("drop").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("Drop").copied())
+    });
 
     // Bind source-defined primitive structs into the literal registry (so number
     // and string literals infer the right type) and the global scope (so bare
@@ -20754,6 +20840,10 @@ pub fn analyze<'src>(
     analyzer.check_resource_any_coercion();
     analyzer.check_resource_moves();
     analyzer.check_resource_generic_instantiations();
+    // The `Drop` restrictions (destruction.md §5): implementable only for a
+    // resource, and synchronous. Runs after classification so subject
+    // resource-ness is settled.
+    analyzer.check_drop_impls();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.
@@ -21212,6 +21302,7 @@ pub fn analyze<'src>(
         expr_type_ids,
         next_entity_id: analyzer.entity_id,
         async_functions: HashSet::new(),
+        drop_method_checks: std::mem::take(&mut analyzer.drop_method_checks),
         async_values: analyzer.async_values.clone(),
         sync_values: analyzer.sync_values.clone(),
         async_fields: analyzer.async_fields.clone(),
@@ -21225,5 +21316,30 @@ pub fn analyze<'src>(
         primitive_views,
         scalar_view_refs,
         scalar_view_calls,
+    }
+}
+
+/// Reject an async `drop` body (destruction.md §5): teardown must be synchronous
+/// in v1 — cancel owned tasks via an `OwnedNursery`; awaited teardown is a future
+/// design. Runs after `async_infer` fills `async_functions`, so it catches BOTH a
+/// declared-`async` drop and one that becomes async only by awaiting inside its
+/// body. The methods were keyed on the std `Drop` entity when collected, so a
+/// user-defined `trait Drop` never reaches here.
+pub fn check_async_drops(program: &mut Program) {
+    let violations: Vec<(Span, String)> = program
+        .drop_method_checks
+        .iter()
+        .filter(|(function_id, _, _)| program.async_functions.contains(function_id))
+        .map(|(_, span, subject)| (*span, subject.clone()))
+        .collect();
+    for (span, subject) in violations {
+        program.diagnostics.push(Error {
+            note: None,
+            span,
+            msg: format!(
+                "`drop` for `{subject}` is async — teardown must be synchronous; cancel \
+                 owned tasks via an `OwnedNursery`. Awaited teardown is a future design"
+            ),
+        });
     }
 }

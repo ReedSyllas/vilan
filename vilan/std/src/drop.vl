@@ -1,0 +1,12 @@
+// The destruction hook (destruction.md §5). At the end of an owner's scope the
+// compiler runs `drop` through a `&mut self` loan, then destroys the fields
+// afterward (reverse field order) — so a value cannot resurrect itself. `Drop`
+// is implementable ONLY for a `resource` type: destruction without move
+// discipline is exactly the double-close bug. `drop` is synchronous in v1;
+// cancel owned tasks via an `OwnedNursery`. A resource without a `Drop` impl is
+// still legal — containment alone moves it and drops its fields.
+//
+// (The compiler-inserted teardown is a later slice; this declares the surface.)
+trait Drop {
+	fun drop(&mut self);
+}
