@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -411,6 +411,20 @@ enum ResourceMoveViolation {
     LoopMove { at: Id, binding: Id },
     /// R9: a closure / spawn capturing a resource binding or parameter.
     Capture { reference_id: Id, binding: Id },
+}
+
+/// One generic instantiation to re-check under R11 (destruction.md §4): a
+/// callee whose generic parameters `resources` are bound to resource types at
+/// this instantiation, so its body must be move-clean with those parameters
+/// treated as resources. The worklist dedups on `(callee, resources)` — the
+/// same dirty instantiation reached twice reports once — and `call_id` records
+/// the FIRST instantiation site, where the diagnostic is spanned.
+struct R11Instance {
+    callee: Id,
+    /// The callee's constraint ids bound to a resource here, sorted (the dedup
+    /// key alongside `callee`).
+    resources: Vec<TypeId>,
+    call_id: Id,
 }
 
 #[derive(Debug)]
@@ -2583,8 +2597,38 @@ impl<'src> Analyzer<'src> {
     /// cycle-guarded (a recursive type — `struct Node { next: Option<Node> }` —
     /// terminates: the cycle edge contributes no resource-ness).
     fn type_is_resource(&mut self, type_id: TypeId) -> bool {
+        // The base classification treats no generic parameter as a resource and
+        // owns the persistent memo; R11's per-instantiation variant
+        // (`type_is_resource_with`) threads its OWN scratch memo — valid only for
+        // its resource-constraint set — through the same recursive core.
+        let empty = HashSet::new();
+        let mut memo = std::mem::take(&mut self.resource_classification);
         let mut visiting = HashSet::new();
-        self.classify_resource(type_id, &mut visiting).0
+        let result = self
+            .classify_resource(type_id, &empty, &mut memo, &mut visiting)
+            .0;
+        self.resource_classification = memo;
+        result
+    }
+
+    /// `type_is_resource`, but with a set of generic constraint ids treated AS
+    /// resources for this query (R11, destruction.md §4) — the machinery that
+    /// re-classifies a generic body under a resource instantiation (T := the
+    /// resource). `Generic(c)` is a resource exactly when
+    /// `c ∈ resource_constraints`, so an aggregate over such a parameter
+    /// (`Option<T>`, a struct field `value: T`) infers resource-ness precisely as
+    /// the concrete instantiation would. `memo` is the caller's — correct only for
+    /// THIS `resource_constraints` set (a `Generic(c)` result differs across
+    /// sets), so R11 keeps one memo per scan.
+    fn type_is_resource_with(
+        &mut self,
+        type_id: TypeId,
+        resource_constraints: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
+    ) -> bool {
+        let mut visiting = HashSet::new();
+        self.classify_resource(type_id, resource_constraints, memo, &mut visiting)
+            .0
     }
 
     /// The memoized, cycle-guarded core of `type_is_resource`. Returns
@@ -2593,12 +2637,17 @@ impl<'src> Analyzer<'src> {
     /// result is correct for THIS query root but is not memoized, since a later
     /// query rooted elsewhere could reach the cut node by an acyclic path (a
     /// `true` result always has an acyclic witness, so it is always complete).
+    /// `resource_constraints` is the set of generic parameters treated as
+    /// resources (empty for the base query; R11's instantiation set otherwise),
+    /// and `memo` is that set's classification cache.
     fn classify_resource(
         &mut self,
         type_id: TypeId,
+        resource_constraints: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
         visiting: &mut HashSet<TypeId>,
     ) -> (bool, bool) {
-        if let Some(&cached) = self.resource_classification.get(&type_id) {
+        if let Some(&cached) = memo.get(&type_id) {
             return (cached, true);
         }
         // A pathological (infinitely-instantiating) generic graph must degrade to
@@ -2610,10 +2659,11 @@ impl<'src> Analyzer<'src> {
         if !visiting.insert(type_id) {
             return (false, false);
         }
-        let (result, complete) = self.compute_resource(type_id, visiting);
+        let (result, complete) =
+            self.compute_resource(type_id, resource_constraints, memo, visiting);
         visiting.remove(&type_id);
         if complete {
-            self.resource_classification.insert(type_id, result);
+            memo.insert(type_id, result);
         }
         (result, complete)
     }
@@ -2625,6 +2675,8 @@ impl<'src> Analyzer<'src> {
     fn compute_resource(
         &mut self,
         type_id: TypeId,
+        resource_constraints: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
         visiting: &mut HashSet<TypeId>,
     ) -> (bool, bool) {
         match type_id.get_type(self) {
@@ -2643,7 +2695,7 @@ impl<'src> Analyzer<'src> {
                 let members: Vec<TypeId> =
                     struct_.fields.iter().map(|field| field.type_id).collect();
                 let context = Self::instantiation_context(&parameters, &arguments);
-                self.any_member_resource(&members, &context, visiting)
+                self.any_member_resource(&members, &context, resource_constraints, memo, visiting)
             }
             Type::Enum(id, arguments) => {
                 if self.enums.get(&id).is_some_and(|enum_| enum_.resource) {
@@ -2659,22 +2711,33 @@ impl<'src> Analyzer<'src> {
                     .flat_map(|variant| variant.data_type_ids.clone())
                     .collect();
                 let context = Self::instantiation_context(&parameters, &arguments);
-                self.any_member_resource(&members, &context, visiting)
+                self.any_member_resource(&members, &context, resource_constraints, memo, visiting)
             }
             // A tuple / fixed-array is a value aggregate: any resource element
             // marks the whole (destruction.md §3, "element type").
-            Type::Tuple(elements) => {
-                self.any_member_resource(&elements, &SubstitutionContext::new(), visiting)
-            }
-            Type::Array(element, _length) => {
-                self.any_member_resource(&[element], &SubstitutionContext::new(), visiting)
-            }
-            // An abstract type parameter is not (yet) a resource — resource-ness is
+            Type::Tuple(elements) => self.any_member_resource(
+                &elements,
+                &SubstitutionContext::new(),
+                resource_constraints,
+                memo,
+                visiting,
+            ),
+            Type::Array(element, _length) => self.any_member_resource(
+                &[element],
+                &SubstitutionContext::new(),
+                resource_constraints,
+                memo,
+                visiting,
+            ),
+            // A generic parameter is a resource iff THIS instantiation designates
+            // it one (R11): base classification passes an empty set, so an
+            // abstract `T` is never a resource there — resource-ness is
             // per-instantiation, and substitution replaces the parameter with its
-            // concrete argument before this point. Everything else is a non-value
-            // or a scalar: never a resource by containment.
-            Type::Generic(_)
-            | Type::Any
+            // concrete argument before the base query reaches this point.
+            Type::Generic(constraint) => (resource_constraints.contains(&constraint), true),
+            // Everything else is a non-value or a scalar: never a resource by
+            // containment.
+            Type::Any
             | Type::Never
             | Type::Void
             | Type::Unknown
@@ -2706,6 +2769,8 @@ impl<'src> Analyzer<'src> {
         &mut self,
         members: &[TypeId],
         context: &SubstitutionContext,
+        resource_constraints: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
         visiting: &mut HashSet<TypeId>,
     ) -> (bool, bool) {
         let mut all_complete = true;
@@ -2717,7 +2782,8 @@ impl<'src> Analyzer<'src> {
                 self.substitute_type(&member_type, context)
                     .get_type_id(self)
             };
-            let (is_resource, complete) = self.classify_resource(member_type_id, visiting);
+            let (is_resource, complete) =
+                self.classify_resource(member_type_id, resource_constraints, memo, visiting);
             if is_resource {
                 return (true, true);
             }
@@ -2985,6 +3051,17 @@ impl<'src> Analyzer<'src> {
             resource_bindings: &resource_bindings,
             resource_value_places: &resource_value_places,
         };
+        let violations = self.scan_bodies_for_moves(&scan);
+        self.emit_resource_move_violations(violations);
+    }
+
+    /// Scan every function and closure body under `scan`, then the R9 capture
+    /// check, collecting the affine-rule violations. Shared by the whole-program
+    /// concrete-resource pass (`check_resource_moves`) and R11's per-instantiation
+    /// re-check (`check_resource_generic_instantiations`), which supplies a `scan`
+    /// whose resource sets are one generic body's T-typed places — so only that
+    /// body yields violations.
+    fn scan_bodies_for_moves(&self, scan: &MoveScan<'_>) -> Vec<ResourceMoveViolation> {
         let mut violations: Vec<ResourceMoveViolation> = Vec::new();
 
         // Function bodies: the body tail is returned, so it is consuming AND
@@ -3004,7 +3081,7 @@ impl<'src> Analyzer<'src> {
         for (statements, tail, parameters) in &bodies {
             let mut flow = MoveFlow::new();
             for parameter in parameters {
-                if resource_bindings.contains(parameter) {
+                if scan.resource_bindings.contains(parameter) {
                     flow.decl_loop_depth.insert(*parameter, 0);
                 }
             }
@@ -3013,7 +3090,7 @@ impl<'src> Analyzer<'src> {
                 *tail,
                 true,
                 true,
-                &scan,
+                scan,
                 &mut flow,
                 0,
                 &mut violations,
@@ -3037,17 +3114,17 @@ impl<'src> Analyzer<'src> {
         for (parameters, destructures, return_id) in &closures {
             let mut flow = MoveFlow::new();
             for binding in parameters.iter().chain(destructures) {
-                if resource_bindings.contains(binding) {
+                if scan.resource_bindings.contains(binding) {
                     flow.decl_loop_depth.insert(*binding, 0);
                 }
             }
-            self.scan_move(*return_id, true, true, &scan, &mut flow, 0, &mut violations);
+            self.scan_move(*return_id, true, true, scan, &mut flow, 0, &mut violations);
         }
 
         // R9: no closure / spawn captures a resource.
-        self.scan_resource_captures(&resource_bindings, &mut violations);
+        self.scan_resource_captures(scan.resource_bindings, &mut violations);
 
-        self.emit_resource_move_violations(violations);
+        violations
     }
 
     /// Scan a block: statements are effect positions (their values discarded);
@@ -3804,32 +3881,49 @@ impl<'src> Analyzer<'src> {
         resource_bindings: &HashSet<Id>,
         violations: &mut Vec<ResourceMoveViolation>,
     ) {
-        for closure in self.closures.values() {
-            let mut declared_inside: HashSet<Id> = HashSet::new();
-            for parameter in closure
-                .parameters
-                .iter()
-                .chain(&closure.parameter_destructures)
-            {
-                declared_inside.insert(*parameter);
-            }
-            let mut captured: Vec<Id> = Vec::new();
-            let mut visited: HashSet<Id> = HashSet::new();
-            self.scan_capture_body(
-                closure.return_,
-                resource_bindings,
-                &mut declared_inside,
-                &mut captured,
-                &mut visited,
-            );
-            for reference_id in captured {
-                if let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(&reference_id) {
-                    if !declared_inside.contains(binding) {
-                        violations.push(ResourceMoveViolation::Capture {
-                            reference_id,
-                            binding: *binding,
-                        });
-                    }
+        for closure_id in self.closures.keys() {
+            self.scan_one_closure_captures(*closure_id, resource_bindings, violations);
+        }
+    }
+
+    /// The R9 capture check for a single closure: a reference to a resource
+    /// binding declared OUTSIDE it (not one of its own parameters, and not a
+    /// local declared inside) is a capture. Factored out of
+    /// `scan_resource_captures` so R11 can run it over just the closures lexical
+    /// to one instantiated generic body.
+    fn scan_one_closure_captures(
+        &self,
+        closure_id: Id,
+        resource_bindings: &HashSet<Id>,
+        violations: &mut Vec<ResourceMoveViolation>,
+    ) {
+        let Some(closure) = self.closures.get(&closure_id) else {
+            return;
+        };
+        let mut declared_inside: HashSet<Id> = HashSet::new();
+        for parameter in closure
+            .parameters
+            .iter()
+            .chain(&closure.parameter_destructures)
+        {
+            declared_inside.insert(*parameter);
+        }
+        let mut captured: Vec<Id> = Vec::new();
+        let mut visited: HashSet<Id> = HashSet::new();
+        self.scan_capture_body(
+            closure.return_,
+            resource_bindings,
+            &mut declared_inside,
+            &mut captured,
+            &mut visited,
+        );
+        for reference_id in captured {
+            if let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(&reference_id) {
+                if !declared_inside.contains(binding) {
+                    violations.push(ResourceMoveViolation::Capture {
+                        reference_id,
+                        binding: *binding,
+                    });
                 }
             }
         }
@@ -4152,6 +4246,630 @@ impl<'src> Analyzer<'src> {
                 }
             };
             self.diagnostics.push(error);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // R11 (destruction.md §4): generic bodies must be move-clean per resource
+    // instantiation. Instantiating a type parameter with a resource type
+    // re-checks the instantiated body under the affine rules (T := the
+    // resource). The mechanism is the instance-worklist precedent (async
+    // adaptation, platform coloring): each call whose callee has a generic
+    // parameter bound to a resource enqueues a `(callee, resource-parameter
+    // set)` check, deduplicated, scanned once, with the diagnostic spanned at
+    // the instantiation and a note pointing into the generic body. The chunk-3
+    // scan is the single source of the affine rules — R11 supplies it a `scan`
+    // whose resource sets are the body's T-typed places (`type_is_resource_with`
+    // treating the parameter set as resources), never forking R1–R9.
+    // ---------------------------------------------------------------------
+
+    /// R11: whether the program declares any resource at all. A program with no
+    /// `resource` leaf has no resource type (containment bottoms out at a
+    /// declared leaf), so no instantiation can be a resource one — the whole pass
+    /// is skipped (std / corpus pay nothing).
+    fn any_declared_resource(&self) -> bool {
+        self.structs.values().any(|struct_| struct_.resource)
+            || self.enums.values().any(|enum_| enum_.resource)
+    }
+
+    /// R11 (destruction.md §4): re-check every generic body instantiated with a
+    /// resource. Seeds a worklist from every call whose callee's generic
+    /// parameters are bound to a concrete resource, then propagates through the
+    /// call graph (a generic passing its resource `T` on to another generic —
+    /// the indirect case), scanning each `(callee, resource-parameter set)` once.
+    fn check_resource_generic_instantiations(&mut self) {
+        if !self.any_declared_resource() {
+            return;
+        }
+        let mut worklist: VecDeque<R11Instance> = VecDeque::new();
+        let mut enqueued: HashSet<(Id, Vec<TypeId>)> = HashSet::new();
+
+        // Seed: every call in the program, under NO known generic-resources — so
+        // only a parameter bound to a CONCRETE resource seeds a check. (A call
+        // inside a generic whose parameter is bound to that generic's own `T`
+        // seeds nothing until the generic is itself known to be instantiated at a
+        // resource, which propagation below discovers.)
+        let empty: HashSet<TypeId> = HashSet::new();
+        let mut seed_memo: HashMap<TypeId, bool> = HashMap::new();
+        let all_calls: Vec<Id> = self.function_calls.keys().copied().collect();
+        for call_id in all_calls {
+            self.r11_discover(
+                call_id,
+                &empty,
+                &mut seed_memo,
+                &mut worklist,
+                &mut enqueued,
+            );
+        }
+
+        while let Some(instance) = worklist.pop_front() {
+            let resources: HashSet<TypeId> = instance.resources.iter().copied().collect();
+            // Delta classification: only the places whose resource-ness is CAUSED
+            // by this instantiation (resource under the parameter set, but not
+            // without it). A place that is a resource regardless — a concrete
+            // resource written into the generic body — is chunk 3's, already
+            // checked with its own in-body span; re-checking it here would
+            // double-report at the instantiation site.
+            let mut memo: HashMap<TypeId, bool> = HashMap::new();
+            let resource_bindings = self.collect_instantiation_bindings(&resources, &mut memo);
+            let resource_value_places =
+                self.collect_instantiation_value_places(&resources, &mut memo);
+            let (calls, closures) = self.r11_body_calls_and_closures(instance.callee);
+            let violations = {
+                let scan = MoveScan {
+                    resource_bindings: &resource_bindings,
+                    resource_value_places: &resource_value_places,
+                };
+                self.scan_instantiated_body(instance.callee, &closures, &scan)
+            };
+            self.emit_r11_violations(instance.callee, instance.call_id, violations);
+
+            // Propagate: the callee's own calls, now under ITS resource
+            // parameters — a call passing `T` on to another generic instantiates
+            // that generic at a resource too (the indirect case).
+            let mut propagate_memo: HashMap<TypeId, bool> = HashMap::new();
+            for call_id in calls {
+                self.r11_discover(
+                    call_id,
+                    &resources,
+                    &mut propagate_memo,
+                    &mut worklist,
+                    &mut enqueued,
+                );
+            }
+        }
+    }
+
+    /// The resource bindings this instantiation introduces: variables and
+    /// parameters whose type is a resource UNDER `resources` (the instantiation's
+    /// resource parameter set) but NOT without it. The delta keeps concrete-
+    /// resource bindings — a resource regardless of `resources` — out: those are
+    /// chunk 3's, already checked with their own in-body span. Collected over the
+    /// whole program, but only bindings named by `Generic(T)` (this generic's own
+    /// parameters and locals) can be delta-resources, and `scan_instantiated_body`
+    /// visits only the callee's body — so the wider set is never queried elsewhere.
+    fn collect_instantiation_bindings(
+        &mut self,
+        resources: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
+    ) -> HashSet<Id> {
+        let mut bindings = HashSet::new();
+        let entries: Vec<(Id, TypeId)> = self
+            .variables
+            .values()
+            .map(|variable| (variable.id, variable.type_id))
+            .chain(
+                self.parameters
+                    .values()
+                    .map(|parameter| (parameter.id, parameter.type_id)),
+            )
+            .collect();
+        for (id, type_id) in entries {
+            if self.type_is_resource_with(type_id, resources, memo)
+                && !self.type_is_resource(type_id)
+            {
+                bindings.insert(id);
+            }
+        }
+        bindings
+    }
+
+    /// The R5 partial-move targets a single instantiation introduces: place
+    /// expressions whose value type is a resource UNDER `resources` but not
+    /// without it (the delta, as `collect_instantiation_bindings`). NOT stored on
+    /// the analyzer — clone sites stay a global, concrete-resource computation
+    /// (R11 is reject-only: a program that passes has no differently-elided copy).
+    fn collect_instantiation_value_places(
+        &mut self,
+        resources: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
+    ) -> HashSet<Id> {
+        let mut places = HashSet::new();
+        let place_ids: Vec<Id> = self
+            .expr_id_to_expr_map
+            .iter()
+            .filter(|(_, expr)| {
+                matches!(
+                    expr,
+                    Expr::Local(_)
+                        | Expr::Field(_, _, _)
+                        | Expr::TupleIndex(_, _, _)
+                        | Expr::Index(_, _)
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in place_ids {
+            if let Some(place_type) = self.place_value_type(id) {
+                let type_id = place_type.get_type_id(self);
+                if self.type_is_resource_with(type_id, resources, memo)
+                    && !self.type_is_resource(type_id)
+                {
+                    places.insert(id);
+                }
+            }
+        }
+        places
+    }
+
+    /// Scan ONE instantiated generic body under `scan`: the callee's own
+    /// function body, the closures lexical to it (scanned as roots, and R9
+    /// capture-checked), collecting affine-rule violations. Scoped to the callee
+    /// rather than the whole program because sibling members of the same `impl`
+    /// share its type parameter (`impl Option<type T>`'s `unwrap`, `map`, … all
+    /// name one `T`): a global scan would attribute a dirty sibling's violation
+    /// to whichever member THIS instantiation entered through. Only the callee's
+    /// body names the parameters this instantiation actually binds.
+    fn scan_instantiated_body(
+        &self,
+        callee: Id,
+        closures: &[Id],
+        scan: &MoveScan<'_>,
+    ) -> Vec<ResourceMoveViolation> {
+        let mut violations: Vec<ResourceMoveViolation> = Vec::new();
+        if let Some(function) = self.functions.get(&callee) {
+            let mut flow = MoveFlow::new();
+            for parameter in &function.parameters {
+                if scan.resource_bindings.contains(parameter) {
+                    flow.decl_loop_depth.insert(*parameter, 0);
+                }
+            }
+            self.scan_move_block(
+                &function.body.0,
+                function.body.1,
+                true,
+                true,
+                scan,
+                &mut flow,
+                0,
+                &mut violations,
+            );
+        }
+        for closure_id in closures {
+            if let Some(closure) = self.closures.get(closure_id) {
+                let mut flow = MoveFlow::new();
+                for binding in closure
+                    .parameters
+                    .iter()
+                    .chain(&closure.parameter_destructures)
+                {
+                    if scan.resource_bindings.contains(binding) {
+                        flow.decl_loop_depth.insert(*binding, 0);
+                    }
+                }
+                self.scan_move(
+                    closure.return_,
+                    true,
+                    true,
+                    scan,
+                    &mut flow,
+                    0,
+                    &mut violations,
+                );
+            }
+        }
+        for closure_id in closures {
+            self.scan_one_closure_captures(*closure_id, scan.resource_bindings, &mut violations);
+        }
+        violations
+    }
+
+    /// R11 discovery: if a call directly resolves to a generic function/method
+    /// whose parameters are bound to resources (concrete resources, or — under
+    /// `current_resources` — the caller's own resource parameters), enqueue the
+    /// `(callee, resource-parameter set)` check. Deduplicated on that key.
+    /// Dispatched (trait/generic-bounded) callees are the recorded residue and
+    /// are not descended into (impl-plan §2 R12); the per-instantiation re-check
+    /// of the concrete impl a resource selects is chunk 3's when that impl's own
+    /// `self` is the concrete resource.
+    fn r11_discover(
+        &mut self,
+        call_id: Id,
+        current_resources: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
+        worklist: &mut VecDeque<R11Instance>,
+        enqueued: &mut HashSet<(Id, Vec<TypeId>)>,
+    ) {
+        let Some(callee) = self.r11_direct_callee(call_id) else {
+            return;
+        };
+        let bindings = self.r11_call_type_bindings(call_id, callee);
+        let mut resources: Vec<TypeId> = Vec::new();
+        for (constraint, bound) in bindings {
+            if self.type_is_resource_with(bound, current_resources, memo)
+                && !resources.contains(&constraint)
+            {
+                resources.push(constraint);
+            }
+        }
+        if resources.is_empty() {
+            return;
+        }
+        resources.sort_unstable_by_key(|constraint| constraint.0);
+        if enqueued.insert((callee, resources.clone())) {
+            worklist.push_back(R11Instance {
+                callee,
+                resources,
+                call_id,
+            });
+        }
+    }
+
+    /// The generic function/method a call directly resolves to (a function with a
+    /// body, reached through a `Local(callee)` subject — the resolved form of
+    /// both free calls and method calls after `wire_method_call`). `None` for a
+    /// dispatched call (recorded residue), an external, a variant constructor, or
+    /// a call through a value.
+    fn r11_direct_callee(&self, call_id: Id) -> Option<Id> {
+        if self.generic_dispatch.contains_key(&call_id) {
+            return None;
+        }
+        let function_call = self.function_calls.get(&call_id)?;
+        if self
+            .generic_dispatch
+            .contains_key(&function_call.subject_id)
+        {
+            return None;
+        }
+        match self.expr_id_to_expr_map.get(&function_call.subject_id)? {
+            Expr::Local(callee) if self.functions.get(callee).is_some_and(|f| f.has_body) => {
+                Some(*callee)
+            }
+            _ => None,
+        }
+    }
+
+    /// A call's generic type bindings as `(callee constraint id, bound type id)`
+    /// pairs, from both channels monomorphization uses: a free call's
+    /// `generic_argument_ids` zipped with the callee's own parameters, and the
+    /// recorded `method_call_substitution` (a method's impl + own generics, which
+    /// also carries a free call's inferred bindings). Bounds are in the CALLER's
+    /// terms — a bound may be the caller's own `Generic(T)`, resolved against
+    /// `current_resources` by the classifier.
+    fn r11_call_type_bindings(&self, call_id: Id, callee: Id) -> Vec<(TypeId, TypeId)> {
+        let mut bindings: Vec<(TypeId, TypeId)> = Vec::new();
+        if let (Some(function_call), Some(function)) = (
+            self.function_calls.get(&call_id),
+            self.functions.get(&callee),
+        ) && !function.generic_parameter_constraint_ids.is_empty()
+            && !function_call.generic_argument_ids.is_empty()
+        {
+            for (constraint, bound) in function
+                .generic_parameter_constraint_ids
+                .iter()
+                .zip(function_call.generic_argument_ids.iter())
+            {
+                bindings.push((*constraint, *bound));
+            }
+        }
+        if let Some(substitution) = self.method_call_substitution.get(&call_id) {
+            for (constraint, bound) in substitution {
+                bindings.push((*constraint, *bound));
+            }
+        }
+        bindings
+    }
+
+    /// The `Expr::Call` ids and lexical closure ids that appear directly in a
+    /// function's body, WITHOUT crossing a closure boundary (each closure is its
+    /// own scan root). The calls feed R11 propagation — a generic body's own
+    /// calls, re-examined once the generic is known instantiated at a resource;
+    /// the closures feed `scan_instantiated_body` (their internal moves and R9
+    /// captures). A closure passed as an argument (`opt.map(|d| ..)`) is defined
+    /// in this body, so it is a lexical closure of it.
+    fn r11_body_calls_and_closures(&self, function_id: Id) -> (Vec<Id>, Vec<Id>) {
+        let Some(function) = self.functions.get(&function_id) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (statements, tail, _) = &function.body;
+        let mut calls = Vec::new();
+        let mut closures = Vec::new();
+        let mut visited = HashSet::new();
+        for statement in statements {
+            self.r11_collect_calls(*statement, &mut visited, &mut calls, &mut closures);
+        }
+        self.r11_collect_calls(*tail, &mut visited, &mut calls, &mut closures);
+        (calls, closures)
+    }
+
+    /// Accumulate the `Expr::Call` ids and lexical closure ids reachable from
+    /// `expr_id` without crossing a closure boundary. Mirrors the control-flow
+    /// arms of `scan_move`; leaves hold neither. (Under-seeing a call only
+    /// under-discovers an indirect instantiation — never a miscompile — but the
+    /// arms stay explicit so a new `Expr` variant is classified here rather than
+    /// silently missed.)
+    fn r11_collect_calls(
+        &self,
+        expr_id: Id,
+        visited: &mut HashSet<Id>,
+        calls: &mut Vec<Id>,
+        closures: &mut Vec<Id>,
+    ) {
+        if !visited.insert(expr_id) {
+            return;
+        }
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        macro_rules! recurse {
+            ($id:expr) => {
+                self.r11_collect_calls($id, visited, calls, closures)
+            };
+        }
+        match expr {
+            Expr::Call(call_id) => {
+                calls.push(call_id);
+                if let Some(function_call) = self.function_calls.get(&call_id).cloned() {
+                    recurse!(function_call.subject_id);
+                    for argument in function_call.argument_ids {
+                        recurse!(argument);
+                    }
+                }
+            }
+            // A lexical closure of this body: recorded as a scan root, NOT
+            // descended into (it is its own root; R9 forbids it capturing a
+            // resource, and the capture walk descends for that check separately).
+            Expr::Closure(closure_id) | Expr::Async(closure_id) => closures.push(closure_id),
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    recurse!(initial);
+                }
+            }
+            Expr::Destructure(value_id, _) => recurse!(value_id),
+            Expr::Assignment(target_id, value_id) => {
+                recurse!(target_id);
+                recurse!(value_id);
+            }
+            Expr::Reference(operand, _)
+            | Expr::Dereference(operand)
+            | Expr::Unary(_, operand)
+            | Expr::Await(operand)
+            | Expr::TryAssert(operand) => recurse!(operand),
+            Expr::Binary(_, lhs, rhs) => {
+                recurse!(lhs);
+                recurse!(rhs);
+            }
+            Expr::Field(subject, _, _) | Expr::TupleIndex(subject, _, _) => recurse!(subject),
+            Expr::Index(subject, index) => {
+                recurse!(subject);
+                recurse!(index);
+            }
+            Expr::FunctionReturn(Some(value)) => recurse!(value),
+            Expr::Block((statements, tail)) => {
+                for statement in &statements {
+                    recurse!(*statement);
+                }
+                recurse!(tail);
+            }
+            Expr::If(branch) => self.r11_collect_calls_if(&branch, visited, calls, closures),
+            Expr::Match(subject, legs) => {
+                recurse!(subject);
+                for leg in legs {
+                    if let Some(guard) = leg.guard {
+                        recurse!(guard);
+                    }
+                    recurse!(leg.body);
+                }
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    recurse!(condition);
+                }
+                for statement in &statements {
+                    recurse!(*statement);
+                }
+                recurse!(tail);
+            }
+            Expr::ForEach(iterable, _item, (statements, tail)) => {
+                recurse!(iterable);
+                for statement in &statements {
+                    recurse!(*statement);
+                }
+                recurse!(tail);
+            }
+            Expr::StructInitializer(_, fields) => {
+                for value in fields.values() {
+                    recurse!(*value);
+                }
+            }
+            Expr::Tuple(ids) | Expr::List(ids) => {
+                for id in &ids {
+                    recurse!(*id);
+                }
+            }
+            Expr::Repeat(value, _length) => recurse!(value),
+            Expr::ArrayLen(subject, _) => recurse!(subject),
+            Expr::Is(subject, _pattern) => recurse!(subject),
+            Expr::Lift(subject, _binder, continuation) => {
+                recurse!(subject);
+                recurse!(continuation);
+            }
+            Expr::LiftRegion(steps, body) => {
+                for (step_id, _binder, _is_split) in &steps {
+                    recurse!(*step_id);
+                }
+                recurse!(body);
+            }
+            Expr::TupleComprehension(_binder, source, body) => {
+                recurse!(source);
+                recurse!(body);
+            }
+            // Leaves and declarations hold no nested call or closure.
+            Expr::FunctionReturn(None)
+            | Expr::Bool(_)
+            | Expr::Number(_, _, _)
+            | Expr::String(_)
+            | Expr::MultilineString(_)
+            | Expr::Null
+            | Expr::Void
+            | Expr::Error
+            | Expr::Jump(_)
+            | Expr::LiftBinder
+            | Expr::EnumVariant(_, _)
+            | Expr::Generic(_)
+            | Expr::Struct(_)
+            | Expr::Enum(_)
+            | Expr::Impl(_)
+            | Expr::Function(_)
+            | Expr::Module(_)
+            | Expr::Trait(_)
+            | Expr::Macro
+            | Expr::Local(_)
+            | Expr::Parameter(_)
+            | Expr::ExternalFunction(_) => {}
+        }
+    }
+
+    /// The `if`/`else if`/`else` arm walk for `r11_collect_calls`.
+    fn r11_collect_calls_if(
+        &self,
+        branch: &ExprIfBranch,
+        visited: &mut HashSet<Id>,
+        calls: &mut Vec<Id>,
+        closures: &mut Vec<Id>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.r11_collect_calls(*condition, visited, calls, closures);
+                for statement in statements {
+                    self.r11_collect_calls(*statement, visited, calls, closures);
+                }
+                self.r11_collect_calls(*tail, visited, calls, closures);
+                if let Some(else_branch) = else_branch {
+                    self.r11_collect_calls_if(else_branch, visited, calls, closures);
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                for statement in statements {
+                    self.r11_collect_calls(*statement, visited, calls, closures);
+                }
+                self.r11_collect_calls(*tail, visited, calls, closures);
+            }
+        }
+    }
+
+    /// Render an instantiation's affine-rule violations as R11 diagnostics
+    /// (destruction.md §11 — "unclean generic, spanned at the instantiation"):
+    /// primary at the instantiation site naming the generic and the offending
+    /// use; a note into the generic body at the second use / capture / copy.
+    fn emit_r11_violations(
+        &mut self,
+        callee: Id,
+        call_id: Id,
+        violations: Vec<ResourceMoveViolation>,
+    ) {
+        if violations.is_empty() {
+            return;
+        }
+        let name = self
+            .functions
+            .get(&callee)
+            .map(|function| function.name)
+            .unwrap_or("this generic");
+        let site = **self.span_map.get(&call_id).unwrap_or(&&EMPTY_SPAN);
+        let call_source = self.source_of_id(call_id);
+        for violation in violations {
+            let (body_id, summary, detail) = match &violation {
+                ResourceMoveViolation::UseAfterMove {
+                    use_id, binding, ..
+                } => {
+                    let binding_name = self.binding_name(*binding);
+                    (
+                        *use_id,
+                        "a resource-typed value is used more than once",
+                        format!(
+                            "in `{name}`, `{binding_name}` is used here after it was moved — a \
+                             resource has a single owner"
+                        ),
+                    )
+                }
+                ResourceMoveViolation::PartialMove { at } => (
+                    *at,
+                    "a resource-typed field is moved out of a live aggregate",
+                    format!(
+                        "in `{name}`, a resource field is moved out of a live aggregate here — v1 \
+                         has no partial moves"
+                    ),
+                ),
+                ResourceMoveViolation::ConditionalMove { at, binding } => {
+                    let binding_name = self.binding_name(*binding);
+                    (
+                        *at,
+                        "a resource-typed value is moved on one path but not all",
+                        format!(
+                            "in `{name}`, `{binding_name}` is moved on one path through this branch \
+                             but not another"
+                        ),
+                    )
+                }
+                ResourceMoveViolation::LoopMove { at, binding } => {
+                    let binding_name = self.binding_name(*binding);
+                    (
+                        *at,
+                        "a resource-typed value is moved inside a loop",
+                        format!(
+                            "in `{name}`, `{binding_name}` is declared outside a loop and moved \
+                             inside it"
+                        ),
+                    )
+                }
+                ResourceMoveViolation::Capture {
+                    reference_id,
+                    binding,
+                } => {
+                    let binding_name = self.binding_name(*binding);
+                    (
+                        *reference_id,
+                        "a resource-typed value is captured by a closure",
+                        format!(
+                            "in `{name}`, `{binding_name}` is captured by a closure here — a \
+                             closure cannot capture a resource"
+                        ),
+                    )
+                }
+            };
+            let body_span = **self.span_map.get(&body_id).unwrap_or(&&EMPTY_SPAN);
+            let note_source = self.source_of_id(body_id);
+            let note = crate::error::Note {
+                span: body_span,
+                msg: detail,
+                // The generic body may live in another file than the
+                // instantiation; name it when so (else the same-file default).
+                source: if note_source.is_some() && note_source != call_source {
+                    note_source
+                } else {
+                    None
+                },
+            };
+            self.diagnostics.push(Error {
+                span: site,
+                msg: format!(
+                    "`{name}` is not move-clean when instantiated with a resource — {summary}; a \
+                     generic used with a resource type argument must use each resource value at \
+                     most once, and never copy or capture it"
+                ),
+                note: Some(note),
+            });
         }
     }
 
@@ -20031,10 +20749,11 @@ pub fn analyze<'src>(
     // The observable half of C4 resource classification (destruction.md §4):
     // R10 (container/external-generic resource arguments) and R12 (no coercion
     // to `any`). R1–R9 (moves, loans, conditional/loop moves, captures) follow;
-    // R11 (per-instantiation move-clean generics) and destructors come later.
+    // then R11 (per-instantiation move-clean generics). Destructors come later.
     analyzer.check_container_resource_arguments();
     analyzer.check_resource_any_coercion();
     analyzer.check_resource_moves();
+    analyzer.check_resource_generic_instantiations();
 
     // Find `Context`'s `new`/`run`/`get` intrinsics (the context threading pass
     // keys off them) now that impl subjects have resolved.

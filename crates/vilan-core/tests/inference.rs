@@ -20423,3 +20423,444 @@ fn r5_variant_construction_moves_the_payload() {
         "moved",
     );
 }
+
+// === C4 S1 chunk 4: R11 — generics must be move-clean per resource instantiation
+// (destruction.md §4/§11). Instantiating a type parameter with a resource re-checks
+// the instantiated body under the affine rules (T := the resource): each T-typed
+// value used at most once as a move, no captures, no copies. The diagnostic is
+// spanned at the INSTANTIATION site (the call), with a note into the generic body.
+// The chunk-3 scan is reused verbatim — R11 supplies it a `scan` whose resource
+// sets are the body's T-typed places, per instantiation.
+
+/// The R11 "not move-clean" diagnostics for `source`, each as
+/// `(message, primary range, note)`.
+fn r11_rejections(
+    source: &str,
+) -> Vec<(
+    String,
+    std::ops::Range<usize>,
+    Option<(String, std::ops::Range<usize>, bool)>,
+)> {
+    failure_diagnostics_with_notes(source)
+        .into_iter()
+        .filter(|(message, _, _)| {
+            message.contains("is not move-clean when instantiated with a resource")
+        })
+        .collect()
+}
+
+// --- Accept: a move-clean generic body, instantiated at a resource --------------
+
+#[test]
+fn r11_unwrap_shape_accept() {
+    // `own self`/`own x` consumed once, payload moved out once — the canonical
+    // move-clean shape (destruction.md §4: `Option::unwrap(self): T` passes).
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun take_one<T>(own x: T): T { x }
+        fun sink(own d: Db) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let out = take_one(db);
+            sink(out);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r11_std_option_unwrap_at_a_resource_accept() {
+    // The real std `Option::unwrap` (self consumed once by the match, payload
+    // moved out once) is clean under R11 when instantiated at `Option<Db>`.
+    assert_compiles(
+        r#"
+        import std::option::Option::{ self, Some };
+        resource struct Db { handle: i32 }
+        fun sink(own d: Db) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let opt: Option<Db> = Some(db);
+            let d = opt.unwrap();
+            sink(d);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r11_map_shape_closure_free_accept() {
+    // `T` moved exactly once into a (closure-free) transform — a constructor.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        struct Box<T> { inner: T }
+        fun wrap<T>(own x: T): Box<T> { Box { inner = x } }
+        fun sink(own b: Box<Db>) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let boxed = wrap(db);
+            sink(boxed);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r11_std_option_map_at_a_resource_accept() {
+    // `Option::map` moves the payload into the transform once (`Some(fn(x))`) —
+    // clean at `Option<Db>` (the map-shape, via std).
+    assert_compiles(
+        r#"
+        import std::option::Option::{ self, Some };
+        resource struct Db { handle: i32 }
+        fun main() {
+            let db = Db { handle = 1 };
+            let opt: Option<Db> = Some(db);
+            let n = opt.map(|d| d.handle);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r11_generic_struct_method_accept() {
+    // An impl-level type parameter (`impl W<type T>`): `into_self` moves the whole
+    // resource aggregate out once — clean at `W<Db>`.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        struct W<T> { value: T }
+        impl W<type T> {
+            fun into_self(own self): W<T> { self }
+        }
+        fun sink(own w: W<Db>) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let w = W { value = db };
+            let w2 = w.into_self();
+            sink(w2);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r11_multi_parameter_only_resource_is_checked_accept() {
+    // `pick<A, B>` is instantiated with `A := Db` (resource) and `B := i32`
+    // (data). `a` is used once; `b` is data. Only `A` joins the resource set, so
+    // the body is clean and it compiles.
+    assert_compiles(
+        r#"
+        resource struct Db { handle: i32 }
+        fun pick<A, B>(own a: A, b: B): A { a }
+        fun sink(own d: Db) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let out = pick(db, 7);
+            sink(out);
+        }
+        "#,
+    );
+}
+
+// --- Accept: the SAME generic at a data type is unaffected ----------------------
+
+#[test]
+fn r11_same_generic_at_a_data_type_compiles() {
+    // `use_twice` reads its parameter twice — a use-after-move ONLY for a
+    // resource. Instantiated at `i32` (data, which copies) it is fine: no
+    // instantiation is enqueued, nothing is re-checked.
+    assert_compiles(
+        r#"
+        fun use_twice<T>(x: T): T {
+            let keep = x;
+            x
+        }
+        fun main() {
+            let out = use_twice(5);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r11_dirty_generic_stays_usable_at_data_even_when_used_at_a_resource() {
+    // The same dirty `use_twice` is instantiated at BOTH `i32` (fine) and `Db`
+    // (rejected) — only the resource instantiation reports.
+    let source = r#"
+        resource struct Db { handle: i32 }
+        fun use_twice<T>(x: T): T {
+            let keep = x;
+            x
+        }
+        fun sink(own d: Db) {}
+        fun main() {
+            let n = use_twice(5);
+            let db = Db { handle = 1 };
+            let out = use_twice(db);
+            sink(out);
+        }
+        "#;
+    let rejections = r11_rejections(source);
+    assert_eq!(
+        rejections.len(),
+        1,
+        "expected exactly one R11 rejection (the resource instantiation); got: {rejections:#?}"
+    );
+    let call_at = source.find("use_twice(db)").unwrap();
+    assert_eq!(
+        rejections[0].1,
+        call_at..call_at + "use_twice(db)".len(),
+        "the R11 diagnostic must span the resource instantiation site"
+    );
+}
+
+// --- Reject: a dirty generic body, spanned at the instantiation with a note -----
+
+#[test]
+fn r11_free_generic_used_twice_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun use_twice<T>(own x: T): T {
+            let keep = x;
+            x
+        }
+        fun sink(own d: Db) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let out = use_twice(db);
+            sink(out);
+        }
+        "#,
+        "is not move-clean when instantiated with a resource",
+    );
+}
+
+#[test]
+fn r11_rejection_is_spanned_at_the_instantiation_with_a_body_note() {
+    // Primary AT the call (`use_twice(db)`); the note points INTO the generic body
+    // at the second use of `x` (the tail), which lives before the call in source.
+    let source = r#"
+        resource struct Db { handle: i32 }
+        fun use_twice<T>(own x: T): T {
+            let keep = x;
+            x
+        }
+        fun sink(own d: Db) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let out = use_twice(db);
+            sink(out);
+        }
+        "#;
+    let rejections = r11_rejections(source);
+    assert_eq!(rejections.len(), 1, "one rejection; got: {rejections:#?}");
+    let (_, primary, note) = &rejections[0];
+    let call_at = source.find("use_twice(db)").unwrap();
+    assert_eq!(
+        *primary,
+        call_at..call_at + "use_twice(db)".len(),
+        "primary spans the instantiation site"
+    );
+    let (note_msg, note_range, _) = note.as_ref().expect("a note into the body");
+    assert!(
+        note_msg.contains("used here after it was moved"),
+        "the note describes the second use; got: {note_msg:?}"
+    );
+    // The note anchors at the tail `x` — inside the body, before the call site.
+    assert!(
+        note_range.end <= call_at,
+        "the note points into the generic body (before the instantiation): {note_range:?}"
+    );
+}
+
+#[test]
+fn r11_generic_struct_method_used_twice_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        struct W<T> { value: T }
+        impl W<type T> {
+            fun use_twice(own self): W<T> {
+                let keep = self;
+                self
+            }
+        }
+        fun main() {
+            let db = Db { handle = 1 };
+            let w = W { value = db };
+            let w2 = w.use_twice();
+        }
+        "#,
+        "is not move-clean when instantiated with a resource",
+    );
+}
+
+#[test]
+fn r11_conditional_move_in_a_generic_body_is_rejected() {
+    // R7 under T := resource: `x` is moved on one path through the `if` but not
+    // the other — rejected at the instantiation of `maybe_sink` at `Db`.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun consume<U>(own u: U) {}
+        fun maybe_sink<T>(own x: T, c: bool) {
+            if c { consume(x); }
+        }
+        fun main() {
+            let db = Db { handle = 1 };
+            maybe_sink(db, true);
+        }
+        "#,
+        "is not move-clean when instantiated with a resource",
+    );
+}
+
+#[test]
+fn r11_closure_capturing_the_type_parameter_is_rejected() {
+    // R9-for-T: a closure inside the generic body captures the T-typed parameter
+    // — rejected when T is a resource.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun run(fn: || i32): i32 { fn() }
+        fun consume<U>(own u: U): i32 { 1 }
+        fun capturing<T>(own x: T): i32 {
+            run(|| consume(x))
+        }
+        fun main() {
+            let db = Db { handle = 1 };
+            let n = capturing(db);
+        }
+        "#,
+        "is not move-clean when instantiated with a resource",
+    );
+}
+
+#[test]
+fn r11_resource_aggregate_type_argument_is_a_resource_instantiation() {
+    // The type argument need not be a leaf resource: `Pair<Db, i32>` is a resource
+    // by containment, so `use_twice<T>` at `T := Pair<Db, i32>` is re-checked and
+    // its double use rejected.
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        struct Pair<A, B> { first: A, second: B }
+        fun use_twice<T>(own x: T): T {
+            let keep = x;
+            x
+        }
+        fun sink(own p: Pair<Db, i32>) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let pair = Pair { first = db, second = 2 };
+            let out = use_twice(pair);
+            sink(out);
+        }
+        "#,
+        "is not move-clean when instantiated with a resource",
+    );
+}
+
+// --- Dedup: the same dirty instantiation reached twice reports once -------------
+
+#[test]
+fn r11_same_dirty_instantiation_reported_once() {
+    let source = r#"
+        resource struct Db { handle: i32 }
+        fun use_twice<T>(own x: T): T {
+            let keep = x;
+            x
+        }
+        fun sink(own d: Db) {}
+        fun main() {
+            let a = Db { handle = 1 };
+            let b = Db { handle = 2 };
+            let r1 = use_twice(a);
+            let r2 = use_twice(b);
+            sink(r1);
+            sink(r2);
+        }
+        "#;
+    let rejections = r11_rejections(source);
+    assert_eq!(
+        rejections.len(),
+        1,
+        "two calls, same (callee, resource-set) key — one report; got: {rejections:#?}"
+    );
+    // Reported at the FIRST instantiation site.
+    let first_call = source.find("use_twice(a)").unwrap();
+    assert_eq!(
+        rejections[0].1,
+        first_call..first_call + "use_twice(a)".len()
+    );
+}
+
+// --- Indirect: dirt discovered through the call chain ---------------------------
+
+#[test]
+fn r11_indirect_generic_chain_is_rejected() {
+    // `outer<T>` is clean itself, but passes its resource `T` on to `inner<U>`,
+    // which is dirty — the worklist propagates `outer`'s instantiation to `inner`
+    // and reports at the `inner(x)` call inside `outer`.
+    let source = r#"
+        resource struct Db { handle: i32 }
+        fun inner<U>(own x: U): U {
+            let keep = x;
+            x
+        }
+        fun outer<T>(own x: T): T {
+            inner(x)
+        }
+        fun sink(own d: Db) {}
+        fun main() {
+            let db = Db { handle = 1 };
+            let out = outer(db);
+            sink(out);
+        }
+        "#;
+    let rejections = r11_rejections(source);
+    assert_eq!(
+        rejections.len(),
+        1,
+        "one rejection (inner); got: {rejections:#?}"
+    );
+    // Spanned at the indirect instantiation site — the `inner(x)` call in `outer`.
+    let inner_call = source.find("inner(x)").unwrap();
+    assert_eq!(
+        rejections[0].1,
+        inner_call..inner_call + "inner(x)".len(),
+        "the indirect rejection spans the inner call inside the outer generic"
+    );
+}
+
+// KNOWN GAP (destruction-impl-plan.md §2, recorded residue): the R11 move scan
+// descends into DIRECT lexical closures only, so a nested closure's own T-typed
+// parameter double-moved inside its body is not seen (verified: this program
+// compiles today). Captures ARE caught transitively — only the nested body's
+// internal moves escape. Un-ignore when the scan recurses through closure
+// nesting.
+#[test]
+#[ignore]
+fn r11_nested_closure_internal_double_move_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Db { handle: i32 }
+        fun devour<T2>(own v: T2) {}
+        fun g<T>(own value: T) {
+            let outer = || {
+                let inner = |x: T| {
+                    devour(x);
+                    devour(x);
+                };
+            };
+        }
+        fun main() {
+            g(Db { handle = 1 });
+        }
+        "#,
+        "moved",
+    );
+}

@@ -106,7 +106,14 @@ From `claims-and-epochs.md` §8:
 - **R11** per-instantiation move-clean re-check of generic bodies (T := resource),
   spanned at the instantiation site. Recorded fallback if the general check drags:
   bless `Option`'s surface first, ship the general rule as the immediate follow-up —
-  but the general rule is the design.
+  but the general rule is the design. Shipped residues (recorded with the chunk):
+  the move scan descends into *direct* lexical closures only — a nested closure's
+  internal T-double-move is unseen (`#[ignore]`d pin
+  `r11_nested_closure_internal_double_move_is_rejected`; captures are caught
+  transitively); dispatched callees skip discovery (the standing convention); the
+  *primary* span uses the chunk-3 `SourceId(0)` convention, so cross-file
+  instantiations mis-anchor the primary (the body note carries the correct source)
+  — diagnostics polish, not semantics.
 - **R12** no coercion to `any` (arguments, bindings, returns; `print(db)` included).
   Recorded conservatism (shipped with the chunk): argument coverage resolves callees
   via `subject -> Local(callee)` — free functions *and* concrete-receiver methods are

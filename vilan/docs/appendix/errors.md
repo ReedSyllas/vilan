@@ -184,6 +184,19 @@ the call, or give ownership to the struct that owns the closure's lifetime.
 `context`-clause bodies are unaffected.)
 → [The memory model](../tour/memory-model.md)
 
+**"`…` is not move-clean when instantiated with a resource — …"**
+A generic function or method was called with a resource type argument
+(`Option<Database>`, `wrap(db)`), and its body — checked with that type
+parameter treated as a resource — breaks the affine rules: it uses a
+value of the parameter's type more than once, moves it on some paths but
+not all, or captures it in a closure. The error is spanned at the **call**
+(the instantiation), and a note points into the generic's body at the
+offending use — the body is fine for data, but a resource has a single
+owner. A generic that means to accept resources must move each such value
+at most once (as `Option::unwrap(self): T` does), never copying or
+capturing it. Instantiating the same generic at a data type is unaffected.
+→ [The memory model](../tour/memory-model.md)
+
 **"the resource `…` cannot be used where `any` is expected — …"**
 `any` is a data sink, and a resource must keep its single owner: passing
 one to `print`, binding it to `let x: any`, or returning it as `any`
