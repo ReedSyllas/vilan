@@ -7,6 +7,8 @@ The process layer (node/deno/bun builds): `std::db`, `std::http`,
 ## std::db — SQLite
 
 ```vilan,fragment
+resource external struct Database;       // a resource: moves, closes on drop
+
 impl Database {
 	fun open(path: str): Database        // ":memory:" for an in-memory db
 	fun exec(self, sql: str)             // DDL / one-off statements
@@ -28,6 +30,19 @@ impl Row {
 
 Parameters are `?` placeholders. Synchronous by design (fits the rpc
 dispatch path). `desc` and other SQL keywords fail as column names.
+
+`Database` is a **`resource`**: it has a single owner and *moves* rather than
+copies, and it closes its `node:sqlite` handle when its owner's scope ends — a
+`let db =
+Database::open(..)` local closes on the function's return, with no `close()`
+method to remember. `drop(db)` closes it early (the move spends the binding).
+A **module-level** `Database` is the serve-forever idiom: it has process
+lifetime, never drops, and is reachable only by loan (method calls,
+`&`-passing) — moving or `drop`ing a module-level database is a compile error.
+Being a resource, a `Database` cannot go into a `List` (use `Option` or a
+struct field), cross the wire (`[derive(Wire)]` rejects it), or be a field of a
+`[service]` struct (the generated dispatcher would capture the store — keep the
+database at module scope instead, next to the service).
 
 ## std::http — the server
 

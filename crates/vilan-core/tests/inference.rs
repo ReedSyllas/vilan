@@ -22014,3 +22014,196 @@ fn a_resource_match_consume_moves_the_payload_to_its_new_owner() {
         "extracted held\ndrop held\n",
     );
 }
+
+// --- C4 S4 chunk a: `Database` — the first real std resource (destruction.md
+// §9), plus the §5 loan-only corollary for module-level resources. The
+// `[service]`-owns-a-resource collision is recorded as backlog C9; the pin below
+// fixes it as the defined v1 rejection (the blessed idiom keeps the resource at
+// module scope). `Database` closes its `node:sqlite` handle on drop.
+
+#[test]
+fn a_database_binding_moves_and_a_later_use_is_use_after_move() {
+    // R1 on the real std resource: `Database` moves on binding, and using the
+    // moved binding is use-after-move — the note at the move site (occurrence 1
+    // of "handle", the `let heir = handle`).
+    assert_use_after_move_noting(
+        r#"
+        import std::db::Database;
+        fun main() {
+            let handle = Database::open(":memory:");
+            let heir = handle;
+            handle.exec("SELECT 1");
+        }
+        "#,
+        "handle",
+        1,
+    );
+}
+
+#[test]
+fn a_struct_holding_a_database_is_a_resource_by_containment() {
+    // Containment: a struct with a `Database` field is itself a resource, so it
+    // moves (R1) — a later use of the moved aggregate is use-after-move.
+    assert_fails_with(
+        r#"
+        import std::db::Database;
+        struct Session { db: Database }
+        fun main() {
+            let session = Session { db = Database::open(":memory:") };
+            let moved = session;
+            session.db.exec("SELECT 1");
+        }
+        "#,
+        "after it was moved",
+    );
+}
+
+#[test]
+fn a_list_of_databases_is_rejected() {
+    // R10 with the real type: a native container cannot hold a resource.
+    assert_fails_with(
+        r#"
+        import std::db::Database;
+        fun main() {
+            let dbs: List<Database> = [];
+        }
+        "#,
+        "cannot hold the resource",
+    );
+}
+
+#[test]
+fn a_module_level_database_is_accepted() {
+    // The serve-forever idiom (destruction.md §5): a module-level `Database` has
+    // process lifetime, reached by loan through method calls — it never drops.
+    assert_compiles(
+        r#"
+        import std::db::Database;
+        let db: Database = Database::open(":memory:");
+        fun query() { db.exec("SELECT 1"); }
+        fun main() { query(); }
+        "#,
+    );
+}
+
+#[test]
+fn dropping_a_local_database_compiles_under_a_process_target() {
+    // `drop(db)` is the early teardown (there is no public `close()`); it lowers
+    // to the handle's destructor under the process (node) target.
+    assert_compiles(
+        r#"
+        import std::db::Database;
+        import std::drop::drop;
+        fun main() {
+            let db = Database::open(":memory:");
+            drop(db);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_wire_derive_on_a_database_holding_struct_is_rejected() {
+    // §8: the Wire all-fields check rejects a resource field — a `Database` is
+    // not plain data and cannot cross the wire.
+    assert_fails_with(
+        r#"
+        import std::db::Database;
+        [derive(Wire)]
+        struct Snapshot { db: Database }
+        "#,
+        "is not plain data",
+    );
+}
+
+#[test]
+fn a_service_struct_owning_a_resource_is_rejected() {
+    // Backlog C9 (the defined v1 rejection): a `[service]` struct that owns a
+    // resource is itself a resource, and the generated dispatcher captures `self`
+    // into a per-`[rpc]` handler closure — which a resource cannot be (R9). The
+    // steer is the capture message; the fix is the module-level idiom.
+    assert_fails_with(
+        r#"
+        import std::db::Database;
+        import std::reactive::Signal;
+        [service(Client)]
+        struct Store {
+            [expose] count: Signal<i32>,
+            db: Database,
+        }
+        impl Store {
+            [rpc]
+            fun ping(self): i32 { 1 }
+        }
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+// --- §5 loan-only corollary: a module-level resource is process-lifetime, so it
+// can only be loaned; moving / `own`-passing / `drop`ing it is rejected.
+
+#[test]
+fn a_module_level_resource_move_into_a_local_is_rejected() {
+    assert_fails_with(
+        r#"
+        import std::print;
+        resource struct Res { tag: str }
+        let shared: Res = Res { tag = "global" };
+        fun steal() {
+            let mine = shared;
+            print(mine.tag);
+        }
+        fun main() { steal(); }
+        "#,
+        "module-level resource",
+    );
+}
+
+#[test]
+fn a_module_level_resource_own_argument_is_rejected() {
+    assert_fails_with(
+        r#"
+        resource struct Res { tag: str }
+        let shared: Res = Res { tag = "global" };
+        fun consume(own r: Res) {}
+        fun use_it() { consume(shared); }
+        fun main() { use_it(); }
+        "#,
+        "module-level resource",
+    );
+}
+
+#[test]
+fn a_module_level_resource_loan_is_accepted() {
+    // A method call and a bare (loan) parameter both borrow the global — accepted.
+    assert_compiles(
+        r#"
+        import std::print;
+        resource struct Res { tag: str }
+        impl Res { fun peek(self) { print(self.tag); } }
+        let shared: Res = Res { tag = "global" };
+        fun borrow_it(r: Res) { print(r.tag); }
+        fun use_it() {
+            shared.peek();
+            borrow_it(shared);
+        }
+        fun main() { use_it(); }
+        "#,
+    );
+}
+
+#[test]
+fn dropping_a_module_level_resource_is_rejected() {
+    // `drop(global)` is an `own`-move of a process-lifetime binding — rejected.
+    assert_fails_with(
+        r#"
+        import std::drop::drop;
+        resource struct Res { tag: str }
+        let shared: Res = Res { tag = "global" };
+        fun tear() { drop(shared); }
+        fun main() { tear(); }
+        "#,
+        "module-level resource",
+    );
+}

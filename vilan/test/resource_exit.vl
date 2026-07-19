@@ -1,0 +1,20 @@
+// A value-returning `main` that owns a resource must run its `drop` BEFORE it
+// exits (destruction.md §5/§7): `process.exit` does NOT run pending `finally`
+// blocks, so the compiler captures the exit code inside the drop scope, lets the
+// finally (teardown) run, and only then calls `process.exit`. The `teardown`
+// print therefore lands after `body` and before the process ends. Host-free, so
+// the interpreter equivalence gate checks it against `node`.
+import std::print;
+import std::drop::Drop;
+
+resource struct Guard { tag: str }
+impl Guard with Drop {
+	fun drop(&mut self) { print(self.tag); }
+}
+
+fun main(): i32 {
+	let guard = Guard { tag = "teardown" };
+	print("body");
+	7
+}
+main();

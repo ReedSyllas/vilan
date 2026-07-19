@@ -37,12 +37,15 @@ fun fresh_token(): str {
 
 // `[service(NotesClient)]` generates the typed client; `[expose]` mirrors
 // the note list to every connected client; each `[rpc]` method is callable
-// remotely. The bodies use the database directly — no injected hooks: the
-// service lives where its resources are.
+// remotely. The bodies reach the module-level `db` (below) directly by loan —
+// no injected hooks. The store holds only the reactive state it exposes: a
+// `Database` is a `resource`, so a struct owning one would be a resource too,
+// and the generated dispatcher captures the store into its per-`[rpc]` handler
+// closures (which a resource cannot be — R9). Process-lifetime state lives at
+// module scope; the store stays plain data.
 [service(NotesClient)]
 struct NotesStore {
 	[expose] notes: Signal<List<Note>>,
-	db: Database,
 }
 
 impl NotesStore {
@@ -53,19 +56,19 @@ impl NotesStore {
 		if username.len() < 2 || password.len() < 8 {
 			ret AuthOutcome { ok = false, token = "", reason = "username or password too short" };
 		}
-		match self.db.prepare("SELECT salt, password_hash FROM account WHERE username = ?").first([username]) {
+		match db.prepare("SELECT salt, password_hash FROM account WHERE username = ?").first([username]) {
 			Some(let row) => {
 				if row.text("password_hash") == hash_password(password, row.text("salt")) {
-					open_session(self.db, username)
+					open_session(db, username)
 				} else {
 					AuthOutcome { ok = false, token = "", reason = "wrong password" }
 				}
 			},
 			None => {
 				let salt = fresh_token();
-				self.db.prepare("INSERT INTO account (username, salt, password_hash) VALUES (?, ?, ?)")
+				db.prepare("INSERT INTO account (username, salt, password_hash) VALUES (?, ?, ?)")
 					.run([username, salt, hash_password(password, salt)]);
-				open_session(self.db, username)
+				open_session(db, username)
 			},
 		}
 	}
@@ -75,9 +78,9 @@ impl NotesStore {
 	// crash between the two can never announce state that was never stored.
 	[rpc]
 	fun add_note(self, token: str, title: str): i32 {
-		match session_user(self.db, token) {
+		match session_user(db, token) {
 			Some(let _user) => {
-				let id = self.db.prepare("INSERT INTO note (title, body) VALUES (?, ?)").run([title, ""]);
+				let id = db.prepare("INSERT INTO note (title, body) VALUES (?, ?)").run([title, ""]);
 				self.notes.set_with(|list| {
 					mut updated = list;
 					updated.push(Note { id = id, title = title, body = "" });
@@ -93,9 +96,9 @@ impl NotesStore {
 	// per-field drafts never re-send each other's text.
 	[rpc]
 	fun retitle_note(self, token: str, note_id: i32, title: str): i32 {
-		match session_user(self.db, token) {
+		match session_user(db, token) {
 			Some(let _user) => {
-				self.db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
+				db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
 				self.notes.set_with(|list| list.map(|note| {
 					if note.id == note_id {
 						Note { id = note.id, title = title, body = note.body }
@@ -112,9 +115,9 @@ impl NotesStore {
 	// Replaces a note's body.
 	[rpc]
 	fun rewrite_note(self, token: str, note_id: i32, body: str): i32 {
-		match session_user(self.db, token) {
+		match session_user(db, token) {
 			Some(let _user) => {
-				self.db.prepare("UPDATE note SET body = ? WHERE id = ?").run([body, note_id]);
+				db.prepare("UPDATE note SET body = ? WHERE id = ?").run([body, note_id]);
 				self.notes.set_with(|list| list.map(|note| {
 					if note.id == note_id {
 						Note { id = note.id, title = note.title, body = body }
@@ -131,9 +134,9 @@ impl NotesStore {
 	// Deletes a note; returns the id, or -1.
 	[rpc]
 	fun delete_note(self, token: str, note_id: i32): i32 {
-		match session_user(self.db, token) {
+		match session_user(db, token) {
 			Some(let _user) => {
-				self.db.prepare("DELETE FROM note WHERE id = ?").run([note_id]);
+				db.prepare("DELETE FROM note WHERE id = ?").run([note_id]);
 				self.notes.set_with(|list| list.filter(|note| note.id != note_id));
 				note_id
 			},
@@ -142,16 +145,30 @@ impl NotesStore {
 	}
 }
 
-// Boot: open (or create) the database, load the mirror once, and hand back
-// the store. Every later write goes SQL-first through the methods above.
+// The database is module-level: process lifetime, opened once at startup and
+// never dropped (destruction.md §5 — a serve-forever server's `Database` is
+// exactly this, the sanctioned home for a long-lived resource). The service and
+// its helpers reach it by loan — method calls and `&`-passing — and never move
+// it: a module-level resource is loan-only. Its `db.close()` runs only when the
+// process ends. Reachability keeps it out of the client bundle (nothing on the
+// client entry reaches it), so the browser never imports `node:sqlite`.
+let db: Database = open_database();
+
+// Open (or create) the database and ensure its schema — the one place the tables
+// are declared. Returns the handle to the module-level binding above.
+fun open_database(): Database {
+	let database = Database::open("notes.db");
+	database.exec("CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, username TEXT UNIQUE, salt TEXT, password_hash TEXT)");
+	database.exec("CREATE TABLE IF NOT EXISTS session (token TEXT PRIMARY KEY, username TEXT)");
+	database.exec("CREATE TABLE IF NOT EXISTS note (id INTEGER PRIMARY KEY, title TEXT, body TEXT)");
+	database
+}
+
+// Boot: load the mirror once from the already-open database and hand back the
+// store. Every later write goes SQL-first through the methods above.
 fun boot(): NotesStore {
-	let db = Database::open("notes.db");
-	db.exec("CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY, username TEXT UNIQUE, salt TEXT, password_hash TEXT)");
-	db.exec("CREATE TABLE IF NOT EXISTS session (token TEXT PRIMARY KEY, username TEXT)");
-	db.exec("CREATE TABLE IF NOT EXISTS note (id INTEGER PRIMARY KEY, title TEXT, body TEXT)");
 	NotesStore {
 		notes = Signal::new(load_notes(db)),
-		db = db,
 	}
 }
 

@@ -353,10 +353,14 @@ enum InvalidationViolation<'src> {
 /// and parameters), and the resource-typed *place* expressions (a `Field` /
 /// `Index` / `TupleIndex` whose value is itself a resource — R5's partial-move
 /// targets). Both are computed once (per-instantiation, memoized) so the scan
-/// itself is `&self`.
+/// itself is `&self`. `module_level_bindings` are the module-level `let`
+/// resources: process-lifetime, so consuming one (a move / `own`-pass) is
+/// rejected outright (destruction.md §5's loan-only corollary) — empty for the
+/// R11 instantiation scan, whose bindings are all in-body.
 struct MoveScan<'a> {
     resource_bindings: &'a HashSet<Id>,
     resource_value_places: &'a HashSet<Id>,
+    module_level_bindings: &'a HashSet<Id>,
 }
 
 /// A resource binding's move state on the path currently being scanned
@@ -411,6 +415,10 @@ enum ResourceMoveViolation {
     LoopMove { at: Id, binding: Id },
     /// R9: a closure / spawn capturing a resource binding or parameter.
     Capture { reference_id: Id, binding: Id },
+    /// §5 loan-only corollary: a consuming use (move / `own`-pass, `drop(x)`
+    /// included) of a module-level resource, which has process lifetime and can
+    /// only be loaned.
+    ModuleLevelMove { at: Id, binding: Id },
 }
 
 /// One generic instantiation to re-check under R11 (destruction.md §4): a
@@ -3186,6 +3194,32 @@ impl<'src> Analyzer<'src> {
     /// R1–R9 (destruction.md §4): the affine move checker. Classifies resource
     /// bindings once, scans every function and closure body for moves, then runs
     /// the R9 capture check and emits the collected violations.
+    /// The module-level `let` binding ids — those whose declaring scope is the
+    /// root (global) scope or a module body scope, never a function / closure /
+    /// block. Mirrors `Program::module_level_bindings` on the analyzer's live
+    /// data (the `Program` is not built until analysis finishes), so the loan-only
+    /// rule and later emission agree on which bindings are module-level.
+    fn module_level_binding_ids(&self) -> HashSet<Id> {
+        let mut module_scopes: HashSet<Id> = self
+            .scopes
+            .values()
+            .filter(|scope| scope.parent_id.is_none())
+            .map(|scope| scope.id)
+            .collect();
+        for module in self.modules.values() {
+            module_scopes.insert(module.body.1);
+        }
+        self.variables
+            .keys()
+            .copied()
+            .filter(|variable_id| {
+                self.expr_id_to_scope_id_map
+                    .get(variable_id)
+                    .is_some_and(|scope_id| module_scopes.contains(scope_id))
+            })
+            .collect()
+    }
+
     fn check_resource_moves(&mut self) {
         let resource_bindings = self.collect_resource_bindings();
         // No resource binding => no resource place (a resource-typed field lives
@@ -3197,9 +3231,17 @@ impl<'src> Analyzer<'src> {
         let resource_value_places = self.collect_resource_value_places();
         // Published for `compute_clone_sites` (R1: a resource never clones).
         self.resource_value_places = resource_value_places.clone();
+        // §5 loan-only corollary: the module-level resources (a subset of the
+        // module-level `let`s). Consuming one is rejected wherever a body reads it.
+        let module_level_bindings: HashSet<Id> = self
+            .module_level_binding_ids()
+            .into_iter()
+            .filter(|id| resource_bindings.contains(id))
+            .collect();
         let scan = MoveScan {
             resource_bindings: &resource_bindings,
             resource_value_places: &resource_value_places,
+            module_level_bindings: &module_level_bindings,
         };
         let violations = self.scan_bodies_for_moves(&scan);
         self.emit_resource_move_violations(violations);
@@ -4202,7 +4244,15 @@ impl<'src> Analyzer<'src> {
             // --- resource places (leaves) ---
             Expr::Local(binding) => {
                 if scan.resource_bindings.contains(&binding) {
-                    self.scan_move_touch(binding, expr_id, consuming, flow, loop_depth, violations);
+                    self.scan_move_touch(
+                        binding,
+                        expr_id,
+                        consuming,
+                        scan.module_level_bindings,
+                        flow,
+                        loop_depth,
+                        violations,
+                    );
                 }
             }
             // R5: a resource field/element access. Consuming it moves a resource
@@ -4476,10 +4526,21 @@ impl<'src> Analyzer<'src> {
         binding: Id,
         use_id: Id,
         consuming: bool,
+        module_level_bindings: &HashSet<Id>,
         flow: &mut MoveFlow,
         loop_depth: u32,
         violations: &mut Vec<ResourceMoveViolation>,
     ) {
+        // §5 loan-only corollary: a module-level resource is never moved, so a
+        // consuming use is rejected here and the binding is left owned — a later
+        // loan of the same global must not read as use-after-move.
+        if consuming && module_level_bindings.contains(&binding) {
+            violations.push(ResourceMoveViolation::ModuleLevelMove {
+                at: use_id,
+                binding,
+            });
+            return;
+        }
         if let Some(state) = flow.moved.get(&binding) {
             // A DEFINITE move => use-after-move. A `MaybeMoved` came from an
             // already-reported R7 divergence (or a terminal tail with no
@@ -5274,6 +5335,18 @@ impl<'src> Analyzer<'src> {
                         note: None,
                     }
                 }
+                ResourceMoveViolation::ModuleLevelMove { at, binding } => {
+                    let name = self.binding_name(binding);
+                    Error {
+                        span: **self.span_map.get(&at).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "`{name}` is a module-level resource — it has process lifetime and \
+                             cannot be moved; loan it with `&{name}` / `&mut {name}` or a method \
+                             call (`drop({name})` moves it, so it is rejected too)"
+                        ),
+                        note: None,
+                    }
+                }
             };
             self.diagnostics.push(error);
         }
@@ -5346,9 +5419,14 @@ impl<'src> Analyzer<'src> {
                 self.collect_instantiation_value_places(&resources, &mut memo);
             let (calls, closures) = self.r11_body_calls_and_closures(instance.callee);
             let violations = {
+                // A generic body's bindings are all in-body (parameters / locals);
+                // module-level resources never enter its delta set, so the loan-only
+                // corollary is inert here.
+                let no_module_level: HashSet<Id> = HashSet::new();
                 let scan = MoveScan {
                     resource_bindings: &resource_bindings,
                     resource_value_places: &resource_value_places,
+                    module_level_bindings: &no_module_level,
                 };
                 self.scan_instantiated_body(instance.callee, &closures, &scan)
             };
@@ -6057,6 +6135,20 @@ impl<'src> Analyzer<'src> {
                         format!(
                             "in `{name}`, `{binding_name}` is captured by a closure here — a \
                              closure cannot capture a resource"
+                        ),
+                    )
+                }
+                // Module-level resources are never in a generic body's delta set,
+                // so this cannot arise from an R11 instantiation scan (empty set);
+                // handled for exhaustiveness.
+                ResourceMoveViolation::ModuleLevelMove { at, binding } => {
+                    let binding_name = self.binding_name(*binding);
+                    (
+                        *at,
+                        "a module-level resource is moved",
+                        format!(
+                            "in `{name}`, the module-level resource `{binding_name}` is moved here \
+                             — it can only be loaned"
                         ),
                     )
                 }

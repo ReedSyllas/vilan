@@ -9,10 +9,14 @@
 // sites.
 
 import pkg::option::Option::{ self, Some, None };
+import pkg::drop::Drop;
 
 /// An open database handle (`node:sqlite`'s DatabaseSync — synchronous, the
-/// right shape for a single-threaded server loop over local storage).
-external struct Database;
+/// right shape for a single-threaded server loop over local storage). A
+/// `resource`: it moves rather than copies, and its `Drop` (below) closes the
+/// underlying handle at the owner's scope end. A module-level `Database` is
+/// process-lifetime and never drops — the serve-forever server idiom.
+resource external struct Database;
 
 /// A prepared statement (reusable; parameters bind per call).
 external struct Statement;
@@ -32,6 +36,22 @@ impl Database {
 
 	[extern(method)]
 	external fun prepare(self, sql: str): Statement;
+}
+
+/// Closes the underlying `node:sqlite` handle — the one host operation with no
+/// public surface. It is reachable only from `Database`'s `Drop` (below), so a
+/// handle closes exactly once, at teardown. There is no public `close()` to
+/// fall out of sync with the destructor; `drop(db)` is the early form.
+[extern("__db_close")]
+external fun close_handle(database: Database): void;
+
+impl Database with Drop {
+	/// Runs at the owner's scope end (or at an explicit `drop(db)`): closes the
+	/// handle through the `&mut self` loan, before the value is destroyed.
+	/// Synchronous and context-free, as a destructor must be.
+	fun drop(&mut self) {
+		close_handle(self);
+	}
 }
 
 /// Parameter spreads and column reads need host glue (`stmt.run(...params)`,

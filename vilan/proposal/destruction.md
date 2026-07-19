@@ -175,7 +175,11 @@ second-class view (`self`/`&`/`&mut` conventions), no ownership change, rule-4 p
   — moving into `drop(db)` destroys at its (immediate) scope end. No public `close()`
   surfaces to keep in sync with destructors, no double-close states.
 - **Module-level resources never drop** (process lifetime; Rust-statics precedent;
-  documented — a serve-forever app's `Database` is exactly this).
+  documented — a serve-forever app's `Database` is exactly this). Corollary (stated
+  2026-07-19, S4a finding): a module-level resource is **loan-only** — moving it into a
+  local binding (or an `own` argument) would hand a process-lifetime resource to a
+  droppable owner, closing the shared handle mid-run; rejected ("a module-level
+  resource has process lifetime — loan it, never move it").
 - **Panic during unwind:** a `drop` that panics while unwinding replaces the in-flight
   error (JS `finally` semantics — documented; a native backend would abort, also
   documented).

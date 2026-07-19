@@ -153,6 +153,11 @@ resources yet).
   panicking during unwind replaces the in-flight error (JS `finally` semantics —
   document).
 - **Corpus**: new `test/resource.vl` (+ golden, debug binary rebuilt first).
+- **S4a residue (recorded 2026-07-19):** the §5 loan-only check covers every
+  function-body consuming use of a module-level resource; a module-*initializer*
+  global→global move (`let b: Res = a` at module scope) is not scanned — benign
+  (module globals never drop, so no double-close), a diagnostic-completeness
+  residue, not soundness.
 - **S2b implementation findings (settled 2026-07-19, §8 amended):** a context-requiring
   `drop` body is REJECTED in v1 (the helper cannot thread `$ctx`; the "joins the wave"
   sentence was unimplementable as written); platform coloring of drops needs a

@@ -83,27 +83,35 @@ struct Note {
 ## The service: next to its resources
 
 [`src/store.vl`](https://github.com/ReedSyllas/vilan/blob/main/vilan/examples/walkthrough/src/store.vl)
-is the heart of the app, and it holds the database **directly**:
+is the heart of the app. Its database is **module-level** — opened once at
+startup, process-lifetime, closed only when the process ends:
 
 ```vilan,fragment
+// Process lifetime: opened once, never dropped (a serve-forever server's
+// `Database` is exactly this). Every method reaches it by loan.
+let db: Database = open_database();
+
 [service(NotesClient)]
 struct NotesStore {
 	[expose] notes: Signal<List<Note>>,
-	db: Database,
 }
 ```
 
-`[service(NotesClient)]` generates the typed client; `[expose]` mirrors
-the note list to every connected client; each `[rpc]` method is callable
-remotely — and its body just uses `self.db`. Every write method has the
-same rhythm: check the session, write SQL, then update the signal:
+Why module-level, and not a field on `NotesStore`? A `Database` is a
+`resource`: it has a single owner, it *moves* rather than copies, and it closes
+itself when its owner's scope ends. A struct that owns a resource is itself a
+resource — and `[service]` generates a dispatcher that captures the store into
+one closure per `[rpc]` method, which a resource can't be (a closure capturing a
+resource is the double-owner bug the class exists to prevent). So the long-lived
+database lives at module scope, and the store holds only the reactive state it
+exposes. Each `[rpc]` body reaches `db` directly, by loan:
 
 ```vilan,fragment
 [rpc]
 fun retitle_note(self, token: str, note_id: i32, title: str): i32 {
-	match session_user(self.db, token) {
+	match session_user(db, token) {
 		Some(let _user) => {
-			self.db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
+			db.prepare("UPDATE note SET title = ? WHERE id = ?").run([title, note_id]);
 			self.notes.set_with(|list| list.map(|note| {
 				if note.id == note_id {
 					Note { id = note.id, title = title, body = note.body }
@@ -118,12 +126,16 @@ fun retitle_note(self, token: str, note_id: i32, title: str): i32 {
 }
 ```
 
-Two things worth pausing on:
+Three things worth pausing on:
 
+- **A module-level resource is loan-only.** `db.prepare(...)` and
+  `session_user(db, ...)` borrow it; the compiler rejects taking ownership
+  away — moving it (`let mine = db`) or `drop(db)` — because process-lifetime
+  state has no scope to be handed off to. It simply lives for the whole run.
 - **No injected hooks.** The service used to be forced into a shared
   package that couldn't name `Database`, so its methods called closures
   the server installed at boot. Platform coloring removed the need: the
-  service lives with its resources, the browser build takes only the
+  service lives with its database, the browser build takes only the
   generated stub and contract hash from this module, and the bodies stay
   server-side because only the server entry reaches them ([Services &
   RPC](services.md#where-the-service-lives)).
@@ -139,8 +151,8 @@ edit never re-sends the other's text.
 Auth is register-or-login in one rpc: an unknown username creates the
 account (pbkdf2-hashed password), a known one checks it, and either path
 opens a session row whose token identifies later calls ([Services &
-RPC](services.md#authentication)). `boot()` at the bottom of the module
-opens the database, creates the tables, and loads the mirror once.
+RPC](services.md#authentication)). `open_database()` creates the tables at
+startup; `boot()` loads the mirror once from the already-open database.
 
 ## The server entry: read, boot, serve
 

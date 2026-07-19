@@ -144,6 +144,7 @@ fn extern_helper(symbol: &str) -> Option<&'static str> {
         "__db_get",
         "__db_column",
         "__db_is_null",
+        "__db_close",
         "__local_get",
         "__session_get",
         "__router_path",
@@ -284,6 +285,9 @@ fn helper_source(name: &str) -> &'static str {
         "__db_is_null" => {
             "function __db_is_null(row, name) {\n\treturn row[name] === null || row[name] === undefined;\n}"
         }
+        // `Database`'s `Drop` closes the handle (destruction.md §9). No public
+        // `close()` surfaces this — the destructor is the only caller.
+        "__db_close" => "function __db_close(database) {\n\tdatabase.close();\n}",
         // Cryptographically random bytes.
         "__random_bytes" => {
             "function __random_bytes(length) {\n\treturn crypto.getRandomValues(new Uint8Array(length));\n}"
@@ -668,10 +672,6 @@ enum TailDisposition {
     /// — if it diverges (`ret`/`jump`) — runs as-is (`push_result_or_divergence`),
     /// inside the drop scope so teardown precedes the branch's result.
     ResultOrDivergence(String),
-    /// The entry `main`: a non-void tail forwards to `process.exit` on a host that
-    /// has one (the exit code), else runs as a plain statement — INSIDE the drop
-    /// scope so teardown precedes exit.
-    MainExit,
 }
 
 impl<'src> Transformer<'src> {
@@ -827,15 +827,42 @@ impl<'src> Transformer<'src> {
 
         let saved_instance = self.enter_instance(main_fn.id, Vec::new());
         // A `main` owning resource locals is restructured into `try`/`finally`
-        // teardown (destruction.md §7), its exit-code tail handled inside the drop
-        // scope so teardown precedes exit; one owning none emits exactly as before.
+        // teardown (destruction.md §7); one owning none emits exactly as before.
+        // `process.exit` does NOT run pending `finally` blocks, so a non-void exit
+        // code is captured to a temp *inside* the drop scope, the finallys (drops)
+        // run, and only THEN does `process.exit` fire — teardown genuinely precedes
+        // exit. A void tail (or a host without `process.exit`, e.g. the browser)
+        // needs no capture: teardown runs and `main` falls through, the tail's side
+        // effects preserved.
         let mut t_main_fn_body = if self.scope_needs_drops(&main_fn.body.0) {
-            self.walk_scope_body(
-                &main_fn.body.0,
-                0,
-                main_fn.body.1,
-                TailDisposition::MainExit,
-            )
+            let tail_is_void = matches!(
+                self.program.entity_map.get(&main_fn.body.1),
+                Some(Expr::Void) | None
+            );
+            if tail_is_void || !self.program.platform.has_process_exit() {
+                self.walk_scope_body(&main_fn.body.0, 0, main_fn.body.1, TailDisposition::Discard)
+            } else {
+                let exit_temp = self.ng.next_name();
+                let mut body = vec![js::Node::LetVariable(js::Variable {
+                    name: exit_temp.clone(),
+                    value: Box::new(js::Node::Void),
+                })];
+                let wrapped = self.walk_scope_body(
+                    &main_fn.body.0,
+                    0,
+                    main_fn.body.1,
+                    TailDisposition::AssignTo(exit_temp.clone()),
+                );
+                body.extend(wrapped);
+                body.push(js::Node::Call(
+                    Box::new(js::Node::Property(
+                        Box::new(js::Node::Local("process".to_string())),
+                        "exit".to_string(),
+                    )),
+                    vec![js::Node::Local(exit_temp)],
+                ));
+                body
+            }
         } else {
             let mut t_main_fn_body = self.walk_list(&main_fn.body.0);
 
@@ -3846,20 +3873,6 @@ impl<'src> Transformer<'src> {
             )),
             TailDisposition::ResultOrDivergence(name) => {
                 self.push_result_or_divergence(&name, node, out)
-            }
-            TailDisposition::MainExit => {
-                let statement = if self.program.platform.has_process_exit() {
-                    js::Node::Call(
-                        Box::new(js::Node::Property(
-                            Box::new(js::Node::Local("process".to_string())),
-                            "exit".to_string(),
-                        )),
-                        vec![node],
-                    )
-                } else {
-                    node
-                };
-                out.push(statement);
             }
         }
     }
