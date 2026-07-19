@@ -160,14 +160,14 @@ The binding was moved (bound to another name, passed to an `own`
 parameter, returned, or matched by value) and then used again. The note
 points at the move. Loan it instead (`&x` / `&mut x`, or a method call),
 or, if you really need two owners, restructure with `Option` + `take`.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"cannot move a resource field out of a live aggregate — … no partial moves …"**
 `let x = s.db`, or passing / returning `s.db` by value, would move a
 resource out of a struct that is still alive — v1 has no partial moves.
 Loan the field (`&s.db`, `&mut s.db`, `s.db.method(…)`), or make the field
 an `Option<…>` and `take()` it out.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`…` is moved on one path through this branch but not another — …"**
 An `if`/`match` moves the binding on some paths and not others, so its
@@ -175,13 +175,13 @@ end-of-scope ownership isn't static (v1 has no runtime drop flags). Move it
 on *every* path, or on none — or hold it in an `Option` and `take()` on the
 path that consumes it. A diverging leg (one that `ret`s or `jump`s out) is
 exempt: it never reaches the merge.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`…` is declared outside this loop and moved inside it — …"**
 Moving a binding from a loop body would move it again on the next
 iteration. Move a value declared *inside* the loop, or loan the outer one
 (`&x` / `&mut x`).
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`…` is a module-level resource — it has process lifetime and cannot be moved …"**
 A top-level `let` resource lives for the whole process and never drops (the
@@ -199,7 +199,7 @@ scope; capturing it would give the closure a second owner. Pass a loan into
 the call, or give ownership to the struct that owns the closure's lifetime.
 (A closure's own *parameter* is per-call, not a capture — injected
 `context`-clause bodies are unaffected.)
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`…` is not move-clean when instantiated with a resource — …"**
 A generic function or method was called with a resource type argument
@@ -220,27 +220,27 @@ clean generic moves each such value exactly once (as `Option::unwrap(self):
 T` does), never copying, capturing, or forwarding it to the sink;
 `drop(concrete)` on a concrete resource *is* the destructor. Instantiating
 the same generic at a data type is unaffected.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"the resource `…` cannot be used where `any` is expected — …"**
 `any` is a data sink, and a resource must keep its single owner: passing
 one to `print`, binding it to `let x: any`, or returning it as `any`
 would launder the discipline away. Debug-print the resource's fields
 instead.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`…` cannot hold the resource `…` — a native container's internals are host code …"**
 `List`, `Map`, `Set`, and the external generics (`Shared`, `Task`,
 `Promise`, `Context`) can't hold a resource in v1 — the move checker
 can't see inside host storage. `Option` is the sanctioned resource
 container; or keep the resource in a struct field.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"field `…` of `[derive(Wire)]` / `[derive(Hashable)]` / `[derive(PartialEq)]` type `…` is the resource `…` — …"**
 A resource is not plain data: it cannot be sent over the wire, hashed by
 value, or compared by copy. Drop it from the derived type, or carry a
 plain-data handle (an id, a key) in its place.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`…` implements `Drop` but is not a resource — … declare it a `resource` …"**
 `Drop` — the destruction hook — may be implemented only for a `resource`
@@ -248,14 +248,14 @@ type. A destructor without move discipline is exactly the double-close bug:
 copy the value and each copy would run `drop`. Declare the type `resource`
 so it moves instead of being copied. (Plain-data, framework-driven teardown
 uses the cooperative `Disposable` protocol, not `Drop`.)
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`drop` for `…` is async — teardown must be synchronous …"**
 A `drop` body may not be `async`, nor await (call an async function): a
 destructor runs synchronously in v1. Cancel owned tasks through an
 `OwnedNursery` — whose own `drop` cancels them — rather than awaiting them.
 Awaited teardown is a future design.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 **"`drop` for `…` requires an ambient context — teardown must be context-free …"**
 A `drop` body reached something that needs an ambient context — most often a
@@ -273,7 +273,7 @@ mutably at each scope end and then destroys the fields, so a by-value `self`
 (which could move the value out and keep it alive), a `&self` receiver (which
 can't run the mutating teardown), an extra parameter (the inserted call
 supplies only the receiver), or a value-returning body are each rejected.
-→ [The memory model](../tour/memory-model.md)
+→ [Resources](../tour/resources.md)
 
 ## Async
 
