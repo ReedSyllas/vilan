@@ -1,12 +1,17 @@
 # Deterministic destruction — the owned-resource class (backlog C4)
 
-> **Status: DRAFT 2026-07-18 — design for review, nothing implemented.** The keystone of
+> **Status: ACCEPTED 2026-07-18 — reviewed same day; every §14 call and the companion's
+> §8 ratified per recommendation. Build sequence: `destruction-impl-plan.md`. Nothing
+> implemented yet.** The keystone of
 > backlog §C: `memory-management-rev-1.md` deferred destruction behind a tripwire ("revisit
 > before the first type with a non-memory drop obligation targets JS") — std has since grown
 > several (`Database` has no `close`, sockets and timers lean on process exit, task teardown
 > is manual). This proposal answers the tripwire. It also *specifies* C1 (`Weak<T>`) against
 > the counted tier (§10) — C1 ships with counting, not with this v1 — and leaves C2 folded
-> into F4's native arc, per `backlog-2026-07-18.md`.
+> into F4's native arc, per `backlog-2026-07-18.md`. **Companion: `claims-and-epochs.md`**
+> (2026-07-18) states the one law behind the whole model and records the closure decision
+> — C4 is the **last major change** to the memory model; its two Tier-2 clarifications
+> (`Weak.get`, the trap law) are folded into §10 below.
 
 ## 1. Why now
 
@@ -257,11 +262,15 @@ idiom R7 pushes toward.
   ```
 
   `enter` runs its body under `ambient_nursery.run(self.nursery, ..)` — Part B's existing
-  registration machinery, minus the join. Drop cancels: in-flight bridged IO aborts,
-  children are already absorbed (never unhandled). Because a detached nursery never
-  joins, its children keep **free-task failure reporting** (recommendation for (d)):
-  cancellation echoes stay silent, real failures still reach the console with their spawn
-  origin — dropping an owner must not become a silent error sink. This is what the SSE
+  registration machinery, minus the join. Drop cancels: in-flight bridged IO aborts.
+  Reporting needs **new machinery, not registration as-is**: under shipped semantics a
+  nursery-owned child never default-reports (absorption exists for the join to re-raise
+  — `task.vl`'s "no `await`, no enclosing nursery" rule), so a never-joining nursery
+  would be exactly the silent error sink decision (d) forbids. `enter`'s nursery
+  therefore runs in **detached mode**: a child failure that is not a cancellation echo
+  takes the free-task reporting path (console, spawn origin) instead of being stored for
+  a join, and does not cancel its siblings — children are independent; ownership is
+  lifetime, not fate-sharing. Cancellation echoes stay silent. This is what the SSE
   pump and `Draft.commit` become owned by, and what lets J4's **free-spawn lint** finally
   state its rule: *a spawn happens inside a `nursery` extent or an `OwnedNursery.enter` —
   anything else is a lint.*
@@ -278,9 +287,31 @@ idiom R7 pushes toward.
   ride the Tier-1 machinery* (scope-end, moves) — the counting itself is what JS never
   needed and native requires (F3's "ARC for `Shared`"). An optional JS *counted mode*
   (debug builds) is recorded as a verification tool, not a semantic.
+- **The dynamic trap law matches static rule 4** (from `claims-and-epochs.md` §5b —
+  rev-1's "a `write()` while any other view is live traps" is *stricter* than the static
+  rule it claims to mirror, and the asymmetry must not fossilize into the native tier):
+  statics deliberately permit aliased views and content writes (two `&mut` to one
+  scalar; sibling-field writes under a field view) and forbid only *invalidation*. The
+  dynamic check enforces the same event set: a cell-value reassignment,
+  geometry-bumping operation, or death under another live view into the cell traps;
+  overlapping content writes never do. C2's runtime generations key off the same
+  events, and C6's inferred geometry effects (`bumps`, the twin of `borrows`) are what
+  classify a method call through `write()` — one law, one event classifier, two
+  checkers.
 - **`Weak<T>` (C1)**: `Shared::downgrade(&self): Weak<T>`; `Weak.upgrade(): Option<Shared<T>>`
   — `Some` (retaining) while strong > 0, `None` after, *deterministically*. Ships with
-  counting; the 2026-07-07 rejection of GC-timing `WeakRef` stands.
+  counting; the 2026-07-07 rejection of GC-timing `WeakRef` stands. **Also
+  `Weak.get(&self): Option<&T> borrows self`** (from `claims-and-epochs.md` §5a): the
+  scoped, non-retaining twin of `upgrade`, mirroring `Arena.get`'s specified form
+  (backlog C8 migrates std's interim copy-returning `get` to it) — every dynamic alias
+  then answers the same verb with the same `Option<&T>` shape. The view is second-class and
+  rule-4-policed; on native it pins the cell for its lexical extent (a scoped
+  retain/release pair — a last-strong release inside that extent defers the cell's drop
+  to the view's block end: deterministic, merely later), on JS it is a plain read.
+  `upgrade` is for keeping the cell alive; `get` is for touching it. This also delivers
+  the second store rev-1's deferred `Store<T>` trait was waiting for (`Shared`/`Weak`
+  is a one-slot counted arena: `clone` = retain, `Weak` = the handle) — extract the
+  trait when Tier 2 builds, not before.
 - **Counted closure environments**: a closure capturing a counted handle holds a retain,
   released when the environment dies — which requires environments themselves to be
   counted objects (Swift's model). This is the single reason `Shared` cannot join Tier 1:
@@ -310,7 +341,11 @@ idiom R7 pushes toward.
 4. **S4 — std adoption**: `Database` + `OwnedNursery` (+ e2e: dropping an owner cancels
    an in-flight sleeping task — the cancellation.rs shape); the J4 free-spawn lint if the
    rule states cleanly.
-5. **S5 — spec §6.x "Resources and destruction" + tour chapter + errors appendix.**
+5. **S5 — spec §6.x "Resources and destruction" + tour chapter + errors appendix.** Also
+   re-words spec §6.4's implementation note and §6.7's "exclusive" parenthetical to the
+   reconciled trap law (§10 — trap on invalidation, not on overlap), and — per the
+   ratified §8(c) of `claims-and-epochs.md` — opens the memory chapter with the
+   claims/epochs law.
 
 ## 13. Pin matrix (S1/S2 acceptance)
 
@@ -327,6 +362,10 @@ reject, drop order (locals reverse; fields reverse; body-before-fields), early `
 
 ## 14. Open questions — user calls wanted before S1
 
+> **All calls made 2026-07-18** — recommendations ratified as written. (e), which
+> carried no recommendation: the draft's working name **`OwnedNursery`** stands; the
+> rename window closes when S4 ships it. Items kept below for the record.
+
 - **(a) Spelling**: `resource` as a prefix modifier (`resource struct`, `resource external
   struct`) — or another word (`owned`?). Recommendation: `resource`.
 - **(b) Naming**: trait `Drop { fun drop(&mut self) }` + std `drop<T>(own value)`.
@@ -341,3 +380,7 @@ reject, drop order (locals reverse; fields reverse; body-before-fields), early `
   as v1.5.
 - **(g) Tier 2 wholly deferred to the native arc** (recommendation) — including `Weak`,
   whose C1 blocker refines from "C4" to "counting".
+- **(h) The two Tier-2 clarifications from `claims-and-epochs.md`** — `Weak.get` and the
+  trap-law reconciliation (§10). Recommendation: ratify with this proposal; both are
+  spec-only until the native arc builds them. (`claims-and-epochs.md` §8 carries its own
+  three decisions — the closure rule itself, C7 wire handles, and where the frame lives.)
