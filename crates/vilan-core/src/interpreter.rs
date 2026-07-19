@@ -975,6 +975,32 @@ impl Interpreter {
                     None => Ok(option_none()),
                 }
             }
+            // `Option.take` / `Option.replace` (destruction.md §6): snapshot the
+            // slot (a structural copy — the payload MOVES out), then rewrite it in
+            // place to `None` / `Some(value)`. Mirrors `__option_take` /
+            // `__option_replace` in `helper_source`.
+            "__option_take" => {
+                let slot = expect_array(&take(0))?;
+                let old: Vec<Value<'a>> = slot.borrow().clone();
+                {
+                    let mut cell = slot.borrow_mut();
+                    cell.truncate(1);
+                    cell[0] = Value::Number(1.0);
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(old))))
+            }
+            "__option_replace" => {
+                let slot = expect_array(&take(0))?;
+                let value = take(1);
+                let old: Vec<Value<'a>> = slot.borrow().clone();
+                {
+                    let mut cell = slot.borrow_mut();
+                    cell.clear();
+                    cell.push(Value::Number(0.0));
+                    cell.push(value);
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(old))))
+            }
             // `asset::emit` — the const-only compile-time effect: live only
             // under `eval_const` (const-eval.md §3); anywhere else (macro
             // expansion, the equivalence runner) it is a capability miss.

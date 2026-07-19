@@ -1,0 +1,103 @@
+// Deterministic destruction (destruction.md §5/§6, C4 S3): `Option.take`/`replace`,
+// the `drop<T>(own)` sink, `own`-parameter drops, the conditional-teardown idiom,
+// and the resource match-move — every teardown prints so the ORDER is visible.
+// Synchronous + host-free, so the interpreter equivalence gate checks it against
+// `node` too (exercising the new `__option_take`/`__option_replace` helper arms).
+import std::print;
+import std::option::Option::{ self, Some, None };
+import std::drop::{ Drop, drop };
+
+resource struct Res {
+	tag: str,
+}
+impl Res with Drop {
+	fun drop(&mut self) {
+		print(i"drop {self.tag}");
+	}
+}
+
+resource enum Holder {
+	Full(Res),
+	Empty,
+}
+
+// `take`/`replace` on data: they are ordinary std surface, useful for data too.
+fun data_take_replace() {
+	mut a = Some(5);
+	let taken = a.take();
+	print(i"take-data taken={taken.unwrap_or(0)} left_none={a.is_none()}");
+	mut b = Some(1);
+	let old = b.replace(2);
+	print(i"replace-data old={old.unwrap_or(0)} now={b.unwrap_or(0)}");
+}
+
+// `take` moves a resource payload into its new owner, which drops it at ITS scope
+// end; the emptied slot (`None`) drops nothing.
+fun take_resource() {
+	mut opt: Option<Res> = Some(Res { tag = "taken" });
+	{
+		let moved = opt.take();
+		print("take-res in-block");
+	}
+	print("take-res after-block");
+}
+
+// The conditional-teardown idiom (destruction.md §6), both arms.
+fun conditional_teardown() {
+	mut full: Option<Res> = Some(Res { tag = "cond" });
+	match full.take() {
+		Some(let c) => drop(c),
+		None => {}
+	}
+	print("cond after-some");
+	mut empty: Option<Res> = None;
+	match empty.take() {
+		Some(let c) => drop(c),
+		None => print("cond none-arm"),
+	}
+}
+
+// An `own` resource parameter not moved out drops at the callee's scope end.
+fun sink(own r: Res) {
+	print(i"sink {r.tag}");
+}
+
+// An `own` parameter moved out on every path (returned) drops NOWHERE in the
+// callee — the caller owns and drops it once.
+fun passthrough(own r: Res): Res {
+	print("passthrough");
+	r
+}
+
+// Matching a resource by value consumes it; the capture is the move, and moving
+// the payload out of the arm hands it to a new owner whose drop is visible.
+fun match_move() {
+	let holder = Holder::Full(Res { tag = "held" });
+	let extracted = match holder {
+		Holder::Full(let inner) => inner,
+		Holder::Empty => Res { tag = "default" },
+	};
+	print(i"match extracted {extracted.tag}");
+	drop(extracted);
+}
+
+fun main() {
+	data_take_replace();
+	print("--");
+	take_resource();
+	print("--");
+	conditional_teardown();
+	print("--");
+	sink(Res { tag = "sunk" });
+	print("sink returned");
+	let back = passthrough(Res { tag = "through" });
+	print("passthrough returned");
+	drop(back);
+	print("--");
+	match_move();
+	print("--");
+	let db = Res { tag = "immediate" };
+	print("before drop");
+	drop(db);
+	print("after drop");
+}

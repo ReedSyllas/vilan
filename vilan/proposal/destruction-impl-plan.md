@@ -180,6 +180,14 @@ resources yet).
   (it IS the drop site; special-known like the `Shared` intrinsics). Pins: concrete
   own-param drops (runtime order), generic zero-move rejected at a resource
   instantiation + accepted at data, `drop(db)` early teardown order.
+- **Ruling (2026-07-19, S3 finding):** the sink lowers by CALL-SITE rewrite to the
+  concrete `__drop` helper; inside a generic body `drop(x)` on a still-`T`-typed value
+  has no concrete destructor (erased emission), so R11's per-instantiation re-check
+  treats a drop-sink call with a generic-typed argument as dirt **under a resource
+  instantiation** ("the erased body cannot destroy a `T` — move it out to the caller")
+  — data instantiations keep the legitimate generic consume-idiom (no-op is correct
+  for data). Sink-call arguments also seed the §8 synthetic coloring edges (a
+  `@process` drop reached only via `drop(db)` must still color/reject).
 
 - **Intrinsics** `take(&mut self): Option<T>` / `replace(&mut self, value: T):
   Option<T>` — compiler-known (the `Shared` intrinsics pattern): analyzer registration,

@@ -32,6 +32,19 @@ impl Option<type T> with Try<T, void> {
 impl Option<type T> with Lift {}
 
 impl Option<type T> {
+	/// Take the value out, leaving `None` behind: `Some(v)` becomes `None` and
+	/// yields `Some(v)`; `None` yields `None` (and stays `None`). This is the one
+	/// sanctioned partial move for a resource field — `self.slot.take()` moves a
+	/// resource out of a live aggregate (destruction.md §5/§6) — and the core of
+	/// the conditional-teardown idiom `match opt.take() { Some(let c) => drop(c),
+	/// None => {} }`. Useful for data too.
+	external fun take(&mut self): Option<T>;
+
+	/// Put `value` in and return the old contents: the slot becomes `Some(value)`
+	/// and yields whatever was there before (`Some(old)` or `None`). The caller
+	/// then owns the old value.
+	external fun replace(&mut self, value: T): Option<T>;
+
 	fun is_some(self): bool {
 		self is Some(_)
 	}

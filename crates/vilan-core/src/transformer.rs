@@ -317,6 +317,29 @@ fn helper_source(name: &str) -> &'static str {
         "__list_pop" => {
             "function __list_pop(list) {\n\treturn list.length === 0 ? [ 1 ] : [ 0, list.pop() ];\n}"
         }
+        // `Option.take(&mut self): Option<T>` — snapshot the slot (a structural
+        // copy, not a deep clone: the payload MOVES out), then rewrite it to `None`
+        // in place so the caller's binding sees the change. `[0, v]` -> the slot
+        // becomes `[1]`, `[0, v]` is returned; `[1]` -> stays `[1]`.
+        "__option_take" => {
+            "function __option_take(slot) {\n\
+             \tconst old = slot.slice();\n\
+             \tslot.length = 1;\n\
+             \tslot[0] = 1;\n\
+             \treturn old;\n\
+             }"
+        }
+        // `Option.replace(&mut self, value): Option<T>` — snapshot the slot, then
+        // rewrite it to `Some(value)` in place; the old contents are returned.
+        "__option_replace" => {
+            "function __option_replace(slot, value) {\n\
+             \tconst old = slot.slice();\n\
+             \tslot[0] = 0;\n\
+             \tslot[1] = value;\n\
+             \tslot.length = 2;\n\
+             \treturn old;\n\
+             }"
+        }
         // `Map.get(key): Option<V>` — returns the `Option` array form, cloning the
         // value so the result can't alias the map (value semantics).
         "__map_get" => {
@@ -577,6 +600,7 @@ struct Transformer<'src> {
     list_new_fn_id: Option<Id>,
     list_push_fn_id: Option<Id>,
     panic_fn_id: Option<Id>,
+    drop_fn_id: Option<Id>,
     program: &'src Program<'src>,
     required_functions: IndexMap<Id, js::Node<'src>>,
     // Functions whose body is currently being walked. A recursive (or mutually
@@ -711,6 +735,7 @@ impl<'src> Transformer<'src> {
             list_new_fn_id: program.list_new_fn_id,
             list_push_fn_id: program.list_push_fn_id,
             panic_fn_id: program.panic_fn_id,
+            drop_fn_id: program.drop_fn_id,
             program,
             required_functions: IndexMap::new(),
             emitting: HashSet::new(),
@@ -1590,6 +1615,28 @@ impl<'src> Transformer<'src> {
                                 })),
                                 Vec::new(),
                             ));
+                        }
+                        // `drop(x)` — the std early-teardown sink (destruction.md
+                        // §6), rewritten by the concrete argument type at THIS
+                        // (possibly monomorphized) site: a resource lowers to its
+                        // `__drop` helper (destructor, then fields, reverse order);
+                        // data is a no-op that still evaluates the argument for its
+                        // effects. Erasure forces the rewrite here — the generic
+                        // sink body cannot drop instantiation-conditionally.
+                        if Some(target_id) == self.drop_fn_id {
+                            let arg_node = args.into_iter().next().unwrap_or(js::Node::Void);
+                            if let Some(argument_id) = function_call.argument_ids.first().copied()
+                                && let Some(type_id) = self
+                                    .drop_argument_type_id(argument_id)
+                                    .map(|t| self.resolve_type_id(t))
+                                && let Some(helper) = self.ensure_drop_helper(type_id)
+                            {
+                                return Some(js::Node::Call(
+                                    Box::new(js::Node::Local(helper)),
+                                    vec![arg_node],
+                                ));
+                            }
+                            return Some(arg_node);
                         }
                         // A call to a generic function/method is compiled to a
                         // specialized instance chosen by its concrete type arguments
@@ -3018,6 +3065,24 @@ impl<'src> Transformer<'src> {
                     args.collect(),
                 )
             }
+            // `opt.take()` / `opt.replace(v)` (destruction.md §6): the receiver is
+            // the `&mut self` slot (a JS array, mutated in place so the caller's
+            // binding sees the change). Each snapshots the old contents, rewrites
+            // the slot to `None` / `Some(value)`, and returns the snapshot.
+            Intrinsic::OptionTake => {
+                self.used_helpers.insert("__option_take");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__option_take".to_string())),
+                    vec![args.next().unwrap_or(js::Node::Void)],
+                )
+            }
+            Intrinsic::OptionReplace => {
+                self.used_helpers.insert("__option_replace");
+                js::Node::Call(
+                    Box::new(js::Node::Local("__option_replace".to_string())),
+                    args.collect(),
+                )
+            }
             Intrinsic::ParseI32 => {
                 self.used_helpers.insert("__parse_i32");
                 js::Node::Call(
@@ -3338,6 +3403,12 @@ impl<'src> Transformer<'src> {
             }
             body
         };
+        // An `own` resource parameter not moved out drops at the body's scope end
+        // (destruction.md §6). Its `finally` wraps the WHOLE body — outside any
+        // local teardown — so parameters drop last (declared before the locals =>
+        // reverse order after them), and `ret` / a thrown panic leave through it.
+        // A function with no such parameter emits exactly as above.
+        let body = self.wrap_own_param_drops(function, body);
         js::Node::Function(js::Function {
             name,
             parameters,
@@ -3348,6 +3419,39 @@ impl<'src> Transformer<'src> {
                     .as_ref()
                     .is_some_and(|instance| instance.is_async),
         })
+    }
+
+    /// Wrap a function body in a `try`/`finally` that drops its owned resource
+    /// parameters (destruction.md §6) in reverse declaration order, or return the
+    /// body unchanged when it has none — which every resource-free program does,
+    /// keeping its output byte-identical. The parameter type ids match the glue
+    /// `build_drop_glue` seeded from the same `parameters` table.
+    fn wrap_own_param_drops(
+        &mut self,
+        function: &Function<'src>,
+        body: Vec<js::Node<'src>>,
+    ) -> Vec<js::Node<'src>> {
+        let param_drops: Vec<(Id, TypeId)> = function
+            .parameters
+            .iter()
+            .filter(|parameter_id| self.program.dropped_bindings.contains(parameter_id))
+            .filter_map(|parameter_id| {
+                let type_id = self.program.parameters.get(parameter_id)?.type_id;
+                self.type_drops_nontrivially(type_id)
+                    .then_some((*parameter_id, type_id))
+            })
+            .collect();
+        if param_drops.is_empty() {
+            return body;
+        }
+        let mut finally: Vec<js::Node<'src>> = Vec::new();
+        for (parameter_id, type_id) in param_drops.iter().rev() {
+            let value = js::Node::Local(self.ng.name_for(*parameter_id));
+            if let Some(drop) = self.resource_drop_of(*type_id, value) {
+                finally.push(drop);
+            }
+        }
+        vec![js::Node::Try(body, finally)]
     }
 
     /// Emits a concrete (non-generic) function once, keyed by its id. Any active
@@ -4141,6 +4245,19 @@ impl<'src> Transformer<'src> {
             Expr::Parameter(binding) => self.program.parameters.get(binding).map(|p| p.type_id),
             _ => None,
         }
+    }
+
+    /// The type of a `drop(x)` argument, for the early-teardown rewrite. Like
+    /// `expr_type_id` but a bare `Expr::Local` of a PARAMETER id also resolves (a
+    /// plain `drop(param)` would otherwise read as untyped and no-op, leaking the
+    /// parameter). Kept separate from `expr_type_id` so the tuple/set layout
+    /// decisions that read it stay byte-identical.
+    fn drop_argument_type_id(&self, expr_id: Id) -> Option<TypeId> {
+        self.expr_type_id(expr_id)
+            .or_else(|| match self.program.entity_map.get(&expr_id)? {
+                Expr::Local(binding) => self.program.parameters.get(binding).map(|p| p.type_id),
+                _ => None,
+            })
     }
 
     /// Whether an expression's (monomorphized) type is a tuple — its value is a
@@ -5033,6 +5150,8 @@ const RESERVED_NAMES: &[&str] = &[
     "__shared_new",
     "__list_get",
     "__list_pop",
+    "__option_take",
+    "__option_replace",
     "__map_get",
     "__map_keys",
     "__map_values",

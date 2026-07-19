@@ -32,6 +32,11 @@ impl Option<type T> {
 	fun unwrap_or(self, fallback: T): T
 	fun unwrap_or_else(self, fn: || T): T
 
+	// in-place partial move — read/replace the slot through `&mut self`,
+	// always leaving a valid Option behind
+	fun take(&mut self): Option<T>               // Some(v) -> None here, Some(v) out
+	fun replace(&mut self, value: T): Option<T>  // value in, old contents out
+
 	// transformation
 	fun map<U>(self, fn: |T| U): Option<U>
 	fun map_or<U>(self, fn: |T| U, fallback: U): U
@@ -57,6 +62,13 @@ impl Option<(type T, type U)> { fun unzip(self): (Option<T>, Option<U>) }
 ```
 
 `str.parse_i32(): Option<i32>` (declared here) is the string→number path.
+
+`take` and `replace` mutate the `Option` in place through `&mut self`: `take`
+swaps `None` in and hands the old contents back, `replace` swaps a new value in
+and hands the old back. Both leave a valid `Option` behind, which is what makes
+them the sanctioned way to move a value *out* of a place — for a `resource` this
+is the only legal partial move (`self.slot.take()`), and `match opt.take() {
+Some(let c) => drop(c), None => {} }` is the conditional-teardown idiom.
 
 ## `Result<T, E>`
 

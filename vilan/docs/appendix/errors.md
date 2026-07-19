@@ -192,14 +192,22 @@ the call, or give ownership to the struct that owns the closure's lifetime.
 **"`…` is not move-clean when instantiated with a resource — …"**
 A generic function or method was called with a resource type argument
 (`Option<Database>`, `wrap(db)`), and its body — checked with that type
-parameter treated as a resource — breaks the affine rules: it uses a
-value of the parameter's type more than once, moves it on some paths but
-not all, or captures it in a closure. The error is spanned at the **call**
-(the instantiation), and a note points into the generic's body at the
-offending use — the body is fine for data, but a resource has a single
-owner. A generic that means to accept resources must move each such value
-at most once (as `Option::unwrap(self): T` does), never copying or
-capturing it. Instantiating the same generic at a data type is unaffected.
+parameter treated as a resource — breaks the affine rules in one of three
+ways. It uses a value of the parameter's type **more than once** (moves it
+on some paths but not all, or captures it in a closure) — a resource has a
+single owner; or an **`own` parameter of resource type is never moved out**
+— because the generic body is shared across every instantiation, it cannot
+run a destructor, so an `own T` must be moved out on *every* path (returned,
+or handed to another owner), or the function must take a concrete type; or
+it **passes such a value to `drop<T>`** — that erased body has no concrete
+destructor either, so the resource would leak (`drop(x)` on data is a fine
+no-op, which is why the data instantiation stays accepted — destroy at a
+concrete type, or move the value out to the caller). The error is spanned at
+the **call** (the instantiation), with a note into the generic's body. A
+clean generic moves each such value exactly once (as `Option::unwrap(self):
+T` does), never copying, capturing, or forwarding it to the sink;
+`drop(concrete)` on a concrete resource *is* the destructor. Instantiating
+the same generic at a data type is unaffected.
 → [The memory model](../tour/memory-model.md)
 
 **"the resource `…` cannot be used where `any` is expected — …"**

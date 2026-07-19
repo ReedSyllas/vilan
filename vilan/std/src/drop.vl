@@ -10,3 +10,12 @@
 trait Drop {
 	fun drop(&mut self);
 }
+
+// Early teardown (destruction.md §5/§6): move a value into `drop` to destroy it
+// at this (immediate) scope end, instead of waiting for the owner's scope to
+// close. The call is rewritten at each site by the concrete argument type — for
+// a resource it lowers directly to that type's destructor; for plain data it is
+// a no-op that merely consumes the argument for its effects. There is no public
+// `close()` to keep in sync with a destructor; `drop(x)` IS the early form. The
+// `own` parameter makes the argument a move (R3), so the value is spent here.
+fun drop<T>(own value: T) {}

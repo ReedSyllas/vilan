@@ -1373,6 +1373,11 @@ pub struct Analyzer<'src> {
     // key on the real std entity, never a user-defined `trait Drop` of the same
     // name. `None` until `std::drop` is reachable (loaded on import).
     drop_trait_id: Option<Id>,
+    // The std `drop<T>(own value)` sink (destruction.md §5/§6), by identity. A
+    // call to it is rewritten at the site by the argument's concrete type (a
+    // resource -> its destructor, data -> a no-op consume), and R11 exempts it
+    // from the exactly-once rule — it IS the drop site. `None` until reachable.
+    drop_fn_id: Option<Id>,
     // The enclosing `Lift` continuations' binder entities, innermost last —
     // what a walked `LiftBinder` node resolves to.
     lift_binder_stack: Vec<Id>,
@@ -1693,6 +1698,7 @@ impl<'src> Analyzer<'src> {
             try_trait_id: None,
             lift_trait_id: None,
             drop_trait_id: None,
+            drop_fn_id: None,
             lift_binder_stack: Vec::new(),
             lift_region_frames: Vec::new(),
             try_dispatch: HashMap::new(),
@@ -3212,7 +3218,13 @@ impl<'src> Analyzer<'src> {
     /// output byte-identical.
     fn plan_resource_drops(&mut self) {
         let resources = self.collect_resource_bindings();
-        if resources.is_empty() {
+        // The resource types reached by a `drop(db)` sink call, per enclosing scan
+        // root (destruction.md §8 platform coloring): a sink call is invisible to
+        // reachability (it lowers transformer-side to the `__drop` helper), so its
+        // owning function/closure needs a synthetic edge to that destructor. Same
+        // source of truth as the scope-end drops (`owned_by_root`).
+        let drop_sink_by_root = self.drop_sink_types_by_root();
+        if resources.is_empty() && drop_sink_by_root.is_empty() {
             return;
         }
         let mut dropped: HashSet<Id> = HashSet::new();
@@ -3220,20 +3232,40 @@ impl<'src> Analyzer<'src> {
         // Per scan-root, the resource types it drops (for the §8 coloring edges).
         let mut owned_by_root: HashMap<Id, HashSet<TypeId>> = HashMap::new();
         // Function bodies: the tail is the return value, so it is consuming — a
-        // resource returned out of the body is moved, not dropped. (`own`
-        // resource PARAMETERS that survive would drop at the body end too, but
-        // that surface — `drop<T>(own)` and friends — is S3; a loan parameter is
-        // never owned, so seeding nothing here is correct for this slice.) Each
-        // root is scanned into its OWN drop/overwrite sets so the types attribute
-        // to the owning node.
-        let bodies: Vec<(Id, Vec<Id>, Id)> = self
+        // resource returned out of the body is moved, not dropped. An `own`
+        // resource parameter of CONCRETE type is owned at entry, so one that is
+        // not moved out on the fall-through path drops at the body end, like a
+        // local (destruction.md §6; S3 closes S2b's recorded leak). A loan
+        // parameter (`self` / `&` / `&mut`) is never owned. A generic `own T`
+        // parameter is not a resource in the base classification, so it is not
+        // seeded here — R11 requires it to be moved out on every path instead
+        // (the shared body cannot drop it). Each root is scanned into its OWN
+        // drop/overwrite sets so the types attribute to the owning node.
+        let bodies: Vec<(Id, Vec<Id>, Id, Vec<Id>)> = self
             .functions
             .values()
             .filter(|function| function.has_body)
-            .map(|function| (function.id, function.body.0.clone(), function.body.1))
+            .map(|function| {
+                let own_params: Vec<Id> = function
+                    .parameters
+                    .iter()
+                    .copied()
+                    .filter(|parameter| {
+                        resources.contains(parameter)
+                            && self.parameters.get(parameter).map(|p| p.convention)
+                                == Some(Convention::Own)
+                    })
+                    .collect();
+                (
+                    function.id,
+                    function.body.0.clone(),
+                    function.body.1,
+                    own_params,
+                )
+            })
             .collect();
-        for (root, statements, tail) in &bodies {
-            let mut owned: HashSet<Id> = HashSet::new();
+        for (root, statements, tail, own_params) in &bodies {
+            let mut owned: HashSet<Id> = own_params.iter().copied().collect();
             let mut root_dropped: HashSet<Id> = HashSet::new();
             let mut root_overwrites: HashSet<Id> = HashSet::new();
             self.plan_scope(
@@ -3245,6 +3277,14 @@ impl<'src> Analyzer<'src> {
                 &mut root_dropped,
                 &mut root_overwrites,
             );
+            // An own resource parameter still owned at the fall-through end was
+            // never moved out, so it drops here (`plan_scope` removes only the
+            // scope's own declared locals, never parameters).
+            for parameter in own_params {
+                if owned.contains(parameter) {
+                    root_dropped.insert(*parameter);
+                }
+            }
             self.record_root_drop_types(*root, &root_dropped, &root_overwrites, &mut owned_by_root);
             dropped.extend(root_dropped);
             overwrites.extend(root_overwrites);
@@ -3272,6 +3312,12 @@ impl<'src> Analyzer<'src> {
             dropped.extend(root_dropped);
             overwrites.extend(root_overwrites);
         }
+        // The §8 coloring edges for `drop(db)` sink calls (the transformer-side
+        // teardown reachability cannot see) — merged into the same per-root type
+        // map the scope-end drops feed.
+        for (root, types) in drop_sink_by_root {
+            owned_by_root.entry(root).or_default().extend(types);
+        }
         self.dropped_bindings = dropped;
         self.overwrite_drops = overwrites;
         self.drop_owned_types_by_root = owned_by_root;
@@ -3289,8 +3335,8 @@ impl<'src> Analyzer<'src> {
     ) {
         let mut types: HashSet<TypeId> = HashSet::new();
         for binding in dropped {
-            if let Some(variable) = self.variables.get(binding) {
-                types.insert(variable.type_id);
+            if let Some(type_id) = self.dropped_binding_type_id(*binding) {
+                types.insert(type_id);
             }
         }
         for assignment in overwrites {
@@ -3719,11 +3765,152 @@ impl<'src> Analyzer<'src> {
     /// per instantiation. Runs after `check_drop_impls` (which records
     /// `drop_methods`) and `plan_resource_drops` (the dropped bindings). Empty on a
     /// resource-free program, so nothing new emits there.
+    /// The concrete argument types of every std `drop<T>(own value)` sink call in
+    /// the program (destruction.md §6), read the SAME way the transformer reads an
+    /// expression's type at the rewrite (`expr_type_ids`, then the binding's own
+    /// type), so a concrete argument's id matches the glue the rewrite looks up. A
+    /// call inside a generic body carries an abstract `Generic(T)` type here, which
+    /// is not a resource and so seeds nothing — the concrete drop rides the
+    /// monomorphized instance's own scan.
+    fn drop_sink_argument_types(&self) -> Vec<TypeId> {
+        let Some(drop_fn_id) = self.drop_fn_id else {
+            return Vec::new();
+        };
+        let mut types = Vec::new();
+        for function_call in self.function_calls.values() {
+            let is_drop_sink = matches!(
+                self.expr_id_to_expr_map.get(&function_call.subject_id),
+                Some(Expr::Local(callee)) if *callee == drop_fn_id
+            );
+            if !is_drop_sink {
+                continue;
+            }
+            if let Some(argument_id) = function_call.argument_ids.first()
+                && let Some(type_id) = self.drop_sink_argument_type_id(*argument_id)
+            {
+                types.push(type_id);
+            }
+        }
+        types
+    }
+
+    /// The resource types reached by a `drop(db)` sink call, keyed by the enclosing
+    /// scan root (function or closure) — the §8 coloring source for sink teardown.
+    /// A function's direct-body calls come from the R11 call collector (which does
+    /// not cross closure boundaries, so each closure attributes its own sink calls);
+    /// a closure's from a walk of its return expression. Non-resource / generic
+    /// argument types are harmless here — `build_drop_glue` only builds an edge for
+    /// a type that has drop glue. Empty when `std::drop` is not loaded.
+    fn drop_sink_types_by_root(&self) -> HashMap<Id, HashSet<TypeId>> {
+        let mut by_root: HashMap<Id, HashSet<TypeId>> = HashMap::new();
+        let Some(drop_fn_id) = self.drop_fn_id else {
+            return by_root;
+        };
+        let function_ids: Vec<Id> = self
+            .functions
+            .values()
+            .filter(|function| function.has_body)
+            .map(|function| function.id)
+            .collect();
+        for function_id in function_ids {
+            let (calls, _) = self.r11_body_calls_and_closures(function_id);
+            let types = self.drop_sink_types_of_calls(&calls, drop_fn_id);
+            if !types.is_empty() {
+                by_root.entry(function_id).or_default().extend(types);
+            }
+        }
+        let closures: Vec<(Id, Id)> = self
+            .closures
+            .iter()
+            .map(|(id, closure)| (*id, closure.return_))
+            .collect();
+        for (closure_id, return_id) in closures {
+            let mut calls = Vec::new();
+            let mut nested = Vec::new();
+            let mut visited = HashSet::new();
+            self.r11_collect_calls(return_id, &mut visited, &mut calls, &mut nested);
+            let types = self.drop_sink_types_of_calls(&calls, drop_fn_id);
+            if !types.is_empty() {
+                by_root.entry(closure_id).or_default().extend(types);
+            }
+        }
+        by_root
+    }
+
+    /// The argument types of the `drop` sink calls among `calls` (the §8 coloring
+    /// helper). Reads each argument's type the same way the transformer's rewrite
+    /// will, so the seeded type matches the glue key.
+    fn drop_sink_types_of_calls(&self, calls: &[Id], drop_fn_id: Id) -> HashSet<TypeId> {
+        let mut types = HashSet::new();
+        for &call_id in calls {
+            let Some(function_call) = self.function_calls.get(&call_id) else {
+                continue;
+            };
+            let is_drop_sink = matches!(
+                self.expr_id_to_expr_map.get(&function_call.subject_id),
+                Some(Expr::Local(callee)) if *callee == drop_fn_id
+            );
+            if !is_drop_sink {
+                continue;
+            }
+            if let Some(argument_id) = function_call.argument_ids.first()
+                && let Some(type_id) = self.drop_sink_argument_type_id(*argument_id)
+            {
+                types.insert(type_id);
+            }
+        }
+        types
+    }
+
+    /// An expression's type id, mirroring `transformer::expr_type_id`: the stored
+    /// type (`expr_id_to_type_id_map` wins over `resolved_types`, as `expr_type_ids`
+    /// is merged), else the type of the binding a bare `Local`/`Parameter` names.
+    fn drop_sink_argument_type_id(&self, expr_id: Id) -> Option<TypeId> {
+        if let Some(type_id) = self.expr_id_to_type_id_map.get(&expr_id) {
+            return Some(*type_id);
+        }
+        if let Some(type_id) = self.resolved_types.get(&expr_id) {
+            return Some(*type_id);
+        }
+        match self.expr_id_to_expr_map.get(&expr_id)? {
+            // A binding reference carries no type on its own id — take the
+            // binding's. A parameter used in expression position is an
+            // `Expr::Local` of a parameter id, so the `Local` arm consults BOTH
+            // tables (a bare `drop(param)` would otherwise read as untyped and
+            // silently no-op — the same reason the generic drop-forwarding check
+            // needs it).
+            Expr::Local(binding) | Expr::Variable(binding) | Expr::Parameter(binding) => self
+                .variables
+                .get(binding)
+                .map(|variable| variable.type_id)
+                .or_else(|| {
+                    self.parameters
+                        .get(binding)
+                        .map(|parameter| parameter.type_id)
+                }),
+            _ => None,
+        }
+    }
+
+    /// The type of a dropped binding — a resource local (a variable) or an owned
+    /// resource parameter (destruction.md §6). A parameter is not a `variable`, so
+    /// both tables are consulted.
+    fn dropped_binding_type_id(&self, binding: Id) -> Option<TypeId> {
+        self.variables
+            .get(&binding)
+            .map(|variable| variable.type_id)
+            .or_else(|| {
+                self.parameters
+                    .get(&binding)
+                    .map(|parameter| parameter.type_id)
+            })
+    }
+
     fn build_drop_glue(&mut self) {
         let mut worklist: Vec<TypeId> = Vec::new();
         for binding in &self.dropped_bindings {
-            if let Some(variable) = self.variables.get(binding) {
-                worklist.push(variable.type_id);
+            if let Some(type_id) = self.dropped_binding_type_id(*binding) {
+                worklist.push(type_id);
             }
         }
         // An overwrite (R2) drops the binding's OLD value in place — the same
@@ -3738,6 +3925,15 @@ impl<'src> Analyzer<'src> {
             {
                 worklist.push(variable.type_id);
             }
+        }
+        // Early teardown (destruction.md §6): `drop(x)` moves `x` into the std
+        // `drop` sink, which the transformer rewrites to `x`'s destructor at the
+        // site. The argument is NOT a scope-end drop (it was moved), so seed its
+        // type here so the glue the rewrite looks up (`resolve_type_id` of the
+        // arg's `expr_type_id`) is present. The type is read the same way the
+        // transformer will read it, so a concrete argument's id matches.
+        for type_id in self.drop_sink_argument_types() {
+            worklist.push(type_id);
         }
         let mut glue: HashMap<TypeId, DropGlue> = HashMap::new();
         let mut seen: HashSet<TypeId> = HashSet::new();
@@ -5157,6 +5353,8 @@ impl<'src> Analyzer<'src> {
                 self.scan_instantiated_body(instance.callee, &closures, &scan)
             };
             self.emit_r11_violations(instance.callee, instance.call_id, violations);
+            self.check_own_generic_exactly_once(&instance, &resource_bindings);
+            self.check_generic_drop_forwarding(&instance, &calls, &resources, &mut memo);
 
             // Propagate: the callee's own calls, now under ITS resource
             // parameters — a call passing `T` on to another generic instantiates
@@ -5172,6 +5370,187 @@ impl<'src> Analyzer<'src> {
                 );
             }
         }
+    }
+
+    /// R11 exactly-once for `own T` parameters (destruction.md §6, the 2026-07-19
+    /// tightening): under a resource instantiation an `own` parameter of (delta-)
+    /// resource type must be moved out on EVERY path — the generic body is shared
+    /// across instantiations, so it cannot drop it, and drop flags are ratified
+    /// out. A zero-move (never moved out) is the leak the body cannot close, so it
+    /// is rejected at the instantiation site. The std `drop` sink is EXEMPT: it IS
+    /// the drop site (its call rewrites to the destructor). Data instantiations are
+    /// never enqueued, so nothing changes for them. Uses the drop-planner's
+    /// ownership walk with the delta resource set: a parameter still owned at the
+    /// fall-through end was never moved out. (A move on some paths but not others
+    /// is R7's conditional-move, already reported by the affine scan.)
+    fn check_own_generic_exactly_once(
+        &mut self,
+        instance: &R11Instance,
+        resource_bindings: &HashSet<Id>,
+    ) {
+        if Some(instance.callee) == self.drop_fn_id {
+            return;
+        }
+        let (own_params, statements, tail) = {
+            let Some(function) = self.functions.get(&instance.callee) else {
+                return;
+            };
+            let own_params: Vec<Id> = function
+                .parameters
+                .iter()
+                .copied()
+                .filter(|parameter| {
+                    resource_bindings.contains(parameter)
+                        && self.parameters.get(parameter).map(|p| p.convention)
+                            == Some(Convention::Own)
+                })
+                .collect();
+            (own_params, function.body.0.clone(), function.body.1)
+        };
+        if own_params.is_empty() {
+            return;
+        }
+        let mut owned: HashSet<Id> = own_params.iter().copied().collect();
+        let mut dropped: HashSet<Id> = HashSet::new();
+        let mut overwrites: HashSet<Id> = HashSet::new();
+        self.plan_scope(
+            &statements,
+            tail,
+            true,
+            resource_bindings,
+            &mut owned,
+            &mut dropped,
+            &mut overwrites,
+        );
+        for parameter in &own_params {
+            if owned.contains(parameter) {
+                self.emit_own_generic_leak(instance, *parameter);
+            }
+        }
+    }
+
+    /// The R11 exactly-once diagnostic: primary at the instantiation site, note at
+    /// the offending parameter — a generic `own T` never moved out (destruction.md
+    /// §6/§11). Shares the "not move-clean when instantiated with a resource"
+    /// framing so it reads as one R11 family, with the specific steer.
+    fn emit_own_generic_leak(&mut self, instance: &R11Instance, parameter: Id) {
+        let name = self
+            .functions
+            .get(&instance.callee)
+            .map(|function| function.name)
+            .unwrap_or("this generic");
+        let parameter_name = self.binding_name(parameter);
+        let site = **self.span_map.get(&instance.call_id).unwrap_or(&&EMPTY_SPAN);
+        let call_source = self.source_of_id(instance.call_id);
+        let note_span = **self.span_map.get(&parameter).unwrap_or(&&EMPTY_SPAN);
+        let note_source = self.source_of_id(parameter);
+        let note = crate::error::Note {
+            span: note_span,
+            msg: format!("in `{name}`, the `own` parameter `{parameter_name}` is never moved out"),
+            source: if note_source.is_some() && note_source != call_source {
+                note_source
+            } else {
+                None
+            },
+        };
+        self.diagnostics.push(Error {
+            span: site,
+            msg: format!(
+                "`{name}` is not move-clean when instantiated with a resource — an `own` \
+                 parameter of resource type is never moved out; a generic body cannot destroy \
+                 a `T` — move it out on every path, or take a concrete type"
+            ),
+            note: Some(note),
+        });
+    }
+
+    /// R11-keyed rejection of `drop(x)` forwarding under a RESOURCE instantiation
+    /// (destruction.md §6, the 2026-07-19 ruling). A generic body is emitted once
+    /// (erased) for inferred-argument free generics, so `drop(x)` on a value whose
+    /// UNSUBSTITUTED type is (or contains) a resource-bound type parameter lowers
+    /// to the data no-op — no concrete destructor exists — and the resource leaks.
+    /// It is dirt at the instantiation, NOT at the body: the same `drop(x)` is the
+    /// correct no-op consume at a DATA instantiation, so a data instantiation is
+    /// never enqueued and stays accepted. The std `drop` sink argument is checked
+    /// with the SAME delta rule as every other R11 place (resource under the
+    /// parameter set, not without it) — a concrete resource dropped in the body
+    /// (`drop(Db{..})`) is chunk 3's and lowers to its real destructor. Spanned at
+    /// the instantiation site, like the other R11 diagnostics.
+    fn check_generic_drop_forwarding(
+        &mut self,
+        instance: &R11Instance,
+        calls: &[Id],
+        resources: &HashSet<TypeId>,
+        memo: &mut HashMap<TypeId, bool>,
+    ) {
+        let Some(drop_fn_id) = self.drop_fn_id else {
+            return;
+        };
+        let mut offending: Vec<Id> = Vec::new();
+        for &call_id in calls {
+            let Some((subject_id, argument_id)) =
+                self.function_calls.get(&call_id).and_then(|function_call| {
+                    Some((
+                        function_call.subject_id,
+                        *function_call.argument_ids.first()?,
+                    ))
+                })
+            else {
+                continue;
+            };
+            let is_drop_sink = matches!(
+                self.expr_id_to_expr_map.get(&subject_id),
+                Some(Expr::Local(callee)) if *callee == drop_fn_id
+            );
+            if !is_drop_sink {
+                continue;
+            }
+            let Some(argument_type) = self.drop_sink_argument_type_id(argument_id) else {
+                continue;
+            };
+            if self.type_is_resource_with(argument_type, resources, memo)
+                && !self.type_is_resource(argument_type)
+            {
+                offending.push(call_id);
+            }
+        }
+        for call_id in offending {
+            self.emit_generic_drop_forward(instance, call_id);
+        }
+    }
+
+    /// The R11 drop-forwarding diagnostic: primary at the instantiation site, note
+    /// at the `drop` call in the generic body. Shares the "not move-clean when
+    /// instantiated with a resource" framing with its steer.
+    fn emit_generic_drop_forward(&mut self, instance: &R11Instance, drop_call_id: Id) {
+        let name = self
+            .functions
+            .get(&instance.callee)
+            .map(|function| function.name)
+            .unwrap_or("this generic");
+        let site = **self.span_map.get(&instance.call_id).unwrap_or(&&EMPTY_SPAN);
+        let call_source = self.source_of_id(instance.call_id);
+        let note_span = **self.span_map.get(&drop_call_id).unwrap_or(&&EMPTY_SPAN);
+        let note_source = self.source_of_id(drop_call_id);
+        let note = crate::error::Note {
+            span: note_span,
+            msg: format!("in `{name}`, this `drop` would consume a resource in an erased body"),
+            source: if note_source.is_some() && note_source != call_source {
+                note_source
+            } else {
+                None
+            },
+        };
+        self.diagnostics.push(Error {
+            span: site,
+            msg: format!(
+                "`{name}` is not move-clean when instantiated with a resource — this \
+                 instantiation would pass a resource to `drop<T>`, whose erased body has no \
+                 concrete destructor — destroy at a concrete type, or move the value out to the \
+                 caller"
+            ),
+            note: Some(note),
+        });
     }
 
     /// The resource bindings this instantiation introduces: variables and
@@ -18791,6 +19170,12 @@ pub enum Intrinsic {
     ListGet,
     // `List.pop(): Option<T>` -> a runtime helper that removes the last element.
     ListPop,
+    // `Option.take(&mut self): Option<T>` -> a runtime helper that reads the slot,
+    // writes `None` back in place, and returns the old contents (destruction.md §6).
+    OptionTake,
+    // `Option.replace(&mut self, value): Option<T>` -> a runtime helper that reads
+    // the slot, writes `Some(value)` back in place, and returns the old contents.
+    OptionReplace,
     // `Shared::new(value)` -> a `{ v: value }` cell (a JS object, so `__clone`
     // shares it by reference instead of deep-copying — that is what makes a
     // `Shared` co-owned rather than snapshotted).
@@ -19041,6 +19426,10 @@ pub struct Program<'src> {
     pub list_push_fn_id: Option<Id>,
     // The `std` `panic` intrinsic (if loaded); its calls lower to a `throw`.
     pub panic_fn_id: Option<Id>,
+    // The std `drop<T>(own value)` sink (if loaded): a call to it is rewritten at
+    // the site by the argument's concrete type — a resource lowers to its `__drop`
+    // helper, data is a no-op consume (destruction.md §6).
+    pub drop_fn_id: Option<Id>,
     /// `std::asset::emit` — the const-only compile-time effect (const-eval.md).
     pub asset_emit_fn_id: Option<Id>,
     /// `const`-marked expression ids in walk order (const-eval.md §1).
@@ -21442,6 +21831,15 @@ pub fn analyze<'src>(
             .get(scope_id)
             .and_then(|scope| scope.name_to_id_map.get("Drop").copied())
     });
+    // The std `drop<T>(own value)` sink, by identity (destruction.md §6): its
+    // calls are rewritten at the site by the concrete argument type, and R11
+    // exempts it from the exactly-once rule. Set only when `std::drop` is loaded.
+    analyzer.drop_fn_id = module_scopes.get("drop").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("drop").copied())
+    });
 
     // Bind source-defined primitive structs into the literal registry (so number
     // and string literals infer the right type) and the global scope (so bare
@@ -21883,6 +22281,29 @@ pub fn analyze<'src>(
             }
         }
     }
+    // `Option.take`/`replace` (destruction.md §6): compiler-known intrinsics on the
+    // std `Option` enum, keyed by its identity so a user's same-named enum is
+    // untouched. `take`/`replace` read the slot, write `None`/`Some(value)` back in
+    // place, and return the old contents — the sanctioned partial move for a
+    // resource field, and ordinary std surface for data.
+    if let Some(option_enum_id) = analyzer.option_enum_id {
+        for implementation in &analyzer.implementations {
+            let subject_is_option = matches!(
+                analyzer.type_id_to_type_map.get(&implementation.subject),
+                Some(Type::Enum(id, _)) if *id == option_enum_id
+            );
+            if subject_is_option {
+                for (name, intrinsic) in [
+                    ("take", Intrinsic::OptionTake),
+                    ("replace", Intrinsic::OptionReplace),
+                ] {
+                    if let Some(id) = implementation.declarations.get(name).copied() {
+                        intrinsics.insert(id, intrinsic);
+                    }
+                }
+            }
+        }
+    }
     let module_member = |module: &str, name: &str| {
         module_scopes
             .get(module)
@@ -22126,6 +22547,7 @@ pub fn analyze<'src>(
         list_new_fn_id,
         list_push_fn_id,
         panic_fn_id: analyzer.panic_fn_id,
+        drop_fn_id: analyzer.drop_fn_id,
         asset_emit_fn_id: analyzer.asset_emit_fn_id,
         const_exprs: analyzer.const_exprs.clone(),
         const_results: HashMap::new(),

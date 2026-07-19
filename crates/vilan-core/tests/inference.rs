@@ -21414,6 +21414,58 @@ fn a_platform_free_drop_adds_no_coloring() {
 }
 
 #[test]
+fn a_drop_sink_call_colors_its_owning_function() {
+    // destruction.md §8 (S3): a resource whose only `@process` surface is its
+    // `Drop`, destroyed ONLY via the `drop(x)` SINK (not a scope-end drop), still
+    // colors its owning function `@process` — the sink call lowers transformer-side
+    // to the `__drop` helper, invisible to reachability, so a synthetic edge from
+    // the function to the destructor is seeded from the sink argument. A browser
+    // build reaching the owner is rejected.
+    assert_fails_browser_with(
+        r#"
+        import std::fs::write_file;
+        import std::drop::{ Drop, drop };
+        resource struct Logger { path: str }
+        impl Logger with Drop {
+            fun drop(&mut self) { write_file(self.path, "closing"); }
+        }
+        fun use_it() {
+            let logger = Logger { path = "log.txt" };
+            print_marker();
+            drop(logger);
+        }
+        fun print_marker() {}
+        fun main() {
+            use_it();
+        }
+        "#,
+        "requires the `process` layer of `std`",
+    );
+}
+
+#[test]
+fn a_platform_free_drop_sink_call_adds_no_coloring() {
+    // The sink-call inverse control: a platform-free `drop(x)` (just `print`) adds
+    // no coloring, so a browser build compiles cleanly.
+    assert_compiles_browser(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun use_it() {
+            let r = Res { tag = "r" };
+            print("used");
+            drop(r);
+        }
+        fun main() {
+            use_it();
+        }
+        "#,
+    );
+}
+
+#[test]
 fn a_drop_runs_synchronously_at_the_scope_exit() {
     // §8 Turns: drops are ordinary statements at scope exits — they run
     // synchronously, in program order, so a nested scope's drop precedes code
@@ -21438,5 +21490,527 @@ fn a_drop_runs_synchronously_at_the_scope_exit() {
         }
         "#,
         "in-scope\ndropped\nafter-scope\n",
+    );
+}
+
+// ============================================================================
+// C4 S3 — `Option.take`/`replace`, the `drop<T>(own)` sink, own-parameter drops,
+// and the generic exactly-once rule (destruction.md §5/§6, impl-plan §4).
+// ============================================================================
+
+// --- `Option.take` / `replace` (destruction.md §6) --------------------------
+
+#[test]
+fn option_take_on_data_leaves_none_and_yields_the_value() {
+    // `take` reads the slot, writes `None` back in place (the caller's binding
+    // sees it), and returns the old contents. Data works exactly like a resource.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut opt = Some(5);
+            let taken = opt.take();
+            print(i"taken={taken.unwrap_or(0)} opt_is_none={opt.is_none()}");
+        }
+        "#,
+        "taken=5 opt_is_none=true\n",
+    );
+}
+
+#[test]
+fn option_take_on_none_stays_none() {
+    // Taking from `None` yields `None` and leaves `None` — the idempotent edge.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut opt: Option<i32> = None;
+            let taken = opt.take();
+            print(i"taken_none={taken.is_none()} opt_none={opt.is_none()}");
+        }
+        "#,
+        "taken_none=true opt_none=true\n",
+    );
+}
+
+#[test]
+fn option_replace_on_data_returns_the_old_and_installs_the_new() {
+    // `replace` puts the new value in and returns the old — `Some(old)` here.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut opt = Some(1);
+            let old = opt.replace(2);
+            print(i"old={old.unwrap_or(0)} now={opt.unwrap_or(0)}");
+        }
+        "#,
+        "old=1 now=2\n",
+    );
+}
+
+#[test]
+fn option_replace_on_none_returns_none() {
+    // Replacing into `None` returns `None` and installs `Some(new)` — the edge.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut opt: Option<i32> = None;
+            let old = opt.replace(7);
+            print(i"old_none={old.is_none()} now={opt.unwrap_or(0)}");
+        }
+        "#,
+        "old_none=true now=7\n",
+    );
+}
+
+#[test]
+fn option_take_on_a_resource_moves_the_payload_out() {
+    // The sanctioned partial move (destruction.md §6): `take` moves the resource
+    // payload into its new owner (`moved`), which drops it at ITS scope end; the
+    // slot (`opt`, now `None`) drops nothing. Reverse-order drop is visible.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        fun main() {
+            mut opt: Option<Res> = Some(Res { tag = "r" });
+            {
+                let moved = opt.take();
+                print("in-block");
+            }
+            print("after-block");
+        }
+        "#,
+        "in-block\ndrop r\nafter-block\n",
+    );
+}
+
+#[test]
+fn option_replace_returns_the_old_resource_for_the_caller_to_own() {
+    // `replace` hands the old resource back to the caller; the returned value and
+    // the new one both drop at the caller's scope end, in reverse declaration
+    // order (`previous` then `slot`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        fun main() {
+            mut slot: Option<Res> = Some(Res { tag = "old" });
+            let previous = slot.replace(Res { tag = "new" });
+            print("replaced");
+        }
+        "#,
+        "replaced\ndrop old\ndrop new\n",
+    );
+}
+
+#[test]
+fn option_take_under_a_live_view_is_rejected() {
+    // `take` is an invalidating mutation, so rule 4 / E2 fences it exactly as it
+    // fences any geometry-bumping write: taking through `opt` while a `&mut` view
+    // into `opt` is live is rejected. Pinned to prove take opens NO new hole.
+    assert_fails_with(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut opt: Option<i32> = Some(5);
+            let view = &mut opt;
+            let taken = opt.take();
+            print(i"{view.is_some()}");
+        }
+        "#,
+        "while a view into it is live",
+    );
+}
+
+// --- The `drop<T>(own)` sink (destruction.md §6) ----------------------------
+
+#[test]
+fn drop_of_a_resource_tears_down_immediately() {
+    // `drop(db)` destroys at its immediate site — BEFORE the following statement
+    // — instead of waiting for the owner's scope end. The sink call is rewritten
+    // to the resource's destructor; `db` then drops nowhere else (no double-drop).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Db { tag: str }
+        impl Db with Drop { fun drop(&mut self) { print(i"close {self.tag}"); } }
+        fun main() {
+            let db = Db { tag = "one" };
+            print("before");
+            drop(db);
+            print("after");
+        }
+        "#,
+        "before\nclose one\nafter\n",
+    );
+}
+
+#[test]
+fn drop_of_data_is_a_no_op() {
+    // On data `drop` is a no-op that still evaluates its argument for effects (no
+    // destructor exists) — the sink is ordinary std surface, useful for both.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::drop;
+        fun main() {
+            let n = 5;
+            drop(n);
+            print("ok");
+        }
+        "#,
+        "ok\n",
+    );
+}
+
+#[test]
+fn the_conditional_teardown_idiom_tears_down_in_both_arms() {
+    // The idiom R7 pushes toward (destruction.md §6): `match opt.take() { Some(let
+    // c) => drop(c), None => {} }`. `take` moves the payload out; `drop(c)` tears
+    // it down in the `Some` arm; the `None` arm tears down nothing. Both exercised.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        import std::drop::{ Drop, drop };
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        fun main() {
+            mut full: Option<Res> = Some(Res { tag = "cond" });
+            match full.take() {
+                Some(let c) => drop(c),
+                None => {}
+            }
+            print("after-some");
+            mut empty: Option<Res> = None;
+            match empty.take() {
+                Some(let c) => drop(c),
+                None => print("none-arm"),
+            }
+            print("after-none");
+        }
+        "#,
+        "drop cond\nafter-some\nnone-arm\nafter-none\n",
+    );
+}
+
+// --- Concrete own-parameter drops (destruction.md §6) -----------------------
+
+#[test]
+fn a_concrete_own_resource_parameter_drops_at_the_callee_scope_end() {
+    // An `own` parameter of concrete resource type not moved out drops at the
+    // callee's scope end (S3 closes S2b's recorded leak) — BEFORE the caller's
+    // later statement runs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        fun sink(own r: Res) {
+            print(i"in-sink {r.tag}");
+        }
+        fun main() {
+            sink(Res { tag = "x" });
+            print("after-sink");
+        }
+        "#,
+        "in-sink x\ndrop x\nafter-sink\n",
+    );
+}
+
+#[test]
+fn two_own_resource_parameters_drop_in_reverse_declaration_order() {
+    // Multiple owned parameters drop in reverse declaration order at the scope
+    // end, like locals — the ordering-sensitive edge (`b` before `a`).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        fun two(own a: Res, own b: Res) {
+            print("in-two");
+        }
+        fun main() {
+            two(Res { tag = "a" }, Res { tag = "b" });
+            print("after");
+        }
+        "#,
+        "in-two\ndrop b\ndrop a\nafter\n",
+    );
+}
+
+#[test]
+fn an_own_parameter_moved_out_on_every_path_drops_nowhere() {
+    // A parameter returned out of the function (R7: moved on every path) drops
+    // NOWHERE in the callee — the caller owns it and drops it once. No double-drop.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        fun passthrough(own r: Res): Res {
+            print("in-passthrough");
+            r
+        }
+        fun main() {
+            let back = passthrough(Res { tag = "y" });
+            print("after-passthrough");
+            drop(back);
+            print("done");
+        }
+        "#,
+        "in-passthrough\nafter-passthrough\ndrop y\ndone\n",
+    );
+}
+
+#[test]
+fn an_async_own_resource_parameter_drops_after_the_await_at_scope_end() {
+    // An `own` resource parameter of an ASYNC function drops at the function's
+    // scope end — AFTER the `await` (destruction.md §5: owning a resource across a
+    // suspension is legal). `wrap_own_param_drops` wraps the whole async body in
+    // one `try`/`finally`, and JS `finally` runs after every `await` in the `try`
+    // completes, so the drop lands after "after-await" and before the caller's
+    // later statement. Finally placement is not subtle: the wrap is outside all
+    // awaits. (Async — node only, not the interpreter subset.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+
+        [extern("node:timers/promises", "setTimeout")]
+        async external fun sleep(ms: i32): void;
+
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+
+        fun work(own r: Res) {
+            print(i"before-await {r.tag}");
+            sleep(0);
+            print("after-await");
+        }
+        fun main() {
+            work(Res { tag = "x" });
+            print("done");
+        }
+        "#,
+        "before-await x\nafter-await\ndrop x\ndone\n",
+    );
+}
+
+// --- The generic exactly-once rule (R11 tightening, destruction.md §6) -------
+
+#[test]
+fn a_generic_own_t_never_moved_out_is_rejected_at_a_resource_instantiation() {
+    // Under a resource instantiation an `own T` parameter must be moved on EVERY
+    // path — a shared generic body cannot drop it (it is emitted erased across
+    // instantiations, and drop flags are ratified out). Zero-move is the leak the
+    // body cannot close, rejected AT the instantiation site with the steer.
+    assert_fails_spanning(
+        r#"
+        import std::print;
+        resource struct Db { tag: str }
+        fun leak<T>(own x: T) {}
+        fun main() {
+            let db = Db { tag = "one" };
+            leak(db);
+        }
+        "#,
+        "leak(db)",
+        "move it out on every path, or take a concrete type",
+    );
+}
+
+#[test]
+fn the_same_generic_own_t_zero_move_at_a_data_type_is_accepted() {
+    // The SAME zero-move generic is fine at a data instantiation: data copies, so
+    // nothing leaks and no instantiation is enqueued. Only resources tighten.
+    assert_compiles(
+        r#"
+        import std::print;
+        fun leak<T>(own x: T) {}
+        fun main() {
+            leak(5);
+            print("ok");
+        }
+        "#,
+    );
+}
+
+#[test]
+fn the_drop_sink_itself_is_accepted_at_a_resource() {
+    // `drop<T>(own value)` zero-moves `value` — yet it is EXEMPT from the
+    // exactly-once rule: it IS the drop site (its call rewrites to the
+    // destructor), special-known like the `Shared` intrinsics. `drop(db)` on a
+    // resource compiles.
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Db { tag: str }
+        impl Db with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun main() {
+            let db = Db { tag = "one" };
+            drop(db);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_generic_own_t_moved_out_by_return_is_accepted_at_a_resource() {
+    // The canonical clean shape: an `own T` returned out (moved on the only path)
+    // is accepted at a resource — the caller receives and owns it.
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Db { tag: str }
+        impl Db with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun identity<T>(own x: T): T { x }
+        fun main() {
+            let db = Db { tag = "one" };
+            let out = identity(db);
+            drop(out);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_generic_own_t_moved_out_on_every_branch_is_accepted() {
+    // Moved out on EVERY path through a branch (R7): both arms return `x` to the
+    // caller — accepted (not a zero-move; the caller then owns and drops it).
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Db { tag: str }
+        impl Db with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun choose<T>(own x: T, flag: bool): T {
+            if flag { x } else { x }
+        }
+        fun main() {
+            let db = Db { tag = "one" };
+            drop(choose(db, true));
+        }
+        "#,
+    );
+}
+
+#[test]
+fn a_generic_forwarding_own_t_to_the_drop_sink_is_rejected_at_a_resource() {
+    // A free generic with an inferred type argument is emitted ONCE (erased), so
+    // `drop(x)` on a `T`-typed value has no concrete destructor and would leak.
+    // The exactly-once check treats `x` as moved (it IS passed to the `own` sink),
+    // so R11 catches this specifically: passing a resource-instantiation's own type
+    // parameter to `drop<T>` is dirt AT the instantiation (destruction.md §6, the
+    // 2026-07-19 ruling). Spanned at the instantiation, with the steer.
+    assert_fails_spanning(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Db { tag: str }
+        impl Db with Drop { fun drop(&mut self) { print(self.tag); } }
+        fun consume<T>(own x: T) { drop(x); }
+        fun main() {
+            let db = Db { tag = "one" };
+            consume(db);
+        }
+        "#,
+        "consume(db)",
+        "pass a resource to `drop<T>`, whose erased body has no concrete destructor",
+    );
+}
+
+#[test]
+fn a_generic_forwarding_own_t_to_the_drop_sink_is_accepted_at_data() {
+    // The control: the SAME generic instantiated only at a data type stays accepted
+    // — `drop(x)` on data is the correct no-op consume. No resource instantiation is
+    // enqueued, so the R11 drop-forwarding check never runs.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::drop;
+        fun consume<T>(own x: T) { drop(x); }
+        fun main() {
+            consume(5);
+            print("ok");
+        }
+        "#,
+        "ok\n",
+    );
+}
+
+#[test]
+fn a_concrete_own_parameter_dropped_via_the_sink_is_destroyed() {
+    // A concrete `own` parameter destroyed via `drop(d)` (the parameter used in
+    // expression position is an `Expr::Local` of a parameter id) — the rewrite
+    // resolves the parameter's type and lowers to the destructor, BEFORE the
+    // following statement. (Guards a latent no-op: a bare `drop(param)` used to
+    // read as untyped and silently leak.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::{ Drop, drop };
+        resource struct Db { tag: str }
+        impl Db with Drop { fun drop(&mut self) { print(i"close {self.tag}"); } }
+        fun consume(own d: Db) {
+            print("in");
+            drop(d);
+            print("post");
+        }
+        fun main() {
+            consume(Db { tag = "one" });
+            print("done");
+        }
+        "#,
+        "in\nclose one\npost\ndone\n",
+    );
+}
+
+// --- Match-move (R6, destruction.md §5) -------------------------------------
+
+#[test]
+fn a_resource_match_consume_moves_the_payload_to_its_new_owner() {
+    // Matching a resource BY VALUE consumes the subject; the capture aliases the
+    // payload, and because the subject is dead the alias IS the move (R6). Moving
+    // the payload out of the arm hands it to a new owner (`extracted`), whose
+    // scope-end drop is visible — the runtime alias-as-move the resource path
+    // relies on (impl-plan §7 risk).
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::drop::Drop;
+        resource struct Res { tag: str }
+        impl Res with Drop { fun drop(&mut self) { print(i"drop {self.tag}"); } }
+        resource enum Holder { Full(Res), Empty }
+        fun main() {
+            let holder = Holder::Full(Res { tag = "held" });
+            let extracted = match holder {
+                Holder::Full(let inner) => inner,
+                Holder::Empty => Res { tag = "default" },
+            };
+            print(i"extracted {extracted.tag}");
+        }
+        "#,
+        "extracted held\ndrop held\n",
     );
 }
