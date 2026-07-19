@@ -11,7 +11,10 @@
 > two refinements queued (backlog **C6** geometry effects, **C7** wire-blessed handles).
 > **Ratified 2026-07-18** — §8's three decisions accepted per recommendation: the closure
 > rule stands, C7 is blessed under §6's conditions, and the frame graduates into spec §6
-> at C4's S5 (build sequence: `destruction-impl-plan.md`).
+> at C4's S5 (build sequence: `destruction-impl-plan.md`). **Graduated 2026-07-19:**
+> spec `memory.md` now opens with the law as §6.0 and carries resources as §6.8 — this
+> document remains the design record and the closure rule's statement; the spec is the
+> normative form.
 
 ## 1. The law
 

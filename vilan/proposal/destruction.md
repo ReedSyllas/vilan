@@ -1,8 +1,14 @@
 # Deterministic destruction — the owned-resource class (backlog C4)
 
-> **Status: ACCEPTED 2026-07-18 — reviewed same day; every §14 call and the companion's
-> §8 ratified per recommendation. Build sequence: `destruction-impl-plan.md`. Nothing
-> implemented yet.** The keystone of
+> **Status: SHIPPED 2026-07-19 — Tier 1 complete, S1–S5.** The ledger: 5ae93f3 (surface)
+> → 8721d45 (classification + R10/R12/derives) → bee8c08 (R1–R9) → 4a5e06a (R11) →
+> fdff090 (`Drop`) → f20ac3b (insertion + lowering) → 417874b (`take`/`replace` + the
+> sink) → a31c14f (`Database`) → 0f299be (`OwnedNursery`) → the S5 docs commit (spec
+> §6.0/§6.8, tour, appendices). Every §-amendment dated 2026-07-19 records where
+> implementation corrected this draft; Tier 2 (§10) builds with the native arc. Open
+> follow-ups: backlog C1/C2/C6/C7/C8/C9, J4, B29.** Originally accepted 2026-07-18
+> (every §14 call + the companion's §8 ratified per recommendation; build sequence:
+> `destruction-impl-plan.md`).** The keystone of
 > backlog §C: `memory-management-rev-1.md` deferred destruction behind a tripwire ("revisit
 > before the first type with a non-memory drop obligation targets JS") — std has since grown
 > several (`Database` has no `close`, sockets and timers lean on process exit, task teardown

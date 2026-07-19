@@ -22,6 +22,11 @@ re-sending it. Echoes are ignored, clean fields update, dirty fields win.
 mounted root, a list row, a `when`/`swap` body. Each boundary has an
 [owner](#owner). [Building UI](../guide/ui.md).
 
+**claim** — any alias into an [owner](#owner): a [view](#view), an
+[arena](#arena) [handle](#handle), a loan of a [resource](#resource). Valid
+only while the owner's [epoch](#epoch) is unchanged. [The memory
+model](../spec/memory.md).
+
 **codec** — the wire format both ends of a connection agree on:
 `json_codec()` (readable) or `binary_codec()` (compact).
 [Services & RPC](../guide/services.md).
@@ -50,6 +55,10 @@ hasn't confirmed yet. Dirty fields ignore adoption; the user's text wins.
 locally at once, commits in the background, and keeps your text on
 failure. [Reactive state](../guide/reactive.md).
 
+**drop** — destruction. The `Drop` hook runs at an owner's scope end;
+`drop(x)` moves a value in to destroy it early. Only [resources](#resource)
+have one. [Resources](../tour/resources.md).
+
 **echo** — your own change arriving back through a [mirror](#mirror). A
 draft recognizes it and does nothing, so your caret never jumps.
 [Reactive state](../guide/reactive.md).
@@ -60,6 +69,10 @@ cleaned up automatically by its [owner](#owner).
 
 **entrypoint** — `fun main` in the entry module. It runs automatically;
 on node the process exits when it finishes. [Async](../tour/async.md).
+
+**epoch** — an [owner](#owner)'s abstract version counter. It advances when
+the owner is rebound, resized, moved, or dropped; a [claim](#claim) is valid
+only while it has not. [The memory model](../spec/memory.md).
 
 **extern** — a declaration binding a host (JavaScript) function, object,
 or property so vilan code can call it. [Platforms](../tour/platforms.md).
@@ -110,6 +123,10 @@ browser. Decides which std [layers](#layer) are importable.
 **prelude** — the few names available without imports: the primitive
 types, `List`, `void`. Everything else is imported explicitly.
 [Spec §4](../spec/names.md).
+
+**resource** — a value with a single owner that *moves* instead of copying
+and is destroyed deterministically at scope end — a `Database`, an
+`OwnedNursery`. [Resources](../tour/resources.md).
 
 **safe integer** — an integer JavaScript's 64-bit floats represent
 exactly: anything within ±2^53. vilan's `i53`/`u53` are named for this

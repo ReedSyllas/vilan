@@ -12,6 +12,7 @@
 - [Control flow](tour/control-flow.md)
 - [The memory model](tour/memory-model.md)
 - [Async](tour/async.md)
+- [Resources](tour/resources.md)
 - [Macros & const](tour/macros-and-const.md)
 - [Platforms](tour/platforms.md)
 

@@ -1,6 +1,9 @@
 # C4 implementation plan — deterministic destruction, to completion
 
-> **Status: ACTIVE 2026-07-18.** The build sequence for `destruction.md` (**ACCEPTED**
+> **Status: COMPLETE 2026-07-19 — all five slices shipped; the ledger is in
+> `destruction.md`'s status block.** The findings/residue notes below are the honest
+> record of where implementation corrected the design. Originally: the build sequence
+> for `destruction.md` (**ACCEPTED**
 > same day — every §14 call and `claims-and-epochs.md` §8 ratified per recommendation;
 > the record is §0 below). Five slices, strictly ordered, each landing green on the full
 > suite before the next begins. Companion docs: `destruction.md` (the design),

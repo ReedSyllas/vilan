@@ -54,6 +54,7 @@ to GitHub Pages automatically. Everything also reads fine as plain files
 | [Control flow](tour/control-flow.md) | `match`/`is`, loops, `ret`, Option/Result idioms, `!` and `?.` |
 | [The memory model](tour/memory-model.md) | value semantics, views, `mut`/`own`, `Shared`, `Arena`/`Handle` |
 | [Async](tour/async.md) | implicit await, `async expr` spawn, promises, timers |
+| [Resources](tour/resources.md) | `resource`, moves & loans, `Drop`, `drop(x)`, `Option.take`, `Database`, `OwnedNursery` |
 | [Macros & const](tour/macros-and-const.md) | `const` evaluation, derive macros, `macro { … }` blocks |
 | [Platforms](tour/platforms.md) | std layers, full-stack packages, externs, assets |
 

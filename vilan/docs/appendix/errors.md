@@ -151,7 +151,9 @@ locals, in reverse declaration order — through `try`/`finally`, so `ret`,
 `jump`, and a thrown panic all run it on the way out; a resource without a
 `Drop` impl still has its fields destroyed. A module-level resource lives for
 the process and never drops. A drop that panics while a panic is already
-unwinding replaces the in-flight error (JS `finally` semantics).
+unwinding replaces the in-flight error (JS `finally` semantics). The tutorial
+is [Resources](../tour/resources.md); the normative rules are spec
+[§6.8](../spec/memory.md).
 
 **"use of `…` after it was moved — a resource has a single owner"**
 The binding was moved (bound to another name, passed to an `own`
@@ -180,6 +182,16 @@ Moving a binding from a loop body would move it again on the next
 iteration. Move a value declared *inside* the loop, or loan the outer one
 (`&x` / `&mut x`).
 → [The memory model](../tour/memory-model.md)
+
+**"`…` is a module-level resource — it has process lifetime and cannot be moved …"**
+A top-level `let` resource lives for the whole process and never drops (the
+serve-forever server's `Database`). Consuming it — moving it into a local,
+passing it to an `own` parameter, or `drop(x)` — would hand a
+process-lifetime resource to a droppable owner and close the shared handle
+out from under the rest of the program. Reach it by loan only: method calls,
+`&x`, `&mut x`. To own a database that closes at a scope's end, open it in a
+local instead.
+→ [Resources](../tour/resources.md)
 
 **"a closure cannot capture the resource `…` — …"**
 A closure or `async`/spawn body referenced a resource from an enclosing
@@ -244,6 +256,15 @@ destructor runs synchronously in v1. Cancel owned tasks through an
 `OwnedNursery` — whose own `drop` cancels them — rather than awaiting them.
 Awaited teardown is a future design.
 → [The memory model](../tour/memory-model.md)
+
+**"`drop` for `…` requires an ambient context — teardown must be context-free …"**
+A `drop` body reached something that needs an ambient context — most often a
+`Signal` write, which threads the current turn as a hidden argument. A
+destructor's call sites are scope exits, which thread no context, so it
+cannot receive one. Keep teardown context-free: hand turn-joining or
+signal-writing work to an owner that runs inside a turn, not to the
+destructor.
+→ [Resources](../tour/resources.md)
 
 **"`Drop` for `…` must declare `fun drop(&mut self)` — a destructor takes `&mut self` …"**
 A `Drop` impl's `drop` must be exactly `fun drop(&mut self)`: a `&mut self`
