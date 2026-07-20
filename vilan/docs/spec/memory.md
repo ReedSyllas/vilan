@@ -141,8 +141,15 @@ element. The parameter conventions:
 While a view of a place is live, mutations that would **invalidate** the
 view (replacing the aggregate that contains the place, removing the
 element it points into, resizing past it) are forbidden. The compiler
-enforces the statically-decidable half: assignments to the viewed root or
-an enclosing place while a view is live are rejected.
+enforces the statically-decidable half in full: reassigning the viewed
+root (or an enclosing place), and any call that may advance the root's
+*geometry* — the callee's inferred `bumps` verdict per parameter, so a
+content-stable `&mut` callee (one that only writes fields or elements
+through the parameter) passes freely. Views anchor at their origin roots
+wherever they arise: a direct `&place`, a view-returning call (the
+callee's `borrows` positions mapped through the arguments), or a
+wrapped-view `match` capture — a projection returned through a call is
+policed exactly like the `&place` it came from.
 
 *Implementation note: the dynamic remainder (aliasing reached through
 calls, container-internal invalidation) is tracked future work. When it

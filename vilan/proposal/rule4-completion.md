@@ -1,6 +1,12 @@
 # Rule-4 completion — the `borrows` root-set and the `bumps` effect (C10 + C6)
 
-> **Status: ACTIVE 2026-07-19 — plan accepted; slices below.** One arc, two backlog
+> **Status: COMPLETE 2026-07-19 — all four slices shipped same day.** 144d44e (S1
+> root-set + a chain-miscompile fix) → d595ed2 (S2 `bumps`) → 9b5e3cf (S3 anchoring +
+> the E2 swap; the pass-ordering bug found by the sweep; ZERO fallout incl. kolt) →
+> the S4 commit (iterator-chain pins proving the ForEach arm composes; spec §6.4 +
+> errors-appendix language matched to enforcement — the appendix had never had the
+> rule-4 entries at all). Residues live in the slice notes below; backlog items 6/10
+> are closed. Original plan follows. One arc, two backlog
 > items that are one machine: **C10** (call-returned views and wrapped-view captures are
 > invisible to rule 4 — `compute_view_origins` anchors only direct `&place` bindings,
 > and `Function.borrows` is a bare bool recording no projected root) and **C6** (E2

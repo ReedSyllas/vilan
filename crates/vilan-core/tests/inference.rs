@@ -23164,3 +23164,77 @@ fn a_bumping_user_call_under_a_live_view_is_still_rejected() {
         "while a view into it is live",
     );
 }
+
+// --- rule-4 completion S4: the iterator chain -------------------------------
+// `for e in &mut user_container` bindings anchor at the container via the
+// ForEach origin arm (which predates S3 and covers user containers driving
+// `next_mut`); these pins prove the chain holds end to end.
+
+#[test]
+fn a_bumping_call_on_a_user_container_inside_for_mut_is_rejected() {
+    // The loop binding e anchors at `bag`, and `push` (through the wrapper's
+    // inferred bumps) fires E2 mid-iteration.
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        struct Bag { items: List<i32>, cursor: i32 }
+        impl Bag {
+            fun next_mut(&mut self): Option<&mut i32> {
+                if self.cursor < self.items.len() {
+                    let index = self.cursor;
+                    self.cursor = self.cursor + 1;
+                    Some(&mut self.items[index])
+                } else {
+                    None
+                }
+            }
+            fun add(&mut self, value: i32) {
+                self.items.push(value);
+            }
+        }
+        fun main() {
+            mut bag = Bag { items = [ 1, 2 ], cursor = 0 };
+            for e in &mut bag {
+                bag.add(3);
+                e = 9;
+            }
+        }
+        main();
+        "#,
+        "while a view into it is live",
+    );
+}
+
+#[test]
+fn a_content_stable_call_on_a_user_container_inside_for_mut_is_accepted() {
+    // The C6 twin one hop up: a cursor-reset is a scalar field write —
+    // content-stable — so calling it mid-iteration is legal.
+    assert_compiles(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        struct Bag { items: List<i32>, cursor: i32 }
+        impl Bag {
+            fun next_mut(&mut self): Option<&mut i32> {
+                if self.cursor < self.items.len() {
+                    let index = self.cursor;
+                    self.cursor = self.cursor + 1;
+                    Some(&mut self.items[index])
+                } else {
+                    None
+                }
+            }
+            fun mark(&mut self) {
+                self.cursor = self.cursor;
+            }
+        }
+        fun main() {
+            mut bag = Bag { items = [ 1, 2 ], cursor = 0 };
+            for e in &mut bag {
+                bag.mark();
+                e = 9;
+            }
+        }
+        main();
+        "#,
+    );
+}

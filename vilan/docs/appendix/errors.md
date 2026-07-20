@@ -127,6 +127,22 @@ keep a reference around, store a plain value, a `Handle` into an
 `Arena`, or a `Shared` cell.
 → [The memory model](../tour/memory-model.md)
 
+**"cannot reassign '…' while a view into it is live (rule 4 …)"**
+Replacing the whole value would detach the view from live storage. Finish
+using the view first (its life ends with its block), or re-derive it after
+the replacement. Views anchor wherever they come from — `&x`, a
+view-returning call (`list.at(0)`, `arena.get(h)`), or a `Some(let v)`
+capture of one — so the rule is the same for all three.
+→ [The memory model](../tour/memory-model.md)
+
+**"cannot mutate '…' with '….(..)' while a view into it is live (rule 4 …)"**
+The call may advance the container's *geometry* (grow, shrink, reallocate,
+swap an aggregate field) while a view points into it. Only
+geometry-advancing callees trigger this — a method that just writes fields
+or elements through `&mut self` passes freely (the compiler infers which is
+which). Do the mutation before taking the view, or after its block ends.
+→ [The memory model](../tour/memory-model.md)
+
 **"cannot hold a view across 'await': '…' is still live here. …"**
 Your function suspends while a view is live, and whatever it points into
 could change during the pause. Re-derive the view after the await
