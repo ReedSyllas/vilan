@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -256,10 +256,15 @@ pub struct Function<'src> {
     /// compiles to a JS `async function`, and calls to it are implicitly
     /// awaited. Set by the async inference pass.
     pub is_async: bool,
-    /// Set when the signature has a `borrows <param>` clause: the returned view
-    /// is a projection of an argument, so it is permitted to escape (rule 3's
-    /// sanctioned case) rather than being rejected by `check_view_escape`.
-    pub borrows: bool,
+    /// The projected *parameter positions* of the returned view (receiver =
+    /// position 0) — the `borrows` root-set (`rule4-completion.md` §1). Non-empty
+    /// exactly when the function returns a view projecting one or more of its
+    /// parameters, whether spelled by a `borrows <param>` clause or inferred; a
+    /// projection permits the view to escape (rule 3's sanctioned case) rather
+    /// than being rejected by `check_view_escape`. An `if`/`match` that returns a
+    /// view of a different parameter per leaf unions their positions. Every
+    /// consumer that once read the bare-bool `borrows` now reads *non-empty*.
+    pub borrows: BTreeSet<u32>,
     /// Whether the (view) return type is `&mut` rather than `&` — so a binding of
     /// the call (`let v = obj.slot()`) is writable through `*v`.
     pub returns_mut_view: bool,
@@ -289,9 +294,12 @@ pub struct ExternalFunction<'src> {
     // The `[extern(..)]` host binding, if any — lowers calls to a JS
     // import/call, method, or property access.
     pub extern_binding: Option<ExternBinding<'src>>,
-    // Declares `borrows` — returns a view projecting a parameter (e.g.
-    // `Shared::write(self): &mut T borrows self`), so a call to it is a view.
-    pub borrows: bool,
+    // The projected parameter positions of the returned view (receiver =
+    // position 0) — the `borrows` root-set. An extern has no body to infer from,
+    // so this is exactly its declared `borrows <param>` clause resolved to a
+    // position (e.g. `Shared::write(self): &mut T borrows self` → `{0}`). A call
+    // to it is a view when this is non-empty.
+    pub borrows: BTreeSet<u32>,
     pub call_count: u32,
     /// Declared `async` — a promise-returning host function. Calls to it are
     /// implicitly awaited.
@@ -6520,11 +6528,38 @@ impl<'src> Analyzer<'src> {
             .return_type_id
             .map(|return_type_id| format!(": {}", self.declaration_type_label(return_type_id)))
             .unwrap_or_default();
+        // The inferred (or declared) `borrows` root-set is part of the signature's
+        // contract — render it like the source clause (E9: hover shows clauses),
+        // naming each projected parameter in position order (`borrows self`,
+        // `borrows a, b`).
+        let borrows_label = self.borrows_clause_label(&function.borrows, &function.parameters);
         format!(
-            "fun {}{generics}({}){return_label}",
+            "fun {}{generics}({}){return_label}{borrows_label}",
             function.name,
             parameters.join(", ")
         )
+    }
+
+    /// The ` borrows <params>` clause for a hover signature, naming each projected
+    /// parameter position in order — empty when the root-set is empty.
+    fn borrows_clause_label(&self, borrows: &BTreeSet<u32>, parameter_ids: &[Id]) -> String {
+        if borrows.is_empty() {
+            return String::new();
+        }
+        let names: Vec<&str> = borrows
+            .iter()
+            .filter_map(|position| {
+                parameter_ids
+                    .get(*position as usize)
+                    .and_then(|parameter_id| self.parameters.get(parameter_id))
+                    .map(|parameter| parameter.name)
+            })
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" borrows {}", names.join(", "))
+        }
     }
 
     /// A struct's declaration block for hover: name, generics, and fields.
@@ -7050,7 +7085,7 @@ impl<'src> Analyzer<'src> {
                 match self.expr_id_to_expr_map.get(&function_call.subject_id)? {
                     Expr::Local(function_id) => {
                         let function = self.functions.get(function_id)?;
-                        function.borrows.then_some(function.returns_mut_view)
+                        (!function.borrows.is_empty()).then_some(function.returns_mut_view)
                     }
                     _ => None,
                 }
@@ -7073,11 +7108,11 @@ impl<'src> Analyzer<'src> {
         };
         self.functions
             .get(function_id)
-            .is_some_and(|function| function.borrows)
+            .is_some_and(|function| !function.borrows.is_empty())
             || self
                 .external_functions
                 .get(function_id)
-                .is_some_and(|external| external.borrows)
+                .is_some_and(|external| !external.borrows.is_empty())
     }
 
     /// Whether a binding or parameter holds a view: a view binding (a `&`/`&mut`
@@ -7235,47 +7270,213 @@ impl<'src> Analyzer<'src> {
         )
     }
 
-    /// Rule 3 (second-class): a view may not escape its scope — it cannot be
-    /// returned, stored in a struct field, placed in a collection, or carried in
-    /// an enum payload. (Passing a view as an argument, or binding it to a local,
-    /// is fine.) This is what removes lifetimes: a view structurally cannot
-    /// outlive its target. Returning a borrow derived from an argument is
-    /// Phase 5 — infer the `borrows` effect. A function whose returned view
-    /// projects a `&`/`&mut` parameter borrows that parameter: the caller's
-    /// argument outlives the call, so the view is sound, whether or not the
-    /// signature spells `borrows` out. (A returned view of a *local* still
-    /// dangles, and `derives_from_view_param` excludes it, so it stays rejected
-    /// by `check_view_escape`.) An inferred function is then indistinguishable
-    /// from an explicit `borrows` one for escape, scalar-view lowering, and
-    /// binding writability — they all read `Function.borrows`.
-    ///
-    /// Runs before `check_view_escape` (and the scalar-view-call analysis) so the
-    /// flipped flag is visible to every consumer. The passing corpus is
-    /// unaffected: a function that returns such a view today *must* already say
-    /// `borrows` or it fails to compile, so this only newly admits programs that
-    /// previously errored.
-    fn infer_borrows(&mut self) {
-        let view_bindings = self.compute_view_bindings();
-        let capturing: HashSet<Id> = self
-            .closures
-            .keys()
-            .copied()
-            .filter(|closure_id| self.closure_captures_view_param(*closure_id))
-            .collect();
-        let inferred: Vec<Id> = self
-            .functions
-            .values()
-            .filter(|function| {
-                function.has_body
-                    && !function.borrows
-                    && self.escapes_as_view(function.body.1, &view_bindings, &capturing)
-                    && self.derives_from_view_param(function.body.1)
+    /// Resolve a `borrows <param>` clause to the projected parameter position
+    /// (receiver = position 0) — the seed for the root-set, which inference then
+    /// unions with any position the body projects. An unresolved name (no such
+    /// parameter) yields the empty set: no check rejects it today, and a body
+    /// that genuinely returns a view still has its projected parameter inferred.
+    fn resolve_borrows_annotation(
+        &self,
+        name: Option<&str>,
+        parameter_ids: &[Id],
+    ) -> BTreeSet<u32> {
+        name.and_then(|name| {
+            parameter_ids.iter().position(|parameter_id| {
+                self.parameters
+                    .get(parameter_id)
+                    .is_some_and(|parameter| parameter.name == name)
             })
-            .map(|function| function.id)
-            .collect();
-        for function_id in inferred {
-            if let Some(function) = self.functions.get_mut(&function_id) {
-                function.borrows = true;
+        })
+        .map(|position| BTreeSet::from([position as u32]))
+        .unwrap_or_default()
+    }
+
+    /// Rule 3 (second-class): a view may not escape its scope. Returning a borrow
+    /// derived from an argument is the sanctioned exception (Phase 5) — a function
+    /// whose returned view projects a `&`/`&mut` parameter *borrows* that
+    /// parameter: the caller's argument outlives the call, so the view is sound
+    /// whether or not the signature spells `borrows` out. This pass records the
+    /// **root-set** — *which* parameter positions the return projects
+    /// (`rule4-completion.md` §1) — extending the former bare-bool `borrows`.
+    ///
+    /// Three sources feed a function's set, unioned: an explicit `borrows`
+    /// clause (already resolved into `Function.borrows` at construction); a
+    /// direct view leaf (`&mut self.value`, or a `&`/`&mut` parameter forwarded
+    /// straight out) contributes its projected parameter; a wrapped-view leaf
+    /// (`Some(&mut self.x)`, including each leg of a conditional `if live { .. }
+    /// else { None }`) contributes the same, so an `if`/`match` projecting a
+    /// different parameter per leg unions their positions. A leaf that is itself
+    /// a **borrows-call** maps the callee's root-set through that call's
+    /// arguments back to the caller's parameters — a chain the fixpoint composes
+    /// (the sixth verse of the inferred-effect worklist). A leaf projecting a
+    /// *local*, or an argument that is not a parameter place, contributes no
+    /// position, so a view of a local still has an empty set and stays rejected
+    /// by `check_view_escape`.
+    ///
+    /// The fixpoint is monotone: a set only grows as the sets of the borrows
+    /// functions it calls grow (union-only, bounded by parameter count), so it
+    /// terminates. Runs before `check_view_escape` and the scalar-view-call
+    /// analysis so the root-set is visible to every consumer, each of which reads
+    /// *non-empty* where it once read the `true` bool.
+    fn infer_borrows(&mut self) {
+        let function_ids: Vec<Id> = self.functions.keys().copied().collect();
+        loop {
+            let mut updates: Vec<(Id, BTreeSet<u32>)> = Vec::new();
+            for function_id in &function_ids {
+                let (has_body, body_tail, current) = {
+                    let Some(function) = self.functions.get(function_id) else {
+                        continue;
+                    };
+                    (function.has_body, function.body.1, function.borrows.clone())
+                };
+                if !has_body {
+                    continue;
+                }
+                let mut positions = current.clone();
+                self.collect_borrows_positions(*function_id, body_tail, &mut positions);
+                if positions != current {
+                    updates.push((*function_id, positions));
+                }
+            }
+            if updates.is_empty() {
+                break;
+            }
+            for (function_id, positions) in updates {
+                if let Some(function) = self.functions.get_mut(&function_id) {
+                    function.borrows = positions;
+                }
+            }
+        }
+    }
+
+    /// The projected parameter positions of the view a function's body returns,
+    /// unioned across the tail leaves an `if`/`match`/block can evaluate to.
+    fn collect_borrows_positions(
+        &self,
+        function_id: Id,
+        body_tail: Id,
+        positions: &mut BTreeSet<u32>,
+    ) {
+        let mut leaves = Vec::new();
+        self.collect_tail_leaves(body_tail, &mut leaves);
+        for leaf in leaves {
+            self.collect_leaf_borrows_position(function_id, leaf, positions);
+        }
+    }
+
+    /// One return leaf's contribution to the root-set: a direct `&place` view or
+    /// a forwarded `&`/`&mut` parameter projects its parameter; a wrapped
+    /// `Some(&place)` view projects the payload's parameter; a borrows-call maps
+    /// the callee's root-set through the call's arguments (the chain).
+    fn collect_leaf_borrows_position(
+        &self,
+        function_id: Id,
+        leaf_id: Id,
+        positions: &mut BTreeSet<u32>,
+    ) {
+        match self.expr_id_to_expr_map.get(&leaf_id) {
+            // `&mut self.value` / `&self.x[i]` — project the referenced place's
+            // parameter root.
+            Some(Expr::Reference(operand, _)) => {
+                if let Some(position) = self.projected_parameter_position(function_id, *operand) {
+                    positions.insert(position);
+                }
+            }
+            // A `&`/`&mut` parameter forwarded straight out (`same(x) = x`).
+            Some(Expr::Local(_)) => {
+                if let Some(position) = self.projected_parameter_position(function_id, leaf_id) {
+                    positions.insert(position);
+                }
+            }
+            Some(Expr::Call(call_id)) => {
+                if let Some(operand) = self.wrapped_leaf_operand(*call_id) {
+                    // `Some(&mut self.x)` — the wrapped payload's parameter root.
+                    if let Some(position) = self.projected_parameter_position(function_id, operand)
+                    {
+                        positions.insert(position);
+                    }
+                } else {
+                    // A borrows-call leaf — chain through its arguments.
+                    self.map_call_borrows_positions(function_id, *call_id, positions);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The position of the `&`/`&mut` parameter a place projects (`self.value` →
+    /// `self`'s position), or `None` if its root is not such a parameter of this
+    /// function — a bare/`own` parameter (owned by the callee, so a view into it
+    /// dangles) or a local both yield `None`, keeping the view an escape.
+    fn projected_parameter_position(&self, function_id: Id, place_id: Id) -> Option<u32> {
+        let root = self.place_root(place_id)?;
+        let is_view_parameter = self.parameters.get(&root).is_some_and(|parameter| {
+            matches!(parameter.convention, Convention::Ref | Convention::RefMut)
+        });
+        if !is_view_parameter {
+            return None;
+        }
+        let function = self.functions.get(&function_id)?;
+        function
+            .parameters
+            .iter()
+            .position(|parameter_id| *parameter_id == root)
+            .map(|index| index as u32)
+    }
+
+    /// If `call_id` is a wrapped-view constructor `Some(&place)` whose payload
+    /// projects a parameter, the `&place` operand (for its parameter root). The
+    /// position twin of `leaf_wrapped_view`, which reports `(mutable, scalar)`.
+    fn wrapped_leaf_operand(&self, call_id: Id) -> Option<Id> {
+        if !self.call_is_variant_constructor(call_id) {
+            return None;
+        }
+        let [argument_id] = self.function_calls.get(&call_id)?.argument_ids.as_slice() else {
+            return None;
+        };
+        match self.expr_id_to_expr_map.get(argument_id) {
+            Some(Expr::Reference(operand, _)) if self.derives_from_view_param(*argument_id) => {
+                Some(*operand)
+            }
+            _ => None,
+        }
+    }
+
+    /// Map a borrows-call's root-set through the call's arguments into the
+    /// caller's parameters: for each position the callee projects, the argument
+    /// at that position — if it is a place rooted at one of *this* function's
+    /// `&`/`&mut` parameters — contributes that parameter's position. The chain
+    /// that composes root-sets across the call graph.
+    fn map_call_borrows_positions(
+        &self,
+        function_id: Id,
+        call_id: Id,
+        positions: &mut BTreeSet<u32>,
+    ) {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return;
+        };
+        let Some(Expr::Local(callee_id)) = self.expr_id_to_expr_map.get(&function_call.subject_id)
+        else {
+            return;
+        };
+        let callee_positions: Vec<u32> = self
+            .functions
+            .get(callee_id)
+            .map(|function| &function.borrows)
+            .or_else(|| {
+                self.external_functions
+                    .get(callee_id)
+                    .map(|external| &external.borrows)
+            })
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        for callee_position in callee_positions {
+            if let Some(argument_id) = function_call.argument_ids.get(callee_position as usize) {
+                if let Some(position) = self.projected_parameter_position(function_id, *argument_id)
+                {
+                    positions.insert(position);
+                }
             }
         }
     }
@@ -7349,7 +7550,7 @@ impl<'src> Analyzer<'src> {
         for function in self.functions.values() {
             if function.has_body
                 && self.escapes_as_view(function.body.1, &view_bindings, &capturing)
-                && !(function.borrows && self.derives_from_view_param(function.body.1))
+                && !(!function.borrows.is_empty() && self.derives_from_view_param(function.body.1))
             {
                 escapes.push(function.body.1);
             }
@@ -7648,7 +7849,7 @@ impl<'src> Analyzer<'src> {
     /// `i32`, so the scalar check is on the collapsed `return_type_id`).
     fn function_returns_scalar_view(&self, function_id: Id) -> bool {
         self.functions.get(&function_id).is_some_and(|function| {
-            function.borrows
+            !function.borrows.is_empty()
                 && function
                     .return_type_id
                     .map(|type_id| type_id.get_type(self))
@@ -10560,6 +10761,7 @@ impl<'src> Analyzer<'src> {
                     }
                     let return_type_id =
                         return_type_id.unwrap_or_else(|| Type::Void.get_type_id(self));
+                    let borrows = self.resolve_borrows_annotation(function.borrows, &parameters);
                     self.external_functions.insert(
                         id,
                         ExternalFunction {
@@ -10570,7 +10772,7 @@ impl<'src> Analyzer<'src> {
                             parameters,
                             return_type_id,
                             extern_binding: function.extern_binding.clone(),
-                            borrows: function.borrows.is_some(),
+                            borrows,
                             call_count: 0,
                             is_async: function.is_async,
                         },
@@ -10632,6 +10834,7 @@ impl<'src> Analyzer<'src> {
                         });
                         self.return_sites.push((id, expr_id));
                     }
+                    let borrows = self.resolve_borrows_annotation(function.borrows, &parameters);
                     self.functions.insert(
                         id,
                         Function {
@@ -10645,7 +10848,7 @@ impl<'src> Analyzer<'src> {
                             has_body: function.body.is_some(),
                             call_count: 0,
                             is_async: function.is_async,
-                            borrows: function.borrows.is_some(),
+                            borrows,
                             returns_mut_view: matches!(
                                 function.return_type.as_deref().map(|spanned| &spanned.0),
                                 Some(Node::Reference(true, _))
@@ -22570,10 +22773,11 @@ pub fn analyze<'src>(
             ": {}",
             analyzer.declaration_type_label(external.return_type_id)
         );
+        let borrows_label = analyzer.borrows_clause_label(&external.borrows, &external.parameters);
         declaration_labels.insert(
             *function_id,
             format!(
-                "external fun {}({}){return_label}",
+                "external fun {}({}){return_label}{borrows_label}",
                 external.name,
                 parameters.join(", ")
             ),

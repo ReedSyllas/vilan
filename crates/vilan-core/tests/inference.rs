@@ -1264,6 +1264,167 @@ fn arena_mutation_under_a_live_get_view_is_rejected() {
     );
 }
 
+// --- rule4-completion S1: the `borrows` root-set (inference only) -----------
+// `Function.borrows` records *which* parameter positions a returned view
+// projects (receiver = position 0), inferred and chained. Inference-only: no
+// enforcement changed, the corpus stays byte-identical. These pin the behavior
+// each root-set drives; the projected positions themselves surface in the
+// language-server hover tests (`borrows self`, `borrows a, b`, `borrows b`).
+
+#[test]
+fn direct_projection_borrows_the_receiver() {
+    // A `&mut self` method returning `&mut self.field` projects the receiver
+    // (position 0): the write through the projection reaches the receiver, and a
+    // binding of the call is a writable view. The inferred twin of `borrows.vl`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Wrapper { value: i32 }
+        impl Wrapper { fun slot(&mut self): &mut i32 { &mut self.value } }
+        fun main() {
+            mut w = Wrapper { value = 1 };
+            w.slot() = 10;
+            print(w.value);          // 10 — written through the projection
+            let v = w.slot();
+            v = 25;
+            print(w.value);          // 25 — written through the bound view
+        }
+        "#,
+        "10\n25\n",
+    );
+}
+
+#[test]
+fn chained_projection_maps_through_a_borrows_call() {
+    // A return leaf that is itself a borrows-call: `outer` returns `self.inner()`
+    // where `inner` borrows self, so the callee's {0} maps back through the
+    // receiver to `outer`'s {0}. Before the root-set this call-tail was not
+    // recognized as a view (it miscompiled); the chain now lowers it correctly.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Wrapper { value: i32 }
+        impl Wrapper {
+            fun inner(&mut self): &mut i32 borrows self { &mut self.value }
+            fun outer(&mut self): &mut i32 { self.inner() }
+        }
+        fun main() {
+            mut w = Wrapper { value = 1 };
+            w.outer() = 42;
+            print(w.value);          // 42
+        }
+        "#,
+        "42\n",
+    );
+}
+
+#[test]
+fn chained_projection_maps_a_non_receiver_argument() {
+    // The chain maps the callee's *position* through the call's arguments: a free
+    // `pick(a, b)` returning `grow(b)` — where `grow` borrows its position-0
+    // parameter — projects `b`, the caller's position 1, not `a`. Only `q` (bound
+    // to `b`) is written; `p` is untouched, proving the mapping is positional.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        fun grow(x: &mut i32): &mut i32 borrows x { x }
+        fun pick(a: &mut i32, b: &mut i32): &mut i32 { grow(b) }
+        fun main() {
+            mut p = 1;
+            mut q = 2;
+            pick(&mut p, &mut q) = 9;
+            print(p);                // 1 — untouched
+            print(q);                // 9 — projected through b
+        }
+        "#,
+        "1\n9\n",
+    );
+}
+
+#[test]
+fn multi_parameter_projection_unions_branch_positions() {
+    // An `if` returning a wrapped view of a *different* parameter per leg unions
+    // their positions → {0, 1}: each branch's projection writes through to the
+    // chosen parameter. The every-leaf-agrees rule still holds (both legs `&mut`,
+    // both aggregate) — a recognized wrapped view, not an escape.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct Box { x: i32 }
+        fun pick(a: &mut Box, b: &mut Box, first: bool): Option<&mut i32> {
+            if first { Some(&mut a.x) } else { Some(&mut b.x) }
+        }
+        fun main() {
+            mut p = Box { x = 1 };
+            mut q = Box { x = 2 };
+            match pick(&mut p, &mut q, true) { Some(let v) => { v = 90; } None => {} }
+            match pick(&mut p, &mut q, false) { Some(let v) => { v = 91; } None => {} }
+            print(p.x);              // 90 — first branch projected a
+            print(q.x);              // 91 — second branch projected b
+        }
+        "#,
+        "90\n91\n",
+    );
+}
+
+#[test]
+fn a_wrapped_view_return_projects_its_parameter() {
+    // The wrapped `Option<&mut T>` shape records the projected position exactly
+    // like a bare view return: un-annotated, `slot` borrows self (position 0),
+    // and the captured view writes through. (The `transparent-references.vl`
+    // `Cell::slot` shape — the root-set now records it without changing codegen.)
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+        struct Cell { value: i32 }
+        impl Cell { fun slot(&mut self): Option<&mut i32> { Some(&mut self.value) } }
+        fun main() {
+            mut cell = Cell { value = 1 };
+            match cell.slot() { Some(let v) => { v = 7; } None => {} }
+            print(cell.value);       // 7
+        }
+        "#,
+        "7\n",
+    );
+}
+
+#[test]
+fn an_explicit_borrows_clause_agrees_with_inference() {
+    // `borrows self` names position 0; inference of the same body also yields
+    // {0} — they agree (the union is idempotent, no check contradicts). The
+    // annotated form compiles and writes through identically to the inferred one.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        struct Wrapper { value: i32 }
+        impl Wrapper { fun slot(&mut self): &mut i32 borrows self { &mut self.value } }
+        fun main() {
+            mut w = Wrapper { value = 3 };
+            w.slot() = 8;
+            print(w.value);          // 8
+        }
+        "#,
+        "8\n",
+    );
+}
+
+#[test]
+fn a_returned_view_of_a_local_is_still_rejected() {
+    // The escape boundary is unchanged: a view of a *local* (not a parameter)
+    // projects no position, so the root-set stays empty and the view escapes —
+    // rejected exactly as before the root-set. (S1 records positions; it does
+    // not relax enforcement.)
+    assert_fails_with(
+        r#"
+        fun leak(): &mut i32 { mut local = 1; &mut local }
+        fun main() { let v = leak(); }
+        "#,
+        "a view cannot escape its scope",
+    );
+}
+
 // --- A1: `Shared::write(): &mut T borrows self` -----------------------------
 
 #[test]

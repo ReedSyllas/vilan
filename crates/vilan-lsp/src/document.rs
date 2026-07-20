@@ -2337,6 +2337,41 @@ pub(crate) mod tests {
         assert!(hover.contains("```vilan\nasync fun warm()\n```"), "{hover}");
     }
 
+    // E9 (rule4-completion S1): the inferred `borrows` root-set surfaces in the
+    // signature like the source clause. A `&mut self` method returning a
+    // projection of `self` renders `borrows self` though no clause was written.
+    #[test]
+    fn hover_shows_an_inferred_single_borrows_position() {
+        let hover = hover_at_cursor(
+            "import std::print;\n\nstruct Wrapper { value: i32 }\n\nimpl Wrapper {\n\tfun sl|ot(&mut self): &mut i32 {\n\t\t&mut self.value\n\t}\n}\n\nfun main() {\n\tmut w = Wrapper { value = 1 };\n\tw.slot() = 2;\n\tprint(w.value);\n}\n",
+        )
+        .expect("hovering `slot` should produce a label");
+        assert!(hover.contains("borrows self"), "{hover}");
+    }
+
+    // A wrapped view projecting a different parameter per branch unions both
+    // positions; the clause names them in order — `borrows a, b`.
+    #[test]
+    fn hover_shows_an_inferred_multi_borrows_position() {
+        let hover = hover_at_cursor(
+            "import std::option::Option::{ self, Some, None };\n\nstruct Box { x: i32 }\n\nfun pi|ck(a: &mut Box, b: &mut Box, first: bool): Option<&mut i32> {\n\tif first { Some(&mut a.x) } else { Some(&mut b.x) }\n}\n\nfun main() {\n\tmut p = Box { x = 1 };\n\tmut q = Box { x = 2 };\n\tmatch pick(&mut p, &mut q, true) {\n\t\tSome(let v) => { v = 9; }\n\t\tNone => {}\n\t}\n}\n",
+        )
+        .expect("hovering `pick` should produce a label");
+        assert!(hover.contains("borrows a, b"), "{hover}");
+    }
+
+    // The rendered position is the one the chain projects, not always the
+    // receiver: `pick` returns `grow(b)`, so it borrows `b` — `borrows b`.
+    #[test]
+    fn hover_shows_a_chained_non_receiver_borrows_position() {
+        let hover = hover_at_cursor(
+            "fun grow(x: &mut i32): &mut i32 borrows x {\n\tx\n}\n\nfun pi|ck(a: &mut i32, b: &mut i32): &mut i32 {\n\tgrow(b)\n}\n\nfun main() {\n\tmut p = 1;\n\tmut q = 2;\n\tpick(&mut p, &mut q) = 9;\n}\n",
+        )
+        .expect("hovering `pick` should produce a label");
+        assert!(hover.contains("borrows b"), "{hover}");
+        assert!(!hover.contains("borrows a"), "{hover}");
+    }
+
     // E9: the declaration's leading `///` block surfaces as prose, and
     // attribute lines between it and the name don't break the chain.
     #[test]
