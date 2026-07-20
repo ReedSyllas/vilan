@@ -22743,6 +22743,42 @@ fn a_module_level_resource_move_into_a_local_is_rejected() {
 }
 
 #[test]
+fn a_module_level_resource_overwrite_is_rejected() {
+    // The loan-only corollary's WRITE half (found 2026-07-20 by the lazy-init
+    // question): overwriting a module global implies dropping the old value at
+    // a site that can never drop — probed pre-fix, the old value silently
+    // leaked. The initializer is the one sanctioned write.
+    assert_fails_with(
+        r#"
+        import std::option::Option::{ self, Some, None };
+        resource struct Res { tag: str }
+        mut slot: Option<Res> = None;
+        fun poke() {
+            slot = Some(Res { tag = "made" });
+        }
+        fun main() { poke(); }
+        "#,
+        "cannot be overwritten",
+    );
+}
+
+#[test]
+fn a_module_level_data_binding_overwrite_is_accepted() {
+    // The control: module-level DATA has no drop obligation — plain global
+    // state stays writable exactly as before.
+    assert_compiles(
+        r#"
+        import std::print;
+        mut counter: i32 = 0;
+        fun tick() {
+            counter = counter + 1;
+        }
+        fun main() { tick(); print(i"{counter}"); }
+        "#,
+    );
+}
+
+#[test]
 fn a_module_level_resource_own_argument_is_rejected() {
     assert_fails_with(
         r#"

@@ -434,17 +434,35 @@ enum ResourceMoveViolation {
         move_span: Span,
     },
     /// R5: moving a resource field out of a live aggregate (no partial moves).
-    PartialMove { at: Id },
+    PartialMove {
+        at: Id,
+    },
     /// R7: a binding moved on some paths through an `if`/`match` but not all.
-    ConditionalMove { at: Id, binding: Id },
+    ConditionalMove {
+        at: Id,
+        binding: Id,
+    },
     /// R8: moving a binding declared outside a loop from inside its body.
-    LoopMove { at: Id, binding: Id },
+    LoopMove {
+        at: Id,
+        binding: Id,
+    },
     /// R9: a closure / spawn capturing a resource binding or parameter.
-    Capture { reference_id: Id, binding: Id },
+    Capture {
+        reference_id: Id,
+        binding: Id,
+    },
     /// §5 loan-only corollary: a consuming use (move / `own`-pass, `drop(x)`
     /// included) of a module-level resource, which has process lifetime and can
     /// only be loaned.
-    ModuleLevelMove { at: Id, binding: Id },
+    ModuleLevelMove {
+        at: Id,
+        binding: Id,
+    },
+    ModuleLevelOverwrite {
+        at: Id,
+        binding: Id,
+    },
 }
 
 /// One generic instantiation to re-check under R11 (destruction.md §4): a
@@ -4336,11 +4354,22 @@ impl<'src> Analyzer<'src> {
 
             // R2: assigning onto a binding that still owns a resource is legal —
             // the old value drops (S2), the binding re-owns the new one. The
-            // overwritten binding must not stay marked moved.
+            // overwritten binding must not stay marked moved. EXCEPT a
+            // module-level resource binding (the §5 loan-only corollary's write
+            // half, found 2026-07-20): the overwrite implies dropping the old
+            // value at a site that can never drop — module globals have process
+            // lifetime — so the old value would silently leak (probed: it did).
+            // Rejected; the initializer is the one sanctioned write.
             Expr::Assignment(target_id, value_id) => {
                 self.scan_move(value_id, true, false, scan, flow, loop_depth, violations);
                 match self.expr_id_to_expr_map.get(&target_id) {
                     Some(Expr::Local(binding)) if scan.resource_bindings.contains(binding) => {
+                        if scan.module_level_bindings.contains(binding) {
+                            violations.push(ResourceMoveViolation::ModuleLevelOverwrite {
+                                at: target_id,
+                                binding: *binding,
+                            });
+                        }
                         flow.moved.remove(binding);
                         flow.decl_loop_depth.entry(*binding).or_insert(loop_depth);
                     }
@@ -5401,6 +5430,18 @@ impl<'src> Analyzer<'src> {
                         note: None,
                     }
                 }
+                ResourceMoveViolation::ModuleLevelOverwrite { at, binding } => {
+                    let name = self.binding_name(binding);
+                    Error {
+                        span: **self.span_map.get(&at).unwrap_or(&&EMPTY_SPAN),
+                        msg: format!(
+                            "`{name}` is a module-level resource — it has process lifetime and \
+                             cannot be overwritten (the old value's drop has nowhere to run); \
+                             its initializer is the one write, and everything after is a loan"
+                        ),
+                        note: None,
+                    }
+                }
             };
             self.diagnostics.push(error);
         }
@@ -6208,6 +6249,17 @@ impl<'src> Analyzer<'src> {
                         format!(
                             "in `{name}`, the module-level resource `{binding_name}` is moved here \
                              — it can only be loaned"
+                        ),
+                    )
+                }
+                ResourceMoveViolation::ModuleLevelOverwrite { at, binding } => {
+                    let binding_name = self.binding_name(*binding);
+                    (
+                        *at,
+                        "a module-level resource is overwritten",
+                        format!(
+                            "in `{name}`, the module-level resource `{binding_name}` is overwritten \
+                             here — the old value's drop has nowhere to run"
                         ),
                     )
                 }
