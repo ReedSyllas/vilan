@@ -183,7 +183,7 @@
         },
         {
           "name": "storage.modifier.vilan",
-          "match": "\\b(let|mut|own|external|export|async|const)\\b"
+          "match": "\\b(let|mut|own|external|export|async|const|resource)\\b"
         },
         {
           "comment": "`with` (trait impl / bound) and the `borrows` return clause.",
