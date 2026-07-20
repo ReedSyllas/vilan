@@ -52,7 +52,7 @@ struct Handle<T> { … }   // slot index + generation; copy freely
 impl Arena<type T> {
 	fun new(): Arena<T>
 	fun insert(&mut self, value: T): Handle<T>
-	fun get(self, handle: Handle<T>): Option<T>        // None once removed
+	fun get(&self, handle: Handle<T>): Option<&T> borrows self  // a view; None once removed
 	fun set(&mut self, handle: Handle<T>, value: T): bool
 	fun remove(&mut self, handle: Handle<T>): Option<T>
 	fun contains(self, handle: Handle<T>): bool
@@ -75,10 +75,11 @@ fun main() {
 	mut nodes: Arena<Node> = Arena::new();
 	let a = nodes.insert(Node { label = "a", edges = [] });
 	let b = nodes.insert(Node { label = "b", edges = [a] });
-	// Close the cycle: a → b.
+	// Close the cycle: a → b. `get` hands back a view, so copy it (`*node`),
+	// edit the copy, and write it back with `set`.
 	match nodes.get(a) {
 		Some(let node) => {
-			mut updated = node;
+			mut updated = *node;
 			updated.edges.push(b);
 			nodes.set(a, updated);
 		},
@@ -91,6 +92,8 @@ fun main() {
 - **Generational** means deletion-safe: removing a value and reusing its
   slot bumps a generation counter, so a stale handle `get`s `None` instead
   of aliasing the new occupant.
-- `get` returns a **copy** of the value; mutate by `get` → modify → `set`
-  (or design nodes so edges/fields update independently).
+- `get` returns a **view** (`Option<&T>`), second-class like any other: read
+  through it, but it may not outlive an arena mutation or be stored. To change
+  a value, copy it out (`*view`), edit, and `set` it back — or design nodes so
+  edges/fields update independently.
 - Traversal is re-`get` per step — the arena stays mutable while you walk.

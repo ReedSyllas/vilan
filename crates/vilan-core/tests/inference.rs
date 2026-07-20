@@ -1120,6 +1120,150 @@ fn transparent_references_reject_value_into_view_binding() {
     );
 }
 
+// --- C8: `Arena.get` migrated to the view-returning form --------------------
+// `fun get(&self, handle): Option<&T> borrows self` (memory-management-rev-1
+// §"A reusable arena in std"; spec §6.0/§6.7's table names this as current).
+// The recognized wrapped-view leaf is `Some(&<T-place>)`, so std's `Slot` now
+// stores `value: T` (not `Option<T>`) to expose that place; occupancy is
+// generation-only, exactly as the proposal's own `get`/`remove` check.
+
+#[test]
+fn arena_get_returns_a_readable_view() {
+    // The view reads into the arena: both a scalar field and a `List` field of
+    // the live value are reachable through the `Some(let node)` capture — the
+    // graph-walk shape a view-returning `get` exists for.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::arena::{ Arena, Handle };
+        import std::option::Option::{ self, Some, None };
+        struct Node { value: i32, edges: List<i32> }
+        fun main() {
+            mut arena: Arena<Node> = Arena::new();
+            let h = arena.insert(Node { value = 7, edges = [1, 2] });
+            match arena.get(h) {
+                Some(let node) => {
+                    print(node.value);           // 7 — field read through the view
+                    mut total = 0;
+                    for edge in node.edges { total = total + edge; }
+                    print(total);                // 3 — list field walked through the view
+                }
+                None => { print(-1); }
+            }
+        }
+        "#,
+        "7\n3\n",
+    );
+}
+
+#[test]
+fn arena_get_on_a_stale_handle_is_none() {
+    // Removal bumps the slot's generation, so the old handle no longer matches
+    // and `get` returns `None`. A reused slot takes the bumped generation, so an
+    // old handle to it stays stale; an untouched handle keeps reading.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::arena::{ Arena, Handle };
+        import std::option::Option::{ self, Some, None };
+        fun read(arena: Arena<i32>, handle: Handle<i32>): i32 {
+            match arena.get(handle) { Some(let v) => *v, None => -1 }
+        }
+        fun main() {
+            mut arena: Arena<i32> = Arena::new();
+            let a = arena.insert(10);
+            let b = arena.insert(20);
+            arena.remove(b);
+            print(read(arena, b));               // -1 — stale after removal
+            let c = arena.insert(30);            // reuses b's slot at a new generation
+            print(read(arena, c));               // 30
+            print(read(arena, b));               // -1 — old handle stays stale
+            print(read(arena, a));               // 10 — untouched
+        }
+        "#,
+        "-1\n30\n-1\n10\n",
+    );
+}
+
+#[test]
+fn arena_get_on_a_data_arena_round_trips() {
+    // A scalar/data arena's whole cycle is unchanged by the migration: insert,
+    // read via `get`, overwrite via `set`, `remove` (owned `Option<T>`), `len`.
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::arena::{ Arena, Handle };
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut arena: Arena<i32> = Arena::new();
+            let a = arena.insert(1);
+            let b = arena.insert(2);
+            print(arena.len());                  // 2
+            arena.set(b, 99);
+            match arena.get(b) { Some(let v) => print(*v), None => print(-1) }  // 99
+            print(arena.remove(a).unwrap_or(-1)); // 1
+            print(arena.len());                  // 1
+        }
+        "#,
+        "2\n99\n1\n1\n",
+    );
+}
+
+#[test]
+fn arena_get_returns_a_view_not_a_copy() {
+    // The distinguisher from the old copy-returning `get(): Option<T>`: the
+    // `Some(let view)` capture is now a *view*, so storing it in a struct field
+    // is a view escape. Under the old form `view` was an owned `Cell` and this
+    // compiled — turning it into an error is exactly what the migration does.
+    assert_fails_with(
+        r#"
+        import std::arena::{ Arena, Handle };
+        import std::option::Option::{ self, Some, None };
+        struct Cell { n: i32 }
+        struct Keeper { held: Cell }
+        fun main() {
+            mut arena: Arena<Cell> = Arena::new();
+            let h = arena.insert(Cell { n = 1 });
+            match arena.get(h) {
+                Some(let view) => { let k = Keeper { held = view }; }
+                None => {}
+            }
+        }
+        "#,
+        "a view cannot escape its scope",
+    );
+}
+
+#[test]
+#[ignore = "pre-existing gap: rule-4/E2 does not anchor borrows-call/wrapped-view results"]
+fn arena_mutation_under_a_live_get_view_is_rejected() {
+    // The intended rule-4/E2 policing: an invalidating arena mutation (`set` /
+    // `insert`) while a `get`-view is live should be rejected. It is NOT today.
+    // `compute_view_origins` (the E1/E2 root map) only anchors `&place` bindings
+    // and view-to-view copies — never a `borrows`-call result or a wrapped-view
+    // `match` capture — and `Function.borrows` is a bare bool that never records
+    // *which* parameter is projected, so such a view has no origin and E1/E2
+    // cannot fire. Pre-existing and general (every borrows-call / wrapped-view
+    // capture, not just Arena); on JS it is semantically empty (GC — nothing
+    // dangles). Un-ignore once the inferred `borrows` summary carries the
+    // projected parameter(s) and `compute_view_origins` anchors these views.
+    assert_fails(
+        r#"
+        import std::print;
+        import std::arena::{ Arena, Handle };
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut arena: Arena<i32> = Arena::new();
+            let h = arena.insert(10);
+            match arena.get(h) {
+                Some(let v) => { arena.set(h, 20); print(*v); }
+                None => {}
+            }
+        }
+        "#,
+    );
+}
+
 // --- A1: `Shared::write(): &mut T borrows self` -----------------------------
 
 #[test]

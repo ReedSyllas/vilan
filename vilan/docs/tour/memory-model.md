@@ -175,10 +175,18 @@ copyable `Handle` ids. Edges are handles, and a handle is a plain value
 you can store anywhere:
 
 ```vilan,fragment
-let nodes: Arena<Node> = Arena::new();
+mut nodes: Arena<Node> = Arena::new();
 let a: Handle = nodes.insert(Node { … });
 let b: Handle = nodes.insert(Node { edges = [a] });
-nodes.get_mut(a).edges.push(b);   // a cycle, no aliasing
+// `get` hands back a view; copy it out, add the edge, write it back.
+match nodes.get(a) {
+	Some(let node) => {
+		mut updated = *node;
+		updated.edges.push(b);      // a cycle, no aliasing
+		nodes.set(a, updated);
+	},
+	None => {},
+}
 ```
 
 Deleting is safe too. Removing a node and reusing its slot bumps a

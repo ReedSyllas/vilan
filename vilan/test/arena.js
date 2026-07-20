@@ -6,19 +6,19 @@ function __list_pop(list) {
 	return list.length === 0 ? [ 1 ] : [ 0, list.pop() ];
 }
 function sum_from(arena, handle) {
-	const $A = $v(arena, handle);
-	let $B = null;
-	if ($A[0] === 0) {
-		const node = $A[1];
+	const $y = $v(arena, handle);
+	let $z = null;
+	if ($y[0] === 0) {
+		const node = $y[1];
 		let total = node[0];
 		for (const edge of node[1]) {
 			total = total + sum_from(arena, edge);
 		}
-		$B = total;
+		$z = total;
 	} else {
-		$B = 0;
+		$z = 0;
 	}
-	return $B;
+	return $z;
 }
 function $a() {
 	return [ [  ], [  ] ];
@@ -28,11 +28,11 @@ function $b(self, value) {
 	let $d = null;
 	if ($c[0] === 0) {
 		const index = $c[1];
-		__at(self[0], index)[1] = [ 0, value ];
+		__at(self[0], index)[1] = value;
 		$d = [ index, __at(self[0], index)[0] ];
 	} else {
 		const index2 = self[0].length;
-		self[0].push([ 0, [ 0, value ] ]);
+		self[0].push([ 0, value ]);
 		$d = [ index2, 0 ];
 	}
 	return $d;
@@ -40,55 +40,54 @@ function $b(self, value) {
 function $e(self) {
 	return self[0].length - self[1].length;
 }
-function $h(self) {
-	const $i = self;
-	return $i[0] === 0;
-}
 function $g(self, handle) {
-	return handle[0] < self[0].length && __at(self[0], handle[0])[0] === handle[1] && $h(__at(self[0], handle[0])[1]);
+	return handle[0] < self[0].length && __at(self[0], handle[0])[0] === handle[1];
 }
 function $f(self, handle) {
-	let $j = null;
+	let $h = null;
 	if ($g(self, handle)) {
-		$j = __at(self[0], handle[0])[1];
+		$h = [ 0, __at(self[0], handle[0])[1] ];
 	} else {
-		$j = [ 1 ];
+		$h = [ 1 ];
 	}
-	return $j;
+	return $h;
 }
-function $k(self, fallback) {
-	const $l = self;
-	let $m = null;
-	if ($l[0] === 0) {
-		const x = $l[1];
-		$m = x;
+function $i(self, fallback) {
+	const $j = self;
+	let $k = null;
+	if ($j[0] === 0) {
+		const x = $j[1];
+		$k = x;
 	} else {
-		$m = fallback;
+		$k = fallback;
+	}
+	return $k;
+}
+function $l(self, handle, value) {
+	let $m = null;
+	if ($g(self, handle)) {
+		__at(self[0], handle[0])[1] = value;
+		$m = true;
+	} else {
+		$m = false;
 	}
 	return $m;
 }
-function $n(self, handle, value) {
+function $n(self, handle) {
 	let $o = null;
-	if ($g(self, handle)) {
-		__at(self[0], handle[0])[1] = [ 0, value ];
-		$o = true;
-	} else {
-		$o = false;
-	}
-	return $o;
-}
-function $p(self, handle) {
-	let $q = null;
 	if ($g(self, handle)) {
 		const removed = __at(self[0], handle[0])[1];
 		__at(self[0], handle[0])[0] = __at(self[0], handle[0])[0] + 1;
-		__at(self[0], handle[0])[1] = [ 1 ];
 		self[1].push(handle[0]);
-		$q = removed;
+		$o = [ 0, removed ];
 	} else {
-		$q = [ 1 ];
+		$o = [ 1 ];
 	}
-	return $q;
+	return $o;
+}
+function $p(self) {
+	const $q = self;
+	return $q[0] === 0;
 }
 function $r() {
 	return [ [  ], [  ] ];
@@ -98,44 +97,40 @@ function $s(self, value) {
 	let $u = null;
 	if ($t[0] === 0) {
 		const index = $t[1];
-		__at(self[0], index)[1] = [ 0, value ];
+		__at(self[0], index)[1] = value;
 		$u = [ index, __at(self[0], index)[0] ];
 	} else {
 		const index2 = self[0].length;
-		self[0].push([ 0, [ 0, value ] ]);
+		self[0].push([ 0, value ]);
 		$u = [ index2, 0 ];
 	}
 	return $u;
 }
-function $x(self) {
-	const $y = self;
-	return $y[0] === 0;
-}
 function $w(self, handle) {
-	return handle[0] < self[0].length && __at(self[0], handle[0])[0] === handle[1] && $x(__at(self[0], handle[0])[1]);
+	return handle[0] < self[0].length && __at(self[0], handle[0])[0] === handle[1];
 }
 function $v(self, handle) {
-	let $z = null;
+	let $x = null;
 	if ($w(self, handle)) {
-		$z = __at(self[0], handle[0])[1];
+		$x = [ 0, __at(self[0], handle[0])[1] ];
 	} else {
-		$z = [ 1 ];
+		$x = [ 1 ];
 	}
-	return $z;
+	return $x;
 }
 let numbers = $a();
 const a = $b(numbers, 10);
 const b = $b(numbers, 20);
 console.log($e(numbers));
-console.log($k($f(numbers, a), -(1)));
-$n(numbers, b, 99);
-console.log($k($f(numbers, b), -(1)));
-console.log($k($p(numbers, b), -(1)));
-console.log($h($f(numbers, b)));
+console.log($i($f(numbers, a), -(1)));
+$l(numbers, b, 99);
+console.log($i($f(numbers, b), -(1)));
+console.log($i($n(numbers, b), -(1)));
+console.log($p($f(numbers, b)));
 const c = $b(numbers, 30);
-console.log($k($f(numbers, c), -(1)));
-console.log($h($f(numbers, b)));
-console.log($k($f(numbers, a), -(1)));
+console.log($i($f(numbers, c), -(1)));
+console.log($p($f(numbers, b)));
+console.log($i($f(numbers, a), -(1)));
 let graph = $r();
 const leaf1 = $s(graph, [ 2, [  ] ]);
 const leaf2 = $s(graph, [ 3, [  ] ]);

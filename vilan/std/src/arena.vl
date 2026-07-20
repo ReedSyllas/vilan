@@ -19,10 +19,13 @@ struct Handle<T> {
 }
 
 /// One arena slot: a generation counter (bumped on removal so stale handles go
-/// `None`) and the value while occupied.
+/// `None`) and the stored value. Occupancy is tracked by the generation alone —
+/// a live handle's generation only ever matches an occupied slot, since removal
+/// bumps it — so a freed slot simply keeps its last value until the slot is
+/// reused and overwritten.
 struct Slot<T> {
 	generation: i32,
-	value: Option<T>,
+	value: T,
 }
 
 /// A generational arena over `T`. `free` holds emptied indices, reused on the
@@ -42,28 +45,31 @@ impl Arena<type T> {
 	fun insert(&mut self, value: T): Handle<T> {
 		match self.free.pop() {
 			Some(let index) => {
-				self.slots[index].value = Some(value);
+				self.slots[index].value = value;
 				Handle { index = index, generation = self.slots[index].generation }
 			},
 			None => {
 				let index = self.slots.len();
-				self.slots.push(Slot { generation = 0, value = Some(value) });
+				self.slots.push(Slot { generation = 0, value = value });
 				Handle { index = index, generation = 0 }
 			},
 		}
 	}
 
-	/// Whether `handle` still refers to a live value: in range, the slot's
-	/// generation matches, and the slot is occupied.
+	/// Whether `handle` still refers to a live value: in range and the slot's
+	/// generation matches. (Removal bumps the generation, so a matching
+	/// generation is exactly an occupied slot.)
 	fun contains(self, handle: Handle<T>): bool {
-		handle.index < self.slots.len() && self.slots[handle.index].generation == handle.generation && self.slots[handle.index].value.is_some()
+		handle.index < self.slots.len() && self.slots[handle.index].generation == handle.generation
 	}
 
-	/// A copy of the value `handle` refers to, or `None` if the handle is stale
-	/// (its slot was removed, or reused under a newer generation).
-	fun get(self, handle: Handle<T>): Option<T> {
+	/// A view of the value `handle` refers to, or `None` if the handle is stale
+	/// (its slot was removed, or reused under a newer generation). The view is
+	/// second-class: it may not outlive an invalidating mutation of the arena,
+	/// and cannot be stored — traverse by re-`get`, and write through `set`.
+	fun get(&self, handle: Handle<T>): Option<&T> borrows self {
 		if self.contains(handle) {
-			self.slots[handle.index].value
+			Some(&self.slots[handle.index].value)
 		} else {
 			None
 		}
@@ -73,7 +79,7 @@ impl Arena<type T> {
 	/// handle was valid (a stale handle changes nothing).
 	fun set(&mut self, handle: Handle<T>, value: T): bool {
 		if self.contains(handle) {
-			self.slots[handle.index].value = Some(value);
+			self.slots[handle.index].value = value;
 			true
 		} else {
 			false
@@ -86,9 +92,8 @@ impl Arena<type T> {
 		if self.contains(handle) {
 			let removed = self.slots[handle.index].value;
 			self.slots[handle.index].generation = self.slots[handle.index].generation + 1;
-			self.slots[handle.index].value = None;
 			self.free.push(handle.index);
-			removed
+			Some(removed)
 		} else {
 			None
 		}
