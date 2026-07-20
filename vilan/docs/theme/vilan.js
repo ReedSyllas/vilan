@@ -18,7 +18,8 @@
 		const KEYWORDS = {
 			keyword:
 				"async await borrows const else enum export external for fun if impl " +
-				"import in is jump let macro match mod mut own ret struct trait type use with",
+				"import in is jump let macro match mod mut own resource ret struct trait " +
+				"type use with",
 			literal: "true false null void self Self",
 			built_in: "print panic assert",
 		};
