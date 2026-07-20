@@ -194,11 +194,13 @@ local instead.
 → [Resources](../tour/resources.md)
 
 **"a closure cannot capture the resource `…` — …"**
-A closure or `async`/spawn body referenced a resource from an enclosing
-scope; capturing it would give the closure a second owner. Pass a loan into
-the call, or give ownership to the struct that owns the closure's lifetime.
-(A closure's own *parameter* is per-call, not a capture — injected
-`context`-clause bodies are unaffected.)
+A closure or `async`/spawn body referenced a *local* or *parameter* resource
+from an enclosing scope; capturing it would give the closure a second owner.
+Pass a loan into the call, give ownership to the struct that owns the
+closure's lifetime, or hoist the resource to **module level** — a module
+global is loan-only and process-lifetime, so a closure may reference it
+without becoming an owner. (A closure's own *parameter* is per-call, not a
+capture — injected `context`-clause bodies are unaffected.)
 → [Resources](../tour/resources.md)
 
 **"`…` is not move-clean when instantiated with a resource — …"**

@@ -129,6 +129,13 @@ second-class view (`self`/`&`/`&mut` conventions), no ownership change, rule-4 p
   a struct that owns the resource; own tasks through an `OwnedNursery` (§9). Injected
   bodies (`context`-clause closures) receive resource *parameters* as loans — parameters
   are per-call, not captures — so `nursery(|n| ..)`-shaped APIs are unaffected.
+  *(Amended 2026-07-19 — kolt-migration finding.)* A closure referencing a
+  **module-level** resource is exempt: the global is loan-only with process lifetime
+  (§5's corollary), so the reference is a per-call loan of storage the closure can
+  never own — no second owner is created, and R9's rationale does not apply. The
+  checker initially flagged any resource free variable; the walkthrough dodged that
+  architecturally (db access in `[rpc]` method bodies), and kolt's storage-agnostic
+  hook closures exposed it. Locals and parameters stay rejected.
 - **R10 — no resource elements in the native containers.** `List`/`Map`/`Set` (and every
   external generic: `Shared`, `Task`, `Promise`, `Context`) reject resource type
   arguments in v1 — their internals are host code the move checker cannot see. `Option`

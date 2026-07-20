@@ -4193,8 +4193,13 @@ impl<'src> Analyzer<'src> {
             self.scan_move(*return_id, true, true, scan, &mut flow, 0, &mut violations);
         }
 
-        // R9: no closure / spawn captures a resource.
-        self.scan_resource_captures(scan.resource_bindings, &mut violations);
+        // R9: no closure / spawn captures a resource (a module-level resource is
+        // exempt — loan-only, process lifetime; §5's corollary).
+        self.scan_resource_captures(
+            scan.resource_bindings,
+            scan.module_level_bindings,
+            &mut violations,
+        );
 
         violations
     }
@@ -4967,25 +4972,40 @@ impl<'src> Analyzer<'src> {
     /// own parameters, and not a local declared inside) is a capture. Injected
     /// (`context`-clause) bodies receive resource *parameters* — per-call, not
     /// captures — so seeding the closure's own parameters exempts them.
+    ///
+    /// *Amended 2026-07-19 (destruction.md §4):* a reference to a **module-level**
+    /// resource is exempt — a module global is loan-only with process lifetime
+    /// (§5's corollary), so a closure can never own it and no second owner is
+    /// created. Locals and parameters stay rejected. (Consuming a module global
+    /// inside the body is still caught by the loan-only move scan, not here.)
     fn scan_resource_captures(
         &self,
         resource_bindings: &HashSet<Id>,
+        module_level_bindings: &HashSet<Id>,
         violations: &mut Vec<ResourceMoveViolation>,
     ) {
         for closure_id in self.closures.keys() {
-            self.scan_one_closure_captures(*closure_id, resource_bindings, violations);
+            self.scan_one_closure_captures(
+                *closure_id,
+                resource_bindings,
+                module_level_bindings,
+                violations,
+            );
         }
     }
 
     /// The R9 capture check for a single closure: a reference to a resource
     /// binding declared OUTSIDE it (not one of its own parameters, and not a
-    /// local declared inside) is a capture. Factored out of
+    /// local declared inside) is a capture — unless the binding is module-level,
+    /// which is exempt (see `scan_resource_captures`). Factored out of
     /// `scan_resource_captures` so R11 can run it over just the closures lexical
-    /// to one instantiated generic body.
+    /// to one instantiated generic body (whose bindings are all in-body, so
+    /// `module_level_bindings` is empty there and the exemption is inert).
     fn scan_one_closure_captures(
         &self,
         closure_id: Id,
         resource_bindings: &HashSet<Id>,
+        module_level_bindings: &HashSet<Id>,
         violations: &mut Vec<ResourceMoveViolation>,
     ) {
         let Some(closure) = self.closures.get(&closure_id) else {
@@ -5010,7 +5030,7 @@ impl<'src> Analyzer<'src> {
         );
         for reference_id in captured {
             if let Some(Expr::Local(binding)) = self.expr_id_to_expr_map.get(&reference_id) {
-                if !declared_inside.contains(binding) {
+                if !declared_inside.contains(binding) && !module_level_bindings.contains(binding) {
                     violations.push(ResourceMoveViolation::Capture {
                         reference_id,
                         binding: *binding,
@@ -5330,7 +5350,8 @@ impl<'src> Analyzer<'src> {
                         span: **self.span_map.get(&reference_id).unwrap_or(&&EMPTY_SPAN),
                         msg: format!(
                             "a closure cannot capture the resource `{name}` — pass a loan into the \
-                             call, or give ownership to the struct that owns this closure's lifetime"
+                             call, give ownership to the struct that owns this closure's lifetime, \
+                             or hoist the resource to module level (process lifetime)"
                         ),
                         note: None,
                     }
@@ -5760,7 +5781,12 @@ impl<'src> Analyzer<'src> {
             }
         }
         for closure_id in closures {
-            self.scan_one_closure_captures(*closure_id, scan.resource_bindings, &mut violations);
+            self.scan_one_closure_captures(
+                *closure_id,
+                scan.resource_bindings,
+                scan.module_level_bindings,
+                &mut violations,
+            );
         }
         violations
     }

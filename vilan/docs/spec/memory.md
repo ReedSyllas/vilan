@@ -284,7 +284,12 @@ changes no ownership and is policed by rule 4.
 - **R9 — closures and spawns cannot capture resources.** Capturing one would
   give the closure a second owner. Injected `context`-clause bodies receive
   resource *parameters* as loans — parameters are per-call, not captures —
-  so `nursery(|n| ..)`-shaped APIs are unaffected.
+  so `nursery(|n| ..)`-shaped APIs are unaffected. A closure referencing a
+  **module-level** resource is likewise exempt: a module global is loan-only
+  and lives for the process (see *Module-level resources never drop*, below),
+  so the closure can never own it and no second owner is created — the
+  reference is a per-call loan, exactly like a parameter. Captures of a
+  **local** or a **parameter** stay rejected.
 - **R10 — no resource elements in the native containers.** `List` / `Map` /
   `Set` and every external generic (`Shared`, `Task`, `Promise`, `Context`)
   reject resource type arguments in v1 — their internals are host code the
@@ -416,12 +421,14 @@ lifetime, not fate-sharing. Cancellation echoes stay silent.
 
 A `[service]` struct that owns a resource field is itself a resource by
 containment, and its generated dispatcher builds per-`[rpc]` handler
-closures that capture `self` — which R9 forbids. This collision is **by
-design**: the sanctioned shape is the module-level idiom — hoist the
-resource (a `Database`) to a module-level `let`, and let the store hold only
-its reactive state (plain data) and reach the resource by loan. The
-module-level resource is process-lifetime and never drops, and reachability
-keeps its initializer out of the client bundle.
+closures that capture `self` — which R9 forbids. R9's module-level exemption
+does not apply here: `self` is a local store value, not a module global, so
+the capture is a genuine second owner. This collision is **by design**: the
+sanctioned shape is the module-level idiom — hoist the resource (a
+`Database`) to a module-level `let`, and let the store hold only its reactive
+state (plain data) and reach the resource by loan. The module-level resource
+is process-lifetime and never drops, and reachability keeps its initializer
+out of the client bundle.
 
 ### Honesty limits
 

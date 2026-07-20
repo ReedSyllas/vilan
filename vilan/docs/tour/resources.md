@@ -189,11 +189,39 @@ of the program, so the compiler rejects that. When you *do* want a database
 that closes at the end of a scope, open it in a local instead — or `drop(db)`
 to close it early.
 
+A **closure** may reach a module-level resource too. A closure that
+references `db` isn't capturing an owner — it borrows the same
+process-lifetime storage, per call, exactly as a function does. This is what
+gives the module-level idiom its reach: request handlers, injected hooks, and
+background tasks can all touch the database, as long as it lives at module
+level.
+
+```vilan,norun
+import std::db::Database;
+import std::shared::Shared;
+
+let db: Database = Database::open(":memory:");
+
+fun main() {
+	db.exec("CREATE TABLE account (username TEXT)");
+	// A hook closure that reaches the module-level `db` — not a captured
+	// owner, just a per-call loan of process-lifetime storage.
+	let insert = |username: str| {
+		db.prepare("INSERT INTO account (username) VALUES (?)").run([username]);
+	};
+	let hook = Shared::new(insert);
+	hook.read()("alice");
+}
+```
+
+A *local* resource is different: a closure that captures one would become a
+second owner, so that stays rejected (below).
+
 ## Owning background work: `OwnedNursery`
 
-A closure can't capture a resource (it would become a second owner), which
-is a problem for background tasks that need to outlive the function that
-starts them. `OwnedNursery` is the answer: a resource that *owns* the tasks
+A closure can't capture a *local* resource (it would become a second owner),
+which is a problem for background tasks that need to outlive the function
+that starts them. `OwnedNursery` is the answer: a resource that *owns* the tasks
 spawned inside its `enter`, and cancels them when it drops.
 
 ```vilan,norun
@@ -225,9 +253,11 @@ owner is an ordinary resource the scope rules already know how to tear down.
   a method call) instead of binding, passing, or returning it by value.
 - **A resource can't go in a `List`, `Map`, or `Set`** — the compiler can't
   see inside those. Use an `Option`, or a struct field.
-- **A closure or spawn can't capture a resource.** Pass a loan into the
-  call, or give the resource to a struct (or an `OwnedNursery`) that owns the
-  closure's lifetime.
+- **A closure or spawn can't capture a *local* resource.** Pass a loan into
+  the call, give the resource to a struct (or an `OwnedNursery`) that owns the
+  closure's lifetime, or keep it at **module level** — a module global is
+  loan-only and process-lifetime, so a closure may reach it without becoming
+  an owner.
 - **`Drop` is only for resources**, must be exactly `fun drop(&mut self)`,
   and must be synchronous and context-free (no `await`, no signal writes).
   Cancel owned tasks through an `OwnedNursery` rather than awaiting them.

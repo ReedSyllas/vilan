@@ -20472,6 +20472,186 @@ fn r9_closure_capturing_an_outer_resource_beside_its_param_is_rejected() {
     );
 }
 
+// --- R9 module-level exemption (destruction.md §4, amended 2026-07-19) ----------
+// A closure referencing a MODULE-LEVEL resource is not a capture: the global is
+// loan-only with process lifetime (§5's corollary), so the closure can never own
+// it and no second owner is created. Locals and parameters stay rejected, and the
+// §5 loan-only policing still fires for a CONSUMING use inside a closure body.
+
+#[test]
+fn r9_module_level_resource_in_a_sync_closure_is_exempt() {
+    // The sync closure (`Expr::Closure`) form: a method loan of the module global.
+    assert_compiles(
+        r#"
+        resource struct Res { handle: i32 }
+        impl Res { fun ping(&self) {} }
+        let res: Res = Res { handle = 1 };
+        fun run_it(body: || void) { body(); }
+        fun main() {
+            run_it(|| res.ping());
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_module_level_resource_in_an_async_closure_is_exempt() {
+    // The async-block form (`Expr::Async` wrapping a block) — same exemption path.
+    assert_compiles(
+        r#"
+        resource struct Res { handle: i32 }
+        impl Res { fun ping(&self) {} }
+        let res: Res = Res { handle = 1 };
+        fun main() {
+            let _ = async { res.ping(); };
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_module_level_resource_in_a_spawn_is_exempt() {
+    // The fire-and-forget spawn form (`async expr`, also `Expr::Async`).
+    assert_compiles(
+        r#"
+        resource struct Res { handle: i32 }
+        impl Res { fun ping(&self) {} }
+        let res: Res = Res { handle = 1 };
+        fun main() {
+            let _ = async res.ping();
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_module_level_resource_in_a_nested_closure_is_exempt() {
+    // A closure inside a closure: the free variable is module-level regardless of
+    // how many closures enclose it, so the exemption holds at any nesting depth.
+    assert_compiles(
+        r#"
+        resource struct Res { handle: i32 }
+        impl Res { fun ping(&self) {} }
+        let res: Res = Res { handle = 1 };
+        fun run_it(body: || void) { body(); }
+        fun main() {
+            run_it(|| {
+                let inner = || res.ping();
+                inner();
+            });
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_kolt_hook_shape_over_a_module_level_database_compiles() {
+    // The kolt-migration motivation: a `Shared<Fn>` hook closure that reaches a
+    // MODULE-LEVEL `Database` and writes a module-level `Signal` — the exact shape
+    // that produced 18 R9 errors before the exemption. Real std types. (The
+    // end-to-end run over node:sqlite is proven separately by the CLI; the S4a
+    // Database pins likewise assert_compiles here.)
+    assert_compiles(
+        r#"
+        import std::reactive::Signal;
+        import std::shared::Shared;
+        import std::db::Database;
+        struct Workspace { id: i32, name: str }
+        let db: Database = Database::open(":memory:");
+        let workspaces: Signal<List<Workspace>> = Signal::new([]);
+        fun main() {
+            let create = |name: str| {
+                let id = db.prepare("INSERT INTO workspace (name) VALUES (?)").run([name]);
+                workspaces.set_with(|list| {
+                    mut updated = list;
+                    updated.push(Workspace { id = id, name = name });
+                    updated
+                });
+                id
+            };
+            let hook = Shared::new(create);
+            let _ = hook.read()("Inbox");
+        }
+        "#,
+    );
+}
+
+#[test]
+fn r9_local_resource_in_a_closure_is_still_rejected() {
+    // The contrast to the exemption: the SAME loan shape over a LOCAL resource is
+    // a capture (a second owner) — still rejected. Only the binding site differs.
+    assert_fails_with(
+        r#"
+        resource struct Res { handle: i32 }
+        impl Res { fun ping(&self) {} }
+        fun run_it(body: || void) { body(); }
+        fun main() {
+            let res = Res { handle = 1 };
+            run_it(|| res.ping());
+        }
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+#[test]
+fn r9_parameter_resource_in_a_closure_is_still_rejected() {
+    // A function PARAMETER is not module-level, so a closure capturing it is a
+    // capture — still rejected. The exemption is module-level only.
+    assert_fails_with(
+        r#"
+        resource struct Res { handle: i32 }
+        impl Res { fun ping(&self) {} }
+        fun run_it(body: || void) { body(); }
+        fun holds(r: Res) {
+            run_it(|| r.ping());
+        }
+        fun main() {}
+        "#,
+        "cannot capture the resource",
+    );
+}
+
+#[test]
+fn r9_consuming_a_module_global_inside_a_closure_via_let_is_rejected() {
+    // The exemption is for LOANS only. Consuming the module global inside the
+    // closure body (`let mine = res`) still trips the §5 loan-only check: the
+    // move scan covers closure bodies, not just top-level function bodies.
+    assert_fails_with(
+        r#"
+        resource struct Res { handle: i32 }
+        let res: Res = Res { handle = 1 };
+        fun run_it(body: || void) { body(); }
+        fun main() {
+            run_it(|| {
+                let mine = res;
+            });
+        }
+        "#,
+        "module-level resource",
+    );
+}
+
+#[test]
+fn r9_dropping_a_module_global_inside_a_closure_is_rejected() {
+    // `drop(res)` inside a closure is an own-move of a process-lifetime binding —
+    // rejected by the §5 loan-only check, which fires inside closure bodies.
+    assert_fails_with(
+        r#"
+        import std::drop::drop;
+        resource struct Res { handle: i32 }
+        let res: Res = Res { handle = 1 };
+        fun run_it(body: || void) { body(); }
+        fun main() {
+            run_it(|| {
+                drop(res);
+            });
+        }
+        "#,
+        "module-level resource",
+    );
+}
+
 // --- OwnedNursery: the resource-owner story (destruction.md §9) ----------------
 
 #[test]
