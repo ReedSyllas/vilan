@@ -347,7 +347,7 @@ pub struct Parameter<'src> {
 /// The precomputed view sets the rule-4 scan matches against: origins for
 /// the root-keyed events (E1/E2), the full binding set for liveness and E3.
 struct InvalidationScan<'a> {
-    view_origins: &'a HashMap<Id, Id>,
+    view_origins: &'a HashMap<Id, Vec<Id>>,
     view_bindings: &'a HashSet<Id>,
 }
 
@@ -8190,8 +8190,17 @@ impl<'src> Analyzer<'src> {
     /// `x`; `let w = v` → `v`'s root). A fixpoint, since views copy between
     /// locals. Views of parameters borrow outside the function, so they have no
     /// local root and are omitted.
-    fn compute_view_origins(&self) -> HashMap<Id, Id> {
-        let mut origins: HashMap<Id, Id> = HashMap::new();
+    /// Every view binding's origin ROOTS — the local/parameter roots whose
+    /// invalidation kills it (rule 4's anchor set; a multi-parameter `borrows`
+    /// projection can carry several). Three sources (rule-4 completion S3, C10):
+    /// direct `&place` bindings and view→view copies (the original pair),
+    /// **`borrows`-call results** (`let v = list.at(0)` → `{list}`, the callee's
+    /// projected positions mapped through the call's arguments), and
+    /// **wrapped-view `match` captures** (`match arena.get(h) { Some(let v) … }`
+    /// → `{arena}`, via the subject's tail leaves so conditional transients
+    /// union their branches).
+    fn compute_view_origins(&self) -> HashMap<Id, Vec<Id>> {
+        let mut origins: HashMap<Id, Vec<Id>> = HashMap::new();
         // `for e in &mut c` bindings have no initial — their origin is the
         // iterated container's root.
         for expr in self.expr_id_to_expr_map.values() {
@@ -8206,7 +8215,7 @@ impl<'src> Analyzer<'src> {
                 _ => *iterable,
             };
             if let Some(root) = self.place_root(operand) {
-                origins.insert(*item, root);
+                origins.insert(*item, vec![root]);
             }
         }
         loop {
@@ -8218,14 +8227,41 @@ impl<'src> Analyzer<'src> {
                 let Some(initial) = variable.initial else {
                     continue;
                 };
-                let root = match self.expr_id_to_expr_map.get(&initial) {
-                    Some(Expr::Reference(operand_id, _)) => self.place_root(*operand_id),
-                    Some(Expr::Local(source_id)) => origins.get(source_id).copied(),
+                let roots = match self.expr_id_to_expr_map.get(&initial) {
+                    Some(Expr::Reference(operand_id, _)) => {
+                        self.place_root(*operand_id).map(|root| vec![root])
+                    }
+                    Some(Expr::Local(source_id)) => origins.get(source_id).cloned(),
+                    Some(Expr::Call(call_id)) => {
+                        let roots = self.call_view_roots(*call_id, &origins);
+                        (!roots.is_empty()).then_some(roots)
+                    }
                     _ => None,
                 };
-                if let Some(root) = root {
-                    origins.insert(variable.id, root);
+                if let Some(roots) = roots {
+                    origins.insert(variable.id, roots);
                     changed = true;
+                }
+            }
+            // Wrapped-view `match` captures have no initial — their origin is
+            // the match SUBJECT's projection. Runs inside the fixpoint so a
+            // later copy of a capture (`let w = v`) still resolves.
+            for expr in self.expr_id_to_expr_map.values() {
+                let Expr::Match(subject_id, legs) = expr else {
+                    continue;
+                };
+                for leg in legs {
+                    if let ExprPattern::Variant(_, _, sub_patterns) = &leg.pattern
+                        && let [ExprPattern::Binding(capture_id)] = sub_patterns.as_slice()
+                        && self.wrapped_view_captures.contains_key(capture_id)
+                        && !origins.contains_key(capture_id)
+                    {
+                        let roots = self.subject_view_roots(*subject_id, &origins);
+                        if !roots.is_empty() {
+                            origins.insert(*capture_id, roots);
+                            changed = true;
+                        }
+                    }
                 }
             }
             if !changed {
@@ -8233,6 +8269,121 @@ impl<'src> Analyzer<'src> {
             }
         }
         origins
+    }
+
+    /// The origin roots a view-returning CALL projects: the callee's `borrows`
+    /// positions mapped through this call's arguments (S1's root-set read at the
+    /// call site). A bodiless callee (a trait signature) with no explicit clause
+    /// but a view-typed return is unknowable — conservatively project every
+    /// referenced argument (the dispatched default, mirroring `bumps`).
+    fn call_view_roots(&self, call_id: Id, origins: &HashMap<Id, Vec<Id>>) -> Vec<Id> {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return Vec::new();
+        };
+        let argument_ids = &function_call.argument_ids;
+        let Some(Expr::Local(callee_id)) = self.expr_id_to_expr_map.get(&function_call.subject_id)
+        else {
+            return Vec::new();
+        };
+        let positions: Vec<u32> = if let Some(function) = self.functions.get(callee_id) {
+            if !function.borrows.is_empty() {
+                function.borrows.iter().copied().collect()
+            } else if !function.has_body && function.returns_mut_view {
+                // Dispatched view-return with no clause: every argument position.
+                (0..argument_ids.len() as u32).collect()
+            } else {
+                return Vec::new();
+            }
+        } else if let Some(external) = self.external_functions.get(callee_id) {
+            external.borrows.iter().copied().collect()
+        } else {
+            return Vec::new();
+        };
+        let mut roots = Vec::new();
+        for position in positions {
+            let Some(argument_id) = argument_ids.get(position as usize) else {
+                continue;
+            };
+            let argument_roots = match self.expr_id_to_expr_map.get(argument_id) {
+                Some(Expr::Reference(operand, _)) => self
+                    .place_root(*operand)
+                    .map(|root| vec![root])
+                    .unwrap_or_default(),
+                Some(Expr::Local(binding)) => origins
+                    .get(binding)
+                    .cloned()
+                    .or_else(|| self.place_root(*argument_id).map(|root| vec![root]))
+                    .unwrap_or_default(),
+                _ => self
+                    .place_root(*argument_id)
+                    .map(|root| vec![root])
+                    .unwrap_or_default(),
+            };
+            for root in argument_roots {
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+        }
+        roots
+    }
+
+    /// The origin roots of a wrapped-view `match` SUBJECT: each tail leaf is a
+    /// wrapped-view call (project via `call_view_roots`), an inline transient
+    /// constructor carrying `&place` (root of the place), or a forwarded view
+    /// binding/parameter (its origins, or itself when it is a parameter place).
+    /// Conditional transients union their leaves.
+    fn subject_view_roots(&self, subject_id: Id, origins: &HashMap<Id, Vec<Id>>) -> Vec<Id> {
+        let mut roots = Vec::new();
+        let mut add = |mut found: Vec<Id>, roots: &mut Vec<Id>| {
+            for root in found.drain(..) {
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+        };
+        let mut leaves = Vec::new();
+        self.collect_tail_leaves(subject_id, &mut leaves);
+        for leaf in leaves {
+            match self.expr_id_to_expr_map.get(&leaf) {
+                Some(Expr::Call(call_id)) => {
+                    let from_call = self.call_view_roots(*call_id, origins);
+                    if !from_call.is_empty() {
+                        add(from_call, &mut roots);
+                        continue;
+                    }
+                    // An inline transient `Some(&mut place)` / `Some(view)`: the
+                    // constructor's arguments carry the projection directly.
+                    let Some(function_call) = self.function_calls.get(call_id) else {
+                        continue;
+                    };
+                    for argument_id in &function_call.argument_ids {
+                        match self.expr_id_to_expr_map.get(argument_id) {
+                            Some(Expr::Reference(operand, _)) => {
+                                if let Some(root) = self.place_root(*operand) {
+                                    add(vec![root], &mut roots);
+                                }
+                            }
+                            Some(Expr::Local(binding)) => {
+                                if let Some(found) = origins.get(binding) {
+                                    add(found.clone(), &mut roots);
+                                } else if self.parameters.contains_key(binding) {
+                                    add(vec![*binding], &mut roots);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(Expr::Local(binding)) => {
+                    if let Some(found) = origins.get(binding) {
+                        add(found.clone(), &mut roots);
+                    }
+                }
+                _ => {}
+            }
+        }
+        roots
     }
 
     /// Slice 4 (primitive-local view boxing): scalar locals that have a view
@@ -8767,6 +8918,7 @@ impl<'src> Analyzer<'src> {
                         .unwrap_or("the view");
                     let msg = match view_origins
                         .get(&view)
+                        .and_then(|roots| roots.first())
                         .and_then(|root| self.variables.get(root))
                         .map(|root| root.name)
                     {
@@ -9307,10 +9459,11 @@ impl<'src> Analyzer<'src> {
                 self.scan_invalidation(value_id, scan, live, violations, saw_await);
                 // Reassigning a whole binding invalidates views into it (E1).
                 if let Some(Expr::Local(root_id)) = self.expr_id_to_expr_map.get(&target_id) {
-                    if live
-                        .iter()
-                        .any(|view| scan.view_origins.get(view) == Some(root_id))
-                    {
+                    if live.iter().any(|view| {
+                        scan.view_origins
+                            .get(view)
+                            .is_some_and(|roots| roots.contains(root_id))
+                    }) {
                         violations.push(InvalidationViolation::Reassignment {
                             anchor: target_id,
                             root: *root_id,
@@ -9426,11 +9579,32 @@ impl<'src> Analyzer<'src> {
                     } else {
                         return;
                     };
-                for (parameter_id, argument_id) in parameter_ids.iter().zip(&argument_ids) {
+                for (position, (parameter_id, argument_id)) in
+                    parameter_ids.iter().zip(&argument_ids).enumerate()
+                {
                     let Some(parameter) = self.parameters.get(parameter_id) else {
                         continue;
                     };
                     if !matches!(parameter.convention, Convention::RefMut) {
+                        continue;
+                    }
+                    // C6 (rule-4 completion S3): E2 fires on the callee's BUMPS
+                    // verdict for this position, no longer on the bare `&mut`
+                    // convention — a content-stable mutator (field/element writes
+                    // only) cannot invalidate. A bodiless callee's verdict is
+                    // unknowable and stays bumping (the S2 default).
+                    let stable = self
+                        .functions
+                        .get(callee_id)
+                        .filter(|function| function.has_body)
+                        .map(|function| !function.bumps.contains(&(position as u32)))
+                        .or_else(|| {
+                            self.external_functions
+                                .get(callee_id)
+                                .map(|external| !external.bumps.contains(&(position as u32)))
+                        })
+                        .unwrap_or(false);
+                    if stable {
                         continue;
                     }
                     let root = match self.expr_id_to_expr_map.get(argument_id) {
@@ -9465,10 +9639,11 @@ impl<'src> Analyzer<'src> {
                     {
                         continue;
                     }
-                    if live
-                        .iter()
-                        .any(|view| scan.view_origins.get(view) == Some(&root))
-                    {
+                    if live.iter().any(|view| {
+                        scan.view_origins
+                            .get(view)
+                            .is_some_and(|roots| roots.contains(&root))
+                    }) {
                         violations.push(InvalidationViolation::MutatingCall {
                             anchor: expr_id,
                             root,
@@ -22832,6 +23007,97 @@ pub fn analyze<'src>(
     // Infer the `borrows` effect before any check reads it (readonly-mutation
     // and the scalar-view lowering both consult `Function.borrows`).
     analyzer.infer_borrows();
+    // The `bumps` table + fixpoint run HERE — before every consumer
+    // (check_invalidation's E2 keys off the verdicts; S2 originally parked this
+    // at the end of analyze(), which S3's consumption exposed).
+    // The `bumps` effect's native base table (rule4-completion.md §1, C6): the
+    // curated verdict for each native-container `&mut self` mutator, keyed on the
+    // resolved std entity (not a bare name), so a user's same-named method is
+    // untouched. Every native container `&mut self` op is a GEOMETRY op — push /
+    // pop / insert / remove all advance the owner's epoch (view-invalidation.md §2)
+    // — so the bump side is the whole extern surface plus the vilan wrappers; the
+    // one stable row is `Arena::set`, an in-place element overwrite (§2: an element
+    // `set` and field writes leave geometry intact). A tabled verdict is
+    // authoritative: `infer_bumps` seeds it and does not re-infer the body. Rows
+    // whose module is not loaded resolve to `None` and drop out — the table is
+    // inert until a container is actually used (the `try_trait_id` precedent).
+    let bumps_rows: [(Option<Id>, bool); 11] = {
+        // Resolve a method id inside the impl of a resolved container struct (the
+        // `list_push_fn_id` pattern), matching the impl subject by nominal id.
+        let container_method = |struct_id: Option<Id>, name: &str| -> Option<Id> {
+            let struct_id = struct_id?;
+            analyzer.implementations.iter().find_map(|implementation| {
+                matches!(
+                    analyzer.type_id_to_type_map.get(&implementation.subject),
+                    Some(Type::Struct(id, _)) if *id == struct_id
+                )
+                .then(|| implementation.declarations.get(name).copied())
+                .flatten()
+            })
+        };
+        let list_struct = analyzer.primitive_struct_ids.get("List").copied();
+        let native_map_struct = analyzer.primitive_struct_ids.get("NativeMap").copied();
+        let map_struct = analyzer.primitive_struct_ids.get("Map").copied();
+        let set_struct = analyzer.primitive_struct_ids.get("Set").copied();
+        // `Arena` is reached only by `import std::arena`, so it is not among the
+        // globally-bound `primitive_struct_ids` — resolve it from its module scope.
+        let arena_struct = module_scopes
+            .get("arena")
+            .and_then(|scope_id| analyzer.scopes.get(scope_id))
+            .and_then(|scope| scope.name_to_id_map.get("Arena").copied());
+        // `true` = bumping (seed `{0}`, the `&mut self` receiver at position 0);
+        // `false` = content-stable (seed `{}`). §2 rationale per row.
+        [
+            // `List::push` — appends; reallocates on the native backends. §2 lists
+            // `push` as invalidating deliberately (a language fact, not a JS accident).
+            (container_method(list_struct, "push"), true),
+            // `List::pop` — removes the last element (§2's P3 mutation).
+            (container_method(list_struct, "pop"), true),
+            // `NativeMap::insert` — a hash insert; may grow / rehash the table.
+            (container_method(native_map_struct, "insert"), true),
+            // `NativeMap::remove` — a hash remove.
+            (container_method(native_map_struct, "remove"), true),
+            // `Map::insert` — a value-keyed insert over `NativeMap` (§1: Map insert bumps).
+            (container_method(map_struct, "insert"), true),
+            // `Map::remove` — a value-keyed remove.
+            (container_method(map_struct, "remove"), true),
+            // `Set::insert` — a value-keyed insert (§1: Set insert bumps).
+            (container_method(set_struct, "insert"), true),
+            // `Set::remove` — a value-keyed remove.
+            (container_method(set_struct, "remove"), true),
+            // `Arena::insert` — stores a value, growing `slots` or reusing a freed
+            // slot: a geometry change (§2 resize/insert class).
+            (container_method(arena_struct, "insert"), true),
+            // `Arena::set` — overwrites a live slot's value IN PLACE: the slot
+            // survives, so a held view into a different slot is untouched and one
+            // into the same slot stays valid. STABLE (§2: an element `set` and field
+            // writes leave geometry intact) — the one native stable `&mut self` row.
+            (container_method(arena_struct, "set"), false),
+            // `Arena::remove` — frees a slot and bumps its generation, stale-ing
+            // every handle to it: a removal (§2 remove class).
+            (container_method(arena_struct, "remove"), true),
+        ]
+    };
+    for (method_id, bumping) in bumps_rows {
+        let Some(method_id) = method_id else {
+            continue;
+        };
+        let verdict = if bumping {
+            BTreeSet::from([0u32])
+        } else {
+            BTreeSet::new()
+        };
+        analyzer.bumps_tabled.insert(method_id);
+        if let Some(function) = analyzer.functions.get_mut(&method_id) {
+            function.bumps = verdict;
+        } else if let Some(external) = analyzer.external_functions.get_mut(&method_id) {
+            external.bumps = verdict;
+        }
+    }
+    // Infer `bumps` over user bodies now that the native table is seeded (the
+    // call-graph fixpoint reads tabled callees' verdicts). S3's E2 keys off the
+    // verdicts, so this whole block runs before check_invalidation below.
+    analyzer.infer_bumps();
     // Record `Some(let v)` captures over wrapped-scalar-view calls before the
     // checks + view classification consult them.
     analyzer.wrapped_view_captures = analyzer.compute_wrapped_view_captures();
@@ -23124,95 +23390,6 @@ pub fn analyze<'src>(
     if let Some(id) = module_member("dom", "query_selector_all") {
         intrinsics.insert(id, Intrinsic::QuerySelectorAll);
     }
-
-    // The `bumps` effect's native base table (rule4-completion.md §1, C6): the
-    // curated verdict for each native-container `&mut self` mutator, keyed on the
-    // resolved std entity (not a bare name), so a user's same-named method is
-    // untouched. Every native container `&mut self` op is a GEOMETRY op — push /
-    // pop / insert / remove all advance the owner's epoch (view-invalidation.md §2)
-    // — so the bump side is the whole extern surface plus the vilan wrappers; the
-    // one stable row is `Arena::set`, an in-place element overwrite (§2: an element
-    // `set` and field writes leave geometry intact). A tabled verdict is
-    // authoritative: `infer_bumps` seeds it and does not re-infer the body. Rows
-    // whose module is not loaded resolve to `None` and drop out — the table is
-    // inert until a container is actually used (the `try_trait_id` precedent).
-    let bumps_rows: [(Option<Id>, bool); 11] = {
-        // Resolve a method id inside the impl of a resolved container struct (the
-        // `list_push_fn_id` pattern), matching the impl subject by nominal id.
-        let container_method = |struct_id: Option<Id>, name: &str| -> Option<Id> {
-            let struct_id = struct_id?;
-            analyzer.implementations.iter().find_map(|implementation| {
-                matches!(
-                    analyzer.type_id_to_type_map.get(&implementation.subject),
-                    Some(Type::Struct(id, _)) if *id == struct_id
-                )
-                .then(|| implementation.declarations.get(name).copied())
-                .flatten()
-            })
-        };
-        let list_struct = analyzer.primitive_struct_ids.get("List").copied();
-        let native_map_struct = analyzer.primitive_struct_ids.get("NativeMap").copied();
-        let map_struct = analyzer.primitive_struct_ids.get("Map").copied();
-        let set_struct = analyzer.primitive_struct_ids.get("Set").copied();
-        // `Arena` is reached only by `import std::arena`, so it is not among the
-        // globally-bound `primitive_struct_ids` — resolve it from its module scope.
-        let arena_struct = module_scopes
-            .get("arena")
-            .and_then(|scope_id| analyzer.scopes.get(scope_id))
-            .and_then(|scope| scope.name_to_id_map.get("Arena").copied());
-        // `true` = bumping (seed `{0}`, the `&mut self` receiver at position 0);
-        // `false` = content-stable (seed `{}`). §2 rationale per row.
-        [
-            // `List::push` — appends; reallocates on the native backends. §2 lists
-            // `push` as invalidating deliberately (a language fact, not a JS accident).
-            (container_method(list_struct, "push"), true),
-            // `List::pop` — removes the last element (§2's P3 mutation).
-            (container_method(list_struct, "pop"), true),
-            // `NativeMap::insert` — a hash insert; may grow / rehash the table.
-            (container_method(native_map_struct, "insert"), true),
-            // `NativeMap::remove` — a hash remove.
-            (container_method(native_map_struct, "remove"), true),
-            // `Map::insert` — a value-keyed insert over `NativeMap` (§1: Map insert bumps).
-            (container_method(map_struct, "insert"), true),
-            // `Map::remove` — a value-keyed remove.
-            (container_method(map_struct, "remove"), true),
-            // `Set::insert` — a value-keyed insert (§1: Set insert bumps).
-            (container_method(set_struct, "insert"), true),
-            // `Set::remove` — a value-keyed remove.
-            (container_method(set_struct, "remove"), true),
-            // `Arena::insert` — stores a value, growing `slots` or reusing a freed
-            // slot: a geometry change (§2 resize/insert class).
-            (container_method(arena_struct, "insert"), true),
-            // `Arena::set` — overwrites a live slot's value IN PLACE: the slot
-            // survives, so a held view into a different slot is untouched and one
-            // into the same slot stays valid. STABLE (§2: an element `set` and field
-            // writes leave geometry intact) — the one native stable `&mut self` row.
-            (container_method(arena_struct, "set"), false),
-            // `Arena::remove` — frees a slot and bumps its generation, stale-ing
-            // every handle to it: a removal (§2 remove class).
-            (container_method(arena_struct, "remove"), true),
-        ]
-    };
-    for (method_id, bumping) in bumps_rows {
-        let Some(method_id) = method_id else {
-            continue;
-        };
-        let verdict = if bumping {
-            BTreeSet::from([0u32])
-        } else {
-            BTreeSet::new()
-        };
-        analyzer.bumps_tabled.insert(method_id);
-        if let Some(function) = analyzer.functions.get_mut(&method_id) {
-            function.bumps = verdict;
-        } else if let Some(external) = analyzer.external_functions.get_mut(&method_id) {
-            external.bumps = verdict;
-        }
-    }
-    // Infer `bumps` over user bodies now that the native table is seeded (the
-    // call-graph fixpoint reads tabled callees' verdicts). Inferred-only this slice
-    // — only hover and the pins read the result; S3 will key E2 off it.
-    analyzer.infer_bumps();
 
     // Transparent references (R5): rewrite bare assignments to a view into the
     // write-through deref form before codegen reads the targets.

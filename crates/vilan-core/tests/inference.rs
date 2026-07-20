@@ -1235,19 +1235,12 @@ fn arena_get_returns_a_view_not_a_copy() {
 }
 
 #[test]
-#[ignore = "pre-existing gap: rule-4/E2 does not anchor borrows-call/wrapped-view results"]
 fn arena_mutation_under_a_live_get_view_is_rejected() {
-    // The intended rule-4/E2 policing: an invalidating arena mutation (`set` /
-    // `insert`) while a `get`-view is live should be rejected. It is NOT today.
-    // `compute_view_origins` (the E1/E2 root map) only anchors `&place` bindings
-    // and view-to-view copies — never a `borrows`-call result or a wrapped-view
-    // `match` capture — and `Function.borrows` is a bare bool that never records
-    // *which* parameter is projected, so such a view has no origin and E1/E2
-    // cannot fire. Pre-existing and general (every borrows-call / wrapped-view
-    // capture, not just Arena); on JS it is semantically empty (GC — nothing
-    // dangles). Un-ignore once the inferred `borrows` summary carries the
-    // projected parameter(s) and `compute_view_origins` anchors these views.
-    assert_fails(
+    // C10 closed (rule-4 completion S3): a wrapped-view `match` capture anchors
+    // at the arena, so a BUMPING mutation (`insert` — grows/reuses slots) inside
+    // the arm fires E2. (`set` no longer invalidates — it is the stable table
+    // row; the accept twin is `arena_set_under_a_live_get_view_is_accepted`.)
+    assert_fails_with(
         r#"
         import std::print;
         import std::arena::{ Arena, Handle };
@@ -1256,7 +1249,31 @@ fn arena_mutation_under_a_live_get_view_is_rejected() {
             mut arena: Arena<i32> = Arena::new();
             let h = arena.insert(10);
             match arena.get(h) {
-                Some(let v) => { arena.set(h, 20); print(*v); }
+                Some(let v) => { arena.insert(30); print(*v); }
+                None => {}
+            }
+        }
+        "#,
+        "while a view into it is live",
+    );
+}
+
+#[test]
+fn arena_set_under_a_live_get_view_is_accepted() {
+    // The C10+C6 showcase: the capture is anchored (C10), and `set` — an
+    // in-place slot overwrite, the stable table row — does not bump (C6), so
+    // holding the view across it is legal.
+    assert_compiles(
+        r#"
+        import std::print;
+        import std::arena::{ Arena, Handle };
+        import std::option::Option::{ self, Some, None };
+        fun main() {
+            mut arena: Arena<i32> = Arena::new();
+            let h = arena.insert(10);
+            let h2 = arena.insert(11);
+            match arena.get(h) {
+                Some(let v) => { arena.set(h2, 20); print(*v); }
                 None => {}
             }
         }
@@ -22990,4 +23007,160 @@ fn bumps_dispatched_callee_defaults_to_bumping() {
         }
     "#;
     assert_bumps(source, "tickle", &[0]);
+}
+
+// --- rule-4 completion S3: anchoring + the E2 swap (C10 + C6) ----------------
+// Call-returned views and wrapped-view captures now anchor at their projected
+// roots (compute_view_origins reads the S1 root-sets at call sites), and E2
+// fires on the callee's S2 `bumps` verdict instead of the bare `&mut`
+// convention. These pins are the liveness proof in both directions: the C10
+// shapes reject, the C6 relaxations accept.
+
+#[test]
+fn a_bumping_call_under_a_live_borrows_call_view_is_rejected() {
+    // The canonical C10 shape: `let v = at(&mut xs, 0)` anchors v at xs, so a
+    // later push fires E2 exactly as a direct `&mut xs[0]` view always did.
+    assert_fails_with(
+        r#"
+        fun at(xs: &mut List<i32>, index: i32): &mut i32 {
+            &mut xs[index]
+        }
+        fun main() {
+            mut xs = [ 1, 2 ];
+            let v = at(&mut xs, 0);
+            xs.push(3);
+            v = 9;
+        }
+        main();
+        "#,
+        "while a view into it is live",
+    );
+}
+
+#[test]
+fn reassigning_the_root_under_a_live_borrows_call_view_is_rejected() {
+    // E1 through the anchored view: whole-root reassignment, not a call.
+    assert_fails_with(
+        r#"
+        fun at(xs: &mut List<i32>, index: i32): &mut i32 {
+            &mut xs[index]
+        }
+        fun main() {
+            mut xs = [ 1, 2 ];
+            let v = at(&mut xs, 0);
+            xs = [ 0 ];
+            v = 9;
+        }
+        main();
+        "#,
+        "cannot reassign",
+    );
+}
+
+#[test]
+fn holding_a_borrows_call_view_across_await_is_rejected() {
+    // E3 sees the anchored binding: re-acquire after the suspension.
+    assert_fails_with(
+        r#"
+        import std::time::sleep;
+        fun at(xs: &mut List<i32>, index: i32): &mut i32 {
+            &mut xs[index]
+        }
+        async fun work() {
+            mut xs = [ 1 ];
+            let v = at(&mut xs, 0);
+            await sleep(1);
+            v = 9;
+        }
+        fun main() { work(); }
+        main();
+        "#,
+        "across 'await'",
+    );
+}
+
+#[test]
+fn a_mutation_of_a_sibling_root_under_a_borrows_call_view_is_accepted() {
+    // The anchor is precise: pushing a DIFFERENT list never touches v's root.
+    assert_compiles(
+        r#"
+        fun at(xs: &mut List<i32>, index: i32): &mut i32 {
+            &mut xs[index]
+        }
+        fun main() {
+            mut xs = [ 1 ];
+            mut ys = [ 2 ];
+            let v = at(&mut xs, 0);
+            ys.push(3);
+            v = 9;
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn a_multi_root_projection_anchors_at_every_branch_root() {
+    // A view projecting either parameter by branch anchors at BOTH roots — a
+    // bumping call on the second root fires even when the first was taken.
+    assert_fails_with(
+        r#"
+        fun pick(a: &mut List<i32>, b: &mut List<i32>, first: bool): &mut i32 {
+            if first { &mut a[0] } else { &mut b[0] }
+        }
+        fun main() {
+            mut xs = [ 1 ];
+            mut ys = [ 2 ];
+            let v = pick(&mut xs, &mut ys, true);
+            ys.push(3);
+            v = 9;
+        }
+        main();
+        "#,
+        "while a view into it is live",
+    );
+}
+
+#[test]
+fn a_content_stable_call_under_a_live_view_is_accepted() {
+    // The C6 relaxation clearing E2's recorded scalar-field conservatism: a
+    // `&mut s` callee that only field-writes cannot invalidate the held field
+    // view, so the call is now legal (it rejected under the convention proxy).
+    assert_compiles(
+        r#"
+        struct Point { x: i32, y: i32 }
+        fun retag(p: &mut Point) {
+            p.x = 1;
+        }
+        fun main() {
+            mut p = Point { x = 0, y = 0 };
+            let v = &mut p.y;
+            retag(&mut p);
+            v = 9;
+        }
+        main();
+        "#,
+    );
+}
+
+#[test]
+fn a_bumping_user_call_under_a_live_view_is_still_rejected() {
+    // The reject twin of the relaxation: same shape, but the callee reassigns
+    // an aggregate field — a bump — so E2 still fires.
+    assert_fails_with(
+        r#"
+        struct Holder { inner: List<i32>, tag: i32 }
+        fun swap_inner(h: &mut Holder) {
+            h.inner = [ 0 ];
+        }
+        fun main() {
+            mut h = Holder { inner = [ 1 ], tag = 0 };
+            let v = &mut h.tag;
+            swap_inner(&mut h);
+            v = 9;
+        }
+        main();
+        "#,
+        "while a view into it is live",
+    );
 }

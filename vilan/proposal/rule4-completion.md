@@ -79,7 +79,16 @@ the callee's per-instantiation verdict where known, bumping otherwise.
    the R11 instance machinery. Second recorded residue: a view-binding argument
    (`let v = &mut xs; unknown(v)`) roots at the binding, under-approximating — S3's
    origin mapping resolves it.)*
-3. **S3 — anchoring + the E2 swap, together** (the breaking slice): origin seeding
+3. **S3 — anchoring + the E2 swap, together** (the breaking slice): *(Shipped
+   findings, 2026-07-19: the sweep's first run failed seven E2 pins — ALL from one
+   bug, S2's table+fixpoint parked at the END of `analyze()` while
+   `check_invalidation` runs earlier, so E2 consumed unseeded (∅ = universally
+   stable) verdicts; the block now runs beside `infer_borrows`, before every
+   consumer — the pass-ordering lesson: an effect landing "inference-only" must
+   still be positioned for its future consumers. After the fix: ZERO fallout —
+   std, corpus, docs, examples, and kolt all compile under the tightening; the
+   arena rule-4 pin un-ignored with `insert` as its invalidator since `set` is now
+   correctly stable — its old body pinned the coarse behavior.)* origin seeding
    from call results + captures; E2 keys off `bumps`; E3 sees the anchored set;
    un-ignore `arena_mutation_under_a_live_get_view_is_rejected`. **The fallout sweep
    is the acceptance**: std, corpus, docs, examples, and kolt (read-only check) all
