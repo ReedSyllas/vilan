@@ -2372,6 +2372,28 @@ pub(crate) mod tests {
         assert!(!hover.contains("borrows a"), "{hover}");
     }
 
+    // The inferred `bumps` effect renders after `borrows` (rule-4 S2, C6): a
+    // geometry-advancing mutator names its bumping parameter.
+    #[test]
+    fn hover_shows_an_inferred_bumps_clause() {
+        let hover = hover_at_cursor(
+            "fun to|uch(xs: &mut List<i32>) {\n\txs.push(1);\n}\n\nfun main() {\n\tmut xs = [ 1 ];\n\ttouch(&mut xs);\n}\n",
+        )
+        .expect("hovering `touch` should produce a label");
+        assert!(hover.contains("bumps xs"), "{hover}");
+    }
+
+    // A content-stable `&mut` mutator (field writes only) carries NO bumps
+    // clause — the absence is the verdict.
+    #[test]
+    fn hover_omits_bumps_for_a_content_stable_mutator() {
+        let hover = hover_at_cursor(
+            "struct Point { x: i32, y: i32 }\n\nfun re|tag(p: &mut Point) {\n\tp.x = 1;\n}\n\nfun main() {\n\tmut p = Point { x = 0, y = 0 };\n\tretag(&mut p);\n}\n",
+        )
+        .expect("hovering `retag` should produce a label");
+        assert!(!hover.contains("bumps"), "{hover}");
+    }
+
     // E9: the declaration's leading `///` block surfaces as prose, and
     // attribute lines between it and the name don't break the chain.
     #[test]

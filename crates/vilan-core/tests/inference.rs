@@ -22772,3 +22772,222 @@ fn dropping_a_module_level_resource_is_rejected() {
         "module-level resource",
     );
 }
+
+// --- rule-4 completion S2: the `bumps` effect (rule4-completion.md §1, C6) ---
+//
+// Inference-only this slice — no enforcement consumer exists until S3 keys E2
+// off the verdict — so these pins read the inferred sets straight off the
+// analysis result.
+
+/// The inferred `bumps` positions per function name (user functions and
+/// externs merged): S2's observable. Analysis-only — no transform — so a test
+/// source may declare bodyless externs freely. Panics on analysis errors.
+fn bumps_of(source: &str) -> std::collections::HashMap<String, Vec<u32>> {
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let leaked: &'static str = Box::leak(source.into_boxed_str());
+            let (program, errors) = analyze_source(
+                leaked,
+                &std_spec(),
+                Path::new("."),
+                Path::new("test.vl"),
+                Some(Platform::default()),
+                &Workspace::default(),
+            );
+            assert!(
+                errors.is_empty(),
+                "expected a clean analysis, got: {:#?}",
+                errors
+                    .into_iter()
+                    .map(|error| error.msg)
+                    .collect::<Vec<_>>()
+            );
+            let program = program.expect("analysis produced no program");
+            let mut bumps: std::collections::HashMap<String, Vec<u32>> = program
+                .functions
+                .values()
+                .map(|function| {
+                    (
+                        function.name.to_string(),
+                        function.bumps.iter().copied().collect(),
+                    )
+                })
+                .collect();
+            for external in program.external_functions.values() {
+                bumps.insert(
+                    external.name.to_string(),
+                    external.bumps.iter().copied().collect(),
+                );
+            }
+            bumps
+        })
+        .expect("spawn worker")
+        .join()
+        .expect("worker panicked")
+}
+
+#[track_caller]
+fn assert_bumps(source: &str, function_name: &str, expected: &[u32]) {
+    let bumps = bumps_of(source);
+    let Some(actual) = bumps.get(function_name) else {
+        panic!("function '{function_name}' not in the analysis result");
+    };
+    assert_eq!(
+        actual, expected,
+        "bumps positions for '{function_name}' (expected {expected:?}, got {actual:?})"
+    );
+}
+
+#[test]
+fn bumps_list_push_bumps_the_receiver() {
+    // The table's `List::push` row flows through the caller: `touch` bumps xs.
+    assert_bumps(
+        "fun touch(xs: &mut List<i32>) { xs.push(1); }\nfun main() { mut xs = [ 1 ]; touch(&mut xs); }\n",
+        "touch",
+        &[0],
+    );
+}
+
+#[test]
+fn bumps_list_pop_bumps_the_receiver() {
+    assert_bumps(
+        "fun shrink(xs: &mut List<i32>) { xs.pop(); }\nfun main() { mut xs = [ 1 ]; shrink(&mut xs); }\n",
+        "shrink",
+        &[0],
+    );
+}
+
+#[test]
+fn bumps_map_insert_and_remove_bump() {
+    let source = r#"
+        import std::map::Map;
+        fun put(m: &mut Map<str, i32>) { m.insert("k", 1); }
+        fun evict(m: &mut Map<str, i32>) { m.remove("k"); }
+        fun main() {
+            mut m: Map<str, i32> = Map::new();
+            put(&mut m);
+            evict(&mut m);
+        }
+    "#;
+    assert_bumps(source, "put", &[0]);
+    assert_bumps(source, "evict", &[0]);
+}
+
+#[test]
+fn bumps_set_insert_and_remove_bump() {
+    let source = r#"
+        import std::set::Set;
+        fun add(s: &mut Set<i32>) { s.insert(1); }
+        fun take_out(s: &mut Set<i32>) { s.remove(1); }
+        fun main() {
+            mut s: Set<i32> = Set::new();
+            add(&mut s);
+            take_out(&mut s);
+        }
+    "#;
+    assert_bumps(source, "add", &[0]);
+    assert_bumps(source, "take_out", &[0]);
+}
+
+#[test]
+fn bumps_arena_insert_and_remove_bump_but_set_is_stable() {
+    // The one stable native row: `Arena::set` overwrites a live slot in place —
+    // geometry intact — while insert grows/reuses slots and remove frees one.
+    let source = r#"
+        import std::arena::{ Arena, Handle };
+        fun grow(a: &mut Arena<i32>): Handle<i32> { a.insert(1) }
+        fun overwrite(a: &mut Arena<i32>, h: Handle<i32>) { a.set(h, 5); }
+        fun free(a: &mut Arena<i32>, h: Handle<i32>) { a.remove(h); }
+        fun main() {
+            mut a: Arena<i32> = Arena::new();
+            let h = grow(&mut a);
+            overwrite(&mut a, h);
+            free(&mut a, h);
+        }
+    "#;
+    assert_bumps(source, "grow", &[0]);
+    assert_bumps(source, "overwrite", &[]);
+    assert_bumps(source, "free", &[0]);
+}
+
+#[test]
+fn bumps_field_writes_are_content_stable() {
+    assert_bumps(
+        "struct Point { x: i32, y: i32 }\nfun retag(p: &mut Point) { p.x = 1; }\nfun main() { mut p = Point { x = 0, y = 0 }; retag(&mut p); }\n",
+        "retag",
+        &[],
+    );
+}
+
+#[test]
+fn bumps_element_writes_are_content_stable() {
+    // A subscript write replaces contents in the surviving slot — §2's element
+    // rule; the path has an Index, so the aggregate-reassignment rule stays out.
+    assert_bumps(
+        "fun blank(xs: &mut List<i32>) { xs[0] = 9; }\nfun main() { mut xs = [ 1 ]; blank(&mut xs); }\n",
+        "blank",
+        &[],
+    );
+}
+
+#[test]
+fn bumps_whole_reassignment_through_the_view_bumps() {
+    // Whole replacement through a view parameter is the BARE assignment
+    // (transparent references write through; `*xs = …` is rejected with a steer)
+    // — and it swaps the entire aggregate: bumping.
+    assert_bumps(
+        "fun reset(xs: &mut List<i32>) { xs = [ 0 ]; }\nfun main() { mut xs = [ 1 ]; reset(&mut xs); }\n",
+        "reset",
+        &[0],
+    );
+}
+
+#[test]
+fn bumps_aggregate_field_reassignment_bumps() {
+    // Swapping an aggregate field detaches every interior view (§6.0's
+    // aggregate-owner event) — bumping, unlike the scalar field write above.
+    assert_bumps(
+        "struct Holder { inner: List<i32> }\nfun swap_inner(h: &mut Holder) { h.inner = [ 0 ]; }\nfun main() { mut h = Holder { inner = [ 1 ] }; swap_inner(&mut h); }\n",
+        "swap_inner",
+        &[0],
+    );
+}
+
+#[test]
+fn bumps_propagates_through_a_forwarding_call() {
+    // The fixpoint chains: `forward` passes its parameter to bumping `touch`.
+    let source = "fun touch(xs: &mut List<i32>) { xs.push(1); }\nfun forward(xs: &mut List<i32>) { touch(xs); }\nfun main() { mut xs = [ 1 ]; forward(&mut xs); }\n";
+    assert_bumps(source, "forward", &[0]);
+}
+
+#[test]
+fn bumps_extern_off_table_defaults_to_bumping() {
+    // A bodyless extern with a `&mut` parameter may do anything — the safe
+    // default — and the verdict propagates to its caller.
+    let source = "external fun grow(xs: &mut List<i32>);\nfun call_it(xs: &mut List<i32>) { grow(xs); }\nfun main() { mut xs = [ 1 ]; call_it(&mut xs); }\n";
+    assert_bumps(source, "grow", &[0]);
+    assert_bumps(source, "call_it", &[0]);
+}
+
+#[test]
+fn bumps_dispatched_callee_defaults_to_bumping() {
+    // A trait method on a generic receiver is unresolvable at inference time —
+    // the receiver defaults to bumping even though this impl only field-writes.
+    let source = r#"
+        trait Poke {
+            fun wiggle(&mut self);
+        }
+        struct Cell { value: i32 }
+        impl Cell with Poke {
+            fun wiggle(&mut self) { self.value = 1; }
+        }
+        fun tickle<T: Poke>(x: &mut T) { x.wiggle(); }
+        fun main() {
+            mut c = Cell { value = 0 };
+            tickle(&mut c);
+        }
+    "#;
+    assert_bumps(source, "tickle", &[0]);
+}

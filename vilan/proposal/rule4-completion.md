@@ -72,7 +72,13 @@ the callee's per-instantiation verdict where known, bumping otherwise.
    instance machinery). Pins: each native table row, a user stable fn (field/element
    writes), a user bumping fn (push-through, reassign-through, onward-pass), the
    extern-default, the dispatched-default, a generic callee verdict at two
-   instantiations.
+   instantiations. *(S2 resolution, 2026-07-19: generic callees take the
+   instantiation-INDEPENDENT conservative verdict — a dispatched/T-typed call defaults
+   to bumping — because with no enforcement consumer the per-instantiation distinction
+   has no S2 observable; S3's per-instantiation E2 pins are where precision lands, on
+   the R11 instance machinery. Second recorded residue: a view-binding argument
+   (`let v = &mut xs; unknown(v)`) roots at the binding, under-approximating — S3's
+   origin mapping resolves it.)*
 3. **S3 — anchoring + the E2 swap, together** (the breaking slice): origin seeding
    from call results + captures; E2 keys off `bumps`; E3 sees the anchored set;
    un-ignore `arena_mutation_under_a_live_get_view_is_rejected`. **The fallout sweep
@@ -98,6 +104,12 @@ the callee's per-instantiation verdict where known, bumping otherwise.
   re-acquire form is a stop condition.
 - **Over-anchoring through copies**: a borrows-call result stored then re-derived must
   not double-count roots (dedupe as view→view copies already do).
+- **Bodiless trait signatures under-mark `borrows`** (found by S2's dispatched-default
+  bug — a bodiless method's never-inferred empty set must not read as a known
+  verdict): a dispatched view-returning trait method leaves its call results
+  unanchored. S3 must decide the dispatched-borrows default (honor an explicit
+  `borrows` clause on the trait signature; without one, a view-returning dispatched
+  call conservatively projects every `&`/`&mut` argument).
 - **The native table is a judgment surface** — keep it small, comment every row, and
   bias to bumping when unsure; a wrong "stable" is a soundness lie, a wrong "bumping"
   is a false rejection someone reports.

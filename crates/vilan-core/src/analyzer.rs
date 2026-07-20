@@ -265,6 +265,16 @@ pub struct Function<'src> {
     /// view of a different parameter per leaf unions their positions. Every
     /// consumer that once read the bare-bool `borrows` now reads *non-empty*.
     pub borrows: BTreeSet<u32>,
+    /// The `&mut`-convention parameter positions (receiver = position 0) whose
+    /// *geometry* the body may advance — the `bumps` effect (`rule4-completion.md`
+    /// §1, C6). A position is present when the body **bumps** that parameter (may
+    /// resize / insert / remove / clear / whole-reassign / drop through it — the
+    /// owner's epoch advances); a `&mut` parameter *absent* from the set is
+    /// **content-stable** (only field/element writes reach it, which leave geometry
+    /// intact). Inferred by a call-graph fixpoint over bodies, seeded from the
+    /// curated native-container table; unresolvable callees default present (the
+    /// safe direction). S3 will key E2 off this; nothing but hover reads it yet.
+    pub bumps: BTreeSet<u32>,
     /// Whether the (view) return type is `&mut` rather than `&` — so a binding of
     /// the call (`let v = obj.slot()`) is writable through `*v`.
     pub returns_mut_view: bool,
@@ -300,6 +310,14 @@ pub struct ExternalFunction<'src> {
     // position (e.g. `Shared::write(self): &mut T borrows self` → `{0}`). A call
     // to it is a view when this is non-empty.
     pub borrows: BTreeSet<u32>,
+    /// The `&mut`-convention parameter positions the extern **bumps** (geometry may
+    /// advance) — the `bumps` effect (`rule4-completion.md` §1). An extern has no
+    /// body to infer from: a curated native-container mutator (`List::push`,
+    /// `NativeMap::insert`, …) is seeded from the table; any other extern with
+    /// `&mut` parameters defaults to *all of them present* (the safe direction — an
+    /// opaque host call may do anything). A `self`-by-value extern (`Shared::write`)
+    /// has no `&mut` parameter and so an empty set.
+    pub bumps: BTreeSet<u32>,
     pub call_count: u32,
     /// Declared `async` — a promise-returning host function. Calls to it are
     /// implicitly awaited.
@@ -1412,6 +1430,12 @@ pub struct Analyzer<'src> {
     // `Task<type of e>` (falling back to `Promise<T>` against an older std),
     // and `await t` unwraps a `Task<T>` to `T`.
     task_struct_id: Option<Id>,
+    // The curated native-container mutators whose `bumps` verdict is authoritative
+    // (`rule4-completion.md` §1, C6): `infer_bumps` seeds their `bumps` set from the
+    // table and does NOT re-infer them from their bodies, so the reviewed judgment
+    // stands even where a body could be read either way. Populated after `build()`
+    // once the container method ids resolve; empty when no container is loaded.
+    bumps_tabled: HashSet<Id>,
 }
 
 static EMPTY_SPAN: Span = Span {
@@ -1721,6 +1745,7 @@ impl<'src> Analyzer<'src> {
             lift_dispatch: HashMap::new(),
             promise_struct_id: None,
             task_struct_id: None,
+            bumps_tabled: HashSet::new(),
         }
     }
 
@@ -6533,8 +6558,12 @@ impl<'src> Analyzer<'src> {
         // naming each projected parameter in position order (`borrows self`,
         // `borrows a, b`).
         let borrows_label = self.borrows_clause_label(&function.borrows, &function.parameters);
+        // The inferred `bumps` effect follows `borrows` in the signature (C6): a
+        // `&mut self` mutator renders `bumps self`, a content-stable one renders
+        // nothing beyond its `&mut`.
+        let bumps_label = self.bumps_clause_label(&function.bumps, &function.parameters);
         format!(
-            "fun {}{generics}({}){return_label}{borrows_label}",
+            "fun {}{generics}({}){return_label}{borrows_label}{bumps_label}",
             function.name,
             parameters.join(", ")
         )
@@ -6559,6 +6588,31 @@ impl<'src> Analyzer<'src> {
             String::new()
         } else {
             format!(" borrows {}", names.join(", "))
+        }
+    }
+
+    /// The ` bumps <params>` clause for a hover signature, naming each `&mut`
+    /// parameter position the function bumps in order — empty when the set is
+    /// empty (every `&mut` parameter is content-stable). Rendered like `borrows`
+    /// (E9: hover shows the inferred effect); shares the same position→name
+    /// projection so `bumps self`, `bumps a, b` read in parameter order.
+    fn bumps_clause_label(&self, bumps: &BTreeSet<u32>, parameter_ids: &[Id]) -> String {
+        if bumps.is_empty() {
+            return String::new();
+        }
+        let names: Vec<&str> = bumps
+            .iter()
+            .filter_map(|position| {
+                parameter_ids
+                    .get(*position as usize)
+                    .and_then(|parameter_id| self.parameters.get(parameter_id))
+                    .map(|parameter| parameter.name)
+            })
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" bumps {}", names.join(", "))
         }
     }
 
@@ -7479,6 +7533,391 @@ impl<'src> Analyzer<'src> {
                 }
             }
         }
+    }
+
+    /// The `bumps` effect (`rule4-completion.md` §1, C6): for every `&mut`
+    /// (RefMut) parameter, decide **content-stable** (only field/element writes
+    /// reach it) or **bumping** (its geometry may advance — a resize / insert /
+    /// remove / clear / whole-reassignment / drop reaches it). The set records the
+    /// bumping positions; a `&mut` parameter absent from it is stable.
+    ///
+    /// Externs first: a curated native-container mutator keeps its tabled seed
+    /// (`bumps_tabled`); any other extern has no readable body, so every `&mut`
+    /// parameter defaults to bumping (an opaque host call may do anything). Then a
+    /// monotone call-graph fixpoint over user bodies (the seventh verse of the
+    /// inferred-effect worklist, beside `borrows`): a parameter is bumping if the
+    /// body whole-reassigns it (or an aggregate place rooted at it), calls a
+    /// bumping operation on a place rooted at it, or passes such a place onward to a
+    /// bumping position. A dispatched or unresolvable callee counts as bumping. The
+    /// set only grows as the callees it depends on grow, so it terminates.
+    ///
+    /// Recorded residue: an argument that is a VIEW BINDING of a parameter place
+    /// (`let v = &mut xs; unknown(v)`) roots at the binding, not the parameter, so
+    /// the scan under-approximates it — the same origin mapping S3 builds for
+    /// rule 4 resolves it; revisit there (rule4-completion.md §3).
+    ///
+    /// Inferred-only in v1: nothing but hover reads the verdict yet (S3 keys E2
+    /// off it). Tabled functions are skipped — their reviewed verdict stands.
+    fn infer_bumps(&mut self) {
+        // Off-table externs default to bumping every `&mut` parameter; tabled ones
+        // (`List::push`, …) keep the seed the native table already wrote.
+        let external_ids: Vec<Id> = self.external_functions.keys().copied().collect();
+        for external_id in external_ids {
+            if self.bumps_tabled.contains(&external_id) {
+                continue;
+            }
+            let Some(parameters) = self
+                .external_functions
+                .get(&external_id)
+                .map(|external| external.parameters.clone())
+            else {
+                continue;
+            };
+            let positions = self.mutable_parameter_positions(&parameters);
+            if let Some(external) = self.external_functions.get_mut(&external_id) {
+                external.bumps = positions;
+            }
+        }
+        let function_ids: Vec<Id> = self.functions.keys().copied().collect();
+        loop {
+            let mut updates: Vec<(Id, BTreeSet<u32>)> = Vec::new();
+            for function_id in &function_ids {
+                if self.bumps_tabled.contains(function_id) {
+                    continue;
+                }
+                let (has_body, current) = {
+                    let Some(function) = self.functions.get(function_id) else {
+                        continue;
+                    };
+                    (function.has_body, function.bumps.clone())
+                };
+                if !has_body {
+                    continue;
+                }
+                let mut positions = current.clone();
+                self.collect_bumps_positions(*function_id, &mut positions);
+                if positions != current {
+                    updates.push((*function_id, positions));
+                }
+            }
+            if updates.is_empty() {
+                break;
+            }
+            for (function_id, positions) in updates {
+                if let Some(function) = self.functions.get_mut(&function_id) {
+                    function.bumps = positions;
+                }
+            }
+        }
+    }
+
+    /// The parameter positions received by `&mut` (RefMut) convention — the domain
+    /// of the `bumps` verdict (receiver = position 0). Seeds an off-table extern's
+    /// default, where every `&mut` parameter is taken to bump.
+    fn mutable_parameter_positions(&self, parameter_ids: &[Id]) -> BTreeSet<u32> {
+        parameter_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter_id)| {
+                self.parameters
+                    .get(parameter_id)
+                    .filter(|parameter| parameter.convention == Convention::RefMut)
+                    .map(|_| index as u32)
+            })
+            .collect()
+    }
+
+    /// The position of `root` among a function's parameters when it is a `&mut`
+    /// (RefMut) parameter — else `None`. A bare/`own`/`&` root never bumps: an
+    /// owned or by-value parameter is the callee's own value, and a `&` parameter
+    /// is immutable, so neither advances the caller's geometry.
+    fn mutable_parameter_position(&self, function_id: Id, root: Id) -> Option<u32> {
+        let is_mutable = self
+            .parameters
+            .get(&root)
+            .is_some_and(|parameter| parameter.convention == Convention::RefMut);
+        if !is_mutable {
+            return None;
+        }
+        self.functions
+            .get(&function_id)?
+            .parameters
+            .iter()
+            .position(|parameter_id| *parameter_id == root)
+            .map(|index| index as u32)
+    }
+
+    /// Scan a function body for the `&mut` parameter positions its bumps, growing
+    /// `positions` (the monotone step of `infer_bumps`).
+    fn collect_bumps_positions(&self, function_id: Id, positions: &mut BTreeSet<u32>) {
+        let Some(function) = self.functions.get(&function_id) else {
+            return;
+        };
+        let statements = function.body.0.clone();
+        let tail = function.body.1;
+        let mut visited = HashSet::new();
+        for statement in &statements {
+            self.scan_bumps(*statement, function_id, positions, &mut visited);
+        }
+        self.scan_bumps(tail, function_id, positions, &mut visited);
+    }
+
+    /// Walk one expression, recording any `&mut` parameter of `function_id` that it
+    /// bumps. Assignments and calls are the events; every other form just recurses
+    /// into its children (mirroring the invalidation scan's coverage). Nested
+    /// closures are walked too — a captured `&mut self` bumped inside `|| self.push(x)`
+    /// still bumps the enclosing parameter (a closure-local place roots at the
+    /// closure's own parameter, so it contributes nothing spurious).
+    fn scan_bumps(
+        &self,
+        expr_id: Id,
+        function_id: Id,
+        positions: &mut BTreeSet<u32>,
+        visited: &mut HashSet<Id>,
+    ) {
+        if !visited.insert(expr_id) {
+            return;
+        }
+        let Some(expr) = self.expr_id_to_expr_map.get(&expr_id).cloned() else {
+            return;
+        };
+        match expr {
+            Expr::Assignment(target_id, value_id) => {
+                self.scan_bumps(value_id, function_id, positions, visited);
+                if let Some(position) = self.assignment_bumps_position(target_id, function_id) {
+                    positions.insert(position);
+                }
+                self.scan_bumps(target_id, function_id, positions, visited);
+            }
+            Expr::Call(call_id) => {
+                self.call_bumps_positions(call_id, function_id, positions);
+                if let Some(function_call) = self.function_calls.get(&call_id) {
+                    for argument in function_call.argument_ids.clone() {
+                        self.scan_bumps(argument, function_id, positions, visited);
+                    }
+                }
+            }
+            Expr::Variable(variable_id) => {
+                if let Some(initial) = self.variables.get(&variable_id).and_then(|v| v.initial) {
+                    self.scan_bumps(initial, function_id, positions, visited);
+                }
+            }
+            Expr::Block((statements, tail)) => {
+                for statement in statements {
+                    self.scan_bumps(statement, function_id, positions, visited);
+                }
+                self.scan_bumps(tail, function_id, positions, visited);
+            }
+            Expr::For(condition, (statements, tail)) => {
+                if let Some(condition) = condition {
+                    self.scan_bumps(condition, function_id, positions, visited);
+                }
+                for statement in statements {
+                    self.scan_bumps(statement, function_id, positions, visited);
+                }
+                self.scan_bumps(tail, function_id, positions, visited);
+            }
+            Expr::ForEach(iterable, _, (statements, tail)) => {
+                self.scan_bumps(iterable, function_id, positions, visited);
+                for statement in statements {
+                    self.scan_bumps(statement, function_id, positions, visited);
+                }
+                self.scan_bumps(tail, function_id, positions, visited);
+            }
+            Expr::If(branch) => self.scan_bumps_if(&branch, function_id, positions, visited),
+            Expr::Match(subject_id, legs) => {
+                self.scan_bumps(subject_id, function_id, positions, visited);
+                for leg in legs {
+                    if let Some(guard) = leg.guard {
+                        self.scan_bumps(guard, function_id, positions, visited);
+                    }
+                    self.scan_bumps(leg.body, function_id, positions, visited);
+                }
+            }
+            Expr::Closure(inner_id) | Expr::Async(inner_id) => {
+                if let Some(inner) = self.closures.get(&inner_id) {
+                    self.scan_bumps(inner.return_, function_id, positions, visited);
+                }
+            }
+            Expr::Binary(_, lhs, rhs) => {
+                self.scan_bumps(lhs, function_id, positions, visited);
+                self.scan_bumps(rhs, function_id, positions, visited);
+            }
+            Expr::Reference(operand, _)
+            | Expr::Dereference(operand)
+            | Expr::Unary(_, operand)
+            | Expr::Field(operand, _, _)
+            | Expr::TupleIndex(operand, _, _)
+            | Expr::FunctionReturn(Some(operand))
+            | Expr::Await(operand)
+            | Expr::TryAssert(operand)
+            | Expr::ArrayLen(operand, _) => {
+                self.scan_bumps(operand, function_id, positions, visited);
+            }
+            Expr::Index(subject, index) => {
+                self.scan_bumps(subject, function_id, positions, visited);
+                self.scan_bumps(index, function_id, positions, visited);
+            }
+            Expr::List(ids) | Expr::Tuple(ids) => {
+                for id in ids {
+                    self.scan_bumps(id, function_id, positions, visited);
+                }
+            }
+            Expr::StructInitializer(_, fields) => {
+                for value in fields.values() {
+                    self.scan_bumps(*value, function_id, positions, visited);
+                }
+            }
+            // Expression-carrying forms `scan_move` also walks — a bumping call can
+            // hide inside any of these (a lift region's steps carry real calls), so
+            // the coverage set mirrors the move scan's, not a shorter list.
+            Expr::Destructure(value_id, _) => {
+                self.scan_bumps(value_id, function_id, positions, visited);
+            }
+            Expr::Repeat(value_id, _) => {
+                self.scan_bumps(value_id, function_id, positions, visited);
+            }
+            Expr::Is(subject, _) => {
+                self.scan_bumps(subject, function_id, positions, visited);
+            }
+            Expr::Lift(subject, _, continuation) => {
+                self.scan_bumps(subject, function_id, positions, visited);
+                self.scan_bumps(continuation, function_id, positions, visited);
+            }
+            Expr::LiftRegion(steps, body) => {
+                for (step_id, _, _) in &steps {
+                    self.scan_bumps(*step_id, function_id, positions, visited);
+                }
+                self.scan_bumps(body, function_id, positions, visited);
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_bumps_if(
+        &self,
+        branch: &ExprIfBranch,
+        function_id: Id,
+        positions: &mut BTreeSet<u32>,
+        visited: &mut HashSet<Id>,
+    ) {
+        match branch {
+            ExprIfBranch::If(condition, (statements, tail), else_branch) => {
+                self.scan_bumps(*condition, function_id, positions, visited);
+                for statement in statements {
+                    self.scan_bumps(*statement, function_id, positions, visited);
+                }
+                self.scan_bumps(*tail, function_id, positions, visited);
+                if let Some(else_branch) = else_branch {
+                    self.scan_bumps_if(else_branch, function_id, positions, visited);
+                }
+            }
+            ExprIfBranch::Else((statements, tail)) => {
+                for statement in statements {
+                    self.scan_bumps(*statement, function_id, positions, visited);
+                }
+                self.scan_bumps(*tail, function_id, positions, visited);
+            }
+        }
+    }
+
+    /// The `&mut` parameter position an assignment target bumps, if any. A whole
+    /// parameter or an *aggregate* place reached by pure field access is a
+    /// geometry-advancing reassignment — a sub-aggregate is swapped, so a held view
+    /// into the old one dangles. A scalar write (`P.x = 1`, `P = 5` for scalar `P`),
+    /// or ANY element/subscript write (`P[i] = v`, `P.list[i] = v`), changes
+    /// contents in place — the slot survives — so it is content-stable and yields
+    /// `None`. The scalar exemption matches view-invalidation.md §2 (a scalar cell
+    /// has no geometry; every write to it is the aliasing the model permits).
+    fn assignment_bumps_position(&self, target_id: Id, function_id: Id) -> Option<u32> {
+        if !self.assignment_path_field_only(target_id) || self.place_is_scalar(target_id) {
+            return None;
+        }
+        let root = self.place_root(target_id)?;
+        self.mutable_parameter_position(function_id, root)
+    }
+
+    /// Whether an assignment target's place path is pure field/tuple access (no
+    /// subscript). A subscript anywhere makes it an *element* write — stable per
+    /// §2 — so the aggregate-reassignment rule does not apply.
+    fn assignment_path_field_only(&self, expr_id: Id) -> bool {
+        match self.expr_id_to_expr_map.get(&expr_id) {
+            Some(Expr::Local(_)) => true,
+            Some(Expr::Field(subject, _, _))
+            | Some(Expr::TupleIndex(subject, _, _))
+            | Some(Expr::Dereference(subject)) => self.assignment_path_field_only(*subject),
+            _ => false,
+        }
+    }
+
+    /// The `&mut` parameter positions a call bumps, added to `positions`. A callee
+    /// that resolves to a concrete function/external maps each of *its* bumping
+    /// positions through the argument there to the caller's parameter root — this
+    /// is the C6 precision: a stable `&mut` call contributes nothing. A dispatched
+    /// or unresolvable callee (a trait method on a generic receiver, a called
+    /// closure value) defaults to bumping: its receiver (argument 0) and any
+    /// explicit `&mut place` argument rooted at a caller `&mut` parameter bump.
+    fn call_bumps_positions(&self, call_id: Id, function_id: Id, positions: &mut BTreeSet<u32>) {
+        let Some(function_call) = self.function_calls.get(&call_id) else {
+            return;
+        };
+        let argument_ids = function_call.argument_ids.clone();
+        let callee_bumps: Option<BTreeSet<u32>> =
+            match self.expr_id_to_expr_map.get(&function_call.subject_id) {
+                // A BODILESS function is a trait signature — the impl actually
+                // dispatched to is unknowable here, so its (never-inferred, empty)
+                // set must not read as a known-stable verdict: fall through to the
+                // dispatched default below. Externs are bodiless too but their
+                // verdict is real (the table or the all-`&mut` default).
+                Some(Expr::Local(callee_id)) => self
+                    .functions
+                    .get(callee_id)
+                    .filter(|function| function.has_body)
+                    .map(|function| function.bumps.clone())
+                    .or_else(|| {
+                        self.external_functions
+                            .get(callee_id)
+                            .map(|external| external.bumps.clone())
+                    }),
+                _ => None,
+            };
+        match callee_bumps {
+            Some(bumps) => {
+                for position in bumps {
+                    if let Some(argument_id) = argument_ids.get(position as usize)
+                        && let Some(caller_position) =
+                            self.argument_root_mutable_position(*argument_id, function_id)
+                    {
+                        positions.insert(caller_position);
+                    }
+                }
+            }
+            None => {
+                for (index, argument_id) in argument_ids.iter().enumerate() {
+                    let is_mutable_reference = matches!(
+                        self.expr_id_to_expr_map.get(argument_id),
+                        Some(Expr::Reference(_, true))
+                    );
+                    if (index == 0 || is_mutable_reference)
+                        && let Some(caller_position) =
+                            self.argument_root_mutable_position(*argument_id, function_id)
+                    {
+                        positions.insert(caller_position);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The caller `&mut` parameter position an argument's place roots at, if any —
+    /// unwrapping a leading `&mut place` to its operand first (the receiver and
+    /// by-value arguments are places directly).
+    fn argument_root_mutable_position(&self, argument_id: Id, function_id: Id) -> Option<u32> {
+        let root = match self.expr_id_to_expr_map.get(&argument_id) {
+            Some(Expr::Reference(operand, _)) => self.place_root(*operand),
+            _ => self.place_root(argument_id),
+        }?;
+        self.mutable_parameter_position(function_id, root)
     }
 
     /// recovered later by `borrows` (Phase 5).
@@ -10773,6 +11212,9 @@ impl<'src> Analyzer<'src> {
                             return_type_id,
                             extern_binding: function.extern_binding.clone(),
                             borrows,
+                            // Seeded after `build()`: the native-container table, or
+                            // the all-`&mut` default (`infer_bumps`). Empty until then.
+                            bumps: BTreeSet::new(),
                             call_count: 0,
                             is_async: function.is_async,
                         },
@@ -10849,6 +11291,9 @@ impl<'src> Analyzer<'src> {
                             call_count: 0,
                             is_async: function.is_async,
                             borrows,
+                            // Inferred by `infer_bumps` after `build()`; the fixpoint
+                            // grows this set from the empty seed.
+                            bumps: BTreeSet::new(),
                             returns_mut_view: matches!(
                                 function.return_type.as_deref().map(|spanned| &spanned.0),
                                 Some(Node::Reference(true, _))
@@ -22680,6 +23125,95 @@ pub fn analyze<'src>(
         intrinsics.insert(id, Intrinsic::QuerySelectorAll);
     }
 
+    // The `bumps` effect's native base table (rule4-completion.md §1, C6): the
+    // curated verdict for each native-container `&mut self` mutator, keyed on the
+    // resolved std entity (not a bare name), so a user's same-named method is
+    // untouched. Every native container `&mut self` op is a GEOMETRY op — push /
+    // pop / insert / remove all advance the owner's epoch (view-invalidation.md §2)
+    // — so the bump side is the whole extern surface plus the vilan wrappers; the
+    // one stable row is `Arena::set`, an in-place element overwrite (§2: an element
+    // `set` and field writes leave geometry intact). A tabled verdict is
+    // authoritative: `infer_bumps` seeds it and does not re-infer the body. Rows
+    // whose module is not loaded resolve to `None` and drop out — the table is
+    // inert until a container is actually used (the `try_trait_id` precedent).
+    let bumps_rows: [(Option<Id>, bool); 11] = {
+        // Resolve a method id inside the impl of a resolved container struct (the
+        // `list_push_fn_id` pattern), matching the impl subject by nominal id.
+        let container_method = |struct_id: Option<Id>, name: &str| -> Option<Id> {
+            let struct_id = struct_id?;
+            analyzer.implementations.iter().find_map(|implementation| {
+                matches!(
+                    analyzer.type_id_to_type_map.get(&implementation.subject),
+                    Some(Type::Struct(id, _)) if *id == struct_id
+                )
+                .then(|| implementation.declarations.get(name).copied())
+                .flatten()
+            })
+        };
+        let list_struct = analyzer.primitive_struct_ids.get("List").copied();
+        let native_map_struct = analyzer.primitive_struct_ids.get("NativeMap").copied();
+        let map_struct = analyzer.primitive_struct_ids.get("Map").copied();
+        let set_struct = analyzer.primitive_struct_ids.get("Set").copied();
+        // `Arena` is reached only by `import std::arena`, so it is not among the
+        // globally-bound `primitive_struct_ids` — resolve it from its module scope.
+        let arena_struct = module_scopes
+            .get("arena")
+            .and_then(|scope_id| analyzer.scopes.get(scope_id))
+            .and_then(|scope| scope.name_to_id_map.get("Arena").copied());
+        // `true` = bumping (seed `{0}`, the `&mut self` receiver at position 0);
+        // `false` = content-stable (seed `{}`). §2 rationale per row.
+        [
+            // `List::push` — appends; reallocates on the native backends. §2 lists
+            // `push` as invalidating deliberately (a language fact, not a JS accident).
+            (container_method(list_struct, "push"), true),
+            // `List::pop` — removes the last element (§2's P3 mutation).
+            (container_method(list_struct, "pop"), true),
+            // `NativeMap::insert` — a hash insert; may grow / rehash the table.
+            (container_method(native_map_struct, "insert"), true),
+            // `NativeMap::remove` — a hash remove.
+            (container_method(native_map_struct, "remove"), true),
+            // `Map::insert` — a value-keyed insert over `NativeMap` (§1: Map insert bumps).
+            (container_method(map_struct, "insert"), true),
+            // `Map::remove` — a value-keyed remove.
+            (container_method(map_struct, "remove"), true),
+            // `Set::insert` — a value-keyed insert (§1: Set insert bumps).
+            (container_method(set_struct, "insert"), true),
+            // `Set::remove` — a value-keyed remove.
+            (container_method(set_struct, "remove"), true),
+            // `Arena::insert` — stores a value, growing `slots` or reusing a freed
+            // slot: a geometry change (§2 resize/insert class).
+            (container_method(arena_struct, "insert"), true),
+            // `Arena::set` — overwrites a live slot's value IN PLACE: the slot
+            // survives, so a held view into a different slot is untouched and one
+            // into the same slot stays valid. STABLE (§2: an element `set` and field
+            // writes leave geometry intact) — the one native stable `&mut self` row.
+            (container_method(arena_struct, "set"), false),
+            // `Arena::remove` — frees a slot and bumps its generation, stale-ing
+            // every handle to it: a removal (§2 remove class).
+            (container_method(arena_struct, "remove"), true),
+        ]
+    };
+    for (method_id, bumping) in bumps_rows {
+        let Some(method_id) = method_id else {
+            continue;
+        };
+        let verdict = if bumping {
+            BTreeSet::from([0u32])
+        } else {
+            BTreeSet::new()
+        };
+        analyzer.bumps_tabled.insert(method_id);
+        if let Some(function) = analyzer.functions.get_mut(&method_id) {
+            function.bumps = verdict;
+        } else if let Some(external) = analyzer.external_functions.get_mut(&method_id) {
+            external.bumps = verdict;
+        }
+    }
+    // Infer `bumps` over user bodies now that the native table is seeded (the
+    // call-graph fixpoint reads tabled callees' verdicts). Inferred-only this slice
+    // — only hover and the pins read the result; S3 will key E2 off it.
+    analyzer.infer_bumps();
+
     // Transparent references (R5): rewrite bare assignments to a view into the
     // write-through deref form before codegen reads the targets.
     analyzer.rewrite_view_assignment_targets();
@@ -22774,10 +23308,11 @@ pub fn analyze<'src>(
             analyzer.declaration_type_label(external.return_type_id)
         );
         let borrows_label = analyzer.borrows_clause_label(&external.borrows, &external.parameters);
+        let bumps_label = analyzer.bumps_clause_label(&external.bumps, &external.parameters);
         declaration_labels.insert(
             *function_id,
             format!(
-                "external fun {}({}){return_label}{borrows_label}",
+                "external fun {}({}){return_label}{borrows_label}{bumps_label}",
                 external.name,
                 parameters.join(", ")
             ),
