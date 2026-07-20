@@ -59,10 +59,22 @@ wanted).
 call passes a viewed root (or a place rooted at it) to a **bumping** position — no
 longer on every `&mut` convention. E3 unchanged in rule (every live view fences
 `await`) but now sees the newly anchored views — this is where honest fallout lives:
-code holding a call-returned view across `await` compiles today and will stop. The two
-recorded E2 conservatisms (scalar-field view under a `&mut s` call; generic-typed
-roots) resolve by the same machinery: a stable verdict clears them, generic roots take
-the callee's per-instantiation verdict where known, bumping otherwise.
+code holding a call-returned view across `await` compiles today and will stop. Of the
+two recorded E2 conservatisms, the arc cleared ONE *(corrected 2026-07-19 by the
+fresh-eyes review — the shipped claim overstated)*: the scalar-field-view-under-
+`&mut s` case clears via the callee's stable verdict (pinned). The generic-typed-ROOT
+conservatism REMAINS — the root-side scalar exemption keys on `is_scalar_view_pointee`,
+false for a still-generic root, so a bumping call on one is still flagged even when the
+instantiation is scalar. Over-rejection (safe direction); clears when `bumps` gains
+per-instantiation verdicts (the recorded S2 residue). Second reviewer note, same
+family: `call_bumps_positions`' dispatched default gates onward-bumps on
+`index == 0 || &mut-reference`, so a BARE-forwarded view parameter at position > 0 to a
+dispatched callee is missed — a distinct path of the recorded view-binding-argument
+under-approximation. And the review BLOCKED the first S4 state on a real one:
+`scan_bumps` omitted `Expr::TupleComprehension` (the parity sweep's line window cut off
+one arm short of `scan_move`'s list), silently reading comprehension-body bumps as
+content-stable — a demonstrated-on-JS soundness regression, fixed + pinned
+(`a_bump_inside_a_tuple_comprehension_is_rejected`).
 
 ## 2. Slices (each suite-gated, docs same commit, per-case pins)
 

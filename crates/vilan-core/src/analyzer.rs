@@ -7526,11 +7526,10 @@ impl<'src> Analyzer<'src> {
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default();
         for callee_position in callee_positions {
-            if let Some(argument_id) = function_call.argument_ids.get(callee_position as usize) {
-                if let Some(position) = self.projected_parameter_position(function_id, *argument_id)
-                {
-                    positions.insert(position);
-                }
+            if let Some(argument_id) = function_call.argument_ids.get(callee_position as usize)
+                && let Some(position) = self.projected_parameter_position(function_id, *argument_id)
+            {
+                positions.insert(position);
             }
         }
     }
@@ -7790,6 +7789,15 @@ impl<'src> Analyzer<'src> {
                 }
                 self.scan_bumps(body, function_id, positions, visited);
             }
+            // A comprehension's source and body are executable — a bump inside
+            // (`(s in xs => { h.inner = [0]; .. })`) counts like any other.
+            // (Review finding: this arm was MISSED on the first pass — the
+            // parity sweep's line window cut off one arm short of scan_move's
+            // list, and the omission read as content-stable, an unsafe default.)
+            Expr::TupleComprehension(_, source, body) => {
+                self.scan_bumps(source, function_id, positions, visited);
+                self.scan_bumps(body, function_id, positions, visited);
+            }
             _ => {}
         }
     }
@@ -7857,6 +7865,26 @@ impl<'src> Analyzer<'src> {
     /// or unresolvable callee (a trait method on a generic receiver, a called
     /// closure value) defaults to bumping: its receiver (argument 0) and any
     /// explicit `&mut place` argument rooted at a caller `&mut` parameter bump.
+    /// The `bumps` set a resolved callee may be TRUSTED for — `None` when the
+    /// verdict is unknowable and the consumer must take the dispatched default
+    /// (treat every position as bumping). This is the ONE home of the
+    /// has-body rule: a BODILESS function is a trait signature whose
+    /// never-inferred, empty set must not read as known-stable; an extern's
+    /// set is real (the native table, the all-`&mut` default, or an explicit
+    /// clause). Consumed by the inference fixpoint and by E2's stable-skip —
+    /// they must never drift apart.
+    fn callee_bumps_set(&self, callee_id: &Id) -> Option<BTreeSet<u32>> {
+        self.functions
+            .get(callee_id)
+            .filter(|function| function.has_body)
+            .map(|function| function.bumps.clone())
+            .or_else(|| {
+                self.external_functions
+                    .get(callee_id)
+                    .map(|external| external.bumps.clone())
+            })
+    }
+
     fn call_bumps_positions(&self, call_id: Id, function_id: Id, positions: &mut BTreeSet<u32>) {
         let Some(function_call) = self.function_calls.get(&call_id) else {
             return;
@@ -7864,21 +7892,7 @@ impl<'src> Analyzer<'src> {
         let argument_ids = function_call.argument_ids.clone();
         let callee_bumps: Option<BTreeSet<u32>> =
             match self.expr_id_to_expr_map.get(&function_call.subject_id) {
-                // A BODILESS function is a trait signature — the impl actually
-                // dispatched to is unknowable here, so its (never-inferred, empty)
-                // set must not read as a known-stable verdict: fall through to the
-                // dispatched default below. Externs are bodiless too but their
-                // verdict is real (the table or the all-`&mut` default).
-                Some(Expr::Local(callee_id)) => self
-                    .functions
-                    .get(callee_id)
-                    .filter(|function| function.has_body)
-                    .map(|function| function.bumps.clone())
-                    .or_else(|| {
-                        self.external_functions
-                            .get(callee_id)
-                            .map(|external| external.bumps.clone())
-                    }),
+                Some(Expr::Local(callee_id)) => self.callee_bumps_set(callee_id),
                 _ => None,
             };
         match callee_bumps {
@@ -7989,7 +8003,7 @@ impl<'src> Analyzer<'src> {
         for function in self.functions.values() {
             if function.has_body
                 && self.escapes_as_view(function.body.1, &view_bindings, &capturing)
-                && !(!function.borrows.is_empty() && self.derives_from_view_param(function.body.1))
+                && (function.borrows.is_empty() || !self.derives_from_view_param(function.body.1))
             {
                 escapes.push(function.body.1);
             }
@@ -8335,8 +8349,8 @@ impl<'src> Analyzer<'src> {
     /// Conditional transients union their leaves.
     fn subject_view_roots(&self, subject_id: Id, origins: &HashMap<Id, Vec<Id>>) -> Vec<Id> {
         let mut roots = Vec::new();
-        let mut add = |mut found: Vec<Id>, roots: &mut Vec<Id>| {
-            for root in found.drain(..) {
+        let add = |found: Vec<Id>, roots: &mut Vec<Id>| {
+            for root in found {
                 if !roots.contains(&root) {
                     roots.push(root);
                 }
@@ -9591,19 +9605,11 @@ impl<'src> Analyzer<'src> {
                     // C6 (rule-4 completion S3): E2 fires on the callee's BUMPS
                     // verdict for this position, no longer on the bare `&mut`
                     // convention — a content-stable mutator (field/element writes
-                    // only) cannot invalidate. A bodiless callee's verdict is
-                    // unknowable and stays bumping (the S2 default).
+                    // only) cannot invalidate. `callee_bumps_set` owns the
+                    // has-body rule; an unknowable verdict stays bumping.
                     let stable = self
-                        .functions
-                        .get(callee_id)
-                        .filter(|function| function.has_body)
-                        .map(|function| !function.bumps.contains(&(position as u32)))
-                        .or_else(|| {
-                            self.external_functions
-                                .get(callee_id)
-                                .map(|external| !external.bumps.contains(&(position as u32)))
-                        })
-                        .unwrap_or(false);
+                        .callee_bumps_set(callee_id)
+                        .is_some_and(|bumps| !bumps.contains(&(position as u32)));
                     if stable {
                         continue;
                     }

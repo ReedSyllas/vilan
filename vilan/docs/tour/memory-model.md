@@ -127,10 +127,15 @@ through to the list.
 > **Going deeper.** A method may return a view that projects its
 > receiver, like `fun get(&mut self, i: i32): &mut T`. The compiler
 > infers which parameter the view borrows from, and the returned view
-> obeys the same short-lived rules at the call site. `Option<&T>` covers
-> "a view, maybe" (map lookups). While a view is live, mutations that
-> would invalidate it — replacing the thing it points into — are
-> compile errors. Spec §6 has the precise rules.
+> obeys the same short-lived rules at the call site — anchored to what it
+> projects, so a `list.push(..)` while a view from `list.at(0)` is live
+> is the same compile error a direct `&mut list[0]` would raise.
+> `Option<&T>` covers "a view, maybe" (map lookups). The compiler is
+> precise about *which* mutations invalidate: only calls that may change
+> a container's geometry (grow, shrink, reallocate — inferred per method)
+> conflict with a live view; a method that just writes fields or elements
+> through `&mut self` passes freely. Hover a function to see both
+> inferred effects (`borrows`, `bumps`). Spec §6 has the precise rules.
 
 ## `Shared<T>`: one cell, many holders
 

@@ -177,6 +177,19 @@ with the borrow anchored to the projected argument: the argument's place
 is treated as viewed while the result is live (rule 4 applies to it).
 Returning a view of a **local** is always an error (it would dangle).
 
+The clause is a *set*: a function whose branches return a view of
+different parameters projects them all (`borrows a, b`), and the call
+result anchors at every corresponding argument. Hover shows the inferred
+clause on any projection, alongside its sibling effect **`bumps`** — the
+per-`&mut`-parameter *geometry verdict* §6.4's call rule fires on. A
+`&mut` parameter the body only writes fields or elements through is
+**content-stable** (absent from the clause; the owner's epoch holds); one
+the body may resize, insert into, remove from, or whole-reassign through
+**bumps**. Both effects are inferred, never written (the explicit
+`borrows` clause remains legal); an unknowable callee — a bodiless trait
+signature, an untabled host function — is treated as bumping and, when
+view-typed, as projecting every argument: the conservative direction.
+
 `Option<&T>` is permitted as a return type for "a view, maybe" (map
 lookups); the `Some` payload obeys the same anchoring. An `Option<&mut T>`
 may also be built **inline as a transient** and matched in the same

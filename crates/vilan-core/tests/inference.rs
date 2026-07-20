@@ -23238,3 +23238,28 @@ fn a_content_stable_call_on_a_user_container_inside_for_mut_is_accepted() {
         "#,
     );
 }
+
+#[test]
+fn a_bump_inside_a_tuple_comprehension_is_rejected() {
+    // The review-block pin: `scan_bumps` initially omitted the
+    // TupleComprehension arm, so an aggregate-field swap inside a comprehension
+    // body read as content-stable and E2 silently permitted it — with an
+    // observable stale write-through on JS. The comprehension's source and body
+    // are executable like any other sub-expression.
+    assert_fails_with(
+        r#"
+        struct Holder { inner: List<i32> }
+        fun sneaky<T: (2..)>(h: &mut Holder, sources: (U in T: List<U>)): T {
+            (source in sources => { h.inner = [ 0 ]; source.len() })
+        }
+        fun main() {
+            mut h = Holder { inner = [ 100, 200 ] };
+            let v = &mut h.inner[0];
+            let _ = sneaky(&mut h, ([ 1, 2, 3 ], [ "a", "b" ]));
+            v = 9;
+        }
+        main();
+        "#,
+        "while a view into it is live",
+    );
+}
