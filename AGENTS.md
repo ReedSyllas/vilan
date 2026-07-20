@@ -82,6 +82,11 @@ Rust workspace, four crates, plus the language's own tree:
   `let` binding.
 - **Numerics:** the JS-backed integers are `i53`/`u53` (a ±2^53 contract); unknown
   numeric suffixes are hard errors.
+- **A new keyword lands in THREE places** — the lexer (`lexer.rs`), the TextMate
+  grammar (`editors/vscode/syntaxes/vilan.tmLanguage.json`), and the book's
+  highlight.js theme (`vilan/docs/theme/vilan.js`). The `resource` keyword shipped
+  with only the first and was caught twice, days apart. Check with a lexer-vs-list
+  diff, not by eye.
 - **A post-`analyze()` pass must be wired into BOTH pipelines** — `lib.rs`'s
   `analyze_source` (tests + LSP) *and* the CLI's duplicated sequence in
   `crates/vilan-cli/src/main.rs` — and verified with a CLI probe, not only an
