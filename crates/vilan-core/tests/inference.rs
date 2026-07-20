@@ -21650,7 +21650,7 @@ fn a_drop_impl_with_a_by_value_receiver_is_rejected() {
         }
         fun main() {}
         "#,
-        "must declare `fun drop(&mut self)`",
+        "match the receiver convention",
     );
 }
 
@@ -21666,7 +21666,7 @@ fn a_drop_impl_with_a_shared_receiver_is_rejected() {
         }
         fun main() {}
         "#,
-        "must declare `fun drop(&mut self)`",
+        "match the receiver convention",
     );
 }
 
@@ -21683,7 +21683,7 @@ fn a_drop_impl_with_an_extra_parameter_is_rejected() {
         }
         fun main() {}
         "#,
-        "must declare `fun drop(&mut self)`",
+        "match the declared parameter list",
     );
 }
 
@@ -21700,7 +21700,7 @@ fn a_drop_impl_with_a_non_void_return_is_rejected() {
         }
         fun main() {}
         "#,
-        "must declare `fun drop(&mut self)`",
+        "match the declared return type",
     );
 }
 
@@ -23297,5 +23297,397 @@ fn a_bump_inside_a_tuple_comprehension_is_rejected() {
         main();
         "#,
         "while a view into it is live",
+    );
+}
+
+// --- B29: full trait-signature conformance -----------------------------------
+// The checker used to accept any impl whose members matched a trait by NAME
+// only; these pin the general per-member signature check (receiver convention,
+// arity, parameter conventions/types under {Self -> subject, trait generics ->
+// with-clause args}, and return type). Asyncness is deliberately NOT enforced
+// (`a_declared_async_impl_of_a_sync_trait_method_is_permitted`).
+
+#[test]
+fn a_by_value_receiver_against_a_ref_declaration_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Speak { fun say(&self): str; }
+        struct Cat {}
+        impl Cat with Speak { fun say(self): str { "meow" } }
+        fun main() { let c = Cat {}; }
+        "#,
+        "match the receiver convention",
+    );
+}
+
+#[test]
+fn a_ref_receiver_against_a_ref_mut_declaration_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Bump { fun bump(&mut self): void; }
+        struct Counter { n: i32 }
+        impl Counter with Bump { fun bump(&self): void {} }
+        fun main() { let c = Counter { n = 0 }; }
+        "#,
+        "match the receiver convention",
+    );
+}
+
+#[test]
+fn a_ref_mut_receiver_against_an_own_declaration_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Consume { fun consume(own self): void; }
+        struct Box2 {}
+        impl Box2 with Consume { fun consume(&mut self): void {} }
+        fun main() { let b = Box2 {}; }
+        "#,
+        "match the receiver convention",
+    );
+}
+
+#[test]
+fn a_matching_receiver_convention_compiles() {
+    assert_compiles(
+        r#"
+        trait Speak { fun say(&self): str; }
+        struct Cat {}
+        impl Cat with Speak { fun say(&self): str { "meow" } }
+        fun main() { let c = Cat {}; }
+        "#,
+    );
+}
+
+#[test]
+fn an_impl_with_too_few_parameters_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Handler2 { fun handle(&self, x: i32): void; }
+        struct H {}
+        impl H with Handler2 { fun handle(&self): void {} }
+        fun main() { let h = H {}; }
+        "#,
+        "match the declared parameter list",
+    );
+}
+
+#[test]
+fn an_impl_with_too_many_parameters_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Handler2 { fun handle(&self, x: i32): void; }
+        struct H {}
+        impl H with Handler2 { fun handle(&self, x: i32, y: i32): void {} }
+        fun main() { let h = H {}; }
+        "#,
+        "match the declared parameter list",
+    );
+}
+
+#[test]
+fn a_parameter_convention_mismatch_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Handler2 { fun handle(&self, x: i32): void; }
+        struct H {}
+        impl H with Handler2 { fun handle(&self, x: &i32): void {} }
+        fun main() { let h = H {}; }
+        "#,
+        "match the parameter convention",
+    );
+}
+
+#[test]
+fn a_parameter_type_mismatch_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Handler2 { fun handle(&self, x: i32): void; }
+        struct H {}
+        impl H with Handler2 { fun handle(&self, x: str): void {} }
+        fun main() { let h = H {}; }
+        "#,
+        "match the declared type",
+    );
+}
+
+#[test]
+fn a_return_type_mismatch_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Producer { fun make(&self): i32; }
+        struct P {}
+        impl P with Producer { fun make(&self): str { "x" } }
+        fun main() { let p = P {}; }
+        "#,
+        "match the declared return type",
+    );
+}
+
+#[test]
+fn a_self_typed_parameter_at_a_concrete_type_compiles() {
+    // `Self` in the trait declaration substitutes to the impl's subject, so an
+    // impl spelling the concrete type conforms.
+    assert_compiles(
+        r#"
+        trait Eq2 { fun eq(self, other: Self): bool; }
+        struct Point { x: i32 }
+        impl Point with Eq2 { fun eq(self, other: Point): bool { self.x == other.x } }
+        fun main() { let p = Point { x = 1 }; }
+        "#,
+    );
+}
+
+#[test]
+fn a_self_typed_parameter_at_the_wrong_type_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Eq2 { fun eq(self, other: Self): bool; }
+        struct Point { x: i32 }
+        struct Other {}
+        impl Point with Eq2 { fun eq(self, other: Other): bool { true } }
+        fun main() { let p = Point { x = 1 }; }
+        "#,
+        "match the declared type",
+    );
+}
+
+#[test]
+fn a_parameterized_traits_generic_through_the_with_clause_compiles() {
+    // `From2<T>`'s `T` substitutes to the `with`-clause argument (`Feet`), so an
+    // impl whose parameter is `Feet` conforms.
+    assert_compiles(
+        r#"
+        trait From2<T> { fun from(value: T): Self; }
+        struct Meters {}
+        struct Feet {}
+        impl Meters with From2<Feet> { fun from(value: Feet): Meters { Meters {} } }
+        fun main() { let m = Meters {}; }
+        "#,
+    );
+}
+
+#[test]
+fn a_parameterized_traits_generic_at_the_wrong_type_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait From2<T> { fun from(value: T): Self; }
+        struct Meters {}
+        struct Feet {}
+        struct Yards {}
+        impl Meters with From2<Feet> { fun from(value: Yards): Meters { Meters {} } }
+        fun main() { let m = Meters {}; }
+        "#,
+        "match the declared type",
+    );
+}
+
+#[test]
+fn a_generic_method_with_a_wrong_type_parameter_count_is_rejected() {
+    // The structural half of a generic member's alpha-equivalence: the type-
+    // parameter lists must match in arity.
+    assert_fails_with(
+        r#"
+        trait Mapper { fun go<T>(&self, x: T): T; }
+        struct S {}
+        impl S with Mapper { fun go(&self, x: i32): i32 { x } }
+        fun main() { let s = S {}; }
+        "#,
+        "match the trait's type-parameter list",
+    );
+}
+
+#[test]
+fn a_generic_method_with_matching_structure_compiles() {
+    assert_compiles(
+        r#"
+        trait Mapper { fun go<T>(&self, x: T): T; }
+        struct S {}
+        impl S with Mapper { fun go<U>(&self, x: U): U { x } }
+        fun main() { let s = S {}; }
+        "#,
+    );
+}
+
+#[test]
+#[ignore = "B29 fallback: deep alpha-equivalent type comparison over a member's \
+            own generics is not done — a generic method that FIXES a generic \
+            parameter to a concrete type (accepting `str` where the trait \
+            promises to accept any `T`) is accepted leniently because an \
+            unbounded generic compares equal to any concrete type. The \
+            structural half (type-parameter count) is enforced; this deep-type \
+            case is the recorded residue."]
+fn a_generic_method_fixing_a_generic_parameter_to_a_concrete_type_should_be_rejected() {
+    assert_fails_with(
+        r#"
+        trait Mapper { fun go<T>(&self, x: T): i32; }
+        struct S {}
+        impl S with Mapper { fun go<T>(&self, x: str): i32 { 0 } }
+        fun main() { let s = S {}; }
+        "#,
+        "match the declared type",
+    );
+}
+
+#[test]
+fn omitting_a_default_bodied_member_compiles() {
+    // A trait member WITH a default body is inherited; an impl need not restate
+    // it, and providing only the required member conforms.
+    assert_compiles(
+        r#"
+        trait Greeter2 {
+            fun name(&self): str;
+            fun greet(&self): str { "hi" }
+        }
+        struct G {}
+        impl G with Greeter2 { fun name(&self): str { "g" } }
+        fun main() { let g = G {}; }
+        "#,
+    );
+}
+
+#[test]
+fn overriding_a_default_bodied_member_conformingly_compiles() {
+    assert_compiles(
+        r#"
+        trait Greeter2 {
+            fun name(&self): str;
+            fun greet(&self): str { "hi" }
+        }
+        struct G {}
+        impl G with Greeter2 {
+            fun name(&self): str { "g" }
+            fun greet(&self): str { "hello" }
+        }
+        fun main() { let g = G {}; }
+        "#,
+    );
+}
+
+#[test]
+fn overriding_a_default_bodied_member_with_a_bad_signature_is_rejected() {
+    // An override conforms like any required member — a mismatched receiver on
+    // the override is caught.
+    assert_fails_with(
+        r#"
+        trait Greeter2 {
+            fun name(&self): str;
+            fun greet(&self): str { "hi" }
+        }
+        struct G {}
+        impl G with Greeter2 {
+            fun name(&self): str { "g" }
+            fun greet(self): str { "hello" }
+        }
+        fun main() { let g = G {}; }
+        "#,
+        "match the receiver convention",
+    );
+}
+
+#[test]
+fn a_declared_async_impl_of_a_sync_trait_method_is_permitted() {
+    // Asyncness agreement is NOT enforced (the WO's escape hatch): dispatch is
+    // monomorphized and `async_infer` propagates asyncness through the contract,
+    // so a caller awaits regardless of the trait's declared asyncness — std's
+    // `SplitDuplex::send` (async body) impls the sync-declared `DuplexTransport::
+    // send` exactly this way and is sound. An async impl of a sync declaration
+    // therefore compiles.
+    assert_compiles(
+        r#"
+        trait T { fun m(&self): void; }
+        struct S {}
+        impl S with T { async fun m(&self): void {} }
+        fun main() { let s = S {}; }
+        "#,
+    );
+}
+
+#[test]
+fn a_std_drop_with_a_by_value_receiver_is_caught_by_the_general_rule() {
+    // S2a's original shape (`fun drop(self)` against `fun drop(&mut self)`) — the
+    // GENERAL conformance rule rejects it independently of the targeted
+    // `check_drop_signature` (both fire; this pins the general rule's message).
+    assert_fails_with(
+        r#"
+        import std::drop::Drop;
+        resource struct R { handle: i32 }
+        impl R with Drop { fun drop(self) {} }
+        fun main() { let r = R { handle = 1 }; }
+        "#,
+        "match the receiver convention",
+    );
+}
+
+#[test]
+fn a_user_defined_trait_named_drop_conforms_on_its_own_terms() {
+    // A user's own `trait Drop` (a different entity than std's) declares
+    // `fun drop(self)`, so an impl providing `fun drop(self)` conforms — the
+    // general rule checks against the user's declaration, not std's.
+    assert_compiles(
+        r#"
+        trait Drop { fun drop(self); }
+        struct X {}
+        impl X with Drop { fun drop(self) {} }
+        fun main() { let x = X {}; }
+        "#,
+    );
+}
+
+// --- B29 review additions --------------------------------------------------
+
+#[test]
+fn a_static_trait_member_conforms_positionally() {
+    // A receiver-less (static) trait member compares position-for-position like
+    // any other — the FromJson::from_json shape.
+    assert_compiles(
+        r#"
+        trait Maker {
+            fun make(seed: i32): Self;
+        }
+        struct Box { value: i32 }
+        impl Box with Maker {
+            fun make(seed: i32): Box { Box { value = seed } }
+        }
+        fun main() { let b = Box::make(1); }
+        "#,
+    );
+}
+
+#[test]
+fn a_static_trait_member_type_mismatch_is_rejected() {
+    assert_fails_with(
+        r#"
+        trait Maker {
+            fun make(seed: i32): Self;
+        }
+        struct Box { value: i32 }
+        impl Box with Maker {
+            fun make(seed: str): Box { Box { value = 1 } }
+        }
+        fun main() {}
+        "#,
+        "match the declared type",
+    );
+}
+
+// KNOWN GAP (recorded with B29's landing): a `= Self`-defaulted trait generic
+// (`Add<B = Self>`) interns to the same TypeId as `Self`, so the declared
+// position is ambiguous and its TYPE goes unchecked — a wrong impl type slips
+// conformance and only errors at use sites. The AST still knows whether the
+// author wrote `Self` or `B`; the fix compares those positions at the
+// declaration-node level. Un-ignore then.
+#[test]
+#[ignore]
+fn a_self_defaulted_generic_position_with_a_wrong_type_should_be_rejected() {
+    assert_fails_with(
+        r#"
+        import std::operators::Add;
+        struct Meters { value: i32 }
+        impl Meters with Add {
+            fun add(self, b: str): Meters { self }
+        }
+        fun main() {}
+        "#,
+        "match the declared type",
     );
 }

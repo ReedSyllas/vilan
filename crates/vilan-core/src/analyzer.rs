@@ -664,6 +664,61 @@ pub struct TraitImplCheck<'src> {
     pub implementation_index: usize,
 }
 
+/// One required trait member the impl provides by NAME, recorded during the
+/// conformance loop so its full SIGNATURE can be checked against the trait's
+/// declaration (B29): receiver convention, arity, per-position conventions and
+/// types, and return type, in `check_trait_conformance` post-build (when declared
+/// types are resolved). Asyncness agreement is deliberately NOT enforced — an
+/// async impl of a sync-declared trait method is sound in vilan (dispatch is
+/// monomorphized and `async_infer` propagates asyncness through the contract, so
+/// a caller awaits regardless of the declaration; std's `SplitDuplex::send` is
+/// exactly this shape). Names are stored owned so the struct carries no lifetime.
+#[derive(Debug, Clone)]
+pub struct ConformanceSignatureCheck {
+    /// The impl's providing member, resolved to its function id.
+    pub impl_function_id: Id,
+    /// The trait's declaration of the member, resolved to its function id.
+    pub trait_function_id: Id,
+    /// The trait that DECLARES the member (the direct trait or a supertrait) —
+    /// its abstract `Self` (`Type::Trait(declaring_trait_id, [])`) substitutes to
+    /// the subject.
+    pub declaring_trait_id: Id,
+    /// The impl's subject type (`Self` maps here).
+    pub subject_type_id: TypeId,
+    /// The declaring trait's generic parameters mapped to the impl's `with`-clause
+    /// arguments (`with From<Bar>` -> `{From::T -> Bar}`) — the parameter/return
+    /// type substitution the WO names `impl_binder_generics`' home. Empty for a
+    /// non-generic trait, and for a generic SUPERTRAIT (its arguments are not
+    /// recovered in v1 — noted as a limitation).
+    pub generic_context: SubstitutionContext,
+    pub member_name: String,
+    pub trait_name: String,
+    pub subject_name: String,
+    /// Fallback anchor (the `with <trait>` clause span) when a narrower span
+    /// (a parameter, the member name) is unavailable.
+    pub span: Span,
+}
+
+/// The positional shape of a member's signature, read out of `functions` /
+/// `parameters` so the conformance comparison can substitute and compare types
+/// without holding those borrows. Position 0 is the receiver for a `self`
+/// method.
+struct MemberSignatureShape {
+    conventions: Vec<Convention>,
+    types: Vec<TypeId>,
+    /// Whether each position's parameter is named `self` (a receiver).
+    is_self: Vec<bool>,
+    /// The impl-side per-position source span, for narrow diagnostics.
+    parameter_spans: Vec<Span>,
+    return_type_id: Option<TypeId>,
+    /// The body's tail expression, so an unannotated impl return can be compared
+    /// by its INFERRED type (std impls like `Iterator::next` omit the annotation).
+    body_tail_id: Id,
+    name_span: Span,
+    generic_count: usize,
+    generic_constraint_ids: Vec<TypeId>,
+}
+
 #[derive(Debug)]
 pub struct Module<'src> {
     pub id: Id,
@@ -1380,6 +1435,10 @@ pub struct Analyzer<'src> {
     // analyzer typed against.
     bound_dispatch_traits: HashMap<Id, Id>,
     prepped_trait_impls: Vec<TraitImplCheck<'src>>,
+    // Required trait members an impl provides by name, recorded during the
+    // conformance loop for full per-member signature checking (B29), consumed
+    // post-build by `check_trait_conformance`.
+    conformance_signature_checks: Vec<ConformanceSignatureCheck>,
     // Deferred named type references: (target type id, name, scope, span, the
     // walked generic argument type ids). The arguments parameterize the resolved
     // nominal type (`Option<i32>` -> `Enum(option_id, [i32])`); empty for a bare
@@ -1732,6 +1791,7 @@ impl<'src> Analyzer<'src> {
             own_generic_call_bindings: HashMap::new(),
             bound_dispatch_traits: HashMap::new(),
             prepped_trait_impls: Vec::new(),
+            conformance_signature_checks: Vec::new(),
             prepped_type_locals: Vec::new(),
             prepped_type_static_accessors: Vec::new(),
             prepped_uses: Vec::new(),
@@ -2743,7 +2803,11 @@ impl<'src> Analyzer<'src> {
                     Some(Expr::Function(function_id)) => *function_id,
                     _ => member_id,
                 };
-                self.check_drop_signature(function_id, span, &rendered);
+                // The drop signature itself is enforced by the GENERAL trait
+                // conformance check (B29) — `Drop` declares `fun drop(&mut
+                // self)`, so receiver/arity/return mismatches anchor there with
+                // the declared-here note. (S2b's targeted check was removed as
+                // redundant when B29 landed: one mistake, one diagnostic.)
                 // Record the resource's own destructor so the inserted teardown
                 // (`build_drop_glue`) calls it before destroying the fields. Keyed
                 // on the NOMINAL id — the subject type interns to several
@@ -2756,44 +2820,433 @@ impl<'src> Analyzer<'src> {
         }
     }
 
-    /// Restriction 4 (destruction.md §5): a `Drop` impl must declare exactly
-    /// `fun drop(&mut self)` — a `&mut self` receiver, no other parameters, and a
-    /// void return. The inserted teardown (S2b) loans `self` mutably at scope end
-    /// and discards the result, and reverse-field destruction assumes the body
-    /// cannot move `self` out; a by-value or `&self` receiver, an extra parameter,
-    /// or a value-returning body all break that contract. This is a TARGETED
-    /// check keyed on `Drop` — general per-member signature conformance (which
-    /// trait conformance does not do yet, checking member-NAME presence only) is
-    /// backlog B29, not built here.
-    fn check_drop_signature(&mut self, function_id: Id, span: Span, rendered: &str) {
-        let Some(function) = self.functions.get(&function_id) else {
+    /// Resolve a trait/impl member declaration id to its underlying function id.
+    /// A member is recorded either as an `Expr::Function(fid)` wrapper or directly
+    /// as the function id (the same peel the missing-member renderer does).
+    fn resolve_member_function_id(&self, member_id: Id) -> Id {
+        match self.expr_id_to_expr_map.get(&member_id) {
+            Some(Expr::Function(function_id)) => *function_id,
+            _ => member_id,
+        }
+    }
+
+    /// The positional shape of a member's signature, read out so the (mutating)
+    /// substitution and comparison in `check_one_conformance` need not hold the
+    /// `functions`/`parameters` borrow. Position 0 is the receiver for a `self`
+    /// method.
+    fn member_signature_shape(&self, function_id: Id) -> Option<MemberSignatureShape> {
+        let function = self.functions.get(&function_id)?;
+        let mut conventions = Vec::new();
+        let mut types = Vec::new();
+        let mut is_self = Vec::new();
+        let mut parameter_spans = Vec::new();
+        for parameter_id in &function.parameters {
+            let Some(parameter) = self.parameters.get(parameter_id) else {
+                continue;
+            };
+            conventions.push(parameter.convention);
+            types.push(parameter.type_id);
+            is_self.push(parameter.name == "self");
+            parameter_spans.push(
+                self.span_map
+                    .get(parameter_id)
+                    .map(|span| **span)
+                    .unwrap_or(EMPTY_SPAN),
+            );
+        }
+        Some(MemberSignatureShape {
+            conventions,
+            types,
+            is_self,
+            parameter_spans,
+            return_type_id: function.return_type_id,
+            body_tail_id: function.body.1,
+            name_span: function.name_span,
+            generic_count: function.generic_parameter_constraint_ids.len(),
+            generic_constraint_ids: function.generic_parameter_constraint_ids.clone(),
+        })
+    }
+
+    /// The cross-file "the trait declares it here" note pointing at the trait
+    /// member's name (the standard conformance note shape).
+    fn conformance_note(
+        &self,
+        trait_function_id: Id,
+        member_name: &str,
+    ) -> Option<crate::error::Note> {
+        let function = self.functions.get(&trait_function_id)?;
+        Some(crate::error::Note {
+            span: function.name_span,
+            msg: format!("the trait declares `{member_name}` here"),
+            source: self.source_of_id(trait_function_id),
+        })
+    }
+
+    /// Full per-member signature conformance (B29): for each required trait
+    /// member the impl provides by name, its receiver convention, arity, per-
+    /// position conventions and (substituted) types, and return type must agree
+    /// with the trait's declaration. The general rule the targeted
+    /// `check_drop_signature` is a special case of. Runs post-build so declared
+    /// types are resolved. Asyncness agreement is intentionally omitted (see
+    /// `ConformanceSignatureCheck`): an async impl of a sync-declared method is
+    /// sound in vilan's monomorphized dispatch.
+    fn check_trait_conformance(&mut self) {
+        let checks = std::mem::take(&mut self.conformance_signature_checks);
+        for check in &checks {
+            self.check_one_conformance(check);
+        }
+    }
+
+    fn check_one_conformance(&mut self, check: &ConformanceSignatureCheck) {
+        let (Some(trait_shape), Some(impl_shape)) = (
+            self.member_signature_shape(check.trait_function_id),
+            self.member_signature_shape(check.impl_function_id),
+        ) else {
             return;
         };
-        let receiver = function
-            .parameters
-            .first()
-            .and_then(|parameter_id| self.parameters.get(parameter_id));
-        let receiver_is_ref_mut_self = receiver.is_some_and(|parameter| {
-            parameter.name == "self" && parameter.convention == Convention::RefMut
-        });
-        let only_self = function.parameters.len() == 1;
-        let returns_void = match function.return_type_id {
-            Some(return_type_id) => matches!(return_type_id.get_type(self), Type::Void),
-            None => true,
+        let self_trait = check.declaring_trait_id;
+        let subject = check.subject_type_id;
+
+        // A generic member's own type parameters must match in COUNT (the
+        // structural half of alpha-equivalence); when they do, align them
+        // positionally (trait's `T` -> impl's `T`) so a parameter type that
+        // mentions them compares equal rather than as two distinct `Generic`
+        // ids. A deeper alpha-equivalent type comparison over *bounded* member
+        // generics is the sanctioned fallback's residue (pinned `#[ignore]`d).
+        let member_generics_align = trait_shape.generic_count == impl_shape.generic_count;
+        if !member_generics_align {
+            let note = self.conformance_note(check.trait_function_id, &check.member_name);
+            self.diagnostics.push(Error {
+                note,
+                span: impl_shape.name_span,
+                msg: format!(
+                    "`{}`'s `{}` declares {} type parameter(s), but `{}` declares {} — \
+                     match the trait's type-parameter list",
+                    check.subject_name,
+                    check.member_name,
+                    impl_shape.generic_count,
+                    check.trait_name,
+                    trait_shape.generic_count
+                ),
+            });
+        }
+        let mut context = check.generic_context.clone();
+        if member_generics_align {
+            for (trait_generic, impl_generic) in trait_shape
+                .generic_constraint_ids
+                .iter()
+                .copied()
+                .zip(impl_shape.generic_constraint_ids.iter().copied())
+            {
+                let mapped = Type::Generic(impl_generic).get_type_id(self);
+                context.insert(trait_generic, mapped);
+            }
+        }
+
+        // A `= Self`-defaulted trait generic (`trait Add<B = Self>`) resolves `B`
+        // to the very same type as `Self` — a declared `b: B` and a declared
+        // `Self` are then indistinguishable at the type level (both intern to
+        // `Type::Trait(self_trait, [])`). Substituting such a position is
+        // ambiguous (it could be `Self` -> subject, or `B` -> the with-clause
+        // argument), so a position typed as the Self-trait type is left
+        // unchecked here (receiver convention, arity, and conventions are still
+        // enforced). `From<T>`-shape (a non-Self-defaulted generic) is unaffected.
+        let self_ambiguous = self
+            .traits
+            .get(&self_trait)
+            .map(|trait_| trait_.generic_parameter_constraint_ids.clone())
+            .unwrap_or_default()
+            .iter()
+            .any(|constraint_id| {
+                matches!(
+                    constraint_id.get_type(self),
+                    Type::Trait(trait_id, ref arguments)
+                        if trait_id == self_trait && arguments.is_empty()
+                )
+            });
+        let is_self_trait_type = |type_: &Type| {
+            matches!(
+                type_,
+                Type::Trait(trait_id, arguments)
+                    if *trait_id == self_trait && arguments.is_empty()
+            )
         };
-        if receiver_is_ref_mut_self && only_self && returns_void {
+
+        // Arity: positions must line up before per-position comparison is
+        // meaningful.
+        if trait_shape.conventions.len() != impl_shape.conventions.len() {
+            let note = self.conformance_note(check.trait_function_id, &check.member_name);
+            self.diagnostics.push(Error {
+                note,
+                span: impl_shape.name_span,
+                msg: format!(
+                    "`{}`'s `{}` takes {} parameter(s), but `{}` declares {} — \
+                     match the declared parameter list",
+                    check.subject_name,
+                    check.member_name,
+                    impl_shape.conventions.len(),
+                    check.trait_name,
+                    trait_shape.conventions.len()
+                ),
+            });
             return;
         }
-        self.diagnostics.push(Error {
-            note: None,
-            span,
-            msg: format!(
-                "`Drop` for `{rendered}` must declare `fun drop(&mut self)` — a \
-                 destructor takes `&mut self` and no other parameters and returns \
-                 void; the compiler loans `self` mutably at scope end, then destroys \
-                 its fields"
-            ),
-        });
+
+        let position_count = trait_shape.conventions.len();
+        for position in 0..position_count {
+            let trait_convention = trait_shape.conventions[position];
+            let impl_convention = impl_shape.conventions[position];
+            let anchor = impl_shape.parameter_spans[position];
+            let is_receiver = position == 0 && trait_shape.is_self[position];
+
+            // Receiver: the `self` shape and its convention are part of the
+            // contract (the compiler loans it per convention).
+            if position == 0 && trait_shape.is_self[0] != impl_shape.is_self[0] {
+                let note = self.conformance_note(check.trait_function_id, &check.member_name);
+                self.diagnostics.push(Error {
+                    note,
+                    span: anchor,
+                    msg: if trait_shape.is_self[0] {
+                        format!(
+                            "`{}`'s `{}` takes no receiver, but `{}` declares `{}` — \
+                             give it the declared receiver",
+                            check.subject_name,
+                            check.member_name,
+                            check.trait_name,
+                            Self::receiver_form(trait_convention)
+                        )
+                    } else {
+                        format!(
+                            "`{}`'s `{}` takes a `{}` receiver, but `{}` declares it \
+                             without one",
+                            check.subject_name,
+                            check.member_name,
+                            Self::receiver_form(impl_convention),
+                            check.trait_name
+                        )
+                    },
+                });
+                continue;
+            }
+
+            if trait_convention != impl_convention {
+                let note = self.conformance_note(check.trait_function_id, &check.member_name);
+                let msg = if is_receiver {
+                    format!(
+                        "`{}`'s `{}` receives `{}`, but `{}` declares `{}` — match the \
+                         receiver convention",
+                        check.subject_name,
+                        check.member_name,
+                        Self::receiver_form(impl_convention),
+                        check.trait_name,
+                        Self::receiver_form(trait_convention)
+                    )
+                } else {
+                    format!(
+                        "parameter {} of `{}`'s `{}` is {}, but `{}` declares {} — \
+                         match the parameter convention",
+                        position,
+                        check.subject_name,
+                        check.member_name,
+                        Self::convention_form(impl_convention),
+                        check.trait_name,
+                        Self::convention_form(trait_convention)
+                    )
+                };
+                self.diagnostics.push(Error {
+                    note,
+                    span: anchor,
+                    msg,
+                });
+            }
+
+            // The receiver's type is always `Self` on both sides (it interns to
+            // the subject) — skip it and compare only the value parameters.
+            if is_receiver {
+                continue;
+            }
+            let trait_param_type = trait_shape.types[position].get_type(self);
+            // Skip an ambiguous `Self`/`B` position of a `= Self`-defaulted trait.
+            if self_ambiguous && is_self_trait_type(&trait_param_type) {
+                continue;
+            }
+            let expected_type =
+                self.substitute_member_type(&trait_param_type, self_trait, subject, &context);
+            let actual_type = impl_shape.types[position].get_type(self);
+            if !self.compare_type(&expected_type, &actual_type, &HashMap::new()) {
+                let note = self.conformance_note(check.trait_function_id, &check.member_name);
+                let expected_label = self.pretty_print_type(&expected_type, &HashMap::new());
+                let actual_label = self.pretty_print_type(&actual_type, &HashMap::new());
+                self.diagnostics.push(Error {
+                    note,
+                    span: anchor,
+                    msg: format!(
+                        "parameter {position} of `{}`'s `{}` is `{actual_label}`, but `{}` \
+                         declares `{expected_label}` — match the declared type",
+                        check.subject_name, check.member_name, check.trait_name
+                    ),
+                });
+            }
+        }
+
+        // Return type: an unannotated/void impl return against a declared type
+        // mismatches (the S2b `Drop` void-return check, generalized). A `Self`
+        // return of a `= Self`-defaulted trait is ambiguous (see above) — skip it.
+        let trait_return_type = trait_shape
+            .return_type_id
+            .map(|type_id| type_id.get_type(self));
+        if self_ambiguous
+            && trait_return_type
+                .as_ref()
+                .is_some_and(|type_| is_self_trait_type(type_))
+        {
+            return;
+        }
+        let expected_return = match &trait_return_type {
+            Some(resolved) => self.substitute_member_type(resolved, self_trait, subject, &context),
+            None => Type::Void,
+        };
+        // An unannotated impl return is compared by its body's INFERRED type, not
+        // treated as void — std impls (`Iterator::next`, `Into::into`) legitimately
+        // omit the annotation and rely on inference. An unmapped tail falls back to
+        // `Unknown`, which matches leniently rather than false-rejecting.
+        let actual_return = match impl_shape.return_type_id {
+            Some(type_id) => type_id.get_type(self),
+            None => self
+                .type_of_expr(impl_shape.body_tail_id)
+                .unwrap_or(Type::Unknown),
+        };
+        if !self.compare_type(&expected_return, &actual_return, &HashMap::new()) {
+            let note = self.conformance_note(check.trait_function_id, &check.member_name);
+            let expected_label = self.pretty_print_type(&expected_return, &HashMap::new());
+            let actual_label = self.pretty_print_type(&actual_return, &HashMap::new());
+            self.diagnostics.push(Error {
+                note,
+                span: impl_shape.name_span,
+                msg: format!(
+                    "`{}`'s `{}` returns `{actual_label}`, but `{}` declares `{expected_label}` \
+                     — match the declared return type",
+                    check.subject_name, check.member_name, check.trait_name
+                ),
+            });
+        }
+    }
+
+    fn receiver_form(convention: Convention) -> &'static str {
+        match convention {
+            Convention::Bare => "self",
+            Convention::Own => "own self",
+            Convention::Ref => "&self",
+            Convention::RefMut => "&mut self",
+        }
+    }
+
+    fn convention_form(convention: Convention) -> &'static str {
+        match convention {
+            Convention::Bare => "by value",
+            Convention::Own => "`own`",
+            Convention::Ref => "`&`",
+            Convention::RefMut => "`&mut`",
+        }
+    }
+
+    /// Substitute a trait member's declared type for comparison against the
+    /// impl's: `Self` (the declaring trait's abstract self type,
+    /// `Type::Trait(self_trait, [])`) becomes the impl's subject, and every
+    /// generic parameter present in `context` (the trait's parameters mapped to
+    /// the `with`-clause arguments, plus the member's own type parameters mapped
+    /// alpha-positionally) is resolved. Mirrors `substitute_type`'s structural
+    /// recursion — it exists separately because `substitute_type` does not know
+    /// `Self`, and leaving a nested `Self` unsubstituted would compare as a
+    /// spurious mismatch (`List<Self>` vs `List<subject>`).
+    fn substitute_member_type(
+        &mut self,
+        type_: &Type,
+        self_trait: Id,
+        subject: TypeId,
+        context: &SubstitutionContext,
+    ) -> Type {
+        let Some(_guard) = crate::util::RecursionGuard::enter() else {
+            return type_.clone();
+        };
+        match type_ {
+            Type::Trait(trait_id, arguments) if *trait_id == self_trait && arguments.is_empty() => {
+                subject.get_type(self)
+            }
+            Type::Generic(constraint_id) => match context.get(constraint_id).copied() {
+                Some(type_id) => type_id.get_type(self),
+                None => type_.clone(),
+            },
+            Type::Enum(id, arguments) => {
+                let arguments = arguments.clone();
+                Type::Enum(
+                    *id,
+                    self.substitute_member_argument_types(&arguments, self_trait, subject, context),
+                )
+            }
+            Type::Struct(id, arguments) => {
+                let arguments = arguments.clone();
+                Type::Struct(
+                    *id,
+                    self.substitute_member_argument_types(&arguments, self_trait, subject, context),
+                )
+            }
+            Type::Trait(id, arguments) => {
+                let arguments = arguments.clone();
+                Type::Trait(
+                    *id,
+                    self.substitute_member_argument_types(&arguments, self_trait, subject, context),
+                )
+            }
+            Type::Tuple(element_ids) => {
+                let element_ids = element_ids.clone();
+                Type::Tuple(self.substitute_member_argument_types(
+                    &element_ids,
+                    self_trait,
+                    subject,
+                    context,
+                ))
+            }
+            Type::Array(element_id, length) => {
+                let element = element_id.get_type(self);
+                let substituted =
+                    self.substitute_member_type(&element, self_trait, subject, context);
+                Type::Array(substituted.get_type_id(self), *length)
+            }
+            Type::Closure(parameter_ids, return_type_id) => {
+                let parameter_ids = parameter_ids.clone();
+                let return_type = return_type_id.get_type(self);
+                let parameters = self.substitute_member_argument_types(
+                    &parameter_ids,
+                    self_trait,
+                    subject,
+                    context,
+                );
+                let return_type = self
+                    .substitute_member_type(&return_type, self_trait, subject, context)
+                    .get_type_id(self);
+                Type::Closure(parameters, return_type)
+            }
+            _ => type_.clone(),
+        }
+    }
+
+    fn substitute_member_argument_types(
+        &mut self,
+        arguments: &[TypeId],
+        self_trait: Id,
+        subject: TypeId,
+        context: &SubstitutionContext,
+    ) -> Vec<TypeId> {
+        arguments
+            .iter()
+            .map(|argument| {
+                let argument_type = argument.get_type(self);
+                let substituted =
+                    self.substitute_member_type(&argument_type, self_trait, subject, context);
+                substituted.get_type_id(self)
+            })
+            .collect()
     }
 
     /// Whether `type_id` is a resource (destruction.md §3): declared `resource`,
@@ -18896,6 +19349,69 @@ impl<'src> Analyzer<'src> {
                 _ => "type",
             };
             let check_subject_type = check.subject_type_id.get_type(self);
+            // Record a signature-conformance check for EVERY trait/supertrait
+            // member the impl provides by name — required members AND overrides
+            // of default-bodied ones (`required` above excludes defaults, so an
+            // override would otherwise go unchecked). The comparison runs
+            // post-build in `check_trait_conformance`, when declared types have
+            // resolved.
+            let all_members: Vec<(&'src str, Id)> = self
+                .trait_with_supertraits(trait_id)
+                .into_iter()
+                .filter_map(|id| self.traits.get(&id).map(|trait_| (id, trait_)))
+                .flat_map(|(declaring_trait_id, trait_)| {
+                    trait_
+                        .declarations
+                        .keys()
+                        .map(move |name| (*name, declaring_trait_id))
+                })
+                .collect();
+            for (member_name, declaring_trait_id) in all_members {
+                let Some(impl_member_id) = check.declarations.get(member_name).copied() else {
+                    continue;
+                };
+                let Some(trait_member_id) = self
+                    .traits
+                    .get(&declaring_trait_id)
+                    .and_then(|trait_| trait_.declarations.get(member_name).copied())
+                else {
+                    continue;
+                };
+                let impl_function_id = self.resolve_member_function_id(impl_member_id);
+                let trait_function_id = self.resolve_member_function_id(trait_member_id);
+                // Map the DECLARING trait's generic parameters to the impl's
+                // `with`-clause arguments — available for the directly-implemented
+                // trait (`check.trait_arguments`); a generic supertrait's
+                // arguments are not recovered in v1, so its context stays empty
+                // (Self substitution still applies).
+                let generic_context: SubstitutionContext = if declaring_trait_id == trait_id {
+                    self.traits
+                        .get(&trait_id)
+                        .map(|trait_| {
+                            trait_
+                                .generic_parameter_constraint_ids
+                                .iter()
+                                .copied()
+                                .zip(check.trait_arguments.iter().copied())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    SubstitutionContext::new()
+                };
+                self.conformance_signature_checks
+                    .push(ConformanceSignatureCheck {
+                        impl_function_id,
+                        trait_function_id,
+                        declaring_trait_id,
+                        subject_type_id: check.subject_type_id,
+                        generic_context,
+                        member_name: member_name.to_string(),
+                        trait_name: check.trait_name.to_string(),
+                        subject_name: subject_name.to_string(),
+                        span: check.span,
+                    });
+            }
             for (member_name, declaring_trait_id) in required {
                 if check.declarations.contains_key(member_name) {
                     continue;
@@ -23193,6 +23709,11 @@ pub fn analyze<'src>(
     // resource, and synchronous. Runs after classification so subject
     // resource-ness is settled.
     analyzer.check_drop_impls();
+    // Full per-member signature conformance (B29): every trait member an impl
+    // provides by name must agree with the trait's declaration on receiver
+    // convention, arity, parameter conventions/types, and return type. Runs
+    // post-build so declared types are resolved.
+    analyzer.check_trait_conformance();
     // With `drop_methods` recorded, build the per-type destruction glue the
     // transformer emits as `__drop_<type>` helpers (destruction.md §5/§7).
     analyzer.build_drop_glue();

@@ -70,6 +70,19 @@ An `impl … with Trait` doesn't provide every required method, or a bound
 demands a trait the type never implemented.
 → [Data and traits](../tour/data-and-traits.md)
 
+**"… match the receiver convention"** · **"… match the parameter convention"** · **"… match the declared type"** · **"… match the declared return type"** · **"… match the declared parameter list"** · **"… match the trait's type-parameter list"**
+A method an `impl … with Trait` provides must match the trait's
+declaration, not just its name: the receiver convention (`self` / `&self`
+/ `&mut self` / `own self`), the parameter count and each parameter's
+convention and type, the return type, and — for a generic method — the
+type-parameter count. Types are compared with `Self` read as the impl's
+subject and the trait's generic parameters read as the `with`-clause
+arguments (`impl Meters with From<Feet>` expects `fun from(value: Feet):
+Meters`). Asyncness is not required to match — an async impl of a
+synchronous trait method is allowed (dispatch is monomorphized, so callers
+await it regardless).
+→ [Data and traits](../tour/data-and-traits.md)
+
 **"match is not exhaustive: missing …"** · **"match is not exhaustive: add a catch-all `_` leg"**
 Some variants have no arm. Handle them or add `_ => …`. This error is
 the feature: it's what fires everywhere when you add a variant.
@@ -284,14 +297,6 @@ signal-writing work to an owner that runs inside a turn, not to the
 destructor.
 → [Resources](../tour/resources.md)
 
-**"`Drop` for `…` must declare `fun drop(&mut self)` — a destructor takes `&mut self` …"**
-A `Drop` impl's `drop` must be exactly `fun drop(&mut self)`: a `&mut self`
-receiver, no other parameters, a void return. The compiler loans `self`
-mutably at each scope end and then destroys the fields, so a by-value `self`
-(which could move the value out and keep it alive), a `&self` receiver (which
-can't run the mutating teardown), an extra parameter (the inserted call
-supplies only the receiver), or a value-returning body are each rejected.
-→ [Resources](../tour/resources.md)
 
 ## Async
 
