@@ -238,6 +238,12 @@ equivalence gate (it is `run --watch`-only), and the gate's builds don't set the
 flag. Pin that assumption with a test asserting `build` output is byte-identical
 with and without a watch-mode compile in the same process.
 
+> **Amendment (2026-07-20, S1):** the shim is prepended CLI-side at dist-write
+> time (`hmr::instrument`, called from the watch round), not via a
+> `BuildOptions.hmr` transformer flag — no emission-shape change exists yet, so
+> the CLI-side prepend is the deliberately simpler home. S2 revisits when the
+> real `__hmr_adopt`/`__hmr_expose` instrumentation lands.
+
 ## 6. Full-stack coordination
 
 Per watch round, after rebuilding all legs (browser legs first, as today):
@@ -389,14 +395,23 @@ three most-worn paths in the industry ended up.
    (`run_writes_assets_beside_the_output`, `workspace_run_writes_fresh_dist_css`,
    `watch_round_refreshes_the_sidecar`). Ships alone — it also fixes `run`'s
    missing-CSS gap today.
-2. **S1 — the dev channel + live reload**: SSE endpoint, artifact routes,
-   byte-diff classification in the watch round, dev-runtime shim with
-   `reload`-on-any-change, `css` hot-swap, and the `error` overlay
-   (show-on-error, clear-on-good-round). No state carryover yet — this
-   slice alone is live-reload + CSS-without-reload + the overlay, a complete
-   DX win at low risk. Pins: unit tests for the byte-diff classifier and SSE
-   framing; an end-to-end CLI test driving a round and asserting the pushed
-   event, including the error → good-round overlay lifecycle.
+2. **S1 — SHIPPED 2026-07-20**: the dev channel (`crates/vilan-cli/src/hmr.rs`
+   — SSE + artifact routes with a traversal guard, hand-rolled on
+   `TcpListener`), byte-diff classification as a pure function (raw pre-shim
+   bytes; server-only → restart + push nothing, K6 carries the client),
+   dev-runtime shim (`hmr_shim.js`: singleton, stale-tab heal, `css`
+   hot-swap via a shim-local cache-buster — css-only rounds deliberately
+   don't bump the build version, so the buster can't reuse it — `error`
+   overlay cleared by the next good event, `swap` = reload placeholder until
+   S2). Pinned: 9 unit (every classifier case, SSE framing, traversal) + one
+   bounded e2e driving swap → css → error → recovery → artifact routes.
+   Residues: the `error` event carries a generic "build failed — see the
+   terminal" message (capturing ariadne's rendered text needs
+   `compile_to_js`/`report` to return a string — deferred; terminal output
+   unchanged); the css event names no sidecar, so the shim bumps every
+   stylesheet `<link>` (correct for the one-sidecar case); non-css asset
+   kinds are written each round but don't classify (css is the only kind the
+   runtime hot-swaps).
 3. **S2 — the swap**: identity + fingerprints, `__hmr_adopt`/`__hmr_expose`
    emission, teardown registration (`mount_root`, duplex), the `std::dev`
    hooks (`on_teardown`, `stash`/`take` with the call-site transfer-bound

@@ -11,6 +11,7 @@ use chumsky::prelude::*;
 // `clap::Parser` collides with `chumsky`'s `Parser` trait (glob-imported above),
 // so bring it in anonymously — enough for `Cli::parse()` — and derive by path.
 use clap::{Parser as _, Subcommand};
+mod hmr;
 mod upgrade;
 
 use vilan_core::analyzer::{analyze, check_library_contract};
@@ -89,6 +90,14 @@ enum Command {
         /// before the file (`vilan run --watch app.vl`), ahead of any program args.
         #[arg(long)]
         watch: bool,
+        /// Turn off hot module replacement under `--watch` (plain restart-the-server
+        /// behavior). HMR is otherwise on for a workspace with a browser leg.
+        #[arg(long)]
+        no_hmr: bool,
+        /// The `127.0.0.1` port for the HMR dev channel (`0` ⇒ an OS-assigned
+        /// ephemeral port). Only meaningful with `--watch` on an HMR-eligible project.
+        #[arg(long, default_value_t = hmr::DEFAULT_HMR_PORT)]
+        hmr_port: u16,
         /// Arguments passed through to the running program (after the file).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -169,9 +178,15 @@ fn run_cli() -> ExitCode {
         },
         // `run`/`test` execute with `node`. `run --watch` restarts the process on a
         // change (see `run_watch`); the others just re-run the command.
-        Command::Run { file, args, watch } => {
+        Command::Run {
+            file,
+            args,
+            watch,
+            no_hmr,
+            hmr_port,
+        } => {
             if watch {
-                run_watch(file, args)
+                run_watch(file, args, no_hmr, hmr_port)
             } else {
                 run_once(file, &args)
             }
@@ -328,16 +343,213 @@ fn watch_loop(roots: &[PathBuf], mut action: impl FnMut()) -> ExitCode {
 /// `vilan run --watch`: rebuild and restart the program on every change. Each round
 /// stops the previous process first (so a server frees its port), then spawns the
 /// new one without waiting and holds its handle for the next round.
-fn run_watch(file: Option<PathBuf>, args: Vec<String>) -> ExitCode {
+///
+/// When the project is a workspace with a browser leg and `--no-hmr` isn't set,
+/// hot module replacement is active (hmr.md §1): a dev channel serves the browser,
+/// and each round classifies the rebuilt bytes (hmr.md §6) — restarting the Node
+/// child only when the server bundle changed, and pushing `swap` / `css` / `error`
+/// to the browser instead of bouncing it. Otherwise this is the plain
+/// restart-the-server loop, byte-for-byte as before.
+fn run_watch(file: Option<PathBuf>, args: Vec<String>, no_hmr: bool, hmr_port: u16) -> ExitCode {
     let roots = watch_roots(&file);
     let mut child: Option<Child> = None;
-    watch_loop(&roots, move || {
-        if let Some(mut previous) = child.take() {
-            let _ = previous.kill();
-            let _ = previous.wait();
+    let channel = if no_hmr {
+        None
+    } else {
+        activate_hmr(&file, hmr_port)
+    };
+    let mut previous: Vec<hmr::LegArtifact> = Vec::new();
+    watch_loop(&roots, move || match &channel {
+        Some(channel) => {
+            child = hmr_round(channel, file.clone(), &args, &mut previous, child.take());
         }
-        child = build_and_spawn_run(file.clone(), &args);
+        None => {
+            if let Some(mut previous) = child.take() {
+                let _ = previous.kill();
+                let _ = previous.wait();
+            }
+            child = build_and_spawn_run(file.clone(), &args);
+        }
     })
+}
+
+/// Turns HMR on for `run --watch` when the project is a workspace with at least
+/// one browser leg (hmr.md §1). Binds the dev channel on `127.0.0.1:port`
+/// (`port` `0` ⇒ ephemeral) and announces it. A port already in use is a warning,
+/// not a crash — the watch continues without HMR. `None` (silently) when the
+/// project isn't HMR-eligible.
+fn activate_hmr(file: &Option<PathBuf>, port: u16) -> Option<hmr::DevChannel> {
+    let project = resolve_project(file.clone()).ok()?;
+    let Project::Workspace { root, members } = &project else {
+        return None;
+    };
+    if !members
+        .iter()
+        .any(|(_, platform)| matches!(platform, Platform::Browser))
+    {
+        return None;
+    }
+    match hmr::DevChannel::bind(port, root.join("dist")) {
+        Ok(channel) => {
+            println!("hmr: dev channel on 127.0.0.1:{}", channel.port());
+            Some(channel)
+        }
+        Err(error) => {
+            eprintln!(
+                "warning: HMR dev channel could not bind 127.0.0.1:{port} ({error}); \
+                 continuing to watch without HMR"
+            );
+            None
+        }
+    }
+}
+
+/// One HMR watch round (hmr.md §6): rebuild every host leg, classify the raw
+/// bundle bytes against the previous round, write `dist/` (browser legs get the
+/// shim prepended, with this build's version embedded), restart the Node child
+/// only when the server bundle changed, and push the round event to the browser.
+/// A compile failure pushes an `error` event and keeps the last good build —
+/// the standard HMR contract — leaving `previous` and the running `child` intact.
+fn hmr_round(
+    channel: &hmr::DevChannel,
+    file: Option<PathBuf>,
+    args: &[String],
+    previous: &mut Vec<hmr::LegArtifact>,
+    child: Option<Child>,
+) -> Option<Child> {
+    let (root, members) = match resolve_project(file) {
+        Ok(Project::Workspace { root, members }) => (root, members),
+        // The project stopped being an HMR-eligible workspace (a manifest edit,
+        // say). Report it as a failed round: overlay + keep the last good build.
+        Ok(_) | Err(_) => {
+            eprintln!("error: the HMR project is no longer a runnable workspace");
+            channel.push("error", Some("build failed — see the terminal"));
+            return child;
+        }
+    };
+
+    // Compile every host leg, capturing the RAW bundle bytes (before the shim is
+    // prepended — the shim embeds the version, so shim-inclusive bytes would
+    // differ every round and misclassify everything as a swap).
+    let mut next = Vec::new();
+    let mut other_assets: Vec<(String, String, String)> = Vec::new();
+    let mut server_name = None;
+    let mut server_count = 0usize;
+    for (unit, platform) in &members {
+        if platform.is_none() {
+            continue;
+        }
+        let (javascript, assets) = match compile_unit(unit, *platform, false) {
+            Ok(compiled) => compiled,
+            // `compile_unit` has already reported the diagnostics to the
+            // terminal (unchanged). Keep the last good build.
+            Err(_) => {
+                channel.push("error", Some("build failed — see the terminal"));
+                return child;
+            }
+        };
+        let mut assembled = vilan_core::const_eval::assemble_assets(&assets);
+        let css = assembled
+            .remove("css")
+            .filter(|content| !content.is_empty());
+        // Any non-css asset kind still lands on disk each round, exactly as
+        // `write_assets` would put it (uniform with the build/run paths); it
+        // just doesn't participate in classification — css is the only kind
+        // the dev runtime knows how to hot-swap.
+        for (kind, content) in assembled {
+            other_assets.push((unit.name.clone(), kind, content));
+        }
+        if matches!(platform, Platform::Node { .. }) {
+            server_name = Some(unit.name.clone());
+            server_count += 1;
+        }
+        next.push(hmr::LegArtifact {
+            name: unit.name.clone(),
+            is_browser: matches!(platform, Platform::Browser),
+            bundle: javascript,
+            css,
+        });
+    }
+
+    let decision = hmr::classify(previous, &next);
+    if decision.bump_version {
+        channel.bump_version();
+    }
+    let version = channel.version();
+
+    // Write `dist/` from the freshly-compiled legs: browser bundles carry the
+    // shim (with the current port + version embedded) so every served browser
+    // bundle's version matches what the channel reports on connect; node bundles
+    // and CSS sidecars are written verbatim.
+    let dist = root.join("dist");
+    if let Err(error) = fs::create_dir_all(&dist) {
+        eprintln!("error: cannot create {}: {error}", dist.display());
+        channel.push("error", Some("build failed — see the terminal"));
+        return child;
+    }
+    for leg in &next {
+        let bundle_path = dist.join(format!("{}.js", leg.name));
+        let contents = if leg.is_browser {
+            hmr::instrument(&leg.bundle, channel.port(), version)
+        } else {
+            leg.bundle.clone()
+        };
+        if let Err(error) = fs::write(&bundle_path, contents) {
+            eprintln!("error: cannot write {}: {error}", bundle_path.display());
+        }
+        if let Some(css) = &leg.css {
+            let css_path = dist.join(format!("{}.css", leg.name));
+            if let Err(error) = fs::write(&css_path, css) {
+                eprintln!("error: cannot write {}: {error}", css_path.display());
+            }
+        }
+    }
+    for (name, kind, content) in &other_assets {
+        let asset_path = dist.join(format!("{name}.{kind}"));
+        if let Err(error) = fs::write(&asset_path, content) {
+            eprintln!("error: cannot write {}: {error}", asset_path.display());
+        }
+    }
+
+    *previous = next;
+
+    // Restart the Node child only when the server bundle changed (or on the
+    // first round, to spawn it). A client-only or CSS-only round leaves the
+    // server running and its port warm.
+    let mut child = child;
+    if decision.restart_server {
+        if let Some(mut running) = child.take() {
+            let _ = running.kill();
+            let _ = running.wait();
+        }
+        child = match (server_count, server_name) {
+            (1, Some(name)) => {
+                // Run from the workspace root so the server reads sibling
+                // `dist/*.js`, exactly as `run_workspace` / `build_and_spawn_run`.
+                let script = Path::new("dist").join(format!("{name}.js"));
+                match spawn_node(&script, args, Some(&root)) {
+                    Ok(spawned) => Some(spawned),
+                    Err(error) => {
+                        eprintln!("error: failed to launch `node`: {error}");
+                        None
+                    }
+                }
+            }
+            (0, _) => None, // no node leg: HMR still serves the browser
+            _ => {
+                eprintln!("error: this workspace has more than one `node` package to run");
+                None
+            }
+        };
+    }
+
+    match decision.push {
+        Some(hmr::Push::Swap) => channel.push("swap", None),
+        Some(hmr::Push::Css) => channel.push("css", None),
+        None => {}
+    }
+
+    child
 }
 
 /// Builds the run target and spawns it with Node **without waiting**, returning the
