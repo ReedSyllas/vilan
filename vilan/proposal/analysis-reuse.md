@@ -1,6 +1,7 @@
 # Analysis reuse — the E3 arc (leak closure, the prelude checkpoint)
 
-> **Status: Phase 1 SHIPPED 2026-07-21; Phase 2 awaiting the user's read.**
+> **Status: Phase 1 SHIPPED 2026-07-21; Phase 2 RATIFIED same day —
+> implementation underway.**
 > Backlog E3 (L), reframed by the 2026-07-21 scout; numbers re-measured that
 > day.
 >

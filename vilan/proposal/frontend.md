@@ -1,6 +1,12 @@
 # The handwritten frontend — replacing chumsky (H6)
 
-> **Status: DRAFT 2026-07-21 — for review.** Backlog H6 (L) + E4 (rides this).
+> **Status: RATIFIED 2026-07-21 — implementation underway (S0 first).** The §6
+> calls (user, same day): **(a) improved errors at cutover** — parse
+> diagnostics may improve, gated by the diagnostics standard + per-changed-
+> message review, no byte-parity requirement; **(b) grammar freeze** — no
+> grammar-touching changes during the arc (B30 `lazy` lands post-cutover).
+>
+> Original status: **DRAFT 2026-07-21 — for review.** Backlog H6 (L) + E4 (rides this).
 > The user pulled the trigger early (2026-07-21, the structural-improvements
 > arc): the recorded triggers ("release builds past ~1s, LSP latency, the next
 > grammar fight") are not yet met — a cold release build of the todo client is
