@@ -302,7 +302,19 @@ check(hmr.exposed["pkg::count"].getter() === 3, "A: count mutated to 3");
 check(hmr.exposed["pkg::tally"].getter() === 3, "A: tally payload mutated to 3");
 
 const bundleB = fs.readFileSync(new URL("./bundleB.js", import.meta.url), "utf8");
-await hmr.swap(bundleB);
+
+// The heal path (the infinite-refresh regression): a `connected` event at our
+// own version is a no-op; one ahead of us fetches the current bundle from the
+// dev channel and SWAPS. location.reload() must never be involved — a page
+// whose server serves a boot-time stale bundle would reload into the same
+// stale bytes and loop forever.
+globalThis.fetch = () => Promise.resolve({ text: () => Promise.resolve(bundleB) });
+await hmr.handleEvent({ kind: "connected", version: hmr.version });
+check(marks["teardown"] === undefined, "heal: an up-to-date connected does nothing");
+const target = hmr.version + 1;
+await hmr.handleEvent({ kind: "connected", version: target });
+check(!globalThis.__reloaded, "heal: a stale connected swapped instead of reloading");
+check(hmr.version === target, "heal: the singleton's version advanced to the channel's");
 
 check(marks["teardown"] === 1, "swap: on_teardown ran");
 check(marks["count-init"] === 1, "swap: count carried (adopt hit — initializer not re-run)");

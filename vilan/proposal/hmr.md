@@ -114,6 +114,17 @@ This heals the fresh-tab-staleness case for free: the common serving idiom reads
 `dist/client.js` once at server boot, so a new tab after a client-only edit gets
 a stale bundle — which then swaps itself forward on its first heartbeat.
 
+> **Amendment (2026-07-21, post-ship):** the first live-browser session (the
+> user, todo example) caught S1's placeholder `location.reload()` surviving
+> into S2b as the heal — an **infinite refresh loop**: the boot-time-read
+> server serves the same stale bundle every reload, the version gap never
+> closes. The design above ("requests a swap") was right; the implementation
+> drifted. Fixed: every `connected` version gap — first load or
+> reconnect-after-missed-swaps — heals by fetching from the dev channel and
+> swapping, and a heal/fetch failure *waits* for the next event rather than
+> reloading. Pinned via the e2e's real event path
+> (`handleEvent({kind:"connected", ...})` with a reload trip-wire).
+
 ## 3. The swap protocol
 
 On a `swap` event the dev runtime, in order:

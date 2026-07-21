@@ -287,36 +287,78 @@
         }
     }
 
-    // A `swap` event: fetch this leg's current bundle from the dev channel and
-    // run the swap protocol. On success the singleton's version advances so a
-    // later reconnect's staleness check agrees; any fetch failure falls back to
-    // a reload.
+    // A staleness signal (a `swap` event, or a `connected` whose version is
+    // ahead of ours): fetch this leg's current bundle from the dev channel —
+    // which always serves the fresh dist bytes — and run the swap protocol. On
+    // success the singleton's version advances so later `connected` checks
+    // agree. A fetch failure warns and WAITS (the next event retries): it must
+    // never reload, because the page's own server may serve a bundle it read
+    // once at boot — reloading re-fetches that stale bundle, whose shim sees
+    // the same version gap and reloads again, forever. The dev channel, not
+    // the page reload, is the only sure route to current bytes.
     function fetchAndSwap(version) {
-        fetch("http://127.0.0.1:" + PORT + "/bundle/" + BUNDLE + ".js")
+        return fetch("http://127.0.0.1:" + PORT + "/bundle/" + BUNDLE + ".js")
             .then(function (response) {
                 return response.text();
             })
             .then(function (text) {
                 var result = swap(text);
                 if (result && typeof result.then === "function") {
-                    result.then(function () {
+                    return result.then(function () {
                         singleton.version = version;
                     });
                 }
+                singleton.version = version;
             })
             .catch(function (error) {
-                reload();
+                if (typeof console !== "undefined" && console.warn) {
+                    console.warn("[vilan] hmr: could not fetch the current bundle; waiting for the next event", error);
+                }
             });
     }
 
+    // One dev-channel event. Exposed on the singleton so the node-stub e2e can
+    // drive the real event path (EventSource is absent under the stub). Returns
+    // the action's promise where there is one, so a test can await completion.
+    function handleEvent(data) {
+        // Any non-error event clears a lingering overlay.
+        if (data.kind !== "error") {
+            removeOverlay();
+        }
+        switch (data.kind) {
+            case "connected":
+                // Sent on every (re)connect with the channel's current version.
+                // A gap means this page runs a stale bundle (the common serving
+                // idiom reads dist once at server boot) or missed swaps while
+                // disconnected — either way, the heal is a swap from the dev
+                // channel, NEVER a reload (hmr.md §2; a reload re-fetches the
+                // stale bundle and loops).
+                if (data.version !== singleton.version) {
+                    return fetchAndSwap(data.version);
+                }
+                break;
+            case "swap":
+                return fetchAndSwap(data.version);
+            case "reload":
+                reload();
+                break;
+            case "css":
+                bumpStylesheets();
+                break;
+            case "error":
+                showOverlay(data.message);
+                break;
+        }
+    }
+    singleton.handleEvent = handleEvent;
+
     function connect() {
-        // Under the node DOM stub there is no EventSource; the swap protocol is
-        // still driven directly via `window.__VILAN_HMR__.swap(text)`.
+        // Under the node DOM stub there is no EventSource; the e2e drives
+        // `window.__VILAN_HMR__.handleEvent(...)` / `.swap(text)` directly.
         if (typeof EventSource === "undefined") {
             return;
         }
         var source = new EventSource("http://127.0.0.1:" + PORT + "/events");
-        var first = true;
         source.onmessage = function (event) {
             var data;
             try {
@@ -324,33 +366,7 @@
             } catch (error) {
                 return;
             }
-            // The connect-time version message: heal a stale tab (hmr.md §2).
-            if (first && data.kind === "connected") {
-                first = false;
-                if (data.version !== VERSION) {
-                    location.reload();
-                }
-                return;
-            }
-            first = false;
-            // Any non-error event clears a lingering overlay.
-            if (data.kind !== "error") {
-                removeOverlay();
-            }
-            switch (data.kind) {
-                case "swap":
-                    fetchAndSwap(data.version);
-                    break;
-                case "reload":
-                    location.reload();
-                    break;
-                case "css":
-                    bumpStylesheets();
-                    break;
-                case "error":
-                    showOverlay(data.message);
-                    break;
-            }
+            handleEvent(data);
         };
         // On error, EventSource reconnects natively — nothing clever to do.
     }
