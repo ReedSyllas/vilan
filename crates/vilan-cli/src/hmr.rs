@@ -16,10 +16,11 @@
 //! untouched). [`classify`] is the pure byte-diff decision the watch round runs
 //! each rebuild; it is unit-tested without processes.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -303,6 +304,43 @@ pub struct LegArtifact {
     pub is_browser: bool,
     pub bundle: String,
     pub css: Option<String>,
+    /// The sources this artifact was compiled from — each loaded file's path
+    /// mapped to the `content_hash` of the text the compiler actually consumed
+    /// (`Program.source_hashes`). Covers the entry plus every std/package
+    /// module the compile loaded; `macro_std` files pulled in only by macro
+    /// *bodies* during world compilation are not listed (toolchain-development
+    /// territory — user macro code lives in ordinary package modules, which
+    /// are). Not part of the classifier — it compares `bundle`/`css` only.
+    pub sources: BTreeMap<PathBuf, u64>,
+}
+
+/// Whether a leg's previous artifact is still current — the per-leg skip
+/// decision (backlog E12, half b). True exactly when the leg's recorded source
+/// map is non-empty and **every** source re-hashes, now, to the hash it was
+/// compiled with. Reuse is decided by CONTENT, never by mtime: the watcher's
+/// mtime scan only *triggers* rounds, and an mtime-preserving write, a
+/// coarse-mtime filesystem, or a same-tick re-edit all still fail the re-hash
+/// and recompile (the 2026-07-21 review's staleness finding). A deleted or
+/// unreadable source yields `None` from `current_hash` and disqualifies the
+/// skip; so does an empty map (no compile records zero sources — it means the
+/// artifact predates source tracking).
+pub fn leg_is_current(
+    previous: &BTreeMap<PathBuf, u64>,
+    current_hash: impl Fn(&Path) -> Option<u64>,
+) -> bool {
+    !previous.is_empty()
+        && previous
+            .iter()
+            .all(|(path, hash)| current_hash(path) == Some(*hash))
+}
+
+/// The round-level guards that force a FULL recompile regardless of per-leg
+/// verification (backlog E12): the first round (nothing recorded yet), a prior
+/// failed round (its artifacts are not trustworthy), and a manifest change
+/// (a `vilan.toml` can alter output without touching any `.vl` source).
+/// Kept as a pure function so the safety cases stay pinned as logic.
+pub fn round_forces_full(first_round: bool, prior_failed: bool, manifest_changed: bool) -> bool {
+    first_round || prior_failed || manifest_changed
 }
 
 /// What the browser is told changed this round.
@@ -409,6 +447,7 @@ mod tests {
             is_browser,
             bundle: bundle.to_string(),
             css: css.map(str::to_string),
+            sources: BTreeMap::new(),
         }
     }
 
@@ -537,5 +576,74 @@ mod tests {
         assert!(!is_safe_asset_name("client.css", "js")); // wrong extension
         assert!(!is_safe_asset_name(".js", "js")); // no stem
         assert!(!is_safe_asset_name("..", "js"));
+    }
+
+    // --- The per-leg skip decision (backlog E12, half b) ---------------------
+
+    fn recorded(entries: &[(&str, u64)]) -> BTreeMap<PathBuf, u64> {
+        entries
+            .iter()
+            .map(|(name, hash)| (PathBuf::from(name), *hash))
+            .collect()
+    }
+
+    /// A verifier over a fixed "current filesystem": present files hash to the
+    /// listed value, everything else reads as unreadable.
+    fn on_disk(entries: &[(&str, u64)]) -> impl Fn(&Path) -> Option<u64> {
+        let current: BTreeMap<PathBuf, u64> = recorded(entries);
+        move |path: &Path| current.get(path).copied()
+    }
+
+    #[test]
+    fn an_unchanged_leg_verifies_and_is_current() {
+        let previous = recorded(&[("server.vl", 1), ("std/list.vl", 2), ("common.vl", 3)]);
+        let disk = on_disk(&[("server.vl", 1), ("std/list.vl", 2), ("common.vl", 3)]);
+        assert!(leg_is_current(&previous, disk));
+    }
+
+    #[test]
+    fn a_content_drift_disqualifies_the_leg_regardless_of_any_other_signal() {
+        // The review's staleness finding, pinned: reuse is decided by CONTENT.
+        // No mtime, changed-set, or watcher signal participates — if a source's
+        // bytes differ from what was compiled (an mtime-preserving write, a
+        // coarse-mtime filesystem, a same-tick re-edit), the re-hash fails and
+        // the leg recompiles.
+        let previous = recorded(&[("client.vl", 1), ("common.vl", 3)]);
+        let disk = on_disk(&[("client.vl", 9), ("common.vl", 3)]);
+        assert!(!leg_is_current(&previous, disk));
+    }
+
+    #[test]
+    fn an_unreadable_or_deleted_source_disqualifies_the_leg() {
+        let previous = recorded(&[("client.vl", 1), ("gone.vl", 2)]);
+        let disk = on_disk(&[("client.vl", 1)]);
+        assert!(!leg_is_current(&previous, disk));
+    }
+
+    #[test]
+    fn an_empty_source_map_never_qualifies() {
+        // No compile records zero sources — an empty map means the artifact
+        // predates source tracking, and trusting it would skip on nothing.
+        let previous = recorded(&[]);
+        let disk = on_disk(&[]);
+        assert!(!leg_is_current(&previous, disk));
+    }
+
+    #[test]
+    fn a_leg_only_verifies_against_its_own_sources() {
+        // A drift in a file the leg never loaded is invisible to it — the
+        // client's edit leaves the server current (the client-only-edit skip).
+        let server = recorded(&[("server.vl", 1), ("common.vl", 3)]);
+        let disk = on_disk(&[("server.vl", 1), ("common.vl", 3), ("client.vl", 42)]);
+        assert!(leg_is_current(&server, disk));
+    }
+
+    #[test]
+    fn the_round_guards_force_a_full_recompile() {
+        // The three safety cases that bypass per-leg verification entirely.
+        assert!(round_forces_full(true, false, false), "first round");
+        assert!(round_forces_full(false, true, false), "prior failure");
+        assert!(round_forces_full(false, false, true), "manifest change");
+        assert!(!round_forces_full(false, false, false));
     }
 }

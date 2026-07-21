@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::{Child, ExitCode},
@@ -358,12 +358,15 @@ fn run_watch(file: Option<PathBuf>, args: Vec<String>, no_hmr: bool, hmr_port: u
     } else {
         activate_hmr(&file, hmr_port)
     };
-    let mut previous: Vec<hmr::LegArtifact> = Vec::new();
+    let mut state = WatchState::default();
     watch_loop(&roots, move || match &channel {
         Some(channel) => {
-            child = hmr_round(channel, file.clone(), &args, &mut previous, child.take());
+            child = hmr_round(channel, file.clone(), &args, &mut state, child.take());
         }
         None => {
+            // The plain restart loop recompiles and respawns wholesale, so the
+            // per-leg skip doesn't drop in naturally here (there are no retained
+            // per-leg artifacts to reuse) (backlog E12).
             if let Some(mut previous) = child.take() {
                 let _ = previous.kill();
                 let _ = previous.wait();
@@ -371,6 +374,26 @@ fn run_watch(file: Option<PathBuf>, args: Vec<String>, no_hmr: bool, hmr_port: u
             child = build_and_spawn_run(file.clone(), &args);
         }
     })
+}
+
+/// The carried-over state of an HMR `run --watch` across rounds (backlog E12):
+/// the previous good artifacts (with their source sets) for the byte classifier
+/// and the per-leg skip, plus the two guards that force a full recompile
+/// regardless of the changed set.
+#[derive(Default)]
+struct WatchState {
+    /// Each host leg's last good artifact — the classifier's `previous`, and the
+    /// source of the reused bytes when a leg is skipped.
+    legs: Vec<hmr::LegArtifact>,
+    /// The previous round failed to compile: no leg has a trustworthy artifact
+    /// to reuse, so recompile every leg until a round succeeds.
+    failed: bool,
+    /// A fingerprint of every `vilan.toml` under the watch root (workspace,
+    /// members, and in-tree dependencies alike). A manifest can change a leg's
+    /// output without touching its `.vl` sources (a dependency, a platform, a
+    /// build option), so a change here forces a full recompile. `None` until
+    /// the first round establishes it.
+    manifest: Option<u64>,
 }
 
 /// Turns HMR on for `run --watch` when the project is a workspace with at least
@@ -414,7 +437,7 @@ fn hmr_round(
     channel: &hmr::DevChannel,
     file: Option<PathBuf>,
     args: &[String],
-    previous: &mut Vec<hmr::LegArtifact>,
+    state: &mut WatchState,
     child: Option<Child>,
 ) -> Option<Child> {
     let (root, members) = match resolve_project(file) {
@@ -423,14 +446,46 @@ fn hmr_round(
         // say). Report it as a failed round: overlay + keep the last good build.
         Ok(_) | Err(_) => {
             eprintln!("error: the HMR project is no longer a runnable workspace");
+            state.failed = true;
             channel.push("error", Some("build failed — see the terminal"));
             return child;
         }
     };
 
-    // Compile every host leg, capturing the RAW bundle bytes (before the shim is
-    // prepended — the shim embeds the version, so shim-inclusive bytes would
-    // differ every round and misclassify everything as a swap).
+    // Decide which legs this round may SKIP — reuse the previous artifact for
+    // rather than recompile (backlog E12, half b). Reuse is decided by CONTENT,
+    // never by mtime: a leg qualifies only when every source its artifact was
+    // compiled from re-hashes, right now, to the hash it was compiled with
+    // (mtime merely *triggers* rounds — review finding, 2026-07-21). The safe
+    // default (skip nothing) covers the first round, a prior failure, and a
+    // manifest change; a deleted or unreadable source fails its re-hash and
+    // recompiles by construction.
+    let manifest = manifest_fingerprint(&root);
+    let manifest_changed = state.manifest.is_some_and(|previous| previous != manifest);
+    state.manifest = Some(manifest);
+    let force_full = hmr::round_forces_full(state.legs.is_empty(), state.failed, manifest_changed);
+    let current_hash = |path: &Path| -> Option<u64> {
+        fs::read_to_string(path)
+            .ok()
+            .map(|text| vilan_core::content_hash(&text))
+    };
+    let skip: BTreeSet<String> = if force_full {
+        BTreeSet::new()
+    } else {
+        members
+            .iter()
+            .filter(|(_, platform)| !platform.is_none())
+            .filter_map(|(unit, _)| {
+                let previous = state.legs.iter().find(|leg| leg.name == unit.name)?;
+                hmr::leg_is_current(&previous.sources, &current_hash).then(|| unit.name.clone())
+            })
+            .collect()
+    };
+
+    // Compile every host leg (skipped legs excepted), capturing the RAW bundle
+    // bytes (before the shim is prepended — the shim embeds the version, so
+    // shim-inclusive bytes would differ every round and misclassify everything
+    // as a swap).
     let mut next = Vec::new();
     let mut other_assets: Vec<(String, String, String)> = Vec::new();
     let mut server_name = None;
@@ -439,7 +494,26 @@ fn hmr_round(
         if platform.is_none() {
             continue;
         }
-        let (javascript, assets) = match compile_unit(
+        if skip.contains(&unit.name) {
+            // Reuse the previous artifact verbatim: the leg's sources are
+            // unchanged, so a recompile would reproduce these exact bytes (the
+            // classifier then sees no change and pushes nothing — identical to
+            // having recompiled). Its non-css assets are already on disk from the
+            // round that built them, so they need no rewrite.
+            let prior = state
+                .legs
+                .iter()
+                .find(|leg| leg.name == unit.name)
+                .expect("skippable_legs only skips a leg with a previous artifact");
+            println!("hmr: skipped {} (sources unchanged)", unit.name);
+            if matches!(platform, Platform::Node { .. }) {
+                server_name = Some(unit.name.clone());
+                server_count += 1;
+            }
+            next.push(prior.clone());
+            continue;
+        }
+        let (javascript, assets, sources) = match compile_unit(
             unit,
             *platform,
             false,
@@ -449,6 +523,7 @@ fn hmr_round(
             // `compile_unit` has already reported the diagnostics to the
             // terminal (unchanged). Keep the last good build.
             Err(_) => {
+                state.failed = true;
                 channel.push("error", Some("build failed — see the terminal"));
                 return child;
             }
@@ -473,10 +548,11 @@ fn hmr_round(
             is_browser: matches!(platform, Platform::Browser),
             bundle: javascript,
             css,
+            sources: sources.into_iter().collect(),
         });
     }
 
-    let decision = hmr::classify(previous, &next);
+    let decision = hmr::classify(&state.legs, &next);
     if decision.bump_version {
         channel.bump_version();
     }
@@ -489,6 +565,7 @@ fn hmr_round(
     let dist = root.join("dist");
     if let Err(error) = fs::create_dir_all(&dist) {
         eprintln!("error: cannot create {}: {error}", dist.display());
+        state.failed = true;
         channel.push("error", Some("build failed — see the terminal"));
         return child;
     }
@@ -516,7 +593,10 @@ fn hmr_round(
         }
     }
 
-    *previous = next;
+    state.legs = next;
+    // This round completed: clear the failure guard so the next round may skip
+    // again (the previous-failure force-full no longer applies).
+    state.failed = false;
 
     // Restart the Node child only when the server bundle changed (or on the
     // first round, to spawn it). A client-only or CSS-only round leaves the
@@ -557,6 +637,41 @@ fn hmr_round(
     child
 }
 
+/// A fingerprint of the workspace + member `vilan.toml` files (backlog E12). A
+/// change here — a dependency, a platform, a build option — can alter a leg's
+/// output without touching any `.vl` source, so a differing fingerprint forces
+/// the round to recompile every leg rather than skip. Walks the watch root for
+/// **every** `vilan.toml` (workspace, members, and in-tree dependency packages
+/// alike — a dependency's manifest changes its dependents' output too) and
+/// hashes each path + content (unreadable ⇒ `None`), so an added, removed, or
+/// edited manifest all shift the value.
+fn manifest_fingerprint(root: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    fn collect_manifests(directory: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_manifests(&path, found);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("vilan.toml") {
+                found.push(path);
+            }
+        }
+    }
+    let mut manifests = Vec::new();
+    collect_manifests(root, &mut manifests);
+    manifests.sort();
+    let mut hasher = DefaultHasher::new();
+    for path in manifests {
+        path.hash(&mut hasher);
+        fs::read(&path).ok().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Builds the run target and spawns it with Node **without waiting**, returning the
 /// child so the next `run --watch` round can stop it. `None` after reporting a
 /// compile error or a non-runnable project.
@@ -585,7 +700,7 @@ fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> 
                 );
                 return None;
             }
-            let (javascript, assets) =
+            let (javascript, assets, _sources) =
                 compile_unit(&unit, Platform::default(), false, false).ok()?;
             // Assets go beside the *canonical* build output — `<entry>.css`, where
             // `build` writes them and the served program reads them — not beside the
@@ -1043,7 +1158,7 @@ fn compile_unit(
     platform: Platform,
     emit_debug: bool,
     hmr: bool,
-) -> Result<(String, Vec<(String, String)>), ExitCode> {
+) -> Result<(String, Vec<(String, String)>, Vec<(PathBuf, u64)>), ExitCode> {
     let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
         Err(message) => {
@@ -1068,7 +1183,7 @@ fn compile_unit(
 
 /// Builds a lone package / bare file, writing `<entry>.js` (or printing to stdout).
 fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool) -> ExitCode {
-    let (javascript, assets) = match compile_unit(unit, platform, emit_debug, false) {
+    let (javascript, assets, _sources) = match compile_unit(unit, platform, emit_debug, false) {
         Ok(compiled) => compiled,
         Err(code) => return code,
     };
@@ -1107,7 +1222,8 @@ fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
 
 /// Builds and runs a lone package's entry with Node, forwarding `args`.
 fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
-    let (javascript, assets) = match compile_unit(unit, Platform::default(), false, false) {
+    let (javascript, assets, _sources) = match compile_unit(unit, Platform::default(), false, false)
+    {
         Ok(compiled) => compiled,
         Err(code) => return code,
     };
@@ -1145,7 +1261,7 @@ fn build_workspace_artifacts(
         if platform.is_none() {
             continue;
         }
-        let (javascript, assets) = compile_unit(unit, *platform, debug, false)?;
+        let (javascript, assets, _sources) = compile_unit(unit, *platform, debug, false)?;
         let output = dist.join(format!("{}.js", unit.name));
         write_assets(&output, &assets);
         if let Err(error) = fs::write(&output, javascript) {
@@ -1263,7 +1379,7 @@ fn test(path: Option<PathBuf>) -> ExitCode {
 /// with the captured runtime output (empty for a compile error, which
 /// `compile_to_js` has already reported to stderr).
 fn run_test(file: &Path) -> Result<(), String> {
-    let (javascript, _assets) = compile_to_js(
+    let (javascript, _assets, _sources) = compile_to_js(
         file,
         &pkg_root_of(file),
         Platform::default(),
@@ -1376,7 +1492,7 @@ fn compile_to_js(
     options: &BuildOptions,
     workspace: &Workspace,
     emit_debug: bool,
-) -> Result<(String, Vec<(String, String)>), ExitCode> {
+) -> Result<(String, Vec<(String, String)>, Vec<(PathBuf, u64)>), ExitCode> {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(error) => {
@@ -1394,11 +1510,14 @@ fn compile_to_js(
     };
     let mut output = None;
 
-    // Fast path: a clean entry file lexes and parses once with zero-size
-    // errors (see `vilan_core::parse_clean`); the rich pipeline below runs
-    // only when there are diagnostics to name.
-    let clean_root = vilan_core::parse_clean(src.as_str());
-    let (tokens, mut errs) = match &clean_root {
+    // Fast path: a clean entry file reuses the shared content-addressed parse
+    // cache (`vilan_core::parse_clean_cached`) — the same cache `std` and the
+    // package modules use — so across `--watch` rounds an unchanged entry file
+    // is served from the cache instead of re-lexed/re-parsed (backlog E12). A
+    // hit is already lift-rewritten and `'static`; the rich pipeline below runs
+    // only when the cache misses (a non-clean file), to name its diagnostics.
+    let cached = vilan_core::parse_clean_cached(&src);
+    let (tokens, mut errs) = match &cached {
         Some(_) => (None, Vec::new()),
         None => lexer().parse(src.as_str()).into_output_errors(),
     };
@@ -1407,10 +1526,13 @@ fn compile_to_js(
     // Note-carrying analyzer diagnostics render outside the `Rich` fold; they
     // still count against a clean build.
     let mut noted_errors = 0usize;
-    let root = match clean_root {
-        Some(root) => Some(root),
-        None => match &tokens {
-            Some(tokens) => {
+    // The freshly rich-parsed tree — present only on a cache miss (a non-clean
+    // file); a hit takes its already-lifted `'static` tree from `cached` instead.
+    // `Spanned` is `vilan_core`'s tuple alias, not the glob-imported
+    // `chumsky::span::Spanned`, so qualify it.
+    let fresh_root: Option<vilan_core::Spanned<vilan_core::node::NodeList>> =
+        match (&cached, &tokens) {
+            (None, Some(tokens)) => {
                 let (ast, errors) = parser()
                     .map_with(|ast, e| (ast, e.span()))
                     .parse(
@@ -1421,21 +1543,34 @@ fn compile_to_js(
                     .into_output_errors();
                 parse_errs = errors;
                 ast.filter(|_| errs.len() + parse_errs.len() == 0)
-                    .map(|(root, _file_span)| root)
+                    .map(|(mut root, _file_span)| {
+                        // Bare-`?` marks become lift regions before analysis
+                        // (expression-lifting.md); the cached path is lifted inside
+                        // `parse_clean_cached`, so lift exactly once here.
+                        vilan_core::lift::rewrite_items(&mut root.0);
+                        root
+                    })
             }
-            None => None,
-        },
+            _ => None,
+        };
+    let root: Option<&vilan_core::Spanned<vilan_core::node::NodeList>> = match &cached {
+        Some((ast, _)) => Some(*ast),
+        None => fresh_root.as_ref(),
+    };
+    // The source text the chosen root's spans index into: the cached `'static`
+    // text on a hit (byte-identical to `src` — the cache is content-keyed),
+    // otherwise `src` itself. Every diagnostic renders against it.
+    let source_ref: &str = match &cached {
+        Some((_, text)) => text,
+        None => src.as_str(),
     };
 
-    if let Some(mut root) = root {
-        // Bare-`?` marks become lift regions before analysis
-        // (expression-lifting.md).
-        vilan_core::lift::rewrite_items(&mut root.0);
+    if let Some(root) = root {
         if emit_debug {
             write_debug(file, "parse.out", &format!("{root:#?}"));
         }
 
-        let mut program = analyze(&root, &src, &std, pkg_root, file, platform, workspace);
+        let mut program = analyze(root, source_ref, &std, pkg_root, file, platform, workspace);
 
         // Thread `std::context::Context` values as hidden parameters (a no-op
         // unless the program creates a context).
@@ -1483,7 +1618,7 @@ fn compile_to_js(
                         // The note's file may BE the entry — same-file
                         // rendering needs no second source.
                         .filter(|(name, _)| *name != filename);
-                    report_error_with_note(&filename, &src, error, note_file);
+                    report_error_with_note(&filename, source_ref, error, note_file);
                     noted_errors += 1;
                 }
                 None => errs.push(Rich::custom(error.span, error.msg.as_str())),
@@ -1492,7 +1627,12 @@ fn compile_to_js(
         // Warnings are non-fatal: render them, but they do not enter `errs`,
         // so they don't block codegen.
         for warning in &program.warnings {
-            report_warning(&filename, &src, warning.span.into_range(), &warning.msg);
+            report_warning(
+                &filename,
+                source_ref,
+                warning.span.into_range(),
+                &warning.msg,
+            );
         }
 
         if emit_debug {
@@ -1503,14 +1643,29 @@ fn compile_to_js(
 
         if errs.is_empty() && noted_errors == 0 {
             match transform(&program, options) {
-                Ok(javascript) => output = Some((javascript, program.const_assets.clone())),
+                // The leg's source set — each path paired with the content
+                // hash it was COMPILED from — which the watch loop verifies
+                // (by re-hashing, never by mtime) to skip a leg whose sources
+                // didn't change (backlog E12, half b).
+                Ok(javascript) => {
+                    output = Some((
+                        javascript,
+                        program.const_assets.clone(),
+                        program
+                            .sources
+                            .iter()
+                            .cloned()
+                            .zip(program.source_hashes.iter().copied())
+                            .collect::<Vec<_>>(),
+                    ))
+                }
                 Err(error) => errs.push(Rich::custom(error.span, error.msg)),
             }
         }
     }
 
     let clean = errs.is_empty() && parse_errs.is_empty() && noted_errors == 0;
-    report(&filename, &src, errs, parse_errs);
+    report(&filename, source_ref, errs, parse_errs);
 
     match output {
         Some(compiled) if clean => Ok(compiled),

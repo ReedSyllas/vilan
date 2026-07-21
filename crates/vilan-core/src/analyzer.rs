@@ -21557,6 +21557,10 @@ pub struct Program<'src> {
     // file, the rest are `std` modules. `source_ranges` maps each entity id to
     // its file (see `source_of`); both drive cross-file navigation in the LSP.
     pub sources: Vec<PathBuf>,
+    // Parallel to `sources`: the content hash each source was compiled from
+    // (`content_hash`; 0 for a source that failed to load) — the watch loop's
+    // per-leg reuse verification (backlog E12).
+    pub source_hashes: Vec<u64>,
     pub source_ranges: Vec<SourceRange>,
     // Library layer roots with their platform patterns (plus base roots with
     // empty patterns, marking library territory) — the seeds and the
@@ -21826,13 +21830,16 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     use std::hash::{Hash, Hasher};
     use std::sync::{Mutex, OnceLock};
 
-    // A process-global, content-addressed parse cache: a hash of the file's
-    // contents maps to its leaked AST. Every analysis re-loads the `std` modules
-    // (and the language server re-analyzes on each keystroke), but their source
-    // rarely changes — so reuse the parse, and leak the source + tree only once
-    // per distinct content instead of once per analysis.
-    static CACHE: OnceLock<Mutex<HashMap<u64, LoadedModule>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // A process-global, content-addressed cache for the rare NON-clean module —
+    // one that recovered from a parse error. Clean modules (the overwhelming
+    // case — std parses clean on every compile) go through the SHARED
+    // `parse_clean_cached` below, the same cache the CLI entry file and the
+    // language server use, so a module is parsed once per distinct content
+    // across the whole process (watch rounds included) instead of once per
+    // analysis. Keeping broken modules in their own cache leaves the shared one
+    // holding only clean, reusable trees.
+    static ERROR_CACHE: OnceLock<Mutex<HashMap<u64, LoadedModule>>> = OnceLock::new();
+    let error_cache = ERROR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     let source = match document_overlay_get(path) {
         Some(buffered) => buffered,
@@ -21843,8 +21850,20 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
         source.hash(&mut hasher);
         hasher.finish()
     };
-    if let Some(loaded) = cache.lock().unwrap().get(&key) {
+    // A previously-recovered broken module is served from its own cache first,
+    // so it is rich-parsed (and its source leaked) once per distinct content.
+    if let Some(loaded) = error_cache.lock().unwrap().get(&key) {
         return Some(*loaded);
+    }
+
+    // The fast path: a clean module reuses the shared clean-parse cache, already
+    // lift-rewritten and leaked to `'static`.
+    if let Some((ast, text)) = crate::parse_clean_cached(&source) {
+        return Some(LoadedModule {
+            ast,
+            text,
+            parse_errors: &[],
+        });
     }
 
     // Renders an error at a source offset as `line N, column M: reason`.
@@ -21855,24 +21874,11 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
         format!("line {line}, column {column}: {reason}")
     }
 
-    // Cache miss: lex and parse. The source is leaked so the parsed tree (which
-    // borrows it) can live for the whole compilation. The token vector is
-    // transient — the AST holds `&'static str` slices into the source.
+    // Non-clean and not yet seen: lex and parse for diagnostics. The source is
+    // leaked so the parsed tree (which borrows it) can live for the whole
+    // compilation. The token vector is transient — the AST holds `&'static str`
+    // slices into the source.
     let source: &'static str = Box::leak(source.into_boxed_str());
-
-    // The fast path: a clean module (the overwhelming case — std parses clean
-    // on every compile) skips rich-error bookkeeping entirely; anything else
-    // falls through to the rich parse below for its diagnostics.
-    if let Some(mut root) = crate::parse_clean(source) {
-        crate::lift::rewrite_items(&mut root.0);
-        let loaded = LoadedModule {
-            ast: &*Box::leak(Box::new(root)),
-            text: source,
-            parse_errors: &[],
-        };
-        cache.lock().unwrap().insert(key, loaded);
-        return Some(loaded);
-    }
 
     let mut errors: Vec<String> = Vec::new();
     fn empty_ast() -> &'static crate::span::Spanned<NodeList<'static>> {
@@ -21916,7 +21922,7 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
         text: source,
         parse_errors: Box::leak(errors.into_boxed_slice()),
     };
-    cache.lock().unwrap().insert(key, loaded);
+    error_cache.lock().unwrap().insert(key, loaded);
     Some(loaded)
 }
 
@@ -23054,7 +23060,12 @@ pub fn analyze<'src>(
 ) -> Program<'src> {
     // `sources[0]` is the entry file; std modules are appended as they load.
     // `source_ranges` records the entity-id span each file's walk produced.
+    // `source_hashes` runs parallel to `sources`: the content hash of the text
+    // each source was COMPILED from (0 for a source that failed to load) — the
+    // watch loop's per-leg reuse verification compares against these, so reuse
+    // is decided by compiled content, never by mtime (backlog E12).
     let mut sources: Vec<PathBuf> = vec![entry_path.to_path_buf()];
+    let mut source_hashes: Vec<u64> = vec![crate::content_hash(entry_source)];
     let mut analyzer = Analyzer::new();
     // The std module inventory for the B4 import steer (module name, path) —
     // every layer's `*.vl` except the package surface itself. Recorded
@@ -23147,6 +23158,7 @@ pub fn analyze<'src>(
     }
     let lib_ast = lib_loaded.map(|loaded| loaded.ast);
     sources.push(PathBuf::from(&lib_path));
+    source_hashes.push(lib_loaded.map_or(0, |loaded| crate::content_hash(loaded.text)));
     let lib_source_id = SourceId((sources.len() - 1) as u32);
     let mut module_scopes: HashMap<&str, Id> = HashMap::new();
     // Each loaded module carries the `[derive(..)]` impls synthesized from its own
@@ -23337,6 +23349,7 @@ pub fn analyze<'src>(
             analyzer.attribute_new_diagnostics(diagnostics_before, SourceId(sources.len() as u32));
             let lib_ast = lib_loaded.ast;
             sources.push(PathBuf::from(&lib_path));
+            source_hashes.push(crate::content_hash(lib_loaded.text));
             let lib_source_id = SourceId((sources.len() - 1) as u32);
             analyzer
                 .package_of_source
@@ -23502,6 +23515,7 @@ pub fn analyze<'src>(
                         SourceId(sources.len() as u32),
                     );
                     sources.push(PathBuf::from(&module_path));
+                    source_hashes.push(crate::content_hash(loaded.text));
                     (
                         loaded.ast,
                         loaded.text,
@@ -24849,6 +24863,7 @@ pub fn analyze<'src>(
         variables: analyzer.variables,
         parameters: analyzer.parameters,
         sources,
+        source_hashes,
         source_ranges: std::mem::take(&mut analyzer.source_ranges),
         layer_platforms,
         diagnostic_sources,

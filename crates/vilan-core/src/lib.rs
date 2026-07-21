@@ -238,6 +238,72 @@ pub fn parse_clean(source: &str) -> Option<Spanned<node::NodeList<'_>>> {
     root
 }
 
+/// A process-global, content-addressed cache of clean parses, shared by every
+/// compile in the process — the CLI's long-lived `--watch` loop, the language
+/// server, the test harness. The key is a hash of the source; the value is the
+/// leaked `'static` AST (already lift-rewritten, so callers must not lift again)
+/// and its leaked source text. Returns `None` when the source is not perfectly
+/// clean, so the caller falls back to its rich-diagnostic pipeline — an erroring
+/// file is not the hot path.
+///
+/// This is the same mechanism [`analyzer::load_package_module`] uses to reuse
+/// `std` and package modules, lifted so the **entry** file — the one file the
+/// CLI parses directly — shares it too. Across watch rounds an unchanged leg's
+/// entry (and every unchanged module) is served from the cache instead of being
+/// re-lexed and re-parsed (backlog E12). Keying on content (never mtime) keeps
+/// it correct: an edited file hashes differently and is parsed afresh; only
+/// byte-identical content is reused. A cache hit returns the identical `'static`
+/// pointer it stored, which is how a test proves reuse without timing.
+pub fn parse_clean_cached(
+    source: &str,
+) -> Option<(&'static Spanned<node::NodeList<'static>>, &'static str)> {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<
+        Mutex<HashMap<u64, (&'static Spanned<node::NodeList<'static>>, &'static str)>>,
+    > = OnceLock::new();
+    // Content hashes known NOT to parse clean — so a broken file (an entry
+    // mid-edit under `--watch`, say) is leaked and re-parsed once per distinct
+    // content, not once per round.
+    static BROKEN: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let broken = BROKEN.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let key = content_hash(source);
+    if let Some(cached) = cache.lock().unwrap().get(&key) {
+        return Some(*cached);
+    }
+    if broken.lock().unwrap().contains(&key) {
+        return None;
+    }
+
+    // Cache miss: leak the source so the parsed tree (which borrows it) can live
+    // for the whole process, then parse. A non-clean source yields `None` — the
+    // caller re-parses it for real diagnostics (leaking the source first mirrors
+    // `load_package_module`, whose rich path also reuses the leaked text).
+    let leaked: &'static str = Box::leak(source.to_string().into_boxed_str());
+    let Some(mut root) = parse_clean(leaked) else {
+        broken.lock().unwrap().insert(key);
+        return None;
+    };
+    lift::rewrite_items(&mut root.0);
+    let leaked_root: &'static Spanned<node::NodeList<'static>> = Box::leak(Box::new(root));
+    cache.lock().unwrap().insert(key, (leaked_root, leaked));
+    Some((leaked_root, leaked))
+}
+
+/// The content hash the compiler keys its caches and source fingerprints on —
+/// one definition, so the parse cache and the watch loop's per-leg source
+/// verification can never disagree about what "same content" means.
+pub fn content_hash(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Lex, parse, and fully analyze a source string. The source must already be
 /// leaked to `'static` so the returned `Program` (which borrows it) can outlive
 /// this call — the front-end that owns the document lifecycle does the leak.

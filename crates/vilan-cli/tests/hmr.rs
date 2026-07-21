@@ -425,3 +425,191 @@ fn a_server_edit_restarts_quietly_and_a_shared_edit_swaps() {
     let _ = std::fs::remove_dir_all(&dir);
     outcome.unwrap();
 }
+
+/// The per-leg skip (backlog E12, half b): a client-only edit recompiles the
+/// client and SKIPS the server — the server's `.vl` sources are unchanged, so
+/// its previous artifact is reused and the round prints `hmr: skipped server
+/// (sources unchanged)` — while the served client bundle still reflects the
+/// edit (the parse cache is content-keyed, never stale). Same single-watcher,
+/// quick-exit-legs hygiene as the matrix test.
+#[test]
+fn a_client_only_edit_skips_the_server_and_still_updates_the_client() {
+    let dir = temp_project("skip");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\n\n[entry.client]\ntarget = \"browser\"\n\n[entry.server]\n",
+    );
+    write(
+        &dir,
+        "src/client.vl",
+        &client_source("clientmark_one", "x1"),
+    );
+    write(
+        &dir,
+        "src/server.vl",
+        "import std::print;\n\nfun main() {\n\tprint(\"server-booted\");\n}\n",
+    );
+
+    let mut watcher = Command::new(env!("CARGO_BIN_EXE_vilan"))
+        .args(["run", "--watch", "--hmr-port", "0", dir.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn run --watch");
+
+    let lines = drain_stdout(watcher.stdout.take().unwrap());
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let deadline = Duration::from_secs(20);
+        let port = wait_for_port(&lines, deadline)
+            .expect("the CLI should announce `hmr: dev channel on 127.0.0.1:<port>`");
+
+        // Round 1 compiles both legs and boots the server; a margin then ensures
+        // the watcher's baseline snapshot precedes the edit.
+        assert!(
+            wait_for_file(&dir.join("dist/client.js"), deadline),
+            "round 1 should have written dist/client.js"
+        );
+        assert!(
+            wait_for_line(&lines, "server-booted", deadline),
+            "the server leg should have booted in round 1"
+        );
+        std::thread::sleep(Duration::from_millis(800));
+
+        let mut sse = SseClient::connect(port);
+        let bundle_before =
+            String::from_utf8_lossy(&http_get(port, "/bundle/client.js")).into_owned();
+        assert!(
+            bundle_before.contains("clientmark_one"),
+            "the round-1 client bundle carries the original marker"
+        );
+        let server_before = std::fs::read(dir.join("dist/server.js")).expect("dist/server.js");
+
+        // A client-only edit: the client bundle changes, the server's sources do
+        // not — so the round SKIPS the server (prints the skip line) and pushes a
+        // `swap` for the client.
+        write(
+            &dir,
+            "src/client.vl",
+            &client_source("clientmark_two", "x1"),
+        );
+        assert!(
+            wait_for_line(&lines, "hmr: skipped server (sources unchanged)", deadline),
+            "a client-only edit must skip recompiling the server"
+        );
+        sse.expect_kind("swap", deadline);
+
+        // The served client bundle reflects the edit — the content-keyed cache
+        // returns the NEW parse, never the stale one.
+        let bundle_after =
+            String::from_utf8_lossy(&http_get(port, "/bundle/client.js")).into_owned();
+        assert!(
+            bundle_after.contains("clientmark_two"),
+            "the served client bundle must reflect the edit:\n{bundle_after}"
+        );
+        assert!(
+            !bundle_after.contains("clientmark_one"),
+            "the stale client content must be gone"
+        );
+
+        // Reuse fidelity: the skipped server leg's dist bytes are the round-1
+        // artifact, untouched by the skip round.
+        let server_after = std::fs::read(dir.join("dist/server.js")).expect("dist/server.js");
+        assert_eq!(
+            server_after, server_before,
+            "a skipped leg's dist bytes must be exactly the reused artifact"
+        );
+        server_after
+    }));
+
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+
+    // The cache-hit A/B (review finding, 2026-07-21): after a round that went
+    // THROUGH the caches (round 2 skipped the server; the client compiled via
+    // parse-cache hits for std), a fresh one-shot build of the same sources
+    // must reproduce the reused server bundle byte-for-byte.
+    if let Ok(reused) = &outcome {
+        let output = Command::new(env!("CARGO_BIN_EXE_vilan"))
+            .args(["build", dir.to_str().unwrap()])
+            .output()
+            .expect("run one-shot build");
+        assert!(
+            output.status.success(),
+            "the one-shot rebuild should succeed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let fresh = std::fs::read(dir.join("dist/server.js")).expect("dist/server.js");
+        assert_eq!(
+            &fresh, reused,
+            "a one-shot build must equal the reused (cache-hit round) artifact"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap();
+}
+
+/// A/B (backlog E12): the content-addressed parse cache and the watch path must
+/// not change a byte. A one-shot `vilan build` and a `run --watch` round compile
+/// the SAME sources; the server leg (a node bundle, uninstrumented in both) must
+/// come out byte-identical — proving the caching/skip machinery is transparent
+/// to emitted output, the same guarantee the corpus gate makes for one-shot.
+#[test]
+fn a_watch_round_server_bundle_equals_a_one_shot_build() {
+    let dir = temp_project("ab");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\n\n[entry.client]\ntarget = \"browser\"\n\n[entry.server]\n",
+    );
+    write(&dir, "src/client.vl", &client_source("ab_client", "x1"));
+    write(
+        &dir,
+        "src/server.vl",
+        "import std::print;\n\nfun main() {\n\tprint(\"server-booted\");\n}\n",
+    );
+
+    // One-shot build (a fresh process, cold cache) → capture the server bundle.
+    let status = Command::new(env!("CARGO_BIN_EXE_vilan"))
+        .args(["build", dir.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run vilan build");
+    assert!(status.success(), "the one-shot build should succeed");
+    let one_shot_server =
+        std::fs::read(dir.join("dist/server.js")).expect("build wrote dist/server.js");
+
+    // A watch round rewrites dist/ from the same sources; its (uninstrumented)
+    // server bundle must match byte-for-byte.
+    let mut watcher = Command::new(env!("CARGO_BIN_EXE_vilan"))
+        .args(["run", "--watch", "--hmr-port", "0", dir.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn run --watch");
+    let lines = drain_stdout(watcher.stdout.take().unwrap());
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let deadline = Duration::from_secs(20);
+        wait_for_port(&lines, deadline).expect("the dev channel should announce its port");
+        // The server boots only after the round has written every dist bundle.
+        assert!(
+            wait_for_line(&lines, "server-booted", deadline),
+            "round 1 should compile and boot the server"
+        );
+        let watched_server = std::fs::read(dir.join("dist/server.js"))
+            .expect("the watch round wrote dist/server.js");
+        assert_eq!(
+            one_shot_server, watched_server,
+            "a watch round's server bundle must be byte-identical to a one-shot build's"
+        );
+    }));
+
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap();
+}
