@@ -1,9 +1,19 @@
-//! End-to-end test for the A13 dev channel (hmr.md slice S1): `run --watch` on
-//! a workspace with a browser leg stands up an SSE dev channel, and each watch
-//! round pushes the byte-diff verdict to connected browsers — `swap` on a code
-//! change, `css` on a stylesheet-only change, `error` on a compile failure (with
-//! the next good round clearing it) — while the artifact routes serve the
-//! shim-instrumented bundle and the CSS sidecar.
+//! End-to-end tests for the A13 dev channel and its full-stack coordination
+//! (hmr.md slices S1 and S3).
+//!
+//! `the_dev_channel_drives_the_watch_round` (S1): `run --watch` on a workspace
+//! with a browser leg stands up an SSE dev channel, and each watch round pushes
+//! the byte-diff verdict to connected browsers — `swap` on a code change, `css`
+//! on a stylesheet-only change, `error` on a compile failure (with the next good
+//! round clearing it) — while the artifact routes serve the shim-instrumented
+//! bundle and the CSS sidecar.
+//!
+//! `a_server_edit_restarts_quietly_and_a_shared_edit_swaps` (S3): the two rows of
+//! the §6 coordination matrix the S1 test doesn't reach — a **server-only** edit
+//! restarts the Node child (witnessed by its per-source boot marker on the
+//! watcher's captured stdout) while pushing *nothing* to the browser, and a
+//! **shared** edit (a `common` module both legs embed) both restarts the server
+//! and pushes a `swap`.
 //!
 //! House process hygiene (the watcher never exits on its own): the legs are
 //! quick-exit (the node server prints and returns), so killing the watcher at
@@ -12,7 +22,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -121,6 +131,26 @@ impl SseClient {
         }
         panic!("did not observe a `{expected}` event within the deadline");
     }
+
+    /// Asserts that none of the `forbidden` event kinds arrive within `window`.
+    /// Other kinds (the connect-time `connected`) are ignored — this is the
+    /// server-only round's "the browser is told nothing" assertion. The push (if
+    /// any) is issued in the same watch round that restarts the Node child, so a
+    /// short window after the restart evidence is enough: a spurious event would
+    /// already be buffered on the socket.
+    fn assert_no(&mut self, forbidden: &[&str], window: Duration) {
+        let start = Instant::now();
+        while start.elapsed() < window {
+            match self.next_kind(window - start.elapsed()) {
+                Some(kind) => assert!(
+                    !forbidden.contains(&kind.as_str()),
+                    "a `{kind}` event was pushed during the quiet window \
+                     (a server-only round must be silent)"
+                ),
+                None => break,
+            }
+        }
+    }
 }
 
 /// The `"kind"` field of a tiny event JSON body, by hand (no JSON crate).
@@ -162,6 +192,55 @@ fn wait_for_file(path: &Path, deadline: Duration) -> bool {
     false
 }
 
+/// Drains the watcher's stdout on a thread, forwarding every line to a channel.
+/// The Node server's `print` output flows here too — `spawn_node` gives the child
+/// no stdio of its own, so it inherits the watcher's stdout (the piped fd) — which
+/// is how the coordination-matrix test witnesses a server restart: a per-source
+/// boot marker printed by the freshly spawned child.
+fn drain_stdout(stdout: ChildStdout) -> mpsc::Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = sender.send(line);
+        }
+    });
+    receiver
+}
+
+/// Waits (bounded) for the activation line and returns its announced port.
+fn wait_for_port(lines: &mpsc::Receiver<String>, deadline: Duration) -> Option<u16> {
+    let start = Instant::now();
+    while start.elapsed() < deadline {
+        match lines.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                if let Some(port) = parse_port(&line) {
+                    return Some(port);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+    None
+}
+
+/// Waits (bounded) for a stdout line containing `needle` (a server boot marker).
+fn wait_for_line(lines: &mpsc::Receiver<String>, needle: &str, deadline: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < deadline {
+        match lines.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                if line.contains(needle) {
+                    return true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+    false
+}
+
 #[test]
 fn the_dev_channel_drives_the_watch_round() {
     let dir = temp_project("channel");
@@ -185,22 +264,13 @@ fn the_dev_channel_drives_the_watch_round() {
         .spawn()
         .expect("spawn run --watch");
 
-    // Drain stdout on a thread (so the pipe never fills), forwarding the port.
-    let stdout = watcher.stdout.take().unwrap();
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(port) = parse_port(&line) {
-                let _ = sender.send(port);
-            }
-        }
-    });
+    // Drain stdout on a thread (so the pipe never fills), forwarding every line.
+    let lines = drain_stdout(watcher.stdout.take().unwrap());
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let port = receiver
-            .recv_timeout(Duration::from_secs(20))
-            .expect("the CLI should announce `hmr: dev channel on 127.0.0.1:<port>`");
         let deadline = Duration::from_secs(20);
+        let port = wait_for_port(&lines, deadline)
+            .expect("the CLI should announce `hmr: dev channel on 127.0.0.1:<port>`");
 
         // Round 1 has run once `dist/client.css` lands; a margin ensures the
         // watcher's baseline snapshot is taken before the first edit (so the
@@ -245,6 +315,108 @@ fn the_dev_channel_drives_the_watch_round() {
         assert!(
             traversal.is_empty(),
             "a traversal path must not serve any bytes"
+        );
+    }));
+
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap();
+}
+
+/// A `common` library both legs import (`pkg::common::banner`). Editing it
+/// changes both bundles — the shared-edit row of the §6 matrix.
+fn common_source(banner: &str) -> String {
+    format!("fun banner(): str {{\n\t\"{banner}\"\n}}\n")
+}
+
+/// A browser client that embeds `banner()` (so a shared edit changes this
+/// bundle) and emits one CSS line (so the sidecar exists but a server-only edit
+/// leaves it untouched — the "no css either" half of the quiet assertion).
+fn shared_client_source(css_marker: &str) -> String {
+    format!(
+        "import std::print;\nimport std::asset::emit;\nimport pkg::common::banner;\n\n\
+         fun styles(): i32 {{\n\temit(\"css\", \".{css_marker}{{color:red}}\");\n\t1\n}}\n\n\
+         let _s = const styles();\n\nfun main() {{\n\tprint(banner());\n}}\n"
+    )
+}
+
+/// A server that prints a per-source boot marker AND the shared banner, so the
+/// watcher's captured stdout witnesses each restart: a server-only edit bumps
+/// the marker; a shared edit bumps the banner.
+fn shared_server_source(server_marker: &str) -> String {
+    format!(
+        "import std::print;\nimport pkg::common::banner;\n\n\
+         fun main() {{\n\tprint(\"server-up {server_marker} banner=\" + banner());\n}}\n"
+    )
+}
+
+/// The two §6 coordination-matrix rows the S1 e2e doesn't reach (hmr.md §§6, 11
+/// S3): a server-only edit restarts the Node child while pushing nothing to the
+/// browser, and a shared edit (a `common` module both legs embed) restarts the
+/// server AND pushes a `swap`.
+#[test]
+fn a_server_edit_restarts_quietly_and_a_shared_edit_swaps() {
+    let dir = temp_project("matrix");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\n\n[entry.client]\ntarget = \"browser\"\n\n[entry.server]\n",
+    );
+    write(&dir, "src/common.vl", &common_source("BANNER_ONE"));
+    write(&dir, "src/client.vl", &shared_client_source("x1"));
+    write(&dir, "src/server.vl", &shared_server_source("SRVMARK_ONE"));
+
+    let mut watcher = Command::new(env!("CARGO_BIN_EXE_vilan"))
+        .args(["run", "--watch", "--hmr-port", "0", dir.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn run --watch");
+
+    let lines = drain_stdout(watcher.stdout.take().unwrap());
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let deadline = Duration::from_secs(20);
+        let port = wait_for_port(&lines, deadline)
+            .expect("the CLI should announce `hmr: dev channel on 127.0.0.1:<port>`");
+
+        // Round 1 is done once dist lands and the server has printed its boot
+        // marker; a margin then ensures the watcher's baseline snapshot is taken
+        // before the first edit (so the edit registers as a change).
+        assert!(
+            wait_for_file(&dir.join("dist/client.js"), deadline),
+            "round 1 should have written dist/client.js"
+        );
+        assert!(
+            wait_for_line(&lines, "SRVMARK_ONE", deadline),
+            "the server leg should have booted in round 1"
+        );
+        std::thread::sleep(Duration::from_millis(800));
+
+        let mut sse = SseClient::connect(port);
+
+        // Row 1 — server-only edit: the server bundle changes, the client bundle
+        // does not. The Node child restarts (its new boot marker appears on
+        // stdout) and NO `swap`/`css` reaches the connected browser — K6
+        // reconnect carries it across the restart (hmr.md §6). Observing the
+        // restart first makes the quiet window deterministic: the round's push
+        // (here, none) is issued before the child it spawned can print.
+        write(&dir, "src/server.vl", &shared_server_source("SRVMARK_TWO"));
+        assert!(
+            wait_for_line(&lines, "SRVMARK_TWO", deadline),
+            "a server-only edit should restart the Node child"
+        );
+        sse.assert_no(&["swap", "css"], Duration::from_millis(2000));
+
+        // Row 2 — shared edit: a change to `common.vl`, which both legs embed.
+        // The server restarts (the banner it prints changes) AND a `swap` reaches
+        // the browser (its bundle changed too, so the byte-diff classifies both).
+        write(&dir, "src/common.vl", &common_source("BANNER_TWO"));
+        sse.expect_kind("swap", deadline);
+        assert!(
+            wait_for_line(&lines, "banner=BANNER_TWO", deadline),
+            "a shared edit should restart the Node child with the new shared code"
         );
     }));
 

@@ -211,6 +211,15 @@ builds. Three functions, each a no-op when `window.__VILAN_HMR__` is absent
   first boot, or plain reload — and is **non-destructive** (a taken value
   stays stashed, matching Vite's persistent `hot.data`; settled at S2b).
 
+  > **Amendment (2026-07-21, S3 review):** the "fingerprint miss" half is
+  > aspirational for the *manual* stash — user-stash entries carry no
+  > fingerprint in v1 (only compiler-managed binding seeds do), so a type
+  > change at a key returns the old value in its old shape. Bounded: the
+  > transfer bound keeps both sides plain data — the same unchecked contract
+  > as Vite's `hot.data`, documented as such in `docs/std/dev.md`. Threading
+  > per-instantiation fingerprints through `stash`/`take` joins the recorded
+  > refinements.
+
 Severable: if review wants a thinner v1, `stash`/`take` cut cleanly —
 `on_teardown` should stay (it closes a recorded hole).
 
@@ -283,6 +292,12 @@ Per watch round, after rebuilding all legs (browser legs first, as today):
   reports as today and the running app keeps its last good build — the
   standard HMR contract. The next good round's `swap`/`css` event clears the
   overlay.
+
+> **Amendment (2026-07-21, S3):** this section assumes exactly one Node leg —
+> which is also `vilan run`'s own standing assumption (a 2+-node workspace
+> errors on every run path, HMR or not; kolt's `probe` diagnostic leg hit it
+> live). Not an HMR gap but a `run` selection gap; recorded as backlog A15
+> (pick the node entry to run in a multi-node workspace).
 
 ## 7. Prior art — the final pass over Vite, React, and Solid
 
@@ -457,7 +472,18 @@ three most-worn paths in the industry ended up.
    precedent); real-browser behavior (blob import, EventSource swap,
    scroll/focus) is exercised via the node stub only — S3's kolt proof is
    the live verification.
-4. **S3 — full-stack proof**: the §6 coordination matrix pinned (server-only /
-   client-only / shared-edit / css-only / compile-error), kolt as the
-   real-world exercise. Docs: the tour's dev-loop page + `run --watch` reference;
-   `documentation.md`'s gate applies.
+4. **S3 — SHIPPED 2026-07-21, A13 COMPLETE.** The §6 matrix fully pinned:
+   server-only → restart + provably quiet channel, shared-edit → restart +
+   swap (`a_server_edit_restarts_quietly_and_a_shared_edit_swaps`; the other
+   three rows were S1's e2e), deterministic 5/5. Kolt live proof: real
+   `run --watch` on the real app — client edit → `swap` with S2a
+   instrumentation in the served bundle (13 adopts vs 0 in a plain build),
+   server edit → restart with the SSE channel surviving, tree restored
+   hash-identical (a temporary `probe`-leg drop was needed — the A15
+   finding, §6 amendment). Docs same commit: `guide/dev-loop.md` +
+   `std/dev.md` (with the honest manual-stash caveat — the §4 S3 amendment)
+   + sidebar, all examples gate-compiled. **Remaining residues live in the
+   S1/S2 entries and the §4/§5/§6 amendments; the one deliberate
+   verification gap is a live-browser session (blob import, EventSource,
+   scroll/focus restore run under the node stub only — first real-browser
+   use is the confirmation).**

@@ -25,6 +25,7 @@
 - [Services & RPC](guide/services.md)
 - [Persistence and the server](guide/persistence.md)
 - [A full-stack walkthrough](guide/walkthrough.md)
+- [The dev loop](guide/dev-loop.md)
 
 # The std reference
 
@@ -41,6 +42,7 @@
 - [Style](std/style.md)
 - [RPC](std/rpc.md)
 - [Browser modules](std/browser.md)
+- [Dev / HMR](std/dev.md)
 - [Process modules](std/process.md)
 - [Misc](std/misc.md)
 
