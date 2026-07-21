@@ -28,15 +28,18 @@ use std::sync::{Arc, Mutex};
 pub const DEFAULT_HMR_PORT: u16 = 35917;
 
 /// The dev-runtime shim, prepended to each browser leg's bundle when HMR is
-/// active. Its `__VILAN_HMR_PORT__` / `__VILAN_HMR_VERSION__` placeholders are
-/// substituted at write time by [`instrument`].
+/// active. Its `__VILAN_HMR_PORT__` / `__VILAN_HMR_VERSION__` /
+/// `__VILAN_HMR_BUNDLE__` placeholders are substituted at write time by
+/// [`instrument`].
 const SHIM: &str = include_str!("hmr_shim.js");
 
-/// One browser leg's bundle, with the shim's port and version embedded.
-pub fn instrument(bundle: &str, port: u16, version: u64) -> String {
+/// One browser leg's bundle, with the shim's port, version, and own bundle name
+/// embedded (the last so a `swap` event can fetch `/bundle/<leg>.js`, hmr.md §3).
+pub fn instrument(bundle: &str, port: u16, version: u64, leg: &str) -> String {
     let shim = SHIM
         .replace("__VILAN_HMR_PORT__", &port.to_string())
-        .replace("__VILAN_HMR_VERSION__", &version.to_string());
+        .replace("__VILAN_HMR_VERSION__", &version.to_string())
+        .replace("__VILAN_HMR_BUNDLE__", leg);
     format!("{shim}\n{bundle}")
 }
 

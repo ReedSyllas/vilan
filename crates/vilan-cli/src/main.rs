@@ -495,7 +495,7 @@ fn hmr_round(
     for leg in &next {
         let bundle_path = dist.join(format!("{}.js", leg.name));
         let contents = if leg.is_browser {
-            hmr::instrument(&leg.bundle, channel.port(), version)
+            hmr::instrument(&leg.bundle, channel.port(), version, &leg.name)
         } else {
             leg.bundle.clone()
         };

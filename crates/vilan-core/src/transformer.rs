@@ -136,6 +136,7 @@ fn unescape_string(raw: &str) -> Cow<'_, str> {
 /// one marks its helper for emission. Returns the canonical `'static` name.
 fn extern_helper(symbol: &str) -> Option<&'static str> {
     const EXTERN_HELPERS: &[&str] = &[
+        "__hmr_active",
         "__hmac_sha512",
         "__pbkdf2_sha512",
         "__random_bytes",
@@ -265,6 +266,14 @@ fn helper_source(name: &str) -> &'static str {
         // Router glue (std::router): `location.pathname` is a global property,
         // which the function-extern form can't address directly.
         "__router_path" => "function __router_path() {\n\treturn location.pathname;\n}",
+        // HMR activity guard (std::dev, `hmr.md` §4/§5): true only when a `run
+        // --watch` shim installed its `window.__VILAN_HMR__` singleton. A
+        // self-contained `typeof` test (safe with no shim, in any host), so the
+        // std hooks and `dev::*` calls that guard on it are inert in production
+        // and under the interpreter (whose `__hmr_active` arm returns false).
+        "__hmr_active" => {
+            "function __hmr_active() {\n\treturn typeof globalThis.__VILAN_HMR__ !== \"undefined\";\n}"
+        }
         // SQLite glue (std::db): parameter spreads and row/column reads the
         // extern binding forms can't express directly.
         "__db_run" => {
@@ -5325,6 +5334,7 @@ const RESERVED_NAMES: &[&str] = &[
     "__nursery_is_cancel",
     "__Nursery",
     "__sleep",
+    "__hmr_active",
 ];
 
 /// The free identifiers a program's `[extern]`s introduce — an imported symbol

@@ -125,12 +125,16 @@ fn every_corpus_golden_is_byte_identical() {
 }
 
 /// The equivalence-gate rationale for HMR (A13, `hmr.md` §5): the `build` path
-/// never sets `BuildOptions.hmr`, so no corpus golden may carry `__hmr_`
-/// instrumentation. A cheap read-only sweep of the committed goldens — instrumentation
-/// is a `run --watch`-only concern and must never reach a built bundle.
+/// never sets `BuildOptions.hmr`, so no corpus golden may carry the watch-only
+/// instrumentation (`__hmr_adopt*` / `__hmr_expose`). The runtime *guard*
+/// (`__hmr_active`) and the guarded std hooks (`__hmr_register_teardown` &c.)
+/// are deliberately NOT swept: they appear in plain builds of programs using
+/// `mount_root`/`connect_socket`/`std::dev` and no-op without a shim — a
+/// future corpus golden may legitimately carry them.
 #[test]
 fn no_corpus_golden_carries_hmr_instrumentation() {
     let corpus = corpus_dir();
+    let watch_only = ["__hmr_adopt", "__hmr_expose"];
     let mut checked = 0usize;
     for entry in std::fs::read_dir(&corpus).expect("corpus directory") {
         let path = entry.expect("corpus entry").path();
@@ -138,10 +142,12 @@ fn no_corpus_golden_carries_hmr_instrumentation() {
             continue;
         }
         let golden = std::fs::read_to_string(&path).expect("read golden");
-        assert!(
-            !golden.contains("__hmr_"),
-            "{path:?} carries HMR instrumentation but was built off the `build` path"
-        );
+        for symbol in watch_only {
+            assert!(
+                !golden.contains(symbol),
+                "{path:?} carries `{symbol}` but was built off the `build` path"
+            );
+        }
         checked += 1;
     }
     assert!(checked > 60, "suspiciously few goldens swept: {checked}");

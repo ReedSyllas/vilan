@@ -26,6 +26,7 @@ import pkg::shared::Shared;
 import pkg::style::Style;
 import pkg::compare::PartialEq;
 import pkg::option::Option::{ self, Some, None };
+import pkg::dev::{ hmr_active, on_teardown };
 
 /// A handle to a DOM element under construction — nothing more: ownership is
 /// the enclosing boundary's job.
@@ -350,5 +351,16 @@ fun mount_root(id: str, body: (sync || View) context owner_scope): Owner {
 	// mount settle as one wave instead of notifying per-`set`.
 	let (built, root) = turn(FlushPolicy::AtSuspension, || comp(body));
 	mount(id, built);
+	// HMR (`hmr.md` §3, step 2): before the next bundle mounts, dispose the root
+	// owner (so every subscription under it dies) and clear the container element
+	// (so the old DOM is gone). A no-op without a dev shim — the closure isn't
+	// even built in a production run.
+	if hmr_active() {
+		let element = get_element_by_id(id);
+		on_teardown(|| {
+			root.dispose();
+			element.clear();
+		});
+	}
 	root
 }

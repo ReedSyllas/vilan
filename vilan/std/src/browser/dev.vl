@@ -1,0 +1,64 @@
+// `std::dev` — the hot-module-replacement app surface (`hmr.md` §4). Every hook
+// here is a no-op unless a `vilan run --watch` round installed its dev shim (the
+// `window.__VILAN_HMR__` singleton), so importing this module costs nothing in a
+// production build. Browser-only: HMR swaps the browser leg in place; the Node
+// leg restarts, so its state has no swap to survive.
+//
+// `hmr_active` binds the `__hmr_active` runtime helper — a self-contained
+// `typeof` check the transformer emits (and the interpreter answers `false`), so
+// it is safe to call in any build. Every other `__hmr_*` is a shim-provided host
+// global, reached only behind an `hmr_active()` guard, so a shim-less build never
+// evaluates one.
+
+import pkg::option::Option::{ self, Some, None };
+
+/// True only while a dev shim is present — i.e. inside a `run --watch` browser
+/// round. Guards every other hook so they are inert without a shim.
+[extern("__hmr_active")]
+external fun hmr_active(): bool;
+
+/// Join the current swap's teardown list (a shim global). Runs, and is cleared,
+/// once before the next bundle evaluates.
+[extern("__hmr_register_teardown")]
+external fun hmr_register_teardown(cleanup: || void): void;
+
+/// Stash `value` under `key` for the next swap to recover (a shim global; the
+/// shim namespaces the key so it can never collide with a binding key).
+[extern("__hmr_stash")]
+external fun hmr_stash<T>(key: str, value: T): void;
+
+/// Recover a stashed value. The shim returns the `Option` runtime encoding
+/// directly — `[0, value]` for a hit, `[1]` for a miss — so this is an
+/// `Option<T>` with no adaptation (a shim global).
+[extern("__hmr_take")]
+external fun hmr_take<T>(key: str): Option<T>;
+
+/// Register a cleanup to run before the next hot swap re-evaluates the bundle
+/// (`hmr.md` §4) — the sanctioned patch for state the swap can't see on its own
+/// (a raw interval, a bare task). A no-op with no dev shim.
+fun on_teardown(cleanup: || void) {
+	if hmr_active() {
+		hmr_register_teardown(cleanup);
+	}
+}
+
+/// Carry a value across the next hot swap under `key` (`hmr.md` §4 — Vite's
+/// `hot.data`). `T` must be transferable-as-value (plain data): the call site is
+/// checked, so a closure, view, resource, or reactive cell is a compile error,
+/// not a value silently smuggled across code. A no-op with no dev shim.
+fun stash<T>(key: str, value: T) {
+	if hmr_active() {
+		hmr_stash(key, value);
+	}
+}
+
+/// Recover a value stashed before the last hot swap, or `None` on first boot, a
+/// fingerprint miss, or a plain reload (`hmr.md` §4). Same transfer bound on `T`
+/// as `stash`. A no-op (`None`) with no dev shim.
+fun take<T>(key: str): Option<T> {
+	if hmr_active() {
+		hmr_take(key)
+	} else {
+		None
+	}
+}

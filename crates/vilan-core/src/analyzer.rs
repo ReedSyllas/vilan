@@ -1479,6 +1479,13 @@ pub struct Analyzer<'src> {
     result_enum_id: Option<Id>,
     try_trait_id: Option<Id>,
     lift_trait_id: Option<Id>,
+    // The std `dev::stash`/`dev::take` functions (`hmr.md` §4), resolved by
+    // identity from `std::dev` after loading. Their generic `T` carries a value
+    // across a hot swap, so the call site is checked against the transfer bound
+    // (`transferable_as_value`) — keyed on the real std fns, never a user's
+    // same-named function. `None` until `std::dev` is reachable (import-only).
+    hmr_stash_fn_id: Option<Id>,
+    hmr_take_fn_id: Option<Id>,
     // The std `Drop` trait (destruction.md §5), resolved by identity from
     // `std::drop` after loading — so the `Drop`-on-data and async-drop rejects
     // key on the real std entity, never a user-defined `trait Drop` of the same
@@ -1815,6 +1822,8 @@ impl<'src> Analyzer<'src> {
             result_enum_id: None,
             try_trait_id: None,
             lift_trait_id: None,
+            hmr_stash_fn_id: None,
+            hmr_take_fn_id: None,
             drop_trait_id: None,
             drop_fn_id: None,
             lift_binder_stack: Vec::new(),
@@ -4017,6 +4026,132 @@ impl<'src> Analyzer<'src> {
                 });
             }
         }
+    }
+
+    /// The HMR transfer bound (`hmr.md` §4): `dev::stash`/`dev::take` carry a
+    /// value across a hot swap in-heap, so their generic `T` must be
+    /// transferable-as-value (plain data) — the same boundary a module binding's
+    /// transfer form draws. The concrete `T` is known only at the call site, so
+    /// the check lives here: a `stash` argument's type, and a `take` call's
+    /// `Option<T>` element, are each classified, and a closure / view / resource /
+    /// reactive cell is rejected. Inert unless `std::dev` is loaded (the ids are
+    /// `None`), so a program that never touches HMR pays nothing.
+    fn check_hmr_transfer_bounds(&mut self) {
+        if self.hmr_stash_fn_id.is_none() && self.hmr_take_fn_id.is_none() {
+            return;
+        }
+        // Collected read-only; the `&mut self` inference/classification runs
+        // after, as in `check_resource_any_coercion`. A `stash` site carries the
+        // value argument (whose type IS `T`); a `take` site carries the call
+        // (whose resolved type is `Option<T>`).
+        let mut stash_value_ids: Vec<Id> = Vec::new();
+        let mut take_call_ids: HashSet<Id> = HashSet::new();
+        for expr in self.expr_id_to_expr_map.values() {
+            let Expr::Call(call_id) = expr else {
+                continue;
+            };
+            let Some(function_call) = self.function_calls.get(call_id) else {
+                continue;
+            };
+            let callee_id = match self.expr_id_to_expr_map.get(&function_call.subject_id) {
+                Some(Expr::Local(callee_id)) => *callee_id,
+                _ => continue,
+            };
+            if Some(callee_id) == self.hmr_stash_fn_id {
+                if let Some(value_id) = function_call.argument_ids.get(1).copied() {
+                    stash_value_ids.push(value_id);
+                }
+            } else if Some(callee_id) == self.hmr_take_fn_id {
+                take_call_ids.insert(*call_id);
+            }
+        }
+        // A `stash` value's type is self-determined (a literal, constructor, or
+        // place), so re-inferring it against no expectation yields `T` directly —
+        // the generic argument isn't recorded on the call when it was inferred,
+        // and a bare closure/call argument carries no stored result type.
+        for value_id in stash_value_ids {
+            let inferred = self.infer_type(value_id, &Type::Unknown, &SubstitutionContext::new());
+            if matches!(inferred, Type::Unresolved | Type::Unknown) {
+                continue;
+            }
+            let type_id = inferred.get_type_id(self);
+            if !self.transferable_as_value(type_id) {
+                self.report_hmr_transfer(value_id, type_id);
+            }
+        }
+        // A `take`'s `T` flows from its expected type (context), so it is read off
+        // the binding the call initializes — `let x: Option<T> = dev::take(..)`,
+        // the realistic place a caller pins the element type. The bare call carries
+        // no stored result type, and an unconstrained `T` (a `take` whose element
+        // never resolves concretely) stays generic and is left alone, so a good
+        // `take` never false-rejects.
+        if !take_call_ids.is_empty() {
+            let mut take_sites: Vec<(Id, TypeId)> = Vec::new();
+            for variable in self.variables.values() {
+                let Some(initial) = variable.initial else {
+                    continue;
+                };
+                if !take_call_ids.contains(&initial) {
+                    continue;
+                }
+                let element = match variable.type_id.get_type(self) {
+                    Type::Enum(id, arguments)
+                        if Some(id) == self.option_enum_id && arguments.len() == 1 =>
+                    {
+                        arguments[0]
+                    }
+                    _ => continue,
+                };
+                if matches!(
+                    element.get_type(self),
+                    Type::Unresolved | Type::Unknown | Type::Generic(_)
+                ) {
+                    continue;
+                }
+                take_sites.push((initial, element));
+            }
+            for (call_id, element) in take_sites {
+                if !self.transferable_as_value(element) {
+                    self.report_hmr_transfer(call_id, element);
+                }
+            }
+        }
+    }
+
+    /// The shared spanned diagnostic for a value that cannot cross a hot swap
+    /// (`hmr.md` §4), steering to the transfer rule. An unbounded generic gets
+    /// its own wording: the check fires at the lexical `dev::stash`/`take`
+    /// site, so a generic wrapper is rejected even if every caller passes
+    /// plain data — the message must name that cause, not accuse the value
+    /// (per-instantiation checking is the recorded refinement, hmr.md §11 S2).
+    fn report_hmr_transfer(&mut self, site: Id, type_id: TypeId) {
+        let resolved = type_id.get_type(self);
+        let rendered = self.pretty_print_type(&resolved, &HashMap::new());
+        let span = **self.span_map.get(&site).unwrap_or(&&EMPTY_SPAN);
+        let msg = if matches!(resolved, Type::Generic(_)) {
+            format!(
+                "`{rendered}` is a generic type parameter here — `dev::stash`/`dev::take` \
+                 need a concrete plain-data type at the call they appear in, and there is \
+                 no bound that grants transferability; call them with concrete arguments \
+                 (inline the stash where the type is known)"
+            )
+        } else {
+            format!(
+                "`{rendered}` cannot cross a hot swap — a closure, view, resource, or \
+                 reactive cell (`Signal`/`Shared`) carries code or identity the new bundle \
+                 cannot adopt; stash only plain data"
+            )
+        };
+        self.diagnostics.push(Error {
+            note: Some(crate::error::Note::here(
+                span,
+                "only plain data transfers — scalars, `str`, lists, options, and \
+                 structs/enums built from them"
+                    .to_string(),
+            )),
+            span,
+            msg,
+        });
     }
 
     /// Whether a parameter's declared type is exactly `any` (R12's target slot).
@@ -23809,6 +23944,21 @@ pub fn analyze<'src>(
             .get(scope_id)
             .and_then(|scope| scope.name_to_id_map.get("Lift").copied())
     });
+    // The std `dev::stash`/`dev::take` functions, by identity (`hmr.md` §4) — set
+    // only when `std::dev` is reachable, so the transfer-bound check at their call
+    // sites keys on the real hooks rather than a user's same-named function.
+    analyzer.hmr_stash_fn_id = module_scopes.get("dev").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("stash").copied())
+    });
+    analyzer.hmr_take_fn_id = module_scopes.get("dev").and_then(|scope_id| {
+        analyzer
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.name_to_id_map.get("take").copied())
+    });
     // The std `Drop` trait, by identity (destruction.md §5) — set only when
     // `std::drop` is reachable, so the destruction-hook rejects key on the real
     // entity rather than the bare name `Drop`.
@@ -24172,6 +24322,10 @@ pub fn analyze<'src>(
     analyzer.check_rpc_signatures();
     analyzer.check_expose_fields();
     analyzer.check_generic_bound_satisfaction();
+    // The HMR transfer bound at `dev::stash`/`dev::take` call sites (`hmr.md` §4);
+    // inert unless `std::dev` is loaded. Runs inside `analyze()` (like the S2a
+    // classification) so both the CLI and the LSP/test pipelines get it.
+    analyzer.check_hmr_transfer_bounds();
     // The observable half of C4 resource classification (destruction.md §4):
     // R10 (container/external-generic resource arguments) and R12 (no coercion
     // to `any`). R1–R9 (moves, loans, conditional/loop moves, captures) follow;

@@ -406,6 +406,119 @@ fn hmr_disabled_is_byte_identical_and_has_no_instrumentation() {
     );
 }
 
+// --- A13 S2b: the dev::stash / dev::take transfer bound (hmr.md §4) -----------
+
+/// A closure argument to `stash` is rejected — it carries code the new bundle
+/// cannot adopt, the one thing the transfer bound forbids.
+#[test]
+fn hmr_stash_rejects_a_closure_argument() {
+    assert_fails_browser_with(
+        r#"
+        import std::dev;
+
+        fun main() {
+            dev::stash("handler", || 0);
+        }
+        "#,
+        "cannot cross a hot swap",
+    );
+}
+
+/// A `Shared` argument to `stash` is rejected — a reactive cell's identity (its
+/// subscribers) does not survive a swap; only a plain value would.
+#[test]
+fn hmr_stash_rejects_a_shared_argument() {
+    assert_fails_browser_with(
+        r#"
+        import std::dev;
+        import std::shared::Shared;
+
+        fun main() {
+            dev::stash("cell", Shared::new(0));
+        }
+        "#,
+        "cannot cross a hot swap",
+    );
+}
+
+/// The bound is by containment: a struct whose field holds a closure is rejected
+/// just as a bare closure is.
+#[test]
+fn hmr_stash_rejects_a_struct_that_holds_a_closure() {
+    assert_fails_browser_with(
+        r#"
+        import std::dev;
+
+        struct Handlers { on_click: || void }
+
+        fun main() {
+            dev::stash("handlers", Handlers { on_click = || {} });
+        }
+        "#,
+        "cannot cross a hot swap",
+    );
+}
+
+/// A plain-data struct stashes cleanly — the bound admits scalars, `str`, lists,
+/// options, and structs/enums built from them.
+#[test]
+fn hmr_stash_accepts_a_plain_struct() {
+    assert_compiles_browser(
+        r#"
+        import std::dev;
+
+        struct Session { id: i32, name: str }
+
+        fun main() {
+            dev::stash("session", Session { id = 1, name = "ada" });
+        }
+        "#,
+    );
+}
+
+/// `take` is bound the same way: an annotated non-transferable element is
+/// rejected at the call site.
+#[test]
+fn hmr_take_rejects_a_non_transferable_element() {
+    assert_fails_browser_with(
+        r#"
+        import std::dev;
+        import std::shared::Shared;
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+            let cell: Option<Shared<i32>> = dev::take("cell");
+            match cell {
+                Some(let c) => {},
+                None => {},
+            }
+        }
+        "#,
+        "cannot cross a hot swap",
+    );
+}
+
+/// A plain-data `take` and `on_teardown` compile cleanly — the hooks are inert
+/// std surface without a shim, and their bounds admit plain data.
+#[test]
+fn hmr_take_and_on_teardown_accept_plain_usage() {
+    assert_compiles_browser(
+        r#"
+        import std::dev;
+        import std::option::Option::{ self, Some, None };
+
+        fun main() {
+            dev::on_teardown(|| {});
+            let count: Option<i32> = dev::take("count");
+            match count {
+                Some(let n) => {},
+                None => {},
+            }
+        }
+        "#,
+    );
+}
+
 #[track_caller]
 fn assert_compiles(source: &str) {
     if let Err(errors) = compile(source) {
@@ -24051,5 +24164,27 @@ fn a_module_level_closure_binding_referenced_only_by_call_still_emits_its_declar
         }
         "#,
         "0\n",
+    );
+}
+
+/// `stash` inside a generic function is rejected at the lexical call site (the
+/// check is not per-instantiation — hmr.md §11 S2's recorded refinement), and
+/// the diagnostic must name the unbounded-generic cause rather than accuse the
+/// value: there is no bound the author could add to make it compile.
+#[test]
+fn hmr_stash_in_a_generic_function_names_the_unbounded_generic_cause() {
+    assert_fails_browser_with(
+        r#"
+        import std::dev;
+
+        fun relay<type T>(key: str, value: T) {
+            dev::stash(key, value);
+        }
+
+        fun main() {
+            relay("count", 3);
+        }
+        "#,
+        "is a generic type parameter here",
     );
 }

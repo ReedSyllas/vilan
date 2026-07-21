@@ -208,7 +208,8 @@ builds. Three functions, each a no-op when `window.__VILAN_HMR__` is absent
   the same transfer classification as bindings, checked at the call site —
   the type system enforces what Vite leaves to convention (no smuggling
   closures across a swap). `take` returns `None` on a fingerprint miss,
-  first boot, or plain reload.
+  first boot, or plain reload — and is **non-destructive** (a taken value
+  stays stashed, matching Vite's persistent `hot.data`; settled at S2b).
 
 Severable: if review wants a thinner v1, `stash`/`take` cut cleanly —
 `on_teardown` should stay (it closes a recorded hole).
@@ -251,7 +252,19 @@ with and without a watch-mode compile in the same process.
 > time (`hmr::instrument`, called from the watch round), not via a
 > `BuildOptions.hmr` transformer flag — no emission-shape change exists yet, so
 > the CLI-side prepend is the deliberately simpler home. S2 revisits when the
-> real `__hmr_adopt`/`__hmr_expose` instrumentation lands.
+> real `__hmr_adopt`/`__hmr_expose` instrumentation lands. (S2a then introduced
+> `BuildOptions.hmr` for the adopt/expose emission; the shim prepend stayed
+> CLI-side — both homes proved right.)
+>
+> **Amendment (2026-07-21, S2b):** "a std-internal hook" is really TWO
+> declaration sites of the same host globals: `std::dev` is browser-layer, but
+> `rpc.vl` is base-layer and may not import it, so the duplex teardown declares
+> its own `hmr_active`/`hmr_register_teardown` externs locally. The layer
+> system shadows whole modules rather than extending them (the
+> `rpc_server`-refactor precedent), so this is the sanctioned shape, not a
+> wart to fix. The guard helper `__hmr_active` is recognized by extern symbol
+> (the `__sleep` precedent), letting every std module bind it without a
+> module-keyed intrinsic.
 
 ## 6. Full-stack coordination
 
@@ -421,16 +434,29 @@ three most-worn paths in the industry ended up.
    stylesheet `<link>` (correct for the one-sidecar case); non-css asset
    kinds are written each round but don't classify (css is the only kind the
    runtime hot-swaps).
-3. **S2 — the swap**: identity + fingerprints, `__hmr_adopt`/`__hmr_expose`
-   emission, teardown registration (`mount_root`, duplex), the `std::dev`
-   hooks (`on_teardown`, `stash`/`take` with the call-site transfer-bound
-   check), Blob-import swap, scroll/focus restore, failure → reload. Pins:
-   transformer unit tests per emission shape (value / signal / shared /
-   excluded); headless DOM-stub e2e (the A10 harness): boot, mutate module
-   state, swap in an edited bundle, assert carryover + new code live + old
-   subscriptions dead + `on_teardown` ran + a stashed value round-trips + a
-   non-plain `stash` argument rejects at compile time; the
-   build-output-unchanged pin (§5).
+3. **S2 — SHIPPED 2026-07-21 in two halves.** S2a (2026-07-20): the analyzer's
+   type-level transfer predicate + `pkg::module::binding` keys + structural
+   fingerprints (djb2 over canonical renders, struct fields/enum variants
+   expanded) + adopt/expose emission under `BuildOptions.hmr` (browser legs of
+   an HMR-active `run --watch` only; A/B pinned byte-identical off). Review
+   blocker fixed pre-commit: selection reuses `module_level_binding_ids`, so
+   function-locals never wrap. S2b (2026-07-21): the shim's swap protocol
+   (capture → teardown → Blob/`import()` → restore → fail=reload; swaps
+   serialized on a promise chain against reentrancy), `std::dev`
+   (`hmr_active` via the `__hmr_active` transformer helper WITH its
+   interpreter arm; `on_teardown`; `stash`/`take` with the call-site
+   transfer-bound check), `mount_root` + duplex teardown hooks (guarded,
+   zero-cost without a shim; the reconnect-swapped socket is the one closed),
+   headless ES-module e2e (20 assertions; data:-URL fallback under node) +
+   6 transfer pins. **Residues:** `take` in return/argument position is
+   unchecked (benign — the stash side is airtight, so a non-transferable
+   `take` can only see `None`); the stash/take check fires at the lexical
+   site, so a generic wrapper is rejected even with plain-data callers — the
+   diagnostic names the unbounded-generic cause, per-instantiation checking
+   is the refinement; `take` is non-destructive (the Vite `hot.data`
+   precedent); real-browser behavior (blob import, EventSource swap,
+   scroll/focus) is exercised via the node stub only — S3's kolt proof is
+   the live verification.
 4. **S3 — full-stack proof**: the §6 coordination matrix pinned (server-only /
    client-only / shared-edit / css-only / compile-error), kolt as the
    real-world exercise. Docs: the tour's dev-loop page + `run --watch` reference;

@@ -952,6 +952,11 @@ impl Interpreter {
                 let items = (0..count).map(|_| deep_clone(&value)).collect();
                 Ok(Value::Array(Rc::new(RefCell::new(items))))
             }
+            // HMR is a `run --watch`-only concern; the native evaluator never has
+            // a shim, so the activity guard (`std::dev`, `hmr.md` §4) is always
+            // false — keeping the guarded `dev::*` / std hooks inert here, so the
+            // equivalence gate holds.
+            "__hmr_active" => Ok(Value::Bool(false)),
             "__shared_new" => {
                 let mut cell = IndexMap::new();
                 cell.insert(Rc::from("v"), take(0));

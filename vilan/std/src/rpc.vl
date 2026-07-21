@@ -290,6 +290,18 @@ external struct WebSocket;
 [extern(new, "WebSocket")]
 external fun new_web_socket(url: str): WebSocket;
 
+// The HMR hooks, declared here rather than imported from `std::dev` (`hmr.md`
+// §5): `std::dev` is a browser-layer module and this base module serves every
+// platform, so it may not depend on it. `hmr_active` binds the `__hmr_active`
+// runtime helper (a `typeof` check, safe in any build); `hmr_register_teardown`
+// is a shim global, only ever reached behind the `hmr_active()` guard — inert
+// (and never referenced at runtime) without a dev shim.
+[extern("__hmr_active")]
+external fun hmr_active(): bool;
+
+[extern("__hmr_register_teardown")]
+external fun hmr_register_teardown(cleanup: || void): void;
+
 external struct SocketMessage;
 
 impl SocketMessage {
@@ -700,6 +712,13 @@ fun connect_socket(url: str): Result<SocketDuplex, str> {
 				on_reconnect = Shared::new([]),
 			};
 			watch_socket(duplex);
+			// HMR (`hmr.md` §3, step 2): close the live socket before the next
+			// bundle re-dials — the fresh duplex resyncs from the server exactly as
+			// a K6 reconnect does. Reads the cell at teardown time, so a socket
+			// swapped in by a reconnect is the one closed. A no-op without a shim.
+			if hmr_active() {
+				hmr_register_teardown(|| duplex.socket.read().close());
+			}
 			Ok(duplex)
 		},
 	}
