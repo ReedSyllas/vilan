@@ -13,6 +13,7 @@ pub mod id;
 pub mod interpreter;
 pub mod leak_tally;
 pub mod lexer;
+pub mod lexing;
 pub mod lift;
 pub(crate) mod macros;
 pub mod manifest;
