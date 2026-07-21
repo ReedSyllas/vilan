@@ -1,7 +1,22 @@
 # Analysis reuse — the E3 arc (leak closure, the prelude checkpoint)
 
-> **Status: Phase 1 SHIPPED 2026-07-21; Phase 2 RATIFIED same day —
-> implementation underway.**
+> **Status: Phase 1 SHIPPED 2026-07-21; Phase 2 CLOSED BY MEASUREMENT same
+> day — its own gate fired. E3 closes at Phase 1; Phase 3 keeps the evidence.**
+>
+> **The Phase 2 stop (implementation step 1, no code shipped):** the §3
+> premise — "snapshot after prelude/dependency loading, analyze only the
+> entry on top" — assumed build/checks over the entry were cheap. Measured
+> (warm LSP floor ~88 ms): loading+walking = 16.3 ms (**18.5%**, under the
+> 30% stop bar); `build()` = 43 ms and the whole-program checks = 29 ms —
+> **82% of the floor re-resolves/re-checks the unchanged std every
+> keystroke**, *after* the entry is interwoven (the entry seeds the load
+> worklist, expands inside the load loop, and one monolithic `build()`
+> resolves std+entry together). A controlled tiny-vs-big-entry comparison
+> confirmed build/checks are std-dominated (+1200 entry entities moved them
+> only +10.5 ms). Clone cost (~56 entity-scaled maps) erodes the 18.5%
+> further. **Capturing the 82% requires an entry-delta fixpoint + entry-
+> scoped checks over a frozen std base — Phase 3 (§4), not a deeper
+> checkpoint.** Concrete Phase-3 blockers found en route, recorded in §4.
 > Backlog E3 (L), reframed by the 2026-07-21 scout; numbers re-measured that
 > day.
 >
@@ -111,12 +126,23 @@ workspace's stable dependency set) is byte-reproducible**. Therefore:
 
 ## 4. Phase 3 — deferred: true incremental (stable ids)
 
-Only if Phase 2's ceiling (entry-file-proportional analysis) still hurts on
-real projects. It is an XL cross-cut (~1400 id sites, every post-parse
-stage, the dense-`SourceId`-indexes-`sources` assumption) and its payoff
-over Phase 2 is limited to *large single files* — the one thing the
-checkpoint can't shrink. Recorded, not planned. If it ever activates, the
-design starts from generation-scoped ids with the checkpoint as generation 0.
+**Now the sole path to the per-keystroke floor** (the Phase 2 stop proved the
+82% lives in `build()` + the whole-program checks, not in loading). It is an
+XL cross-cut (~1400 id sites, every post-parse stage, the
+dense-`SourceId`-indexes-`sources` assumption). Recorded, not planned; take
+it only when the ~88 ms warm floor demonstrably hurts on real projects.
+Concrete blockers found by the Phase 2 attempt (2026-07-21), recorded so the
+eventual design starts from evidence:
+
+- `build()` **clones** (not drains) `prepped_imports`/`prepped_locals`/
+  `prepped_type_locals`, so a second `build()` over a reused base would
+  re-resolve std imports and **double-increment `reference_count`** — any
+  delta design must make resolution idempotent or drain-once.
+- The constraint fixpoint **mints type ids mid-resolution** — freezing a std
+  base means new ids must not collide with or renumber frozen ones
+  (generation-scoped ids, with the frozen base as generation 0).
+- ~25 whole-program checks iterate everything; each needs an entry-scoped
+  form (or a per-generation partition) to stop re-checking std.
 
 ## 5. Order and gates
 
