@@ -7,7 +7,10 @@
 > groundwork — stable identities for state and a transfer classification — and HMR
 > exercises both without also needing serialization (§4). This document settles the
 > design; facts about the existing machinery were verified against the code
-> 2026-07-20 (file references inline).
+> 2026-07-20 (file references inline), and a derivation pass over Vite, React
+> Fast Refresh, and solid-refresh was folded in the same day (§7 — it added
+> the error overlay, the `std::dev` hooks, the stated initializer-edit rule,
+> and scroll/focus restore, and confirmed both structural choices).
 
 ## 0. What exists, and what that dictates
 
@@ -45,7 +48,7 @@ Two consequences drive the whole design:
    everything is what watch already does, and full rebuilds are fast (§7 of the
    caching plan bought that). Per-module swap would require module-boundary
    emission for a payoff — preserving *local* UI state — that module boundaries
-   alone don't deliver anyway. Evaluate later, don't presume (§8).
+   alone don't deliver anyway. Evaluate later, don't presume (§9).
 2. **Change detection by output bytes, not input analysis.** Each watch round
    rebuilds every leg (unchanged philosophy); then the *artifacts* are compared:
    server bundle bytes changed → restart the server child; client bundle bytes
@@ -64,7 +67,7 @@ Instrumentation (§5) applies only to bundles built by an HMR-active `run
 --watch`, so `build` output — and every golden — is byte-identical to today.
 
 A single-package browser app cannot `run` today (no Node leg to execute); it is
-out of v1's scope and recorded in §8 (the dev channel's static serving could
+out of v1's scope and recorded in §9 (the dev channel's static serving could
 grow to cover it).
 
 ## 2. The dev channel
@@ -75,8 +78,10 @@ in keeping with the dependency-free watcher — SSE needs no websocket handshake
 no SHA-1, no crate:
 
 - `GET /events` — **Server-Sent Events**. On each watch round the CLI pushes one
-  event describing what changed: `{ kind: "swap" | "css" | "reload", version }`.
-  `version` is a monotonically increasing build counter.
+  event describing what changed:
+  `{ kind: "swap" | "css" | "reload" | "error", version }`.
+  `version` is a monotonically increasing build counter; an `error` event
+  carries the rendered diagnostic text.
 - `GET /bundle/<leg>.js` and `GET /asset/<leg>.css` — the current artifacts,
   served from `dist/` with `Access-Control-Allow-Origin: *` (the page origin is
   the user's server, not the CLI).
@@ -93,6 +98,10 @@ instance), connects an `EventSource` to the embedded port, and reacts:
   already classifies this correctly, since inlined CSS changes the bundle.)
 - `reload` → `location.reload()` — the escape hatch the CLI can always fall back
   to, and the dev runtime's own response to any swap failure.
+- `error` → show an **in-page overlay** with the diagnostic text (the terminal
+  stays authoritative; the overlay is the copy for the eyes already on the
+  browser). The next successful round's event clears it. (Vite's overlay,
+  §7 — the single most-loved piece of its dev loop.)
 
 On connect, the CLI sends the current `version`; the dev runtime compares it to
 the version embedded in its own bundle and immediately requests a swap if stale.
@@ -106,7 +115,9 @@ On a `swap` event the dev runtime, in order:
 
 1. **Capture** — read every exposed binding's transfer value (§4) from the live
    registry into a seed map `{ key → { fingerprint, value } }`. A getter that
-   throws skips its binding (fresh init instead).
+   throws skips its binding (fresh init instead). Also record the viewport's
+   scroll position and the focused element's id + selection range, when it has
+   an id — best-effort continuity for the edit-and-glance loop.
 2. **Teardown** — run the registered teardown list: dispose each recorded root
    `Owner` and `clear()` its container (registered by `mount_root`, §5), close
    each live `SocketDuplex`'s socket (registered at dial). Disposal clears
@@ -117,7 +128,9 @@ On a `swap` event the dev runtime, in order:
    collide). The new bundle's instrumented initializers consult the seed map
    (§4), its inlined `main` re-runs, remounts the UI, and re-dials RPC — a fresh
    duplex against the still-running server, so mirrors resync exactly as K6
-   reconnect does today.
+   reconnect does today. Then restore the recorded scroll position and, if an
+   element with the recorded id exists, its focus + selection — silently skip
+   what no longer matches.
 4. **On any failure** — teardown already ran, so don't limp: `location.reload()`.
 
 What this preserves and what it doesn't (v1, stated honestly):
@@ -128,7 +141,7 @@ What this preserves and what it doesn't (v1, stated honestly):
 - **Reset**: state minted *inside* functions during mount — ephemeral UI signals,
   half-typed uncommitted input, focus, scroll. Fine-grained reactivity gives
   these no stable identity to key on; inventing one (positional component
-  identity) is the A7-adjacent refinement, §8. Un-pushed dirty `Draft` text is
+  identity) is the A7-adjacent refinement, §9. Un-pushed dirty `Draft` text is
   lost with them — recorded, with A14's debounced auto-push as the mitigation.
 
 ## 4. Identity and transfer — the A7 groundwork
@@ -157,6 +170,34 @@ compile time:
 - anything else (a closure-holding struct, a `View`, a resource — module-level
   resources are loan-only and never drop, so the old bundle's is simply
   abandoned to the realm) → not exposed, fresh init.
+
+**The initializer-edit rule, stated.** An edit that changes a binding's
+*initializer* but not its type keeps the old value — `mut counter = 0` edited
+to `mut counter = 100` stays at the live count. This is the deliberate choice
+every mainstream implementation converged on (React preserves state when only
+a component's body changes, §7): during iteration, the value you're watching
+*is* the work. The reset gesture needs no `// @refresh reset` analog either —
+seed state lives only in the page's heap, so a plain browser refresh **is**
+the reset, always available and always complete.
+
+**User hooks — `std::dev`.** Vite's `hot.dispose`/`hot.data` prove the demand
+for a small app-facing surface, and both ride machinery this design already
+builds. Three functions, each a no-op when `window.__VILAN_HMR__` is absent
+(same guarded-host-global pattern as the std registration hooks, §5):
+
+- `dev::on_teardown(cleanup: || void)` — join the swap's teardown list. This
+  is also the sanctioned patch for the zombie gap (§8): an app that starts a
+  raw interval or a bare task registers its own cancel.
+- `dev::stash<T>(key: str, value: T)` / `dev::take<T>(key: str): Option<T>` —
+  the `hot.data` analog: app-chosen carryover under app-chosen keys (prefixed
+  internally so they can never collide with binding keys). `T` is bound by
+  the same transfer classification as bindings, checked at the call site —
+  the type system enforces what Vite leaves to convention (no smuggling
+  closures across a swap). `take` returns `None` on a fingerprint miss,
+  first boot, or plain reload.
+
+Severable: if review wants a thinner v1, `stash`/`take` cut cleanly —
+`on_teardown` should stay (it closes a recorded hole).
 
 **Why this is the A7 groundwork.** Hydration needs the same two artifacts —
 stable state keys and a which-values-can-cross classification — plus
@@ -205,25 +246,112 @@ Per watch round, after rebuilding all legs (browser legs first, as today):
 - **Client bundle changed, server didn't** → push `swap`; the server keeps
   running and its port stays warm.
 - **Only a CSS sidecar changed** → push `css`.
-- **Compile error** → push nothing; report in the terminal as today (the running
-  app keeps its last good build — the standard HMR contract).
+- **Compile error** → push an `error` event (the overlay, §2); the terminal
+  reports as today and the running app keeps its last good build — the
+  standard HMR contract. The next good round's `swap`/`css` event clears the
+  overlay.
 
-## 7. Classification, risks, non-goals
+## 7. Prior art — the final pass over Vite, React, and Solid
+
+A deliberate derivation pass (2026-07-20) over the three reference
+implementations. Each lesson below is either **adopted** (woven into the
+sections above), **validated** (we independently arrived at their answer), or
+**rejected with cause**.
+
+**Vite** (`import.meta.hot`: `accept`/`dispose`/`prune`/`data`/`invalidate`/
+`decline`/`on`; https://vite.dev/guide/api-hmr):
+
+- *Boundary propagation* — an update bubbles up the import graph until an
+  `accept`ing module catches it; no boundary → full reload. **Rejected with
+  cause**: propagation exists to avoid re-running unchanged modules, which
+  presupposes per-module emission. Whole-bundle swap makes every update
+  trivially "caught at the root"; we take the fallback discipline (when in
+  doubt, reload) without the graph machinery.
+- *`hot.dispose` + `hot.data`* — per-module cleanup and a value bag persisted
+  across instances. **Adopted** as `dev::on_teardown` and `dev::stash`/`take`
+  (§4), with one improvement Vite can't have: the transfer classification is
+  *type-checked* at the call site, so code-bearing values can't be smuggled
+  across a swap by convention-trusting user code.
+- *`hot.invalidate`* — a module realizes at runtime it can't apply an update
+  and escalates. **Validated**: our per-binding fingerprint miss (fresh init)
+  and swap-failure → reload are the same runtime-humility principle, resolved
+  statically where possible.
+- *The error overlay* + guarded dev-only API (tree-shaken in production).
+  **Adopted**: the `error` event + overlay (§2, §6). Our production story is
+  stronger by construction — instrumentation is emitted only under
+  `BuildOptions.hmr`, not stripped by a bundler convention.
+- *`prune`* (cleanup for removed modules, used for CSS). Not applicable —
+  whole-bundle teardown subsumes removal; the CSS sidecar swap replaces the
+  whole stylesheet each round.
+
+**React Fast Refresh** (https://reactnative.dev/docs/fast-refresh,
+https://nextjs.org/docs/architecture/fast-refresh):
+
+- *Compiler-registered identity + a signature hash* (components registered by
+  the build; hooks order/arguments hashed; a signature change resets state, a
+  body-only change preserves it). **Validated, precisely**: this is our
+  key + structural-type fingerprint (§4) — independent convergence on
+  "identity is minted by the compiler, and a shape change means reset is
+  *correct*, not a failure." Their design principles — recover gracefully
+  from mistakes, fall back to a full reload when needed, no invasive
+  transforms — read as a checklist this design already passes.
+- *Preserve-on-body-edit* — **adopted and stated** as the initializer-edit
+  rule (§4). Their `// @refresh reset` escape hatch is **rejected as
+  unnecessary**: our seed state is page-heap-only, so browser refresh is a
+  complete reset; React needs the directive because its state survives inside
+  a long-lived runtime the user can't otherwise flush per-file.
+- *"Only export components"* — a file mixing components with other exports
+  degrades to reload, a real paper cut in practice. **Avoided by
+  construction**: whole-bundle swap imposes no file-shape rule at all — the
+  simplicity payoff of not having sub-bundle boundaries, worth naming.
+- *Error-boundary retry* — after a bad render, the next edit retries in
+  place. The analog we keep: a compile error never touches the running app
+  (last-good-build + overlay), and the next good round swaps normally.
+
+**Solid / solid-refresh** (https://github.com/solidjs/solid-refresh):
+
+- The load-bearing fact: **Solid does not persist component-local state
+  across HMR updates** — of React/Vue/Svelte/Solid, Solid and Svelte are the
+  two that reset (solidjs/solid#2419). Fine-grained reactivity has no
+  re-render unit to reattach state to; solid-refresh's default mode simply
+  *remounts components in place*, and its docs recommend keeping durable
+  state in module-scope stores. **Validated, strongly**: "remount the UI,
+  keep module-scope state" is not our compromise — it is the reference
+  fine-grained implementation's actual contract. Our v1 meets it without
+  component wrappers, and exceeds it on one axis: module-keyed carryover
+  survives re-evaluation of the *defining module itself*, where
+  solid-refresh preserves module state only in modules the update didn't
+  re-run.
+- *Granular mode* — per-component code-hash signatures so unchanged
+  components skip the remount. **Deferred knowingly**: this is the shape the
+  §9 local-state-identity refinement would take (positional identity +
+  per-unit signatures), and Solid's experience places it as incremental
+  polish on the remount model, not a different foundation — which is why it
+  can wait for v1 to ship and the loss to be felt, or not.
+
+Net effect of the pass on the design: the `error` overlay (§2), the
+`std::dev` hooks (§4), the initializer-edit rule stated with precedent (§4),
+scroll/focus restore (§3) — plus the confidence that the two structural
+choices (whole-bundle swap, module-keyed carryover) sit exactly where the
+three most-worn paths in the industry ended up.
+
+## 8. Classification, risks, non-goals
 
 - **Closure rule**: not a model change — no new alias kind, no epoch event, no
   language semantics at all. This is tooling plus dev-only emission.
 - **Zombie risk**: anything the old bundle scheduled outside owner tracking
   (a raw `set_interval` extern, a bare spawned task) keeps running after
-  teardown. v1 records this; the practical mitigation is that std's own
-  machinery (effects, subscriptions, the duplex) is teardown-registered, and a
-  stray timer's writes land in disposed cells. If it bites in practice, the
+  teardown. std's own machinery (effects, subscriptions, the duplex) is
+  teardown-registered; app-level strays have the sanctioned patch
+  `dev::on_teardown` (§4); a stray that registers nothing writes into
+  disposed cells — inert, but recorded. If it bites in practice, the
   refinement is owner-tracking timers — independently worth considering.
 - **Server-side HMR**: a non-goal, permanently — restart is the model for the
   Node leg; the process is cheap and correctness is free.
 - **Security**: the dev channel binds `127.0.0.1` only and serves only `dist/`
   artifacts.
 
-## 8. Recorded refinements (not v1)
+## 9. Recorded refinements (not v1)
 
 - **Local-state identity** (positional/component keys) — the piece that would
   preserve in-flight UI state; shared design space with A7's resumable
@@ -235,7 +363,7 @@ Per watch round, after rebuilding all legs (browser legs first, as today):
 - **Watch precision**: watch exactly `Program.sources` (the `watch-mode.md`
   refinement) — orthogonal, becomes more attractive as HMR tightens the loop.
 
-## 9. Open questions — calls wanted before S1
+## 10. Open questions — calls wanted before S1
 
 - **(a) Surface**: HMR default-on under `run --watch` with `--no-hmr` opt-out
   (recommendation), vs opt-in `--hmr`, vs a `vilan dev` subcommand.
@@ -246,7 +374,7 @@ Per watch round, after rebuilding all legs (browser legs first, as today):
   debounced auto-push shrinks the window), vs teardown-flush dirty drafts before
   swap (couples HMR to Draft semantics and can push half-typed state).
 
-## 10. Slices (suite-gated, docs same commit, per-case pins)
+## 11. Slices (suite-gated, docs same commit, per-case pins)
 
 1. **S0 — the G2 tail**: `run` and `run --watch` write assets each round
    (`write_assets` on the run paths). Pins: a CLI test per path; sidecar bytes
@@ -254,16 +382,22 @@ Per watch round, after rebuilding all legs (browser legs first, as today):
    today.
 2. **S1 — the dev channel + live reload**: SSE endpoint, artifact routes,
    byte-diff classification in the watch round, dev-runtime shim with
-   `reload`-on-any-change and `css` hot-swap. No state carryover yet — this
-   slice alone is live-reload + CSS-without-reload, a complete DX win at low
-   risk. Pins: unit tests for the byte-diff classifier and SSE framing; an
-   end-to-end CLI test driving a round and asserting the pushed event.
+   `reload`-on-any-change, `css` hot-swap, and the `error` overlay
+   (show-on-error, clear-on-good-round). No state carryover yet — this
+   slice alone is live-reload + CSS-without-reload + the overlay, a complete
+   DX win at low risk. Pins: unit tests for the byte-diff classifier and SSE
+   framing; an end-to-end CLI test driving a round and asserting the pushed
+   event, including the error → good-round overlay lifecycle.
 3. **S2 — the swap**: identity + fingerprints, `__hmr_adopt`/`__hmr_expose`
-   emission, teardown registration (`mount_root`, duplex), Blob-import swap,
-   failure → reload. Pins: transformer unit tests per emission shape (value /
-   signal / shared / excluded); headless DOM-stub e2e (the A10 harness): boot,
-   mutate module state, swap in an edited bundle, assert carryover + new code
-   live + old subscriptions dead; the build-output-unchanged pin (§5).
+   emission, teardown registration (`mount_root`, duplex), the `std::dev`
+   hooks (`on_teardown`, `stash`/`take` with the call-site transfer-bound
+   check), Blob-import swap, scroll/focus restore, failure → reload. Pins:
+   transformer unit tests per emission shape (value / signal / shared /
+   excluded); headless DOM-stub e2e (the A10 harness): boot, mutate module
+   state, swap in an edited bundle, assert carryover + new code live + old
+   subscriptions dead + `on_teardown` ran + a stashed value round-trips + a
+   non-plain `stash` argument rejects at compile time; the
+   build-output-unchanged pin (§5).
 4. **S3 — full-stack proof**: the §6 coordination matrix pinned (server-only /
    client-only / shared-edit / css-only / compile-error), kolt as the
    real-world exercise. Docs: the tour's dev-loop page + `run --watch` reference;
