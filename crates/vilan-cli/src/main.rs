@@ -368,7 +368,14 @@ fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> 
                 );
                 return None;
             }
-            let (javascript, _assets) = compile_unit(&unit, Platform::default(), false).ok()?;
+            let (javascript, assets) = compile_unit(&unit, Platform::default(), false).ok()?;
+            // Assets go beside the *canonical* build output — `<entry>.css`, where
+            // `build` writes them and the served program reads them — not beside the
+            // /tmp watch script Node executes (which nothing serves). Each watch
+            // round thus refreshes the on-disk sidecar for the dev loop (hmr.md §11
+            // S0); the workspace arm below gets this for free via
+            // `build_workspace_artifacts`.
+            write_assets(&unit.entry.with_extension("js"), &assets);
             let script = env::temp_dir().join(format!("vilan-watch-{}.js", std::process::id()));
             if let Err(error) = fs::write(&script, javascript) {
                 eprintln!("error: cannot write {}: {error}", script.display());
@@ -876,10 +883,16 @@ fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
 
 /// Builds and runs a lone package's entry with Node, forwarding `args`.
 fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
-    let (javascript, _assets) = match compile_unit(unit, Platform::default(), false) {
+    let (javascript, assets) = match compile_unit(unit, Platform::default(), false) {
         Ok(compiled) => compiled,
         Err(code) => return code,
     };
+    // Const-eval assets (the CSS sidecar &c.) belong beside the *canonical* build
+    // output — `<entry>.css`, where `build` writes them and a served page reads
+    // them — not beside the temp script `run_node_script` hands Node, which the
+    // program never reads. Same helper and placement as `build_single`, so `run`
+    // keeps the on-disk sidecar fresh (const-eval.md §3; hmr.md §11 S0).
+    write_assets(&unit.entry.with_extension("js"), &assets);
     run_node_script(&javascript, args)
 }
 

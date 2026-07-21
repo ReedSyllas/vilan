@@ -16,7 +16,10 @@ join — a root's call into R errors AT THAT call site, the outermost runtime
 crossing, while `emit` inside R-functions called from `const` chains stays
 legal (the styling property-function shape, pinned). Recorded refinements:
 indirect/closure-value paths into `emit` are the conservative gap;
-`run`/`--watch` don't write assets yet; liveness-tied emission (dead-style
+`run`/`--watch` write assets beside the canonical output each round (SHIPPED
+2026-07-20, hmr.md §11 S0 — single-package `run` and the `--watch` single arm
+now call `write_assets`; the workspace paths already did via
+`build_workspace_artifacts`); liveness-tied emission (dead-style
 elimination), Tier-2 LSP memoization, and deep failure spans as before. Implementation notes that
 amended the design: the JS-refugee hint lives in the ANALYZER, not the
 parser — `const x = 3` parses fine (assignment is an expression, so it is

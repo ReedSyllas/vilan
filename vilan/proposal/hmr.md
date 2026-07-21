@@ -1,6 +1,11 @@
 # Hot module replacement — closing the dev loop (A13)
 
-> **Status: DRAFT 2026-07-20 — for review.** Backlog A13 (L; proposal first; before
+> **Status: RATIFIED 2026-07-20 — implementation underway (S0 first).** The §10
+> calls all landed per recommendation (user, 2026-07-20): (a) HMR default-on
+> under `run --watch` with `--no-hmr`; (b) fingerprint miss = silent fresh init
+> with a console note; (c) v1 accepts un-pushed `Draft` loss.
+>
+> Original status: **DRAFT 2026-07-20 — for review.** Backlog A13 (L; proposal first; before
 > A7, ahead of F5/F7 — user calls 2026-07-18). Goal: edit a source file and the
 > running browser app updates without a full reload, reactive state preserved.
 > Sequenced ahead of A7 (SSR/hydration) because the two share their hardest
@@ -376,10 +381,14 @@ three most-worn paths in the industry ended up.
 
 ## 11. Slices (suite-gated, docs same commit, per-case pins)
 
-1. **S0 — the G2 tail**: `run` and `run --watch` write assets each round
-   (`write_assets` on the run paths). Pins: a CLI test per path; sidecar bytes
-   refresh on a watch round. Ships alone — it also fixes `run`'s missing-CSS gap
-   today.
+1. **S0 — SHIPPED 2026-07-20**: `run` and `run --watch` write assets each round
+   beside the canonical `<entry>.js`/`dist/<name>.js` output (not the temp
+   script). Single-package `run` and the `--watch` single arm now call
+   `write_assets`; the workspace paths already did via
+   `build_workspace_artifacts`. Pinned per path in `crates/vilan-cli/tests/assets.rs`
+   (`run_writes_assets_beside_the_output`, `workspace_run_writes_fresh_dist_css`,
+   `watch_round_refreshes_the_sidecar`). Ships alone — it also fixes `run`'s
+   missing-CSS gap today.
 2. **S1 — the dev channel + live reload**: SSE endpoint, artifact routes,
    byte-diff classification in the watch round, dev-runtime shim with
    `reload`-on-any-change, `css` hot-swap, and the `error` overlay
