@@ -7,6 +7,23 @@ A-rules) · **REWORD** (fails B-rules) · **DEMOTE** (cascade) ·
 snapshot at generation; the message head is the stable key. Updated per
 audit batch, in the batch's commit.
 
+**Batch 7 (continuation), 2026-07-21.** The standard's "180/180 —
+AUDIT COMPLETE" is the 2026-07-16 snapshot. The arcs that shipped after it
+(C4 resources/destruction, R11 generic-resource, B29 conformance, A13 HMR
+transfer, R12 resource-`any`, the async-polymorphism transitive checks)
+added 23 new `diagnostics.push` sites — enumerated by diffing `9f59099..HEAD`
+(20 new analyzer messages + 3 async_infer; the two `[rpc]`-Wire sites and the
+`async` closure-type-position site only relocated). All 23 verdict QUALIFIES:
+each was born inside a proven, pinned arc and already follows the B-rules
+(rendered types, one-action steers, rule statements) with a family pin; span
+quality spot-checked (B29 anchors at the offending parameter/return). The
+five `could not be resolved` residual rows (142–145, 147) are finalized
+**DEMOTE** — the `!self.diagnostics.is_empty()` guard suppresses them behind
+any real error, verified with a multi-use-site pin. No new cross-source note
+producer points into `std` for a user-caused condition (backlog item 11 /
+E11): the only into-`std` notes are the bound- and trait-declaration notes,
+both control cases — see that item's finding.
+
 | # | Site | Message head | Verdict |
 |---|------|--------------|---------|
 | 1 | analyzer.rs:1856 | `` |QUALIFIES — reviewed in the batch-7 sweep: B6-shaped rule statement from a designed arc; pin via its family's suite |
@@ -64,7 +81,7 @@ audit batch, in the batch's commit.
 | 53 | analyzer.rs:7867 | `this pattern binds {} {}, but the array's length is {}` |QUALIFIES — array-destructure count check (destructuring pins) |
 | 54 | analyzer.rs:7884 | `cannot destructure {rendered} as a fixed array — ` |QUALIFIES — B6 names the pattern's domain (destructuring pins) |
 | 55 | analyzer.rs:7915 | `literal pattern of type {} cannot match type {}` |QUALIFIES — B2 both sides (match pins) |
-| 56 | analyzer.rs:8025 | `an `async` closure type is only supported on parameters and ` |QUALIFIES — B6 (J2 marker positions, pinned) |
+| 56 | analyzer.rs:14180 | `an `async` closure type is only supported on parameters, `let` annotations, struct fields, and function return types` |QUALIFIES — B6 marker position; relocated + reworded (widened to struct fields / return types) since the snapshot, pin re-confirmed (inference.rs:18940) |
 | 57 | analyzer.rs:8033 | `a `context` clause is only supported on a parameter's closur` |QUALIFIES — coverage-fence family (ambient-owner pins); B6 names run/extent rules |
 | 58 | analyzer.rs:8740 | `this array literal has {} element{}, but its type is `[_; {l` |QUALIFIES — count-vs-type wording (fixed-arrays pins) |
 | 59 | analyzer.rs:8770 | `Expected {expected} (this literal's element type), but got {` |QUALIFIES — unified list/array element wording (heterogeneous-literal pins) |
@@ -150,12 +167,12 @@ audit batch, in the batch's commit.
 | 139 | analyzer.rs:14006 | `duplicate context `{name}` in this clause` |QUALIFIES — coverage-fence family (ambient-owner pins); B6 names run/extent rules |
 | 140 | analyzer.rs:14062 | `unknown numeric suffix `{suffix}`{hint}` |QUALIFIES — B4 rename hint (i53 rename pins) |
 | 141 | analyzer.rs:14129 | `the literal `{whole}` is out of range for `{name}` ({range})` |QUALIFIES — range-checked literals, B2-shaped range text (numeric-types pins) |
-| 142 | analyzer.rs:14143 | `type of struct initializer could not be resolved` |QUALIFIES — field-value anchors (E7 pass-1 pins) |
-| 143 | analyzer.rs:14148 | `type of accessor subject could not be resolved` |DEMOTE-CANDIDATE — post-solve residuals; each is a symptom of an upstream failure (B5): batch 7 verifies an upstream diagnostic always exists, else these are the lone signal and stay |
-| 144 | analyzer.rs:14153 | `type of variable '{}' could not be resolved` |DEMOTE-CANDIDATE — post-solve residuals; each is a symptom of an upstream failure (B5): batch 7 verifies an upstream diagnostic always exists, else these are the lone signal and stay |
-| 145 | analyzer.rs:14167 | `type of function call arguments could not be resolved` |DEMOTE-CANDIDATE — post-solve residuals; each is a symptom of an upstream failure (B5): batch 7 verifies an upstream diagnostic always exists, else these are the lone signal and stay |
+| 142 | analyzer.rs:14143 | `type of struct initializer could not be resolved` |DEMOTE — same suppressed-residual family as 143–145/147 (was mis-verdicted QUALIFIES); guarded by `!self.diagnostics.is_empty()`, surfaces only as the lone signal. Pin one_unresolved_name_does_not_cascade_across_many_use_sites |
+| 143 | analyzer.rs:14148 | `type of accessor subject could not be resolved` |DEMOTE — post-solve residual, guarded by `!self.diagnostics.is_empty()` (a symptom of an upstream failure, B5); surfaces only as the lone signal. Multi-use-site pin one_unresolved_name_does_not_cascade_across_many_use_sites |
+| 144 | analyzer.rs:14153 | `type of variable '{}' could not be resolved` |DEMOTE — post-solve residual, guarded by `!self.diagnostics.is_empty()` (B5); surfaces only as the lone signal. Multi-use-site pin one_unresolved_name_does_not_cascade_across_many_use_sites |
+| 145 | analyzer.rs:14167 | `type of function call arguments could not be resolved` |DEMOTE — post-solve residual, guarded by `!self.diagnostics.is_empty()` (B5); surfaces only as the lone signal. Multi-use-site pin one_unresolved_name_does_not_cascade_across_many_use_sites |
 | 146 | analyzer.rs:14190 | `cannot index this List: its element type is never determined` |QUALIFIES — B4 annotate steer (B16 pins) |
-| 147 | analyzer.rs:14210 | `type of match expression could not be resolved (subject: {})` |DEMOTE-CANDIDATE — post-solve residuals; each is a symptom of an upstream failure (B5): batch 7 verifies an upstream diagnostic always exists, else these are the lone signal and stay |
+| 147 | analyzer.rs:14210 | `type of match expression could not be resolved (subject: {})` |DEMOTE — post-solve residual, guarded (its own `residuals_are_cascade` gate, B5); surfaces only as the lone signal. Multi-use-site pin one_unresolved_name_does_not_cascade_across_many_use_sites |
 | 148 | analyzer.rs:14284 | `the type of '{name}' is never fully determined: `{rendered}`` |QUALIFIES — B4 annotate steer (Map-sweep pins) |
 | 149 | analyzer.rs:15270 | `` |QUALIFIES — reviewed in the batch-7 sweep: B6-shaped rule statement from a designed arc; pin via its family's suite |
 | 150 | analyzer.rs:16224 | ``{importer}` imports `pkg::{module}`, but `{module}` is not ` |QUALIFIES — L1/E.10 module-shape rules (module_resolution pins) |
@@ -189,3 +206,26 @@ audit batch, in the batch's commit.
 | 178 | macros.rs:1358 | `{label} generated a `macro {{ .. }}` block — macros cannot ` |QUALIFIES — expansion diagnostics site-anchored w/ output previews (macro-engine pins); analyzer errors INSIDE generated code re-anchor at the attribute (batch 5 redirect; pin a_diagnostic_in_generated_code…) |
 | 179 | platform_color.rs:110 | `unknown platform pattern `{pattern_text}` in `[platform(…)]`` |QUALIFIES — B6 lists the accepted forms; pattern-anchored ([platform] fence pins) |
 | 180 | platform_color.rs:232 | `` |QUALIFIES — reviewed in the batch-7 sweep: B6-shaped rule statement from a designed arc; pin via its family's suite |
+| 181 | analyzer.rs:2641 | `{label} of `[derive(Wire)]` type `{type_name}` is the resourc` |QUALIFIES — C4 resource-not-Wire variant (B2 renders the resource type, B4 plain-data-handle steer); pin derive_wire_rejects_a_resource_field |
+| 182 | analyzer.rs:2729 | `{label} of `[derive(Hashable)]` type `{type_name}` is the res` |QUALIFIES — C4 resource variant; pin derive_hashable_rejects_a_resource_field |
+| 183 | analyzer.rs:2767 | `{label} of `[derive(PartialEq)]` type `{type_name}` is the re` |QUALIFIES — C4 resource variant; pin derive_partialeq_rejects_a_resource_field |
+| 184 | analyzer.rs:2796 | ``{rendered}` implements `Drop` but is not a resource — destru` |QUALIFIES — C4 §3/§11 double-close rule (B6 + declare-`resource` steer); pins `declare it a `resource``, `is not a resource` |
+| 185 | analyzer.rs:2928 | ``{}`'s `{}` declares {} type parameter(s), but `{}` declares ` |QUALIFIES — B29 conformance (B2 both counts + match steer; conformance_note = declaration control); B29 pins |
+| 186 | analyzer.rs:2988 | ``{}`'s `{}` takes {} parameter(s), but `{}` declares {} — matc` |QUALIFIES — B29 arity (B2 + match-the-list steer); B29 pins |
+| 187 | analyzer.rs:3015 | ``{}`'s `{}` takes no receiver / a `{}` receiver, but `{}` decl` |QUALIFIES — B29 receiver presence (B6 + give-the-receiver steer); B29 pins |
+| 188 | analyzer.rs:3065 | ``{}`'s `{}` receives `{}` / parameter {} is {}, but `{}` decl` |QUALIFIES — B29 receiver/param convention; pin `match the receiver convention` |
+| 189 | analyzer.rs:3089 | `parameter {position} of `{}`'s `{}` is `{actual_label}`, but ` |QUALIFIES — B29 param type (B2 both sides, anchored at the parameter — A1 verified); pin `match the declared type` |
+| 190 | analyzer.rs:3132 | ``{}`'s `{}` returns `{actual_label}`, but `{}` declares `{exp` |QUALIFIES — B29 return type (B2 + match-the-return steer); pin `match the declared return type` |
+| 191 | analyzer.rs:3924 | ``{container_name}` cannot hold the resource `{rendered}` — a ` |QUALIFIES — C4 native-container-resource (B6 + `Option`/struct-field steer); pin `cannot hold the resource` |
+| 192 | analyzer.rs:4018 | `the resource `{rendered}` cannot be used where `any` is expec` |QUALIFIES — R12 resource-to-`any` (B2 + debug-print steer); r12_rejects_* pins |
+| 193 | analyzer.rs:4145 | ``{rendered}` cannot cross a hot swap / is a generic type para` |QUALIFIES — A13 HMR transfer (B6 + stash-plain-data steer, same-file `only plain data transfers` note); `cannot cross a hot swap` pins |
+| 194 | analyzer.rs:6456 | `use of `{name}` after it was moved` (+6 affine arms) |QUALIFIES — C4 affine-rule family, 7 arms one push (B6 + loan/`Option`+take steers; UseAfterMove carries a same-file `moved here` note); pins `after it was moved`, `no partial moves`, `moved on one path`, `declared outside this loop`, `cannot capture the resource`, `module-level resource` |
+| 195 | analyzer.rs:6639 | ``{name}` is not move-clean when instantiated with a resource ` |QUALIFIES — R11 own-generic-leak; primary at the instantiation (A2), cross-file note into the generic body is user↔user (no std `own`-generic leaks — see E11 finding); `not move-clean` pins |
+| 196 | analyzer.rs:6727 | ``{name}` is not move-clean … pass a resource to `drop<T>`` |QUALIFIES — R11 drop-forward; `not move-clean` pins |
+| 197 | analyzer.rs:7290 | ``{name}` is not move-clean when instantiated with a resource ` |QUALIFIES — R11 move-violation family (per-violation summary + steer); `not move-clean` pins |
+| 198 | analyzer.rs:14193 | `a `sync` closure contract is only supported on parameters` |QUALIFIES — B6 marker position (async-polymorphism A.2); pin `a `sync` closure contract is only supported on parameters` |
+| 199 | analyzer.rs:24914 | ``drop` for `{subject}` is async — teardown must be synchronou` |QUALIFIES — C4 §5 sync-teardown (B6 + OwnedNursery steer); pin `teardown must be synchronous` |
+| 200 | analyzer.rs:24940 | ``drop` for `{subject}` requires an ambient context — teardown` |QUALIFIES — C4 context-free teardown (B6 + hand-work-to-owner steer); pin `teardown must be context-free` |
+| 201 | async_infer.rs:1208 | `this call passes an async closure that reaches `{parameter}`,` |QUALIFIES — async-polymorphism transitive sync (B6 + move-async-outside steer; cross-file note at the forwarding site is user↔user — std takes sync closures directly, so its violations are DIRECT, reported at the global check); pin `forwarded into the `sync` parameter` |
+| 202 | async_infer.rs:1272 | `this call passes an async closure that reaches the host (`ext` |QUALIFIES — async-polymorphism transitive extern (B6; forwarding note user↔user as above); pin `cannot await a vilan closure` |
+| 203 | async_infer.rs:1329 | `an async closure cannot adapt a trait/generic-dispatched call` |QUALIFIES — async-polymorphism dispatch refusal (B6 + bind-concretely / declare-the-param-async steer, no note); pin `cannot adapt a trait/generic-dispatched call` |

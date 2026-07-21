@@ -119,6 +119,10 @@ boundary sketch, and this week's diagnostics (the B13 origin-naming, the
    (a new diagnostic cites the rules it satisfies).
 
 **AUDIT COMPLETE 2026-07-16 — 180/180 verdicted across seven batches.**
+**Standing rule (2026-07-21, batch-7 continuation):** the audit is a living
+gate, not a finished event — arcs that add `diagnostics.push` sites owe the
+ledger their verdicts (the continuation verdicted the 23 sites the C4/R11/
+B29/A13/R12/async arcs added; 203 total). The ledger is the running record.
 Shipped fixes: four import steers (values, types, traits, struct literals —
 loaded-modules + the lazy std-wide index), two inference-origin notes (the
 closure first-call and the variable initializer, on the new C3 mechanism),

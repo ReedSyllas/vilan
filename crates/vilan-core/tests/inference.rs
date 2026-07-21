@@ -15690,6 +15690,56 @@ fn a_root_error_does_not_cascade_into_residual_noise() {
 }
 
 #[test]
+fn one_unresolved_name_does_not_cascade_across_many_use_sites() {
+    // The multi-use-site form (backlog item 7): one unknown name feeds EVERY
+    // residual-producing position — a plain variable, a field access, a call
+    // argument, a struct field, and a match subject. Each of these is a
+    // `could not be resolved` residual site (struct-initializer, field-
+    // accessor, variable, call-subject, match); the std-missing wall printed
+    // five of them for one cause before batch 7 demoted them (standard B5).
+    // The root must stand alone: no residual echoes it at any of the five.
+    let diagnostics = failure_diagnostics(
+        r#"
+        struct Box { v: i32 }
+        fun take(x: i32): i32 { x }
+        fun main() {
+            let root = zzz_missing(1);
+            let via_var = root;
+            let via_field = root.field;
+            let via_call = take(root);
+            let via_struct = Box { v = root };
+            let via_match = match root {
+                _ => 1,
+            };
+        }
+        "#,
+    );
+    // Exactly one root error, once — not once per downstream use.
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|(message, _)| message.contains("cannot find 'zzz_missing'"))
+            .count(),
+        1,
+        "the root error must stand exactly once: {diagnostics:#?}"
+    );
+    // None of the five downstream positions emits a residual.
+    assert!(
+        diagnostics
+            .iter()
+            .all(|(message, _)| !message.contains("could not be resolved")),
+        "one unresolved name must not fan into `could not be resolved` residuals: {diagnostics:#?}"
+    );
+    // And no echo storm: the root plus at most the one call-subject
+    // consequence (`root` is called, so `zzz_missing(1)` also reports
+    // `cannot call ... void`) — never a per-use-site wall.
+    assert!(
+        diagnostics.len() <= 2,
+        "one unresolved name must not bury the user in echoes: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn an_unknown_struct_steers_to_its_import() {
     assert_fails_with(
         r#"
@@ -24186,5 +24236,33 @@ fn hmr_stash_in_a_generic_function_names_the_unbounded_generic_cause() {
         }
         "#,
         "is a generic type parameter here",
+    );
+}
+
+#[test]
+#[ignore = "B32 (found by E7's cascade probes, 2026-07-21): an unknown name used \
+            as a VALUE types as `void`, so one root error cascades into a type \
+            error at every use site (`Expected i32, but got void`, field-access \
+            errors, ...) — unlike the `could not be resolved` residuals, which \
+            are suppressed, and the unknown-call path, which stays clean. The \
+            root fix is to type an unresolved name as the non-cascading Unknown \
+            (the B5 type) rather than `void`; an inference change with ripple, \
+            deliberately not patched per-site."]
+fn an_unknown_value_name_reports_once_without_type_cascade() {
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun print_field(value: i32) {}
+
+        fun main() {
+            let a = zzz_missing;
+            let b: i32 = a;
+            print_field(a);
+        }
+        "#,
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the unknown name must report once, with no void-typed cascade: {diagnostics:#?}"
     );
 }
