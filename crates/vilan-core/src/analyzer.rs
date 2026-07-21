@@ -3454,6 +3454,428 @@ impl<'src> Analyzer<'src> {
         (false, all_complete)
     }
 
+    /// The HMR transfer classification (`hmr.md` §4) for every module-level `let`
+    /// binding of the ENTRY package. Candidates are the genuine module-level
+    /// bindings — `module_level_binding_ids` (whose declaring scope IS a root or a
+    /// `mod`-body scope, never a function / closure / block, so a function-local
+    /// never qualifies, §3: function-minted state must reset). Of those, entry
+    /// bindings are the ones whose scope chain reaches the entry root
+    /// (`global_scope_id`); std / dependency modules hang off their own namespace
+    /// root, so their chains never reach it and they are skipped. Each binding's
+    /// `TransferForm`, source-derived key (`pkg::module_path::name`), and structural
+    /// fingerprint are computed once, while the type tables are live.
+    fn compute_hmr_bindings(&mut self, global_scope_id: Id) -> HashMap<Id, HmrBinding> {
+        // Scope id -> enclosing `mod`'s name, for scopes that are a module body.
+        let mut module_of_scope: HashMap<Id, &'src str> = HashMap::new();
+        for module in self.modules.values() {
+            module_of_scope.insert(module.body.1, module.name);
+        }
+        // The `mod` names crossed on the way up to the entry root (innermost first)
+        // form the module path — using the DECLARING scope, so a `use` re-export
+        // cannot mislabel a binding's home. Only module-level bindings are walked,
+        // so the chain climbs module bodies to the root, never a function body.
+        let mut entries: Vec<(Id, Vec<String>)> = Vec::new();
+        let mut candidates: Vec<Id> = self.module_level_binding_ids().into_iter().collect();
+        candidates.sort_by_key(|id| id.0);
+        for binding in candidates {
+            let Some(&declaring_scope) = self.expr_id_to_scope_id_map.get(&binding) else {
+                continue;
+            };
+            let mut path: Vec<String> = Vec::new();
+            let mut current = Some(declaring_scope);
+            let mut reached_entry_root = false;
+            let mut guard = 0usize;
+            while let Some(scope_id) = current {
+                if scope_id == global_scope_id {
+                    reached_entry_root = true;
+                    break;
+                }
+                if let Some(name) = module_of_scope.get(&scope_id) {
+                    path.push(name.to_string());
+                }
+                current = self.scopes.get(&scope_id).and_then(|scope| scope.parent_id);
+                guard += 1;
+                if guard > 10_000 {
+                    break;
+                }
+            }
+            if !reached_entry_root {
+                continue;
+            }
+            path.reverse();
+            entries.push((binding, path));
+        }
+        let mut bindings = HashMap::new();
+        for (binding_id, module_path) in entries {
+            let (type_id, name) = match self.variables.get(&binding_id) {
+                Some(variable) => (variable.type_id, variable.name.to_string()),
+                None => continue,
+            };
+            let form = self.hmr_transfer_form(type_id);
+            // `pkg::` is the entry package's canonical namespace name (matching the
+            // `pkg::` import root); the proposal's illustrative `app::` would be the
+            // vilan.toml package name, which does not reach the analyzer (recorded
+            // for the coordinator).
+            let mut key = String::from("pkg");
+            for segment in &module_path {
+                key.push_str("::");
+                key.push_str(segment);
+            }
+            key.push_str("::");
+            key.push_str(&name);
+            let mut rendering = String::new();
+            let mut visiting = HashSet::new();
+            self.render_type_canonical(type_id, 0, &mut visiting, &mut rendering);
+            let fingerprint = djb2_hash(&rendering);
+            bindings.insert(
+                binding_id,
+                HmrBinding {
+                    form,
+                    key,
+                    fingerprint,
+                },
+            );
+        }
+        bindings
+    }
+
+    /// A binding's transfer form (`hmr.md` §4): a `Signal<T>`/`Shared<T>` with a
+    /// transferable payload carries that payload across the swap; a plain-data type
+    /// carries its value; anything else is excluded (fresh init).
+    fn hmr_transfer_form(&mut self, type_id: TypeId) -> TransferForm {
+        let signal_id = self.primitive_struct_ids.get("Signal").copied();
+        let shared_id = self.primitive_struct_ids.get("Shared").copied();
+        if let Type::Struct(id, arguments) = type_id.get_type(self) {
+            if Some(id) == signal_id && arguments.len() == 1 {
+                return if self.transferable_as_value(arguments[0]) {
+                    TransferForm::SignalPayload
+                } else {
+                    TransferForm::Excluded
+                };
+            }
+            if Some(id) == shared_id && arguments.len() == 1 {
+                return if self.transferable_as_value(arguments[0]) {
+                    TransferForm::SharedPayload
+                } else {
+                    TransferForm::Excluded
+                };
+            }
+        }
+        if self.transferable_as_value(type_id) {
+            TransferForm::Value
+        } else {
+            TransferForm::Excluded
+        }
+    }
+
+    /// Whether a type is plain data safe to carry across a hot swap by reference
+    /// (`hmr.md` §4): a scalar, or a fixed array / `List` / `Option` / `Result` /
+    /// `Map` / `Set` / tuple / struct / enum whose components are all transferable.
+    /// Modeled on `type_is_resource`'s per-instantiation containment (arguments are
+    /// substituted before members are classified), but with the polarity flipped —
+    /// EVERY component must be transferable — and drawn conservatively: a closure,
+    /// view, resource, bare `Shared`/`Signal`, external/opaque struct, or anything
+    /// unresolved excludes the whole. Memoized and cycle-guarded.
+    fn transferable_as_value(&mut self, type_id: TypeId) -> bool {
+        let mut memo: HashMap<TypeId, bool> = HashMap::new();
+        let mut visiting: HashSet<TypeId> = HashSet::new();
+        self.classify_transferable(type_id, &mut memo, &mut visiting)
+            .0
+    }
+
+    /// The memoized, cycle-guarded core of `transferable_as_value`. Returns
+    /// `(transferable, complete)`; a result that relied on cutting a containment
+    /// cycle back to an ancestor is not memoized (it is correct for this query root
+    /// only). A cycle edge is neutral for the AND: the recursive field does not
+    /// itself make the type non-transferable — the other fields and the base decide.
+    fn classify_transferable(
+        &mut self,
+        type_id: TypeId,
+        memo: &mut HashMap<TypeId, bool>,
+        visiting: &mut HashSet<TypeId>,
+    ) -> (bool, bool) {
+        if let Some(&cached) = memo.get(&type_id) {
+            return (cached, true);
+        }
+        // A pathological (infinitely-instantiating) generic graph degrades to a
+        // conservative exclude rather than overflowing the stack.
+        let Some(_guard) = crate::util::RecursionGuard::enter() else {
+            return (false, false);
+        };
+        if !visiting.insert(type_id) {
+            return (true, false);
+        }
+        let (result, complete) = self.compute_transferable(type_id, memo, visiting);
+        visiting.remove(&type_id);
+        if complete {
+            memo.insert(type_id, result);
+        }
+        (result, complete)
+    }
+
+    /// One transferability step: the scalar and native-container leaves, then
+    /// all-members containment over the (substituted) fields / variant payloads.
+    fn compute_transferable(
+        &mut self,
+        type_id: TypeId,
+        memo: &mut HashMap<TypeId, bool>,
+        visiting: &mut HashSet<TypeId>,
+    ) -> (bool, bool) {
+        const SCALARS: &[&str] = &[
+            "str", "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i53", "u53", "f32", "f64",
+        ];
+        let signal_id = self.primitive_struct_ids.get("Signal").copied();
+        let shared_id = self.primitive_struct_ids.get("Shared").copied();
+        match type_id.get_type(self) {
+            Type::Struct(id, arguments) => {
+                // A resource carries no old code but is loan-only, never plain data.
+                if self.type_is_resource(type_id) {
+                    return (false, true);
+                }
+                // A bare `Signal`/`Shared` COMPONENT is not transferable-as-value —
+                // only a top-level `Signal<T>`/`Shared<T>` binding transfers, via
+                // its payload form (handled in `hmr_transfer_form`).
+                if Some(id) == signal_id || Some(id) == shared_id {
+                    return (false, true);
+                }
+                let name = self.structs.get(&id).map(|struct_| struct_.name);
+                // Scalars are transferable leaves (their host storage holds only a
+                // number/string/bool).
+                if name.is_some_and(|name| SCALARS.contains(&name)) {
+                    return (true, true);
+                }
+                // The native containers hold exactly what their element arguments
+                // describe — transferable iff those are.
+                if name.is_some_and(|name| matches!(name, "List" | "Map" | "Set")) {
+                    return self.all_members_transferable(
+                        &arguments,
+                        &SubstitutionContext::new(),
+                        memo,
+                        visiting,
+                    );
+                }
+                let Some(struct_) = self.structs.get(&id) else {
+                    return (false, true);
+                };
+                // A bodyless struct is an external/opaque host handle (a bodyless
+                // `external struct` records no fields) — or a trivial marker;
+                // exclude conservatively rather than treat it as empty plain data.
+                if struct_.fields.is_empty() {
+                    return (false, true);
+                }
+                let parameters = struct_.generic_parameter_constraint_ids.clone();
+                let members: Vec<TypeId> =
+                    struct_.fields.iter().map(|field| field.type_id).collect();
+                let context = Self::instantiation_context(&parameters, &arguments);
+                self.all_members_transferable(&members, &context, memo, visiting)
+            }
+            Type::Enum(id, arguments) => {
+                if self.type_is_resource(type_id) {
+                    return (false, true);
+                }
+                let Some(enum_) = self.enums.get(&id) else {
+                    return (false, true);
+                };
+                // A data-less enum (`bool`, a C-like enum) has no payloads, so the
+                // all-members check trivially holds; `Option`/`Result`/a payload
+                // enum recurse into their (substituted) variant data.
+                let parameters = enum_.generic_parameter_constraint_ids.clone();
+                let members: Vec<TypeId> = enum_
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.data_type_ids.clone())
+                    .collect();
+                let context = Self::instantiation_context(&parameters, &arguments);
+                self.all_members_transferable(&members, &context, memo, visiting)
+            }
+            Type::Tuple(elements) => self.all_members_transferable(
+                &elements,
+                &SubstitutionContext::new(),
+                memo,
+                visiting,
+            ),
+            Type::Array(element, _length) => self.all_members_transferable(
+                &[element],
+                &SubstitutionContext::new(),
+                memo,
+                visiting,
+            ),
+            // A closure / function type carries code; a view is a borrow; a generic
+            // parameter is abstract (a resolved binding never has one, but exclude
+            // if it slips through); everything else is a non-value or unresolved.
+            Type::Any
+            | Type::Never
+            | Type::Void
+            | Type::Unknown
+            | Type::Unresolved
+            | Type::Closure(_, _)
+            | Type::Function(_)
+            | Type::Module(_)
+            | Type::Trait(_, _)
+            | Type::Generic(_)
+            | Type::Mapped(_, _, _) => (false, true),
+        }
+    }
+
+    /// Whether EVERY member (substituted through `context`) is transferable-as-value
+    /// — the AND dual of `any_member_resource`. Returns `(all, complete)`: a
+    /// non-transferable member is definitive; an all-transferable verdict is
+    /// complete only if every member's classification was.
+    fn all_members_transferable(
+        &mut self,
+        members: &[TypeId],
+        context: &SubstitutionContext,
+        memo: &mut HashMap<TypeId, bool>,
+        visiting: &mut HashSet<TypeId>,
+    ) -> (bool, bool) {
+        let mut all_complete = true;
+        for member in members {
+            let member_type = member.get_type(self);
+            let member_type_id = if context.is_empty() {
+                *member
+            } else {
+                self.substitute_type(&member_type, context)
+                    .get_type_id(self)
+            };
+            let (transferable, complete) =
+                self.classify_transferable(member_type_id, memo, visiting);
+            if !transferable {
+                return (false, true);
+            }
+            all_complete &= complete;
+        }
+        (true, all_complete)
+    }
+
+    /// A stable, `TypeId`-independent canonical rendering of a type, feeding the HMR
+    /// fingerprint (`hmr.md` §4). Nominal types render by NAME plus their type
+    /// arguments AND their expanded shape — struct fields, enum variant payloads —
+    /// so the same structure always renders identically regardless of interning
+    /// order, and a field-type change (even one the type name and arguments don't
+    /// reflect, as for a non-generic struct) flips the fingerprint. The `visiting`
+    /// set cuts containment cycles (a recursive `struct Node { next: Option<Node> }`
+    /// renders its self-reference by name only). Field types render abstractly (no
+    /// per-instantiation substitution) — a generic instantiation's arguments already
+    /// carry the concrete difference. Depth-capped against pathological recursion.
+    fn render_type_canonical(
+        &self,
+        type_id: TypeId,
+        depth: usize,
+        visiting: &mut HashSet<Id>,
+        buf: &mut String,
+    ) {
+        if depth > 24 {
+            buf.push('…');
+            return;
+        }
+        match type_id.get_type(self) {
+            Type::Struct(id, arguments) => {
+                buf.push_str(self.structs.get(&id).map(|s| s.name).unwrap_or("?"));
+                self.render_type_arguments_canonical(&arguments, depth, visiting, buf);
+                if let Some(struct_) = self.structs.get(&id) {
+                    if !struct_.fields.is_empty() && visiting.insert(id) {
+                        buf.push('{');
+                        for (index, field) in struct_.fields.iter().enumerate() {
+                            if index > 0 {
+                                buf.push_str(", ");
+                            }
+                            buf.push_str(field.name);
+                            buf.push_str(": ");
+                            self.render_type_canonical(field.type_id, depth + 1, visiting, buf);
+                        }
+                        buf.push('}');
+                        visiting.remove(&id);
+                    }
+                }
+            }
+            Type::Enum(id, arguments) => {
+                buf.push_str(self.enums.get(&id).map(|e| e.name).unwrap_or("?"));
+                self.render_type_arguments_canonical(&arguments, depth, visiting, buf);
+                if let Some(enum_) = self.enums.get(&id) {
+                    if visiting.insert(id) {
+                        buf.push('{');
+                        for (index, variant) in enum_.variants.iter().enumerate() {
+                            if index > 0 {
+                                buf.push_str(", ");
+                            }
+                            buf.push_str(variant.name);
+                            for payload in &variant.data_type_ids {
+                                buf.push(' ');
+                                self.render_type_canonical(*payload, depth + 1, visiting, buf);
+                            }
+                        }
+                        buf.push('}');
+                        visiting.remove(&id);
+                    }
+                }
+            }
+            Type::Trait(id, arguments) => {
+                buf.push_str(self.traits.get(&id).map(|t| t.name).unwrap_or("?"));
+                self.render_type_arguments_canonical(&arguments, depth, visiting, buf);
+            }
+            Type::Tuple(elements) => {
+                buf.push('(');
+                for (index, element) in elements.iter().enumerate() {
+                    if index > 0 {
+                        buf.push_str(", ");
+                    }
+                    self.render_type_canonical(*element, depth + 1, visiting, buf);
+                }
+                buf.push(')');
+            }
+            Type::Array(element, length) => {
+                buf.push('[');
+                self.render_type_canonical(element, depth + 1, visiting, buf);
+                buf.push_str(&format!("; {length}]"));
+            }
+            Type::Closure(parameters, return_id) => {
+                buf.push_str("fn(");
+                for (index, parameter) in parameters.iter().enumerate() {
+                    if index > 0 {
+                        buf.push_str(", ");
+                    }
+                    self.render_type_canonical(*parameter, depth + 1, visiting, buf);
+                }
+                buf.push_str("): ");
+                self.render_type_canonical(return_id, depth + 1, visiting, buf);
+            }
+            Type::Generic(constraint_id) => buf.push_str(
+                self.generic_constraint_names
+                    .get(&constraint_id)
+                    .copied()
+                    .unwrap_or("?"),
+            ),
+            Type::Function(_) => buf.push_str("fn"),
+            Type::Module(_) => buf.push_str("module"),
+            Type::Mapped(_, _, _) => buf.push_str("mapped"),
+            Type::Any => buf.push_str("any"),
+            Type::Never => buf.push_str("never"),
+            Type::Unknown => buf.push_str("unknown"),
+            Type::Unresolved => buf.push_str("unresolved"),
+            Type::Void => buf.push_str("void"),
+        }
+    }
+
+    fn render_type_arguments_canonical(
+        &self,
+        arguments: &[TypeId],
+        depth: usize,
+        visiting: &mut HashSet<Id>,
+        buf: &mut String,
+    ) {
+        if arguments.is_empty() {
+            return;
+        }
+        buf.push('<');
+        for (index, argument) in arguments.iter().enumerate() {
+            if index > 0 {
+                buf.push_str(", ");
+            }
+            self.render_type_canonical(*argument, depth + 1, visiting, buf);
+        }
+        buf.push('>');
+    }
+
     /// R10 (destruction.md §4): a native container (`List`/`Map`/`Set`) or
     /// external generic (`Shared`/`Task`/`Promise`/`Context`) rejects a resource
     /// type argument — their internals are host code the move checker cannot see
@@ -21109,6 +21531,44 @@ pub struct Program<'src> {
     // Call exprs resolving to a `borrows` function that returns a scalar view, so
     // `*call` derefs through `call[0][call[1]]`.
     pub scalar_view_calls: HashSet<Id>,
+    // The HMR transfer classification (`hmr.md` §4), one entry per module-level
+    // `let` binding of the ENTRY package: its transfer form, source-derived
+    // identity key, and structural fingerprint. Computed always (a cheap type-
+    // level pass); consulted only when `BuildOptions.hmr` is set, so it never
+    // changes non-HMR output.
+    pub hmr_bindings: HashMap<Id, HmrBinding>,
+}
+
+/// One module-level binding's HMR transfer descriptor (`hmr.md` §4).
+#[derive(Debug, Clone)]
+pub struct HmrBinding {
+    /// How the binding's value crosses a hot swap.
+    pub form: TransferForm,
+    /// The compiler-minted identity key, `package::module_path::binding_name` —
+    /// stable across rebuilds, deliberately NOT stable across a rename (a renamed
+    /// binding is a new thing and fresh-initializes).
+    pub key: String,
+    /// A stable djb2 hash of the binding's canonical structural type rendering,
+    /// independent of `TypeId` numbering — a type change flips it, so the swap
+    /// falls back to fresh init instead of adopting a stale shape.
+    pub fingerprint: u32,
+}
+
+/// How a module-level binding's value is carried across a hot module swap
+/// (`hmr.md` §4). `Value` and the two payload forms are transferred by reference
+/// in-heap (no serialization); `Excluded` bindings fresh-initialize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferForm {
+    /// A plain-data binding: the value itself crosses the swap.
+    Value,
+    /// A `Signal<T>` with transferable `T`: the payload (the value cell) crosses;
+    /// the new bundle builds a fresh signal seeded with it, so old subscribers die.
+    SignalPayload,
+    /// A `Shared<T>` with transferable `T`: the payload crosses into a fresh cell.
+    SharedPayload,
+    /// Not safely transferable (a closure-holder, a view, a resource, a bare
+    /// `Signal`/`Shared`, an unresolved type): fresh init, not exposed.
+    Excluded,
 }
 
 impl<'src> Program<'src> {
@@ -21580,11 +22040,18 @@ fn derive_enum_impls(
 /// types, return types, and exposed fields — djb2 over the canonical string, so
 /// the same contract always hashes the same and any drift changes it.
 fn service_contract_hash(surface: &str) -> String {
+    format!("{:08x}", djb2_hash(surface))
+}
+
+/// The djb2 string hash (the `service_contract_hash` precedent), as a raw `u32` —
+/// the HMR fingerprint of a binding's canonical structural type rendering
+/// (`hmr.md` §4).
+fn djb2_hash(text: &str) -> u32 {
     let mut hash: u32 = 5381;
-    for byte in surface.bytes() {
+    for byte in text.bytes() {
         hash = hash.wrapping_mul(33) ^ (byte as u32);
     }
-    format!("{hash:08x}")
+    hash
 }
 
 /// The synthesized source for a `[service(Client)]` struct (transport-rpc.md
@@ -23468,6 +23935,20 @@ pub fn analyze<'src>(
             .insert("Shared", shared_struct_id);
     }
 
+    // The `std::reactive` `Signal` struct, if `reactive.vl` loaded — captured the
+    // same way as `Shared`, for the HMR transfer classification (`hmr.md` §4):
+    // a `Signal<T>` binding carries its payload across a hot swap. `Signal` is
+    // otherwise recognized only syntactically, so its id is captured nowhere else.
+    let signal_struct_id = module_scopes
+        .get("reactive")
+        .and_then(|scope_id| analyzer.scopes.get(scope_id))
+        .and_then(|scope| scope.name_to_id_map.get("Signal").copied());
+    if let Some(signal_struct_id) = signal_struct_id {
+        analyzer
+            .primitive_struct_ids
+            .insert("Signal", signal_struct_id);
+    }
+
     // The `std::json` `JsonValue` struct, if `json.vl` loaded — same treatment.
     // Its `field` method id is captured after `build()` to lower to `self[name]`.
     let json_value_struct_id = module_scopes
@@ -23979,6 +24460,12 @@ pub fn analyze<'src>(
     let scalar_view_refs = analyzer.compute_scalar_view_refs();
     let scalar_view_calls = analyzer.compute_scalar_view_calls();
 
+    // The HMR transfer classification (`hmr.md` §4), computed while the analyzer
+    // still holds the type tables and the resource classifier. Always computed (a
+    // cheap type-level pass over the entry's module-level bindings); the transformer
+    // consults it only under `BuildOptions.hmr`, so non-HMR output is unaffected.
+    let hmr_bindings = analyzer.compute_hmr_bindings(global_scope_id);
+
     // Pre-render a type label for every typed expression (for hover). Done here
     // while the analyzer still holds the type tables; `expr_id_to_type_id_map`
     // is applied last so it wins over `resolved_types`, matching `type_of_expr`.
@@ -24237,6 +24724,7 @@ pub fn analyze<'src>(
         primitive_views,
         scalar_view_refs,
         scalar_view_calls,
+        hmr_bindings,
     }
 }
 

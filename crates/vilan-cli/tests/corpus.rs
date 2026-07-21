@@ -123,3 +123,26 @@ fn every_corpus_golden_is_byte_identical() {
         failures.join("\n")
     );
 }
+
+/// The equivalence-gate rationale for HMR (A13, `hmr.md` §5): the `build` path
+/// never sets `BuildOptions.hmr`, so no corpus golden may carry `__hmr_`
+/// instrumentation. A cheap read-only sweep of the committed goldens — instrumentation
+/// is a `run --watch`-only concern and must never reach a built bundle.
+#[test]
+fn no_corpus_golden_carries_hmr_instrumentation() {
+    let corpus = corpus_dir();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(&corpus).expect("corpus directory") {
+        let path = entry.expect("corpus entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("js") {
+            continue;
+        }
+        let golden = std::fs::read_to_string(&path).expect("read golden");
+        assert!(
+            !golden.contains("__hmr_"),
+            "{path:?} carries HMR instrumentation but was built off the `build` path"
+        );
+        checked += 1;
+    }
+    assert!(checked > 60, "suspiciously few goldens swept: {checked}");
+}

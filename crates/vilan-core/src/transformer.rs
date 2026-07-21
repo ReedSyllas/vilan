@@ -1,6 +1,6 @@
 use crate::analyzer::{
     Expr, ExprIfBranch, ExprPattern, Function, GenericDispatch, Intrinsic, LiftDispatch, Program,
-    TryDispatch,
+    TransferForm, TryDispatch,
 };
 use crate::error::Error;
 use crate::id::Id;
@@ -680,6 +680,11 @@ struct Transformer<'src> {
     // Host imports an `[extern]` call needs, as module -> imported symbols;
     // emitted as `import { a, b } from "module";` lines at the top.
     used_imports: BTreeMap<String, BTreeSet<String>>,
+    // Emit HMR instrumentation (`hmr.md` §5): wrap each transferable module-level
+    // binding's initializer in an `__hmr_adopt` thunk and emit a matching
+    // `__hmr_expose` getter at the module tail. Set only by an HMR-active `run
+    // --watch`; false keeps output byte-identical.
+    hmr: bool,
 }
 
 /// How a resource-owning scope's tail value is used when it is restructured into
@@ -778,6 +783,7 @@ impl<'src> Transformer<'src> {
             is_bindings: HashMap::new(),
             used_helpers: BTreeSet::new(),
             used_imports: BTreeMap::new(),
+            hmr: options.hmr,
         }
     }
 
@@ -936,11 +942,65 @@ impl<'src> Transformer<'src> {
 
         // Assembly-time tree-shake: keep a binding's declaration only when
         // something emitted referenced it.
+        let emitted_bindings: Vec<Id> = binding_nodes
+            .iter()
+            .filter(|(binding, _)| self.referenced_globals.contains(binding))
+            .map(|(binding, _)| *binding)
+            .collect();
         let t_global_variables: Vec<js::Node<'src>> = binding_nodes
             .into_iter()
             .filter(|(binding, _)| self.referenced_globals.contains(binding))
             .flat_map(|(_, nodes)| nodes)
             .collect();
+
+        // HMR (`hmr.md` §5): one `__hmr_expose` getter per non-excluded binding
+        // that actually emitted, at the module tail (after the globals, before
+        // main). The getter closes over the live binding, so capture at swap time
+        // reads the current value; a payload getter reads the value cell
+        // (`Signal` -> `[0].v`, `Shared` -> `.v`). Referenced by the binding's
+        // emitted identifier, so `rename_for_scopes` rewrites both consistently.
+        let mut hmr_expose: Vec<js::Node<'src>> = Vec::new();
+        if self.hmr {
+            for binding in &emitted_bindings {
+                let Some(hmr_binding) = self.program.hmr_bindings.get(binding) else {
+                    continue;
+                };
+                if hmr_binding.form == TransferForm::Excluded {
+                    continue;
+                }
+                let key = hmr_binding.key.clone();
+                let fingerprint = hmr_binding.fingerprint;
+                let form = hmr_binding.form;
+                let name = self.ng.name_for(*binding);
+                let getter_body = match form {
+                    TransferForm::Value => js::Node::Local(name),
+                    TransferForm::SignalPayload => js::Node::Property(
+                        Box::new(js::Node::PropertyIndex(
+                            Box::new(js::Node::Local(name)),
+                            Box::new(js::Node::Number("0".to_string(), None)),
+                        )),
+                        "v".to_string(),
+                    ),
+                    TransferForm::SharedPayload => {
+                        js::Node::Property(Box::new(js::Node::Local(name)), "v".to_string())
+                    }
+                    TransferForm::Excluded => unreachable!("filtered above"),
+                };
+                let getter = js::Node::Closure(js::Closure {
+                    parameters: Vec::new(),
+                    body: vec![js::Node::Return(Box::new(getter_body))],
+                    is_async: false,
+                });
+                hmr_expose.push(js::Node::Call(
+                    Box::new(js::Node::Local("__hmr_expose".to_string())),
+                    vec![
+                        js::Node::String(Cow::Owned(key)),
+                        js::Node::Number(fingerprint.to_string(), None),
+                        getter,
+                    ],
+                ));
+            }
+        }
 
         let mut t_functions = self.required_functions.into_iter().collect::<Vec<_>>();
         t_functions.sort_by(|a, b| (a.0.0).cmp(&b.0.0));
@@ -971,6 +1031,7 @@ impl<'src> Transformer<'src> {
         let mut nodes = t_functions
             .chain(t_instances)
             .chain(t_global_variables)
+            .chain(hmr_expose)
             .chain(t_main_fn_body)
             .collect::<Vec<_>>();
         // Re-allocate names over the JS scope tree so disjoint scopes share them
@@ -2261,24 +2322,72 @@ impl<'src> Transformer<'src> {
                 }
                 let name = self.ng.name_for(*id);
                 let variable = self.program.variables.get(id).unwrap();
-                let value = variable
-                    .initial
-                    .and_then(|value_id| {
-                        self.walk_entity(value_id, block)
-                            .map(|node| self.maybe_clone(value_id, node))
-                    })
-                    .unwrap_or(js::Node::Void);
-                // A boxed scalar local is declared as a one-slot cell.
-                let value = if self.local_is_boxed(*id) {
-                    js::Node::Array(vec![value])
+                let initial = variable.initial;
+                let mutable = variable.mutable;
+                // HMR (`hmr.md` §5): a transferable module-level binding's
+                // initializer is wrapped in an `__hmr_adopt` thunk so it runs
+                // lazily — only on a cache miss. Any prelude the initializer needs
+                // is walked INTO the thunk body, so a cache hit runs none of it.
+                let hmr_binding = if self.hmr {
+                    self.program
+                        .hmr_bindings
+                        .get(id)
+                        .filter(|binding| binding.form != TransferForm::Excluded)
                 } else {
-                    value
+                    None
+                };
+                let value = if let Some(hmr_binding) = hmr_binding {
+                    let mut thunk_block = Vec::new();
+                    let inner = initial
+                        .and_then(|value_id| {
+                            self.walk_entity(value_id, &mut thunk_block)
+                                .map(|node| self.maybe_clone(value_id, node))
+                        })
+                        .unwrap_or(js::Node::Void);
+                    let inner = if self.local_is_boxed(*id) {
+                        js::Node::Array(vec![inner])
+                    } else {
+                        inner
+                    };
+                    thunk_block.push(js::Node::Return(Box::new(inner)));
+                    let thunk = js::Node::Closure(js::Closure {
+                        parameters: Vec::new(),
+                        body: thunk_block,
+                        is_async: false,
+                    });
+                    let callee = match hmr_binding.form {
+                        TransferForm::Value => "__hmr_adopt",
+                        TransferForm::SignalPayload => "__hmr_adopt_signal",
+                        TransferForm::SharedPayload => "__hmr_adopt_shared",
+                        TransferForm::Excluded => unreachable!("filtered above"),
+                    };
+                    js::Node::Call(
+                        Box::new(js::Node::Local(callee.to_string())),
+                        vec![
+                            js::Node::String(Cow::Owned(hmr_binding.key.clone())),
+                            js::Node::Number(hmr_binding.fingerprint.to_string(), None),
+                            thunk,
+                        ],
+                    )
+                } else {
+                    let value = initial
+                        .and_then(|value_id| {
+                            self.walk_entity(value_id, block)
+                                .map(|node| self.maybe_clone(value_id, node))
+                        })
+                        .unwrap_or(js::Node::Void);
+                    // A boxed scalar local is declared as a one-slot cell.
+                    if self.local_is_boxed(*id) {
+                        js::Node::Array(vec![value])
+                    } else {
+                        value
+                    }
                 };
                 let js_variable = js::Variable {
                     name,
                     value: Box::new(value),
                 };
-                if variable.mutable {
+                if mutable {
                     js::Node::LetVariable(js_variable)
                 } else {
                     js::Node::ConstVariable(js_variable)

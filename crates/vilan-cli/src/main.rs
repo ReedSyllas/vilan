@@ -439,7 +439,12 @@ fn hmr_round(
         if platform.is_none() {
             continue;
         }
-        let (javascript, assets) = match compile_unit(unit, *platform, false) {
+        let (javascript, assets) = match compile_unit(
+            unit,
+            *platform,
+            false,
+            matches!(platform, Platform::Browser),
+        ) {
             Ok(compiled) => compiled,
             // `compile_unit` has already reported the diagnostics to the
             // terminal (unchanged). Keep the last good build.
@@ -580,7 +585,8 @@ fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> 
                 );
                 return None;
             }
-            let (javascript, assets) = compile_unit(&unit, Platform::default(), false).ok()?;
+            let (javascript, assets) =
+                compile_unit(&unit, Platform::default(), false, false).ok()?;
             // Assets go beside the *canonical* build output — `<entry>.css`, where
             // `build` writes them and the served program reads them — not beside the
             // /tmp watch script Node executes (which nothing serves). Each watch
@@ -1036,6 +1042,7 @@ fn compile_unit(
     unit: &Unit,
     platform: Platform,
     emit_debug: bool,
+    hmr: bool,
 ) -> Result<(String, Vec<(String, String)>), ExitCode> {
     let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
@@ -1044,11 +1051,16 @@ fn compile_unit(
             return Err(ExitCode::FAILURE);
         }
     };
+    // HMR instrumentation is opt-in per compile (an HMR-active `run --watch`,
+    // browser legs only) — every other caller passes `false`, so `build`/`run`/
+    // `check` output stays byte-identical.
+    let mut options = unit.options;
+    options.hmr = hmr;
     compile_to_js(
         &unit.entry,
         &unit.pkg_root,
         platform,
-        &unit.options,
+        &options,
         &workspace,
         emit_debug,
     )
@@ -1056,7 +1068,7 @@ fn compile_unit(
 
 /// Builds a lone package / bare file, writing `<entry>.js` (or printing to stdout).
 fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool) -> ExitCode {
-    let (javascript, assets) = match compile_unit(unit, platform, emit_debug) {
+    let (javascript, assets) = match compile_unit(unit, platform, emit_debug, false) {
         Ok(compiled) => compiled,
         Err(code) => return code,
     };
@@ -1084,7 +1096,7 @@ fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool)
 
 /// Type-checks a lone package / bare file, writing no output.
 fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
-    match compile_unit(unit, platform, emit_debug) {
+    match compile_unit(unit, platform, emit_debug, false) {
         Ok(_) => {
             println!("{}: no errors", unit.entry.display());
             ExitCode::SUCCESS
@@ -1095,7 +1107,7 @@ fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
 
 /// Builds and runs a lone package's entry with Node, forwarding `args`.
 fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
-    let (javascript, assets) = match compile_unit(unit, Platform::default(), false) {
+    let (javascript, assets) = match compile_unit(unit, Platform::default(), false, false) {
         Ok(compiled) => compiled,
         Err(code) => return code,
     };
@@ -1133,7 +1145,7 @@ fn build_workspace_artifacts(
         if platform.is_none() {
             continue;
         }
-        let (javascript, assets) = compile_unit(unit, *platform, debug)?;
+        let (javascript, assets) = compile_unit(unit, *platform, debug, false)?;
         let output = dist.join(format!("{}.js", unit.name));
         write_assets(&output, &assets);
         if let Err(error) = fs::write(&output, javascript) {
@@ -1150,7 +1162,7 @@ fn build_workspace_artifacts(
 fn check_workspace(members: &[(Unit, Platform)], debug: bool) -> ExitCode {
     let mut ok = true;
     for (unit, platform) in members {
-        ok &= compile_unit(unit, *platform, debug).is_ok();
+        ok &= compile_unit(unit, *platform, debug, false).is_ok();
     }
     if ok {
         ExitCode::SUCCESS

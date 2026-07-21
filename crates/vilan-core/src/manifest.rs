@@ -958,6 +958,17 @@ mod tests {
     }
 
     #[test]
+    fn build_hmr_key_is_ignored_not_a_user_knob() {
+        // HMR instrumentation is never a `vilan.toml` setting (A13 S2a): it is set
+        // only by an HMR-active `run --watch`. An `hmr` key under `[build]` is
+        // ignored exactly like any unknown build key — it never turns on the
+        // `BuildOptions.hmr` flag.
+        let manifest = parse("[package]\nname = \"x\"\n[build]\nhmr = true\n");
+        let options = manifest.build_options().unwrap();
+        assert!(!options.hmr, "a `[build] hmr` key must not set the flag");
+    }
+
+    #[test]
     fn unknown_top_level_key_warns() {
         let (_, warnings) = Manifest::parse("[package]\nname = \"x\"\n[wat]\nk = 1\n").unwrap();
         assert!(warnings.iter().any(|w| w.contains("wat")));

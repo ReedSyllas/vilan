@@ -168,6 +168,15 @@ code: the **plain-data classification const-eval already defines** (scalars,
 views, resources) is reused as the transfer test, applied per binding type at
 compile time:
 
+> **Amendment (2026-07-20, S2 scout):** const-eval's classification turned out
+> to be *value-level* (`value_to_const` in the interpreter — it classifies
+> already-evaluated values, mid-evaluation only), so it cannot test an
+> arbitrary binding's *type*. The transfer test is therefore a new
+> **type-level** predicate in the analyzer, modeled on the
+> `is_wire_type`/`type_is_resource` precedents, drawing the same boundary the
+> const rule draws. Same semantics, different machinery — the proposal's
+> "reused" was aspiration, not fact.
+
 - plain-data binding → transfer the value itself;
 - `Signal<T>` / `Shared<T>` with plain `T` → transfer the **payload**
   (`.get()` / `.read()`); the new bundle constructs a fresh cell seeded with it —

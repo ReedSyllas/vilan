@@ -52,6 +52,14 @@ pub struct BuildOptions {
     /// When `readable_names` is off, still annotate the obfuscated short names with
     /// their source (`a/*count*/`). Off: obfuscated short names only.
     pub debug_names: bool,
+    /// Emit the hot-module-replacement instrumentation (`hmr.md` §5): each
+    /// transferable module-level binding's initializer is wrapped in an
+    /// `__hmr_adopt` thunk and a matching `__hmr_expose` getter is emitted at the
+    /// module tail. Off by default and set ONLY by an HMR-active `run --watch`
+    /// (never by `build`), so goldens and release output stay byte-identical. This
+    /// is not a user-facing `[build]` knob — `vilan.toml` cannot set it (an
+    /// `hmr` key under `[build]` is ignored like any unknown key).
+    pub hmr: bool,
 }
 
 impl BuildOptions {
@@ -63,12 +71,14 @@ impl BuildOptions {
                 spaces: true,
                 readable_names: true,
                 debug_names: false,
+                hmr: false,
             },
             Preset::Release => Self {
                 indent: false,
                 spaces: false,
                 readable_names: false,
                 debug_names: false,
+                hmr: false,
             },
         }
     }
