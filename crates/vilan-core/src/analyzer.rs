@@ -21879,10 +21879,17 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
     // compilation. The token vector is transient — the AST holds `&'static str`
     // slices into the source.
     let source: &'static str = Box::leak(source.into_boxed_str());
+    crate::leak_tally::record(crate::leak_tally::LeakSite::ModuleErrorText, source.len());
 
     let mut errors: Vec<String> = Vec::new();
     fn empty_ast() -> &'static crate::span::Spanned<NodeList<'static>> {
-        &*Box::leak(Box::new((Vec::new(), (0..0).into())))
+        let leaked: &'static crate::span::Spanned<NodeList<'static>> =
+            &*Box::leak(Box::new((Vec::new(), (0..0).into())));
+        crate::leak_tally::record(
+            crate::leak_tally::LeakSite::ModuleErrorAst,
+            std::mem::size_of_val(leaked),
+        );
+        leaked
     }
     let (tokens, lex_errors) = crate::lexer::lexer().parse(source).into_output_errors();
     errors.extend(
@@ -21908,7 +21915,12 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
             match root {
                 Some((mut root, _file_span)) => {
                     crate::lift::rewrite_items(&mut root.0);
-                    &*Box::leak(Box::new(root))
+                    let leaked = &*Box::leak(Box::new(root));
+                    crate::leak_tally::record(
+                        crate::leak_tally::LeakSite::ModuleErrorAst,
+                        std::mem::size_of_val(leaked),
+                    );
+                    leaked
                 }
                 // Recovery failed outright: an empty module + the errors above —
                 // loud, instead of pretending the file doesn't exist.
@@ -21917,10 +21929,15 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
         }
         None => empty_ast(),
     };
+    let parse_errors = Box::leak(errors.into_boxed_slice());
+    crate::leak_tally::record(
+        crate::leak_tally::LeakSite::ModuleErrorAst,
+        std::mem::size_of_val(parse_errors),
+    );
     let loaded = LoadedModule {
         ast: root,
         text: source,
-        parse_errors: Box::leak(errors.into_boxed_slice()),
+        parse_errors,
     };
     error_cache.lock().unwrap().insert(key, loaded);
     Some(loaded)
@@ -23278,6 +23295,7 @@ pub fn analyze<'src>(
                     .unwrap_or_else(|| "dep".to_string())
                     .into_boxed_str(),
             );
+            crate::leak_tally::record(crate::leak_tally::LeakSite::DisplayName, display_name.len());
             analyzer.modules.insert(
                 namespace_id,
                 Module {

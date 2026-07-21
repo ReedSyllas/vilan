@@ -633,6 +633,7 @@ pub(crate) fn world_prelude_nodes(
         return Some(Vec::new());
     }
     let text: &'static str = Box::leak(text.into_boxed_str());
+    crate::leak_tally::record(crate::leak_tally::LeakSite::MacroPreludeText, text.len());
     let (root, _span) = crate::parse_clean(text)?;
     Some(root)
 }
@@ -651,6 +652,7 @@ fn compile_world(
     }
 
     let leaked: &'static str = Box::leak(blanked.into_boxed_str());
+    crate::leak_tally::record(crate::leak_tally::LeakSite::MacroWorldText, leaked.len());
     let workspace = Workspace {
         packages: vec![macro_std.clone()],
         entry_dependencies: vec![("macro_std".to_string(), 0)],
@@ -696,6 +698,10 @@ fn compile_world(
     // program is leaked — bounded: one leak per distinct macro-definition set,
     // the same shape as the parse cache's leaks.
     let program: &'static crate::Program<'static> = Box::leak(Box::new(program));
+    crate::leak_tally::record(
+        crate::leak_tally::LeakSite::MacroWorldProgram,
+        std::mem::size_of_val(program),
+    );
 
     // The world's roots are the blanked entry's top-level functions — exactly
     // the file's macro funs (and their helper macro funs).
@@ -995,14 +1001,16 @@ impl Expander<'_, '_> {
         let Some((literal, input)) = construct_service(client_name, item, siblings, text) else {
             return; // a bodyless struct generates nothing, like the Rust path
         };
-        // The input text (struct + gathered methods) is the cache key: leak it
-        // to reuse expand_call's borrowed-slice shape.
-        let input: &'static str = Box::leak(input.into_boxed_str());
+        // The input text (struct + gathered methods) is only `expand_call`'s
+        // cache key, which hashes it transiently — `run_attribute` passes a
+        // plain `slice(text, ..)` here for exactly that reason. So it need not
+        // outlive the call and must not leak per keystroke (analysis-reuse.md
+        // §2): `literal` owns its strings, nothing borrows `input`.
         self.expand_call(
             def,
             "service",
             item.1,
-            input,
+            &input,
             &[],
             vec![literal],
             depth,
@@ -1269,10 +1277,13 @@ impl Expander<'_, '_> {
             }
         };
 
-        // Stamp `__m<N>` placeholders unique per splice site (§7). Outputs
-        // without placeholders (the common case) parse through the
-        // content-addressed cache; stamped text is site-unique, so it parses
-        // fresh.
+        // Stamp `__m<N>` placeholders unique per splice site (§7). The stamp
+        // bakes the splice-site number into the text, so stamped and unstamped
+        // output alike parse through the content-addressed cache: within one
+        // analysis each site's text is distinct (no false sharing), and across
+        // analyses an unchanged site regenerates byte-identical text (the
+        // splice counter is deterministic), so a keystroke reuses the cached
+        // tree instead of re-leaking one (analysis-reuse.md §2).
         *self.site_counter += 1;
         let stamped = stamp_gensyms(raw, *self.site_counter);
 
@@ -1281,7 +1292,7 @@ impl Expander<'_, '_> {
             // parsed as the statement `(<output>);` — the grouping makes any
             // expression a well-formed statement without changing it.
             let wrapped = format!("({});", stamped.as_deref().unwrap_or(raw));
-            let (parsed, parsed_text) = match parse_generated(&wrapped) {
+            let (parsed, parsed_text) = match parse_cached(&wrapped) {
                 Ok(parsed) => parsed,
                 Err(message) => {
                     self.diagnostics.push(Error {
@@ -1328,7 +1339,7 @@ impl Expander<'_, '_> {
         } else {
             let parse_result = match &stamped {
                 None => parse_cached(raw),
-                Some(stamped) => parse_generated(stamped),
+                Some(stamped) => parse_cached(stamped),
             };
             let (parsed, parsed_text) = match parse_result {
                 Ok(parsed) => parsed,
@@ -1412,6 +1423,7 @@ fn cached_run(
     )
     .map_err(|failure| failure.message)?;
     let leaked: &'static str = Box::leak(source.into_boxed_str());
+    crate::leak_tally::record(crate::leak_tally::LeakSite::MacroExpansion, leaked.len());
     expansions.lock().unwrap().insert(key, leaked);
     Ok(leaked)
 }
@@ -1471,9 +1483,17 @@ fn slice<'a>(text: &'a str, span: Span) -> &'a str {
         .unwrap_or("")
 }
 
-/// The content-addressed parse cache for UNSTAMPED macro output — re-analyses
-/// skip both the interpreter and the parse.
-fn parse_cached(text: &'static str) -> Result<(&'static NodeList<'static>, &'static str), String> {
+/// The content-addressed parse cache for macro output — re-analyses skip both
+/// the interpreter and the parse. Keyed by the text's content, so a re-analysis
+/// (an editor keystroke) that regenerates identical output reuses the cached
+/// tree instead of re-leaking a fresh one (analysis-reuse.md §2). Stamped
+/// output is served too: gensym stamping bakes the per-site number into the
+/// text (`__s<site>_m<N>`), so the content key is already site-composite — two
+/// distinct sites can never collide, and the same site across keystrokes hits
+/// (the splice counter is deterministic per analysis). The `text` need not be
+/// `'static`: only its content is hashed, and `parse_generated` leaks its own
+/// `'static` copy of whatever it returns.
+fn parse_cached(text: &str) -> Result<(&'static NodeList<'static>, &'static str), String> {
     static PARSES: OnceLock<Mutex<HashMap<u64, (&'static NodeList<'static>, &'static str)>>> =
         OnceLock::new();
     let key = content_key(text);
@@ -1491,10 +1511,15 @@ fn parse_cached(text: &'static str) -> Result<(&'static NodeList<'static>, &'sta
 fn parse_generated(source: &str) -> Result<(&'static NodeList<'static>, &'static str), String> {
     use chumsky::prelude::*;
     let source: &'static str = Box::leak(source.to_string().into_boxed_str());
+    crate::leak_tally::record(crate::leak_tally::LeakSite::MacroParseText, source.len());
     // Fast path for clean output; the rich pipeline below runs only to name
     // what's wrong with a macro's malformed source.
     if let Some(root) = crate::parse_clean(source) {
         let leaked: &'static crate::span::Spanned<NodeList<'static>> = Box::leak(Box::new(root));
+        crate::leak_tally::record(
+            crate::leak_tally::LeakSite::MacroParseAst,
+            std::mem::size_of_val(leaked),
+        );
         return Ok((&leaked.0, source));
     }
     let (tokens, lex_errors) = crate::lexer::lexer().parse(source).into_output_errors();
@@ -1523,6 +1548,10 @@ fn parse_generated(source: &str) -> Result<(&'static NodeList<'static>, &'static
             crate::lift::rewrite_items(&mut root.0);
             let leaked: &'static crate::span::Spanned<NodeList<'static>> =
                 Box::leak(Box::new(root));
+            crate::leak_tally::record(
+                crate::leak_tally::LeakSite::MacroParseAst,
+                std::mem::size_of_val(leaked),
+            );
             Ok((&leaked.0, source))
         }
         None => Err("empty output".to_string()),

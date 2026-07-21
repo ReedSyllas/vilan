@@ -11,6 +11,7 @@ pub mod error;
 pub mod formatter;
 pub mod id;
 pub mod interpreter;
+pub mod leak_tally;
 pub mod lexer;
 pub mod lift;
 pub(crate) mod macros;
@@ -283,12 +284,17 @@ pub fn parse_clean_cached(
     // caller re-parses it for real diagnostics (leaking the source first mirrors
     // `load_package_module`, whose rich path also reuses the leaked text).
     let leaked: &'static str = Box::leak(source.to_string().into_boxed_str());
+    leak_tally::record(leak_tally::LeakSite::ParseCleanCacheText, leaked.len());
     let Some(mut root) = parse_clean(leaked) else {
         broken.lock().unwrap().insert(key);
         return None;
     };
     lift::rewrite_items(&mut root.0);
     let leaked_root: &'static Spanned<node::NodeList<'static>> = Box::leak(Box::new(root));
+    leak_tally::record(
+        leak_tally::LeakSite::ParseCleanCacheAst,
+        std::mem::size_of_val(leaked_root),
+    );
     cache.lock().unwrap().insert(key, (leaked_root, leaked));
     Some((leaked_root, leaked))
 }
@@ -386,6 +392,7 @@ pub fn analyze_source(
                 };
                 let name: &'static str =
                     Box::leak(macros::block_entry_name(block_ordinal).into_boxed_str());
+                leak_tally::record(leak_tally::LeakSite::MacroBlockEntryName, name.len());
                 block_ordinal += 1;
                 let start = node.1.into_range().start;
                 let head: Span = (start..start).into();
@@ -431,6 +438,7 @@ pub fn analyze_source(
     // raw trees, so source text prints back verbatim.
     lift::rewrite_items(&mut root.0);
     let root = Box::leak(Box::new(root));
+    leak_tally::record(leak_tally::LeakSite::EntryAst, std::mem::size_of_val(root));
     // Use the front-end's resolved platform (e.g. from `vilan.toml`), else infer
     // one from the file's own imports: a file importing the browser DOM layer is a
     // browser file, otherwise Node. This keeps the platform gate from

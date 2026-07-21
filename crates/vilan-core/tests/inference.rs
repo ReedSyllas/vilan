@@ -7759,6 +7759,38 @@ fn gensyms_do_not_capture_across_splice_sites() {
     );
 }
 
+// An item-position macro whose output carries a `fresh()` gensym: the stamped
+// ITEM path (`macros.rs` `Some(stamped) => parse_cached`), which the corpus
+// exercises only in expression position. Content-keying the stamped parse
+// (analysis-reuse.md §2) must keep it working — the stamped name both binds a
+// declaration and is referenced from a second one within the same expansion.
+#[test]
+fn an_item_invocation_with_a_gensym_binds_and_references_it() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        macro fun genfun(arguments: Arguments): Source {
+            import macro_std::source;
+            import macro_std::fresh;
+            import macro_std::meta::{ Arguments, Source };
+
+            let name = fresh();
+            source(i"fun {name}(): i32 \{ 42 \}\nfun caller(): i32 \{ {name}() \}")
+        }
+
+        macro genfun();
+
+        fun main() {
+            print(caller());
+        }
+
+        main();
+        "#,
+        "42\n",
+    );
+}
+
 // Shape mismatches are clean errors in both directions.
 #[test]
 fn an_attribute_shaped_macro_cannot_be_invoked() {

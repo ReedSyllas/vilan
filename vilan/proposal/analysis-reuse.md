@@ -1,7 +1,26 @@
 # Analysis reuse — the E3 arc (leak closure, the prelude checkpoint)
 
-> **Status: DRAFT 2026-07-21 — for review.** Backlog E3 (L), reframed by the
-> 2026-07-21 scout. Every number below was re-measured that day.
+> **Status: Phase 1 SHIPPED 2026-07-21; Phase 2 awaiting the user's read.**
+> Backlog E3 (L), reframed by the 2026-07-21 scout; numbers re-measured that
+> day.
+>
+> **Phase 1 outcome + two corrections to §0** (implementation, same day): the
+> three uncached sites are closed — the two macro parse sites now route
+> through the content-addressed `parse_cached` (gensym stamping bakes the
+> site number into the text, so the content key was already site-composite;
+> "stamped parses fresh" was optimization-only, per git archaeology), and the
+> `run_service` leak was **removed at the root** (nothing ever borrowed the
+> input — it was only hashed). Corrections: (1) the scout's "only
+> `reactive.vl` uses `fresh(`" was a grep false-positive (`Refresh(`
+> matched) — **std ships no gensyms**, so the per-keystroke exposure was
+> user-gensym-macro projects, not every UI project; (2) a hypothesized fourth
+> site (`flush_rust_fallback`) was measured and disproved — the scout's three
+> were complete. Instrumentation: `leak_tally` (14 named sites, thread-local
+> counters), and the harness is un-`#[ignore]`d asserting on COUNTERS — the
+> measured split on a changing entry is **357 B/analysis of named leak vs
+> ~60 KiB/analysis of RSS allocator churn**, which is §0's inference made
+> fact and Phase 2's whole motivation: the churn *is* the re-analysis, and
+> only the checkpoint removes it.
 
 ## 0. What the scout established (corrections to E3's framing)
 

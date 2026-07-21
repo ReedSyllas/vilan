@@ -308,6 +308,10 @@ impl Document {
         // The program borrows its source for `'static`, so leak a copy (the
         // editor re-analyzes on change; see the known leak tradeoff).
         let leaked: &'static str = Box::leak(text.to_string().into_boxed_str());
+        vilan_core::leak_tally::record(
+            vilan_core::leak_tally::LeakSite::LspEntryText,
+            leaked.len(),
+        );
         // Prefer the project's declared platform and source root (the file's role in
         // its `vilan.toml`); fall back to inferring the platform from imports and
         // rooting `pkg::` at the file's own directory.
@@ -2871,6 +2875,7 @@ pub(crate) mod tests {
 mod leak_measurement {
     use super::*;
     use crate::document::tests::std_root;
+    use vilan_core::leak_tally::{self, LeakSite};
 
     /// Resident set size in KiB, from /proc/self/statm (Linux pages × 4).
     fn rss_kib() -> usize {
@@ -2884,54 +2889,229 @@ mod leak_measurement {
         pages * 4
     }
 
-    // Backlog E3 says MEASURE FIRST: every `Document::analyze` leaks its
-    // inputs (`Box::leak`ed source text, macro worlds, AST arenas) by
-    // design — the question is how fast that grows under real typing.
-    // This is a measurement, not a gate: run it explicitly with
-    //   cargo test -p vilan-lsp -- --ignored leak --nocapture
-    // and read the printed bytes/analysis.
-    #[test]
-    #[ignore = "measurement, not a gate — run with --ignored --nocapture"]
-    fn measure_per_analysis_leak() {
+    /// The macro-expansion leak sites. analysis-reuse.md §2's fix routes the
+    /// stamped `parse_generated` calls through the content cache, so after an
+    /// unchanged program's expansions are cached these must PLATEAU — leak zero
+    /// further bytes per analysis. (Before the fix, a gensym-stamped expansion
+    /// re-leaked its parse every analysis, the true per-keystroke leak.)
+    const MACRO_SITES: &[LeakSite] = &[
+        LeakSite::MacroParseText,
+        LeakSite::MacroParseAst,
+        LeakSite::MacroExpansion,
+        LeakSite::MacroWorldText,
+        LeakSite::MacroWorldProgram,
+        LeakSite::MacroPreludeText,
+        LeakSite::MacroBlockEntryName,
+    ];
+
+    fn macro_bytes() -> usize {
+        MACRO_SITES.iter().copied().map(leak_tally::bytes).sum()
+    }
+
+    /// The per-analysis leak counted over the `measured` window, plus the RSS
+    /// growth (a noisy report, never asserted on). Built on the analysis thread
+    /// — the counters are thread-local, so a snapshot read after the loop on the
+    /// same thread tallies exactly these analyses and nothing a parallel test
+    /// leaked (the E12 flaky-global-counter lesson).
+    struct LeakReport {
+        rss_grown: usize,
+        entry_text: usize,
+        entry_ast: usize,
+        display: usize,
+        /// The two sites analysis-reuse.md §2 fixes: `parse_generated`'s leaked
+        /// source and AST, reached from the stamped expansion paths.
+        stamped_parse: usize,
+        macro_bytes: usize,
+        total: usize,
+        measured: usize,
+    }
+
+    impl LeakReport {
+        fn print(&self, label: &str) {
+            println!(
+                "[{label}] RSS +{} KiB ≈ {:.1} KiB/analysis over {} analyses (report only)",
+                self.rss_grown,
+                self.rss_grown as f64 / self.measured as f64,
+                self.measured,
+            );
+            println!(
+                "[{label}] counted leak over {} analyses: entry-text {} B, entry-AST {} B, \
+                 display {} B, macro {} B, total {} B ≈ {:.0} B/analysis",
+                self.measured,
+                self.entry_text,
+                self.entry_ast,
+                self.display,
+                self.macro_bytes,
+                self.total,
+                self.total as f64 / self.measured as f64,
+            );
+        }
+    }
+
+    /// Runs `warmup` then `measured` analyses of `text_at(i)` **on the current
+    /// thread** (via `analyze_on_this_thread`, so the leaks land in this
+    /// thread's `leak_tally`), zeroing the counters after warmup. Callers must
+    /// invoke this on a big-stack thread — the pipeline nests a full analysis
+    /// inside macro-world compiles.
+    fn measure(text_at: impl Fn(usize) -> String, warmup: usize, measured: usize) -> LeakReport {
         let dir = std::env::temp_dir().join(format!("vilan_leak_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let entry = dir.join("main.vl");
         let std_dir = std_root();
-        // A medium, std-using document — each iteration's text differs (a
-        // simulated keystroke), so no unchanged-skip or parse-cache hit.
-        let text_at = |i: usize| {
-            format!(
-                "import std::print;\nimport std::option::Option::{{ self, Some, None }};\n\n\
-                 fun describe(value: Option<i32>): str {{\n\
-                 \tmatch value {{\n\t\tSome(n) => \"got \" + n.to_string(),\n\t\tNone => \"empty {i}\",\n\t}}\n}}\n\n\
-                 fun main() {{\n\tlet value = Some({i});\n\tprint(describe(value));\n\tprint(describe(None));\n}}\n"
-            )
+        // Warmup fills every content-addressed cache (the reachable std, the
+        // module parses, the macro worlds and their stamped expansions) so the
+        // measured window sees only the genuinely per-analysis leaks.
+        for i in 0..warmup {
+            let _ = Document::analyze_on_this_thread(&text_at(i), &std_dir, &entry);
+        }
+        leak_tally::reset();
+        let before_rss = rss_kib();
+        for i in warmup..warmup + measured {
+            let _ = Document::analyze_on_this_thread(&text_at(i), &std_dir, &entry);
+        }
+        let report = LeakReport {
+            rss_grown: rss_kib().saturating_sub(before_rss),
+            entry_text: leak_tally::bytes(LeakSite::LspEntryText),
+            entry_ast: leak_tally::bytes(LeakSite::EntryAst),
+            display: leak_tally::bytes(LeakSite::DisplayName),
+            stamped_parse: leak_tally::bytes(LeakSite::MacroParseText)
+                + leak_tally::bytes(LeakSite::MacroParseAst),
+            macro_bytes: macro_bytes(),
+            total: leak_tally::total(),
+            measured,
         };
+        let _ = std::fs::remove_dir_all(&dir);
+        report
+    }
+
+    fn on_big_stack(work: impl FnOnce() -> LeakReport + Send + 'static) -> LeakReport {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(work)
+            .expect("spawn measurement thread")
+            .join()
+            .expect("measurement thread panicked")
+    }
+
+    // A changing, std-using document with no macros. Each `i` differs (a
+    // keystroke), so every analysis re-parses and re-analyzes.
+    fn no_macro_text(i: usize) -> String {
+        format!(
+            "import std::print;\nimport std::option::Option::{{ self, Some, None }};\n\n\
+             fun describe(value: Option<i32>): str {{\n\
+             \tmatch value {{\n\t\tSome(let n) => int_to_string(n),\n\t\tNone => \"empty {i}\",\n\t}}\n}}\n\n\
+             fun int_to_string(n: i32): str {{\n\t\"n\"\n}}\n\n\
+             fun main() {{\n\tlet value = Some({i});\n\tprint(describe(value));\n\tprint(describe(None));\n}}\n"
+        )
+    }
+
+    // The Phase-1 pin (analysis-reuse.md §2): a changing, std-using document
+    // that uses NO macros. After warmup the ONLY per-analysis leaks must be the
+    // named, file-size-proportional ones — entry source text and entry AST (no
+    // dependency packages, so no display names) — and nothing on the macro path
+    // or any other site. RSS is far noisier (allocator retention from rebuilding
+    // the reachable `Program`); it is printed, never asserted.
+    #[test]
+    fn per_analysis_leak_is_bounded_by_named_sites() {
         let warmup = 20;
         let measured = 200;
-        for i in 0..warmup {
-            let _ = Document::analyze(&text_at(i), &std_dir, &entry);
-        }
-        let before = rss_kib();
-        for i in warmup..warmup + measured {
-            let _ = Document::analyze(&text_at(i), &std_dir, &entry);
-            if (i - warmup + 1) % 50 == 0 {
-                println!(
-                    "after {:>3} analyses: {} KiB resident",
-                    i - warmup + 1,
-                    rss_kib()
-                );
-            }
-        }
-        let grown = rss_kib().saturating_sub(before);
-        println!(
-            "leak: {} KiB over {} analyses ≈ {:.1} KiB/analysis ({:.1} MiB per 1000 keystrokes)",
-            grown,
-            measured,
-            grown as f64 / measured as f64,
-            grown as f64 / measured as f64 * 1000.0 / 1024.0
+        let report = on_big_stack(move || measure(no_macro_text, warmup, measured));
+        report.print("no-macro");
+
+        // The counted per-analysis leak is EXACTLY the named sites — every other
+        // leak site (macro path, the content-keyed module parses, the loader's
+        // error path) contributed zero over the measured window.
+        assert_eq!(
+            report.total,
+            report.entry_text + report.entry_ast + report.display,
+            "an unnamed leak site grew per analysis: total {} B, named {} B",
+            report.total,
+            report.entry_text + report.entry_ast + report.display,
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            report.macro_bytes, 0,
+            "a non-macro document leaked {} macro bytes over {} analyses",
+            report.macro_bytes, report.measured,
+        );
+        // The entry source is the dominant named leak and is file-proportional:
+        // it is exactly the bytes of every analyzed text (each keystroke leaks
+        // its own source copy — the recorded, still-open refinement).
+        let expected_entry_text: usize = (warmup..warmup + measured)
+            .map(|i| no_macro_text(i).len())
+            .sum();
+        assert_eq!(
+            report.entry_text, expected_entry_text,
+            "entry-text leak {} B is not the sum of analyzed source lengths {} B",
+            report.entry_text, expected_entry_text,
+        );
+    }
+
+    // A document that defines and invokes an expression-position macro emitting
+    // a `fresh()` gensym: its output is `__s<site>_m<N>`-stamped, the path that
+    // used to `parse_generated` uncached (analysis-reuse.md §2). `tail` changes
+    // per analysis (a keystroke that does not touch the macro), but always four
+    // digits — so the length-preserving world blanking maps every analysis to a
+    // byte-identical blanked source, and the macro world (which the macro
+    // definition living in this file would otherwise recompile on every edit)
+    // stays cached. The changing invocation is thus isolated: the only thing
+    // that could re-leak on the macro path is the stamped expansion's parse.
+    fn gensym_text(tail: usize) -> String {
+        format!(
+            "import std::print;\n\n\
+             macro fun unroll(arguments: Arguments): Source {{\n\
+             \timport macro_std::source;\n\
+             \timport macro_std::fresh;\n\
+             \timport macro_std::meta::{{ Arguments, Source }};\n\
+             \timport macro_std::option::Option::{{ self, Some, None }};\n\
+             \tlet count = match arguments.as_i32(0) {{\n\t\tSome(let n) => n,\n\t\tNone => 0,\n\t}};\n\
+             \tlet binder = fresh();\n\
+             \tmut sum = \"0\";\n\
+             \tmut index = 0;\n\
+             \tfor index < count {{\n\t\tsum = sum + i\" + {{binder}}({{index}})\";\n\t\tindex = index + 1;\n\t}}\n\
+             \tsource(i\"\\{{ let {{binder}} = (|x: i32| x + 1); {{sum}} \\}}\")\n\
+             }}\n\n\
+             fun main() {{\n\tlet unrolled = macro unroll(4);\n\tprint(unrolled);\n\tlet tail = {tail:04};\n\tprint(tail);\n}}\n\n\
+             main();\n"
+        )
+    }
+
+    // The gensym plateau — the leak analysis-reuse.md §2 actually fixes. Before
+    // the fix the stamped expression parse re-leaked every analysis; after, the
+    // content cache (keyed on the site-stamped text) makes it plateau to zero.
+    #[test]
+    fn gensym_expansion_leak_plateaus() {
+        // `tail` stays four digits so the blanked world source is byte-stable.
+        let warmup = 8;
+        let measured = 40;
+        let report = on_big_stack(move || {
+            let report = measure(|i| gensym_text(1000 + i), warmup, measured);
+            for site in MACRO_SITES {
+                println!("[gensym] {:?} = {} B", site, leak_tally::bytes(*site));
+            }
+            report
+        });
+        report.print("gensym");
+
+        // The §2-fixed sites: the stamped expression parse is content-cached, so
+        // the warm, unchanged invocation re-leaks nothing.
+        assert_eq!(
+            report.stamped_parse, 0,
+            "the gensym expansion's stamped parse re-leaked {} B over {} analyses — \
+             `parse_generated` is not being content-cached (analysis-reuse.md §2)",
+            report.stamped_parse, report.measured,
+        );
+        // With the world cached (fixed-width tail) the WHOLE macro path plateaus.
+        assert_eq!(
+            report.macro_bytes, 0,
+            "the macro path re-leaked {} B over {} analyses (see the per-site breakdown above)",
+            report.macro_bytes, report.measured,
+        );
+        // The entry still leaks per analysis (the changing tail), so the fixture
+        // genuinely re-analyzes each round rather than short-circuiting.
+        assert!(
+            report.entry_text > 0,
+            "the changing gensym fixture leaked no entry text — it may not be re-analyzing",
+        );
     }
 }
