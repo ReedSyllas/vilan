@@ -1,6 +1,17 @@
 # `lazy` — defer to first demand
 
-> **Status: DRAFT 2026-07-20 — for review.** Origin: the lazy-database question
+> **Status: RATIFIED 2026-07-21.** The §6 calls (user): **(a) poison** — a
+> failed initializer/argument re-panics on later touches; **(b) retrofit** —
+> `Option.unwrap_or`/`Result.unwrap_or` become `lazy fallback`, gated on the
+> corpus/std/docs sweep (any observable difference is stop-and-decide);
+> **(c) `lazy`** — the user offered `lazy` or `late`; `lazy` chosen for the
+> Kotlin/Swift precedent, and because Dart's `late` names a different
+> contract (assign-before-use, not memoized call-by-need) that would import
+> wrong intuitions. Implementation queue: slices in §7, sequenced at the
+> user's call (A13 shipped 2026-07-21; F5/F7 hold the next slot in the
+> agreed order).
+>
+> Original status: **DRAFT 2026-07-20 — for review.** Origin: the lazy-database question
 > (2026-07-20) — the accessor sketch (`fun db(): &Database` over a `mut
 > Option<Database>` global) fights three model walls at once (module writes, view
 > returns, payload locking) because it relocates ownership plumbing into user code.
@@ -107,19 +118,21 @@ its interpreter arm in the same commit** (the equivalence gate). Hover renders
 (grep-verified free of identifier uses) — and per the AGENTS.md invariant it lands
 in **three homes**: lexer, TextMate grammar, book theme, same commit.
 
-## 6. Open questions — calls wanted before S1
+## 6. Open questions — SETTLED 2026-07-21 (calls in the status block)
 
 - **(a) Poison vs retry** on a panicking initializer/argument. Recommendation:
-  poison (at-most-once stays true; retry re-runs side effects).
+  poison (at-most-once stays true; retry re-runs side effects). **CALL: poison.**
 - **(b) Retrofitting `Option.unwrap_or` / `Result.unwrap_or`** to `lazy fallback`.
   This *changes observable behavior* of existing call sites whose fallback has side
   effects (they stop running eagerly on the `Some` path). Recommendation: retrofit —
   deferred-fallback is what callers nearly always mean, `unwrap_or_else` remains the
   explicit form, and the corpus/std/docs sweep is the gate (any observable
   difference is a stop-and-decide, per the E2/E3 precedent). New `expect(self, lazy
-  message: str)` lands alongside either way.
+  message: str)` lands alongside either way. **CALL: retrofit, sweep-gated.**
 - **(c) Keyword spelling**: `lazy` (recommendation; Kotlin/Swift precedent) vs
   `defer` (collides with Go/Zig's unrelated meaning) vs annotation-style.
+  **CALL: `lazy`** (user offered `lazy`/`late`; `late` rejected as Dart's
+  different contract).
 
 ## 7. Slices (suite-gated, docs same commit, per-case pins)
 
