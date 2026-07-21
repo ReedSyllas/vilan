@@ -159,6 +159,24 @@ during S1–S5, or lands in both frontends with the differential as the referee
 — decided per case, with "hold" the default. The arc should be short enough
 (the grammar is ~2.5k lines total) that this does not bite.
 
+> **S0 SHIPPED 2026-07-21.** 17 recovery pins (`parser_recovery.rs` — every
+> `nested_delimiters` site's placeholder shape, the `.`/`?.` member
+> recoveries at parse and analyze level, the `resource` steer's continuation,
+> the lexer skip) + the differential harness (`parse_differential.rs`,
+> fn-pointer oracle/candidate seam): **260 sources (97 corpus + 53 std + 24
+> examples + 86 docs examples), 260 clean-compared, 0 recovered, 0
+> disagreements**. Findings: (1) the fmt tripwire caught **10 corpus files
+> silently bailing** (pre-existing printer fallbacks on newer constructs —
+> macros, lift, fixed arrays, sized numerics, unary minus, destructuring,
+> reactive-owner); pinned as a green ledger (`KNOWN_FORMATTER_BAILS`) + an
+> `#[ignore]`d zero-bail goal, and split out as backlog **E13** — note the
+> S5 fmt net passes trivially on exactly those files until E13 closes.
+> (2) The callgrind lex-vs-parse split is **not separable** under chumsky —
+> generic combinators collapse lexer and parser monomorphizations into one
+> symbol each; the clean datum is `token.rs` self-cost 9.22% (parser-side
+> wrap+compare) vs `lexer.rs` 0.03%. S1 re-baselines on
+> `vilan build examples/todo/client` (5.21B Ir on the profiling profile).
+
 ## 4. Risks, named
 
 - **Span drift** — the differential is span-inclusive by construction; any
