@@ -184,11 +184,7 @@ pub fn infer(program: &mut Program) {
                 .span_map
                 .get(parameter)
                 .map(|span| **span)
-                .unwrap_or(crate::span::Span {
-                    start: 0,
-                    end: 0,
-                    context: (),
-                });
+                .unwrap_or(crate::span::Span { start: 0, end: 0 });
             // A `sync`-marked parameter is a deliberate contract
             // (async-polymorphism.md A.2) — refused, with the contract's
             // steer. A PLAIN value-returning parameter ADAPTS (the instance
@@ -241,16 +237,11 @@ pub fn infer(program: &mut Program) {
             if !value_async_in(program, &held_values, &async_set, &no_flags, &[], *argument) {
                 continue;
             }
-            let span =
-                program
-                    .span_map
-                    .get(argument)
-                    .map(|span| **span)
-                    .unwrap_or(crate::span::Span {
-                        start: 0,
-                        end: 0,
-                        context: (),
-                    });
+            let span = program
+                .span_map
+                .get(argument)
+                .map(|span| **span)
+                .unwrap_or(crate::span::Span { start: 0, end: 0 });
             divergences.push((
                 span,
                 format!(
@@ -316,11 +307,7 @@ pub fn infer(program: &mut Program) {
             .span_map
             .get(&value_id)
             .map(|span| **span)
-            .unwrap_or(crate::span::Span {
-                start: 0,
-                end: 0,
-                context: (),
-            });
+            .unwrap_or(crate::span::Span { start: 0, end: 0 });
         field_divergences.push((
             span,
             format!(
@@ -362,11 +349,7 @@ pub fn infer(program: &mut Program) {
             .span_map
             .get(value_id)
             .map(|span| **span)
-            .unwrap_or(crate::span::Span {
-                start: 0,
-                end: 0,
-                context: (),
-            });
+            .unwrap_or(crate::span::Span { start: 0, end: 0 });
         divergences.push((
             span,
             format!(
@@ -480,11 +463,7 @@ pub fn infer(program: &mut Program) {
                 .span_map
                 .get(&call.call_id)
                 .map(|span| **span)
-                .unwrap_or(crate::span::Span {
-                    start: 0,
-                    end: 0,
-                    context: (),
-                });
+                .unwrap_or(crate::span::Span { start: 0, end: 0 });
             // A nameless target is an awaiting closure applied directly (an
             // adopted value, or a lowered `run` body) — phrase it as what it
             // is rather than backticking a description.
@@ -1142,11 +1121,7 @@ fn span_of(program: &Program, id: Id) -> crate::span::Span {
         .span_map
         .get(&id)
         .map(|span| **span)
-        .unwrap_or(crate::span::Span {
-            start: 0,
-            end: 0,
-            context: (),
-        })
+        .unwrap_or(crate::span::Span { start: 0, end: 0 })
 }
 
 /// Transitive `sync` violations at one call: an argument async ONLY through

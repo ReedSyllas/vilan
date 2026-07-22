@@ -18616,7 +18616,7 @@ fn an_unused_repeat_of_a_side_effectful_value_still_runs() {
 }
 
 // --- Parser diagnostics (diagnostics-standard.md §4: targeted labels/hints
-// --- for the worst chumsky messages; render_parse_error in lib.rs)
+// --- from the handwritten frontend — `parsing::parse` + `parsing::render`)
 
 /// The `!=` soup: `a!==b` lexes as `!=` then `=`. The parse error carries the
 /// targeted hint naming the real fix.

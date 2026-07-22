@@ -13,5 +13,4 @@ path = "src/main.rs"
 vilan-core = { path = "../vilan-core" }
 vilan-embedded-std = { path = "../vilan-embedded-std" }
 ariadne = "0.6.0"
-chumsky = "0.12.0"
 clap = { version = "4", features = ["derive"] }

@@ -83,10 +83,7 @@ pub enum ParseErrorReason {
     /// "found <found>, expected <one of expected>" — the structured recursive-
     /// descent farthest-failure. `expected` is a curated set (never the optional-
     /// continuation noise chumsky merged in at every type position).
-    Expected {
-        found: Found,
-        expected: Vec<&'static str>,
-    },
+    Expected { found: Found, expected: Vec<String> },
     /// A curated message stating a language rule (diagnostics-standard.md B6 — the
     /// prohibition explains itself and names the sanctioned spelling). The
     /// misplaced-`resource` steer is the one case today.
@@ -123,14 +120,14 @@ fn matching_close(open: char) -> char {
 /// Render one parse error as user-facing text, following the diagnostics standard
 /// (`proposal/diagnostics-standard.md`): "found X expected Y in <context> — <hint>"
 /// for the structured case, the curated rule verbatim, and an unclosed-delimiter
-/// message for a recovered region. Exported for the S5 cutover to wire into the
-/// pipeline's four fold sites in place of chumsky's `render_parse_error`; tested
-/// directly here, never called from the pipeline yet.
+/// message for a genuinely garbled region. Wired into the pipeline's fold sites at
+/// the S5 cutover (`analyze_source`, the module loader, macro expansion, the CLI
+/// report), replacing chumsky's `render_parse_error`.
 ///
-/// The noise-filtering `render_parse_error` does on `Rich` (dropping the ever-
-/// present `context clause` / `generic arguments` expectations) is unnecessary
-/// here: the farthest-failure records only real expectations, so an over-eager
-/// optional continuation is never in the set to begin with.
+/// No noise-filtering is needed (chumsky's renderer dropped the ever-present
+/// `context clause` / `generic arguments` expectations): the farthest-failure
+/// records only real expectations, so an over-eager optional continuation is never
+/// in the set to begin with.
 pub fn render(error: &ParseError) -> String {
     use std::fmt::Write;
 
@@ -220,7 +217,7 @@ pub fn parse(source: &str) -> (Option<Spanned<NodeList<'_>>>, Vec<ParseError>) {
             span: (error.position..error.position + error.character.len_utf8()).into(),
             reason: ParseErrorReason::Expected {
                 found: Found::Character(error.character),
-                expected: vec!["a token"],
+                expected: vec!["a token".to_string()],
             },
             context: Vec::new(),
             hint: None,
@@ -264,7 +261,7 @@ struct Failure {
     /// The token index reached (converted to a byte span at emission).
     position: usize,
     /// The curated expectations recorded at [`Failure::position`].
-    expected: Vec<&'static str>,
+    expected: Vec<String>,
     /// The production context at [`Failure::position`], outermost first.
     context: Vec<&'static str>,
 }
@@ -451,14 +448,45 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
+    /// Expect a control token. A CLOSING delimiter (`)` `]` `}` `>`) is a committed
+    /// demand — the matching opener was already consumed — so on failure it records
+    /// what was wanted (`note_expected`), letting a farthest-failure diagnostic name
+    /// the real, located error ("found `y` expected `,` or `}`" at `y`) rather than a
+    /// false "unclosed" claim on a region that actually closed (`recover_delimited`).
+    /// An OPENING delimiter, by contrast, is a speculative head-check for an
+    /// alternative and stays silent — noting it would fill the expected set with every
+    /// alternative's opener (chumsky's expected-dump noise, which the curated
+    /// farthest-failure exists to avoid). The note is on the failure path only, so a
+    /// clean (error-free) parse is untouched and stays byte-identical.
     fn expect_ctrl(&mut self, character: char) -> Option<()> {
-        self.eat_ctrl(character).then_some(())
+        if self.eat_ctrl(character) {
+            Some(())
+        } else {
+            if matches!(character, ')' | ']' | '}' | '>') {
+                self.note_expected(&format!("'{character}'"));
+            }
+            None
+        }
     }
 
+    /// Expect an operator token. Every `expect_op` site is a COMMITTED demand (a
+    /// speculative operator check uses `eat_op` / `peek_is_op` and backtracks), so on
+    /// failure it records what was wanted — e.g. a closure's closing `|` or a match
+    /// arm's `=>`. Failure-path only, so a clean parse is untouched.
     fn expect_op(&mut self, symbol: &str) -> Option<()> {
-        self.eat_op(symbol).then_some(())
+        if self.eat_op(symbol) {
+            Some(())
+        } else {
+            self.note_expected(&format!("'{symbol}'"));
+            None
+        }
     }
 
+    /// Expect a specific token. Kept SILENT on failure: `expect` guards the leading
+    /// keyword of item/statement alternatives (`fun`, `struct`, `is`, …), which are
+    /// speculative head-checks — noting them would list every item keyword at any
+    /// statement-position failure. Delimiter/closer demands (the false-"unclosed"
+    /// class) go through `expect_ctrl`/`expect_op`, which do note.
     fn expect(&mut self, token: &Token<'src>) -> Option<()> {
         self.eat(token).then_some(())
     }
@@ -551,10 +579,12 @@ impl<'a, 'src> Parser<'a, 'src> {
     // --- Error tracking (farthest failure) -----------------------------------
 
     /// Record that `expected` was wanted at the current position, keeping only the
-    /// farthest such point. Called at committed token demands ([`Parser::expect`]
-    /// and friends) and the semantic leaves (atom/type/pattern), never at the
-    /// speculative `eat_*` probes. Purely diagnostic.
-    fn note_expected(&mut self, expected: &'static str) {
+    /// farthest such point. Called at every committed token demand ([`Parser::expect`]
+    /// / [`Parser::expect_ctrl`] / [`Parser::expect_op`]), the comma-list separator,
+    /// and the semantic leaves (atom/type/pattern), never at the speculative `eat_*`
+    /// probes. Purely diagnostic — it never touches the parsed tree, so the clean
+    /// (error-free) path is unchanged and a clean parse stays byte-identical.
+    fn note_expected(&mut self, expected: &str) {
         let position = self.position;
         let advance = match &self.farthest_failure {
             Some(failure) => position > failure.position,
@@ -563,12 +593,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         if advance {
             self.farthest_failure = Some(Failure {
                 position,
-                expected: vec![expected],
+                expected: vec![expected.to_string()],
                 context: self.context_stack.clone(),
             });
         } else if let Some(failure) = &mut self.farthest_failure {
-            if position == failure.position && !failure.expected.contains(&expected) {
-                failure.expected.push(expected);
+            if position == failure.position && !failure.expected.iter().any(|e| e == expected) {
+                failure.expected.push(expected.to_string());
             }
         }
     }
@@ -593,14 +623,26 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// was recorded), naming what was found and the curated expectations, plus the
     /// structural `!=`-soup hint when it applies.
     fn emit_leftover_error(&mut self) {
-        let (position, expected, context) = match self.farthest_failure.take() {
+        match self.farthest_failure.take() {
             Some(failure) if failure.position >= self.position => {
-                (failure.position, failure.expected, failure.context)
+                self.emit_failure(failure.position, failure.expected, failure.context);
             }
             // Nothing deeper than where the last statement declined: fall back to
             // the leftover token and the top-level expectation.
-            _ => (self.position, vec!["an item", "end of input"], Vec::new()),
-        };
+            _ => self.emit_failure(
+                self.position,
+                vec!["an item".to_string(), "end of input".to_string()],
+                Vec::new(),
+            ),
+        }
+    }
+
+    /// Push an `Expected` error for a failure at `position`: the found token, its
+    /// curated `expected` set, its production `context`, and the structural
+    /// `!=`-soup hint when it applies. Shared by the top-level leftover diagnostic
+    /// and delimiter recovery (which surfaces the real inner error, not a claim the
+    /// region was unclosed).
+    fn emit_failure(&mut self, position: usize, expected: Vec<String>, context: Vec<&'static str>) {
         let span = self.token_span(position);
         let found = self.found_at(position);
         let hint = self.soup_hint(position);
@@ -610,6 +652,20 @@ impl<'a, 'src> Parser<'a, 'src> {
             context,
             hint,
         });
+    }
+
+    /// Take the recorded farthest failure iff it lies strictly inside the token
+    /// range `(start, end)` — deeper than an opening delimiter at `start` and before
+    /// the region's close at `end`. Clears it, so the top-level leftover diagnostic
+    /// does not also report it. A failure outside the region is stale (recorded by an
+    /// earlier sibling) and left in place.
+    fn take_failure_within(&mut self, start: usize, end: usize) -> Option<Failure> {
+        match &self.farthest_failure {
+            Some(failure) if failure.position > start && failure.position < end => {
+                self.farthest_failure.take()
+            }
+            _ => None,
+        }
     }
 
     /// The `!=` soup, recognized structurally (not by string matching, as the
@@ -669,15 +725,29 @@ impl<'a, 'src> Parser<'a, 'src> {
         let start = self.position;
         self.position = end;
         let span = self.span_from(start);
-        self.errors.push(ParseError {
-            span,
-            reason: ParseErrorReason::Unbalanced {
-                production,
-                delimiter: open,
-            },
-            context: self.context_stack.clone(),
-            hint: None,
-        });
+        // `scan_balanced` only returns here when the region CLOSED. If a farthest
+        // failure was recorded strictly inside it — a committed demand
+        // (`expect_ctrl`/`expect_op`, e.g. a missing separator or closer) or a
+        // semantic leaf that hit the real error — surface THAT, with its context and
+        // the `!=`-soup hint: the located "found X expected Y", never a false
+        // "unclosed" on a region that did close. Only a GENUINELY GARBLED region —
+        // whose content declines at its very first token, committing to nothing
+        // (`struct S { 1 2 3 }`, `fun f<1 2 3>`) — reaches the `Unbalanced` fallback,
+        // which names the production and its opener. (That fallback's "unclosed"
+        // wording is imprecise for a closed region; it is kept as the last-resort
+        // production-namer, pinned at `render_names_the_unclosed_delimiter`.)
+        match self.take_failure_within(start, end) {
+            Some(failure) => self.emit_failure(failure.position, failure.expected, failure.context),
+            None => self.errors.push(ParseError {
+                span,
+                reason: ParseErrorReason::Unbalanced {
+                    production,
+                    delimiter: open,
+                },
+                context: self.context_stack.clone(),
+                hint: None,
+            }),
+        }
         Some(span)
     }
 
@@ -760,6 +830,12 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 continue;
             }
+            // No separator: the list ends here. Record (for diagnostics) that a `,`
+            // — another item — was ALSO admissible, so if the caller's closer is
+            // then missing the report reads "expected `,` or <closer>" at this
+            // token, not the bare closer alone. On a clean parse the closer follows
+            // and this note is never surfaced.
+            self.note_expected("','");
             break;
         }
         Some(items)
@@ -1540,6 +1616,11 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 items.push(parser.parse_expression()?);
             }
+            // The list has its own item loop (the `[v; n]` repeat form rules out
+            // `comma_list`), so record here — as `comma_list` does — that a `,`
+            // (another element) was also admissible, giving "expected `,` or `]`" if
+            // the closer is missing rather than the bare `]`.
+            parser.note_expected("','");
             parser.expect_ctrl(']')?;
             Some((Node::List(items), parser.span_from(start)))
         })
@@ -4276,6 +4357,72 @@ mod tests {
         assert_eq!(
             rendered_errors("fun f(): {}\n"),
             vec!["found '{' expected a type in return type".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_surfaces_the_real_error_from_inside_a_recovered_block() {
+        // FIX (frontend.md S5 review): a block whose body has a syntax error
+        // recovers over its (balanced, CLOSED) braces, but the diagnostic must name
+        // the real inner error — the farthest failure recorded inside the region —
+        // never falsely claim the block was unclosed. The `!=`-soup hint fires from
+        // inside a block, and an unclosed generic in a `let` type annotation steers
+        // to `,`/`>` at the offending token.
+        assert_eq!(
+            rendered_errors("fun f() { let bad = a!==b; }\n"),
+            vec![
+                "found '=' expected an expression — if this was postfix `!` before a \
+                 comparison, the space is required: `a! == b` (`!=` always lexes as \
+                 not-equals)"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            rendered_errors("fun f() { let p: Map<str, List<i32> = m; }\n"),
+            vec!["found '=' expected ',' or '>' in type annotation".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_steers_a_missing_parameter_comma() {
+        // FIX (frontend.md S5 review): a missing comma between parameters is a
+        // committed list-close failure — it steers to `,`/`)` at the offending
+        // token, instead of backtracking to the statement-position expression
+        // attempt (which would blame the leading `fun` at column 1).
+        assert_eq!(
+            rendered_errors("fun f(x: i32 y: i32) {}\n"),
+            vec!["found 'y' expected ',' or ')'".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_steers_a_missing_list_separator() {
+        // FIX (frontend.md S5 review): a missing separator between comma-list items
+        // — at every ~committed closer, not just parameters — steers to `,` or the
+        // closer at the offending token, never a false "unclosed" on a region that
+        // closed. The committed close demand (`expect_ctrl` for `) ] } >`, `expect_op`
+        // for a closure's `|`) records the closer; the list records the `,`. Covers
+        // the review's four shapes (struct field, enum variant, call arg, closure
+        // param) plus the list literal.
+        assert_eq!(
+            rendered_errors("struct S { x: i32 y: i32 }\n"),
+            vec!["found 'y' expected ',' or '}'".to_string()]
+        );
+        assert_eq!(
+            rendered_errors("enum E { A(i32) B(str) }\n"),
+            vec!["found 'B' expected '=', ',', or '}'".to_string()]
+        );
+        assert_eq!(
+            rendered_errors("fun f() { outer(a b) }\n"),
+            vec!["found 'b' expected ',' or ')'".to_string()]
+        );
+        assert_eq!(
+            rendered_errors("fun f() { let xs = [a b]; }\n"),
+            vec!["found 'b' expected ',' or ']'".to_string()]
+        );
+        assert_eq!(
+            rendered_errors("fun f() { let g = |a b| a; }\n"),
+            vec!["found 'b' expected ',' or '|'".to_string()]
         );
     }
 

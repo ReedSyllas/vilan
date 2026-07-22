@@ -1,12 +1,54 @@
 # The handwritten frontend — replacing chumsky (H6)
 
-> **Status: RATIFIED 2026-07-21 — implementation underway (S0 first).** The §6
-> calls (user, same day): **(a) improved errors at cutover** — parse
-> diagnostics may improve, gated by the diagnostics standard + per-changed-
-> message review, no byte-parity requirement; **(b) grammar freeze** — no
-> grammar-touching changes during the arc (B30 `lazy` lands post-cutover).
+> **Status: SHIPPED 2026-07-22 — the arc is complete, chumsky is deleted.**
+> Six slices in two days, every one differentially gated: S0 pins+harness
+> (1dbd7ba), S1 lexer (15f0938), S2 expressions/types/patterns (b9003fc),
+> S3 full grammar — 279/279 whole-file differential + 97/97 corpus programs
+> byte-identical through the new frontend (5e62fc8), S4 recovery + rich
+> errors (b869d76), S5 cutover (this commit): owned `Span` (usize fields —
+> the u32 sketch lost to ~10 casts and the recompile-unchanged goal), the
+> whole pipeline on `lexing::tokenize`/`parsing::parse`/`render`, chumsky
+> deleted (8 files, 4,601 lines, gone from the lock).
 >
-> Original status: **DRAFT 2026-07-21 — for review.** Backlog H6 (L) + E4 (rides this).
+> **Measured** (release, todo, vs the S0 baselines): `build` 466–509 ms →
+> **181 ms** (~2.7×); `check .` 651–694 ms → **236 ms**; callgrind 5.21 B →
+> **2.01 B Ir**; the frontend's share of a compile ~63% → **3.7%** (lexing
+> 0.3%, parsing 3.2%, token 0.2%). The differential harness itself: 19.5 s
+> → 0.24 s once the oracle went.
+>
+> **The S5 review cycle** (adversarial, FIX-FIRST, both findings root-fixed
+> pre-commit): (1) the 396 adversarial fixtures had been deleted with the
+> oracle — restored as an oracle-free regression corpus (accept + decline
+> sweeps + 36 span-inclusive precedence/grouping snapshots incl. the
+> bit-tier shapes the corpus provably lacks); (2) the false-"unclosed"
+> diagnostic survived at ~20 of 22 list-closers — fixed by the principled
+> noting rule: **closing delimiters and committed operators note their
+> expectations; speculative opener head-checks stay silent** (blanket noting
+> re-imports the expected-dump noise). Missing-separator typos now report
+> the located `found 'y' expected ',' or '}'` at every site. Accepted
+> residual, pinned: a genuinely-garbled region declining at its first token
+> still reports the production-naming "unclosed" fallback.
+>
+> **The salvage divergence** (the one §6a behavior change, KEEP): chumsky's
+> top-level parse was all-or-nothing — any unconsumed input discarded the
+> whole tree; the handwritten frontend salvages the parsed prefix (the LSP
+> win — a whole item before mid-file garbage survives, e.g.
+> `fun ok() {}` + `BROKEN nonsense` keeps `ok`). Nine divergence rows were
+> inventoried at S4/S5; two sub-roots beyond the salvage: the S1
+> lexer-discard case (chumsky drops the whole stream on a trailing
+> un-lexable char; we keep partials + per-char errors, a count delta), and
+> shared recovery limits (unbalanced inner delimiters defeat body recovery
+> on both). All KEEP.
+>
+> **Residuals**: `parsing.rs` doc comments still cite the chumsky-era
+> productions as design rationale (deliberate); E13 (the ten formatter
+> bails) remains open and the fmt tripwire + ledger stay live; E4 (sub-file
+> incremental parsing) is now unlocked; the grammar freeze is LIFTED — B30
+> `lazy` is the first grammar change through the new frontend.
+>
+> Ratified calls (user, 2026-07-21): (a) improved errors at cutover,
+> standard-gated; (b) grammar freeze during the arc. Original status:
+> **DRAFT 2026-07-21 — for review.** Backlog H6 (L) + E4 (rides this).
 > The user pulled the trigger early (2026-07-21, the structural-improvements
 > arc): the recorded triggers ("release builds past ~1s, LSP latency, the next
 > grammar fight") are not yet met — a cold release build of the todo client is

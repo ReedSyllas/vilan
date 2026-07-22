@@ -1522,11 +1522,7 @@ pub struct Analyzer<'src> {
     bumps_tabled: HashSet<Id>,
 }
 
-static EMPTY_SPAN: Span = Span {
-    start: 0,
-    end: 0,
-    context: (),
-};
+static EMPTY_SPAN: Span = Span { start: 0, end: 0 };
 
 // Flattens an `import`/`use` tree into (path, leaf-name) pairs, e.g.
 // `a::{ b, c::d }` becomes `([a], b)` and `([a, c], d)`.
@@ -21824,7 +21820,6 @@ fn document_overlay_get(path: &str) -> Option<String> {
 }
 
 pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
-    use chumsky::prelude::*;
     use std::collections::HashMap;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -21891,42 +21886,27 @@ pub(crate) fn load_package_module(path: &str) -> Option<LoadedModule> {
         );
         leaked
     }
-    let (tokens, lex_errors) = crate::lexer::lexer().parse(source).into_output_errors();
+    // The handwritten frontend lexes and parses in one pass, always recovering a
+    // (possibly partial) tree alongside its diagnostics (lexer and parser errors,
+    // span-ordered). Each renders to `line N, column M: reason` for this file.
+    let (tree, parse_errors) = crate::parsing::parse(source);
     errors.extend(
-        lex_errors
-            .into_iter()
-            .map(|error| render_at(source, error.span().start, error.to_string())),
+        parse_errors
+            .iter()
+            .map(|error| render_at(source, error.span.start, crate::parsing::render(error))),
     );
-    let root: &'static crate::span::Spanned<NodeList<'static>> = match tokens {
-        Some(tokens) => {
-            let end = source.len();
-            let (root, parse_errors) = crate::parser::parser()
-                .map_with(|ast, e| (ast, e.span()))
-                .parse(
-                    tokens
-                        .as_slice()
-                        .map((end..end).into(), |(token, span)| (token, span)),
-                )
-                .into_output_errors();
-            errors.extend(parse_errors.into_iter().map(|error| {
-                let msg = crate::render_parse_error(&error, source);
-                render_at(source, error.span().start, msg)
-            }));
-            match root {
-                Some((mut root, _file_span)) => {
-                    crate::lift::rewrite_items(&mut root.0);
-                    let leaked = &*Box::leak(Box::new(root));
-                    crate::leak_tally::record(
-                        crate::leak_tally::LeakSite::ModuleErrorAst,
-                        std::mem::size_of_val(leaked),
-                    );
-                    leaked
-                }
-                // Recovery failed outright: an empty module + the errors above —
-                // loud, instead of pretending the file doesn't exist.
-                None => empty_ast(),
-            }
+    let root: &'static crate::span::Spanned<NodeList<'static>> = match tree {
+        Some(mut root) => {
+            crate::lift::rewrite_items(&mut root.0);
+            let leaked = &*Box::leak(Box::new(root));
+            crate::leak_tally::record(
+                crate::leak_tally::LeakSite::ModuleErrorAst,
+                std::mem::size_of_val(leaked),
+            );
+            leaked
         }
+        // Recovery failed outright: an empty module + the errors above —
+        // loud, instead of pretending the file doesn't exist.
         None => empty_ast(),
     };
     let parse_errors = Box::leak(errors.into_boxed_slice());

@@ -634,7 +634,8 @@ pub(crate) fn world_prelude_nodes(
     }
     let text: &'static str = Box::leak(text.into_boxed_str());
     crate::leak_tally::record(crate::leak_tally::LeakSite::MacroPreludeText, text.len());
-    let (root, _span) = crate::parse_clean(text)?;
+    let (tree, errors) = crate::parsing::parse(text);
+    let (root, _span) = tree.filter(|_| errors.is_empty())?;
     Some(root)
 }
 
@@ -1509,40 +1510,17 @@ fn parse_cached(text: &str) -> Result<(&'static NodeList<'static>, &'static str)
 /// Lexes + parses a macro's returned source. Unlike the trusted derive
 /// generators, macro output is user code: errors are returned, not swallowed.
 fn parse_generated(source: &str) -> Result<(&'static NodeList<'static>, &'static str), String> {
-    use chumsky::prelude::*;
     let source: &'static str = Box::leak(source.to_string().into_boxed_str());
     crate::leak_tally::record(crate::leak_tally::LeakSite::MacroParseText, source.len());
-    // Fast path for clean output; the rich pipeline below runs only to name
-    // what's wrong with a macro's malformed source.
-    if let Some(root) = crate::parse_clean(source) {
-        let leaked: &'static crate::span::Spanned<NodeList<'static>> = Box::leak(Box::new(root));
-        crate::leak_tally::record(
-            crate::leak_tally::LeakSite::MacroParseAst,
-            std::mem::size_of_val(leaked),
-        );
-        return Ok((&leaked.0, source));
+    // The handwritten frontend lexes and parses in one pass. Macro output is user
+    // code, so any diagnostic is reported (not swallowed) — the first one names
+    // what is wrong with the malformed source.
+    let (tree, errors) = crate::parsing::parse(source);
+    if let Some(error) = errors.first() {
+        return Err(crate::parsing::render(error));
     }
-    let (tokens, lex_errors) = crate::lexer::lexer().parse(source).into_output_errors();
-    if let Some(error) = lex_errors.first() {
-        return Err(error.to_string());
-    }
-    let Some(tokens) = tokens else {
-        return Err("empty output".to_string());
-    };
-    let end = source.len();
-    let (root, parse_errors) = crate::parser::parser()
-        .map_with(|ast, e| (ast, e.span()))
-        .parse(
-            tokens
-                .as_slice()
-                .map((end..end).into(), |(token, span)| (token, span)),
-        )
-        .into_output_errors();
-    if let Some(error) = parse_errors.first() {
-        return Err(crate::render_parse_error(error, source));
-    }
-    match root {
-        Some((mut root, _file_span)) => {
+    match tree {
+        Some(mut root) => {
             // Expansion output walks like any other tree — its bare-`?`
             // marks become lift regions here (expression-lifting.md).
             crate::lift::rewrite_items(&mut root.0);

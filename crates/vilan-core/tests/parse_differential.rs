@@ -1,20 +1,16 @@
-//! The corpus-scale differential + fmt tripwire (H6 S0, `proposal/frontend.md` §3).
+//! The handwritten frontend's corpus-scale regression sweep + fmt tripwire
+//! (`proposal/frontend.md` §3 S5).
 //!
-//! `proposal/frontend.md` replaces the chumsky lexer+parser with a handwritten
-//! frontend, holding chumsky in-tree as the ORACLE for the whole arc and requiring
-//! the new frontend to produce byte-identical (span-inclusive) trees. This target
-//! scales `parse_fast_path.rs`'s `Debug`-string differential to every real source
-//! in the repo, so a divergence — now, or when S1 swaps the candidate frontend —
-//! fails loudly with the offending file.
-//!
-//! The differential SEAM (below) is a fn-pointer pair: `ORACLE` is the rich chumsky
-//! parse, held constant; `CANDIDATE` is the frontend under test. At S0 the candidate
-//! was the fast chumsky path (`parse_clean`); **S3 repoints `CANDIDATE` at the
-//! handwritten frontend** (`parsing::parse`), so this is now the TOTAL differential
-//! — the whole file, items included — that the proposal's §3 S3 gate requires. The
-//! original fast-vs-rich chumsky self-check is NOT lost: `chumsky_candidate` is kept
-//! and driven by its own test (`fast_and_rich_chumsky_agree_over_the_corpus`), so
-//! the oracle's own invariant (fast path ≡ rich path) still runs.
+//! Through the H6 arc this was a differential against the chumsky ORACLE, proving
+//! the handwritten frontend byte-identical over every real source. At the S5
+//! cutover chumsky is deleted, so the oracle arm retires: this target becomes the
+//! new parser's own regression corpus — every `*.vl` in the repo, every std layer,
+//! every example, every compilable docs fence, and the corpus-absent construct set
+//! must parse CLEAN (a tree, zero diagnostics) through `parsing::parse`, with no
+//! panic. The trees themselves were proven byte-identical to chumsky's at S3 and
+//! are re-checked end-to-end by the corpus byte-gate (`vilan-cli --test corpus`);
+//! this sweep guards the *front* of the pipeline — that the whole clean corpus
+//! still parses without error or panic.
 //!
 //! The fmt tripwire converts the formatter's silent-no-op failure mode (§0: the
 //! re-lex-and-compare safety net turns `fmt` into a no-op when the token stream
@@ -22,79 +18,12 @@
 //! checks: `formatter_output_token_matches_input_over_the_corpus` guards against
 //! token-drifting output, and `formatter_bail_set_is_the_known_ledger` pins the
 //! exact set of files `fmt` currently no-ops on (an S0 FINDING — see
-//! `KNOWN_FORMATTER_BAILS`), with `formatter_never_silently_bails_over_the_corpus`
-//! the `#[ignore]`d zero-bail goal.
+//! `KNOWN_FORMATTER_BAILS`, still open as backlog E13), with
+//! `formatter_never_silently_bails_over_the_corpus` the `#[ignore]`d zero-bail goal.
 
-use chumsky::prelude::*;
 use std::path::{Path, PathBuf};
 use vilan_core::token::Token;
-use vilan_core::{formatter, lexer, parse_clean, parser, parsing};
-
-// ---------------------------------------------------------------------------
-// The differential seam
-// ---------------------------------------------------------------------------
-
-/// A frontend's judgement of one source: the `Debug` of the recovered tree (if a
-/// tree came back at all) and the diagnostic count.
-type Judgement = (Option<String>, usize);
-
-/// ORACLE — the rich (diagnostics-bearing) chumsky instantiation, exactly as the
-/// diagnostics path runs it. Held constant for the whole H6 arc (proposal §3).
-fn chumsky_oracle(source: &str) -> Judgement {
-    let (tokens, lex_errors) = lexer().parse(source).into_output_errors();
-    let Some(tokens) = tokens else {
-        return (None, lex_errors.len());
-    };
-    let end = source.len();
-    let (root, parse_errors) = parser()
-        .parse(
-            tokens
-                .as_slice()
-                .map((end..end).into(), |(token, span)| (token, span)),
-        )
-        .into_output_errors();
-    (
-        root.map(|tree| format!("{tree:?}")),
-        lex_errors.len() + parse_errors.len(),
-    )
-}
-
-/// The fast chumsky path (`parse_clean`): accepts ONLY perfectly clean sources and
-/// declines (returns `None`) on any lex/parse error or recovery. Held as the
-/// oracle's own self-check candidate through the whole arc — the invariant "the
-/// fast path agrees with the rich path" must not be lost when `CANDIDATE` moves to
-/// the handwritten frontend.
-///
-/// (`parse_clean` does NOT lift-rewrite — only `parse_clean_cached` does — so its
-/// tree compares directly against the un-lifted oracle tree, exactly as
-/// `parse_fast_path.rs::clean_source_parses_and_matches_the_rich_tree` relies on.)
-fn chumsky_candidate(source: &str) -> Option<String> {
-    parse_clean(source).map(|tree| format!("{tree:?}"))
-}
-
-/// CANDIDATE — the frontend under differential test. **S3: the handwritten frontend**
-/// (`parsing::parse`, which internally lexes with `lexing::tokenize`). It returns a
-/// tree only when the source is perfectly clean, so — like `chumsky_candidate` — its
-/// clean tree compares directly against the un-lifted oracle tree (neither
-/// lift-rewrites). Repointing this single const is the whole S3 seam move on the
-/// harness side.
-///
-/// S4 gave `parse` recovery: it now returns a (possibly recovered) tree ALONGSIDE a
-/// non-empty error list, exactly as chumsky's `into_output_errors` does. So the
-/// clean-or-decline contract this CLEAN differential relies on is expressed by the
-/// error list (empty ⇒ clean), not by a missing tree — the recovery-mode comparison
-/// lives in its own target (`tests/parse_recovery_differential.rs`).
-fn handwritten_candidate(source: &str) -> Option<String> {
-    let (tree, errors) = parsing::parse(source);
-    if errors.is_empty() {
-        tree.map(|tree| format!("{tree:?}"))
-    } else {
-        None
-    }
-}
-
-const ORACLE: fn(&str) -> Judgement = chumsky_oracle;
-const CANDIDATE: fn(&str) -> Option<String> = handwritten_candidate;
+use vilan_core::{formatter, lexing, parsing};
 
 // ---------------------------------------------------------------------------
 // Source enumeration: the corpus, every std layer, examples, and docs examples
@@ -182,12 +111,11 @@ fn collect_markdown(dir: &Path, into: &mut Vec<PathBuf>) {
 }
 
 /// Whole-file S3 constructs that the repo corpus happens NOT to exercise (so the
-/// file-derived differential never reaches them), each a clean program the oracle
-/// and candidate must parse byte-identically. Only PARSED here (types need not
-/// resolve), so bare type names are fine. This closes the corpus's coverage gaps —
-/// notably `[trait_only]` / `[doc(hidden)]` (zero corpus uses) and the tuple-bound
-/// endpoint variants — through the same oracle comparison as every real source,
-/// rather than leaving them to the (chumsky-free, durable) in-module pins alone.
+/// file-derived sweep never reaches them), each a clean program the parser must
+/// accept. Only PARSED here (types need not resolve), so bare type names are fine.
+/// This closes the corpus's coverage gaps — notably `[trait_only]` / `[doc(hidden)]`
+/// (zero corpus uses) and the tuple-bound endpoint variants — alongside the
+/// (durable) in-module pins in `parsing.rs`.
 fn corpus_absent_constructs() -> Vec<(String, String)> {
     [
         // The two attributes with zero corpus uses.
@@ -240,7 +168,7 @@ fn corpus_absent_constructs() -> Vec<(String, String)> {
     .collect()
 }
 
-/// The full differential corpus: `(label, source)` over `vilan/test`, every
+/// The full sweep corpus: `(label, source)` over `vilan/test`, every
 /// `vilan/std/src` layer, `vilan/examples`, the docs examples, and the
 /// corpus-absent S3 constructs above.
 fn all_sources() -> Vec<(String, String)> {
@@ -262,75 +190,11 @@ fn all_sources() -> Vec<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// The differential
+// The regression sweep
 // ---------------------------------------------------------------------------
 
-/// Run one candidate against the oracle over every source, returning
-/// `(clean_compared, recovered, disagreements, hard_fails)` — the same tally the
-/// S0 harness computed, factored out so both the handwritten candidate (the S3
-/// gate) and the fast chumsky candidate (the oracle self-check) drive it.
-fn differential_report(
-    candidate: fn(&str) -> Option<String>,
-    sources: &[(String, String)],
-) -> (usize, usize, Vec<String>, Vec<String>) {
-    let mut clean_compared = 0usize; // M: candidate clean AND oracle agrees
-    let mut recovered = 0usize; // K: candidate declined, oracle recovered a tree
-    let mut disagreements: Vec<String> = Vec::new();
-    let mut hard_fails: Vec<String> = Vec::new();
-
-    for (label, source) in sources {
-        let (oracle_tree, oracle_errors) = ORACLE(source);
-        match candidate(source) {
-            Some(candidate_tree) => {
-                // The candidate accepted the source as clean; the oracle MUST
-                // agree — a tree, zero diagnostics, and a byte-identical (=
-                // span-identical) `Debug`. Any of these failing is a live
-                // fast/rich parser divergence (proposal §3 stop condition).
-                match oracle_tree {
-                    Some(oracle_tree) if oracle_errors == 0 && oracle_tree == candidate_tree => {
-                        clean_compared += 1;
-                    }
-                    Some(oracle_tree) if oracle_errors == 0 => {
-                        disagreements.push(format!(
-                            "{label}: candidate/oracle trees differ (both clean)\n  \
-                             candidate: {candidate_tree}\n  oracle:    {oracle_tree}"
-                        ));
-                    }
-                    _ => {
-                        disagreements.push(format!(
-                            "{label}: candidate parsed it clean but the oracle reported \
-                             {oracle_errors} diagnostic(s)"
-                        ));
-                    }
-                }
-            }
-            None => {
-                // The candidate declined (a lex/parse error or a recovery). The
-                // oracle must still return a tree — that a real repo source needs
-                // recovery at all is itself worth recording.
-                if oracle_tree.is_some() {
-                    recovered += 1;
-                    if oracle_errors == 0 {
-                        // Oracle sees a clean tree but the candidate declined: the
-                        // candidate is wrongly stricter than the oracle.
-                        disagreements.push(format!(
-                            "{label}: candidate declined a source the oracle parses CLEAN \
-                             (candidate is too strict)"
-                        ));
-                    }
-                } else {
-                    hard_fails.push(format!(
-                        "{label}: neither frontend produced a tree ({oracle_errors} diagnostics)"
-                    ));
-                }
-            }
-        }
-    }
-    (clean_compared, recovered, disagreements, hard_fails)
-}
-
 #[test]
-fn candidate_and_oracle_agree_over_the_corpus() {
+fn the_handwritten_frontend_parses_every_clean_source() {
     let sources = all_sources();
     assert!(
         sources.len() > 150,
@@ -338,59 +202,39 @@ fn candidate_and_oracle_agree_over_the_corpus() {
         sources.len()
     );
 
-    let (clean_compared, recovered, disagreements, hard_fails) =
-        differential_report(CANDIDATE, &sources);
+    // Every enumerated source is a complete, valid program (it compiles, or is a
+    // parse-only adversarial construct), so it must parse CLEAN: a tree comes back
+    // (always — the frontend never discards), with an EMPTY diagnostic list. A
+    // non-empty list means the parser rejects a source it must accept — a real
+    // regression, localized by label. `parsing::parse` never panics on any input
+    // (the recovery contract), so reaching the end at all is part of the sweep.
+    let mut rejected: Vec<String> = Vec::new();
+    let mut clean = 0usize;
+    for (label, source) in &sources {
+        let (tree, errors) = parsing::parse(source);
+        if tree.is_none() {
+            rejected.push(format!("{label}: no tree returned"));
+        } else if !errors.is_empty() {
+            rejected.push(format!(
+                "{label}: {} diagnostic(s) on a clean source: {}",
+                errors.len(),
+                parsing::render(&errors[0])
+            ));
+        } else {
+            clean += 1;
+        }
+    }
 
     eprintln!(
-        "parse differential (handwritten frontend): N={} files, M={} clean-compared, K={} recovered",
+        "parse sweep (handwritten frontend): N={} sources, {} parsed clean",
         sources.len(),
-        clean_compared,
-        recovered
-    );
-
-    assert!(
-        disagreements.is_empty(),
-        "candidate/oracle DISAGREEMENT on {} source(s):\n{}",
-        disagreements.len(),
-        disagreements.join("\n")
+        clean
     );
     assert!(
-        hard_fails.is_empty(),
-        "{} source(s) produced NO tree from either frontend:\n{}",
-        hard_fails.len(),
-        hard_fails.join("\n")
-    );
-    assert!(
-        clean_compared > 150,
-        "expected the bulk of the corpus to compare clean, got M={clean_compared}"
-    );
-}
-
-/// The oracle's own self-check, preserved through the S3 candidate move: the fast
-/// chumsky path (`parse_clean`) must agree with the rich chumsky path (`parser()`)
-/// over every clean source. This is the invariant the S0 harness enforced before
-/// `CANDIDATE` pointed at chumsky's fast path; keeping it as its own test means
-/// swapping `CANDIDATE` to the handwritten frontend does not silently drop it.
-#[test]
-fn fast_and_rich_chumsky_agree_over_the_corpus() {
-    let sources = all_sources();
-    let (clean_compared, _recovered, disagreements, hard_fails) =
-        differential_report(chumsky_candidate, &sources);
-    assert!(
-        disagreements.is_empty(),
-        "chumsky fast/rich DISAGREEMENT on {} source(s):\n{}",
-        disagreements.len(),
-        disagreements.join("\n")
-    );
-    assert!(
-        hard_fails.is_empty(),
-        "{} source(s) produced NO tree from either chumsky path:\n{}",
-        hard_fails.len(),
-        hard_fails.join("\n")
-    );
-    assert!(
-        clean_compared > 150,
-        "expected the bulk of the corpus to compare clean, got M={clean_compared}"
+        rejected.is_empty(),
+        "the handwritten frontend rejected {} source(s) it must accept:\n{}",
+        rejected.len(),
+        rejected.join("\n")
     );
 }
 
@@ -399,16 +243,15 @@ fn fast_and_rich_chumsky_agree_over_the_corpus() {
 // ---------------------------------------------------------------------------
 
 /// The formatter's own notion of "the same code": the lexer's token stream with
-/// spans stripped. Re-implemented here against the PUBLIC lexer so the check is
-/// external to `formatter.rs` (the point of a tripwire) and survives the H6
-/// cutover. Mirrors `formatter::code_tokens` + `formatter::normalize`.
+/// spans stripped. Re-implemented here against the PUBLIC `lexing::tokenize` so the
+/// check is external to `formatter.rs` (the point of a tripwire). Mirrors
+/// `formatter::code_tokens` + `formatter::normalize`.
 fn normalized_tokens(source: &str) -> Option<Vec<Token<'_>>> {
-    let tokens: Vec<Token<'_>> = lexer()
-        .parse(source)
-        .into_output()?
-        .into_iter()
-        .map(|(token, _span)| token)
-        .collect();
+    let (spanned, lex_errors) = lexing::tokenize(source);
+    if !lex_errors.is_empty() {
+        return None;
+    }
+    let tokens: Vec<Token<'_>> = spanned.into_iter().map(|(token, _span)| token).collect();
     // A trailing comma before a closer is insignificant in vilan — the formatter
     // may normalize it in or out, so the safety check ignores it.
     let mut result: Vec<Token<'_>> = Vec::with_capacity(tokens.len());
@@ -436,9 +279,8 @@ fn corpus_files() -> Vec<PathBuf> {
 fn formatter_output_token_matches_input_over_the_corpus() {
     // The durable tripwire: whatever `format` returns for a corpus file, its token
     // stream must match the input's (unchanged output matches trivially; a
-    // successful reprint matches by the formatter's contract). This holds today
-    // via the internal safety net; post-cutover it catches any token-drifting
-    // output that slips that net.
+    // successful reprint matches by the formatter's contract). This catches any
+    // token-drifting output that slips the formatter's internal safety net.
     let files = corpus_files();
     assert!(
         files.len() > 60,
@@ -502,10 +344,9 @@ fn current_bail_set() -> Vec<String> {
 /// file names correlate with newer language forms (macros, expression lifting,
 /// fixed arrays, sized numerics, unary minus, irrefutable destructuring). This is
 /// a REPORTED FINDING, not a fix: completing the formatter is a separate work item
-/// (out of H6 S0 scope, which is "pin the ground"). Pinning the exact set makes it
-/// an active regression tripwire — a NEW bailer, or one the formatter learns to
-/// handle, flips this test and forces the ledger (and the goal test below) to be
-/// revisited.
+/// (backlog E13, still open). Pinning the exact set makes it an active regression
+/// tripwire — a NEW bailer, or one the formatter learns to handle, flips this test
+/// and forces the ledger (and the goal test below) to be revisited.
 const KNOWN_FORMATTER_BAILS: &[&str] = &[
     "destructuring.vl",
     "fixed-arrays.vl",
@@ -539,8 +380,8 @@ fn formatter_bail_set_is_the_known_ledger() {
 
 #[test]
 #[ignore = "H6 S0 FINDING: 10 corpus files silently bail through `vilan fmt` (see \
-            KNOWN_FORMATTER_BAILS). The goal is zero; un-ignore when the formatter \
-            handles every corpus construct. Do NOT fix in S0 — report only."]
+            KNOWN_FORMATTER_BAILS), backlog E13. The goal is zero; un-ignore when the \
+            formatter handles every corpus construct."]
 fn formatter_never_silently_bails_over_the_corpus() {
     let bails = current_bail_set();
     assert!(

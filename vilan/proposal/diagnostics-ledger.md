@@ -24,6 +24,26 @@ producer points into `std` for a user-caused condition (backlog item 11 /
 E11): the only into-`std` notes are the bound- and trait-declaration notes,
 both control cases — see that item's finding.
 
+**H6 S5 cutover, 2026-07-21.** The handwritten frontend (`frontend.md`) replaces
+chumsky at the S5 cutover; its parse diagnostics (`parsing::parse` +
+`parsing::render`) now flow through the pipeline's fold sites (`analyze_source`,
+the module loader, macro expansion, the CLI report), replacing chumsky's
+`render_parse_error`. Five message forms go live (204–208), all QUALIFIES — the S4
+error-quality pass built them to the standard (found/expected/context/hint, curated
+expectations with none of chumsky's `context clause` / `generic arguments` noise, a
+structural `!=`-soup hint, the B6 misplaced-`resource` rule), and the S5 review
+added FIX 1 (a recovered CLOSED delimited region surfaces its real *located* inner
+error when a committed demand or leaf recorded one — never a false "unclosed" on a
+missing separator/typo; only a GENUINELY GARBLED region, declining at its first
+token, falls back to the production-naming "unclosed" last resort) and FIX 2 (the
+committed close demands — closing `) ] } >` via `expect_ctrl`, a closure's `|` via
+`expect_op`, and each list's `,` separator — record what they wanted, so a missing
+separator steers to "`,` or <closer>" at the offending token instead of the leading
+keyword; opening delimiters and item keywords stay silent, keeping the expected set
+curated). Pins: `parsing.rs` `render_*` (8) + `inference.rs` the three steers
+(`the_not_equals_soup_hints…`, `an_unclosed_generic_steers…`,
+`a_missing_parameter_comma_steers…`).
+
 | # | Site | Message head | Verdict |
 |---|------|--------------|---------|
 | 1 | analyzer.rs:1856 | `` |QUALIFIES — reviewed in the batch-7 sweep: B6-shaped rule statement from a designed arc; pin via its family's suite |
@@ -229,3 +249,8 @@ both control cases — see that item's finding.
 | 201 | async_infer.rs:1208 | `this call passes an async closure that reaches `{parameter}`,` |QUALIFIES — async-polymorphism transitive sync (B6 + move-async-outside steer; cross-file note at the forwarding site is user↔user — std takes sync closures directly, so its violations are DIRECT, reported at the global check); pin `forwarded into the `sync` parameter` |
 | 202 | async_infer.rs:1272 | `this call passes an async closure that reaches the host (`ext` |QUALIFIES — async-polymorphism transitive extern (B6; forwarding note user↔user as above); pin `cannot await a vilan closure` |
 | 203 | async_infer.rs:1329 | `an async closure cannot adapt a trait/generic-dispatched call` |QUALIFIES — async-polymorphism dispatch refusal (B6 + bind-concretely / declare-the-param-async steer, no note); pin `cannot adapt a trait/generic-dispatched call` |
+| 204 | parsing.rs:637 (emit_failure) | `found {found} expected {expected} in {context} — {hint}` |QUALIFIES — the handwritten frontend's structured parse error (frontend.md S4/S5; diagnostics-standard §4). Farthest-failure anchored (A1); curated expectations only. Pins: parsing.rs render_carries_the_production_context, render_surfaces_the_real_error_from_inside_a_recovered_block, render_steers_a_missing_parameter_comma; inference.rs an_unclosed_generic_steers…, a_missing_parameter_comma_steers… |
+| 205 | parsing.rs recover_delimited (Unbalanced fallback) | `unclosed `{delimiter}` in {production} — expected a matching `{close}`` |QUALIFIES (with a noted imprecision) — the LAST-RESORT fallback for a GENUINELY GARBLED region whose content declines at its first token, recording no committed inner failure (`struct S { 1 2 3 }`, `fun f<1 2 3>`); it names the production + opener. FIX 1: whenever a committed demand OR leaf recorded a failure inside the (closed) region — a missing separator/closer or a typo — that located error is surfaced instead, so "unclosed" never fires on those. The fallback's "unclosed" wording is imprecise for a region that did close; kept as the production-namer. Pins: parsing.rs render_names_the_unclosed_delimiter_and_its_production, the_ten_delimiter_sites_recover_to_their_exact_placeholders |
+| 206 | parsing.rs:3206 (parse_misplaced_resource) | `` `resource` is a type-declaration modifier — it may appear only `` |QUALIFIES — B6 rule statement (the prohibition explains itself + names the sanctioned position). Pin: parsing.rs render_states_the_resource_language_rule |
+| 207 | parsing.rs:221 (parse, lex error) | `found '{character}' expected a token` |QUALIFIES — the S1 LexError surfaced as a found/expected error, span-anchored at the un-lexable char (mid-file → the rest still parses). Pin: parsing.rs render_reports_an_illegal_character |
+| 208 | parsing.rs:663 (soup_hint) | `if this was postfix `!` before a comparison, the space is required: `a! == b`` |QUALIFIES — §6a first-class hint, recognized STRUCTURALLY (a stray `=` after a `!=` token), not by source-string match; fires from inside blocks (FIX 1). Pins: parsing.rs render_gives_the_not_equals_soup_a_first_class_message, render_surfaces_the_real_error_from_inside_a_recovered_block; inference.rs the_not_equals_soup_hints_the_postfix_bang_spacing |

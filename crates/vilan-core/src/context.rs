@@ -176,11 +176,7 @@ fn span_of(program: &Program, id: Id) -> crate::span::Span {
         .span_map
         .get(&id)
         .map(|span| **span)
-        .unwrap_or(crate::span::Span {
-            start: 0,
-            end: 0,
-            context: (),
-        })
+        .unwrap_or(crate::span::Span { start: 0, end: 0 })
 }
 
 fn context_name<'a>(program: &'a Program, context: Id) -> &'a str {
@@ -1168,11 +1164,7 @@ fn analyze(
             }
             _ => errors.push(Error {
                 note: None,
-                span: crate::span::Span {
-                    start: 0,
-                    end: 0,
-                    context: (),
-                },
+                span: crate::span::Span { start: 0, end: 0 },
                 msg: "`get_safe` needs `std::option::Option` loaded".to_string(),
             }),
         }
@@ -1231,11 +1223,7 @@ fn apply(program: &mut Program, plan: Plan) {
         }
     }
 
-    let empty_span = crate::span::Span {
-        start: 0,
-        end: 0,
-        context: (),
-    };
+    let empty_span = crate::span::Span { start: 0, end: 0 };
     // Synthesizes `Some(parameter)`: a fresh call to the `Option::Some`
     // variant constructor. The transformer lowers a variant-subject call to
     // the variant value directly, so no method records are needed.

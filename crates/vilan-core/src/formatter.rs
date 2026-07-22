@@ -7,14 +7,10 @@
 //! input's (ignoring spans, whitespace, and comments); on any mismatch it returns
 //! the source unchanged rather than risk corrupting the file.
 
-use chumsky::prelude::*;
-
-use crate::lexer::lexer_with;
 use crate::node::{
     BinaryOp, Convention, ExternBinding, Func, GenericParameters, ImportBranch, Node, NodeIfBranch,
     NodeList, Pattern,
 };
-use crate::parser::parser_with;
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 
@@ -51,10 +47,10 @@ pub fn extract_comments(source: &str) -> Vec<(Span, &str)> {
 /// The lexer's token stream with spans stripped — the formatter's notion of "the
 /// same code", used to check a reprint didn't change anything but trivia.
 fn code_tokens(source: &str) -> Option<Vec<Token<'_>>> {
-    lexer_with::<extra::Default>()
-        .parse(source)
-        .into_output()
-        .map(|tokens| tokens.into_iter().map(|(token, _)| token).collect())
+    let (tokens, lex_errors) = crate::lexing::tokenize(source);
+    lex_errors
+        .is_empty()
+        .then(|| tokens.into_iter().map(|(token, _)| token).collect())
 }
 
 /// Drops every comma that sits immediately before a closing `}`, `)`, or `]`.
@@ -77,17 +73,11 @@ fn normalize(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
     result
 }
 
-/// Parses `source` into its top-level item list, or `None` if it doesn't parse.
+/// Parses `source` into its top-level item list, or `None` if it doesn't parse
+/// perfectly cleanly — the formatter reprints only sources it fully understands.
 fn parse(source: &str) -> Option<NodeList<'_>> {
-    let tokens = lexer_with::<extra::Default>().parse(source).into_output()?;
-    let end = source.len();
-    let stream = tokens
-        .as_slice()
-        .map((end..end).into(), |(token, span)| (token, span));
-    parser_with::<_, extra::Default>()
-        .parse(stream)
-        .into_output()
-        .map(|(items, _)| items)
+    let (tree, errors) = crate::parsing::parse(source);
+    tree.filter(|_| errors.is_empty()).map(|(items, _)| items)
 }
 
 /// Formats `source`, returning the reprinted text. Returns the input unchanged if

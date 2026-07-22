@@ -1,13 +1,17 @@
-// Adversarial expression/type fixtures for the H6 S2 expression differential
-// (`parse_expr_differential.rs` includes this file). Built from the grammar
+// Adversarial expression/type fixtures for the handwritten frontend's regression
+// corpus (`parse_expr_regression.rs` includes this file). Built from the grammar
 // inventory: every operator at every adjacent-precedence boundary, the postfix /
 // `?.` grouping cases, split shifts vs comparisons, unary stacking, `is` with its
 // pattern subset, struct-literal vs condition ambiguity, i-string holes, and every
 // type form (embedded in generic-argument position so `parse_type` is exercised).
 //
-// Every entry MUST parse cleanly through the chumsky oracle (a decliner would make
-// the differential's "neither frontend produced a subtree" arm fire); shapes that
-// only reach recovery are out of scope for S2 (proposal §6a — S4 owns recovery).
+// Through the H6 arc these were the S2 expression differential against the chumsky
+// oracle (both frontends proven byte-identical). At the S5 cutover the oracle is
+// deleted; the arrays live on as the parser's own regression corpus — the ACCEPT
+// fixtures must parse cleanly (no errors, no panic), the DECLINER fixtures must
+// still be rejected, and a curated precedence/grouping-critical subset is pinned
+// with inline `Debug`-tree snapshots (the shapes a whole-file corpus sweep cannot
+// isolate). Recovery shapes stay out of scope here (proposal §6a — S4 owns them).
 
 /// Fixtures parsed in EXPRESSION position (`let __probe = <fixture>;`) — struct
 /// literals are admitted as operands here.

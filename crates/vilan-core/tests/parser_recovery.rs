@@ -6,9 +6,9 @@
 //! in vilan-lsp) is pinned as an observable today; the ten `nested_delimiters`
 //! sites, the `?.` sibling, the misplaced-`resource` steer, and the lexer's
 //! skip-then-retry are exercised only indirectly. These pins make each one an
-//! explicit contract, asserting — against BOTH frontends (the chumsky oracle AND
-//! the handwritten `parsing::parse`, which S4 gave recovery; see `frontends`) —
-//! that a garbled input at the site:
+//! explicit contract, asserting — against the handwritten `parsing::parse` (which
+//! S4 gave recovery; through the arc these also ran against the chumsky oracle,
+//! now deleted — see `frontends`) — that a garbled input at the site:
 //!   (a) does NOT hard-fail (a partial tree comes back),
 //!   (b) recovers to the documented placeholder (empty vec / `None` / `Node::Error`
 //!       / empty block), and
@@ -24,52 +24,24 @@
 //! Every recovered shape below was captured from the current binary, not asserted
 //! from reading (H6 S0 is probe-first).
 
-use chumsky::prelude::*;
-use vilan_core::{lexer, parser, parsing};
+use vilan_core::parsing;
 
-/// The rich (diagnostics-bearing) chumsky instantiation, exactly as the
-/// diagnostics path runs it (mirrors `parse_fast_path.rs::rich_parse`). Returns
-/// the recovered tree's `Debug` (if any) and the total lex+parse diagnostic count.
-/// This is the ORACLE arm — deleted at S5, when `frontends` drops down to the
-/// handwritten arm alone and these two `use`s of chumsky go with it.
-fn chumsky_recovered(source: &str) -> (Option<String>, usize) {
-    let (tokens, lex_errors) = lexer().parse(source).into_output_errors();
-    let Some(tokens) = tokens else {
-        return (None, lex_errors.len());
-    };
-    let end = source.len();
-    let (root, parse_errors) = parser()
-        .parse(
-            tokens
-                .as_slice()
-                .map((end..end).into(), |(token, span)| (token, span)),
-        )
-        .into_output_errors();
-    (
-        root.map(|tree| format!("{tree:?}")),
-        lex_errors.len() + parse_errors.len(),
-    )
-}
-
-/// The handwritten frontend (H6 S4) — the DURABLE arm these pins survive on past
-/// the S5 cutover. `parsing::parse` recovers over the same fixtures byte-for-byte
-/// (proven against the oracle in `parse_recovery_differential.rs`); here the pins
-/// hold the recovered SHAPES independent of chumsky.
+/// The handwritten frontend (H6 S4). Through the arc these pins ran against BOTH
+/// this and the chumsky oracle (proven byte-identical); at the S5 cutover the
+/// oracle is deleted and the pins hold the recovered SHAPES on the handwritten
+/// frontend alone. Returns the recovered tree's `Debug` (if any) and the diagnostic
+/// count.
 fn handwritten_recovered(source: &str) -> (Option<String>, usize) {
     let (tree, errors) = parsing::parse(source);
     (tree.map(|tree| format!("{tree:?}")), errors.len())
 }
 
-/// The frontends every parse-level pin runs against. Both must hold the recovery
-/// contract (they produce byte-identical recovered trees on these fixtures). At
-/// S5 the oracle arm is deleted — drop the first tuple and the chumsky `use`s, and
-/// the handwritten pin remains, unchanged.
+/// The frontends every parse-level pin runs against. Post-cutover this is the
+/// handwritten frontend alone (the `for_each_frontend` loop is retained so the
+/// pins read unchanged).
 type Frontend = fn(&str) -> (Option<String>, usize);
-fn frontends() -> [(&'static str, Frontend); 2] {
-    [
-        ("chumsky oracle", chumsky_recovered),
-        ("handwritten", handwritten_recovered),
-    ]
+fn frontends() -> [(&'static str, Frontend); 1] {
+    [("handwritten", handwritten_recovered)]
 }
 
 /// Run `check` against every frontend's recovery of `source`, asserting first that

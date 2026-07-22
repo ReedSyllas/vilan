@@ -7,9 +7,6 @@ use std::{
 };
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
-use chumsky::prelude::*;
-// `clap::Parser` collides with `chumsky`'s `Parser` trait (glob-imported above),
-// so bring it in anonymously — enough for `Cli::parse()` — and derive by path.
 use clap::{Parser as _, Subcommand};
 mod hmr;
 mod upgrade;
@@ -18,9 +15,7 @@ use vilan_core::analyzer::{analyze, check_library_contract};
 use vilan_core::async_infer;
 use vilan_core::call_graph::CallGraph;
 use vilan_core::context;
-use vilan_core::lexer::lexer;
 use vilan_core::manifest::Package;
-use vilan_core::parser::parser;
 use vilan_core::transformer::transform;
 use vilan_core::{Backend, BuildOptions, Manifest, Platform, Workspace};
 
@@ -1513,46 +1508,39 @@ fn compile_to_js(
     // Fast path: a clean entry file reuses the shared content-addressed parse
     // cache (`vilan_core::parse_clean_cached`) — the same cache `std` and the
     // package modules use — so across `--watch` rounds an unchanged entry file
-    // is served from the cache instead of re-lexed/re-parsed (backlog E12). A
-    // hit is already lift-rewritten and `'static`; the rich pipeline below runs
-    // only when the cache misses (a non-clean file), to name its diagnostics.
+    // is served from the cache instead of re-parsed (backlog E12). A hit is
+    // already lift-rewritten and `'static`; the handwritten frontend runs only
+    // when the cache misses (a non-clean file), recovering a tree and naming its
+    // diagnostics in a single fast-and-rich pass.
     let cached = vilan_core::parse_clean_cached(&src);
-    let (tokens, mut errs) = match &cached {
-        Some(_) => (None, Vec::new()),
-        None => lexer().parse(src.as_str()).into_output_errors(),
-    };
 
-    let mut parse_errs = Vec::new();
-    // Note-carrying analyzer diagnostics render outside the `Rich` fold; they
-    // still count against a clean build.
+    // Analyzer and codegen diagnostics, collected as `(span, message)` for
+    // ariadne; note-carrying ones render separately (they still count against a
+    // clean build via `noted_errors`).
+    let mut analyzer_errors: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     let mut noted_errors = 0usize;
-    // The freshly rich-parsed tree — present only on a cache miss (a non-clean
-    // file); a hit takes its already-lifted `'static` tree from `cached` instead.
-    // `Spanned` is `vilan_core`'s tuple alias, not the glob-imported
-    // `chumsky::span::Spanned`, so qualify it.
-    let fresh_root: Option<vilan_core::Spanned<vilan_core::node::NodeList>> =
-        match (&cached, &tokens) {
-            (None, Some(tokens)) => {
-                let (ast, errors) = parser()
-                    .map_with(|ast, e| (ast, e.span()))
-                    .parse(
-                        tokens
-                            .as_slice()
-                            .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-                    )
-                    .into_output_errors();
-                parse_errs = errors;
-                ast.filter(|_| errs.len() + parse_errs.len() == 0)
-                    .map(|(mut root, _file_span)| {
-                        // Bare-`?` marks become lift regions before analysis
-                        // (expression-lifting.md); the cached path is lifted inside
-                        // `parse_clean_cached`, so lift exactly once here.
-                        vilan_core::lift::rewrite_items(&mut root.0);
-                        root
-                    })
-            }
-            _ => None,
-        };
+
+    // On a cache miss the handwritten frontend parses the entry, always returning
+    // a (possibly recovered) tree alongside every diagnostic. A batch compile does
+    // not analyze a file that failed to parse cleanly — its parse errors are
+    // reported and the build fails — so the freshly parsed tree is taken only when
+    // the parse produced no diagnostics.
+    let mut parse_errors: Vec<vilan_core::parsing::ParseError> = Vec::new();
+    let fresh_root: Option<vilan_core::Spanned<vilan_core::node::NodeList>> = match &cached {
+        None => {
+            let (tree, errors) = vilan_core::parsing::parse(src.as_str());
+            let clean = errors.is_empty();
+            parse_errors = errors;
+            tree.filter(|_| clean).map(|(mut items, span)| {
+                // Bare-`?` marks become lift regions before analysis
+                // (expression-lifting.md); the cached path is lifted inside
+                // `parse_clean_cached`, so lift exactly once here.
+                vilan_core::lift::rewrite_items(&mut items);
+                (items, span)
+            })
+        }
+        Some(_) => None,
+    };
     let root: Option<&vilan_core::Spanned<vilan_core::node::NodeList>> = match &cached {
         Some((ast, _)) => Some(*ast),
         None => fresh_root.as_ref(),
@@ -1602,8 +1590,8 @@ fn compile_to_js(
 
         for error in &program.diagnostics {
             // A note-carrying diagnostic renders directly (two labels — the
-            // `Rich` fold has nowhere to put the secondary location); plain
-            // ones keep the shared path.
+            // shared ariadne path has nowhere to put the secondary location);
+            // plain ones keep the shared path.
             match &error.note {
                 Some(note) => {
                     // A cross-source note reads its file so the sub-label can
@@ -1621,7 +1609,7 @@ fn compile_to_js(
                     report_error_with_note(&filename, source_ref, error, note_file);
                     noted_errors += 1;
                 }
-                None => errs.push(Rich::custom(error.span, error.msg.as_str())),
+                None => analyzer_errors.push((error.span.into_range(), error.msg.clone())),
             }
         }
         // Warnings are non-fatal: render them, but they do not enter `errs`,
@@ -1641,7 +1629,7 @@ fn compile_to_js(
             write_debug(file, "callgraph.out", &call_graph.debug_dump(&program));
         }
 
-        if errs.is_empty() && noted_errors == 0 {
+        if analyzer_errors.is_empty() && noted_errors == 0 {
             match transform(&program, options) {
                 // The leg's source set — each path paired with the content
                 // hash it was COMPILED from — which the watch loop verifies
@@ -1659,13 +1647,13 @@ fn compile_to_js(
                             .collect::<Vec<_>>(),
                     ))
                 }
-                Err(error) => errs.push(Rich::custom(error.span, error.msg)),
+                Err(error) => analyzer_errors.push((error.span.into_range(), error.msg)),
             }
         }
     }
 
-    let clean = errs.is_empty() && parse_errs.is_empty() && noted_errors == 0;
-    report(&filename, source_ref, errs, parse_errs);
+    let clean = analyzer_errors.is_empty() && parse_errors.is_empty() && noted_errors == 0;
+    report(&filename, source_ref, analyzer_errors, parse_errors);
 
     match output {
         Some(compiled) if clean => Ok(compiled),
@@ -1729,43 +1717,34 @@ fn write_debug(file: &Path, extension: &str, contents: &str) {
     }
 }
 
-/// Renders lexer + parser diagnostics with ariadne (analyzer diagnostics arrive
-/// folded into `errs` as `Rich::custom`).
-fn report<'src>(
+/// Renders parser diagnostics (via the handwritten frontend's `render`) and
+/// analyzer/codegen diagnostics with ariadne. Analyzer diagnostics arrive
+/// pre-rendered as `(span, message)`; parse errors carry the structured
+/// found/expected/context/hint the renderer assembles.
+fn report(
     filename: &str,
-    src: &'src str,
-    errs: Vec<Rich<'src, char>>,
-    parse_errs: Vec<Rich<'src, vilan_core::token::Token<'src>>>,
+    src: &str,
+    analyzer_errors: Vec<(std::ops::Range<usize>, String)>,
+    parse_errors: Vec<vilan_core::parsing::ParseError>,
 ) {
-    errs.into_iter()
-        .map(|error| error.map_token(|character| character.to_string()))
-        .chain(
-            parse_errs
-                .into_iter()
-                .map(|error| error.map_token(|token| token.to_string())),
-        )
-        .for_each(|error| {
-            let reason = vilan_core::render_parse_error_reason(&error);
-            Report::build(
-                ReportKind::Error,
-                (filename.to_string(), error.span().into_range()),
-            )
+    let diagnostics = analyzer_errors.into_iter().chain(
+        parse_errors
+            .into_iter()
+            .map(|error| (error.span.into_range(), vilan_core::parsing::render(&error))),
+    );
+    for (span, message) in diagnostics {
+        Report::build(ReportKind::Error, (filename.to_string(), span.clone()))
             .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
-            .with_message(vilan_core::render_parse_error(&error, src))
+            .with_message(&message)
             .with_label(
-                Label::new((filename.to_string(), error.span().into_range()))
-                    .with_message(reason)
+                Label::new((filename.to_string(), span))
+                    .with_message(&message)
                     .with_color(Color::Red),
             )
-            .with_labels(error.contexts().map(|(label, span)| {
-                Label::new((filename.to_string(), span.into_range()))
-                    .with_message(format!("while parsing this {label}"))
-                    .with_color(Color::Yellow)
-            }))
             .finish()
             .print(sources([(filename.to_string(), src.to_string())]))
             .unwrap()
-        });
+    }
 }
 
 /// Renders one analyzer diagnostic that carries a secondary note

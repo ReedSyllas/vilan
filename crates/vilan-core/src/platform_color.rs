@@ -589,11 +589,7 @@ fn violation(
         .rev()
         .find_map(|(_, arrived)| arrived.and_then(|(span, user)| user.then_some(span)))
         .or_else(|| program.span_map.get(&node).map(|span| **span))
-        .unwrap_or(Span {
-            start: 0,
-            end: 0,
-            context: (),
-        });
+        .unwrap_or(Span { start: 0, end: 0 });
     let from = match origin {
         Origin::Entry => "reachable from the entry".to_string(),
         Origin::Fence { function, fence } => {
