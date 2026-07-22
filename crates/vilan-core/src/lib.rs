@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod node;
 pub mod options;
 pub mod parser;
+pub mod parsing;
 pub mod platform_color;
 pub mod span;
 pub mod target;
