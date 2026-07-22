@@ -9,8 +9,12 @@
 //!
 //! The differential SEAM (below) is a fn-pointer pair: `ORACLE` is the rich chumsky
 //! parse, held constant; `CANDIDATE` is the frontend under test. At S0 the candidate
-//! is the fast chumsky path (`parse_clean`); S1+ repoints the single `CANDIDATE`
-//! const at the handwritten lexer+parser and nothing else in the harness changes.
+//! was the fast chumsky path (`parse_clean`); **S3 repoints `CANDIDATE` at the
+//! handwritten frontend** (`parsing::parse`), so this is now the TOTAL differential
+//! — the whole file, items included — that the proposal's §3 S3 gate requires. The
+//! original fast-vs-rich chumsky self-check is NOT lost: `chumsky_candidate` is kept
+//! and driven by its own test (`fast_and_rich_chumsky_agree_over_the_corpus`), so
+//! the oracle's own invariant (fast path ≡ rich path) still runs.
 //!
 //! The fmt tripwire converts the formatter's silent-no-op failure mode (§0: the
 //! re-lex-and-compare safety net turns `fmt` into a no-op when the token stream
@@ -24,7 +28,7 @@
 use chumsky::prelude::*;
 use std::path::{Path, PathBuf};
 use vilan_core::token::Token;
-use vilan_core::{formatter, lexer, parse_clean, parser};
+use vilan_core::{formatter, lexer, parse_clean, parser, parsing};
 
 // ---------------------------------------------------------------------------
 // The differential seam
@@ -55,11 +59,11 @@ fn chumsky_oracle(source: &str) -> Judgement {
     )
 }
 
-/// CANDIDATE — the frontend under differential test. At S0 this is the fast
-/// chumsky path (`parse_clean`), which accepts ONLY perfectly clean sources and
-/// declines (returns `None`) on any lex/parse error or recovery. S1+ repoints this
-/// single const at the handwritten frontend. Returns the tree `Debug` when the
-/// candidate accepts the source as clean.
+/// The fast chumsky path (`parse_clean`): accepts ONLY perfectly clean sources and
+/// declines (returns `None`) on any lex/parse error or recovery. Held as the
+/// oracle's own self-check candidate through the whole arc — the invariant "the
+/// fast path agrees with the rich path" must not be lost when `CANDIDATE` moves to
+/// the handwritten frontend.
 ///
 /// (`parse_clean` does NOT lift-rewrite — only `parse_clean_cached` does — so its
 /// tree compares directly against the un-lifted oracle tree, exactly as
@@ -68,8 +72,19 @@ fn chumsky_candidate(source: &str) -> Option<String> {
     parse_clean(source).map(|tree| format!("{tree:?}"))
 }
 
+/// CANDIDATE — the frontend under differential test. **S3: the handwritten frontend**
+/// (`parsing::parse`, which internally lexes with `lexing::tokenize`). It returns a
+/// tree only when the source is perfectly clean (a non-empty error list yields
+/// `None`), so — like `chumsky_candidate` — its clean tree compares directly against
+/// the un-lifted oracle tree (neither lift-rewrites). Repointing this single const
+/// is the whole S3 seam move on the harness side.
+fn handwritten_candidate(source: &str) -> Option<String> {
+    let (tree, _errors) = parsing::parse(source);
+    tree.map(|tree| format!("{tree:?}"))
+}
+
 const ORACLE: fn(&str) -> Judgement = chumsky_oracle;
-const CANDIDATE: fn(&str) -> Option<String> = chumsky_candidate;
+const CANDIDATE: fn(&str) -> Option<String> = handwritten_candidate;
 
 // ---------------------------------------------------------------------------
 // Source enumeration: the corpus, every std layer, examples, and docs examples
@@ -156,8 +171,68 @@ fn collect_markdown(dir: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
+/// Whole-file S3 constructs that the repo corpus happens NOT to exercise (so the
+/// file-derived differential never reaches them), each a clean program the oracle
+/// and candidate must parse byte-identically. Only PARSED here (types need not
+/// resolve), so bare type names are fine. This closes the corpus's coverage gaps —
+/// notably `[trait_only]` / `[doc(hidden)]` (zero corpus uses) and the tuple-bound
+/// endpoint variants — through the same oracle comparison as every real source,
+/// rather than leaving them to the (chumsky-free, durable) in-module pins alone.
+fn corpus_absent_constructs() -> Vec<(String, String)> {
+    [
+        // The two attributes with zero corpus uses.
+        ("trait_only", "trait Surface { [trait_only] fun hidden(&self): i32; }"),
+        ("doc_hidden", "[doc(hidden)] fun helper(): i32 { 0 }"),
+        // Every function attribute at once, in the one legal (fixed) order.
+        (
+            "all_attributes",
+            "[extern(\"m\", \"s\")] [must_use] [rpc] [trait_only] [doc(hidden)] [platform(\"@process\", \"browser\")] external fun everything(): i32;",
+        ),
+        // Tuple-bound endpoint variants: both, hi-only, and an element bound.
+        ("tuple_bound_both", "fun a<T: (2..10)>(): T { default() }"),
+        ("tuple_bound_hi", "fun b<T: (..10)>(): T { default() }"),
+        ("tuple_bound_element", "fun c<T: (..: Show)>(): T { default() }"),
+        // A generic default and a `type` binder default together.
+        ("generic_defaults", "struct Cell<T = Self, type U = i32> { value: T }"),
+        // Import/use path shapes: a top-level set, a deeply nested set, a use set.
+        ("import_top_set", "import { alpha, beta };"),
+        ("import_nested_set", "import root::mid::{ leaf, twig::{ a, b } };"),
+        ("use_set", "use collection::{ Map, Set };"),
+        // Every parameter convention in one signature (own + & + &mut + inferred).
+        (
+            "conventions",
+            "fun mix(own a: A, &b: B, &mut c: C, d: D, e: &E): i32 { 0 }",
+        ),
+        // The `null`-named bodyless external struct and the full resource modifier.
+        ("external_null", "external struct null;"),
+        ("resource_external", "resource external struct Handle;"),
+        ("resource_enum", "resource enum State { Open, Closed }"),
+        // An enum with negative + explicit discriminants alongside a payload.
+        (
+            "enum_discriminants",
+            "enum Ordering { Less = -1, Equal = 0, Greater(i32) }",
+        ),
+        // A tuple comprehension as a value, and macro forms in both positions.
+        ("tuple_comprehension", "fun t(): T { (x in xs => x + 1) }"),
+        (
+            "macro_forms",
+            "macro fun make(): Source { source(\"\") }\nmacro grow(a, b)\nfun use_it() { let v = macro pick(x); macro { ret void } }",
+        ),
+        // `export` wrapping several item kinds, and a nested module.
+        ("export_items", "export struct S { x: i32 }\nexport fun f() { }\nexport use m::n;"),
+        (
+            "nested_module",
+            "mod outer { mod inner { fun deep() { } } struct Local { n: i32 } }",
+        ),
+    ]
+    .into_iter()
+    .map(|(label, source)| (format!("adversarial:{label}"), source.to_string()))
+    .collect()
+}
+
 /// The full differential corpus: `(label, source)` over `vilan/test`, every
-/// `vilan/std/src` layer, `vilan/examples`, and the docs examples.
+/// `vilan/std/src` layer, `vilan/examples`, the docs examples, and the
+/// corpus-absent S3 constructs above.
 fn all_sources() -> Vec<(String, String)> {
     let vilan = repo_vilan();
     let mut files = Vec::new();
@@ -172,6 +247,7 @@ fn all_sources() -> Vec<(String, String)> {
         })
         .collect();
     collect_doc_examples(&mut sources);
+    sources.extend(corpus_absent_constructs());
     sources
 }
 
@@ -179,23 +255,22 @@ fn all_sources() -> Vec<(String, String)> {
 // The differential
 // ---------------------------------------------------------------------------
 
-#[test]
-fn candidate_and_oracle_agree_over_the_corpus() {
-    let sources = all_sources();
-    assert!(
-        sources.len() > 150,
-        "suspiciously few sources enumerated: {}",
-        sources.len()
-    );
-
+/// Run one candidate against the oracle over every source, returning
+/// `(clean_compared, recovered, disagreements, hard_fails)` — the same tally the
+/// S0 harness computed, factored out so both the handwritten candidate (the S3
+/// gate) and the fast chumsky candidate (the oracle self-check) drive it.
+fn differential_report(
+    candidate: fn(&str) -> Option<String>,
+    sources: &[(String, String)],
+) -> (usize, usize, Vec<String>, Vec<String>) {
     let mut clean_compared = 0usize; // M: candidate clean AND oracle agrees
     let mut recovered = 0usize; // K: candidate declined, oracle recovered a tree
     let mut disagreements: Vec<String> = Vec::new();
     let mut hard_fails: Vec<String> = Vec::new();
 
-    for (label, source) in &sources {
+    for (label, source) in sources {
         let (oracle_tree, oracle_errors) = ORACLE(source);
-        match CANDIDATE(source) {
+        match candidate(source) {
             Some(candidate_tree) => {
                 // The candidate accepted the source as clean; the oracle MUST
                 // agree — a tree, zero diagnostics, and a byte-identical (=
@@ -241,9 +316,23 @@ fn candidate_and_oracle_agree_over_the_corpus() {
             }
         }
     }
+    (clean_compared, recovered, disagreements, hard_fails)
+}
+
+#[test]
+fn candidate_and_oracle_agree_over_the_corpus() {
+    let sources = all_sources();
+    assert!(
+        sources.len() > 150,
+        "suspiciously few sources enumerated: {}",
+        sources.len()
+    );
+
+    let (clean_compared, recovered, disagreements, hard_fails) =
+        differential_report(CANDIDATE, &sources);
 
     eprintln!(
-        "parse differential: N={} files, M={} clean-compared, K={} recovered",
+        "parse differential (handwritten frontend): N={} files, M={} clean-compared, K={} recovered",
         sources.len(),
         clean_compared,
         recovered
@@ -258,6 +347,34 @@ fn candidate_and_oracle_agree_over_the_corpus() {
     assert!(
         hard_fails.is_empty(),
         "{} source(s) produced NO tree from either frontend:\n{}",
+        hard_fails.len(),
+        hard_fails.join("\n")
+    );
+    assert!(
+        clean_compared > 150,
+        "expected the bulk of the corpus to compare clean, got M={clean_compared}"
+    );
+}
+
+/// The oracle's own self-check, preserved through the S3 candidate move: the fast
+/// chumsky path (`parse_clean`) must agree with the rich chumsky path (`parser()`)
+/// over every clean source. This is the invariant the S0 harness enforced before
+/// `CANDIDATE` pointed at chumsky's fast path; keeping it as its own test means
+/// swapping `CANDIDATE` to the handwritten frontend does not silently drop it.
+#[test]
+fn fast_and_rich_chumsky_agree_over_the_corpus() {
+    let sources = all_sources();
+    let (clean_compared, _recovered, disagreements, hard_fails) =
+        differential_report(chumsky_candidate, &sources);
+    assert!(
+        disagreements.is_empty(),
+        "chumsky fast/rich DISAGREEMENT on {} source(s):\n{}",
+        disagreements.len(),
+        disagreements.join("\n")
+    );
+    assert!(
+        hard_fails.is_empty(),
+        "{} source(s) produced NO tree from either chumsky path:\n{}",
         hard_fails.len(),
         hard_fails.join("\n")
     );

@@ -1,37 +1,43 @@
-//! The handwritten parser (H6 S2, `proposal/frontend.md` §2 "Parser" + §3 S2).
+//! The handwritten parser (H6 S3, `proposal/frontend.md` §2 "Parser" + §3 S3).
 //!
 //! A dependency-free, single-pass recursive-descent + precedence-climbing parser
 //! over `&[(Token, Span)]` (the output of [`crate::lexing::tokenize`], which S1
 //! proved byte-identical to the chumsky lexer). It produces the same
 //! `Spanned<Node>` tree — spans included — that the chumsky grammar in `parser.rs`
 //! produces, which stays in-tree as the oracle for the whole H6 arc (deleted at
-//! S5). Nothing in the pipeline calls this yet; it is exercised only by the
-//! expression-level differential (`tests/parse_expr_differential.rs`) and this
-//! module's own pins.
+//! S5). Nothing in the pipeline calls this yet; it is exercised by the corpus-
+//! scale differential (`tests/parse_differential.rs`, which S3 repoints at this
+//! module), the corpus-through-the-new-frontend byte gate
+//! (`tests/corpus_new_frontend.rs`), and this module's own pins.
 //!
-//! S2's remit is the *expression* and *type* grammar plus the block-bearing
-//! expression forms (`closure`/`if`/`for`/`match`/block/`let`/assignment/`ret`/
-//! `jump`): everything the chumsky `secondary_expression` / `condition_expression`
-//! layer covers. Top-level *items* (`fun`/`struct`/`enum`/`impl`/`trait`/`mod`/
-//! `import`/`use`/`export`), the *macro forms* (`macro fun`/`macro { }`/`macro
-//! name(..)`/`[derive(..)]`/`[service]`/attribute macros), and the niche
-//! `tuple_comprehension` atom are the S3 seam — [`Parser::at_item_keyword`] marks
-//! the boundary, and until S3 fills it the parser cleanly declines any source that
-//! reaches those forms (the S2/S3 slice boundary is a build convenience; S3 is
-//! where the differential gate is total — proposal §3).
+//! With S3 the grammar is COMPLETE — the whole file, not just its expressions.
+//! S2 covered the *expression* and *type* grammar plus the block-bearing forms
+//! (`closure`/`if`/`for`/`match`/block/`let`/assignment/`ret`/`jump`). S3 fills the
+//! seam: top-level *items* (`fun`/`struct`/`enum`/`impl`/`trait`/`mod`/`import`/
+//! `use`/`export`), the bracket-attribute grammar (`[derive(..)]`/`[service(..)]`/
+//! `[extern(..)]`/`[platform(..)]`/`[must_use]`/`[rpc]`/`[trait_only]`/`[doc(..)]`/
+//! `[expose]` and user macro attributes), the *macro forms* (`macro fun`/`macro
+//! { }`/`macro name(..)`), and the deferred `tuple_comprehension` atom. The
+//! statement/item interleaving reproduces the chumsky `statement` choice ORDER
+//! exactly — the attribute/macro/export forms lead, then `expression ;` (and the
+//! block-bearing statement forms), then the declaration items — because that
+//! order decides which reading of an ambiguous `[`- or `async`-led head wins.
 //!
 //! Faithfulness over improvement: every shape here reproduces the chumsky grammar,
 //! quirks included (the split-shift reassembly, the H.1 struct-literal-free
 //! condition mode as a boolean rather than a parallel grammar, the collect-then-
 //! group `?.` continuation, the arrow-less closure *type*, the paren-dissolving
 //! atom that keeps the inner expression's own span, `apply_binding_mutability`
-//! leaving array binders untouched). Ugly-but-reproduced behaviours are recorded
-//! for the S4/S5 error-quality pass, not fixed. The differential is the referee.
+//! leaving array binders untouched, the FIXED attribute order on a function, the
+//! optional `;` on a `macro`-statement vs the mandatory one on an expression, the
+//! `resource`-misplaced steer). Ugly-but-reproduced behaviours are recorded for
+//! the S4/S5 error-quality pass, not fixed. The differential is the referee.
 
 use crate::lexing;
 use crate::node::{
-    BinaryOp, Closure, Convention, GenericArguments, If, MatchLeg, Node, NodeIfBranch, NodeList,
-    Parameter, Pattern,
+    BinaryOp, Closure, Convention, EnumVariant, ExternBinding, Func, GenericArguments,
+    GenericParameter, GenericParameters, If, ImportBranch, MatchLeg, Node, NodeIfBranch, NodeList,
+    Parameter, Pattern, StructField, TupleBound,
 };
 use crate::span::{Span, Spanned};
 use crate::token::Token;
@@ -137,6 +143,67 @@ fn apply_binding_mutability(pattern: Pattern<'_>, mutable: bool) -> Pattern<'_> 
         ),
         other => other,
     }
+}
+
+/// One argument inside a `[extern(..)]` attribute — a bare word (`method`/`get`/
+/// `set`/`new`) or a quoted string (a module path or host symbol). A faithful copy
+/// of `parser.rs::ExternArg`.
+enum ExternArg<'src> {
+    Word(&'src str),
+    Text(&'src str),
+}
+
+/// Interprets a `[extern(..)]` attribute's arguments into a host binding. A
+/// faithful copy of `parser.rs::extern_binding_from_args` — a malformed attribute
+/// (author error) lowers to an empty global symbol, exactly as the oracle does.
+fn extern_binding_from_args<'src>(args: &[ExternArg<'src>]) -> ExternBinding<'src> {
+    use ExternArg::{Text, Word};
+    match args {
+        [Text(symbol)] => ExternBinding::Function {
+            module: None,
+            symbol,
+        },
+        [Text(module), Text(symbol)] => ExternBinding::Function {
+            module: Some(module),
+            symbol,
+        },
+        [Word("method")] => ExternBinding::Method { symbol: None },
+        [Word("method"), Text(symbol)] => ExternBinding::Method {
+            symbol: Some(symbol),
+        },
+        [Word("get"), Text(symbol)] => ExternBinding::Get { symbol },
+        [Word("set"), Text(symbol)] => ExternBinding::Set { symbol },
+        [Word("new"), Text(symbol)] => ExternBinding::New {
+            module: None,
+            symbol,
+        },
+        [Word("new"), Text(module), Text(symbol)] => ExternBinding::New {
+            module: Some(module),
+            symbol,
+        },
+        _ => ExternBinding::Function {
+            module: None,
+            symbol: "",
+        },
+    }
+}
+
+/// The built-in attribute-marker names, excluded from a *user* macro attribute's
+/// name (they keep their own parsers, fused into `function`/`struct` or earlier in
+/// the statement choice). Mirrors the chumsky `macro_attribute_name` guard.
+fn is_known_attribute_marker(name: &str) -> bool {
+    matches!(
+        name,
+        "derive"
+            | "service"
+            | "extern"
+            | "must_use"
+            | "rpc"
+            | "trait_only"
+            | "doc"
+            | "expose"
+            | "platform"
+    )
 }
 
 impl<'a, 'src> Parser<'a, 'src> {
@@ -357,56 +424,88 @@ impl<'a, 'src> Parser<'a, 'src> {
         (statements, self.span_from(0))
     }
 
-    /// The tokens that lead an S3 item / attribute / macro form — the seam S3 fills.
-    /// A statement led by one of these declines in S2 (the chumsky `statement`
-    /// choice has these before AND after the `expression` alternative: `[…]`
-    /// attribute items, `macro …`, `export …`, and the `fun`/`struct`/`enum`/
-    /// `impl`/`trait`/`mod`/`import`/`use`/`resource`/`external` declarations).
-    /// `async` is deliberately absent — `async { … }` / `async expr` are S2
-    /// expressions; only `async fun` is an item, and it declines by falling through
-    /// the expression attempt.
-    fn at_item_keyword(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(
-                Token::Ctrl('[')
-                    | Token::Macro
-                    | Token::Export
-                    | Token::Fun
-                    | Token::Struct
-                    | Token::Enum
-                    | Token::Impl
-                    | Token::Trait
-                    | Token::Mod
-                    | Token::Import
-                    | Token::Use
-                    | Token::Resource
-                    | Token::External
-            )
-        )
-    }
-
-    /// One statement: an `expression ;`, or a block-bearing expression
-    /// (`if`/`for`/`match`/block) used as a statement — which needs no `;` but must
-    /// not be the last thing in its block (the chumsky `not_block_end` lookahead).
-    /// Returns `None` (restoring) when no S2 statement starts here, so the caller's
+    /// One statement, reproducing the chumsky `statement` choice in ORDER — the
+    /// ordering is load-bearing (it decides which reading of an ambiguous `[`- or
+    /// `async`-led head wins). Each alternative backtracks cleanly on a mismatch,
+    /// so the first that matches wins, exactly as chumsky's ordered `choice`.
+    /// Returns `None` (restoring) when no statement starts here, so the caller's
     /// loop can stop and a trailing block value can be taken instead.
+    ///
+    /// The chumsky order (parser.rs `statement.define`):
+    /// 1. `[derive(..)] struct|enum`, 2. `[service(..)] struct`,
+    /// 3. `[<user>(..)] struct|enum|fun`, 4. `macro fun`, 5. `macro { } ;?`,
+    /// 6. `macro name(..) ;?`, 7. `export <stmt>`, 8. `expression ;`,
+    /// 9-11. `if`/`for`/`match` without `;` (not-block-end), 12. `fun`,
+    /// 13. `struct`, 14. `enum`, 15. misplaced-`resource` steer, 16. `impl`,
+    /// 17. `trait`, 18. `mod`, 19. `import ;`, 20. `use ;`, 21. `{ } block`
+    /// without `;` (not-block-end). Items 8-11 and 21 are fused into one
+    /// expression attempt (an expression carries the block-bearing forms and the
+    /// bare block already), exactly as S2 did.
     fn parse_statement(&mut self) -> Option<Spanned<Node<'src>>> {
-        if self.at_item_keyword() {
-            return None;
+        if let Some(item) = self.attempt(Self::parse_derived_item) {
+            return Some(item);
         }
-        self.attempt(|parser| {
+        if let Some(item) = self.attempt(Self::parse_service_item) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_macro_attributed_item) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_macro_fun) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_macro_block_statement) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_macro_invocation_statement) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_export) {
+            return Some(item);
+        }
+        // Items 8-11 & 21: `expression ;`, or a block-bearing form
+        // (`if`/`for`/`match`/`{ }`) used as a statement — which needs no `;` but
+        // must not be the last thing in its block (chumsky's `not_block_end`).
+        if let Some(statement) = self.attempt(|parser| {
             let expression = parser.parse_expression()?;
             if parser.eat_ctrl(';') {
                 return Some(expression);
             }
-            // No `;`: a block-bearing form is a statement only when it is not the
-            // last item in the enclosing block (a non-`}` token follows).
             if is_block_like(&expression.0) && !parser.peek_is_ctrl('}') {
                 return Some(expression);
             }
             None
-        })
+        }) {
+            return Some(statement);
+        }
+        if let Some(item) = self.attempt(Self::parse_function) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_struct) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_enum) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_misplaced_resource) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_impl) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_trait) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_module) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_import_statement) {
+            return Some(item);
+        }
+        if let Some(item) = self.attempt(Self::parse_use_statement) {
+            return Some(item);
+        }
+        None
     }
 
     // --- Expressions ---------------------------------------------------------
@@ -960,15 +1059,24 @@ impl<'a, 'src> Parser<'a, 'src> {
         Some(((name, value), self.span_from(start)))
     }
 
-    /// An atom (containing no ambiguity): a literal, a bare name (`Accessor`), a
-    /// `[..]` (repeat or list), or a `(..)` (tuple or parenthesised group). The
-    /// deferred atoms `tuple_comprehension` and the `macro` forms are S3
-    /// ([`Parser::at_item_keyword`] documents the boundary); `local_type` is dead in
-    /// expression position (the bare-name alternative always wins), matching the
-    /// chumsky choice.
+    /// An atom (containing no ambiguity), in the chumsky `atom` choice order: a
+    /// literal, a `tuple_comprehension` (`(x in xs => e)`), a `macro name(..)`
+    /// invocation, a `macro { }` block, a bare name (`Accessor`), a `[..]` (repeat
+    /// or list), or a `(..)` (tuple or parenthesised group). `local_type` is dead
+    /// in expression position (the bare-name alternative always wins), matching the
+    /// chumsky choice, so it is omitted.
     fn parse_atom(&mut self) -> Option<Spanned<Node<'src>>> {
         if let Some(literal) = self.parse_literal() {
             return Some(literal);
+        }
+        if let Some(comprehension) = self.parse_tuple_comprehension() {
+            return Some(comprehension);
+        }
+        if let Some(invocation) = self.parse_macro_invocation() {
+            return Some(invocation);
+        }
+        if let Some(macro_block) = self.parse_macro_block() {
+            return Some(macro_block);
         }
         if let Some(Token::Ident(name)) = self.peek() {
             let node = Node::Accessor(name);
@@ -1749,6 +1857,830 @@ impl<'a, 'src> Parser<'a, 'src> {
         let name = self.eat_ident()?;
         Some((name, self.span_from(start)))
     }
+
+    // --- Item bodies ---------------------------------------------------------
+
+    /// `{ statement* }` — an item body (an `impl` or `mod` block): a bare statement
+    /// list with NO trailing expression (unlike [`Parser::parse_block`]), carrying
+    /// the `{ .. }` span. Reproduces the chumsky `statement.repeated().collect()
+    /// .delimited_by('{','}')`.
+    fn parse_item_body(&mut self) -> Option<Spanned<NodeList<'src>>> {
+        let start = self.position;
+        self.expect_ctrl('{')?;
+        let mut statements = Vec::new();
+        loop {
+            if self.peek_is_ctrl('}') || self.at_end() {
+                break;
+            }
+            match self.parse_statement() {
+                Some(statement) => statements.push(statement),
+                None => break,
+            }
+        }
+        self.expect_ctrl('}')?;
+        Some((statements, self.span_from(start)))
+    }
+
+    /// `{ function* }` — a trait body: a list of function declarations ONLY (not
+    /// arbitrary statements), carrying the `{ .. }` span. Reproduces the chumsky
+    /// `function.repeated().collect().delimited_by('{','}')`.
+    fn parse_trait_body(&mut self) -> Option<Spanned<NodeList<'src>>> {
+        let start = self.position;
+        self.expect_ctrl('{')?;
+        let mut functions = Vec::new();
+        loop {
+            if self.peek_is_ctrl('}') || self.at_end() {
+                break;
+            }
+            match self.attempt(Self::parse_function) {
+                Some(function) => functions.push(function),
+                None => break,
+            }
+        }
+        self.expect_ctrl('}')?;
+        Some((functions, self.span_from(start)))
+    }
+
+    // --- Generic parameters --------------------------------------------------
+
+    /// `<param, ...>` — generic PARAMETERS in declaration position (allow-trailing),
+    /// or `None` (backtracking) when no well-formed `<...>` is present. Distinct
+    /// from [`Parser::parse_generic_arguments`] (types). Recovery of a malformed
+    /// `<...>` is deferred to S4.
+    fn parse_generic_parameters(&mut self) -> Option<GenericParameters<'src>> {
+        self.attempt(|parser| {
+            let start = parser.position;
+            parser.expect_ctrl('<')?;
+            let parameters = parser.comma_list(Self::parse_generic_parameter, |parser| {
+                parser.peek_is_ctrl('>')
+            })?;
+            parser.expect_ctrl('>')?;
+            Some((parameters, parser.span_from(start)))
+        })
+    }
+
+    /// One generic parameter: `type? name (: (tuple_bound | A + B))? (= default)?`.
+    /// The `type` marker makes it a binder (impl subject patterns); the bound is a
+    /// tuple bound (`(2..)`) tried before the `+`-separated trait-bound list.
+    fn parse_generic_parameter(&mut self) -> Option<GenericParameter<'src>> {
+        let is_type = self.eat(&Token::Type);
+        let name_start = self.position;
+        let name = self.eat_ident()?;
+        let name_span = self.span_from(name_start);
+        let (bounds, tuple_bound) = if self.eat_op(":") {
+            match self.parse_tuple_bound() {
+                Some(bound) => (Vec::new(), Some(bound)),
+                None => (self.parse_type_bounds()?, None),
+            }
+        } else {
+            (Vec::new(), None)
+        };
+        let default = if self.eat_op("=") {
+            Some(Box::new(self.parse_type()?))
+        } else {
+            None
+        };
+        Some(GenericParameter {
+            name,
+            name_span,
+            is_type,
+            bounds,
+            tuple_bound,
+            default,
+        })
+    }
+
+    /// `(lo?..hi? (: element)?)` — a tuple-arity bound (`T: (2..)`, `(..: Display)`).
+    /// The `..` is two `.` control tokens (NO adjacency check, matching the chumsky
+    /// `dot_dot`, unlike the shift operator). Backtracks when the `(` does not open
+    /// an `int? .. …` shape (so a tuple-type bound `(A, B)` falls through to the
+    /// trait-bound list). Endpoints that do not parse as `u32` become `None`.
+    fn parse_tuple_bound(&mut self) -> Option<TupleBound<'src>> {
+        self.attempt(|parser| {
+            let start = parser.position;
+            parser.expect_ctrl('(')?;
+            let lo = parser.eat_integer();
+            parser.expect_ctrl('.')?;
+            parser.expect_ctrl('.')?;
+            let hi = parser.eat_integer();
+            let element = if parser.eat_op(":") {
+                Some(Box::new(parser.parse_type()?))
+            } else {
+                None
+            };
+            parser.expect_ctrl(')')?;
+            Some(TupleBound {
+                lo: lo.and_then(|whole| whole.parse::<u32>().ok()),
+                hi: hi.and_then(|whole| whole.parse::<u32>().ok()),
+                element,
+                span: parser.span_from(start),
+            })
+        })
+    }
+
+    // --- Functions -----------------------------------------------------------
+
+    /// A function declaration: the ORDERED attribute prefix (`[extern(..)]`,
+    /// `[must_use]`, `[rpc]`, `[trait_only]`, `[doc(hidden)]`, `[platform(..)]` —
+    /// each optional but IN THIS ORDER, a faithful quirk), then `async? external?
+    /// fun name generics? (params) (: return)? (borrows param)? (block | ;)`.
+    fn parse_function(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        let extern_binding = self.parse_extern_attribute();
+        let must_use = self.eat_marker_attribute("must_use");
+        let rpc = self.eat_marker_attribute("rpc");
+        let trait_only = self.eat_marker_attribute("trait_only");
+        let doc_hidden = self.parse_doc_hidden_attribute();
+        let platform_fence = self.parse_platform_attribute().unwrap_or_default();
+        let is_async = self.eat(&Token::Async);
+        let external = self.eat(&Token::External);
+        self.expect(&Token::Fun)?;
+        let name_start = self.position;
+        let name = self.eat_ident()?;
+        let name = (name, self.span_from(name_start));
+        let generic_parameters = self.parse_generic_parameters();
+        let parameters = self.parse_function_parameters()?;
+        let return_type = if self.eat_op(":") {
+            Some(Box::new(self.parse_type()?))
+        } else {
+            None
+        };
+        // `borrows <param>` — the returned view is a projection of that parameter.
+        let borrows = if self.eat(&Token::Borrows) {
+            Some(self.eat_ident()?)
+        } else {
+            None
+        };
+        // A block body, or `;` for a signature-only declaration (a required trait
+        // method or an `external` intrinsic). The block is tried first (chumsky
+        // `block.map(Some).or(';'.map(|_| None))`), but the two lead on disjoint
+        // tokens (`{` vs `;`) so a bare `;` short-circuits equivalently.
+        let body = if self.eat_ctrl(';') {
+            None
+        } else {
+            Some(self.parse_block()?)
+        };
+        Some((
+            Node::Func(Func {
+                name,
+                is_async,
+                external,
+                extern_binding,
+                must_use,
+                rpc,
+                trait_only,
+                doc_hidden,
+                platform_fence,
+                generic_parameters,
+                parameters,
+                return_type,
+                borrows,
+                body,
+            }),
+            self.span_from(start),
+        ))
+    }
+
+    /// `(param, ...)` — a function parameter list (allow-trailing), carrying the
+    /// `( .. )` span.
+    fn parse_function_parameters(&mut self) -> Option<Spanned<Vec<Parameter<'src>>>> {
+        let start = self.position;
+        self.expect_ctrl('(')?;
+        let parameters = self.comma_list(Self::parse_function_parameter, |parser| {
+            parser.peek_is_ctrl(')')
+        })?;
+        self.expect_ctrl(')')?;
+        Some((parameters, self.span_from(start)))
+    }
+
+    /// One function parameter: `(own | & mut?)? binder (: type)?`. The convention is
+    /// the explicit prefix, else inferred from a `&T` / `&mut T` type, else `Bare`.
+    /// (Distinct from a closure parameter, which carries no convention.)
+    fn parse_function_parameter(&mut self) -> Option<Parameter<'src>> {
+        let prefix = if self.eat(&Token::Own) {
+            Some(Convention::Own)
+        } else if self.eat_op("&") {
+            Some(if self.eat(&Token::Mut) {
+                Convention::RefMut
+            } else {
+                Convention::Ref
+            })
+        } else {
+            None
+        };
+        let (pattern, pattern_span) = self.parse_binder()?;
+        let parameter_type = if self.eat_op(":") {
+            Some(Box::new(self.parse_type()?))
+        } else {
+            None
+        };
+        let convention =
+            prefix.unwrap_or_else(
+                || match parameter_type.as_deref().map(|spanned| &spanned.0) {
+                    Some(Node::Reference(true, _)) => Convention::RefMut,
+                    Some(Node::Reference(false, _)) => Convention::Ref,
+                    _ => Convention::Bare,
+                },
+            );
+        Some((pattern, parameter_type, convention, pattern_span))
+    }
+
+    // --- Structs / enums -----------------------------------------------------
+
+    /// `resource? external? struct (name | null) generics? ({ fields } | ;)`. The
+    /// `resource` modifier sits in `external`'s position (canonical order `resource
+    /// external struct`); the name may be the `null` keyword (the built-in `external
+    /// struct null`); a bodyless `;` form is valid only for an `external` struct
+    /// (checked past the parser).
+    fn parse_struct(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        let resource = self.eat(&Token::Resource);
+        let external = self.eat(&Token::External);
+        self.expect(&Token::Struct)?;
+        let name_start = self.position;
+        let name = if let Some(name) = self.eat_ident() {
+            name
+        } else if self.eat(&Token::Null) {
+            "null"
+        } else {
+            return None;
+        };
+        let name = (name, self.span_from(name_start));
+        let generic_parameters = self.parse_generic_parameters();
+        let body = if self.peek_is_ctrl('{') {
+            let fields_start = self.position;
+            self.expect_ctrl('{')?;
+            let fields =
+                self.comma_list(Self::parse_struct_field, |parser| parser.peek_is_ctrl('}'))?;
+            self.expect_ctrl('}')?;
+            Some((fields, self.span_from(fields_start)))
+        } else if self.eat_ctrl(';') {
+            None
+        } else {
+            return None;
+        };
+        Some((
+            Node::Struct(name, generic_parameters, external, resource, body),
+            self.span_from(start),
+        ))
+    }
+
+    /// `[expose]? name (: type)?` — one struct field, carrying the whole-field span
+    /// (the inner name keeps its own span).
+    fn parse_struct_field(&mut self) -> Option<Spanned<StructField<'src>>> {
+        let start = self.position;
+        let exposed = self.eat_marker_attribute("expose");
+        let name_start = self.position;
+        let name = self.eat_ident()?;
+        let name = (name, self.span_from(name_start));
+        let type_ = if self.eat_op(":") {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        Some(((name, type_, exposed), self.span_from(start)))
+    }
+
+    /// `resource? enum name generics? { variants }`. There is no `external enum`, so
+    /// `resource` is the only leading modifier.
+    fn parse_enum(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        let resource = self.eat(&Token::Resource);
+        self.expect(&Token::Enum)?;
+        let name_start = self.position;
+        let name = self.eat_ident()?;
+        let name = (name, self.span_from(name_start));
+        let generic_parameters = self.parse_generic_parameters();
+        let variants_start = self.position;
+        self.expect_ctrl('{')?;
+        let variants =
+            self.comma_list(Self::parse_enum_variant, |parser| parser.peek_is_ctrl('}'))?;
+        self.expect_ctrl('}')?;
+        let variants = (variants, self.span_from(variants_start));
+        Some((
+            Node::Enum(name, generic_parameters, resource, variants),
+            self.span_from(start),
+        ))
+    }
+
+    /// One enum variant: `name (payload types)? (= discriminant)?`, carrying the
+    /// whole-variant span.
+    fn parse_enum_variant(&mut self) -> Option<Spanned<EnumVariant<'src>>> {
+        let start = self.position;
+        let name = self.eat_name()?;
+        let data = self.attempt(|parser| {
+            parser.expect_ctrl('(')?;
+            let types = parser.comma_list(Self::parse_type, |parser| parser.peek_is_ctrl(')'))?;
+            parser.expect_ctrl(')')?;
+            Some(types)
+        });
+        let discriminant = self.parse_discriminant();
+        Some((
+            (name, data.unwrap_or_default(), discriminant),
+            self.span_from(start),
+        ))
+    }
+
+    /// `= (-)? integer` — an explicit enum discriminant, or `None` (backtracking)
+    /// when no `=` follows. The magnitude is parsed as `i64` (0 on overflow,
+    /// matching chumsky's `unwrap_or(0)`).
+    fn parse_discriminant(&mut self) -> Option<i64> {
+        self.attempt(|parser| {
+            parser.expect_op("=")?;
+            let negative = parser.eat_op("-");
+            let whole = parser.eat_integer()?;
+            let magnitude = whole.parse::<i64>().unwrap_or(0);
+            Some(if negative { -magnitude } else { magnitude })
+        })
+    }
+
+    // --- impl / trait / mod --------------------------------------------------
+
+    /// `impl <subject> (with A + B)? { statements }`. The subject is a type (its
+    /// `type X` binders declare the impl's generics); the optional `with` clause is
+    /// the `+`-separated list of implemented traits.
+    fn parse_impl(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Impl)?;
+        let subject = self.parse_type()?;
+        let traits = if self.eat(&Token::With) {
+            self.parse_type_bounds()?
+        } else {
+            Vec::new()
+        };
+        let body = self.parse_item_body()?;
+        Some((
+            Node::Impl(Box::new(subject), traits, body),
+            self.span_from(start),
+        ))
+    }
+
+    /// `trait name generics? (with A + B)? { functions }`. The body is a list of
+    /// function declarations only.
+    fn parse_trait(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Trait)?;
+        let name_start = self.position;
+        let name = self.eat_ident()?;
+        let name = (name, self.span_from(name_start));
+        let generic_parameters = self.parse_generic_parameters();
+        let supertraits = if self.eat(&Token::With) {
+            self.parse_type_bounds()?
+        } else {
+            Vec::new()
+        };
+        let body = self.parse_trait_body()?;
+        Some((
+            Node::Trait(name, generic_parameters, supertraits, body),
+            self.span_from(start),
+        ))
+    }
+
+    /// `mod name { statements }` — a nested module.
+    fn parse_module(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Mod)?;
+        let name = self.eat_ident()?;
+        let body = self.parse_item_body()?;
+        Some((Node::Module(name, body), self.span_from(start)))
+    }
+
+    // --- import / use / export -----------------------------------------------
+
+    /// `import <namespace_path>` (the node's span covers only `import <path>`; the
+    /// statement-level `;` is consumed separately).
+    fn parse_import(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Import)?;
+        let path = self.parse_namespace_path()?;
+        Some((Node::Import(path), self.span_from(start)))
+    }
+
+    /// `import <namespace_path> ;` — an import used as a statement.
+    fn parse_import_statement(&mut self) -> Option<Spanned<Node<'src>>> {
+        let import = self.parse_import()?;
+        self.expect_ctrl(';')?;
+        Some(import)
+    }
+
+    /// `use <namespace_path>` (the statement-level `;` is consumed separately).
+    fn parse_use(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Use)?;
+        let path = self.parse_namespace_path()?;
+        Some((Node::Use(path), self.span_from(start)))
+    }
+
+    /// `use <namespace_path> ;` — a use used as a statement.
+    fn parse_use_statement(&mut self) -> Option<Spanned<Node<'src>>> {
+        let use_ = self.parse_use()?;
+        self.expect_ctrl(';')?;
+        Some(use_)
+    }
+
+    /// `export <statement>` — re-export an import or expose a declaration. The
+    /// inner statement consumes its own terminator (so `export import a::b;`'s
+    /// `Export` span includes the `;`, while the inner `Import` span does not).
+    fn parse_export(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Export)?;
+        let inner = self.parse_statement()?;
+        Some((Node::Export(Box::new(inner)), self.span_from(start)))
+    }
+
+    /// A `::`-separated namespace path ending in a name or a `{ a, b }` set (H2) —
+    /// the recursive `import`/`use` path grammar. A single path (a name with an
+    /// optional `:: continuation`) is tried before a brace set, matching the chumsky
+    /// `path.clone().or(set)`.
+    fn parse_namespace_path(&mut self) -> Option<ImportBranch<'src>> {
+        if let Some(path) = self.attempt(Self::parse_namespace_single_path) {
+            return Some(path);
+        }
+        self.parse_namespace_set()
+    }
+
+    /// `name (:: branch)?` — one path in a namespace path (the chumsky `path`). The
+    /// name's `ImportBranch::Path` span is the name token only; the continuation is
+    /// a full [`Parser::parse_namespace_path`] (a further path or a set).
+    fn parse_namespace_single_path(&mut self) -> Option<ImportBranch<'src>> {
+        let start = self.position;
+        let name = self.eat_name()?;
+        let name_span = self.span_from(start);
+        let continuation = if self.eat_op("::") {
+            Some(Box::new(self.parse_namespace_path()?))
+        } else {
+            None
+        };
+        Some(ImportBranch::Path(name, name_span, continuation))
+    }
+
+    /// `{ path, ... }` — a brace-delimited set of paths (allow-trailing). Each
+    /// element is a single path (chumsky's `path`, which must start with a name),
+    /// so a nested bare set is not a legal element.
+    fn parse_namespace_set(&mut self) -> Option<ImportBranch<'src>> {
+        self.attempt(|parser| {
+            parser.expect_ctrl('{')?;
+            let paths = parser.comma_list(Self::parse_namespace_single_path, |parser| {
+                parser.peek_is_ctrl('}')
+            })?;
+            parser.expect_ctrl('}')?;
+            Some(ImportBranch::Set(paths))
+        })
+    }
+
+    // --- Derive / service / macro-attribute items ----------------------------
+
+    /// `[derive(A, B)] (struct | enum)` — a derive attribute wrapping a struct/enum.
+    fn parse_derived_item(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        let derives = self.parse_derive_attribute()?;
+        let item = match self.attempt(Self::parse_struct) {
+            Some(item) => item,
+            None => self.attempt(Self::parse_enum)?,
+        };
+        Some((Node::Derive(derives, Box::new(item)), self.span_from(start)))
+    }
+
+    /// `[derive(A, B)]` — the derive trait names (with spans), allow-trailing; or
+    /// `None` when no derive attribute leads.
+    fn parse_derive_attribute(&mut self) -> Option<Vec<(&'src str, Span)>> {
+        self.attempt(|parser| {
+            parser.expect_ctrl('[')?;
+            if parser.peek() != Some(&Token::Ident("derive")) {
+                return None;
+            }
+            parser.bump();
+            parser.expect_ctrl('(')?;
+            let names =
+                parser.comma_list(Self::parse_spanned_ident, |parser| parser.peek_is_ctrl(')'))?;
+            parser.expect_ctrl(')')?;
+            parser.expect_ctrl(']')?;
+            Some(names)
+        })
+    }
+
+    /// An identifier with its own span, for derive names.
+    fn parse_spanned_ident(&mut self) -> Option<(&'src str, Span)> {
+        let start = self.position;
+        let name = self.eat_ident()?;
+        Some((name, self.span_from(start)))
+    }
+
+    /// `[service(Client)?] struct …` — a service struct; the argument names the
+    /// generated client type (default `<Struct>Client`).
+    fn parse_service_item(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        let client_name = self.parse_service_attribute()?;
+        let item = self.parse_struct()?;
+        Some((
+            Node::Service(client_name, Box::new(item)),
+            self.span_from(start),
+        ))
+    }
+
+    /// `[service(Name)?]` — a service attribute. The outer `Option` is whether this
+    /// is a service attribute at all (`None` ⇒ not one); the inner `Option<&str>` is
+    /// the optional `(Name)` client name.
+    fn parse_service_attribute(&mut self) -> Option<Option<&'src str>> {
+        self.attempt(|parser| {
+            parser.expect_ctrl('[')?;
+            if parser.peek() != Some(&Token::Ident("service")) {
+                return None;
+            }
+            parser.bump();
+            let client_name = parser.attempt(|parser| {
+                parser.expect_ctrl('(')?;
+                let name = parser.eat_ident()?;
+                parser.expect_ctrl(')')?;
+                Some(name)
+            });
+            parser.expect_ctrl(']')?;
+            Some(client_name)
+        })
+    }
+
+    /// `[<user-name>(args)?] (struct | enum | fun)` — a user macro attribute. The
+    /// name must NOT be a known built-in marker (they keep their own parsers); the
+    /// `(args)?` are OPTIONAL and captured as argument SPANS (source text is what the
+    /// macro receives).
+    fn parse_macro_attributed_item(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect_ctrl('[')?;
+        let name_start = self.position;
+        let name = match self.peek() {
+            Some(Token::Ident(name)) if !is_known_attribute_marker(name) => *name,
+            _ => return None,
+        };
+        self.bump();
+        let name_span = self.span_from(name_start);
+        let arguments = self
+            .attempt(|parser| {
+                parser.expect_ctrl('(')?;
+                let arguments = parser
+                    .comma_list(Self::parse_argument_span, |parser| parser.peek_is_ctrl(')'))?;
+                parser.expect_ctrl(')')?;
+                Some(arguments)
+            })
+            .unwrap_or_default();
+        self.expect_ctrl(']')?;
+        let item = match self.attempt(Self::parse_struct) {
+            Some(item) => item,
+            None => match self.attempt(Self::parse_enum) {
+                Some(item) => item,
+                None => self.attempt(Self::parse_function)?,
+            },
+        };
+        Some((
+            Node::MacroAttribute(name, name_span, arguments, Box::new(item)),
+            self.span_from(start),
+        ))
+    }
+
+    /// The SPAN of one macro-argument expression (its source text is what the macro
+    /// receives — arguments are syntax). Parses a full expression, keeps its span.
+    fn parse_argument_span(&mut self) -> Option<Span> {
+        self.parse_expression().map(|(_, span)| span)
+    }
+
+    // --- Bracket attribute helpers -------------------------------------------
+
+    /// `[ marker ]` — a bare marker attribute (`[must_use]`, `[rpc]`, `[trait_only]`,
+    /// `[expose]`). Consumes it and returns `true` when the exact `[ marker ]` is
+    /// next; leaves the cursor untouched and returns `false` otherwise.
+    fn eat_marker_attribute(&mut self, marker: &str) -> bool {
+        self.attempt(|parser| {
+            parser.expect_ctrl('[')?;
+            if parser.peek() != Some(&Token::Ident(marker)) {
+                return None;
+            }
+            parser.bump();
+            parser.expect_ctrl(']')?;
+            Some(())
+        })
+        .is_some()
+    }
+
+    /// `[extern(args)]` — the host binding for the `external` function that follows,
+    /// or `None` when no extern attribute leads. Args are bare words or quoted
+    /// strings, interpreted by [`extern_binding_from_args`] (a malformed attribute
+    /// lowers to an empty global symbol, exactly as the oracle does).
+    fn parse_extern_attribute(&mut self) -> Option<ExternBinding<'src>> {
+        self.attempt(|parser| {
+            parser.expect_ctrl('[')?;
+            if parser.peek() != Some(&Token::Ident("extern")) {
+                return None;
+            }
+            parser.bump();
+            parser.expect_ctrl('(')?;
+            let args =
+                parser.comma_list(Self::parse_extern_arg, |parser| parser.peek_is_ctrl(')'))?;
+            parser.expect_ctrl(')')?;
+            parser.expect_ctrl(']')?;
+            Some(extern_binding_from_args(&args))
+        })
+    }
+
+    /// One `[extern(..)]` argument: a bare word (`method`/`get`/`set`/`new`) or a
+    /// quoted string (a module path or host symbol). Word is tried before Text,
+    /// matching the chumsky choice.
+    fn parse_extern_arg(&mut self) -> Option<ExternArg<'src>> {
+        match self.peek() {
+            Some(Token::Ident(word)) => {
+                let word = *word;
+                self.bump();
+                Some(ExternArg::Word(word))
+            }
+            Some(Token::String(text)) => {
+                let text = *text;
+                self.bump();
+                Some(ExternArg::Text(text))
+            }
+            _ => None,
+        }
+    }
+
+    /// `[doc(hidden)]` — a tooling marker (omit from completion). Returns whether it
+    /// is present.
+    fn parse_doc_hidden_attribute(&mut self) -> bool {
+        self.attempt(|parser| {
+            parser.expect_ctrl('[')?;
+            if parser.peek() != Some(&Token::Ident("doc")) {
+                return None;
+            }
+            parser.bump();
+            parser.expect_ctrl('(')?;
+            if parser.peek() != Some(&Token::Ident("hidden")) {
+                return None;
+            }
+            parser.bump();
+            parser.expect_ctrl(')')?;
+            parser.expect_ctrl(']')?;
+            Some(())
+        })
+        .is_some()
+    }
+
+    /// `[platform("a", "b")]` — a platform fence (≥1 string patterns, allow-trailing),
+    /// or `None` when no platform attribute leads.
+    fn parse_platform_attribute(&mut self) -> Option<Vec<Spanned<&'src str>>> {
+        self.attempt(|parser| {
+            parser.expect_ctrl('[')?;
+            if parser.peek() != Some(&Token::Ident("platform")) {
+                return None;
+            }
+            parser.bump();
+            parser.expect_ctrl('(')?;
+            let patterns = parser.comma_list(Self::parse_platform_pattern, |parser| {
+                parser.peek_is_ctrl(')')
+            })?;
+            if patterns.is_empty() {
+                return None;
+            }
+            parser.expect_ctrl(')')?;
+            parser.expect_ctrl(']')?;
+            Some(patterns)
+        })
+    }
+
+    /// One platform pattern: a quoted string with its span.
+    fn parse_platform_pattern(&mut self) -> Option<Spanned<&'src str>> {
+        let start = self.position;
+        if let Some(Token::String(text)) = self.peek() {
+            let text = *text;
+            self.bump();
+            Some((text, self.span_from(start)))
+        } else {
+            None
+        }
+    }
+
+    // --- Macro forms ---------------------------------------------------------
+
+    /// `macro fun name(..) { .. }` — a macro definition. The `function` production
+    /// is reused and its `Node::Func` re-wrapped as `Node::MacroFun`.
+    fn parse_macro_fun(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Macro)?;
+        let (node, _) = self.parse_function()?;
+        let node = match node {
+            Node::Func(function) => Node::MacroFun(function),
+            other => other,
+        };
+        Some((node, self.span_from(start)))
+    }
+
+    /// `macro { .. }` — an anonymous, immediately-expanded macro block. An atom
+    /// (expression position) and a statement (via
+    /// [`Parser::parse_macro_block_statement`]).
+    fn parse_macro_block(&mut self) -> Option<Spanned<Node<'src>>> {
+        self.attempt(|parser| {
+            let start = parser.position;
+            parser.expect(&Token::Macro)?;
+            let body = parser.parse_block()?;
+            Some((Node::MacroBlock(body), parser.span_from(start)))
+        })
+    }
+
+    /// `macro { .. } ;?` — a macro block used as a statement (the `;` is OPTIONAL,
+    /// unlike the mandatory `;` on an expression statement); the node's span
+    /// excludes the `;`.
+    fn parse_macro_block_statement(&mut self) -> Option<Spanned<Node<'src>>> {
+        let macro_block = self.parse_macro_block()?;
+        self.eat_ctrl(';');
+        Some(macro_block)
+    }
+
+    /// `macro name(args)` — a macro invocation. An atom (expression position) and a
+    /// statement (via [`Parser::parse_macro_invocation_statement`]). Arguments are
+    /// captured as SPANS (their source text is what the macro receives).
+    fn parse_macro_invocation(&mut self) -> Option<Spanned<Node<'src>>> {
+        self.attempt(|parser| {
+            let start = parser.position;
+            parser.expect(&Token::Macro)?;
+            let name_start = parser.position;
+            let name = parser.eat_ident()?;
+            let name_span = parser.span_from(name_start);
+            parser.expect_ctrl('(')?;
+            let arguments =
+                parser.comma_list(Self::parse_argument_span, |parser| parser.peek_is_ctrl(')'))?;
+            parser.expect_ctrl(')')?;
+            Some((
+                Node::MacroInvocation(name, name_span, arguments),
+                parser.span_from(start),
+            ))
+        })
+    }
+
+    /// `macro name(args) ;?` — a macro invocation used as a statement (`;` OPTIONAL);
+    /// the node's span excludes the `;`.
+    fn parse_macro_invocation_statement(&mut self) -> Option<Spanned<Node<'src>>> {
+        let invocation = self.parse_macro_invocation()?;
+        self.eat_ctrl(';');
+        Some(invocation)
+    }
+
+    /// `(binder in source => body)` — a tuple comprehension. The `in` distinguishes
+    /// it from a tuple/group atom (and the `=>` from the mapped *type* `(U in T:
+    /// F)`); `source` is a secondary expression, `body` a full expression.
+    /// Backtracks when the `(binder in` shape is absent.
+    fn parse_tuple_comprehension(&mut self) -> Option<Spanned<Node<'src>>> {
+        self.attempt(|parser| {
+            let start = parser.position;
+            parser.expect_ctrl('(')?;
+            let binder_start = parser.position;
+            let binder = parser.eat_ident()?;
+            let binder_span = parser.span_from(binder_start);
+            parser.expect(&Token::In)?;
+            let source = parser.parse_secondary(false)?;
+            parser.expect_op("=>")?;
+            let body = parser.parse_expression()?;
+            parser.expect_ctrl(')')?;
+            Some((
+                Node::TupleComprehension {
+                    binder,
+                    binder_span,
+                    source: Box::new(source),
+                    body: Box::new(body),
+                },
+                parser.span_from(start),
+            ))
+        })
+    }
+
+    /// `resource` NOT followed by `external` / `struct` / `enum` — the misplaced-
+    /// modifier steer (item 15 in the statement choice, after `struct`/`enum`, so a
+    /// valid `resource struct` / `resource external struct` / `resource enum` is
+    /// never shadowed). Emits a parse error and recovers to a `Node::Error` spanning
+    /// the `resource` keyword, leaving the offending token unconsumed (so
+    /// `fun`/`impl`/`let`/`trait` still parse on the next statement).
+    fn parse_misplaced_resource(&mut self) -> Option<Spanned<Node<'src>>> {
+        let start = self.position;
+        self.expect(&Token::Resource)?;
+        if matches!(
+            self.peek(),
+            Some(Token::External | Token::Struct | Token::Enum)
+        ) {
+            return None;
+        }
+        let span = self.span_from(start);
+        self.errors.push(ParseError {
+            span,
+            expected: "`resource` may appear only before a `struct` or `enum` declaration",
+        });
+        Some((Node::Error, span))
+    }
+
+    /// The whole part of a `Number` token, consumed — the chumsky `integer`
+    /// selector, used by tuple bounds, discriminants, and array lengths.
+    fn eat_integer(&mut self) -> Option<&'src str> {
+        if let Some(Token::Number(whole, _, _)) = self.peek() {
+            let whole = *whole;
+            self.bump();
+            Some(whole)
+        } else {
+            None
+        }
+    }
 }
 
 /// Whether a node is a block-bearing form that may be a statement without a
@@ -1892,6 +2824,22 @@ mod tests {
     fn declines(source: &str) -> bool {
         let (tree, errors) = parse(source);
         tree.is_none() || !errors.is_empty()
+    }
+
+    /// Parse a whole `source` file, asserting a clean parse (a tree and no errors),
+    /// and return its statement list. The S3 whole-file entry — the one S2's seam
+    /// could not reach.
+    fn program(source: &str) -> Spanned<NodeList<'_>> {
+        let (tree, errors) = parse(source);
+        assert!(errors.is_empty(), "parse errors on {source:?}: {errors:?}");
+        tree.expect("program did not parse")
+    }
+
+    /// The single top-level item's node, for the common one-item pins.
+    fn only_item(source: &str) -> Node<'_> {
+        let (mut statements, _span) = program(source);
+        assert_eq!(statements.len(), 1, "expected one item in {source:?}");
+        statements.remove(0).0
     }
 
     // --- Precedence and associativity (full span-inclusive Debug) ------------
@@ -2284,10 +3232,432 @@ mod tests {
         assert!(declines("let __probe = (a,);"));
     }
 
+    // --- S3 items: functions -------------------------------------------------
+
     #[test]
-    fn items_are_the_s3_seam_and_decline() {
-        assert!(declines("fun main() { }"));
-        assert!(declines("struct Point { x: i32 }"));
-        assert!(declines("macro foo(a)"));
+    fn function_signature_only_has_no_body() {
+        // A `;` body (a required trait method / external declaration) is `None`.
+        match only_item("fun default(): Self;") {
+            Node::Func(function) => {
+                assert_eq!(function.name.0, "default");
+                assert!(function.body.is_none(), "signature-only body is None");
+                assert!(function.return_type.is_some());
+            }
+            other => panic!("expected Func, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_generics_conventions_and_borrows() {
+        // Generics, an `own`/`&`/`&mut`/bare mix of conventions, a return type, and
+        // a `borrows` clause — every function-signature axis in one pin.
+        match only_item(
+            "fun slot<T>(&mut self, own value: T, plain: i32): &mut T borrows self { self }",
+        ) {
+            Node::Func(function) => {
+                let generics = function.generic_parameters.as_ref().expect("generics");
+                assert_eq!(generics.0.len(), 1);
+                let conventions: Vec<Convention> = function
+                    .parameters
+                    .0
+                    .iter()
+                    .map(|(_, _, convention, _)| *convention)
+                    .collect();
+                assert_eq!(
+                    conventions,
+                    vec![Convention::RefMut, Convention::Own, Convention::Bare]
+                );
+                assert_eq!(function.borrows, Some("self"));
+                assert!(function.body.is_some());
+            }
+            other => panic!("expected Func, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameter_convention_is_inferred_from_a_reference_type() {
+        // No prefix, but a `&mut T` type gives `RefMut`; a `&T` type gives `Ref`.
+        match only_item("fun f(a: &mut i32, b: &i32, c: i32) { }") {
+            Node::Func(function) => {
+                let conventions: Vec<Convention> = function
+                    .parameters
+                    .0
+                    .iter()
+                    .map(|(_, _, convention, _)| *convention)
+                    .collect();
+                assert_eq!(
+                    conventions,
+                    vec![Convention::RefMut, Convention::Ref, Convention::Bare]
+                );
+            }
+            other => panic!("expected Func, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn async_fun_is_a_function_not_an_expression() {
+        // `async fun` is an item (the expression attempt fails on `fun`), unlike
+        // `async { .. }` / `async expr`, which are expressions.
+        match only_item("async fun tick() { }") {
+            Node::Func(function) => {
+                assert!(function.is_async);
+                assert!(!function.external);
+            }
+            other => panic!("expected an async Func, got {other:?}"),
+        }
+        // `external fun` is a bodyless intrinsic.
+        match only_item("external fun print(line: str);") {
+            Node::Func(function) => {
+                assert!(function.external);
+                assert!(function.body.is_none());
+            }
+            other => panic!("expected an external Func, got {other:?}"),
+        }
+    }
+
+    // --- S3 items: structs / enums -------------------------------------------
+
+    #[test]
+    fn struct_fields_generics_and_modifiers() {
+        match only_item("struct Point<T> { x: T, y: T }") {
+            Node::Struct(name, generics, external, resource, body) => {
+                assert_eq!(name.0, "Point");
+                assert!(generics.is_some());
+                assert!(!external && !resource);
+                assert_eq!(body.expect("fields").0.len(), 2);
+            }
+            other => panic!("expected Struct, got {other:?}"),
+        }
+        // `resource external struct null;` — every modifier, the `null` name, the
+        // bodyless `;` form.
+        match only_item("resource external struct null;") {
+            Node::Struct(name, _, external, resource, body) => {
+                assert_eq!(name.0, "null");
+                assert!(external && resource);
+                assert!(body.is_none());
+            }
+            other => panic!("expected Struct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exposed_struct_field_is_recorded() {
+        match only_item("struct Room { [expose] count: Signal, name: str }") {
+            Node::Struct(_, _, _, _, Some(fields)) => {
+                let exposed: Vec<bool> = fields.0.iter().map(|field| field.0.2).collect();
+                assert_eq!(exposed, vec![true, false]);
+            }
+            other => panic!("expected a struct with fields, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_variants_payloads_and_discriminants() {
+        match only_item("enum Sign { Less = -1, Zero = 0, More(i32, str) }") {
+            Node::Enum(name, _, resource, variants) => {
+                assert_eq!(name.0, "Sign");
+                assert!(!resource);
+                let (_, less_data, less_disc) = &variants.0[0].0;
+                assert!(less_data.is_empty());
+                assert_eq!(*less_disc, Some(-1));
+                let (_, more_data, more_disc) = &variants.0[2].0;
+                assert_eq!(more_data.len(), 2, "More carries two payload types");
+                assert_eq!(*more_disc, None);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+        // `resource enum` — the only leading modifier on an enum.
+        match only_item("resource enum Handle { Open, Closed }") {
+            Node::Enum(_, _, resource, _) => assert!(resource),
+            other => panic!("expected a resource Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_parameter_bounds_and_tuple_bounds() {
+        // A trait-bound list, a defaulted binder, and a tuple-arity bound.
+        match only_item("fun f<A: Show + Eq, type B = Self, C: (2..: Display)>() { }") {
+            Node::Func(function) => {
+                let generics = &function.generic_parameters.as_ref().unwrap().0;
+                assert_eq!(generics[0].bounds.len(), 2, "A: Show + Eq");
+                assert!(
+                    generics[1].is_type && generics[1].default.is_some(),
+                    "type B = Self"
+                );
+                let tuple_bound = generics[2].tuple_bound.as_ref().expect("C tuple bound");
+                assert_eq!(tuple_bound.lo, Some(2));
+                assert_eq!(tuple_bound.hi, None);
+                assert!(tuple_bound.element.is_some(), "(..: Display) element bound");
+            }
+            other => panic!("expected Func, got {other:?}"),
+        }
+    }
+
+    // --- S3 items: impl / trait / mod ----------------------------------------
+
+    #[test]
+    fn impl_with_clause_and_body() {
+        match only_item("impl Point<type T> with Show + Eq { fun show(&self): str { \"p\" } }") {
+            Node::Impl(_subject, traits, body) => {
+                assert_eq!(traits.len(), 2, "with Show + Eq");
+                assert_eq!(body.0.len(), 1, "one method");
+                assert!(matches!(body.0[0].0, Node::Func(_)));
+            }
+            other => panic!("expected Impl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trait_body_holds_declarations_and_default_members() {
+        // A signature-only declaration and a defaulted method, plus a supertrait.
+        match only_item(
+            "trait Ord<T> with Eq { fun cmp(&self, other: &T): i32; fun max(&self): i32 { 0 } }",
+        ) {
+            Node::Trait(name, generics, supertraits, body) => {
+                assert_eq!(name.0, "Ord");
+                assert!(generics.is_some());
+                assert_eq!(supertraits.len(), 1);
+                assert_eq!(body.0.len(), 2);
+                let bodies: Vec<bool> = body
+                    .0
+                    .iter()
+                    .map(|member| match &member.0 {
+                        Node::Func(function) => function.body.is_some(),
+                        other => panic!("trait member is not a Func: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(bodies, vec![false, true], "decl then default");
+            }
+            other => panic!("expected Trait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_nests_items() {
+        match only_item(
+            "mod geometry { struct Point { x: i32 } fun origin(): Point { Point { x = 0 } } }",
+        ) {
+            Node::Module(name, body) => {
+                assert_eq!(name, "geometry");
+                assert_eq!(body.0.len(), 2);
+            }
+            other => panic!("expected Module, got {other:?}"),
+        }
+    }
+
+    // --- S3 items: import / use / export -------------------------------------
+
+    #[test]
+    fn import_recursive_path_and_brace_set() {
+        // `std::collections::{ Map, Set }` — a `::` path ending in a set.
+        match only_item("import std::collections::{ Map, Set };") {
+            Node::Import(ImportBranch::Path("std", _, Some(next))) => match &*next {
+                ImportBranch::Path("collections", _, Some(set)) => match &**set {
+                    ImportBranch::Set(members) => assert_eq!(members.len(), 2),
+                    other => panic!("expected a Set continuation, got {other:?}"),
+                },
+                other => panic!("expected a nested path, got {other:?}"),
+            },
+            other => panic!("expected Import(Path), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn use_bare_path_and_export_reexport() {
+        assert!(matches!(
+            only_item("use option::Some;"),
+            Node::Use(ImportBranch::Path("option", _, Some(_)))
+        ));
+        // `export import a::b;` — the inner import consumes its own `;`; the Export
+        // wraps it (and its span, tested via the differential, includes the `;`).
+        match only_item("export import shared::config;") {
+            Node::Export(inner) => assert!(matches!(inner.0, Node::Import(_))),
+            other => panic!("expected Export, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_let_and_mut_bindings() {
+        assert!(matches!(only_item("let answer = 42;"), Node::Let(..)));
+        assert!(matches!(only_item("mut total = 0;"), Node::Let(..)));
+    }
+
+    // --- S3 attribute / macro forms ------------------------------------------
+
+    #[test]
+    fn derive_and_service_attributes_wrap_their_item() {
+        match only_item("[derive(Show, Eq)] struct P { x: i32 }") {
+            Node::Derive(derives, item) => {
+                let names: Vec<&str> = derives.iter().map(|(name, _)| *name).collect();
+                assert_eq!(names, vec!["Show", "Eq"]);
+                assert!(matches!(item.0, Node::Struct(..)));
+            }
+            other => panic!("expected Derive, got {other:?}"),
+        }
+        // `[service(Client)] struct` names its generated client type.
+        match only_item("[service(RoomClient)] struct Room { }") {
+            Node::Service(Some("RoomClient"), item) => assert!(matches!(item.0, Node::Struct(..))),
+            other => panic!("expected Service(Some), got {other:?}"),
+        }
+        // Bare `[service]` defaults the client name to `None`.
+        assert!(matches!(
+            only_item("[service] struct Room { }"),
+            Node::Service(None, _)
+        ));
+    }
+
+    #[test]
+    fn function_attributes_are_recognized_in_fixed_order() {
+        // The full ordered attribute prefix (`extern`, `must_use`, `rpc`,
+        // `trait_only`, `doc(hidden)`, `platform`) on one external function.
+        match only_item(
+            "[extern(\"node:http\", \"createServer\")] [must_use] [rpc] [trait_only] [doc(hidden)] [platform(\"@process\")] external fun serve();",
+        ) {
+            Node::Func(function) => {
+                assert!(matches!(
+                    function.extern_binding,
+                    Some(ExternBinding::Function {
+                        module: Some("node:http"),
+                        symbol: "createServer"
+                    })
+                ));
+                assert!(
+                    function.must_use && function.rpc && function.trait_only && function.doc_hidden
+                );
+                assert_eq!(function.platform_fence.len(), 1);
+                assert!(function.external);
+            }
+            other => panic!("expected a fully-attributed Func, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_attributes_out_of_order_decline() {
+        // `[must_use]` must precede `[rpc]` (the chumsky attribute chain is ordered):
+        // `[rpc] [must_use] fun` is NOT a function, and no other alternative claims
+        // it, so the whole program declines.
+        assert!(declines("[rpc] [must_use] fun f() { }"));
+    }
+
+    #[test]
+    fn bracket_attribute_vs_list_literal_disambiguation() {
+        // `[must_use] fun` is a function (the list-literal expression reading fails
+        // for want of a `;`, then `function` claims it).
+        assert!(matches!(only_item("[must_use] fun f() { }"), Node::Func(_)));
+        // A genuine list-literal statement (`[a, b];`) is still an expression.
+        assert!(matches!(only_item("[a, b];"), Node::List(_)));
+        // A user macro attribute (name NOT a known marker) wraps its item.
+        match only_item("[route(\"/\", get)] fun index() { }") {
+            Node::MacroAttribute(name, _, arguments, item) => {
+                assert_eq!(name, "route");
+                assert_eq!(arguments.len(), 2, "argument SPANS");
+                assert!(matches!(item.0, Node::Func(_)));
+            }
+            other => panic!("expected MacroAttribute, got {other:?}"),
+        }
+        // A bare user attribute with no args wraps too.
+        assert!(matches!(
+            only_item("[handler] struct H { }"),
+            Node::MacroAttribute("handler", _, _, _)
+        ));
+    }
+
+    #[test]
+    fn macro_definition_block_and_invocation_forms() {
+        // `macro fun` is a definition.
+        assert!(matches!(
+            only_item("macro fun expand(): Source { source(\"\") }"),
+            Node::MacroFun(_)
+        ));
+        // `macro { .. }` is a block; the statement `;` is optional (both parse).
+        assert!(matches!(
+            only_item("macro { ret void }"),
+            Node::MacroBlock(_)
+        ));
+        assert!(matches!(
+            only_item("macro { ret void };"),
+            Node::MacroBlock(_)
+        ));
+        // `macro name(args)` is an invocation, `;` optional; arguments are SPANS.
+        match only_item("macro define(a, b + 1)") {
+            Node::MacroInvocation(name, _, arguments) => {
+                assert_eq!(name, "define");
+                assert_eq!(arguments.len(), 2);
+            }
+            other => panic!("expected MacroInvocation, got {other:?}"),
+        }
+        assert!(matches!(
+            only_item("macro define(a);"),
+            Node::MacroInvocation(..)
+        ));
+    }
+
+    #[test]
+    fn macro_invocation_in_expression_position_is_an_atom() {
+        // Anywhere but statement head, `macro name(args)` is an expression atom.
+        match &expr("x + macro pick(a)").0 {
+            Node::Binary(BinaryOp::Add, _, right) => {
+                assert!(matches!(right.0, Node::MacroInvocation(..)));
+            }
+            other => panic!("expected a macro invocation operand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tuple_comprehension_atom_parses() {
+        // `(x in xs => e)` — the deferred S2 atom, now live.
+        match &expr("(x in items => x + 1)").0 {
+            Node::TupleComprehension { binder, .. } => assert_eq!(*binder, "x"),
+            other => panic!("expected TupleComprehension, got {other:?}"),
+        }
+        // The `in` is what forks it from a group / tuple — `(a + b)` still dissolves.
+        assert!(matches!(
+            expr("(a + b)").0,
+            Node::Binary(BinaryOp::Add, _, _)
+        ));
+    }
+
+    // --- S3 statement interleaving + the resource steer ----------------------
+
+    #[test]
+    fn misplaced_resource_declines_but_a_valid_resource_declaration_parses() {
+        // `resource` before a non-declaration is the steer (an error) — declines.
+        assert!(declines("resource fun f() { }"));
+        assert!(declines("resource impl Foo { }"));
+        // But `resource struct` / `resource external struct` / `resource enum` are
+        // valid and parse cleanly (the steer never shadows them).
+        assert!(matches!(
+            only_item("resource struct File { }"),
+            Node::Struct(_, _, false, true, _)
+        ));
+        assert!(matches!(
+            only_item("resource enum State { A, B }"),
+            Node::Enum(_, _, true, _)
+        ));
+    }
+
+    #[test]
+    fn a_block_bearing_form_is_a_statement_only_when_not_block_last() {
+        // Inside a module body, `fun a` then `fun b` — two statements, no trailing
+        // expression (an item body has none).
+        match only_item("mod m { fun a() { } fun b() { } }") {
+            Node::Module(_, body) => assert_eq!(body.0.len(), 2),
+            other => panic!("expected Module, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_whole_file_is_a_sequence_of_items() {
+        let (statements, _span) = program(
+            "import std::io;\n\
+             struct Point { x: i32, y: i32 }\n\
+             [derive(Show)] enum Dir { N, S }\n\
+             fun main() { print(\"hi\") }\n",
+        );
+        assert_eq!(statements.len(), 4);
+        assert!(matches!(statements[0].0, Node::Import(_)));
+        assert!(matches!(statements[1].0, Node::Struct(..)));
+        assert!(matches!(statements[2].0, Node::Derive(..)));
+        assert!(matches!(statements[3].0, Node::Func(_)));
     }
 }
