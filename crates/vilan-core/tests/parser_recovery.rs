@@ -6,8 +6,9 @@
 //! in vilan-lsp) is pinned as an observable today; the ten `nested_delimiters`
 //! sites, the `?.` sibling, the misplaced-`resource` steer, and the lexer's
 //! skip-then-retry are exercised only indirectly. These pins make each one an
-//! explicit contract, asserting — against the current chumsky parser — that a
-//! garbled input at the site:
+//! explicit contract, asserting — against BOTH frontends (the chumsky oracle AND
+//! the handwritten `parsing::parse`, which S4 gave recovery; see `frontends`) —
+//! that a garbled input at the site:
 //!   (a) does NOT hard-fail (a partial tree comes back),
 //!   (b) recovers to the documented placeholder (empty vec / `None` / `Node::Error`
 //!       / empty block), and
@@ -24,17 +25,14 @@
 //! from reading (H6 S0 is probe-first).
 
 use chumsky::prelude::*;
-use vilan_core::{lexer, parser};
+use vilan_core::{lexer, parser, parsing};
 
 /// The rich (diagnostics-bearing) chumsky instantiation, exactly as the
 /// diagnostics path runs it (mirrors `parse_fast_path.rs::rich_parse`). Returns
-/// the recovered tree (if any) and the total lex+parse diagnostic count.
-fn rich_parse(
-    source: &str,
-) -> (
-    Option<vilan_core::Spanned<vilan_core::node::NodeList<'_>>>,
-    usize,
-) {
+/// the recovered tree's `Debug` (if any) and the total lex+parse diagnostic count.
+/// This is the ORACLE arm — deleted at S5, when `frontends` drops down to the
+/// handwritten arm alone and these two `use`s of chumsky go with it.
+fn chumsky_recovered(source: &str) -> (Option<String>, usize) {
     let (tokens, lex_errors) = lexer().parse(source).into_output_errors();
     let Some(tokens) = tokens else {
         return (None, lex_errors.len());
@@ -47,16 +45,46 @@ fn rich_parse(
                 .map((end..end).into(), |(token, span)| (token, span)),
         )
         .into_output_errors();
-    (root, lex_errors.len() + parse_errors.len())
+    (
+        root.map(|tree| format!("{tree:?}")),
+        lex_errors.len() + parse_errors.len(),
+    )
 }
 
-/// Parse `source`, assert recovery did NOT hard-fail (a partial tree came back),
-/// and return `(debug_of_tree, diagnostic_count)` for the per-site assertions.
+/// The handwritten frontend (H6 S4) — the DURABLE arm these pins survive on past
+/// the S5 cutover. `parsing::parse` recovers over the same fixtures byte-for-byte
+/// (proven against the oracle in `parse_recovery_differential.rs`); here the pins
+/// hold the recovered SHAPES independent of chumsky.
+fn handwritten_recovered(source: &str) -> (Option<String>, usize) {
+    let (tree, errors) = parsing::parse(source);
+    (tree.map(|tree| format!("{tree:?}")), errors.len())
+}
+
+/// The frontends every parse-level pin runs against. Both must hold the recovery
+/// contract (they produce byte-identical recovered trees on these fixtures). At
+/// S5 the oracle arm is deleted — drop the first tuple and the chumsky `use`s, and
+/// the handwritten pin remains, unchanged.
+type Frontend = fn(&str) -> (Option<String>, usize);
+fn frontends() -> [(&'static str, Frontend); 2] {
+    [
+        ("chumsky oracle", chumsky_recovered),
+        ("handwritten", handwritten_recovered),
+    ]
+}
+
+/// Run `check` against every frontend's recovery of `source`, asserting first that
+/// recovery did NOT hard-fail (a partial tree came back — contract (a)). `check`
+/// receives the frontend's name (for the failure message), the tree's `Debug`, and
+/// the diagnostic count.
 #[track_caller]
-fn recovered(source: &str) -> (String, usize) {
-    let (root, errors) = rich_parse(source);
-    let tree = root.expect("recovery must yield a partial tree, not hard-fail (a)");
-    (format!("{tree:?}"), errors)
+fn for_each_frontend(source: &str, check: impl Fn(&str, &str, usize)) {
+    for (name, frontend) in frontends() {
+        let (tree, errors) = frontend(source);
+        let tree = tree.unwrap_or_else(|| {
+            panic!("[{name}] recovery must yield a partial tree, not hard-fail (a), for {source:?}")
+        });
+        check(name, &tree, errors);
+    }
 }
 
 // --- The ten `nested_delimiters` sites (parser.rs, verified 2026-07-21) --------
@@ -66,30 +94,32 @@ fn recovers_garbled_generic_parameters() {
     // parser.rs ~248: a garbled `<...>` generic-PARAMETER list (on a declaration)
     // recovers via `nested_delimiters(<, >, .., |span| (Vec::new(), span))` to an
     // EMPTY parameter vec.
-    let (tree, errors) = recovered("fun f<1 2 3>() {}\n");
-    assert!(
-        errors > 0,
-        "garbled generic parameters must report (c): {tree}"
-    );
-    assert!(
-        tree.contains("generic_parameters: Some(([]"),
-        "recovered to an empty generic-parameter vec (b); got: {tree}"
-    );
+    for_each_frontend("fun f<1 2 3>() {}\n", |name, tree, errors| {
+        assert!(
+            errors > 0,
+            "[{name}] garbled generic parameters must report (c): {tree}"
+        );
+        assert!(
+            tree.contains("generic_parameters: Some(([]"),
+            "[{name}] recovered to an empty generic-parameter vec (b); got: {tree}"
+        );
+    });
 }
 
 #[test]
 fn recovers_garbled_generic_arguments() {
     // parser.rs ~269: a garbled `<...>` generic-ARGUMENT list (in a type position)
     // recovers to an EMPTY argument vec — here on the type `List<..>`.
-    let (tree, errors) = recovered("fun f(x: List<1 2 3>) {}\n");
-    assert!(
-        errors > 0,
-        "garbled generic arguments must report (c): {tree}"
-    );
-    assert!(
-        tree.contains("AccessorWithGenerics(\"List\", ([]"),
-        "recovered to an empty generic-argument vec (b); got: {tree}"
-    );
+    for_each_frontend("fun f(x: List<1 2 3>) {}\n", |name, tree, errors| {
+        assert!(
+            errors > 0,
+            "[{name}] garbled generic arguments must report (c): {tree}"
+        );
+        assert!(
+            tree.contains("AccessorWithGenerics(\"List\", ([]"),
+            "[{name}] recovered to an empty generic-argument vec (b); got: {tree}"
+        );
+    });
 }
 
 #[test]
@@ -97,14 +127,18 @@ fn recovers_garbled_struct_initializer_fields() {
     // parser.rs ~299: a garbled `Name { .. }` struct-initializer field list
     // recovers via `|span| (None, span)` (then mapped to an empty vec) to EMPTY
     // fields.
-    let (tree, errors) = recovered("fun main() { let p = Point { 1 2 3 }; }\n");
-    assert!(
-        errors > 0,
-        "garbled struct-init fields must report (c): {tree}"
-    );
-    assert!(
-        tree.contains("StructInitializer(\"Point\", None, ([]"),
-        "recovered to empty struct-initializer fields (b); got: {tree}"
+    for_each_frontend(
+        "fun main() { let p = Point { 1 2 3 }; }\n",
+        |name, tree, errors| {
+            assert!(
+                errors > 0,
+                "[{name}] garbled struct-init fields must report (c): {tree}"
+            );
+            assert!(
+                tree.contains("StructInitializer(\"Point\", None, ([]"),
+                "[{name}] recovered to empty struct-initializer fields (b); got: {tree}"
+            );
+        },
     );
 }
 
@@ -114,12 +148,16 @@ fn recovers_garbled_parenthesized_expression() {
     // `|span| (Node::Error, span)` to a `Node::Error` in expression position.
     // (The shape is shared with the list site below; the `(` delimiter is what
     // routes recovery here — only the paren-recovery can fire on a paren group.)
-    let (tree, errors) = recovered("fun main() { let x = (1 +); }\n");
-    assert!(errors > 0, "garbled paren group must report (c): {tree}");
-    assert!(
-        tree.contains("Let((\"x\", 17..18), None, Some((Error,"),
-        "garbled paren recovered to a Node::Error expression (b); got: {tree}"
-    );
+    for_each_frontend("fun main() { let x = (1 +); }\n", |name, tree, errors| {
+        assert!(
+            errors > 0,
+            "[{name}] garbled paren group must report (c): {tree}"
+        );
+        assert!(
+            tree.contains("Let((\"x\", 17..18), None, Some((Error,"),
+            "[{name}] garbled paren recovered to a Node::Error expression (b); got: {tree}"
+        );
+    });
 }
 
 #[test]
@@ -127,12 +165,16 @@ fn recovers_garbled_list_literal() {
     // parser.rs ~442: a garbled `[ .. ]` list literal recovers via
     // `|span| (Node::Error, span)` to a `Node::Error` in expression position.
     // The `[` delimiter routes recovery to the list site (not the paren site).
-    let (tree, errors) = recovered("fun main() { let x = [1 +]; }\n");
-    assert!(errors > 0, "garbled list literal must report (c): {tree}");
-    assert!(
-        tree.contains("Let((\"x\", 17..18), None, Some((Error,"),
-        "garbled list recovered to a Node::Error expression (b); got: {tree}"
-    );
+    for_each_frontend("fun main() { let x = [1 +]; }\n", |name, tree, errors| {
+        assert!(
+            errors > 0,
+            "[{name}] garbled list literal must report (c): {tree}"
+        );
+        assert!(
+            tree.contains("Let((\"x\", 17..18), None, Some((Error,"),
+            "[{name}] garbled list recovered to a Node::Error expression (b); got: {tree}"
+        );
+    });
 }
 
 #[test]
@@ -140,24 +182,29 @@ fn recovers_garbled_block() {
     // parser.rs ~539: a garbled `{ .. }` block recovers via `|span| (None, span)`
     // to an EMPTY block (no statements, a `Void` tail). The non-empty source with
     // `errors > 0` proves this is recovery, not a legitimately-empty `fun main() {}`.
-    let (tree, errors) = recovered("fun main() { let x = 1 + ; }\n");
-    assert!(errors > 0, "garbled block must report (c): {tree}");
-    assert!(
-        tree.contains("body: Some((([], (Void,"),
-        "garbled block recovered to an empty block (b); got: {tree}"
-    );
+    for_each_frontend("fun main() { let x = 1 + ; }\n", |name, tree, errors| {
+        assert!(errors > 0, "[{name}] garbled block must report (c): {tree}");
+        assert!(
+            tree.contains("body: Some((([], (Void,"),
+            "[{name}] garbled block recovered to an empty block (b); got: {tree}"
+        );
+    });
 }
 
 #[test]
 fn recovers_garbled_struct_body() {
     // parser.rs ~1160: a garbled `struct N { .. }` body recovers via
     // `|span| (None, span)` (mapped to an empty vec) to an EMPTY braced body.
-    let (tree, errors) = recovered("struct S { 1 2 3 }\n");
-    assert!(errors > 0, "garbled struct body must report (c): {tree}");
-    assert!(
-        tree.contains("Struct((\"S\", 7..8), None, false, false, Some(([]"),
-        "garbled struct body recovered to empty fields (b); got: {tree}"
-    );
+    for_each_frontend("struct S { 1 2 3 }\n", |name, tree, errors| {
+        assert!(
+            errors > 0,
+            "[{name}] garbled struct body must report (c): {tree}"
+        );
+        assert!(
+            tree.contains("Struct((\"S\", 7..8), None, false, false, Some(([]"),
+            "[{name}] garbled struct body recovered to empty fields (b); got: {tree}"
+        );
+    });
 }
 
 #[test]
@@ -165,15 +212,22 @@ fn recovers_garbled_impl_body_and_continues() {
     // parser.rs ~1210: a garbled `impl X { .. }` body recovers via
     // `|span| (Vec::new(), span)` to an EMPTY body, AND the following item still
     // parses (recovery synchronizes at the item boundary).
-    let (tree, errors) = recovered("impl Foo { 1 2 3 }\nfun after() {}\n");
-    assert!(errors > 0, "garbled impl body must report (c): {tree}");
-    assert!(
-        tree.contains("Impl((Accessor(\"Foo\"), 5..8), [], ([]"),
-        "garbled impl body recovered to an empty body (b); got: {tree}"
-    );
-    assert!(
-        tree.contains("(\"after\""),
-        "the item after a recovered impl body must still parse; got: {tree}"
+    for_each_frontend(
+        "impl Foo { 1 2 3 }\nfun after() {}\n",
+        |name, tree, errors| {
+            assert!(
+                errors > 0,
+                "[{name}] garbled impl body must report (c): {tree}"
+            );
+            assert!(
+                tree.contains("Impl((Accessor(\"Foo\"), 5..8), [], ([]"),
+                "[{name}] garbled impl body recovered to an empty body (b); got: {tree}"
+            );
+            assert!(
+                tree.contains("(\"after\""),
+                "[{name}] the item after a recovered impl body must still parse; got: {tree}"
+            );
+        },
     );
 }
 
@@ -181,15 +235,22 @@ fn recovers_garbled_impl_body_and_continues() {
 fn recovers_garbled_trait_body_and_continues() {
     // parser.rs ~1252: a garbled `trait X { .. }` body recovers via
     // `|span| (Vec::new(), span)` to an EMPTY body, and the following item parses.
-    let (tree, errors) = recovered("trait Foo { 1 2 3 }\nfun after() {}\n");
-    assert!(errors > 0, "garbled trait body must report (c): {tree}");
-    assert!(
-        tree.contains("Trait((\"Foo\", 6..9), None, [], ([]"),
-        "garbled trait body recovered to an empty body (b); got: {tree}"
-    );
-    assert!(
-        tree.contains("(\"after\""),
-        "the item after a recovered trait body must still parse; got: {tree}"
+    for_each_frontend(
+        "trait Foo { 1 2 3 }\nfun after() {}\n",
+        |name, tree, errors| {
+            assert!(
+                errors > 0,
+                "[{name}] garbled trait body must report (c): {tree}"
+            );
+            assert!(
+                tree.contains("Trait((\"Foo\", 6..9), None, [], ([]"),
+                "[{name}] garbled trait body recovered to an empty body (b); got: {tree}"
+            );
+            assert!(
+                tree.contains("(\"after\""),
+                "[{name}] the item after a recovered trait body must still parse; got: {tree}"
+            );
+        },
     );
 }
 
@@ -197,15 +258,22 @@ fn recovers_garbled_trait_body_and_continues() {
 fn recovers_garbled_module_body_and_continues() {
     // parser.rs ~1280: a garbled `mod X { .. }` body recovers via
     // `|span| (Vec::new(), span)` to an EMPTY body, and the following item parses.
-    let (tree, errors) = recovered("mod foo { 1 2 3 }\nfun after() {}\n");
-    assert!(errors > 0, "garbled module body must report (c): {tree}");
-    assert!(
-        tree.contains("Module(\"foo\", ([]"),
-        "garbled module body recovered to an empty body (b); got: {tree}"
-    );
-    assert!(
-        tree.contains("(\"after\""),
-        "the item after a recovered module body must still parse; got: {tree}"
+    for_each_frontend(
+        "mod foo { 1 2 3 }\nfun after() {}\n",
+        |name, tree, errors| {
+            assert!(
+                errors > 0,
+                "[{name}] garbled module body must report (c): {tree}"
+            );
+            assert!(
+                tree.contains("Module(\"foo\", ([]"),
+                "[{name}] garbled module body recovered to an empty body (b); got: {tree}"
+            );
+            assert!(
+                tree.contains("(\"after\""),
+                "[{name}] the item after a recovered module body must still parse; got: {tree}"
+            );
+        },
     );
 }
 
@@ -218,14 +286,18 @@ fn recovers_trailing_dot_member_keeping_receiver() {
     // property the LSP's member completion relies on (its analyze-level diagnostic
     // is pinned in the `analyze` module below). This recovery is deliberately
     // SILENT at parse (0 parse errors), so no `errors` assertion here.
-    let (tree, _errors) = recovered("fun main() { let p = Point { x = 1 }; p. }\n");
-    assert!(
-        tree.contains("MemberAccessor((Accessor(\"p\")"),
-        "the receiver `p` must survive the trailing `.` (b); got: {tree}"
-    );
-    assert!(
-        tree.contains(", (Error,"),
-        "the missing member is a `Node::Error` placeholder (b); got: {tree}"
+    for_each_frontend(
+        "fun main() { let p = Point { x = 1 }; p. }\n",
+        |name, tree, _errors| {
+            assert!(
+                tree.contains("MemberAccessor((Accessor(\"p\")"),
+                "[{name}] the receiver `p` must survive the trailing `.` (b); got: {tree}"
+            );
+            assert!(
+                tree.contains(", (Error,"),
+                "[{name}] the missing member is a `Node::Error` placeholder (b); got: {tree}"
+            );
+        },
     );
 }
 
@@ -235,14 +307,18 @@ fn recovers_trailing_question_dot_member_keeping_receiver() {
     // mid-edit recovers to `Postfix::LiftMember((Node::Error, dot_span))`, keeping
     // the receiver `p`. Also silent at parse (0 errors); the lift diagnostic is
     // pinned at the analyze level.
-    let (tree, _errors) = recovered("fun main() { let p = Point { x = 1 }; p?. }\n");
-    assert!(
-        tree.contains("Lift((Accessor(\"p\")"),
-        "the receiver `p` must survive the trailing `?.` (b); got: {tree}"
-    );
-    assert!(
-        tree.contains(", (Error,"),
-        "the missing `?.` member is a `Node::Error` placeholder (b); got: {tree}"
+    for_each_frontend(
+        "fun main() { let p = Point { x = 1 }; p?. }\n",
+        |name, tree, _errors| {
+            assert!(
+                tree.contains("Lift((Accessor(\"p\")"),
+                "[{name}] the receiver `p` must survive the trailing `?.` (b); got: {tree}"
+            );
+            assert!(
+                tree.contains(", (Error,"),
+                "[{name}] the missing `?.` member is a `Node::Error` placeholder (b); got: {tree}"
+            );
+        },
     );
 }
 
@@ -256,18 +332,22 @@ fn recovers_misplaced_resource_and_continues() {
     // MESSAGE is already pinned in inference.rs (`resource_on_a_*_is_rejected`);
     // this pins the RECOVERY half — the steer placeholder plus the fact that the
     // steered item AND every subsequent item still parse.
-    let (tree, errors) = recovered("resource fun foo() {}\nfun after() {}\n");
-    assert!(
-        errors > 0,
-        "the misplaced `resource` must report (c): {tree}"
-    );
-    assert!(
-        tree.contains("(Error, 0..8)"),
-        "`resource` steered to a Node::Error placeholder (b); got: {tree}"
-    );
-    assert!(
-        tree.contains("(\"foo\"") && tree.contains("(\"after\""),
-        "the steered `fun foo` and the following `fun after` must both parse; got: {tree}"
+    for_each_frontend(
+        "resource fun foo() {}\nfun after() {}\n",
+        |name, tree, errors| {
+            assert!(
+                errors > 0,
+                "[{name}] the misplaced `resource` must report (c): {tree}"
+            );
+            assert!(
+                tree.contains("(Error, 0..8)"),
+                "[{name}] `resource` steered to a Node::Error placeholder (b); got: {tree}"
+            );
+            assert!(
+                tree.contains("(\"foo\"") && tree.contains("(\"after\""),
+                "[{name}] the steered `fun foo` and the following `fun after` must both parse; got: {tree}"
+            );
+        },
     );
 }
 
@@ -277,12 +357,21 @@ fn recovers_misplaced_resource_and_continues() {
 fn lexer_skips_an_illegal_character_and_lexes_the_rest() {
     // lexer.rs ~257: `.recover_with(skip_then_retry_until(any().ignored(), end()))`
     // — an illegal character (here U+0007 BEL, which matches no token) is reported
-    // and skipped, and the rest of the file lexes and parses normally.
-    let (tree, errors) = recovered("fun main() { let x = 1; \u{0007} let y = 2; }\n");
-    assert!(errors > 0, "the illegal character must report (c): {tree}");
-    assert!(
-        tree.contains("(\"x\"") && tree.contains("(\"y\""),
-        "both statements around the illegal character must parse (b); got: {tree}"
+    // and skipped, and the rest of the file lexes and parses normally. (The
+    // handwritten lexer, S1, records the same skip; the char is mid-file, so
+    // chumsky does NOT discard the stream — both frontends agree here.)
+    for_each_frontend(
+        "fun main() { let x = 1; \u{0007} let y = 2; }\n",
+        |name, tree, errors| {
+            assert!(
+                errors > 0,
+                "[{name}] the illegal character must report (c): {tree}"
+            );
+            assert!(
+                tree.contains("(\"x\"") && tree.contains("(\"y\""),
+                "[{name}] both statements around the illegal character must parse (b); got: {tree}"
+            );
+        },
     );
 }
 

@@ -1,4 +1,4 @@
-//! The handwritten parser (H6 S3, `proposal/frontend.md` §2 "Parser" + §3 S3).
+//! The handwritten parser (H6 S3 + S4, `proposal/frontend.md` §2 "Parser" + §3).
 //!
 //! A dependency-free, single-pass recursive-descent + precedence-climbing parser
 //! over `&[(Token, Span)]` (the output of [`crate::lexing::tokenize`], which S1
@@ -8,7 +8,15 @@
 //! S5). Nothing in the pipeline calls this yet; it is exercised by the corpus-
 //! scale differential (`tests/parse_differential.rs`, which S3 repoints at this
 //! module), the corpus-through-the-new-frontend byte gate
-//! (`tests/corpus_new_frontend.rs`), and this module's own pins.
+//! (`tests/corpus_new_frontend.rs`), the recovery pins (`tests/parser_recovery.rs`,
+//! S4-repointed to run against BOTH frontends), the recovery-mode differential
+//! (`tests/parse_recovery_differential.rs`), and this module's own pins.
+//!
+//! S4 adds RECOVERY and rich errors on top of the clean grammar: the ten
+//! `nested_delimiters` sites reproduce their placeholders ([`Parser::recover_delimited`]),
+//! the top-level parse keeps whatever prefix parsed, and [`ParseError`] carries the
+//! found/expected/context/hint a real renderer ([`render`]) needs — messages that
+//! may IMPROVE on chumsky's (§6a), never wired into the pipeline (that is S5).
 //!
 //! With S3 the grammar is COMPLETE — the whole file, not just its expressions.
 //! S2 covered the *expression* and *type* grammar plus the block-bearing forms
@@ -42,62 +50,188 @@ use crate::node::{
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 
-/// A parse error value: where it was detected and a description of what the parser
-/// wanted. S2 accumulates these but does not yet reproduce chumsky's structured
-/// expected/found sets or their rendering — that is S4's concern (proposal §6a
-/// allows improved, not byte-identical, diagnostics at cutover). The expression
-/// differential compares only *clean* parses, so this content is not yet gated;
-/// its shape is deliberately minimal for S4 to build the real diagnostics on.
+/// A parse error value: where it was detected, *what* went wrong (found/expected,
+/// or a curated reason), the production context, and an optional targeted hint.
+/// This is the shape [`render`] turns into a user-facing message following the
+/// diagnostics standard (`proposal/diagnostics-standard.md` §1-4). Proposal §6a
+/// governs it: parse errors may *improve* on chumsky's at cutover — they are not
+/// byte-matched — so this carries what a good renderer needs, not chumsky's
+/// internal `Rich` shape. Rendering is exported for S5 and tested directly here;
+/// nothing in the pipeline reads it yet.
 #[derive(Clone, Debug)]
 pub struct ParseError {
-    /// Where the error was detected (a token span, or a zero-width span at end of
-    /// input).
+    /// Where the error is anchored (diagnostics-standard.md A1 — the narrowest
+    /// identifying span): the offending token, the recovered delimiter region, or
+    /// a zero-width span at end of input.
     pub span: Span,
-    /// A human description of what was expected at [`ParseError::span`].
-    pub expected: &'static str,
+    /// What went wrong.
+    pub reason: ParseErrorReason,
+    /// The production context, outermost first — rendered as the `in <context>`
+    /// tail (`in type`, `in function parameters`). Curated: only the ~productions
+    /// where a label aids the message push one, so the noise chumsky emitted
+    /// (`context clause` / `generic arguments` after every type) never appears.
+    pub context: Vec<&'static str>,
+    /// A targeted hint for a known-confusing shape (§6a's first-class messages —
+    /// e.g. the `!=` soup), recognized structurally at the failure, not by string
+    /// matching. Rendered as the ` — <hint>` tail.
+    pub hint: Option<&'static str>,
 }
 
-/// Parse `source` into its statement list (with spans) and any parse errors. The
-/// tree is the same `Spanned<NodeList>` the chumsky parser produces for every
-/// source the H6 differential covers within S2's implemented subset; on any lex
-/// error, a source that reaches an unimplemented item/macro form, or any other
-/// parse failure, the error list is non-empty and the tree is `None` — the
-/// clean-or-decline contract the differential's candidate relies on.
+/// Why a parse failed — the content a message is built from.
+#[derive(Clone, Debug)]
+pub enum ParseErrorReason {
+    /// "found <found>, expected <one of expected>" — the structured recursive-
+    /// descent farthest-failure. `expected` is a curated set (never the optional-
+    /// continuation noise chumsky merged in at every type position).
+    Expected {
+        found: Found,
+        expected: Vec<&'static str>,
+    },
+    /// A curated message stating a language rule (diagnostics-standard.md B6 — the
+    /// prohibition explains itself and names the sanctioned spelling). The
+    /// misplaced-`resource` steer is the one case today.
+    Rule(&'static str),
+    /// An unbalanced / garbled delimited region recovered at `production` — one of
+    /// the ten `nested_delimiters` sites. `delimiter` is the opening bracket; the
+    /// span is the recovered region.
+    Unbalanced {
+        production: &'static str,
+        delimiter: char,
+    },
+}
+
+/// What the parser found at a failure: a token (rendered via its `Display`), an
+/// un-lexable character (an S1 [`lexing::LexError`] fed in), or end of input.
+#[derive(Clone, Debug)]
+pub enum Found {
+    Token(String),
+    Character(char),
+    EndOfInput,
+}
+
+/// The closing bracket that matches an opening one — for the `Unbalanced` message.
+fn matching_close(open: char) -> char {
+    match open {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        '<' => '>',
+        other => other,
+    }
+}
+
+/// Render one parse error as user-facing text, following the diagnostics standard
+/// (`proposal/diagnostics-standard.md`): "found X expected Y in <context> — <hint>"
+/// for the structured case, the curated rule verbatim, and an unclosed-delimiter
+/// message for a recovered region. Exported for the S5 cutover to wire into the
+/// pipeline's four fold sites in place of chumsky's `render_parse_error`; tested
+/// directly here, never called from the pipeline yet.
+///
+/// The noise-filtering `render_parse_error` does on `Rich` (dropping the ever-
+/// present `context clause` / `generic arguments` expectations) is unnecessary
+/// here: the farthest-failure records only real expectations, so an over-eager
+/// optional continuation is never in the set to begin with.
+pub fn render(error: &ParseError) -> String {
+    use std::fmt::Write;
+
+    let mut message = match &error.reason {
+        ParseErrorReason::Rule(rule) => rule.to_string(),
+        ParseErrorReason::Unbalanced {
+            production,
+            delimiter,
+        } => {
+            format!(
+                "unclosed `{delimiter}` in {production} — expected a matching `{}`",
+                matching_close(*delimiter)
+            )
+        }
+        ParseErrorReason::Expected { found, expected } => {
+            let found = match found {
+                Found::Token(text) => format!("'{text}'"),
+                Found::Character(character) => format!("'{}'", character.escape_debug()),
+                Found::EndOfInput => "end of input".to_string(),
+            };
+            let mut message = format!("found {found} expected ");
+            match expected.as_slice() {
+                [] => message.push_str("something else"),
+                [only] => message.push_str(only),
+                [first, second] => write!(message, "{first} or {second}").unwrap(),
+                many => {
+                    for one in &many[..many.len() - 1] {
+                        write!(message, "{one}, ").unwrap();
+                    }
+                    write!(message, "or {}", many[many.len() - 1]).unwrap();
+                }
+            }
+            message
+        }
+    };
+    for label in &error.context {
+        write!(message, " in {label}").unwrap();
+    }
+    if let Some(hint) = error.hint {
+        write!(message, " — {hint}").unwrap();
+    }
+    message
+}
+
+/// Parse `source` into its statement list (with spans) and any diagnostics. For a
+/// CLEAN source the tree is the same `Spanned<NodeList>` the chumsky parser produces
+/// (byte-identical, spans included — the S3 differential) and the error list is
+/// empty. For a BROKEN source (S4) the parser RECOVERS: the ten `nested_delimiters`
+/// sites produce their placeholders, the `.`/`?.` member cases and the `resource`
+/// steer synchronize, and the top-level `statement*` keeps whatever prefix parsed —
+/// so a tree ALWAYS comes back (like chumsky's `into_output_errors`), alongside a
+/// non-empty error list. The clean-or-decline contract the differential relies on is
+/// therefore the ERROR LIST (empty ⇒ clean), not a missing tree.
+///
+/// (This is a deliberate improvement chumsky's top-level parse does not make — it is
+/// all-or-nothing, discarding the whole tree on any leftover; see
+/// `tests/parse_recovery_differential.rs`'s divergence ledger. Rendering the errors
+/// is [`render`], exported for the S5 cutover, not wired into the pipeline here.)
 ///
 /// The returned tree borrows `source` (identifiers, string bodies, and numeric
 /// slices are `&'src str` copied out of the tokens), exactly like the chumsky
 /// parser; the intermediate token vector does not outlive this call.
 pub fn parse(source: &str) -> (Option<Spanned<NodeList<'_>>>, Vec<ParseError>) {
     let (tokens, lex_errors) = lexing::tokenize(source);
-    if !lex_errors.is_empty() {
-        let errors = lex_errors
-            .iter()
-            .map(|error| ParseError {
-                span: (error.position..error.position + error.character.len_utf8()).into(),
-                expected: "a valid token",
-            })
-            .collect();
-        return (None, errors);
-    }
 
     let mut parser = Parser::new(&tokens, source.len());
     let root = parser.parse_program();
     if parser.position != tokens.len() {
-        // Statements were consumed greedily but tokens remain — an unparseable
-        // statement (an unimplemented item, or a genuine error). The differential
-        // candidate declines on a non-empty error list.
-        let span = parser.here_span();
-        parser.errors.push(ParseError {
-            span,
-            expected: "an item or end of input",
-        });
+        // The top-level `statement*` stopped before consuming everything — an
+        // unparseable statement (a genuine syntax error). Chumsky's `.parse()`
+        // reports "expected end of input" here and still returns the partial
+        // tree; reproduce that, but anchored at the FARTHEST the deepest attempt
+        // reached (a better location than the leftover token, which is only where
+        // the last statement declined) so the message speaks to the real problem.
+        parser.emit_leftover_error();
     }
 
-    if parser.errors.is_empty() {
-        (Some(root), Vec::new())
-    } else {
-        (None, parser.errors)
-    }
+    // The lexer never discards its stream (S1): un-lexable characters are skipped
+    // and reported, and the parser recovers over the surviving tokens. So a tree
+    // always comes back — clean, or recovered from delimiter/character errors —
+    // exactly as chumsky's `into_output_errors` returns `Some(tree)` alongside its
+    // diagnostics. The clean-or-decline contract the differential relies on is now
+    // expressed by the ERROR LIST (empty ⇒ clean), not by a missing tree.
+    let mut errors: Vec<ParseError> = lex_errors
+        .iter()
+        .map(|error| ParseError {
+            span: (error.position..error.position + error.character.len_utf8()).into(),
+            reason: ParseErrorReason::Expected {
+                found: Found::Character(error.character),
+                expected: vec!["a token"],
+            },
+            context: Vec::new(),
+            hint: None,
+        })
+        .collect();
+    errors.append(&mut parser.errors);
+    // A stable, span-ordered diagnostic list (diagnostics-standard.md C1): lexer
+    // errors and recovered-region errors interleave by where they occur.
+    errors.sort_by_key(|error| (error.span.start, error.span.end));
+
+    (Some(root), errors)
 }
 
 struct Parser<'a, 'src> {
@@ -106,7 +240,33 @@ struct Parser<'a, 'src> {
     /// The end-of-input offset (`source.len()`), the span the chumsky parser reports
     /// at EOI — `.map((end..end).into(), …)` in every call site.
     eoi: usize,
+    /// Recovered-region and steer errors, in the order produced. A failed
+    /// [`Parser::attempt`] rolls these back with the cursor (a backtracked
+    /// alternative emits nothing), so a recovery error survives exactly when the
+    /// enclosing parse path that produced it survives — chumsky's "errors on the
+    /// successful branch are kept" behavior.
     errors: Vec<ParseError>,
+    /// The farthest point any attempt reached before it could not proceed — the
+    /// location and (curated) expectations for the top-level decline diagnostic.
+    /// The standard recursive-descent heuristic: a speculative alternative that
+    /// fails at a shallower position is overwritten once the parser advances past
+    /// it, so what remains is where parsing genuinely got stuck. Purely
+    /// diagnostic — it never affects the parsed tree, so the clean parse stays
+    /// byte-identical to chumsky's.
+    farthest_failure: Option<Failure>,
+    /// The live production-context stack (`in type`, `in function parameters`),
+    /// snapshotted when a new farthest failure is recorded.
+    context_stack: Vec<&'static str>,
+}
+
+/// A recorded farthest failure (see [`Parser::farthest_failure`]).
+struct Failure {
+    /// The token index reached (converted to a byte span at emission).
+    position: usize,
+    /// The curated expectations recorded at [`Failure::position`].
+    expected: Vec<&'static str>,
+    /// The production context at [`Failure::position`], outermost first.
+    context: Vec<&'static str>,
 }
 
 // --- A postfix suffix in the member/call chain, collected then grouped ----------
@@ -213,6 +373,8 @@ impl<'a, 'src> Parser<'a, 'src> {
             position: 0,
             eoi,
             errors: Vec::new(),
+            farthest_failure: None,
+            context_stack: Vec::new(),
         }
     }
 
@@ -367,16 +529,214 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    /// Run `body`; if it declines (`None`), restore the cursor to where it started.
-    /// The recursive-descent equivalent of chumsky's backtracking on a failed
-    /// alternative.
+    /// Run `body`; if it declines (`None`), restore the cursor AND roll back any
+    /// errors it emitted. The recursive-descent equivalent of chumsky's
+    /// backtracking on a failed alternative: a discarded branch leaves nothing
+    /// behind — neither cursor movement nor diagnostics — so a recovery error
+    /// emitted inside a branch is kept only if that branch ultimately succeeds
+    /// (the farthest-failure record, deliberately, is NOT rolled back — the
+    /// deepest exploration is remembered across backtracks, which is what makes
+    /// the decline diagnostic point at the real problem).
     fn attempt<T>(&mut self, body: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
         let start = self.position;
+        let error_count = self.errors.len();
         let result = body(self);
         if result.is_none() {
             self.position = start;
+            self.errors.truncate(error_count);
         }
         result
+    }
+
+    // --- Error tracking (farthest failure) -----------------------------------
+
+    /// Record that `expected` was wanted at the current position, keeping only the
+    /// farthest such point. Called at committed token demands ([`Parser::expect`]
+    /// and friends) and the semantic leaves (atom/type/pattern), never at the
+    /// speculative `eat_*` probes. Purely diagnostic.
+    fn note_expected(&mut self, expected: &'static str) {
+        let position = self.position;
+        let advance = match &self.farthest_failure {
+            Some(failure) => position > failure.position,
+            None => true,
+        };
+        if advance {
+            self.farthest_failure = Some(Failure {
+                position,
+                expected: vec![expected],
+                context: self.context_stack.clone(),
+            });
+        } else if let Some(failure) = &mut self.farthest_failure {
+            if position == failure.position && !failure.expected.contains(&expected) {
+                failure.expected.push(expected);
+            }
+        }
+    }
+
+    /// Push a production context for the span of `body`, popping it afterward
+    /// (always — even when `body` declines), so the stack a farthest failure
+    /// snapshots reflects where it occurred. Only the ~productions where a label
+    /// aids the message wrap their body, keeping the `in <context>` tail curated.
+    fn in_context<T>(
+        &mut self,
+        label: &'static str,
+        body: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<T> {
+        self.context_stack.push(label);
+        let result = body(self);
+        self.context_stack.pop();
+        result
+    }
+
+    /// Build the top-level decline diagnostic when statements remain unparsed:
+    /// anchored at the farthest failure (or the leftover token if nothing deeper
+    /// was recorded), naming what was found and the curated expectations, plus the
+    /// structural `!=`-soup hint when it applies.
+    fn emit_leftover_error(&mut self) {
+        let (position, expected, context) = match self.farthest_failure.take() {
+            Some(failure) if failure.position >= self.position => {
+                (failure.position, failure.expected, failure.context)
+            }
+            // Nothing deeper than where the last statement declined: fall back to
+            // the leftover token and the top-level expectation.
+            _ => (self.position, vec!["an item", "end of input"], Vec::new()),
+        };
+        let span = self.token_span(position);
+        let found = self.found_at(position);
+        let hint = self.soup_hint(position);
+        self.errors.push(ParseError {
+            span,
+            reason: ParseErrorReason::Expected { found, expected },
+            context,
+            hint,
+        });
+    }
+
+    /// The `!=` soup, recognized structurally (not by string matching, as the
+    /// generated `parse_error_hint` must): `a!==b` lexes as `!=` then `=`, so the
+    /// operand after `!=` is missing and the failure lands on that stray `=` whose
+    /// immediately-preceding token is `!=`. A first-class message (§6a).
+    fn soup_hint(&self, position: usize) -> Option<&'static str> {
+        let found_equals = matches!(self.tokens.get(position), Some((Token::Op("="), _)));
+        let after_not_equals = position
+            .checked_sub(1)
+            .and_then(|previous| self.tokens.get(previous))
+            .is_some_and(|(token, _)| matches!(token, Token::Op("!=")));
+        (found_equals && after_not_equals).then_some(
+            "if this was postfix `!` before a comparison, the space is required: \
+             `a! == b` (`!=` always lexes as not-equals)",
+        )
+    }
+
+    /// The byte span of the token at `position`, or the zero-width EOI span.
+    fn token_span(&self, position: usize) -> Span {
+        match self.tokens.get(position) {
+            Some((_, span)) => *span,
+            None => (self.eoi..self.eoi).into(),
+        }
+    }
+
+    /// What the parser found at `position`, for a `found <X>` message.
+    fn found_at(&self, position: usize) -> Found {
+        match self.tokens.get(position) {
+            Some((token, _)) => Found::Token(token.to_string()),
+            None => Found::EndOfInput,
+        }
+    }
+
+    // --- Delimiter recovery (chumsky `nested_delimiters`) --------------------
+
+    /// Reproduce chumsky's `nested_delimiters(open, close, others, fallback)`
+    /// recovery (recovery.rs): from an opening `open`, skip a balanced region —
+    /// nesting the `others` pairs as well as `open`/`close` — up to the matching
+    /// `close`, then report the region and return its span; the caller maps the
+    /// span to the site's placeholder. Precondition: the site's clean parse just
+    /// failed and rewound to `open`. If the cursor is NOT at `open`, or the region
+    /// cannot be balanced (an unbalanced inner delimiter, or EOI first — the exact
+    /// case chumsky hard-fails on), the cursor is left untouched and `None` is
+    /// returned (the caller declines too).
+    fn recover_delimited(
+        &mut self,
+        production: &'static str,
+        open: char,
+        close: char,
+        others: &[(char, char)],
+    ) -> Option<Span> {
+        if !self.peek_is_ctrl(open) {
+            return None;
+        }
+        let end = self.scan_balanced(self.position, open, close, others)?;
+        let start = self.position;
+        self.position = end;
+        let span = self.span_from(start);
+        self.errors.push(ParseError {
+            span,
+            reason: ParseErrorReason::Unbalanced {
+                production,
+                delimiter: open,
+            },
+            context: self.context_stack.clone(),
+            hint: None,
+        });
+        Some(span)
+    }
+
+    /// Scan a balanced `open..close` region starting at token index `start` (which
+    /// must hold `open`), nesting `open`/`close` and every `others` pair, and
+    /// return the index one past the matching `close` — or `None` if a closing
+    /// delimiter appears unbalanced or the input ends first. A faithful, non-
+    /// backtracking reading of the chumsky `nested_delimiters` grammar (a repeated
+    /// choice of a nested balanced block or a non-delimiter token): the two agree
+    /// on accept/reject and on the consumed region. Pure over the token slice.
+    fn scan_balanced(
+        &self,
+        start: usize,
+        open: char,
+        close: char,
+        others: &[(char, char)],
+    ) -> Option<usize> {
+        let is_opener =
+            |character: char| character == open || others.iter().any(|&(o, _)| o == character);
+        let closer_for = |character: char| -> Option<char> {
+            if character == open {
+                Some(close)
+            } else {
+                others
+                    .iter()
+                    .find(|&&(o, _)| o == character)
+                    .map(|&(_, c)| c)
+            }
+        };
+        let is_closer =
+            |character: char| character == close || others.iter().any(|&(_, c)| c == character);
+
+        // A stack of expected closers; `start` holds `open`, so seed with `close`.
+        let mut expected_closers = vec![close];
+        let mut index = start + 1;
+        while let Some(top) = expected_closers.last().copied() {
+            let (token, _) = self.tokens.get(index)?;
+            if let Token::Ctrl(character) = token {
+                let character = *character;
+                if character == top {
+                    expected_closers.pop();
+                    index += 1;
+                } else if is_opener(character) {
+                    expected_closers.push(closer_for(character).unwrap());
+                    index += 1;
+                } else if is_closer(character) {
+                    // A closer that does not match the innermost open: the chumsky
+                    // `repeated` stops here and the enclosing delimiter fails.
+                    return None;
+                } else {
+                    // A non-delimiter control token (`.`, `,`, `;`): consumed.
+                    index += 1;
+                }
+            } else {
+                // Any non-control token: consumed.
+                index += 1;
+            }
+        }
+        Some(index)
     }
 
     /// `item (',' item)* ','?` up to (but not consuming) the closer `is_close`
@@ -915,6 +1275,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         // An optional single fused call: `<generics>? ( args )`. If generics parse
         // but no `(` follows, they are backtracked and the bare accessor is kept.
         let save = self.position;
+        let error_count = self.errors.len();
         let generic_arguments = self.parse_generic_arguments();
         if self.peek_is_ctrl('(') {
             let arguments = self.parse_argument_list()?;
@@ -923,7 +1284,10 @@ impl<'a, 'src> Parser<'a, 'src> {
                 self.span_from(start),
             ))
         } else {
+            // A recovered but un-called `<...>` is backtracked whole — including any
+            // recovery error it emitted, since this reading is being discarded.
             self.position = save;
+            self.errors.truncate(error_count);
             Some(accessor)
         }
     }
@@ -936,6 +1300,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let mut callee = self.parse_static_accessor(no_struct)?;
         loop {
             let save = self.position;
+            let error_count = self.errors.len();
             let generic_arguments = self.parse_generic_arguments();
             if self.peek_is_ctrl('(') {
                 let arguments = self.parse_argument_list()?;
@@ -944,7 +1309,10 @@ impl<'a, 'src> Parser<'a, 'src> {
                     self.span_from(start),
                 );
             } else {
+                // A recovered but un-called `<...>` is backtracked whole — including
+                // any recovery error it emitted, since this reading is discarded.
                 self.position = save;
+                self.errors.truncate(error_count);
                 break;
             }
         }
@@ -1031,13 +1399,31 @@ impl<'a, 'src> Parser<'a, 'src> {
             if !parser.peek_is_ctrl('{') {
                 return None;
             }
-            let fields_start = parser.position;
-            parser.expect_ctrl('{')?;
-            let fields = parser.comma_list(Self::parse_struct_initializer_field, |parser| {
-                parser.peek_is_ctrl('}')
-            })?;
-            parser.expect_ctrl('}')?;
-            let fields = (fields, parser.span_from(fields_start));
+            // The `{ field, ... }` list, clean or recovered to empty fields on a
+            // garbled body (chumsky's `nested_delimiters` on the struct-initializer
+            // fields, site 3 of 10). A `{ ... }` that cannot even be balanced makes
+            // the whole initializer decline, so a bare name falls through to the
+            // atom — matching the oracle.
+            let fields = match parser.attempt(|parser| {
+                let fields_start = parser.position;
+                parser.expect_ctrl('{')?;
+                let fields = parser.comma_list(Self::parse_struct_initializer_field, |parser| {
+                    parser.peek_is_ctrl('}')
+                })?;
+                parser.expect_ctrl('}')?;
+                Some((fields, parser.span_from(fields_start)))
+            }) {
+                Some(clean) => clean,
+                None => {
+                    let span = parser.recover_delimited(
+                        "struct initializer",
+                        '{',
+                        '}',
+                        &[('(', ')'), ('[', ']')],
+                    )?;
+                    (Vec::new(), span)
+                }
+            };
             Some((
                 Node::StructInitializer(name, generic_arguments, fields),
                 parser.span_from(start),
@@ -1085,11 +1471,30 @@ impl<'a, 'src> Parser<'a, 'src> {
             return Some((node, span));
         }
         if self.peek_is_ctrl('[') {
-            return self.parse_bracket_atom();
+            if let Some(list) = self.parse_bracket_atom() {
+                return Some(list);
+            }
         }
         if self.peek_is_ctrl('(') {
-            return self.parse_paren_atom();
+            if let Some(paren) = self.parse_paren_atom() {
+                return Some(paren);
+            }
         }
+        // Recovery: the two chained `recover_with` on the chumsky `atom` choice — a
+        // balanced-but-garbled `(...)` (site 4) / `[...]` (site 5) recovers to a
+        // `Node::Error`. Paren is tried first, as chumsky orders them; the two are
+        // disjoint on the opening bracket, so the order is not observable.
+        if let Some(span) =
+            self.recover_delimited("expression", '(', ')', &[('[', ']'), ('{', '}')])
+        {
+            return Some((Node::Error, span));
+        }
+        if let Some(span) =
+            self.recover_delimited("expression", '[', ']', &[('(', ')'), ('{', '}')])
+        {
+            return Some((Node::Error, span));
+        }
+        self.note_expected("an expression");
         None
     }
 
@@ -1176,9 +1581,12 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     /// `<Type, …>` — generic arguments (allow-trailing), or `None` (backtracking)
     /// when no well-formed `<…>` is present, which is how `a < b` stays a
-    /// comparison. Recovery of a malformed `<…>` is deferred to S4.
+    /// comparison. A balanced-but-garbled `<…>` recovers to an empty argument vec
+    /// (chumsky's `nested_delimiters` on `generic_arguments`, site 2 of 10) —
+    /// which is safe here precisely because recovery requires a matching `>`, so a
+    /// lone `<` (a comparison) still declines.
     fn parse_generic_arguments(&mut self) -> Option<GenericArguments<'src>> {
-        self.attempt(|parser| {
+        if let Some(clean) = self.attempt(|parser| {
             if !parser.peek_is_ctrl('<') {
                 return None;
             }
@@ -1188,15 +1596,39 @@ impl<'a, 'src> Parser<'a, 'src> {
                 parser.comma_list(Self::parse_type, |parser| parser.peek_is_ctrl('>'))?;
             parser.expect_ctrl('>')?;
             Some((arguments, parser.span_from(start)))
-        })
+        }) {
+            return Some(clean);
+        }
+        self.recover_delimited(
+            "generic arguments",
+            '<',
+            '>',
+            &[('(', ')'), ('[', ']'), ('{', '}')],
+        )
+        .map(|span| (Vec::new(), span))
     }
 
     // --- Block-bearing forms -------------------------------------------------
 
     /// A brace-delimited block: `statement* trailing_expression?`. The trailing
     /// expression is the block's value; with none, the value is `void` at the
-    /// closing brace.
+    /// closing brace. A garbled body recovers to an empty block — no statements, a
+    /// `Void` tail at the closing brace (chumsky's `nested_delimiters` on `block`,
+    /// site 6 of 10).
     fn parse_block(&mut self) -> Option<Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>> {
+        if let Some(clean) = self.attempt(Self::parse_block_clean) {
+            return Some(clean);
+        }
+        self.recover_delimited("block", '{', '}', &[('(', ')'), ('[', ']')])
+            .map(|span| {
+                let void = Box::new((Node::Void, (span.end..span.end).into()));
+                ((Vec::new(), void), span)
+            })
+    }
+
+    /// The clean `{ statement* trailing_expression? }` parse, wrapped by
+    /// [`Parser::parse_block`]'s recovery.
+    fn parse_block_clean(&mut self) -> Option<Spanned<(NodeList<'src>, Box<Spanned<Node<'src>>>)>> {
         let start = self.position;
         self.expect_ctrl('{')?;
         let mut statements = Vec::new();
@@ -1373,7 +1805,9 @@ impl<'a, 'src> Parser<'a, 'src> {
         };
         let (pattern, pattern_span) = self.parse_binder()?;
         let type_ = if self.eat_op(":") {
-            Some(Box::new(self.parse_type()?))
+            Some(Box::new(
+                self.in_context("type annotation", Self::parse_type)?,
+            ))
         } else {
             None
         };
@@ -1588,6 +2022,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             };
             return Some((pattern, self.span_from(start)));
         }
+        self.note_expected("a pattern");
         None
     }
 
@@ -1638,8 +2073,11 @@ impl<'a, 'src> Parser<'a, 'src> {
             if let Some(mapped) = self.parse_mapped_type() {
                 return Some(mapped);
             }
-            return self.parse_tuple_type();
+            if let Some(tuple) = self.parse_tuple_type() {
+                return Some(tuple);
+            }
         }
+        self.note_expected("a type");
         None
     }
 
@@ -1862,9 +2300,21 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     /// `{ statement* }` — an item body (an `impl` or `mod` block): a bare statement
     /// list with NO trailing expression (unlike [`Parser::parse_block`]), carrying
-    /// the `{ .. }` span. Reproduces the chumsky `statement.repeated().collect()
-    /// .delimited_by('{','}')`.
-    fn parse_item_body(&mut self) -> Option<Spanned<NodeList<'src>>> {
+    /// the `{ .. }` span. A garbled body recovers to an empty body, and the item
+    /// after synchronizes (chumsky's `nested_delimiters`, sites 8 `impl` / 10
+    /// `module` of 10 — identical fallback `(Vec::new(), span)`, `production`
+    /// naming which for the message).
+    fn parse_item_body(&mut self, production: &'static str) -> Option<Spanned<NodeList<'src>>> {
+        if let Some(clean) = self.attempt(Self::parse_item_body_clean) {
+            return Some(clean);
+        }
+        self.recover_delimited(production, '{', '}', &[('(', ')'), ('[', ']')])
+            .map(|span| (Vec::new(), span))
+    }
+
+    /// The clean `{ statement* }` parse, wrapped by [`Parser::parse_item_body`]'s
+    /// recovery.
+    fn parse_item_body_clean(&mut self) -> Option<Spanned<NodeList<'src>>> {
         let start = self.position;
         self.expect_ctrl('{')?;
         let mut statements = Vec::new();
@@ -1882,9 +2332,20 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     /// `{ function* }` — a trait body: a list of function declarations ONLY (not
-    /// arbitrary statements), carrying the `{ .. }` span. Reproduces the chumsky
-    /// `function.repeated().collect().delimited_by('{','}')`.
+    /// arbitrary statements), carrying the `{ .. }` span. A garbled body recovers
+    /// to an empty body (chumsky's `nested_delimiters` on the trait body, site 9
+    /// of 10).
     fn parse_trait_body(&mut self) -> Option<Spanned<NodeList<'src>>> {
+        if let Some(clean) = self.attempt(Self::parse_trait_body_clean) {
+            return Some(clean);
+        }
+        self.recover_delimited("trait body", '{', '}', &[('(', ')'), ('[', ']')])
+            .map(|span| (Vec::new(), span))
+    }
+
+    /// The clean `{ function* }` parse, wrapped by [`Parser::parse_trait_body`]'s
+    /// recovery.
+    fn parse_trait_body_clean(&mut self) -> Option<Spanned<NodeList<'src>>> {
         let start = self.position;
         self.expect_ctrl('{')?;
         let mut functions = Vec::new();
@@ -1905,10 +2366,11 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     /// `<param, ...>` — generic PARAMETERS in declaration position (allow-trailing),
     /// or `None` (backtracking) when no well-formed `<...>` is present. Distinct
-    /// from [`Parser::parse_generic_arguments`] (types). Recovery of a malformed
-    /// `<...>` is deferred to S4.
+    /// from [`Parser::parse_generic_arguments`] (types). A balanced-but-garbled
+    /// `<...>` recovers to an empty parameter vec (chumsky's `nested_delimiters` on
+    /// `generic_parameters`, site 1 of 10).
     fn parse_generic_parameters(&mut self) -> Option<GenericParameters<'src>> {
-        self.attempt(|parser| {
+        if let Some(clean) = self.attempt(|parser| {
             let start = parser.position;
             parser.expect_ctrl('<')?;
             let parameters = parser.comma_list(Self::parse_generic_parameter, |parser| {
@@ -1916,7 +2378,16 @@ impl<'a, 'src> Parser<'a, 'src> {
             })?;
             parser.expect_ctrl('>')?;
             Some((parameters, parser.span_from(start)))
-        })
+        }) {
+            return Some(clean);
+        }
+        self.recover_delimited(
+            "generic parameters",
+            '<',
+            '>',
+            &[('(', ')'), ('[', ']'), ('{', '}')],
+        )
+        .map(|span| (Vec::new(), span))
     }
 
     /// One generic parameter: `type? name (: (tuple_bound | A + B))? (= default)?`.
@@ -2001,7 +2472,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let generic_parameters = self.parse_generic_parameters();
         let parameters = self.parse_function_parameters()?;
         let return_type = if self.eat_op(":") {
-            Some(Box::new(self.parse_type()?))
+            Some(Box::new(self.in_context("return type", Self::parse_type)?))
         } else {
             None
         };
@@ -2070,7 +2541,9 @@ impl<'a, 'src> Parser<'a, 'src> {
         };
         let (pattern, pattern_span) = self.parse_binder()?;
         let parameter_type = if self.eat_op(":") {
-            Some(Box::new(self.parse_type()?))
+            Some(Box::new(
+                self.in_context("parameter type", Self::parse_type)?,
+            ))
         } else {
             None
         };
@@ -2108,12 +2581,25 @@ impl<'a, 'src> Parser<'a, 'src> {
         let name = (name, self.span_from(name_start));
         let generic_parameters = self.parse_generic_parameters();
         let body = if self.peek_is_ctrl('{') {
-            let fields_start = self.position;
-            self.expect_ctrl('{')?;
-            let fields =
-                self.comma_list(Self::parse_struct_field, |parser| parser.peek_is_ctrl('}'))?;
-            self.expect_ctrl('}')?;
-            Some((fields, self.span_from(fields_start)))
+            // The `{ field, ... }` body, clean or recovered to empty fields on a
+            // garbled body (chumsky's `nested_delimiters` on the struct body, site
+            // 7 of 10).
+            let fields = match self.attempt(|parser| {
+                let fields_start = parser.position;
+                parser.expect_ctrl('{')?;
+                let fields = parser
+                    .comma_list(Self::parse_struct_field, |parser| parser.peek_is_ctrl('}'))?;
+                parser.expect_ctrl('}')?;
+                Some((fields, parser.span_from(fields_start)))
+            }) {
+                Some(clean) => clean,
+                None => {
+                    let span =
+                        self.recover_delimited("struct body", '{', '}', &[('(', ')'), ('[', ']')])?;
+                    (Vec::new(), span)
+                }
+            };
+            Some(fields)
         } else if self.eat_ctrl(';') {
             None
         } else {
@@ -2208,7 +2694,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         } else {
             Vec::new()
         };
-        let body = self.parse_item_body()?;
+        let body = self.parse_item_body("implementation body")?;
         Some((
             Node::Impl(Box::new(subject), traits, body),
             self.span_from(start),
@@ -2241,7 +2727,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let start = self.position;
         self.expect(&Token::Mod)?;
         let name = self.eat_ident()?;
-        let body = self.parse_item_body()?;
+        let body = self.parse_item_body("module body")?;
         Some((Node::Module(name, body), self.span_from(start)))
     }
 
@@ -2665,7 +3151,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         let span = self.span_from(start);
         self.errors.push(ParseError {
             span,
-            expected: "`resource` may appear only before a `struct` or `enum` declaration",
+            reason: ParseErrorReason::Rule(
+                "`resource` is a type-declaration modifier — it may appear only \
+                 before a `struct` or `enum` declaration",
+            ),
+            context: Vec::new(),
+            hint: None,
         });
         Some((Node::Error, span))
     }
@@ -3659,5 +4150,151 @@ mod tests {
         assert!(matches!(statements[1].0, Node::Struct(..)));
         assert!(matches!(statements[2].0, Node::Derive(..)));
         assert!(matches!(statements[3].0, Node::Func(_)));
+    }
+
+    // --- S4 recovery + error rendering (durable — no chumsky, survives S5) ----
+    //
+    // `parser_recovery.rs` pins the recovered SHAPES against BOTH frontends and
+    // `parse_recovery_differential.rs` pins byte-equality with the oracle; these
+    // pins are the handwritten frontend's OWN durable corpus for the recovered
+    // trees, the parse contract, and — the part no other target covers — the
+    // rendered messages.
+
+    /// Parse `source` and render every error, for the message pins.
+    fn rendered_errors(source: &str) -> Vec<String> {
+        let (_tree, errors) = parse(source);
+        errors.iter().map(render).collect()
+    }
+
+    #[test]
+    fn a_clean_source_reports_no_errors_and_a_broken_one_does() {
+        let (tree, errors) = parse("fun main() { }\n");
+        assert!(tree.is_some() && errors.is_empty(), "clean: {errors:?}");
+        let (tree, errors) = parse("struct S { 1 2 3 }\n");
+        assert!(tree.is_some(), "recovery always returns a tree");
+        assert!(!errors.is_empty(), "a recovered source reports");
+    }
+
+    #[test]
+    fn the_ten_delimiter_sites_recover_to_their_exact_placeholders() {
+        // The exact recovered shape at each of the ten sites (durable counterpart
+        // of the cross-frontend `parser_recovery.rs` substring pins).
+        let cases: &[(&str, &str)] = &[
+            (
+                "fun f<1 2 3>() {}\n",
+                "generic_parameters: Some(([], 5..12)",
+            ),
+            (
+                "fun f(x: List<1 2 3>) {}\n",
+                "AccessorWithGenerics(\"List\", ([], 13..20)",
+            ),
+            (
+                "fun main() { let p = Point { 1 2 3 }; }\n",
+                "StructInitializer(\"Point\", None, ([], 27..36)",
+            ),
+            ("fun main() { let x = (1 +); }\n", "Some((Error, 21..26))"),
+            ("fun main() { let x = [1 +]; }\n", "Some((Error, 21..26))"),
+            (
+                "fun main() { let x = 1 + ; }\n",
+                "body: Some((([], (Void, 28..28)",
+            ),
+            (
+                "struct S { 1 2 3 }\n",
+                "Struct((\"S\", 7..8), None, false, false, Some(([], 9..18))",
+            ),
+            (
+                "impl Foo { 1 2 3 }\nfun after() {}\n",
+                "Impl((Accessor(\"Foo\"), 5..8), [], ([], 9..18))",
+            ),
+            (
+                "trait Foo { 1 2 3 }\nfun after() {}\n",
+                "Trait((\"Foo\", 6..9), None, [], ([], 10..19))",
+            ),
+            (
+                "mod foo { 1 2 3 }\nfun after() {}\n",
+                "Module(\"foo\", ([], 8..17))",
+            ),
+        ];
+        for (source, shape) in cases {
+            let (tree, errors) = parse(source);
+            let tree = format!("{:?}", tree.expect("a tree comes back"));
+            assert!(tree.contains(shape), "{source:?} → {tree}");
+            assert!(!errors.is_empty(), "{source:?} must report");
+        }
+    }
+
+    #[test]
+    fn render_names_the_unclosed_delimiter_and_its_production() {
+        assert_eq!(
+            rendered_errors("fun f<1 2 3>() {}\n"),
+            vec!["unclosed `<` in generic parameters — expected a matching `>`".to_string()]
+        );
+        assert_eq!(
+            rendered_errors("struct S { 1 2 3 }\n"),
+            vec!["unclosed `{` in struct body — expected a matching `}`".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_states_the_resource_language_rule() {
+        // diagnostics-standard.md B6 — the prohibition explains itself.
+        assert_eq!(
+            rendered_errors("resource fun foo() {}\n"),
+            vec![
+                "`resource` is a type-declaration modifier — it may appear only \
+                 before a `struct` or `enum` declaration"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn render_gives_the_not_equals_soup_a_first_class_message() {
+        // §6a — the `parse_error_hint` stopgap becomes a structural first-class
+        // message: recognized by the stray `=` after a `!=` token, not by string
+        // matching the source.
+        assert_eq!(
+            rendered_errors("let x = a!==b;\n"),
+            vec![
+                "found '=' expected an expression — if this was postfix `!` before a \
+                 comparison, the space is required: `a! == b` (`!=` always lexes as \
+                 not-equals)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn render_carries_the_production_context() {
+        // diagnostics-standard.md §4 — `in parameter type` / `in return type`,
+        // curated (never the `context clause` / `generic arguments` noise chumsky
+        // merged in at every type position).
+        assert_eq!(
+            rendered_errors("fun f(x: ) {}\n"),
+            vec!["found ')' expected a type in parameter type".to_string()]
+        );
+        assert_eq!(
+            rendered_errors("fun f(): {}\n"),
+            vec!["found '{' expected a type in return type".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_reports_an_illegal_character() {
+        // The S1 `LexError` feeds in as a `found <char>` error (mid-file, so the
+        // rest still parses — one error, the skipped BEL).
+        let errors = rendered_errors("fun main() { \u{0007} }\n");
+        assert_eq!(errors, vec!["found '\\u{7}' expected a token".to_string()]);
+    }
+
+    #[test]
+    fn a_syntax_error_salvages_the_parsed_prefix() {
+        // The LSP payoff (recorded in the recovery differential's ledger): a broken
+        // statement does not blank the complete items before it.
+        let (tree, errors) = parse("fun ok() {}\nBROKEN nonsense\n");
+        let (statements, _span) = tree.expect("a tree is always returned");
+        assert_eq!(statements.len(), 1, "the complete `fun ok` survives");
+        assert!(matches!(statements[0].0, Node::Func(_)));
+        assert!(!errors.is_empty(), "the broken tail is still reported");
     }
 }

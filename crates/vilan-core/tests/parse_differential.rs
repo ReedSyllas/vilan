@@ -74,13 +74,23 @@ fn chumsky_candidate(source: &str) -> Option<String> {
 
 /// CANDIDATE — the frontend under differential test. **S3: the handwritten frontend**
 /// (`parsing::parse`, which internally lexes with `lexing::tokenize`). It returns a
-/// tree only when the source is perfectly clean (a non-empty error list yields
-/// `None`), so — like `chumsky_candidate` — its clean tree compares directly against
-/// the un-lifted oracle tree (neither lift-rewrites). Repointing this single const
-/// is the whole S3 seam move on the harness side.
+/// tree only when the source is perfectly clean, so — like `chumsky_candidate` — its
+/// clean tree compares directly against the un-lifted oracle tree (neither
+/// lift-rewrites). Repointing this single const is the whole S3 seam move on the
+/// harness side.
+///
+/// S4 gave `parse` recovery: it now returns a (possibly recovered) tree ALONGSIDE a
+/// non-empty error list, exactly as chumsky's `into_output_errors` does. So the
+/// clean-or-decline contract this CLEAN differential relies on is expressed by the
+/// error list (empty ⇒ clean), not by a missing tree — the recovery-mode comparison
+/// lives in its own target (`tests/parse_recovery_differential.rs`).
 fn handwritten_candidate(source: &str) -> Option<String> {
-    let (tree, _errors) = parsing::parse(source);
-    tree.map(|tree| format!("{tree:?}"))
+    let (tree, errors) = parsing::parse(source);
+    if errors.is_empty() {
+        tree.map(|tree| format!("{tree:?}"))
+    } else {
+        None
+    }
 }
 
 const ORACLE: fn(&str) -> Judgement = chumsky_oracle;
