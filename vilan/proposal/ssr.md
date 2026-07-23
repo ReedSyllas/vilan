@@ -1,7 +1,12 @@
 # Server-side rendering — render and replace (A7)
 
-> **Status: DRAFT 2026-07-22 — for review.** Backlog A7, reframed per the
-> user's call (2026-07-22): **v1 is render + replace — hydration is not
+> **Status: RATIFIED 2026-07-22 — implementation starts 2026-07-23 (user
+> call: too large for end of day).** The §6 calls landed per recommendation:
+> (a) the process layer omits `mount_root`; (b) the shell splice stays in
+> user code for v1; (c) S3 waits on demand — kolt's usage decides.
+>
+> Original status: DRAFT 2026-07-22 — for review. Backlog A7, reframed per
+> the user's call (2026-07-22): **v1 is render + replace — hydration is not
 > deferred, it is rejected.** The client never adopts server DOM; it renders
 > fresh and replaces. Resumability (A7b, §7) is the recorded end-state, and
 > the progression replace → resumability builds nothing hydration would have

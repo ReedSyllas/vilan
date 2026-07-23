@@ -8,14 +8,16 @@ out at runtime.
 
 It ships as one coherent stack. The language, a standard library, a
 fine-grained reactive UI layer, typed compile-time styling, an enum-based
-router, and a service layer where the server exposes live-synced state and
+router, a service layer where the server exposes live-synced state and
 typed rpc methods from a single struct — no REST endpoints, no schema
-files, no client SDK to regenerate.
+files, no client SDK to regenerate — and a dev loop to match: save a file
+and the running browser app updates in place, reactive state intact.
 
 > **Status: fast-moving alpha.** The language changes weekly and there are
 > no stability promises yet. It is, however, real: the test suite holds
-> ~670 tests, every example in the documentation is compiled by CI, and
-> the repo contains a working full-stack example app.
+> ~1,500 tests, every example in the documentation is compiled by CI, the
+> compiler front end is handwritten (a full build of the example client is
+> ~0.2 s), and the repo contains a working full-stack example app.
 
 ## A taste
 
@@ -68,6 +70,11 @@ test suite builds it on every run.
 - **Values copy.** Assigning or passing data gives the receiver its own
   copy. Sharing is explicit and typed — a whole class of
   spooky-action-at-a-distance bugs doesn't exist.
+- **One law behind the memory model.** Every alias is a claim on an owner;
+  views are the statically-proven claims, handles the checked ones — and a
+  `resource` (a database handle, a task nursery) has exactly one owner and
+  cleans up deterministically at scope end, with the double-close family
+  rejected at compile time.
 - **No `null`, no exceptions.** Absence is `Option`, failure is `Result`,
   and the `!` and `?.` operators keep both ergonomic.
 - **`await` is implicit.** Calling an async function just gives you the
@@ -78,6 +85,10 @@ test suite builds it on every run.
 - **The wire is checked.** Payload types derive `Wire`; client and server
   compare a contract hash at connect; mirrors resync themselves after
   reconnects.
+- **The loop is hot.** `vilan run --watch` rebuilds in a fraction of a
+  second, hot-swaps the browser with module state carried across, shows
+  compile errors in-page, and restarts the server leg while the client
+  reconnects on its own.
 - **Docs that can't rot.** Every example in the book is compiled by the
   test suite.
 
@@ -93,9 +104,12 @@ curl -fsSL https://github.com/ReedSyllas/vilan/releases/latest/download/install.
 That puts `vilan` and `vilan-lsp` in `~/.vilan/bin` and prints the PATH
 line to add. Update any time with `vilan upgrade` (it only touches the
 network when you run it). Each [release](https://github.com/ReedSyllas/vilan/releases)
-also carries `vilan-vscode.vsix` — the VS Code extension (highlighting,
-diagnostics, hover, go-to-definition, rename), installed via
-"Extensions: Install from VSIX". Or build from source (Rust required):
+also carries `vilan-vscode.vsix` — the VS Code extension: highlighting,
+diagnostics, hover with docs on everything (keywords included),
+go-to-definition, rename, call-shaped completion with signatures, inlay
+hints, semantic tokens, Organize Imports, and a formatter — all of it
+still working while the file has errors. Installed via "Extensions:
+Install from VSIX". Or build from source (Rust required):
 
 ```sh
 git clone https://github.com/ReedSyllas/vilan
@@ -114,6 +128,10 @@ fun main() {
 
 vilan run hello.vl
 ```
+
+For a full-stack project, `vilan run --watch .` is the whole dev loop —
+rebuild, hot-swap the browser, restart the server — described in
+[the dev-loop guide](vilan/docs/guide/dev-loop.md).
 
 From there, read the book. It starts with
 [Coming from JavaScript](vilan/docs/tour/coming-from-javascript.md) and
