@@ -15552,6 +15552,30 @@ impl<'src> Analyzer<'src> {
             // `ret`/`jump` never produce a value where they stand — a match
             // leg or if-branch ending in one doesn't constrain the type.
             Expr::FunctionReturn(_) | Expr::Jump(_) => Type::Never,
+            // An already-errored node (an unresolved value name, a rejected
+            // field access, a parse `Node::Error`, ...) has an *unresolved*
+            // type, not `void`: the user-facing diagnostic was emitted at the
+            // site that produced the `Expr::Error`, so every downstream
+            // consumer must stay silent rather than fan a second error out of
+            // the same root cause. `Type::Void` is a concrete type, so it
+            // cascaded — `Expected i32, but got void` at each use (B32).
+            // `Type::Unresolved` is the non-cascading type every downstream
+            // check ALREADY treats as "don't re-report": a binding whose value
+            // is unresolved defers (never grounds to a concrete type),
+            // `resolve_field_accessor` and `resolve_call_subject` defer on it,
+            // and the argument checks skip it — so this is exactly the clean
+            // path an unresolved *call* (`zzz_missing(..)`, whose `Call` arm
+            // returns `Unresolved` when it can't be wired) already flows
+            // through, and the post-solve residuals it leaves behind are
+            // demoted behind the root by the cascade guard (batch 7). Choosing
+            // `Type::Unknown` here would instead GROUND the binding (an
+            // unannotated `let a = err` unifies `Unknown` with `Unknown`,
+            // caching a concrete `Unknown` in `resolved_types`) and then leak
+            // through the checks that only defer on `Unresolved` — a field
+            // access or call of the poison would still report "on type
+            // unknown" / "it is unknown". `_ => Type::Void` remains for the
+            // genuinely-void nodes (`Expr::Void`).
+            Expr::Error => Type::Unresolved,
             _ => Type::Void,
         };
 

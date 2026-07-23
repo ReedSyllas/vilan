@@ -24475,16 +24475,16 @@ fn hmr_stash_in_a_generic_function_names_the_unbounded_generic_cause() {
     );
 }
 
+// --- B32: an unknown value name is unresolved, not void, so it never cascades
+
 #[test]
-#[ignore = "B32 (found by E7's cascade probes, 2026-07-21): an unknown name used \
-            as a VALUE types as `void`, so one root error cascades into a type \
-            error at every use site (`Expected i32, but got void`, field-access \
-            errors, ...) — unlike the `could not be resolved` residuals, which \
-            are suppressed, and the unknown-call path, which stays clean. The \
-            root fix is to type an unresolved name as the non-cascading Unknown \
-            (the B5 type) rather than `void`; an inference change with ripple, \
-            deliberately not patched per-site."]
 fn an_unknown_value_name_reports_once_without_type_cascade() {
+    // B32 (found by E7's cascade probes): an unknown name used as a VALUE
+    // used to type as `void`, so the one root error ("cannot find …")
+    // cascaded into `Expected i32, but got void` at the annotated binding AND
+    // at the call argument. The fix types `Expr::Error` as `Type::Unresolved`
+    // (the non-cascading answer the unresolved-*call* path already flows
+    // through), so both downstream positions stay silent.
     let diagnostics = failure_diagnostics(
         r#"
         fun print_field(value: i32) {}
@@ -24500,5 +24500,239 @@ fn an_unknown_value_name_reports_once_without_type_cascade() {
         diagnostics.len(),
         1,
         "the unknown name must report once, with no void-typed cascade: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics[0].0.contains("cannot find 'zzz_missing'"),
+        "the lone diagnostic must be the root, not a downstream echo: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn an_unknown_value_stays_silent_at_every_downstream_position() {
+    // The bare-NAME twin of the E7 multi-use pin (which used a
+    // `zzz_missing(1)` CALL): one unknown name feeds a plain variable, a
+    // field access, a call argument, a struct field, and a match subject.
+    // Every one of those used to fan a `void` type error (field access even
+    // reported `cannot access field … on type void`); now the poison is
+    // `Unresolved`, so each position defers and is demoted behind the root.
+    // Exactly ONE diagnostic — the root — survives.
+    let diagnostics = failure_diagnostics(
+        r#"
+        struct Box { v: i32 }
+        fun take(x: i32): i32 { x }
+        fun main() {
+            let root = zzz_missing;
+            let via_var = root;
+            let via_field = root.field;
+            let via_call = take(root);
+            let via_struct = Box { v = root };
+            let via_match = match root {
+                _ => 1,
+            };
+        }
+        "#,
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "no downstream position may echo the poison: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics[0].0.contains("cannot find 'zzz_missing'"),
+        "the lone diagnostic must be the root: {diagnostics:#?}"
+    );
+    // Belt and braces: not one of the void/unknown-typed cascade shapes.
+    assert!(
+        diagnostics
+            .iter()
+            .all(|(message, _)| !message.contains("but got void")
+                && !message.contains("on type void")
+                && !message.contains("on type unknown")
+                && !message.contains("could not be resolved")),
+        "no void/unknown/residual cascade may survive: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn two_independent_unknown_names_each_report_their_own_root() {
+    // Ripple (a): the poison must not swallow a DIFFERENT genuine error
+    // downstream of it. `a`'s value is unknown, and a separate unknown name
+    // sits in an argument position — both roots must stand.
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun foo(x: i32) {}
+        fun main() {
+            let a = zzz_missing;
+            foo(b_also_missing);
+        }
+        "#,
+    );
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "both independent roots must report: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("cannot find 'zzz_missing'")),
+        "the first root must stand: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("cannot find 'b_also_missing'")),
+        "the second, independent root must stand: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn an_unknown_value_does_not_poison_a_sibling_binding() {
+    // Ripple (b): the poison must not spread through unification into a
+    // sibling's constraints. `b`/`c` are wholly unrelated to `a` and must
+    // both type and stay clean — only the root survives.
+    let clean = failure_diagnostics(
+        r#"
+        fun main() {
+            let a = zzz_missing;
+            let b: i32 = 5;
+            let c: i32 = b + 1;
+        }
+        "#,
+    );
+    assert_eq!(
+        clean.len(),
+        1,
+        "an unrelated sibling must not inherit the poison: {clean:#?}"
+    );
+    assert!(
+        clean[0].0.contains("cannot find 'zzz_missing'"),
+        "the lone diagnostic must be the root: {clean:#?}"
+    );
+
+    // And the sibling's inference is genuinely LIVE, not merely silenced: a
+    // real type error on `b` still fires (alongside the untouched root).
+    let live = failure_diagnostics(
+        r#"
+        fun main() {
+            let a = zzz_missing;
+            let b: i32 = 5;
+            let d: str = b;
+        }
+        "#,
+    );
+    assert!(
+        live.iter()
+            .any(|(message, _)| message.contains("cannot find 'zzz_missing'")),
+        "the root must stand: {live:#?}"
+    );
+    assert!(
+        live.iter()
+            .any(|(message, _)| message.contains("Expected str, but got i32")),
+        "the sibling's own type error must still fire — inference is live: {live:#?}"
+    );
+}
+
+#[test]
+fn an_unknown_value_as_a_generic_argument_does_not_ghost_report() {
+    // Ripple (c): passing the poison to a generic must not panic or ghost-
+    // report (a spurious binding error), and a well-typed instantiation of
+    // the same generic beside it stays clean. Only the root survives.
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun identity<type T>(value: T): T { value }
+        fun main() {
+            let a = zzz_missing;
+            let r = identity(a);
+            let s: str = identity("ok");
+        }
+        "#,
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "a poisoned generic argument must not ghost-report: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics[0].0.contains("cannot find 'zzz_missing'"),
+        "the lone diagnostic must be the root: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_closure_capturing_an_unknown_value_reports_only_its_own_errors() {
+    // Ripple (d): a closure that captures the poison must stay silent about
+    // IT, but must still report the closure's OWN independent error. Two
+    // roots, no cascade from the captured poison.
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun main() {
+            let a = zzz_missing;
+            let g = |x: i32| x + a;
+            let h = |x: i32| x + other_missing;
+        }
+        "#,
+    );
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "the captured poison stays silent; the closure's own error fires: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("cannot find 'zzz_missing'")),
+        "the captured-value root must stand: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|(message, _)| message.contains("cannot find 'other_missing'")),
+        "the closure's own root must stand: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn an_unknown_call_result_reports_once_without_type_cascade() {
+    // The unknown-CALL leg (E7's already-clean path) must not regress under
+    // the B32 fix — and in fact improves: `zzz_missing(1)` is unresolved, so
+    // the annotated binding and the call argument stay silent, and the
+    // call-subject cascade (`cannot call … it is void`) that used to accompany
+    // the root is gone too. One diagnostic, the root.
+    let diagnostics = failure_diagnostics(
+        r#"
+        fun print_field(value: i32) {}
+
+        fun main() {
+            let a = zzz_missing(1);
+            let b: i32 = a;
+            print_field(a);
+        }
+        "#,
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the unknown-call result must not cascade a void type error: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics[0].0.contains("cannot find 'zzz_missing'"),
+        "the lone diagnostic must be the root: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn a_genuine_non_function_call_still_reports_its_type() {
+    // Guard the precedent the B32 fix must NOT disturb: calling a real
+    // non-function value (`42`, an `i32` — not an `Expr::Error`) still names
+    // the subject's type. Only `Expr::Error` became `Unresolved`; a concrete
+    // non-callable type is unaffected.
+    assert_fails_with(
+        r#"
+        fun main() {
+            let x = (42)(1);
+        }
+        "#,
+        "cannot call this as a function — it is i32",
     );
 }
