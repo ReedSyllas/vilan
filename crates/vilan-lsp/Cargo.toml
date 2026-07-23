@@ -14,3 +14,7 @@ vilan-embedded-std = { path = "../vilan-embedded-std" }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "time"] }
 dashmap = "6"
+# Reading the client's feature settings (`initializationOptions` /
+# `workspace/didChangeConfiguration`), which arrive as `serde_json::Value`.
+# Already in the tree via tower-lsp — this only makes the edge direct.
+serde_json = "1"

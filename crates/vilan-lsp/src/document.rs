@@ -523,6 +523,24 @@ fn span_of(program: &Program, id: Id) -> Option<Span> {
     program.span_map.get(&id).map(|span| **span)
 }
 
+/// Whether an expression is a value-position use of the definition `def_id` — the
+/// forms the entity map records for a resolved name (a call subject, a bare value,
+/// an enum variant). Used by the Organize Imports prune to keep a value-used
+/// import. An enum-variant expression carries its enum's Id.
+fn expr_references_definition(expr: &Expr, def_id: Id) -> bool {
+    match expr {
+        Expr::Local(id)
+        | Expr::Function(id)
+        | Expr::ExternalFunction(id)
+        | Expr::Struct(id)
+        | Expr::Enum(id)
+        | Expr::Trait(id)
+        | Expr::Module(id)
+        | Expr::EnumVariant(id, _) => *id == def_id,
+        _ => false,
+    }
+}
+
 impl Document {
     pub fn analyze(text: &str, std_dir: &Path, entry_path: &Path) -> Self {
         // The pipeline recurses deeply (chumsky), and macro-world compiles NEST
@@ -1388,6 +1406,113 @@ impl Document {
             return Vec::new();
         };
         self.occurrences(program, target)
+    }
+
+    /// The "Organize Imports" edits (WO-2): the top-level import runs sorted into
+    /// canonical order — the same order `vilan fmt` produces, through the shared
+    /// `formatter::organize_import_runs` — and unused imports pruned. Returns one
+    /// `(span, replacement)` per run whose canonical form differs from the source;
+    /// empty when already organized (the action then offers nothing).
+    ///
+    /// Pruning is conservative. It happens only when the analyzed program matches
+    /// the current buffer exactly and carries no diagnostics — a mid-edit
+    /// unresolved name might be about to use an import, so a broken or stale
+    /// document sorts but never prunes. Re-exports are never pruned (handled in
+    /// the formatter — they are surface, not usage), and an import a macro
+    /// expansion references is kept (see `unused_import_leaf_spans`).
+    pub fn organize_import_edits(&self) -> Vec<(Span, String)> {
+        let source = self.text.as_str();
+        // Prune only against a fresh, diagnostic-free analysis of THIS buffer: a
+        // stale or broken document (a mid-edit unresolved name might be about to
+        // use an import) sorts but never prunes.
+        let prunable_program = self
+            .program
+            .as_ref()
+            .filter(|_| self.diagnostics.is_empty() && self.text_hash == hash_text(source));
+        let edits = match prunable_program {
+            Some(program) => {
+                let keep = |leaf_span: Span| self.import_leaf_is_used(program, leaf_span);
+                vilan_core::formatter::organize_import_runs(source, &keep)
+            }
+            None => vilan_core::formatter::organize_import_runs(source, &|_| true),
+        };
+        edits
+            .map(|edits| {
+                edits
+                    .into_iter()
+                    .map(|edit| (edit.span, edit.replacement))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the top-level import whose terminal name occupies `leaf_span` is
+    /// used, so the organizer keeps it. Maps the leaf to the definition it binds
+    /// (`resolve_import` records the leaf as a reference at its own span — see
+    /// `flatten_namespace_branch`/`record_reference`), then asks whether that
+    /// definition is referenced anywhere in this file beyond the import itself.
+    /// An unmappable leaf (an import that didn't resolve — but then the file
+    /// carries a diagnostic and pruning is off) is conservatively kept.
+    ///
+    /// Conservatism, per the surfaces a use can land in: a reference on ANY of
+    /// them keeps the import.
+    ///  - (A) Type/trait positions — `type_references`, filtered to this file.
+    ///    This includes derive-GENERATED type/trait references, which the
+    ///    analyzer attributes to the deriving (this) file, so a derive-only
+    ///    import survives.
+    ///  - (B) Value positions (call subject, bare value) — the entity map, whose
+    ///    per-use source lets us filter to this file (or code generated from it).
+    ///    `reference_count` is deliberately NOT used: an import binds its leaf
+    ///    directly to the shared definition Id, so that tally aggregates uses
+    ///    across every file and reads ~0 for type-only imports.
+    ///  - (C) Struct constructors (`Point { .. }`) — the initializer map.
+    fn import_leaf_is_used(&self, program: &Program, leaf_span: Span) -> bool {
+        let entry = SourceId(0);
+        let Some(def_id) = program
+            .type_references
+            .iter()
+            .find_map(|(source, span, definition, _)| {
+                (*source == entry && *span == leaf_span).then_some(*definition)
+            })
+            .flatten()
+        else {
+            return true;
+        };
+        // (A) Type / trait references in this file, beyond this import's own leaf.
+        let referenced_as_type =
+            program
+                .type_references
+                .iter()
+                .any(|(source, span, definition, _)| {
+                    *source == entry && *definition == Some(def_id) && *span != leaf_span
+                });
+        if referenced_as_type {
+            return true;
+        }
+        // (B) Value references in this file (or generated from it).
+        let referenced_as_value = program.entity_map.iter().any(|(use_id, expr)| {
+            expr_references_definition(expr, def_id)
+                && self.use_in_entry_or_generated(program, *use_id)
+        });
+        if referenced_as_value {
+            return true;
+        }
+        // (C) Struct constructors reference the type through the initializer map.
+        program
+            .struct_initializer_to_def
+            .iter()
+            .any(|(initializer_id, struct_id)| {
+                *struct_id == def_id && self.use_in_entry_or_generated(program, *initializer_id)
+            })
+    }
+
+    /// Whether a use site belongs to the entry file or to code generated from it
+    /// (a derive expansion) — the two sources whose references keep an import.
+    fn use_in_entry_or_generated(&self, program: &Program, use_id: Id) -> bool {
+        matches!(
+            program.source_of(use_id),
+            Some(SourceId(0)) | Some(DERIVED_SOURCE)
+        )
     }
 
     /// A struct/enum/trait target when the cursor is on a type *use* (e.g.
@@ -3376,6 +3501,216 @@ pub(crate) mod tests {
             vilan_core::analyzer::SourceId(0),
             "the definition lives in std's compare.vl, not the entry"
         );
+    }
+
+    // --- WO-2: Organize Imports (sort + conservative prune) ----------------
+    //
+    // A helper package for the mechanics pins: two free functions and a struct,
+    // so imports resolve without depending on std's exact surface. The
+    // derive-survival pin needs a real derive, so it uses `std::json`.
+    const ORGANIZE_HELPER: &str = "fun alpha() {}\nfun beta() {}\nstruct Widget {}\n";
+
+    /// Applies the Organize Imports edits to the document's text (back-to-front,
+    /// so earlier offsets stay valid), or `None` when the action offers no edit.
+    fn organized(document: &Document) -> Option<String> {
+        let mut edits = document.organize_import_edits();
+        if edits.is_empty() {
+            return None;
+        }
+        edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.into_range().start));
+        let mut text = document.text.clone();
+        for (span, replacement) in edits {
+            text.replace_range(span.into_range(), &replacement);
+        }
+        Some(text)
+    }
+
+    // A shuffled top-level run sorts into canonical order; both imports are used,
+    // so nothing is pruned.
+    #[test]
+    fn organize_sorts_a_shuffled_run() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import pkg::helper::beta;\nimport pkg::helper::alpha;\nfun main() {\n\talpha();\n\tbeta();\n}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let result = organized(&document).expect("a shuffled run offers a sort edit");
+        assert_eq!(
+            result,
+            "import pkg::helper::alpha;\nimport pkg::helper::beta;\nfun main() {\n\talpha();\n\tbeta();\n}\n",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An import referenced nowhere is pruned; the used one stays.
+    #[test]
+    fn organize_prunes_an_unused_import() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import pkg::helper::alpha;\nimport pkg::helper::beta;\nfun main() {\n\talpha();\n}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let result = organized(&document).expect("an unused import offers a prune edit");
+        assert_eq!(
+            result,
+            "import pkg::helper::alpha;\nfun main() {\n\talpha();\n}\n",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A brace set with one dead branch shrinks to the live branch; the whole
+    // import survives because a live branch remains.
+    #[test]
+    fn organize_shrinks_a_brace_set_to_its_used_branch() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import pkg::helper::{ alpha, beta };\nfun main() {\n\talpha();\n}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        let result = organized(&document).expect("a dead branch offers a shrink edit");
+        assert_eq!(
+            result,
+            "import pkg::helper::{ alpha };\nfun main() {\n\talpha();\n}\n",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An import referenced ONLY by derive-generated code survives: the code
+    // `[derive(Json)]` synthesizes (the `impl Json for Point`) references `Json`,
+    // and the analyzer attributes that reference to this file. The empty-diags
+    // assert guards against a vacuous pass (a diagnostic would disable pruning).
+    #[test]
+    fn organize_keeps_an_import_used_only_by_a_derive() {
+        let (dir, document) = analyze_workspace(&[(
+            "main.vl",
+            "import std::json::Json;\n[derive(Json)]\nstruct Point {\n\tx: i32,\n\ty: i32,\n}\nfun make(): Point {\n\tPoint { x = 1, y = 2 }\n}\n",
+        )]);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        assert_eq!(
+            organized(&document),
+            None,
+            "an import used only by a derive was pruned",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A re-export is public surface, not local usage — never pruned, even when
+    // its name is used nowhere in this file.
+    #[test]
+    fn organize_never_prunes_a_reexport() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "export import pkg::helper::alpha;\nfun main() {}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        assert_eq!(organized(&document), None, "a re-export was pruned");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A file with diagnostics still sorts (a mid-edit error disables pruning, not
+    // sorting): the run reorders but the unused import is NOT pruned. Both halves
+    // asserted.
+    #[test]
+    fn organize_with_diagnostics_sorts_but_does_not_prune() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import pkg::helper::beta;\nimport pkg::helper::alpha;\nfun main() {\n\talpha();\n\tundefined_name();\n}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert!(
+            !document.diagnostics.is_empty(),
+            "the entry must carry the unresolved-name error",
+        );
+        let result = organized(&document).expect("sorting is still offered under diagnostics");
+        assert!(
+            result.contains("import pkg::helper::beta;"),
+            "beta was pruned despite diagnostics:\n{result}",
+        );
+        let alpha_at = result.find("helper::alpha").unwrap();
+        let beta_at = result.find("helper::beta").unwrap();
+        assert!(alpha_at < beta_at, "the run was not sorted:\n{result}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Block-scoped imports (inside a fn body) are deliberate placements the
+    // organizer never touches: they live in a block body, not the top-level item
+    // list it walks. The file still parses (the shuffled block `use`s are valid
+    // syntax — they don't resolve, which is backlog H2, but the organizer skips
+    // them structurally either way), so a no-op here proves the organizer never
+    // reached into the block to reorder them.
+    #[test]
+    fn organize_leaves_block_scoped_imports_alone() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "fun main() {\n\tuse std::collections::Map;\n\tuse std::collections::Set;\n}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert_eq!(
+            organized(&document),
+            None,
+            "the organizer reached into a block and reordered its imports",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An already-organized file (sorted, nothing dead) offers no edit — the
+    // no-op the action relies on to stay quiet under `codeActionsOnSave`.
+    #[test]
+    fn organize_is_a_no_op_when_already_organized() {
+        let (dir, document) = analyze_workspace(&[
+            (
+                "main.vl",
+                "import pkg::helper::alpha;\nimport pkg::helper::beta;\nfun main() {\n\talpha();\n\tbeta();\n}\n",
+            ),
+            ("helper.vl", ORGANIZE_HELPER),
+        ]);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        assert_eq!(
+            organized(&document),
+            None,
+            "an already-organized file offered an edit",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

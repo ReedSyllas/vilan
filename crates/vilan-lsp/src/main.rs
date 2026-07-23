@@ -28,6 +28,78 @@ use crate::publish::PublishState;
 /// keystrokes collapses to a single analysis instead of one per character.
 const DEBOUNCE_MS: u64 = 150;
 
+/// How completion inserts a function or method call — the `vilan.completion.functionCall`
+/// setting. WO-3 consumes this to shape its insert text; this order only defines
+/// and plumbs it, so completion behavior is unchanged for now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CompletionFunctionCall {
+    /// Insert the name only.
+    None,
+    /// Insert `name()` (empty parentheses).
+    ParensOnly,
+    /// Insert `name(…)` with a placeholder argument list.
+    Full,
+}
+
+/// The client's feature settings (VS Code `contributes.configuration`), received
+/// as `initializationOptions` at startup and refreshed live by
+/// `workspace/didChangeConfiguration`. Defaults preserve today's behavior: every
+/// provider on, full function-call completion. (`organizeImports.onSave` is a
+/// client-only concern — `editor.codeActionsOnSave` — so the server never reads
+/// it.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Config {
+    inlay_hints_enabled: bool,
+    semantic_tokens_enabled: bool,
+    completion_function_call: CompletionFunctionCall,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            inlay_hints_enabled: true,
+            semantic_tokens_enabled: true,
+            completion_function_call: CompletionFunctionCall::Full,
+        }
+    }
+}
+
+impl Config {
+    /// Parses the settings object the client sends. Accepts either the bare
+    /// `vilan` config (as `initializationOptions`) or a `{ "vilan": { … } }`
+    /// wrapper (as `didChangeConfiguration`'s `settings`). Every field falls back
+    /// to its default when absent or the wrong type, so a partial or malformed
+    /// payload never silently flips a provider off.
+    fn from_settings(settings: &serde_json::Value) -> Self {
+        let root = settings.get("vilan").unwrap_or(settings);
+        let mut config = Config::default();
+        if let Some(enabled) = root
+            .pointer("/inlayHints/enabled")
+            .and_then(|v| v.as_bool())
+        {
+            config.inlay_hints_enabled = enabled;
+        }
+        if let Some(enabled) = root
+            .pointer("/semanticTokens/enabled")
+            .and_then(|v| v.as_bool())
+        {
+            config.semantic_tokens_enabled = enabled;
+        }
+        if let Some(mode) = root
+            .pointer("/completion/functionCall")
+            .and_then(|v| v.as_str())
+        {
+            config.completion_function_call = match mode {
+                "none" => CompletionFunctionCall::None,
+                "parensOnly" => CompletionFunctionCall::ParensOnly,
+                // `full` and any unrecognized value keep the default.
+                _ => CompletionFunctionCall::Full,
+            };
+        }
+        config
+    }
+}
+
 /// Convert a Vilan completion candidate to an LSP `CompletionItem`.
 fn to_completion_item(completion: Completion) -> CompletionItem {
     let kind = match completion.kind {
@@ -97,6 +169,11 @@ struct Backend {
     /// `std` files don't change during a session, so cache their line indices
     /// rather than re-reading the file on every cross-file definition/reference.
     line_indices: Arc<DashMap<PathBuf, Arc<LineIndex>>>,
+    /// The client's feature settings, seeded from `initializationOptions` and
+    /// updated live by `workspace/didChangeConfiguration`. Read per request
+    /// (`inlay_hint`, `semantic_tokens_full`, …) so a toggle takes effect without
+    /// re-registering capabilities.
+    config: Arc<std::sync::RwLock<Config>>,
 }
 
 /// Locate the `std` package directory: `$VILAN_STD`, else the nearest ancestor
@@ -144,6 +221,112 @@ mod std_discovery_tests {
                 && discovered.join("src/lib.vl").is_file(),
             "expected the materialized embedded std, got {discovered:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{CompletionFunctionCall, Config};
+    use serde_json::json;
+
+    // Defaults preserve today's behavior: every provider on, full completion.
+    #[test]
+    fn defaults_preserve_todays_behavior() {
+        let config = Config::default();
+        assert!(config.inlay_hints_enabled);
+        assert!(config.semantic_tokens_enabled);
+        assert_eq!(
+            config.completion_function_call,
+            CompletionFunctionCall::Full
+        );
+    }
+
+    // `initializationOptions` sends the bare `vilan` config object.
+    #[test]
+    fn parses_the_bare_vilan_object() {
+        let config = Config::from_settings(&json!({
+            "inlayHints": { "enabled": false },
+            "semanticTokens": { "enabled": false },
+            "completion": { "functionCall": "parensOnly" },
+        }));
+        assert!(!config.inlay_hints_enabled);
+        assert!(!config.semantic_tokens_enabled);
+        assert_eq!(
+            config.completion_function_call,
+            CompletionFunctionCall::ParensOnly
+        );
+    }
+
+    // `didChangeConfiguration` wraps it as `{ "vilan": { … } }`; unspecified
+    // fields keep their defaults.
+    #[test]
+    fn parses_the_wrapped_settings_and_keeps_unset_defaults() {
+        let config = Config::from_settings(&json!({
+            "vilan": {
+                "inlayHints": { "enabled": false },
+                "completion": { "functionCall": "none" },
+            },
+        }));
+        assert!(!config.inlay_hints_enabled);
+        assert!(config.semantic_tokens_enabled);
+        assert_eq!(
+            config.completion_function_call,
+            CompletionFunctionCall::None
+        );
+    }
+
+    // A partial, empty, or malformed payload never silently flips a provider off:
+    // wrong types and unknown enum values fall back to the default.
+    #[test]
+    fn a_malformed_payload_keeps_defaults() {
+        assert_eq!(Config::from_settings(&json!({})), Config::default());
+        let config = Config::from_settings(&json!({
+            "inlayHints": { "enabled": "yes" },
+            "completion": { "functionCall": 3 },
+        }));
+        assert!(config.inlay_hints_enabled);
+        assert_eq!(
+            config.completion_function_call,
+            CompletionFunctionCall::Full
+        );
+        let config = Config::from_settings(&json!({ "completion": { "functionCall": "wat" } }));
+        assert_eq!(
+            config.completion_function_call,
+            CompletionFunctionCall::Full
+        );
+    }
+}
+
+#[cfg(test)]
+mod code_action_tests {
+    use super::organize_imports_requested;
+    use tower_lsp::lsp_types::CodeActionKind;
+
+    // Organize Imports is offered when unfiltered (the Source Action menu), for
+    // its exact kind, and for the ancestor `source` kind (what
+    // `codeActionsOnSave` requests).
+    #[test]
+    fn organize_is_offered_for_matching_and_ancestor_kinds() {
+        assert!(organize_imports_requested(&None));
+        assert!(organize_imports_requested(&Some(vec![
+            CodeActionKind::SOURCE_ORGANIZE_IMPORTS
+        ])));
+        assert!(organize_imports_requested(&Some(vec![
+            CodeActionKind::SOURCE
+        ])));
+    }
+
+    // It is NOT offered for unrelated kinds, a sibling `source.*` kind, or an
+    // empty filter.
+    #[test]
+    fn organize_is_not_offered_for_unrelated_kinds() {
+        assert!(!organize_imports_requested(&Some(vec![
+            CodeActionKind::QUICKFIX
+        ])));
+        assert!(!organize_imports_requested(&Some(vec![
+            CodeActionKind::SOURCE_FIX_ALL
+        ])));
+        assert!(!organize_imports_requested(&Some(vec![])));
     }
 }
 
@@ -287,7 +470,13 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Seed the feature settings from the client's `initializationOptions`
+        // (the extension sends the `vilan` config object); later changes arrive
+        // via `did_change_configuration`.
+        if let Some(options) = &params.initialization_options {
+            *self.config.write().unwrap() = Config::from_settings(options);
+        }
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -332,6 +521,13 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                // WO-2: the "Organize Imports" source action (sort + prune).
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::SOURCE_ORGANIZE_IMPORTS]),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -345,6 +541,17 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "vilan-lsp initialized")
             .await;
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // Our client pushes `{ "vilan": { … } }` on a relevant change; re-parse
+        // and replace (providers read the config per request, so a toggle is live
+        // without re-registration). Ignore a payload without the `vilan` section
+        // — the language client also emits a bare `{ settings: null }` on any
+        // config change, which must NOT reset our settings to their defaults.
+        if params.settings.get("vilan").is_some() {
+            *self.config.write().unwrap() = Config::from_settings(&params.settings);
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -427,6 +634,10 @@ impl LanguageServer for Backend {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        // `vilan.inlayHints.enabled` gates the provider server-side.
+        if !self.config.read().unwrap().inlay_hints_enabled {
+            return Ok(None);
+        }
         let uri = params.text_document.uri;
         let Some(document) = self.documents.get(&uri) else {
             return Ok(None);
@@ -457,6 +668,11 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
+        // `vilan.semanticTokens.enabled` gates the provider server-side; when off,
+        // the editor falls back to its TextMate grammar.
+        if !self.config.read().unwrap().semantic_tokens_enabled {
+            return Ok(None);
+        }
         let uri = params.text_document.uri;
         let Some(document) = self.documents.get(&uri) else {
             return Ok(None);
@@ -619,6 +835,61 @@ impl LanguageServer for Backend {
             new_text: formatted,
         }]))
     }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        // The only source action we offer is Organize Imports; skip the work
+        // entirely when the client asked for a different kind (e.g. quickfix).
+        if !organize_imports_requested(&params.context.only) {
+            return Ok(None);
+        }
+        let uri = params.text_document.uri;
+        let Some(document) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let edits = document.organize_import_edits();
+        // No edits = already organized (or nothing to do): offer no action, so
+        // `codeActionsOnSave` is a clean no-op.
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        let text_edits: Vec<TextEdit> = edits
+            .into_iter()
+            .map(|(span, new_text)| TextEdit {
+                range: document.line_index.range(&span),
+                new_text,
+            })
+            .collect();
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri, text_edits);
+        let action = CodeAction {
+            title: "Organize Imports".to_string(),
+            kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Ok(Some(vec![CodeActionOrCommand::CodeAction(action)]))
+    }
+}
+
+/// Whether a code-action request wants the Organize Imports source action: an
+/// unfiltered request (no `only`) does, and a filtered one does when it lists
+/// `source.organizeImports` or an ancestor kind (`source`). The `.`-delimited
+/// kind hierarchy means a requested `source` matches `source.organizeImports`.
+fn organize_imports_requested(only: &Option<Vec<CodeActionKind>>) -> bool {
+    let Some(kinds) = only else {
+        return true;
+    };
+    let organize = CodeActionKind::SOURCE_ORGANIZE_IMPORTS;
+    kinds.iter().any(|requested| {
+        organize == *requested
+            || organize
+                .as_str()
+                .strip_prefix(requested.as_str())
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
 }
 
 #[tokio::main]
@@ -631,6 +902,7 @@ async fn main() {
         publish_state: Arc::new(std::sync::Mutex::new(PublishState::new())),
         pending: Arc::new(DashMap::new()),
         line_indices: Arc::new(DashMap::new()),
+        config: Arc::new(std::sync::RwLock::new(Config::default())),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

@@ -425,6 +425,92 @@ pub fn sort_import_runs<'src>(tokens: &[Token<'src>]) -> Vec<Token<'src>> {
     result
 }
 
+// --- Organize imports (the editor action) ------------------------------------
+//
+// The LSP "Organize Imports" source action both *sorts* a file's top-level
+// import runs — in exactly the order `vilan fmt` produces, through the same
+// [`import_sort_key`], so the two can never disagree — and *prunes* the leaves
+// an editor's analyzer reports as unused. Sorting is the formatter's job either
+// way; the usage decision is the editor's, threaded in as the `keep` predicate.
+// Pruning is deliberately NOT part of `vilan fmt` (fmt has no analyzer), so it
+// lives only behind this entry point.
+
+/// One organized top-level import run: the source span it currently occupies and
+/// the canonical replacement text (empty when the whole run pruned away). The LSP
+/// turns each into a `TextEdit`.
+pub struct ImportRunEdit {
+    pub span: Span,
+    pub replacement: String,
+}
+
+/// A pruned import statement awaiting canonical rendering. A re-export is surface,
+/// not usage, so it is never pruned and renders from its original node; an
+/// `import`/`use` that survived (whole or in part) renders from a node rebuilt to
+/// carry only the leaves `keep` retained.
+enum PrunedStatement<'ast, 'src> {
+    ReExport(&'ast Node<'src>),
+    Rebuilt(Node<'src>),
+}
+
+impl<'src> PrunedStatement<'_, 'src> {
+    fn node(&self) -> &Node<'src> {
+        match self {
+            PrunedStatement::ReExport(node) => node,
+            PrunedStatement::Rebuilt(node) => node,
+        }
+    }
+}
+
+/// Prunes an import path to the leaves `keep` retains, returning the surviving
+/// branch — or `None` if every leaf was dropped. `keep(name_span)` is asked of
+/// each *terminal* segment (the actual imported name): a `Path` with a `::`
+/// continuation survives iff its continuation does, and a brace `Set` keeps its
+/// surviving branches (`{ a, b }` with `b` unused becomes `{ a }`), dying only
+/// when all of them go.
+fn prune_import_branch<'src>(
+    branch: &ImportBranch<'src>,
+    keep: &dyn Fn(Span) -> bool,
+) -> Option<ImportBranch<'src>> {
+    match branch {
+        ImportBranch::Path(name, span, None) => {
+            keep(*span).then(|| ImportBranch::Path(name, *span, None))
+        }
+        ImportBranch::Path(name, span, Some(child)) => prune_import_branch(child, keep)
+            .map(|pruned| ImportBranch::Path(name, *span, Some(Box::new(pruned)))),
+        ImportBranch::Set(branches) => {
+            let kept: Vec<ImportBranch<'src>> = branches
+                .iter()
+                .filter_map(|branch| prune_import_branch(branch, keep))
+                .collect();
+            (!kept.is_empty()).then_some(ImportBranch::Set(kept))
+        }
+    }
+}
+
+/// Organizes a file's *top-level* import runs: sorts each into canonical order
+/// (the shared [`import_sort_key`], identical to `vilan fmt`) and, per `keep`,
+/// prunes unused leaves. Returns one [`ImportRunEdit`] per run whose canonical
+/// form differs from the source — an already-organized run yields nothing.
+/// `keep(name_span)` decides whether the import leaf whose terminal name occupies
+/// `name_span` survives; pass `|_| true` for sort-only. `None` when the source
+/// doesn't parse cleanly (no edit would be safe). Block-scoped imports live
+/// inside item bodies, not the top-level list, so they are never considered.
+pub fn organize_import_runs(
+    source: &str,
+    keep: &dyn Fn(Span) -> bool,
+) -> Option<Vec<ImportRunEdit>> {
+    let items = parse(source)?;
+    let mut printer = Printer {
+        out: String::new(),
+        indent: 0,
+        comments: extract_comments(source),
+        cursor: 0,
+        source,
+        bailed: false,
+    };
+    Some(printer.organize_runs(&items, keep))
+}
+
 /// Parses `source` into its top-level item list, or `None` if it doesn't parse
 /// perfectly cleanly — the formatter reprints only sources it fully understands.
 fn parse(source: &str) -> Option<NodeList<'_>> {
@@ -664,6 +750,169 @@ impl<'src> Printer<'src> {
             }
         }
         run.last().unwrap().1.into_range().end
+    }
+
+    /// Organizes the top-level import runs among `items` (sort + `keep`-prune),
+    /// returning one edit per run that changes. Non-import items — and everything
+    /// inside a block body — are untouched: only the top-level list is walked, and
+    /// block-scoped imports never appear in it.
+    fn organize_runs(
+        &mut self,
+        items: &[Spanned<Node<'src>>],
+        keep: &dyn Fn(Span) -> bool,
+    ) -> Vec<ImportRunEdit> {
+        let mut edits = Vec::new();
+        let mut index = 0;
+        while index < items.len() {
+            if import_kind_and_branch(&items[index].0).is_some() {
+                let run_end = self.import_run_end(items, index);
+                if let Some(edit) = self.organize_run(&items[index..run_end], keep) {
+                    edits.push(edit);
+                }
+                index = run_end;
+            } else {
+                index += 1;
+            }
+        }
+        edits
+    }
+
+    /// Organizes one import run (sort + prune) into a single replacement edit, or
+    /// `None` when the run is already canonical. See [`organize_import_runs`].
+    fn organize_run(
+        &mut self,
+        run: &[Spanned<Node<'src>>],
+        keep: &dyn Fn(Span) -> bool,
+    ) -> Option<ImportRunEdit> {
+        let run_start = run[0].1.into_range().start;
+        // Reach this run's own trailing comments; a standalone comment before the
+        // run stays put (it is outside the replaced span, and it broke the run).
+        self.skip_comments_before(run_start);
+
+        // Source-order pass: prune each statement and claim its trailing comment,
+        // which travels with it exactly as the printer's reorder does.
+        let mut entries: Vec<(
+            ImportSortKey,
+            usize,
+            PrunedStatement<'_, 'src>,
+            Option<&'src str>,
+        )> = Vec::with_capacity(run.len());
+        for (position, item) in run.iter().enumerate() {
+            let end = item.1.into_range().end;
+            let statement = match &item.0 {
+                // A re-export is surface, not usage — never pruned.
+                Node::Export(_) => Some(PrunedStatement::ReExport(&item.0)),
+                Node::Import(branch) => prune_import_branch(branch, keep)
+                    .map(|pruned| PrunedStatement::Rebuilt(Node::Import(pruned))),
+                Node::Use(branch) => prune_import_branch(branch, keep)
+                    .map(|pruned| PrunedStatement::Rebuilt(Node::Use(pruned))),
+                _ => None,
+            };
+            let trailing = self.take_trailing_comment(end);
+            if let Some(statement) = statement {
+                let key = node_import_key(statement.node());
+                entries.push((key, position, statement, trailing));
+            }
+            // A statement pruned to nothing drops its trailing comment with it.
+        }
+
+        // The replaced span covers the whole run. An import node's span ends at
+        // its path, so reach past the terminating `;` and then past the last
+        // statement's trailing comment (the canonical text re-emits both).
+        let last_terminator = self.statement_terminator_end(run.last().unwrap().1.into_range().end);
+        let source_end = self
+            .trailing_comment_end(last_terminator)
+            .unwrap_or(last_terminator);
+
+        // Every statement pruned away: delete the run, taking one line break so no
+        // blank line is left behind.
+        if entries.is_empty() {
+            let mut deletion_end = source_end;
+            if self.source.as_bytes().get(deletion_end) == Some(&b'\n') {
+                deletion_end += 1;
+            }
+            return Some(ImportRunEdit {
+                span: Span::from(run_start..deletion_end),
+                replacement: String::new(),
+            });
+        }
+
+        // Canonical order — a stable sort, so equal keys keep their source order.
+        entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        // Render through the printer's own import printing, so an organized run is
+        // byte-for-byte what `vilan fmt` would produce for it (minus pruned
+        // leaves). `self.out` doubles as the scratch buffer for one statement.
+        let mut replacement = String::new();
+        for (position, (_, _, statement, trailing)) in entries.iter().enumerate() {
+            if position > 0 {
+                replacement.push('\n');
+            }
+            self.out.clear();
+            self.print_import_like(statement.node());
+            replacement.push_str(&self.out);
+            if let Some(text) = trailing {
+                replacement.push(' ');
+                replacement.push_str(text);
+            }
+        }
+
+        // An already-organized run offers no edit.
+        if self.source.get(run_start..source_end) == Some(replacement.as_str()) {
+            return None;
+        }
+        Some(ImportRunEdit {
+            span: Span::from(run_start..source_end),
+            replacement,
+        })
+    }
+
+    /// Advances the comment cursor past every comment starting before `pos`,
+    /// emitting nothing (unlike `flush_comments_before`) — the organizer uses it
+    /// to reach a run's trailing comments while leaving earlier standalone
+    /// comments in place.
+    fn skip_comments_before(&mut self, pos: usize) {
+        while let Some((span, _)) = self.comments.get(self.cursor) {
+            if span.into_range().start >= pos {
+                break;
+            }
+            self.cursor += 1;
+        }
+    }
+
+    /// The offset just past the `;` that terminates an import statement whose
+    /// path ends at `path_end` (the import node's span stops at its path; the
+    /// `;`, possibly after whitespace, is a separate token). Falls back to
+    /// `path_end` if no `;` is found — a cleanly parsed import always has one.
+    fn statement_terminator_end(&self, path_end: usize) -> usize {
+        let bytes = self.source.as_bytes();
+        let mut index = path_end;
+        while index < bytes.len() && bytes[index] != b';' {
+            if !bytes[index].is_ascii_whitespace() {
+                return path_end;
+            }
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b';') {
+            index + 1
+        } else {
+            path_end
+        }
+    }
+
+    /// The end offset of the trailing same-line comment of an item ending at
+    /// `after` (a comment starting at/after `after` with no intervening newline),
+    /// or `None` — so the organizer's replaced span covers a comment it re-emits.
+    fn trailing_comment_end(&self, after: usize) -> Option<usize> {
+        self.comments.iter().find_map(|(span, _)| {
+            let range = span.into_range();
+            (range.start >= after
+                && self
+                    .source
+                    .get(after..range.start)
+                    .is_some_and(|gap| !gap.contains('\n')))
+            .then_some(range.end)
+        })
     }
 
     /// Prints one top-level import-like item with its brace sets sorted —
@@ -2696,6 +2945,153 @@ mod import_sorting {
             normalize(raw_tokens("fun f() {\nuse b::y;\nuse a::x;\n}\n")),
             normalize(raw_tokens("fun f() {\nuse a::x;\nuse b::y;\n}\n")),
             "normalize must not reorder block-scoped imports"
+        );
+    }
+}
+
+#[cfg(test)]
+mod organize {
+    //! `organize_import_runs` backs the LSP "Organize Imports" action: it sorts
+    //! top-level import runs into the same canonical order `vilan fmt` produces
+    //! and prunes the leaves an analyzer reports unused. Here the analyzer's role
+    //! is faked by a name list — `keep` rejects any leaf whose terminal name is
+    //! in `dead` — so these pin the sort/prune/edit mechanics in isolation; the
+    //! LSP pins cover the real (usage-driven, macro-aware) predicate.
+    use super::organize_import_runs;
+    use crate::span::Span;
+
+    /// Applies the organizer's edits to `source`, treating every leaf named in
+    /// `dead` as unused. Edits apply back-to-front so earlier offsets stay valid.
+    fn organize(source: &str, dead: &[&str]) -> String {
+        let keep = |span: Span| !dead.contains(&&source[span.into_range()]);
+        let mut edits = organize_import_runs(source, &keep).expect("source parses cleanly");
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.span.into_range().start));
+        let mut result = source.to_string();
+        for edit in edits {
+            result.replace_range(edit.span.into_range(), &edit.replacement);
+        }
+        result
+    }
+
+    /// The organizer offers no edit at all (already organized / nothing to prune).
+    fn assert_no_edit(source: &str, dead: &[&str]) {
+        let keep = |span: Span| !dead.contains(&&source[span.into_range()]);
+        let edits = organize_import_runs(source, &keep).expect("source parses cleanly");
+        assert!(
+            edits.is_empty(),
+            "expected no edit, got {} edit(s)",
+            edits.len()
+        );
+    }
+
+    // Sort-only (nothing dead): a shuffled run reorders exactly as `vilan fmt`.
+    #[test]
+    fn sort_only_reorders_a_run() {
+        assert_eq!(
+            organize("import std::z;\nimport std::a;\n", &[]),
+            "import std::a;\nimport std::z;\n",
+        );
+    }
+
+    // A whole import with no live leaf is dropped; the survivor stays.
+    #[test]
+    fn a_dead_import_is_pruned() {
+        assert_eq!(
+            organize("import std::used;\nimport std::dead;\n", &["dead"]),
+            "import std::used;\n",
+        );
+    }
+
+    // A dead brace-set branch shrinks the set (`{ a, b }` → `{ a }`); the whole
+    // import survives because a live branch remains.
+    #[test]
+    fn a_dead_branch_shrinks_its_set() {
+        assert_eq!(
+            organize("import std::x::{ alpha, beta };\n", &["beta"]),
+            "import std::x::{ alpha };\n",
+        );
+        // The middle of three goes, leaving the two live ones in canonical order.
+        assert_eq!(
+            organize("import std::x::{ a, b, c };\n", &["b"]),
+            "import std::x::{ a, c };\n",
+        );
+    }
+
+    // A whole import prunes only when EVERY branch is dead.
+    #[test]
+    fn an_import_dies_only_when_all_branches_do() {
+        assert_eq!(
+            organize("import std::x::{ a, b };\nfun main() {}\n", &["a", "b"]),
+            "fun main() {}\n",
+        );
+    }
+
+    // A re-export is surface, not usage — never pruned, even when its name is
+    // reported unused. (It still participates in sorting.)
+    #[test]
+    fn a_reexport_is_never_pruned() {
+        assert_no_edit("export import std::api;\n", &["api"]);
+        // And a dead plain import next to a same-named re-export: the re-export
+        // stays, the plain import goes.
+        assert_eq!(
+            organize(
+                "export import std::api;\nimport std::dead;\n",
+                &["api", "dead"],
+            ),
+            "export import std::api;\n",
+        );
+    }
+
+    // A trailing same-line comment travels with its surviving import when the run
+    // is reordered.
+    #[test]
+    fn a_trailing_comment_travels_when_sorting() {
+        assert_eq!(
+            organize("import std::z; // note z\nimport std::a;\n", &[]),
+            "import std::a;\nimport std::z; // note z\n",
+        );
+    }
+
+    // An already-canonical run with nothing dead offers no edit (the no-op the
+    // action relies on to stay quiet).
+    #[test]
+    fn already_organized_offers_no_edit() {
+        assert_no_edit(
+            "import std::a;\nimport std::b;\nuse dep::x;\n\nfun main() {}\n",
+            &[],
+        );
+    }
+
+    // Block-scoped imports live in a block body, never the top-level list, so the
+    // organizer leaves them entirely alone — order AND unused leaves both.
+    #[test]
+    fn block_scoped_imports_are_left_alone() {
+        assert_no_edit(
+            "fun f() {\n\tuse zeta::last;\n\tuse alpha::first;\n\tfirst();\n}\n",
+            &["last"],
+        );
+    }
+
+    // A whole run pruned away is deleted, taking its line break so no blank line
+    // is left behind.
+    #[test]
+    fn a_fully_dead_run_is_deleted() {
+        assert_eq!(
+            organize("import std::dead;\nfun main() {}\n", &["dead"]),
+            "fun main() {}\n",
+        );
+    }
+
+    // Sort and prune compose: the run reorders and the dead leaf disappears in one
+    // edit.
+    #[test]
+    fn sort_and_prune_compose() {
+        assert_eq!(
+            organize(
+                "import std::z;\nimport std::a::{ keep, drop };\n",
+                &["drop"],
+            ),
+            "import std::a::{ keep };\nimport std::z;\n",
         );
     }
 }

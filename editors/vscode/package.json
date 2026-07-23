@@ -75,6 +75,36 @@
           "type": "string",
           "default": "",
           "description": "Path to the Vilan standard library source root (vilan/std/src). Overrides auto-discovery; sets VILAN_STD for the server."
+        },
+        "vilan.inlayHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inlay type hints (inferred let-binding and parameter types). Applies live."
+        },
+        "vilan.semanticTokens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use the analyzer's semantic token highlighting. When off, the editor falls back to the TextMate grammar. Applies live."
+        },
+        "vilan.completion.functionCall": {
+          "type": "string",
+          "enum": [
+            "none",
+            "parensOnly",
+            "full"
+          ],
+          "enumDescriptions": [
+            "Insert the name only.",
+            "Insert the name followed by empty parentheses.",
+            "Insert the name with a placeholder argument list."
+          ],
+          "default": "full",
+          "description": "How completion inserts a function or method call."
+        },
+        "vilan.organizeImports.onSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run Organize Imports (sort and prune unused) on save. Registers the `source.organizeImports` code action in `editor.codeActionsOnSave`; your own `editor.codeActionsOnSave` settings are respected and take precedence."
         }
       }
     }

@@ -1,8 +1,20 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { workspace, window, commands, OutputChannel, ExtensionContext } from 'vscode';
 import {
+    workspace,
+    window,
+    commands,
+    CodeAction,
+    CodeActionKind,
+    OutputChannel,
+    ExtensionContext,
+    Range,
+    TextDocument,
+    TextEdit,
+} from 'vscode';
+import {
+    DidChangeConfigurationNotification,
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
@@ -11,6 +23,20 @@ import {
 
 let client: LanguageClient | undefined;
 let outputChannel: OutputChannel | undefined;
+
+/// The feature settings the server reads (gating inlay hints / semantic tokens,
+/// and — for WO-3 — completion's call style). Sent as `initializationOptions` at
+/// startup and re-sent via `workspace/didChangeConfiguration` on change. Shaped
+/// as the server's `Config::from_settings` expects. (`organizeImports.onSave` is
+/// handled entirely on the client, so it is not included here.)
+function readFeatureConfig(): object {
+    const config = workspace.getConfiguration('vilan');
+    return {
+        inlayHints: { enabled: config.get<boolean>('inlayHints.enabled', true) },
+        semanticTokens: { enabled: config.get<boolean>('semanticTokens.enabled', true) },
+        completion: { functionCall: config.get<string>('completion.functionCall', 'full') },
+    };
+}
 
 /// Resolve the language-server binary. An explicit `vilan.server.path` setting
 /// wins; otherwise look for a binary built in-repo (the extension lives at
@@ -88,6 +114,9 @@ async function startClient(context: ExtensionContext): Promise<void> {
         synchronize: {
             fileEvents: workspace.createFileSystemWatcher('**/*.vl'),
         },
+        // Seed the server's feature settings; later changes go via
+        // `workspace/didChangeConfiguration` (see `activate`).
+        initializationOptions: readFeatureConfig(),
         outputChannel,
     };
 
@@ -101,6 +130,28 @@ async function startClient(context: ExtensionContext): Promise<void> {
     }
 }
 
+/// The Organize Imports text edits the server offers for `document`, or `[]`.
+/// Backs `vilan.organizeImports.onSave` by requesting the server's OWN
+/// `source.organizeImports` action — so on-save organizing is byte-identical to
+/// invoking it from the Source Action menu (the "editor and fmt can never
+/// disagree" chain extends to the save hook).
+async function organizeImportsEdits(document: TextDocument): Promise<TextEdit[]> {
+    if (!client) {
+        return [];
+    }
+    const wholeFile = new Range(0, 0, document.lineCount, 0);
+    const actions = await commands.executeCommand<CodeAction[]>(
+        'vscode.executeCodeActionProvider',
+        document.uri,
+        wholeFile,
+        CodeActionKind.SourceOrganizeImports.value,
+    );
+    const organize = actions?.find((action) =>
+        action.kind?.contains(CodeActionKind.SourceOrganizeImports),
+    );
+    return organize?.edit?.get(document.uri) ?? [];
+}
+
 export function activate(context: ExtensionContext): void {
     outputChannel = window.createOutputChannel('Vilan Language Server');
     context.subscriptions.push(outputChannel);
@@ -112,6 +163,50 @@ export function activate(context: ExtensionContext): void {
             await startClient(context);
             if (client) {
                 window.showInformationMessage('Vilan: language server restarted.');
+            }
+        }),
+    );
+
+    // Live setting changes. A server-path / std-path change needs a restart to
+    // take effect; a feature toggle is pushed to the running server, which reads
+    // its config per request (no re-registration needed).
+    context.subscriptions.push(
+        workspace.onDidChangeConfiguration(async (event) => {
+            if (
+                event.affectsConfiguration('vilan.server.path') ||
+                event.affectsConfiguration('vilan.stdPath')
+            ) {
+                await startClient(context);
+                return;
+            }
+            if (
+                client &&
+                (event.affectsConfiguration('vilan.inlayHints') ||
+                    event.affectsConfiguration('vilan.semanticTokens') ||
+                    event.affectsConfiguration('vilan.completion'))
+            ) {
+                client.sendNotification(DidChangeConfigurationNotification.type, {
+                    settings: { vilan: readFeatureConfig() },
+                });
+            }
+        }),
+    );
+
+    // `vilan.organizeImports.onSave`: run the server's Organize Imports action
+    // before a save writes the file. This is the extension's own hook rather
+    // than mutating the user's `editor.codeActionsOnSave` — it leaves that config
+    // untouched (respecting it), and because organizing is a fixed point, a user
+    // who has ALSO listed `source.organizeImports` there gets no double effect.
+    context.subscriptions.push(
+        workspace.onWillSaveTextDocument((event) => {
+            if (event.document.languageId !== 'vilan' || !client) {
+                return;
+            }
+            const enabled = workspace
+                .getConfiguration('vilan', event.document)
+                .get<boolean>('organizeImports.onSave', false);
+            if (enabled) {
+                event.waitUntil(organizeImportsEdits(event.document));
             }
         }),
     );
