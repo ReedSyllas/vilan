@@ -2,8 +2,8 @@
 // body's dynamic extent — its own, a helper's, and a grandchild spawned by a
 // running child — is joined before `nursery` returns its body's value.
 import std::print;
-import std::time::sleep;
 import std::task::nursery;
+import std::time::sleep;
 
 fun spawn_step(label: str, ms: i32) {
 	let _ = async {

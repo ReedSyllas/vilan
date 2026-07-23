@@ -23,6 +23,139 @@ function __try_parse_json(text) {
 		return [ 1 ];
 	}
 }
+function char_at(value2) {
+	return alphabet.substring(value2, value2 + 1);
+}
+function encode_url(bytes) {
+	const total = bytes.length;
+	let out = "";
+	const $b = new4(0, Math.trunc(total / 3));
+	while (true) {
+		const $c = next($b);
+		if ($c[0] !== 0) {
+			break;
+		}
+		const group = $c[1];
+		const base = group * 3;
+		const chunk = bytes.at(base) << 16 | bytes.at(base + 1) << 8 | bytes.at(base + 2);
+		out = out + char_at(chunk >> 18 & 63) + char_at(chunk >> 12 & 63) + char_at(chunk >> 6 & 63) + char_at(chunk & 63);
+	}
+	const rest = total % 3;
+	if (rest === 1) {
+		const chunk2 = bytes.at(total - 1) << 16;
+		out = out + char_at(chunk2 >> 18 & 63) + char_at(chunk2 >> 12 & 63);
+	}
+	if (rest === 2) {
+		const chunk3 = bytes.at(total - 2) << 16 | bytes.at(total - 1) << 8;
+		out = out + char_at(chunk3 >> 18 & 63) + char_at(chunk3 >> 12 & 63) + char_at(chunk3 >> 6 & 63);
+	}
+	return out;
+}
+function digit(code) {
+	const c = as_i32(code);
+	if (c >= 65 && c <= 90) {
+		return c - 65;
+	}
+	if (c >= 97 && c <= 122) {
+		return c - 71;
+	}
+	if (c >= 48 && c <= 57) {
+		return c + 4;
+	}
+	if (c === 45) {
+		return 62;
+	}
+	if (c === 95) {
+		return 63;
+	}
+	return 0 - 1;
+}
+function decode_url(text) {
+	const length = text.length;
+	const rest = length % 4;
+	if (rest === 1) {
+		return [ 1 ];
+	}
+	const full = Math.trunc(length / 4);
+	const $d = rest;
+	let $e = null;
+	if ($d === 2) {
+		$e = 1;
+	} else if ($d === 3) {
+		$e = 2;
+	} else {
+		$e = 0;
+	}
+	const tail_bytes = $e;
+	let out = new Uint8Array(full * 3 + tail_bytes);
+	let write = 0;
+	const $f = new4(0, full);
+	while (true) {
+		const $g = next($f);
+		if ($g[0] !== 0) {
+			break;
+		}
+		const group = $g[1];
+		const base = group * 4;
+		const a = digit(text.charCodeAt(base));
+		const b = digit(text.charCodeAt(base + 1));
+		const c = digit(text.charCodeAt(base + 2));
+		const d = digit(text.charCodeAt(base + 3));
+		if (a < 0 || b < 0 || c < 0 || d < 0) {
+			return [ 1 ];
+		}
+		const chunk = a << 18 | b << 12 | c << 6 | d;
+		set(out, write, chunk >> 16 & 255);
+		set(out, write + 1, chunk >> 8 & 255);
+		set(out, write + 2, chunk & 255);
+		write = write + 3;
+	}
+	if (rest === 2) {
+		const a2 = digit(text.charCodeAt(length - 2));
+		const b2 = digit(text.charCodeAt(length - 1));
+		if (a2 < 0 || b2 < 0) {
+			return [ 1 ];
+		}
+		set(out, write, (a2 << 6 | b2) >> 4 & 255);
+	}
+	if (rest === 3) {
+		const a3 = digit(text.charCodeAt(length - 3));
+		const b3 = digit(text.charCodeAt(length - 2));
+		const c2 = digit(text.charCodeAt(length - 1));
+		if (a3 < 0 || b3 < 0 || c2 < 0) {
+			return [ 1 ];
+		}
+		const chunk2 = a3 << 12 | b3 << 6 | c2;
+		set(out, write, chunk2 >> 10 & 255);
+		set(out, write + 1, chunk2 >> 2 & 255);
+	}
+	return [ 0, out ];
+}
+function set(self, index, value2) {
+	self.fill(value2, index, index + 1);
+}
+function encode_utf8(text) {
+	return new TextEncoder().encode(text);
+}
+function decode_utf8(bytes) {
+	return new TextDecoder().decode(bytes);
+}
+function equals_constant_time(a, b) {
+	if (a.length !== b.length) {
+		return false;
+	}
+	let acc = 0;
+	const $w = new4(0, a.length);
+	while (true) {
+		const $x = next($w);
+		if ($x[0] !== 0) {
+			break;
+		}
+		const index = $x[1];
+		acc = acc | a.at(index) ^ b.at(index);
+	}
+	return acc === 0;
+}
 function new2() {
 	return [ __shared_new(""), __shared_new(false), __shared_new([  ]), __shared_new([  ]) ];
 }
@@ -177,153 +310,6 @@ function opened_reader(text) {
 	}
 	return $D;
 }
-function set(self, index, value2) {
-	self.fill(value2, index, index + 1);
-}
-function encode_utf8(text) {
-	return new TextEncoder().encode(text);
-}
-function decode_utf8(bytes) {
-	return new TextDecoder().decode(bytes);
-}
-function new4(start, end) {
-	return [ start, end ];
-}
-function next(self) {
-	let $a = null;
-	if (self[0] < self[1]) {
-		const value2 = self[0];
-		self[0] = self[0] + 1;
-		$a = [ 0, value2 ];
-	} else {
-		$a = [ 1 ];
-	}
-	return $a;
-}
-function char_at(value2) {
-	return alphabet.substring(value2, value2 + 1);
-}
-function encode_url(bytes) {
-	const total = bytes.length;
-	let out = "";
-	const $b = new4(0, Math.trunc(total / 3));
-	while (true) {
-		const $c = next($b);
-		if ($c[0] !== 0) {
-			break;
-		}
-		const group = $c[1];
-		const base = group * 3;
-		const chunk = bytes.at(base) << 16 | bytes.at(base + 1) << 8 | bytes.at(base + 2);
-		out = out + char_at(chunk >> 18 & 63) + char_at(chunk >> 12 & 63) + char_at(chunk >> 6 & 63) + char_at(chunk & 63);
-	}
-	const rest = total % 3;
-	if (rest === 1) {
-		const chunk2 = bytes.at(total - 1) << 16;
-		out = out + char_at(chunk2 >> 18 & 63) + char_at(chunk2 >> 12 & 63);
-	}
-	if (rest === 2) {
-		const chunk3 = bytes.at(total - 2) << 16 | bytes.at(total - 1) << 8;
-		out = out + char_at(chunk3 >> 18 & 63) + char_at(chunk3 >> 12 & 63) + char_at(chunk3 >> 6 & 63);
-	}
-	return out;
-}
-function digit(code) {
-	const c = as_i32(code);
-	if (c >= 65 && c <= 90) {
-		return c - 65;
-	}
-	if (c >= 97 && c <= 122) {
-		return c - 71;
-	}
-	if (c >= 48 && c <= 57) {
-		return c + 4;
-	}
-	if (c === 45) {
-		return 62;
-	}
-	if (c === 95) {
-		return 63;
-	}
-	return 0 - 1;
-}
-function decode_url(text) {
-	const length = text.length;
-	const rest = length % 4;
-	if (rest === 1) {
-		return [ 1 ];
-	}
-	const full = Math.trunc(length / 4);
-	const $d = rest;
-	let $e = null;
-	if ($d === 2) {
-		$e = 1;
-	} else if ($d === 3) {
-		$e = 2;
-	} else {
-		$e = 0;
-	}
-	const tail_bytes = $e;
-	let out = new Uint8Array(full * 3 + tail_bytes);
-	let write = 0;
-	const $f = new4(0, full);
-	while (true) {
-		const $g = next($f);
-		if ($g[0] !== 0) {
-			break;
-		}
-		const group = $g[1];
-		const base = group * 4;
-		const a = digit(text.charCodeAt(base));
-		const b = digit(text.charCodeAt(base + 1));
-		const c = digit(text.charCodeAt(base + 2));
-		const d = digit(text.charCodeAt(base + 3));
-		if (a < 0 || b < 0 || c < 0 || d < 0) {
-			return [ 1 ];
-		}
-		const chunk = a << 18 | b << 12 | c << 6 | d;
-		set(out, write, chunk >> 16 & 255);
-		set(out, write + 1, chunk >> 8 & 255);
-		set(out, write + 2, chunk & 255);
-		write = write + 3;
-	}
-	if (rest === 2) {
-		const a2 = digit(text.charCodeAt(length - 2));
-		const b2 = digit(text.charCodeAt(length - 1));
-		if (a2 < 0 || b2 < 0) {
-			return [ 1 ];
-		}
-		set(out, write, (a2 << 6 | b2) >> 4 & 255);
-	}
-	if (rest === 3) {
-		const a3 = digit(text.charCodeAt(length - 3));
-		const b3 = digit(text.charCodeAt(length - 2));
-		const c2 = digit(text.charCodeAt(length - 1));
-		if (a3 < 0 || b3 < 0 || c2 < 0) {
-			return [ 1 ];
-		}
-		const chunk2 = a3 << 12 | b3 << 6 | c2;
-		set(out, write, chunk2 >> 10 & 255);
-		set(out, write + 1, chunk2 >> 2 & 255);
-	}
-	return [ 0, out ];
-}
-function equals_constant_time(a, b) {
-	if (a.length !== b.length) {
-		return false;
-	}
-	let acc = 0;
-	const $w = new4(0, a.length);
-	while (true) {
-		const $x = next($w);
-		if ($x[0] !== 0) {
-			break;
-		}
-		const index = $x[1];
-		acc = acc | a.at(index) ^ b.at(index);
-	}
-	return acc === 0;
-}
 function fold_unsigned(value2, modulus) {
 	const truncated = Math.trunc(value2);
 	const wrapped = truncated % modulus;
@@ -348,6 +334,20 @@ function fold_signed(value2, modulus, half) {
 function as_i32(self) {
 	const widened = Number(self);
 	return Number(fold_signed(widened, 4294967296, 2147483648));
+}
+function new4(start, end) {
+	return [ start, end ];
+}
+function next(self) {
+	let $a = null;
+	if (self[0] < self[1]) {
+		const value2 = self[0];
+		self[0] = self[0] + 1;
+		$a = [ 0, value2 ];
+	} else {
+		$a = [ 1 ];
+	}
+	return $a;
 }
 function $o(self, serializer) {
 	str_value(serializer, self);

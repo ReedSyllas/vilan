@@ -3,12 +3,12 @@
 // `sleep_for`. Everything printed is deterministic — the live clock is only
 // sanity-checked against a claim that holds for any working clock.
 
-import std::print;
-import std::time::{ now, sleep_for, Instant, Duration };
-import std::wire::{ encode, decode };
-import std::json::json_codec;
 import std::binary::binary_codec;
-import std::result::Result::{ self, Ok, Err };
+import std::json::json_codec;
+import std::print;
+import std::result::Result::{ Err, Ok, self };
+import std::time::{ Duration, Instant, now, sleep_for };
+import std::wire::{ decode, encode };
 
 [derive(Wire, PartialEq)]
 struct Stamp {

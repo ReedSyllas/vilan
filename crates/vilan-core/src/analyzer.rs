@@ -23201,6 +23201,24 @@ pub fn analyze<'src>(
         Pkg,
         Dep(usize),
     }
+    // The canonical module load order (WO-1b), rhyming with WO-1's import sort:
+    // std modules first (tier 0), then each dependency package by its manifest
+    // index (tier 1), then the entry package's own modules (tier 2); ties broken
+    // by module name. Two distinct loaded modules never share a key — std/pkg
+    // names are unique within their package, and a dependency's modules are
+    // distinguished by the package index — so the order is total and stable. The
+    // drain below always loads the smallest key still pending, making the load
+    // order (and thus every entity id, and thus the emitted declaration order) a
+    // function only of WHICH modules are reachable and their packages, never of
+    // the order imports appear in the source.
+    fn load_order_key(entry: (Origin, &str)) -> (u8, usize, &str) {
+        let (origin, name) = entry;
+        match origin {
+            Origin::Std => (0, 0, name),
+            Origin::Dep(index) => (1, index, name),
+            Origin::Pkg => (2, 0, name),
+        }
+    }
     // The entry program's package root (`pkg_root`, passed in): the directory its
     // `import pkg::..` siblings live in. When it is one of `std`'s own layer roots
     // we're compiling std itself (or a std file opened in an editor), so every
@@ -23480,7 +23498,26 @@ pub fn analyze<'src>(
     let mut generated_by_source: HashMap<SourceId, Vec<(Span, &'static NodeList<'static>)>> =
         HashMap::new();
     loop {
-        while let Some((origin, name)) = to_load.pop() {
+        // Canonical drain (WO-1b): load the smallest-key module still pending
+        // rather than the last one pushed. `to_load.pop()` (LIFO) made the load
+        // order — and therefore every entity id and the id-sorted emitted
+        // declarations — depend on the textual order of the file's imports, so a
+        // pure import reorder (e.g. `vilan fmt`'s import sort) churned the JS
+        // bytes though nothing ran differently. Selecting the minimum instead
+        // makes the drain a pure function of the reachable set (min over a set is
+        // independent of insertion order; equal keys are duplicate loads of the
+        // same module, which the dedup below collapses). The set loaded is
+        // unchanged — same seeds, same discovery graph, same `loaded_keys` dedup;
+        // only the traversal order is canonicalized. The always-loaded core
+        // modules (`boolean`, `list`, ...) fold into this rule rather than
+        // keeping their seed-list order.
+        while !to_load.is_empty() {
+            let next = (0..to_load.len())
+                .min_by(|&left, &right| {
+                    load_order_key(to_load[left]).cmp(&load_order_key(to_load[right]))
+                })
+                .expect("to_load is non-empty");
+            let (origin, name) = to_load.swap_remove(next);
             if !loaded_keys.insert((origin, name)) {
                 continue;
             }

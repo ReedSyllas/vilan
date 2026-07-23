@@ -1,9 +1,9 @@
-import std::print;
+import std::base64::{ decode_url, encode_url };
+import std::bytes::{ decode_utf8, encode_utf8 };
+import std::crypto::{ equals_constant_time, pbkdf2_sha512, random_bytes };
 import std::jwt::{ sign_hs512, verify_hs512 };
-import std::crypto::{ pbkdf2_sha512, random_bytes, equals_constant_time };
-import std::base64::{ encode_url, decode_url };
-import std::bytes::{ encode_utf8, decode_utf8 };
-import std::option::Option::{ self, Some, None };
+import std::option::Option::{ None, Some, self };
+import std::print;
 import std::wire::Wire;
 
 // WebCrypto-backed auth primitives (proposal/kolt-migration.md §2.1): base64url

@@ -152,3 +152,75 @@ fn no_corpus_golden_carries_hmr_instrumentation() {
     }
     assert!(checked > 60, "suspiciously few goldens swept: {checked}");
 }
+
+/// WO-1b: the emitted JS must not depend on the order of a file's import
+/// STATEMENTS (which modules load and in what order). `vilan fmt` sorts imports
+/// canonically (WO-1); before this change a pure import-statement reorder churned
+/// the JS bytes, because module load order — and so entity-id assignment, and so
+/// the id-sorted declaration emission — was LIFO of import order. The analyzer
+/// now drains modules in a canonical order (`analyzer.rs`, `load_order_key`), so
+/// permuting the import statements compiles to identical bytes.
+///
+/// SCOPE: this pins the module-walk mechanism only. A DISTINCT sensitivity —
+/// the emission order of imported module-level CONSTANTS, which follows the
+/// order names are listed inside a `{ .. }` brace set (`module_level_bindings`
+/// iterates the entry scope's insertion-ordered `IndexMap`) — is deliberately
+/// NOT exercised here: it is unaddressed by WO-1b and cannot be fixed by simply
+/// sorting globals by id (that reorders semantically-significant, non-hoisted
+/// `const` declarations and miscompiles a cross-module module-level dependency
+/// into a TDZ error). So this test permutes only whole import statements, never
+/// names within a brace set.
+///
+/// Non-vacuous by construction: `std::base64` and `std::display` both sit
+/// OUTSIDE the always-loaded prelude closure (unlike `std::bytes`, which
+/// `std::json` pulls in transitively, fixing its load order regardless of the
+/// entry's imports). With two such modules present, their relative load order —
+/// and the order of the helper functions they emit — did depend on import order
+/// under the old LIFO drain (a measured 6-line churn). Reverting the drain to
+/// LIFO fails this test.
+#[test]
+fn emitted_js_is_independent_of_import_order() {
+    // A shared program body; only the leading import block's order differs
+    // between the two variants. `encode_url`/`encode_utf8`/`format` keep every
+    // module's functions reachable (and thus emitted).
+    let body =
+        "\n\nfun main() {\n\tprint(encode_url(encode_utf8(\"vilan\")));\n\tprint(format(42));\n}\n";
+    let print_import = "import std::print;\n";
+    let bytes_import = "import std::bytes::{ encode_utf8 };\n";
+    let base64_import = "import std::base64::{ encode_url };\n";
+    let display_import = "import std::display::{ format };\n";
+    let order_a = format!("{print_import}{bytes_import}{base64_import}{display_import}{body}");
+    // A genuine shuffle of the same four imports.
+    let order_b = format!("{display_import}{base64_import}{print_import}{bytes_import}{body}");
+
+    let work = std::env::temp_dir().join(format!("vilan_import_order_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    // Same basename in separate directories, so nothing but the import order
+    // varies (the emitted JS embeds no source path — verified: identical dirs
+    // produce identical bytes).
+    let build = |variant: &str, source: &str| -> String {
+        let dir = work.join(variant);
+        std::fs::create_dir_all(&dir).expect("create work dir");
+        let src = dir.join("prog.vl");
+        std::fs::write(&src, source).expect("write source");
+        let output = Command::new(env!("CARGO_BIN_EXE_vilan"))
+            .arg("build")
+            .arg(&src)
+            .env("VILAN_STD", std_dir())
+            .output()
+            .expect("run vilan build");
+        assert!(
+            output.status.success(),
+            "build failed for variant {variant}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(src.with_extension("js")).expect("read emitted js")
+    };
+    let js_a = build("a", &order_a);
+    let js_b = build("b", &order_b);
+    let _ = std::fs::remove_dir_all(&work);
+    assert_eq!(
+        js_a, js_b,
+        "emitted JS differs under an import reorder — the module walk order is not canonical"
+    );
+}
