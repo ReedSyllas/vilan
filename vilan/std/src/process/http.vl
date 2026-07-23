@@ -6,7 +6,7 @@
 
 import pkg::bytes::{ Bytes, new_text_decoder };
 import pkg::json::JsonValue;
-import pkg::option::Option::{ self, Some, None };
+import pkg::option::Option::{ None, Some, self };
 
 // --- Raw node:http bindings ---
 

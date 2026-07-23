@@ -4,9 +4,9 @@
 // The prelude is universal (core) — every entry is `std::print`/`std::panic`/…,
 // reachable on any target. Platform I/O (`scan`) lives in `std::process` (Node)
 // and is imported explicitly, so it is gated when building for the browser.
-export import pkg::io::print;
-export import pkg::io::panic;
-export import pkg::io::assert;
-export import pkg::string::str;
-export import pkg::number::{ u32, i32, f64, BigInt, i8, u8, i16, u16, i53, u53, f32 };
 export import pkg::default::Default;
+export import pkg::io::assert;
+export import pkg::io::panic;
+export import pkg::io::print;
+export import pkg::number::{ BigInt, f32, f64, i16, i32, i53, i8, u16, u32, u53, u8 };
+export import pkg::string::str;

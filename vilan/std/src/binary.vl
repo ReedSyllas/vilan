@@ -6,11 +6,11 @@
 // byte. Little-endian throughout. A truncated or over-declared frame fails
 // sticky (`unexpected end of frame`) — validating decode, same as JSON's.
 
-import pkg::bytes::{ Bytes, data_view, encode_utf8, decode_utf8 };
-import pkg::option::Option::{ self, Some, None };
+import pkg::bytes::{ Bytes, data_view, decode_utf8, encode_utf8 };
+import pkg::option::Option::{ None, Some, self };
+import pkg::result::Result::{ Err, Ok, self };
 import pkg::shared::Shared;
-import pkg::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer, Codec, Frame };
-import pkg::result::Result::{ self, Ok, Err };
+import pkg::wire::{ Codec, Deserialize, Deserializer, Frame, Serialize, Serializer, Wire };
 
 // --- The write side ----------------------------------------------------------
 

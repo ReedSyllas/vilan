@@ -14,8 +14,8 @@
 // them entirely.
 
 import pkg::bytes::Bytes;
-import pkg::option::Option::{ self, Some, None };
-import pkg::result::Result::{ self, Ok, Err };
+import pkg::option::Option::{ None, Some, self };
+import pkg::result::Result::{ Err, Ok, self };
 
 /// The write half of the visitor: what a codec's writer implements. See
 /// `Serializer` (the record) for the call-by-call protocol notes.

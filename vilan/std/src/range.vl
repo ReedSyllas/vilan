@@ -1,4 +1,4 @@
-import pkg::option::Option::{ self, Some, None };
+import pkg::option::Option::{ None, Some, self };
 
 /// A half-open integer range `[start, end)`. Iterate it with
 /// `for i in Range::new(start, end)`, which yields `start, start + 1, ..., end - 1`

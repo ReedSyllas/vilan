@@ -3,7 +3,7 @@
 // (I1). Each element is turned into a canonical `Hash` via `value.hash()`, which
 // keys the underlying native map; the original value is stored alongside so
 // `for x in set` yields real `T`s in insertion order.
-import pkg::hash::{ Hashable, Hash };
+import pkg::hash::{ Hash, Hashable };
 import pkg::native_map::NativeMap;
 
 struct Set<T: Hashable> {

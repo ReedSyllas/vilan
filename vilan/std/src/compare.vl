@@ -1,4 +1,4 @@
-import pkg::option::Option::{ self, Some };
+import pkg::option::Option::{ Some, self };
 
 trait PartialEq<B = Self> {
 	fun eq(self, b: B): bool;

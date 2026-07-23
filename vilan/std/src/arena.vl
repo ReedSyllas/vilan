@@ -1,4 +1,4 @@
-import pkg::option::Option::{ self, Some, None };
+import pkg::option::Option::{ None, Some, self };
 
 // `std::arena` — a generational arena: stable, deletion-safe identities for
 // values of any type `T`, with no per-type bookkeeping.

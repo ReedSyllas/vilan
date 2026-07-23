@@ -4,12 +4,12 @@
 // struct is ordinary typed data ([derive(Wire)]), and a malformed or tampered
 // token decodes to `None`, never to garbage.
 
-import pkg::base64::{ encode_url, decode_url };
-import pkg::bytes::{ Bytes, encode_utf8, decode_utf8 };
-import pkg::crypto::{ hmac_sha512, equals_constant_time };
-import pkg::json::{ encode_json, decode_json };
-import pkg::option::Option::{ self, Some, None };
-import pkg::result::Result::{ self, Ok, Err };
+import pkg::base64::{ decode_url, encode_url };
+import pkg::bytes::{ Bytes, decode_utf8, encode_utf8 };
+import pkg::crypto::{ equals_constant_time, hmac_sha512 };
+import pkg::json::{ decode_json, encode_json };
+import pkg::option::Option::{ None, Some, self };
+import pkg::result::Result::{ Err, Ok, self };
 import pkg::wire::Wire;
 
 let header_segment = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9"; // {"alg":"HS512","typ":"JWT"}

@@ -13,7 +13,7 @@
 // available when building for the browser.
 
 import pkg::dom::Event;
-import pkg::reactive::{ Signal, turn, FlushPolicy };
+import pkg::reactive::{ FlushPolicy, Signal, turn };
 import pkg::shared::Shared;
 import pkg::ui::{ View, view };
 

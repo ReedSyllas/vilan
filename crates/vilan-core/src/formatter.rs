@@ -53,11 +53,21 @@ fn code_tokens(source: &str) -> Option<Vec<Token<'_>>> {
         .then(|| tokens.into_iter().map(|(token, _)| token).collect())
 }
 
+/// The formatter's token-level canonicalization, used to check a reprint changed
+/// nothing but trivia and the canonical import order. Two order-insensitivities
+/// are folded in so the safety check accepts them: insignificant trailing commas
+/// (dropped), and the canonical ordering of a top-level import run (see the
+/// canonical-import-order section below). Everything else must match token for
+/// token, so the net still catches every *other* reordering.
+fn normalize(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
+    sort_import_runs(&drop_trailing_commas(tokens))
+}
+
 /// Drops every comma that sits immediately before a closing `}`, `)`, or `]`.
 /// Vilan treats such a trailing comma as insignificant (tuples need two or more
 /// elements, so there is no `(a,)` one-tuple to confuse it with), which lets the
 /// safety check accept the formatter normalizing trailing commas in or out.
-fn normalize(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
+fn drop_trailing_commas(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
     let mut result: Vec<Token<'_>> = Vec::with_capacity(tokens.len());
     for token in tokens {
         if matches!(
@@ -69,6 +79,348 @@ fn normalize(tokens: Vec<Token<'_>>) -> Vec<Token<'_>> {
             }
         }
         result.push(token);
+    }
+    result
+}
+
+// --- Canonical import order --------------------------------------------------
+//
+// `vilan fmt` canonicalizes the order of a file's top-level `import`/`use`
+// statements (the pruning of unused imports is the editor's job, not the
+// formatter's). The rule, defined once here and applied by both the printer
+// (which reorders AST items) and `normalize` (which reorders token statements)
+// through the shared [`import_sort_key`], is:
+//
+//   * A *run* is a maximal span of consecutive top-level import/use statements.
+//     Blank lines between them do not break a run — they coalesce, and the run
+//     reprints as one block. A standalone (own-line) comment *does* break a run
+//     (it pins a deliberate grouping), so imports never reorder across it; a
+//     trailing same-line comment travels with its own import.
+//   * Within a run, statements sort by: kind (`import` before `use`; an
+//     `export import`/`export use` re-export sorts as a plain import/use — the
+//     `export` prefix does not change grouping), then root namespace (`std`
+//     first, dependency packages alphabetically, `pkg` last), then the full
+//     `::`-separated path compared case-sensitively segment by segment.
+//   * A brace-set import (`import std::x::{ b, a }`) sorts its inner branch list
+//     the same way (`{ a, b }`), recursively.
+//   * Only *top-level* runs are touched. Block-scoped imports (inside
+//     `fn`/`impl`/`mod` bodies — backlog H2) are deliberate placements and are
+//     left exactly as written, order and brace sets both.
+//
+// `normalize` applies the same canonicalization to *both* sides of the safety
+// check, so the check passes whatever order the printer emits (its job is only
+// to confirm no import was dropped or corrupted and no *other* code moved),
+// while the printer's own tested logic is what fixes the visible order.
+
+/// `import` vs `use` for the canonical order — imports sort before uses. The
+/// `export` re-export prefix does not participate.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ImportKind {
+    Import,
+    Use,
+}
+
+/// The root-namespace rank: `std` first, then dependency packages ordered by
+/// name, then `pkg` (the current package), then a bare brace-set import with no
+/// leading namespace (`import { a, b }`, rare) last.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum RootRank {
+    Std,
+    Dependency(String),
+    Pkg,
+    Unrooted,
+}
+
+/// A `::`-separated import path reduced to an order-only comparable form: names
+/// compare case-sensitively segment by segment, a shorter path sorts before a
+/// longer one extending it (`a` before `a::b`, via `End` < `Path`), and a brace
+/// set's branches are pre-sorted so the whole set compares canonically.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum BranchKey {
+    End,
+    Path(String, Box<BranchKey>),
+    Set(Vec<BranchKey>),
+}
+
+/// The full sort key for one top-level import/use statement — the single
+/// definition of the canonical order, shared by the printer and `normalize` so
+/// the two cannot disagree. Ordered by kind, then root namespace, then path.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ImportSortKey {
+    kind: ImportKind,
+    root: RootRank,
+    rest: BranchKey,
+}
+
+/// A parsed import path — `ImportBranch` without the source spans. Both the AST
+/// (via [`branch_from_ast`]) and the token stream (via [`parse_token_branch`])
+/// reduce to this shape, from which the shared key and the canonical token
+/// re-emission are derived.
+enum TokenBranch<'src> {
+    Path(&'src str, Option<Box<TokenBranch<'src>>>),
+    Set(Vec<TokenBranch<'src>>),
+}
+
+/// Drops the spans from an `ImportBranch`, giving the span-free [`TokenBranch`]
+/// the shared key operates on.
+fn branch_from_ast<'src>(branch: &ImportBranch<'src>) -> TokenBranch<'src> {
+    match branch {
+        ImportBranch::Path(name, _, child) => TokenBranch::Path(
+            name,
+            child.as_ref().map(|child| Box::new(branch_from_ast(child))),
+        ),
+        ImportBranch::Set(branches) => {
+            TokenBranch::Set(branches.iter().map(branch_from_ast).collect())
+        }
+    }
+}
+
+/// The order key for one import path — brace sets are sorted internally so equal
+/// paths, whatever their source branch order, produce equal keys.
+fn branch_key(branch: &TokenBranch<'_>) -> BranchKey {
+    match branch {
+        TokenBranch::Path(name, None) => {
+            BranchKey::Path((*name).to_string(), Box::new(BranchKey::End))
+        }
+        TokenBranch::Path(name, Some(child)) => {
+            BranchKey::Path((*name).to_string(), Box::new(branch_key(child)))
+        }
+        TokenBranch::Set(branches) => {
+            let mut keys: Vec<BranchKey> = branches.iter().map(branch_key).collect();
+            keys.sort();
+            BranchKey::Set(keys)
+        }
+    }
+}
+
+/// The canonical sort key for an import/use of `kind` importing `branch`:
+/// root-namespace rank first, then the path after the root.
+fn import_sort_key(kind: ImportKind, branch: &TokenBranch<'_>) -> ImportSortKey {
+    let (root, rest) = match branch {
+        TokenBranch::Path(name, child) => {
+            let root = match *name {
+                "std" => RootRank::Std,
+                "pkg" => RootRank::Pkg,
+                other => RootRank::Dependency(other.to_string()),
+            };
+            let rest = match child {
+                Some(child) => branch_key(child),
+                None => BranchKey::End,
+            };
+            (root, rest)
+        }
+        TokenBranch::Set(_) => (RootRank::Unrooted, branch_key(branch)),
+    };
+    ImportSortKey { kind, root, rest }
+}
+
+/// If `node` is an import-like item — `import`/`use`, or an `export import` /
+/// `export use` re-export — returns its kind and imported path (the `export`
+/// prefix does not change the kind). `None` for any other item, which breaks a
+/// run.
+fn import_kind_and_branch<'node, 'src>(
+    node: &'node Node<'src>,
+) -> Option<(ImportKind, &'node ImportBranch<'src>)> {
+    match node {
+        Node::Import(branch) => Some((ImportKind::Import, branch)),
+        Node::Use(branch) => Some((ImportKind::Use, branch)),
+        Node::Export(inner) => import_kind_and_branch(&inner.0),
+        _ => None,
+    }
+}
+
+/// The canonical key of an import-like `node` (panics if it is not one — callers
+/// gate on [`import_kind_and_branch`] first).
+fn node_import_key(node: &Node<'_>) -> ImportSortKey {
+    let (kind, branch) =
+        import_kind_and_branch(node).expect("node_import_key on a non-import item");
+    import_sort_key(kind, &branch_from_ast(branch))
+}
+
+/// Whether the tokens at `index` begin a top-level import/use statement —
+/// `import …`, `use …`, or `export import …` / `export use …`.
+fn starts_import(tokens: &[Token<'_>], index: usize) -> bool {
+    match tokens.get(index) {
+        Some(Token::Import | Token::Use) => true,
+        Some(Token::Export) => {
+            matches!(tokens.get(index + 1), Some(Token::Import | Token::Use))
+        }
+        _ => false,
+    }
+}
+
+/// The path-segment name at `index`, mirroring the parser's `eat_name` (an
+/// identifier, or the `true`/`false` literals treated as names).
+fn token_name<'src>(tokens: &[Token<'src>], index: usize) -> Option<&'src str> {
+    match tokens.get(index) {
+        Some(&Token::Ident(name)) => Some(name),
+        Some(&Token::Bool(true)) => Some("true"),
+        Some(&Token::Bool(false)) => Some("false"),
+        _ => None,
+    }
+}
+
+/// Parses the `::`-separated import path beginning at `index` (mirroring the
+/// parser's `parse_namespace_path`: a name-headed path is tried before a brace
+/// set), returning the branch and the index just past it, or `None` if the
+/// tokens do not match the import-path grammar.
+fn parse_token_branch<'src>(
+    tokens: &[Token<'src>],
+    index: usize,
+) -> Option<(TokenBranch<'src>, usize)> {
+    if let Some(name) = token_name(tokens, index) {
+        let mut next = index + 1;
+        let continuation = if tokens.get(next) == Some(&Token::Op("::")) {
+            let (child, after) = parse_token_branch(tokens, next + 1)?;
+            next = after;
+            Some(Box::new(child))
+        } else {
+            None
+        };
+        Some((TokenBranch::Path(name, continuation), next))
+    } else if tokens.get(index) == Some(&Token::Ctrl('{')) {
+        let mut branches = Vec::new();
+        let mut next = index + 1;
+        // An empty set `{}` closes immediately; otherwise each element is a
+        // name-headed single path, comma-separated, allow-trailing.
+        while tokens.get(next) != Some(&Token::Ctrl('}')) {
+            let name = token_name(tokens, next)?;
+            let mut after = next + 1;
+            let continuation = if tokens.get(after) == Some(&Token::Op("::")) {
+                let (child, past) = parse_token_branch(tokens, after + 1)?;
+                after = past;
+                Some(Box::new(child))
+            } else {
+                None
+            };
+            branches.push(TokenBranch::Path(name, continuation));
+            next = after;
+            match tokens.get(next) {
+                Some(Token::Ctrl(',')) => next += 1,
+                Some(Token::Ctrl('}')) => break,
+                _ => return None,
+            }
+        }
+        Some((TokenBranch::Set(branches), next + 1))
+    } else {
+        None
+    }
+}
+
+/// Parses one import/use statement beginning at `index` into its kind, whether
+/// it is an `export` re-export, its path, and the index past its `;` — or `None`
+/// if the tokens do not match the import grammar (leaving the run unsorted, a
+/// safe no-op). Callers gate on [`starts_import`] first.
+fn parse_import_statement<'src>(
+    tokens: &[Token<'src>],
+    index: usize,
+) -> Option<(ImportKind, bool, TokenBranch<'src>, usize)> {
+    let mut next = index;
+    let export = tokens.get(next) == Some(&Token::Export);
+    if export {
+        next += 1;
+    }
+    let kind = match tokens.get(next) {
+        Some(Token::Import) => ImportKind::Import,
+        Some(Token::Use) => ImportKind::Use,
+        _ => return None,
+    };
+    next += 1;
+    let (branch, after) = parse_token_branch(tokens, next)?;
+    next = after;
+    if tokens.get(next) != Some(&Token::Ctrl(';')) {
+        return None;
+    }
+    Some((kind, export, branch, next + 1))
+}
+
+/// Appends the canonical token form of an import path, brace sets sorted.
+fn emit_branch_tokens<'src>(branch: &TokenBranch<'src>, out: &mut Vec<Token<'src>>) {
+    match branch {
+        TokenBranch::Path(name, child) => {
+            out.push(Token::Ident(name));
+            if let Some(child) = child {
+                out.push(Token::Op("::"));
+                emit_branch_tokens(child, out);
+            }
+        }
+        TokenBranch::Set(branches) => {
+            out.push(Token::Ctrl('{'));
+            let mut order: Vec<&TokenBranch<'src>> = branches.iter().collect();
+            order.sort_by_cached_key(|branch| branch_key(branch));
+            for (position, child) in order.iter().enumerate() {
+                if position > 0 {
+                    out.push(Token::Ctrl(','));
+                }
+                emit_branch_tokens(child, out);
+            }
+            out.push(Token::Ctrl('}'));
+        }
+    }
+}
+
+/// Reorders each contiguous run of top-level (brace-depth-zero) import/use
+/// statements into the canonical order, re-emitting each in a canonical token
+/// form (brace sets sorted) so that a source run and the printer's reordered
+/// reprint reduce to the same token sequence. Statements inside a block
+/// (`fn`/`impl`/`mod` bodies — brace depth ≥ 1) and every non-import token keep
+/// their positions, so the safety net still catches every other reordering.
+// `pub` (doc-hidden) only so the external corpus tripwire in
+// `tests/parse_differential.rs` mirrors the net's import canonicalization through
+// this ONE implementation rather than a divergent copy — the "cannot disagree"
+// guarantee. Not part of the supported API.
+#[doc(hidden)]
+pub fn sort_import_runs<'src>(tokens: &[Token<'src>]) -> Vec<Token<'src>> {
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut depth: i32 = 0;
+    let mut index = 0;
+    while index < tokens.len() {
+        if depth == 0 && starts_import(tokens, index) {
+            // Parse the maximal run of consecutive import statements. Each
+            // statement consumes its own brace set, so depth stays 0 across it.
+            let mut statements: Vec<(ImportSortKey, ImportKind, bool, TokenBranch<'src>)> =
+                Vec::new();
+            let mut cursor = index;
+            let mut parsed_cleanly = true;
+            while cursor < tokens.len() && starts_import(tokens, cursor) {
+                match parse_import_statement(tokens, cursor) {
+                    Some((kind, export, branch, next)) => {
+                        let key = import_sort_key(kind, &branch);
+                        statements.push((key, kind, export, branch));
+                        cursor = next;
+                    }
+                    None => {
+                        parsed_cleanly = false;
+                        break;
+                    }
+                }
+            }
+            if parsed_cleanly && !statements.is_empty() {
+                statements.sort_by(|left, right| left.0.cmp(&right.0));
+                for (_, kind, export, branch) in &statements {
+                    if *export {
+                        result.push(Token::Export);
+                    }
+                    result.push(match kind {
+                        ImportKind::Import => Token::Import,
+                        ImportKind::Use => Token::Use,
+                    });
+                    emit_branch_tokens(branch, &mut result);
+                    result.push(Token::Ctrl(';'));
+                }
+                index = cursor;
+                continue;
+            }
+            // A parse failure (never expected for a cleanly-parsed source) falls
+            // through to the raw passthrough below — a safe no-op.
+        }
+        match &tokens[index] {
+            Token::Ctrl('{') | Token::Ctrl('(') | Token::Ctrl('[') => depth += 1,
+            Token::Ctrl('}') | Token::Ctrl(')') | Token::Ctrl(']') => depth -= 1,
+            _ => {}
+        }
+        result.push(tokens[index].clone());
+        index += 1;
     }
     result
 }
@@ -98,7 +450,7 @@ pub fn format(source: &str) -> String {
         source,
         bailed: false,
     };
-    let prev_end = printer.print_items(&items, 0);
+    let prev_end = printer.print_items(&items, 0, true);
     // Comments after the last item (trailing end-of-file comments).
     printer.flush_comments_before(source.len(), prev_end);
     printer.out.push('\n');
@@ -132,6 +484,23 @@ impl<'src> Printer<'src> {
                 .source
                 .get(from..to)
                 .is_some_and(|gap| gap.bytes().filter(|byte| *byte == b'\n').count() >= 2)
+    }
+
+    /// Whether a standalone (own-line) comment sits between source offsets
+    /// `after` and `before` — a comment preceded within the gap by a newline,
+    /// i.e. not a trailing same-line comment of whatever ends at `after`. Such a
+    /// comment pins an import run: the run breaks there, so imports never
+    /// reorder across it.
+    fn standalone_comment_between(&self, after: usize, before: usize) -> bool {
+        self.comments.iter().any(|(span, _)| {
+            let start = span.into_range().start;
+            after <= start
+                && start < before
+                && self
+                    .source
+                    .get(after..start)
+                    .is_some_and(|gap| gap.contains('\n'))
+        })
     }
 
     /// Starts a fresh line at the current indentation (no leading newline at the
@@ -180,6 +549,17 @@ impl<'src> Printer<'src> {
     /// printed (`foo(); // note`) rather than on its own line. Spacing collapses to
     /// a single space.
     fn flush_trailing_comment(&mut self, after: usize) {
+        if let Some(text) = self.take_trailing_comment(after) {
+            self.out.push(' ');
+            self.out.push_str(text);
+        }
+    }
+
+    /// Consumes and returns the next pending comment when it is a trailing
+    /// same-line comment of whatever ends at `after` (`import x; // note`), so a
+    /// caller reordering the items it belongs to can re-emit it in the new
+    /// place. Returns `None` (consuming nothing) otherwise.
+    fn take_trailing_comment(&mut self, after: usize) -> Option<&'src str> {
         if let Some((span, text)) = self.comments.get(self.cursor).copied() {
             let start = span.into_range().start;
             if start >= after
@@ -188,19 +568,34 @@ impl<'src> Printer<'src> {
                     .get(after..start)
                     .is_some_and(|gap| !gap.contains('\n'))
             {
-                self.out.push(' ');
-                self.out.push_str(text);
                 self.cursor += 1;
+                return Some(text);
             }
         }
+        None
     }
 
     /// Prints a list of items (top level or a block body), interleaving standalone
     /// comments and preserved blank lines. Returns the source offset past the last
-    /// item, for any trailing comments.
-    fn print_items(&mut self, items: &[Spanned<Node<'src>>], start_from: usize) -> usize {
+    /// item, for any trailing comments. When `top_level`, a run of import/use
+    /// statements prints in the canonical order (see the canonical-import-order
+    /// section); block-scoped imports are left as written.
+    fn print_items(
+        &mut self,
+        items: &[Spanned<Node<'src>>],
+        start_from: usize,
+        top_level: bool,
+    ) -> usize {
         let mut prev_end = start_from;
-        for item in items {
+        let mut index = 0;
+        while index < items.len() {
+            if top_level && import_kind_and_branch(&items[index].0).is_some() {
+                let run_end = self.import_run_end(items, index);
+                prev_end = self.print_import_run(&items[index..run_end], prev_end);
+                index = run_end;
+                continue;
+            }
+            let item = &items[index];
             let range = item.1.into_range();
             let after_comments = self.flush_comments_before(range.start, prev_end);
             if self.has_blank_between(after_comments, range.start) {
@@ -213,8 +608,85 @@ impl<'src> Printer<'src> {
             }
             self.flush_trailing_comment(range.end);
             prev_end = range.end;
+            index += 1;
         }
         prev_end
+    }
+
+    /// The exclusive end of the import run starting at `start`: the longest span
+    /// of consecutive import-like items that no standalone comment breaks (a
+    /// blank line does not break it — the block coalesces).
+    fn import_run_end(&self, items: &[Spanned<Node<'src>>], start: usize) -> usize {
+        let mut end = start + 1;
+        while end < items.len() {
+            if import_kind_and_branch(&items[end].0).is_none() {
+                break;
+            }
+            let previous_end = items[end - 1].1.into_range().end;
+            let this_start = items[end].1.into_range().start;
+            if self.standalone_comment_between(previous_end, this_start) {
+                break;
+            }
+            end += 1;
+        }
+        end
+    }
+
+    /// Prints a run of top-level import-like items in canonical order (see
+    /// [`import_sort_key`]): reordered by kind/root/path, brace sets sorted,
+    /// blank lines coalesced into one block. Each item's trailing same-line
+    /// comment travels with it. Returns the source offset past the run.
+    fn print_import_run(&mut self, run: &[Spanned<Node<'src>>], prev_end: usize) -> usize {
+        let first_start = run[0].1.into_range().start;
+        let after_comments = self.flush_comments_before(first_start, prev_end);
+        if self.has_blank_between(after_comments, first_start) {
+            self.blank_line();
+        }
+        // Attach each item's trailing comment (in source order, as the cursor
+        // reaches it) before reordering. A run has no standalone comments within
+        // it (they break it), so every comment here is one item's trailing one.
+        let mut entries: Vec<(ImportSortKey, usize, Option<&'src str>)> =
+            Vec::with_capacity(run.len());
+        for (position, item) in run.iter().enumerate() {
+            let end = item.1.into_range().end;
+            let key = node_import_key(&item.0);
+            let trailing = self.take_trailing_comment(end);
+            entries.push((key, position, trailing));
+        }
+        // A stable canonical sort — duplicate imports keep their source order.
+        entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        for (_, position, trailing) in &entries {
+            self.line();
+            self.print_import_like(&run[*position].0);
+            if let Some(text) = trailing {
+                self.out.push(' ');
+                self.out.push_str(text);
+            }
+        }
+        run.last().unwrap().1.into_range().end
+    }
+
+    /// Prints one top-level import-like item with its brace sets sorted —
+    /// `import`/`use`, or an `export import`/`export use` re-export.
+    /// (Block-scoped imports print through `print_item` without sorting.)
+    fn print_import_like(&mut self, node: &Node<'src>) {
+        match node {
+            Node::Use(branch) => {
+                self.out.push_str("use ");
+                self.print_import_branch(branch, true);
+                self.out.push(';');
+            }
+            Node::Import(branch) => {
+                self.out.push_str("import ");
+                self.print_import_branch(branch, true);
+                self.out.push(';');
+            }
+            Node::Export(inner) => {
+                self.out.push_str("export ");
+                self.print_import_like(&inner.0);
+            }
+            _ => {}
+        }
     }
 
     /// Whether `node`, printed as a statement, takes a terminating `;`. Expression
@@ -342,14 +814,17 @@ impl<'src> Printer<'src> {
                     self.out.push('}');
                 }
             }
+            // A block-scoped `use`/`import` (inside a `fn`/`impl`/`mod` body):
+            // printed as written, brace set unsorted — a deliberate placement.
+            // Top-level import runs print through `print_import_run` instead.
             Node::Use(branch) => {
                 self.out.push_str("use ");
-                self.print_import_branch(branch);
+                self.print_import_branch(branch, false);
                 self.out.push(';');
             }
             Node::Import(branch) => {
                 self.out.push_str("import ");
-                self.print_import_branch(branch);
+                self.print_import_branch(branch, false);
                 self.out.push(';');
             }
             Node::Func(func) => self.print_func(func),
@@ -428,23 +903,29 @@ impl<'src> Printer<'src> {
         }
     }
 
-    /// Prints an import/use path: `a::b::{ c, d }`.
-    fn print_import_branch(&mut self, branch: &ImportBranch<'src>) {
+    /// Prints an import/use path: `a::b::{ c, d }`. When `sort`, a brace set's
+    /// branches print in canonical order (`{ c, d }`) — used for top-level
+    /// imports; block-scoped imports pass `false` to print them as written.
+    fn print_import_branch(&mut self, branch: &ImportBranch<'src>, sort: bool) {
         match branch {
             ImportBranch::Path(name, _, child) => {
                 self.out.push_str(name);
                 if let Some(child) = child {
                     self.out.push_str("::");
-                    self.print_import_branch(child);
+                    self.print_import_branch(child, sort);
                 }
             }
             ImportBranch::Set(branches) => {
                 self.out.push_str("{ ");
-                for (index, child) in branches.iter().enumerate() {
+                let mut order: Vec<&ImportBranch<'src>> = branches.iter().collect();
+                if sort {
+                    order.sort_by_cached_key(|branch| branch_key(&branch_from_ast(branch)));
+                }
+                for (index, child) in order.iter().enumerate() {
                     if index > 0 {
                         self.out.push_str(", ");
                     }
-                    self.print_import_branch(child);
+                    self.print_import_branch(child, sort);
                 }
                 self.out.push_str(" }");
             }
@@ -599,7 +1080,7 @@ impl<'src> Printer<'src> {
         }
         self.out.push('{');
         self.indent += 1;
-        let prev_end = self.print_items(&body.0, range.start + 1);
+        let prev_end = self.print_items(&body.0, range.start + 1, false);
         self.flush_comments_before(range.end, prev_end);
         self.indent -= 1;
         self.line();
@@ -770,7 +1251,7 @@ impl<'src> Printer<'src> {
         }
         self.out.push('{');
         self.indent += 1;
-        let mut prev_end = self.print_items(statements, range.start + 1);
+        let mut prev_end = self.print_items(statements, range.start + 1, false);
         if !matches!(tail.0, Node::Void) {
             let tail_range = tail.1.into_range();
             let after_comments = self.flush_comments_before(tail_range.start, prev_end);
@@ -2048,6 +2529,173 @@ mod bailing_constructs {
         assert_construct(
             "[derive(Json, Debug)]\nstruct Packet {\n\tkind: u8,\n}\n",
             "[derive(Json, Debug)]\nstruct Packet {\n\tkind: u8,\n}\n",
+        );
+    }
+}
+
+#[cfg(test)]
+mod import_sorting {
+    //! `vilan fmt` reorders a file's top-level `import`/`use` statements into the
+    //! canonical order (see the canonical-import-order section): kind (`import`
+    //! before `use`), then root namespace (`std`, dependencies, `pkg`), then the
+    //! full path, with brace sets sorted internally. Runs coalesce across blank
+    //! lines and break at standalone comments; a trailing comment travels with
+    //! its import; block-scoped imports are left as written.
+    use super::{format, normalize};
+    use crate::lexing::tokenize;
+    use crate::token::Token;
+
+    /// The reprint carries the canonical order, is idempotent, and did not
+    /// silently bail (a bail returns the input verbatim, so appended blank
+    /// lines — pure trivia — would survive instead of canonicalizing).
+    fn assert_sorts(source: &str, expected: &str) {
+        assert_eq!(format(source), expected, "unexpected canonical order");
+        assert_eq!(format(expected), expected, "not idempotent");
+        assert_eq!(
+            format(&format!("{source}\n\n")),
+            expected,
+            "silently bailed on {source:?}"
+        );
+    }
+
+    /// The lexer's tokens with spans stripped — a raw stream to feed `normalize`
+    /// directly (unlike the reprint path, this does not sort anything itself).
+    fn raw_tokens(text: &str) -> Vec<Token<'_>> {
+        let (tokens, errors) = tokenize(text);
+        assert!(errors.is_empty(), "did not lex cleanly: {text:?}");
+        tokens.into_iter().map(|(token, _)| token).collect()
+    }
+
+    // A run mixing every root and both kinds sorts to canonical order: imports
+    // before uses, then `std` < dependency (`acme`) < `pkg`, then path.
+    #[test]
+    fn shuffled_std_dependency_pkg_run_sorts_canonically() {
+        assert_sorts(
+            "import pkg::z::thing;\nimport std::io::print;\nimport acme::widget;\n\
+             use std::option::Option;\nimport std::alpha;\nuse acme::helper;\n",
+            "import std::alpha;\nimport std::io::print;\nimport acme::widget;\n\
+             import pkg::z::thing;\nuse std::option::Option;\nuse acme::helper;\n",
+        );
+    }
+
+    // A brace set's inner branch list sorts alphabetically (case-sensitive), the
+    // path is otherwise unchanged.
+    #[test]
+    fn branch_set_inner_list_sorts() {
+        assert_sorts(
+            "import std::x::{ delta, beta, alpha };\n",
+            "import std::x::{ alpha, beta, delta };\n",
+        );
+        // Case-sensitive: capitalized names sort before lowercase (ASCII).
+        assert_sorts(
+            "import std::option::Option::{ self, Some, None };\n",
+            "import std::option::Option::{ None, Some, self };\n",
+        );
+    }
+
+    // A `use` always sorts after every `import`, whatever the paths — the kind
+    // is the primary key.
+    #[test]
+    fn use_sorts_after_import() {
+        assert_sorts(
+            "use std::a;\nimport std::z;\n",
+            "import std::z;\nuse std::a;\n",
+        );
+    }
+
+    // The `export` re-export prefix does not change grouping: an `export import`
+    // sorts as a plain import (by root and path), keeping its prefix. A
+    // `std`-rooted plain import still precedes `pkg` re-exports.
+    #[test]
+    fn export_reexports_sort_by_the_same_key() {
+        assert_sorts(
+            "export import pkg::string::str;\nexport import pkg::io::print;\n\
+             import std::option::Option;\nexport import pkg::number::{ u32, BigInt, i8 };\n",
+            "import std::option::Option;\nexport import pkg::io::print;\n\
+             export import pkg::number::{ BigInt, i8, u32 };\nexport import pkg::string::str;\n",
+        );
+    }
+
+    // A block-scoped import (inside a `fn` body — backlog H2) is a deliberate
+    // placement: neither its run order nor its brace set is touched, even when
+    // both are non-canonical. Byte-identical output, and the net did not trip.
+    #[test]
+    fn block_scoped_imports_are_untouched() {
+        let source = "fun f() {\n\tuse zeta::last;\n\timport std::b::{ y, x };\n\
+                      \timport std::a;\n\tb::go();\n}\n";
+        assert_eq!(
+            format(source),
+            source,
+            "block-scoped imports were reordered"
+        );
+    }
+
+    // A standalone (own-line) comment pins the run: imports do not reorder
+    // across it, so the two sides sort independently and the comment stays put.
+    // A blank line, by contrast, coalesces (the run reprints as one block).
+    #[test]
+    fn standalone_comment_pins_the_run_blank_line_coalesces() {
+        assert_sorts(
+            "import std::b;\n\nimport std::c;\n// pin\nimport std::z;\nimport std::m;\n",
+            "import std::b;\nimport std::c;\n// pin\nimport std::m;\nimport std::z;\n",
+        );
+    }
+
+    // A trailing same-line comment travels with its import to the new position.
+    #[test]
+    fn trailing_comment_travels_with_its_import() {
+        assert_sorts(
+            "import std::c; // the c note\nimport std::a;\n",
+            "import std::a;\nimport std::c; // the c note\n",
+        );
+    }
+
+    // Formatting an already-canonical run changes nothing (no spurious churn) —
+    // the property the whole corpus fallout depends on.
+    #[test]
+    fn already_canonical_run_is_a_fixed_point() {
+        let canonical = "import std::a;\nimport std::b;\nuse dep::x;\n\nfun main() {}\n";
+        assert_eq!(format(canonical), canonical);
+    }
+
+    // The safety net forgives import-run order (and brace-set order) — on BOTH
+    // sides — so the printer's reorder passes. This is what makes the reprint
+    // land instead of bailing.
+    #[test]
+    fn normalize_forgives_import_run_and_branch_order() {
+        assert_eq!(
+            normalize(raw_tokens("import std::b;\nimport std::a;\n")),
+            normalize(raw_tokens("import std::a;\nimport std::b;\n")),
+            "normalize must canonicalize top-level import-run order"
+        );
+        assert_eq!(
+            normalize(raw_tokens("import std::x::{ b, a };\n")),
+            normalize(raw_tokens("import std::x::{ a, b };\n")),
+            "normalize must canonicalize brace-set order"
+        );
+    }
+
+    // ...but nothing else. Swapping two top-level functions stays a detectable
+    // difference — the net did not go order-insensitive beyond import runs, so
+    // it still catches a genuine reprint reordering bug.
+    #[test]
+    fn net_still_catches_a_non_import_reordering() {
+        assert_ne!(
+            normalize(raw_tokens("fun a() {}\nfun b() {}\n")),
+            normalize(raw_tokens("fun b() {}\nfun a() {}\n")),
+            "the net went order-insensitive beyond import runs"
+        );
+    }
+
+    // A block-scoped import run (brace depth ≥ 1) is likewise NOT forgiven by
+    // the net: the two orders stay distinct, so the net still polices the
+    // placements the printer deliberately never reorders.
+    #[test]
+    fn net_does_not_forgive_block_scoped_import_order() {
+        assert_ne!(
+            normalize(raw_tokens("fun f() {\nuse b::y;\nuse a::x;\n}\n")),
+            normalize(raw_tokens("fun f() {\nuse a::x;\nuse b::y;\n}\n")),
+            "normalize must not reorder block-scoped imports"
         );
     }
 }

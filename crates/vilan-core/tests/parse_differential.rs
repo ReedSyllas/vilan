@@ -323,6 +323,15 @@ fn formatter_output_token_matches_input_over_the_corpus() {
     // stream must match the input's (unchanged output matches trivially; a
     // successful reprint matches by the formatter's contract). This catches any
     // token-drifting output that slips the formatter's internal safety net.
+    //
+    // The formatter canonicalizes top-level import-run order, so a reprint's
+    // tokens may legitimately differ from the input's by that reorder alone. We
+    // check order-sensitively FIRST (the strong, independent test that most files
+    // pass trivially); only when the raw streams differ do we fall back to the
+    // net's own import-run canonicalization (`formatter::sort_import_runs`, the
+    // shared implementation) to confirm the difference is import order and
+    // nothing else. That fallback leaves non-import tokens in place, so a genuine
+    // non-import reordering still diverges and still fires this tripwire.
     let files = corpus_files();
     assert!(
         files.len() > 60,
@@ -338,9 +347,18 @@ fn formatter_output_token_matches_input_over_the_corpus() {
         if output == source {
             continue; // unchanged: trivially token-equal
         }
-        let input_tokens = normalized_tokens(&source);
-        let output_tokens = normalized_tokens(&output);
-        if input_tokens != output_tokens {
+        let (Some(input_tokens), Some(output_tokens)) =
+            (normalized_tokens(&source), normalized_tokens(&output))
+        else {
+            mismatches.push(format!("{} (did not lex)", path.display()));
+            continue;
+        };
+        if input_tokens == output_tokens {
+            continue; // token-equal modulo trailing commas — no import reorder
+        }
+        // The streams differ: the only legitimate cause is import-run reordering.
+        if formatter::sort_import_runs(&input_tokens) != formatter::sort_import_runs(&output_tokens)
+        {
             mismatches.push(format!("{}", path.display()));
         }
     }

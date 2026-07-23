@@ -8,9 +8,9 @@
 // `fetch`/`send` and `Response::text` are async (the host returns promises), so calls
 // to them are implicitly awaited.
 
-import pkg::bytes::{ Bytes, ByteBuffer, bytes_of_buffer };
-import pkg::option::Option::{ self, Some, None };
-import pkg::task::{ ambient_signal, CancelSignal };
+import pkg::bytes::{ ByteBuffer, Bytes, bytes_of_buffer };
+import pkg::option::Option::{ None, Some, self };
+import pkg::task::{ CancelSignal, ambient_signal };
 
 external struct Response;
 

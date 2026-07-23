@@ -7,11 +7,11 @@
 // a `from_json` that rebuilds the struct from that object. The scalar impls bind
 // to the host `JSON.stringify`/`JSON.parse` and the host coercions.
 
-import pkg::option::Option::{ self, Some, None };
-import pkg::result::Result::{ self, Ok, Err };
-import pkg::shared::Shared;
 import pkg::bytes::decode_utf8;
-import pkg::wire::{ Wire, Serialize, Deserialize, Serializer, Deserializer, Codec, Frame };
+import pkg::option::Option::{ None, Some, self };
+import pkg::result::Result::{ Err, Ok, self };
+import pkg::shared::Shared;
+import pkg::wire::{ Codec, Deserialize, Deserializer, Frame, Serialize, Serializer, Wire };
 
 // --- Serialization (`to_json`) ------------------------------------------------
 

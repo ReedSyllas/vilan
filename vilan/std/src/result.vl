@@ -1,15 +1,15 @@
-import pkg::io::panic;
-import pkg::option::Option::{ self, Some, None };
 import pkg::compare::PartialEq;
 import pkg::default::Default;
+import pkg::io::panic;
 import pkg::operators::{ Lift, Try, Verdict };
+import pkg::option::Option::{ None, Some, self };
 
 enum Result<T, E> {
 	Ok(T),
 	Err(E),
 }
 
-use Result::{ Ok, Err };
+use Result::{ Err, Ok };
 
 // `!` on a `Result`: `Ok` is good; `Err` is bad, its residual the error itself,
 // returned as-is (v1: the enclosing function's error type must match —

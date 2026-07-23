@@ -10,7 +10,7 @@
 // global, reached only behind an `hmr_active()` guard, so a shim-less build never
 // evaluates one.
 
-import pkg::option::Option::{ self, Some, None };
+import pkg::option::Option::{ None, Some, self };
 
 /// True only while a dev shim is present — i.e. inside a `run --watch` browser
 /// round. Guards every other hook so they are inert without a shim.

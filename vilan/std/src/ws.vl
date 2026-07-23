@@ -9,8 +9,8 @@
 // ping/pong, close. Lengths use the 7/16/64-bit ladder; a 64-bit length above
 // 2^31-1 is treated as a protocol violation (nothing that big is a frame).
 
+import pkg::bytes::{ Bytes, decode_utf8, encode_utf8 };
 import pkg::shared::Shared;
-import pkg::bytes::{ Bytes, encode_utf8, decode_utf8 };
 
 // --- Encoding (server → client: FIN set, unmasked) ---------------------------
 

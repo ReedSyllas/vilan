@@ -8,8 +8,8 @@
 // through typed column accessors. No ORM ambitions — grow from real call
 // sites.
 
-import pkg::option::Option::{ self, Some, None };
 import pkg::drop::Drop;
+import pkg::option::Option::{ None, Some, self };
 
 /// An open database handle (`node:sqlite`'s DatabaseSync — synchronous, the
 /// right shape for a single-threaded server loop over local storage). A

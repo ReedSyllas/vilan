@@ -12,8 +12,8 @@
 // This is the former `Map` intrinsic: `new` is `new Map()`, `insert` is `.set`,
 // `get` returns an `Option<V>` (a copy), and `keys`/`values` are cloned `List`
 // snapshots in insertion order.
-import pkg::option::Option;
 import pkg::hash::Hash;
+import pkg::option::Option;
 
 external struct NativeMap<V>;
 

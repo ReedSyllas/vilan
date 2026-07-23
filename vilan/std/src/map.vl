@@ -4,9 +4,9 @@
 // native map; the original key is stored alongside the value so `keys()`
 // returns real `K`s, and mutating the original afterward can't desync the map
 // (value semantics snapshot it on insert).
-import pkg::option::Option::{ self, Some, None };
-import pkg::hash::{ Hashable, Hash };
+import pkg::hash::{ Hash, Hashable };
 import pkg::native_map::NativeMap;
+import pkg::option::Option::{ None, Some, self };
 
 struct Map<K: Hashable, V> {
 	table: NativeMap<(K, V)>,
