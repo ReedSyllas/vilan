@@ -1675,6 +1675,19 @@ impl<'src> Transformer<'src> {
                 match subject {
                     Expr::Local(target_id) => {
                         let target_id = *target_id;
+                        // Calling a named binding REFERENCES it, exactly as
+                        // reading it does (the `Expr::Local` value arm above):
+                        // the tree-shake keeps a module-level binding only when
+                        // `referenced_globals` holds it, and a call site emitted
+                        // as `name(..)` needs the `name` to survive. This arm
+                        // reads the subject directly instead of walking it, so
+                        // it must record the reference itself — without this, a
+                        // module closure reached ONLY by call (`f()`) is dropped
+                        // while its call site remains (B31). Non-binding targets
+                        // (intrinsics, externs, functions, variants) are filtered
+                        // out at the consumption sites, so this is harmless for
+                        // them, matching the value arm's unconditional insert.
+                        self.referenced_globals.insert(target_id);
                         // An external std intrinsic lowers to native JS or a
                         // runtime helper.
                         if let Some(intrinsic) = self.program.intrinsics.get(&target_id).copied() {

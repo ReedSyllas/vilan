@@ -24227,13 +24227,17 @@ fn a_self_defaulted_generic_position_with_a_wrong_type_should_be_rejected() {
     );
 }
 
+/// B31 (found by A13 S2a's probes, HMR-independent; fixed): a module-level
+/// closure binding referenced *only* by CALL (`f()`) used to be dropped from
+/// the emitted globals while the call site remained — the bundle threw
+/// `f is not defined` at runtime. Root cause was the assembly-time tree-shake,
+/// not reachability: the call-graph walk DID reach the binding (its call
+/// subject is a recorded `global_reference`), but the transformer's `Expr::Call`
+/// arm reads the `Expr::Local` callee subject directly and emits `f(..)` by
+/// name without recording it in `referenced_globals` — so assembly then dropped
+/// the declaration. The fix records the reference in that arm, mirroring the
+/// value arm's unconditional insert.
 #[test]
-#[ignore = "pre-existing tree-shake miscompile (found by A13 S2a's probes, \
-            HMR-independent): a module-level closure binding referenced only \
-            by CALL is dropped from the emitted globals, yet the call site \
-            remains — the bundle throws `f is not defined` at runtime. The \
-            reachability walk that keeps module bindings does not count a \
-            bare call through a closure-typed binding as a reference."]
 fn a_module_level_closure_binding_referenced_only_by_call_still_emits_its_declaration() {
     assert_compiles_and_runs(
         r#"
@@ -24246,6 +24250,206 @@ fn a_module_level_closure_binding_referenced_only_by_call_still_emits_its_declar
         }
         "#,
         "0\n",
+    );
+}
+
+/// B31 edge — same root cause reached through another binding's INITIALIZER: `a`
+/// is referenced only by the call inside `b`'s initializer (`let b = a()`).
+/// Emitting `b`'s init runs through the same `Expr::Call` arm, so `a` must be
+/// recorded and kept, else `b = a()` throws `a is not defined` at load.
+#[test]
+fn a_module_binding_called_only_inside_another_bindings_initializer_survives() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        let a = || 7;
+        let b = a();
+
+        fun main() {
+            print(i"{b}");
+        }
+        "#,
+        "7\n",
+    );
+}
+
+/// B31 edge — TRANSITIVE reachability: `main` calls `b`, whose closure body
+/// calls `a`. `b` must be kept (main's call records it) AND `a` must be kept
+/// (b's body call records it). Before the fix both were dropped (`b` first,
+/// because main's call didn't record it, so its body was never even emitted).
+#[test]
+fn transitive_module_closure_calls_are_all_kept() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        let a = || 5;
+        let b = || a();
+
+        fun main() {
+            print(i"{b()}");
+        }
+        "#,
+        "5\n",
+    );
+}
+
+/// B31 edge — a closure binding declared in a nested `mod`, referenced only by
+/// call (`inner::f()`). Module-level bindings include `mod`-scoped `let`s, so
+/// the same tree-shake applies; before the fix the declaration was dropped.
+#[test]
+fn a_nested_mod_closure_binding_referenced_only_by_call_survives() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        mod inner {
+            export let f = || 3;
+        }
+
+        fun main() {
+            print(i"{inner::f()}");
+        }
+        "#,
+        "3\n",
+    );
+}
+
+/// B31 edge — a module closure whose CALL result is postfixed with the `?`
+/// try/lift operator (`g(20)? + g(22)?` in a lift region). The postfix wraps the
+/// call, but the callee is still emitted through the same `Expr::Call` arm, so
+/// the fix keeps `g`; before it, the emitted `g(..)` threw `g is not defined`.
+#[test]
+fn a_module_closure_called_through_a_try_region_postfix_survives() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+
+        let g = |n: i32| Some(n);
+
+        fun main() {
+            print((g(20)? + g(22)?).unwrap_or(0));
+        }
+        "#,
+        "42\n",
+    );
+}
+
+/// B31 edge — a module closure whose CALL result is postfixed with the `!`
+/// force operator, inside a function that returns `Option`. Same callee-emission
+/// path as the try postfix; the fix keeps `g`.
+#[test]
+fn a_module_closure_called_through_a_force_postfix_survives() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+
+        let g = |n: i32| Some(n);
+
+        fun pick(): Option<i32> {
+            let x = g(20)!;
+            Some(x)
+        }
+
+        fun main() {
+            print(pick().unwrap_or(0));
+        }
+        "#,
+        "20\n",
+    );
+}
+
+/// B31 edge — a module closure called at the head of a `?.` try-and-lift CHAIN
+/// (`find(true)?.title`). The lift continuation is a different codegen path from
+/// the bare-`?` region above, but the callee `find` is emitted through the same
+/// `Expr::Call` arm, so the fix keeps it.
+#[test]
+fn a_module_closure_called_at_the_head_of_a_try_chain_survives() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+        import std::option::Option::{ self, Some, None };
+
+        struct Book { title: str }
+
+        let find = |hit: bool| if hit { Some(Book { title = "dune" }) } else { None };
+
+        fun main() {
+            print((find(true)?.title).unwrap_or("none"));
+        }
+        "#,
+        "dune\n",
+    );
+}
+
+/// B31 regression — a module closure passed as a VALUE argument already worked
+/// (an argument is walked through `walk_entity`, whose `Expr::Local` value arm
+/// records the reference); pinned so the general fix doesn't quietly change the
+/// already-good path.
+#[test]
+fn a_module_closure_passed_as_an_argument_survives() {
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        fun apply(g: || i32): i32 {
+            g()
+        }
+
+        let f = || 9;
+
+        fun main() {
+            print(i"{apply(f)}");
+        }
+        "#,
+        "9\n",
+    );
+}
+
+/// B31 precision guard — the general fix must NOT keep a genuinely-dead binding.
+/// `unused_leaf` is never referenced, so its declaration must still be
+/// tree-shaken away; `kept_leaf` (called) is retained. The `kept_leaf` assertion
+/// makes the check self-validating: module-level names are emitted verbatim, so
+/// if a future rename pass mangled them the positive check would fail rather
+/// than let the negative one pass vacuously.
+#[test]
+fn a_genuinely_dead_module_closure_is_still_tree_shaken() {
+    let js = compile(
+        r#"
+        import std::print;
+
+        let kept_leaf = || 1;
+        let unused_leaf = || 2;
+
+        fun main() {
+            print(i"{kept_leaf()}");
+        }
+        "#,
+    )
+    .expect("clean compile");
+    assert!(
+        js.contains("kept_leaf"),
+        "the called binding must be emitted; got:\n{js}"
+    );
+    assert!(
+        !js.contains("unused_leaf"),
+        "the dead binding must be tree-shaken; got:\n{js}"
+    );
+    assert_compiles_and_runs(
+        r#"
+        import std::print;
+
+        let kept_leaf = || 1;
+        let unused_leaf = || 2;
+
+        fun main() {
+            print(i"{kept_leaf()}");
+        }
+        "#,
+        "1\n",
     );
 }
 
