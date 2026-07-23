@@ -4042,6 +4042,304 @@ pub(crate) mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // --- WO-5: LSP features survive recoverable errors ---------------------
+    //
+    // Since the handwritten frontend cut over (H6 S5), `parsing::parse` salvages
+    // the parsed prefix of a broken file and `analyze_source` runs the analyzer
+    // on that partial tree, so `Document::program` is `Some` for everything that
+    // parsed — a syntax error no longer blanks the file. These pins prove every
+    // position-based feature keeps serving the salvaged program, per input class.
+    //
+    // A mid-file error inside a `{}` body: the delimiter recovery closes the
+    // broken region and parsing continues, so the items above AND below the
+    // error all survive. `let x = ;` is the syntax error; nothing else is wrong.
+    const RECOVERABLE_INBODY: &str = "struct Widget { size: i32 }\n\nfun above(w: Widget): i32 {\n\tw.size\n}\n\nfun broken() {\n\tlet x = ;\n}\n\nfun below(): i32 {\n\thelper()\n}\n\nfun helper(): i32 {\n\t7\n}\n";
+    // A stray token at file scope: the top-level statement loop declines and
+    // stops, so only the PREFIX (everything before the token) is salvaged; the
+    // tail after it is not recovered. This is the other salvage regime.
+    const RECOVERABLE_TOPLEVEL: &str =
+        "fun above(): i32 {\n\t42\n}\n\n$ garbage here $\n\nfun below(): i32 {\n\t7\n}\n";
+    // A clean parse with an analyzer error in the middle (`no_such_name` is
+    // unresolved): the whole program is present, so every feature works on both
+    // sides of the erroring expression.
+    const ANALYZER_ONLY: &str = "struct Point { x: i32 }\n\nfun before(): i32 {\n\tlet p = Point { x = 1 };\n\tp.x\n}\n\nfun uses_undefined(): i32 {\n\tno_such_name()\n}\n\nfun after(): i32 {\n\tlet q = Point { x = 2 };\n\tq.x\n}\n";
+
+    fn analyze_text(text: &str) -> Document {
+        Document::analyze(text, &std_root(), Path::new("test.vl"))
+    }
+
+    /// The byte offset of `needle` in `text`, plus `delta` (to land inside the
+    /// matched identifier). Panics if the needle is absent, so a source edit that
+    /// invalidates a pin fails loudly rather than silently probing offset 0.
+    fn offset_at(text: &str, needle: &str, delta: usize) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not found in the pin source"))
+            + delta
+    }
+
+    // A syntax error mid-file leaves `program` present (salvage) and the
+    // diagnostics non-empty — the precondition every pin below relies on. Guards
+    // against a source that accidentally became clean (a vacuous pass).
+    #[test]
+    fn a_recoverable_source_still_yields_a_program() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        assert!(
+            document.program.is_some(),
+            "the salvaged tree must still analyze to a program",
+        );
+        assert!(
+            !document.diagnostics.is_empty(),
+            "the syntax error must be reported",
+        );
+    }
+
+    // Hover on a function name ABOVE a mid-file syntax error shows its full
+    // signature (the salvaged program still carries the declaration).
+    #[test]
+    fn hover_above_a_syntax_error_shows_the_signature() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let hover = document
+            .hover(offset_at(RECOVERABLE_INBODY, "fun above", 4))
+            .expect("hovering `above` above the error");
+        assert!(hover.contains("fun above(w: Widget): i32"), "{hover}",);
+    }
+
+    // Hover on a TYPE reference above the error resolves to its declaration —
+    // the type_references surface survives salvage.
+    #[test]
+    fn hover_on_a_type_above_a_syntax_error_shows_its_declaration() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let hover = document
+            .hover(offset_at(RECOVERABLE_INBODY, "w: Widget", 3))
+            .expect("hovering the `Widget` annotation above the error");
+        assert!(hover.contains("struct Widget"), "{hover}");
+    }
+
+    // Go-to-definition from a use-site above the error jumps to the binding it
+    // resolves to (here the parameter `w`).
+    #[test]
+    fn goto_definition_above_a_syntax_error_resolves() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let (source, span) = document
+            .definition(offset_at(RECOVERABLE_INBODY, "w.size", 0))
+            .expect("go-to-def on `w` above the error");
+        assert_eq!(source, SourceId(0));
+        assert_eq!(
+            &RECOVERABLE_INBODY[span.into_range()],
+            "w",
+            "the jump target is the parameter's name",
+        );
+    }
+
+    // Scope completion inside a function above the error offers the scope
+    // entities: the local parameter (`w`) and a top-level sibling (`helper`),
+    // proving both the local and the global scope survive salvage.
+    #[test]
+    fn completion_above_a_syntax_error_offers_scope_entities() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let labels: Vec<String> = document
+            .completion(offset_at(RECOVERABLE_INBODY, "w.size", 0))
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect();
+        assert!(labels.contains(&"w".to_string()), "local param: {labels:?}");
+        assert!(
+            labels.contains(&"helper".to_string()),
+            "top-level sibling: {labels:?}",
+        );
+    }
+
+    // Member completion on a receiver above the error lists the receiver's
+    // fields — the receiver's type still resolves in the salvaged program.
+    #[test]
+    fn member_completion_above_a_syntax_error_lists_fields() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let labels: Vec<String> = document
+            .completion(offset_at(RECOVERABLE_INBODY, "w.size", 2))
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect();
+        assert!(labels.contains(&"size".to_string()), "{labels:?}");
+    }
+
+    // Semantic tokens cover the salvaged region (non-empty) and the pass never
+    // panics on a partial program.
+    #[test]
+    fn semantic_tokens_cover_a_salvaged_region() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        assert!(
+            !document.semantic_tokens().is_empty(),
+            "the salvaged declarations must still tokenize",
+        );
+    }
+
+    // Document symbols list every salvaged item — the outline survives a mid-file
+    // error (an in-body error recovers, so the tail items are here too).
+    #[test]
+    fn document_symbols_list_the_salvaged_items() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let names: Vec<String> = document
+            .document_symbols()
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect();
+        for expected in ["Widget", "above", "broken", "below", "helper"] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing `{expected}` from the outline: {names:?}",
+            );
+        }
+    }
+
+    // The reality of the in-body regime: an error inside a `{}` body is
+    // delimiter-recovered, so the items AFTER it survive too — hover and
+    // go-to-def work on a function declared below the broken one.
+    #[test]
+    fn an_in_body_error_keeps_the_items_after_it() {
+        let document = analyze_text(RECOVERABLE_INBODY);
+        let hover = document
+            .hover(offset_at(RECOVERABLE_INBODY, "fun below", 4))
+            .expect("hovering `below`, declared after the error");
+        assert!(hover.contains("fun below(): i32"), "{hover}");
+        let (source, span) = document
+            .definition(offset_at(RECOVERABLE_INBODY, "helper()", 0))
+            .expect("go-to-def on `helper`, called and declared after the error");
+        assert_eq!(source, SourceId(0));
+        assert_eq!(&RECOVERABLE_INBODY[span.into_range()], "helper");
+    }
+
+    // The reality of the top-level regime: a stray token at file scope stops the
+    // statement loop, so only the prefix is salvaged. `above` (before) works;
+    // `below` (after) is not in the program at all. Contrast the in-body case.
+    #[test]
+    fn a_top_level_error_salvages_the_prefix_and_drops_the_tail() {
+        let document = analyze_text(RECOVERABLE_TOPLEVEL);
+        assert!(document.program.is_some());
+        assert!(!document.diagnostics.is_empty());
+        let names: Vec<String> = document
+            .document_symbols()
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect();
+        assert!(
+            names.contains(&"above".to_string()),
+            "prefix kept: {names:?}"
+        );
+        assert!(
+            !names.contains(&"below".to_string()),
+            "the tail after a top-level stray token is not recovered: {names:?}",
+        );
+        assert!(
+            document
+                .hover(offset_at(RECOVERABLE_TOPLEVEL, "fun above", 4))
+                .is_some_and(|hover| hover.contains("fun above(): i32")),
+            "the prefix item still hovers",
+        );
+        assert_eq!(
+            document.hover(offset_at(RECOVERABLE_TOPLEVEL, "fun below", 4)),
+            None,
+            "the dropped tail item has nothing to hover",
+        );
+    }
+
+    // A clean parse with an analyzer error in the middle: hover and go-to-def
+    // work on BOTH sides of the erroring expression (the whole program is
+    // present — a diagnostic never blanks a feature).
+    #[test]
+    fn hover_and_goto_work_on_both_sides_of_an_analyzer_error() {
+        let document = analyze_text(ANALYZER_ONLY);
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.msg.contains("cannot find 'no_such_name'")),
+            "the analyzer error must be present: {:?}",
+            document.diagnostics,
+        );
+        // Before the error.
+        assert!(
+            document
+                .hover(offset_at(ANALYZER_ONLY, "Point { x = 1 }", 0))
+                .is_some_and(|hover| hover.contains("struct Point")),
+            "hover before the error",
+        );
+        let (source, span) = document
+            .definition(offset_at(ANALYZER_ONLY, "Point { x = 1 }", 0))
+            .expect("go-to-def before the error");
+        assert_eq!(
+            (source, &ANALYZER_ONLY[span.into_range()]),
+            (SourceId(0), "Point")
+        );
+        // After the error.
+        assert!(
+            document
+                .hover(offset_at(ANALYZER_ONLY, "Point { x = 2 }", 0))
+                .is_some_and(|hover| hover.contains("struct Point")),
+            "hover after the error",
+        );
+        let (source, span) = document
+            .definition(offset_at(ANALYZER_ONLY, "Point { x = 2 }", 0))
+            .expect("go-to-def after the error");
+        assert_eq!(
+            (source, &ANALYZER_ONLY[span.into_range()]),
+            (SourceId(0), "Point")
+        );
+        // The full outline and tokens are present (nothing degraded).
+        assert_eq!(document.document_symbols().len(), 4);
+        assert!(!document.semantic_tokens().is_empty());
+    }
+
+    // The graceful-empty case: a hopeless file panics nowhere and every feature
+    // returns cleanly. The test completing IS the no-panic proof; the empty
+    // assertions pin that a program with no salvageable items answers with
+    // nothing rather than garbage.
+    #[test]
+    fn a_hopeless_file_answers_every_feature_without_panicking() {
+        for source in [
+            "@@@@ !!!! $$$$ %%%%\n",
+            "",
+            "))))]]]]}}}}\n",
+            "12 34 fun fun",
+        ] {
+            let document = analyze_text(source);
+            // Position queries at several offsets, all in bounds.
+            for offset in [0, source.len() / 2, source.len()] {
+                let _ = document.hover(offset);
+                let _ = document.definition(offset);
+                let _ = document.completion(offset);
+                let _ = document.references(offset);
+            }
+            assert!(
+                document.document_symbols().is_empty(),
+                "no items to outline in {source:?}",
+            );
+            assert!(
+                document.semantic_tokens().is_empty(),
+                "no tokens in {source:?}",
+            );
+            assert!(document.inlay_hints().is_empty(), "no hints in {source:?}");
+            assert!(
+                document.organize_import_edits().is_empty(),
+                "no imports to organize in {source:?}",
+            );
+        }
+    }
+
+    // Formatting a source that does not parse cleanly degrades to no edit: the
+    // formatter's net requires a clean parse, so `format` returns the input
+    // verbatim, and the LSP `formatting` handler turns `formatted == source`
+    // into `Ok(None)` — no edit, no error popup.
+    #[test]
+    fn a_broken_source_formats_to_no_edit() {
+        for source in [RECOVERABLE_INBODY, RECOVERABLE_TOPLEVEL] {
+            assert_eq!(
+                vilan_core::formatter::format(source),
+                source,
+                "a non-clean source must format to itself (the handler then emits no edit)",
+            );
+        }
+    }
 }
 
 #[cfg(test)]
