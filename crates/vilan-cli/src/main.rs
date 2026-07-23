@@ -9,6 +9,7 @@ use std::{
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use clap::{Parser as _, Subcommand};
 mod hmr;
+mod paint;
 mod upgrade;
 
 use vilan_core::analyzer::{analyze, check_library_contract};
@@ -254,7 +255,8 @@ fn run_once(file: Option<PathBuf>, args: &[String], entry: Option<&str>) -> Exit
                 run_single(&unit, args)
             } else {
                 eprintln!(
-                    "error: `vilan run` executes with Node, but the package platform is `{}`",
+                    "{} `vilan run` executes with Node, but the package platform is `{}`",
+                    paint::error_prefix(),
                     platform.name()
                 );
                 ExitCode::FAILURE
@@ -320,7 +322,7 @@ fn scan_vl(roots: &[PathBuf]) -> BTreeMap<PathBuf, SystemTime> {
 /// also stops any `run --watch` child).
 fn watch_loop(roots: &[PathBuf], mut action: impl FnMut()) -> ExitCode {
     if roots.iter().all(|root| !root.exists()) {
-        eprintln!("error: nothing to watch (no such path)");
+        eprintln!("{} nothing to watch (no such path)", paint::error_prefix());
         return ExitCode::FAILURE;
     }
     let watched = roots
@@ -328,7 +330,13 @@ fn watch_loop(roots: &[PathBuf], mut action: impl FnMut()) -> ExitCode {
         .map(|root| root.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    eprintln!("[watch] watching {watched} for `.vl` changes — Ctrl-C to stop");
+    eprintln!(
+        "{}",
+        paint::err(
+            paint::Style::CYAN,
+            &format!("[watch] watching {watched} for `.vl` changes — Ctrl-C to stop")
+        )
+    );
     action();
     let mut snapshot = scan_vl(roots);
     loop {
@@ -336,7 +344,10 @@ fn watch_loop(roots: &[PathBuf], mut action: impl FnMut()) -> ExitCode {
         let next = scan_vl(roots);
         if next != snapshot {
             snapshot = next;
-            eprintln!("\n[watch] change detected — re-running");
+            eprintln!(
+                "\n{}",
+                paint::err(paint::Style::CYAN, "[watch] change detected — re-running")
+            );
             action();
         }
     }
@@ -429,13 +440,20 @@ fn activate_hmr(file: &Option<PathBuf>, port: u16) -> Option<hmr::DevChannel> {
     }
     match hmr::DevChannel::bind(port, root.join("dist")) {
         Ok(channel) => {
-            println!("hmr: dev channel on 127.0.0.1:{}", channel.port());
+            println!(
+                "{}",
+                paint::out(
+                    paint::Style::CYAN,
+                    &format!("hmr: dev channel on 127.0.0.1:{}", channel.port())
+                )
+            );
             Some(channel)
         }
         Err(error) => {
             eprintln!(
-                "warning: HMR dev channel could not bind 127.0.0.1:{port} ({error}); \
-                 continuing to watch without HMR"
+                "{} HMR dev channel could not bind 127.0.0.1:{port} ({error}); \
+                 continuing to watch without HMR",
+                paint::warning_prefix()
             );
             None
         }
@@ -461,7 +479,10 @@ fn hmr_round(
         // The project stopped being an HMR-eligible workspace (a manifest edit,
         // say). Report it as a failed round: overlay + keep the last good build.
         Ok(_) | Err(_) => {
-            eprintln!("error: the HMR project is no longer a runnable workspace");
+            eprintln!(
+                "{} the HMR project is no longer a runnable workspace",
+                paint::error_prefix()
+            );
             state.failed = true;
             channel.push("error", Some("build failed — see the terminal"));
             return child;
@@ -519,7 +540,13 @@ fn hmr_round(
                 .iter()
                 .find(|leg| leg.name == unit.name)
                 .expect("skippable_legs only skips a leg with a previous artifact");
-            println!("hmr: skipped {} (sources unchanged)", unit.name);
+            println!(
+                "{}",
+                paint::out(
+                    paint::Style::CYAN,
+                    &format!("hmr: skipped {} (sources unchanged)", unit.name)
+                )
+            );
             next.push(prior.clone());
             continue;
         }
@@ -591,7 +618,11 @@ fn hmr_round(
     // and CSS sidecars are written verbatim.
     let dist = root.join("dist");
     if let Err(error) = fs::create_dir_all(&dist) {
-        eprintln!("error: cannot create {}: {error}", dist.display());
+        eprintln!(
+            "{} cannot create {}: {error}",
+            paint::error_prefix(),
+            dist.display()
+        );
         state.failed = true;
         channel.push("error", Some("build failed — see the terminal"));
         return child;
@@ -604,19 +635,31 @@ fn hmr_round(
             leg.bundle.clone()
         };
         if let Err(error) = fs::write(&bundle_path, contents) {
-            eprintln!("error: cannot write {}: {error}", bundle_path.display());
+            eprintln!(
+                "{} cannot write {}: {error}",
+                paint::error_prefix(),
+                bundle_path.display()
+            );
         }
         if let Some(css) = &leg.css {
             let css_path = dist.join(format!("{}.css", leg.name));
             if let Err(error) = fs::write(&css_path, css) {
-                eprintln!("error: cannot write {}: {error}", css_path.display());
+                eprintln!(
+                    "{} cannot write {}: {error}",
+                    paint::error_prefix(),
+                    css_path.display()
+                );
             }
         }
     }
     for (name, kind, content) in &other_assets {
         let asset_path = dist.join(format!("{name}.{kind}"));
         if let Err(error) = fs::write(&asset_path, content) {
-            eprintln!("error: cannot write {}: {error}", asset_path.display());
+            eprintln!(
+                "{} cannot write {}: {error}",
+                paint::error_prefix(),
+                asset_path.display()
+            );
         }
     }
 
@@ -642,7 +685,7 @@ fn hmr_round(
                 match spawn_node(&script, args, Some(&root)) {
                     Ok(spawned) => Some(spawned),
                     Err(error) => {
-                        eprintln!("error: failed to launch `node`: {error}");
+                        eprintln!("{} failed to launch `node`: {error}", paint::error_prefix());
                         None
                     }
                 }
@@ -652,7 +695,7 @@ fn hmr_round(
             // 2+ node legs and no `--entry` (or a bad `--entry`): report it (once,
             // on the first round's spawn attempt) and serve the browser anyway.
             Err(message) => {
-                eprintln!("error: {message}");
+                eprintln!("{} {message}", paint::error_prefix());
                 None
             }
         };
@@ -717,14 +760,14 @@ fn build_and_spawn_run(
     let project = match resolve_project(file) {
         Ok(project) => project,
         Err(message) => {
-            eprintln!("error: {message}");
+            eprintln!("{} {message}", paint::error_prefix());
             return None;
         }
     };
     let launch = |script: &Path, cwd: Option<&Path>| match spawn_node(script, args, cwd) {
         Ok(child) => Some(child),
         Err(error) => {
-            eprintln!("error: failed to launch `node`: {error}");
+            eprintln!("{} failed to launch `node`: {error}", paint::error_prefix());
             None
         }
     };
@@ -733,7 +776,8 @@ fn build_and_spawn_run(
             let platform = platform.unwrap_or_default();
             if !matches!(platform, Platform::Node { .. }) {
                 eprintln!(
-                    "error: `vilan run` executes with Node, but the package platform is `{}`",
+                    "{} `vilan run` executes with Node, but the package platform is `{}`",
+                    paint::error_prefix(),
                     platform.name()
                 );
                 return None;
@@ -749,7 +793,11 @@ fn build_and_spawn_run(
             write_assets(&unit.entry.with_extension("js"), &assets);
             let script = env::temp_dir().join(format!("vilan-watch-{}.js", std::process::id()));
             if let Err(error) = fs::write(&script, javascript) {
-                eprintln!("error: cannot write {}: {error}", script.display());
+                eprintln!(
+                    "{} cannot write {}: {error}",
+                    paint::error_prefix(),
+                    script.display()
+                );
                 return None;
             }
             launch(&script, None)
@@ -758,11 +806,14 @@ fn build_and_spawn_run(
             let server = match select_node_entry(&members, entry) {
                 Ok(Some(unit)) => unit,
                 Ok(None) => {
-                    eprintln!("error: no `node` package in this workspace to run");
+                    eprintln!(
+                        "{} no `node` package in this workspace to run",
+                        paint::error_prefix()
+                    );
                     return None;
                 }
                 Err(message) => {
-                    eprintln!("error: {message}");
+                    eprintln!("{} {message}", paint::error_prefix());
                     return None;
                 }
             };
@@ -783,15 +834,16 @@ fn build_and_spawn_run(
 
 /// Prints an `error: <message>` line and returns the failure code.
 fn report_error(message: &str) -> ExitCode {
-    eprintln!("error: {message}");
+    eprintln!("{} {message}", paint::error_prefix());
     ExitCode::FAILURE
 }
 
 /// Reports that a `none`-platform package can't be built (it's a pure library).
 fn no_host_platform() -> ExitCode {
     eprintln!(
-        "error: the platform is `none` (a pure library); pick a host to build for with \
-         `--platform node` or `--platform browser`"
+        "{} the platform is `none` (a pure library); pick a host to build for with \
+         `--platform node` or `--platform browser`",
+        paint::error_prefix()
     );
     ExitCode::FAILURE
 }
@@ -800,8 +852,9 @@ fn no_host_platform() -> ExitCode {
 /// as a dependency of an app.
 fn not_buildable_library(name: &str) -> ExitCode {
     eprintln!(
-        "error: `{name}` is a `[library]`, built only as a dependency of an app, not on its own. \
-         Verify its platform contract with `vilan check`, or build an app that depends on it."
+        "{} `{name}` is a `[library]`, built only as a dependency of an app, not on its own. \
+         Verify its platform contract with `vilan check`, or build an app that depends on it.",
+        paint::error_prefix()
     );
     ExitCode::FAILURE
 }
@@ -814,11 +867,14 @@ fn check_library(dir: &Path, name: &str) -> ExitCode {
     let spec = vilan_core::manifest::resolve_library(dir);
     let violations = check_library_contract(&spec);
     if violations.is_empty() {
-        println!("{name}: platform contract OK");
+        println!(
+            "{name}: {}",
+            paint::out(paint::Style::GREEN, "platform contract OK")
+        );
         ExitCode::SUCCESS
     } else {
         for violation in &violations {
-            eprintln!("error: {}", violation.msg);
+            eprintln!("{} {}", paint::error_prefix(), violation.msg);
         }
         ExitCode::FAILURE
     }
@@ -880,7 +936,11 @@ fn fmt(paths: &[PathBuf], check: bool) -> ExitCode {
         let source = match fs::read_to_string(file) {
             Ok(source) => source,
             Err(error) => {
-                eprintln!("error: cannot read {}: {error}", file.display());
+                eprintln!(
+                    "{} cannot read {}: {error}",
+                    paint::error_prefix(),
+                    file.display()
+                );
                 failed = true;
                 continue;
             }
@@ -890,13 +950,25 @@ fn fmt(paths: &[PathBuf], check: bool) -> ExitCode {
             continue;
         }
         if check {
-            println!("would reformat {}", file.display());
+            println!(
+                "{} {}",
+                paint::out(paint::Style::YELLOW, "would reformat"),
+                paint::out(paint::Style::BOLD, &file.display().to_string())
+            );
             changed += 1;
         } else if let Err(error) = fs::write(file, &formatted) {
-            eprintln!("error: cannot write {}: {error}", file.display());
+            eprintln!(
+                "{} cannot write {}: {error}",
+                paint::error_prefix(),
+                file.display()
+            );
             failed = true;
         } else {
-            println!("formatted {}", file.display());
+            println!(
+                "{} {}",
+                paint::out(paint::Style::GREEN, "formatted"),
+                paint::out(paint::Style::BOLD, &file.display().to_string())
+            );
         }
     }
     if failed || (check && changed > 0) {
@@ -966,7 +1038,7 @@ fn with_project(path: Option<PathBuf>, action: impl FnOnce(Project) -> ExitCode)
     match resolve_project(path) {
         Ok(project) => action(project),
         Err(message) => {
-            eprintln!("error: {message}");
+            eprintln!("{} {message}", paint::error_prefix());
             ExitCode::FAILURE
         }
     }
@@ -1012,7 +1084,12 @@ fn read_manifest(directory: &Path) -> Result<Manifest, String> {
     let (manifest, warnings) = Manifest::parse(&contents)
         .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
     for warning in &warnings {
-        eprintln!("warning: {} in {}", warning, manifest_path.display());
+        eprintln!(
+            "{} {} in {}",
+            paint::warning_prefix(),
+            warning,
+            manifest_path.display()
+        );
     }
     let errors = manifest.validate();
     if !errors.is_empty() {
@@ -1196,7 +1273,7 @@ fn compile_unit(
     let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
         Err(message) => {
-            eprintln!("error: {message}");
+            eprintln!("{} {message}", paint::error_prefix());
             return Err(ExitCode::FAILURE);
         }
     };
@@ -1232,14 +1309,19 @@ fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool)
     match fs::write(&output_path, javascript) {
         Ok(()) => {
             println!(
-                "Compiled {} -> {}",
+                "{} {} -> {}",
+                paint::out(paint::Style::GREEN, "Compiled"),
                 unit.entry.display(),
-                output_path.display()
+                paint::out(paint::Style::BOLD, &output_path.display().to_string())
             );
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: cannot write {}: {error}", output_path.display());
+            eprintln!(
+                "{} cannot write {}: {error}",
+                paint::error_prefix(),
+                output_path.display()
+            );
             ExitCode::FAILURE
         }
     }
@@ -1249,7 +1331,11 @@ fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool)
 fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
     match compile_unit(unit, platform, emit_debug, false, None) {
         Ok(_) => {
-            println!("{}: no errors", unit.entry.display());
+            println!(
+                "{}: {}",
+                unit.entry.display(),
+                paint::out(paint::Style::GREEN, "no errors")
+            );
             ExitCode::SUCCESS
         }
         Err(code) => code,
@@ -1290,7 +1376,11 @@ fn build_workspace_artifacts(
 ) -> Result<(), ExitCode> {
     let dist = root.join("dist");
     if let Err(error) = fs::create_dir_all(&dist) {
-        eprintln!("error: cannot create {}: {error}", dist.display());
+        eprintln!(
+            "{} cannot create {}: {error}",
+            paint::error_prefix(),
+            dist.display()
+        );
         return Err(ExitCode::FAILURE);
     }
     for (unit, platform) in members {
@@ -1301,10 +1391,19 @@ fn build_workspace_artifacts(
         let output = dist.join(format!("{}.js", unit.name));
         write_assets(&output, &assets);
         if let Err(error) = fs::write(&output, javascript) {
-            eprintln!("error: cannot write {}: {error}", output.display());
+            eprintln!(
+                "{} cannot write {}: {error}",
+                paint::error_prefix(),
+                output.display()
+            );
             return Err(ExitCode::FAILURE);
         }
-        println!("Compiled {} -> {}", unit.entry.display(), output.display());
+        println!(
+            "{} {} -> {}",
+            paint::out(paint::Style::GREEN, "Compiled"),
+            unit.entry.display(),
+            paint::out(paint::Style::BOLD, &output.display().to_string())
+        );
     }
     Ok(())
 }
@@ -1393,11 +1492,14 @@ fn run_workspace(
     let server = match select_node_entry(members, entry) {
         Ok(Some(unit)) => unit,
         Ok(None) => {
-            eprintln!("error: no `node` package in this workspace to run");
+            eprintln!(
+                "{} no `node` package in this workspace to run",
+                paint::error_prefix()
+            );
             return ExitCode::FAILURE;
         }
         Err(message) => {
-            eprintln!("error: {message}");
+            eprintln!("{} {message}", paint::error_prefix());
             return ExitCode::FAILURE;
         }
     };
@@ -1433,33 +1535,57 @@ fn test(path: Option<PathBuf>) -> ExitCode {
     let tests = match discover_tests(path) {
         Ok(tests) => tests,
         Err(message) => {
-            eprintln!("error: {message}");
+            eprintln!("{} {message}", paint::error_prefix());
             return ExitCode::FAILURE;
         }
     };
     if tests.is_empty() {
-        println!("no `*_test.vl` tests found");
+        println!(
+            "{}",
+            paint::out(paint::Style::DIM, "no `*_test.vl` tests found")
+        );
         return ExitCode::SUCCESS;
     }
-    println!("running {} test(s)", tests.len());
+    println!(
+        "running {} test(s)",
+        paint::out(paint::Style::BOLD, &tests.len().to_string())
+    );
     let mut passed = 0u32;
     let mut failed = 0u32;
     for test in &tests {
         match run_test(test) {
             Ok(()) => {
                 passed += 1;
-                println!("  ok    {}", test.display());
+                println!(
+                    "  {}    {}",
+                    paint::out(paint::Style::GREEN, "ok"),
+                    test.display()
+                );
             }
             Err(detail) => {
                 failed += 1;
-                println!("  FAIL  {}", test.display());
+                println!(
+                    "  {}  {}",
+                    paint::out(paint::Style::BOLD_RED, "FAIL"),
+                    test.display()
+                );
                 for line in detail.lines() {
                     println!("        {line}");
                 }
             }
         }
     }
-    println!("\n{passed} passed, {failed} failed");
+    // A zero failure count is muted rather than alarmed in red.
+    let failed_style = if failed == 0 {
+        paint::Style::DIM
+    } else {
+        paint::Style::BOLD_RED
+    };
+    println!(
+        "\n{}, {}",
+        paint::out(paint::Style::BOLD_GREEN, &format!("{passed} passed")),
+        paint::out(failed_style, &format!("{failed} failed"))
+    );
     if failed == 0 {
         ExitCode::SUCCESS
     } else {
@@ -1571,9 +1697,17 @@ fn write_assets(output_js: &std::path::Path, assets: &[(String, String)]) {
     for (kind, content) in vilan_core::const_eval::assemble_assets(assets) {
         let path = output_js.with_extension(kind.as_str());
         if let Err(error) = fs::write(&path, content) {
-            eprintln!("error: cannot write {}: {error}", path.display());
+            eprintln!(
+                "{} cannot write {}: {error}",
+                paint::error_prefix(),
+                path.display()
+            );
         } else {
-            println!("Emitted  {}", path.display());
+            println!(
+                "{}  {}",
+                paint::out(paint::Style::GREEN, "Emitted"),
+                paint::out(paint::Style::BOLD, &path.display().to_string())
+            );
         }
     }
 }
@@ -1595,7 +1729,11 @@ fn compile_to_js(
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
         Err(error) => {
-            eprintln!("error: cannot read {}: {error}", file.display());
+            eprintln!(
+                "{} cannot read {}: {error}",
+                paint::error_prefix(),
+                file.display()
+            );
             return Err(ExitCode::FAILURE);
         }
     };
@@ -1603,7 +1741,7 @@ fn compile_to_js(
     let std = match std_dir(file) {
         Ok(directory) => vilan_core::manifest::resolve_std(&directory),
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("{} {error}", paint::error_prefix());
             return Err(ExitCode::FAILURE);
         }
     };
@@ -1813,7 +1951,11 @@ fn compile_to_js(
 fn run_node_script(javascript: &str, args: &[String]) -> ExitCode {
     let script = env::temp_dir().join(format!("vilan-run-{}.js", std::process::id()));
     if let Err(error) = fs::write(&script, javascript) {
-        eprintln!("error: cannot write {}: {error}", script.display());
+        eprintln!(
+            "{} cannot write {}: {error}",
+            paint::error_prefix(),
+            script.display()
+        );
         return ExitCode::FAILURE;
     }
     let status = spawn_node(&script, args, None).and_then(|mut child| child.wait());
@@ -1844,8 +1986,9 @@ fn exit_code_of(status: std::io::Result<std::process::ExitStatus>) -> ExitCode {
         },
         Err(error) => {
             eprintln!(
-                "error: failed to launch `node`: {error} \
-                 (is Node.js installed and on your PATH?)"
+                "{} failed to launch `node`: {error} \
+                 (is Node.js installed and on your PATH?)",
+                paint::error_prefix()
             );
             ExitCode::FAILURE
         }
@@ -1857,7 +2000,11 @@ fn exit_code_of(status: std::io::Result<std::process::ExitStatus>) -> ExitCode {
 fn write_debug(file: &Path, extension: &str, contents: &str) {
     let path = file.with_extension(extension);
     if fs::write(&path, contents).is_err() {
-        eprintln!("warning: failed to write {}", path.display());
+        eprintln!(
+            "{} failed to write {}",
+            paint::warning_prefix(),
+            path.display()
+        );
     }
 }
 

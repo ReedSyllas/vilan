@@ -21,13 +21,15 @@
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+use crate::paint::{self, Style};
+
 const DEFAULT_BASE: &str = "https://github.com/ReedSyllas/vilan";
 
 pub fn upgrade(check_only: bool) -> ExitCode {
     match run(check_only) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("error: {message}");
+            eprintln!("{} {message}", paint::error_prefix());
             ExitCode::FAILURE
         }
     }
@@ -43,13 +45,25 @@ fn run(check_only: bool) -> Result<(), String> {
         .ok_or_else(|| format!("cannot parse the latest release version from `{latest_label}`"))?;
 
     if latest <= current {
-        println!("vilan {} is the newest release.", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{}",
+            paint::out(
+                Style::GREEN,
+                &format!("vilan {} is the newest release.", env!("CARGO_PKG_VERSION"))
+            )
+        );
         return Ok(());
     }
     if check_only {
         println!(
-            "vilan {} → {latest_label} available — run `vilan upgrade`.",
-            env!("CARGO_PKG_VERSION")
+            "{}",
+            paint::out(
+                Style::CYAN,
+                &format!(
+                    "vilan {} → {latest_label} available — run `vilan upgrade`.",
+                    env!("CARGO_PKG_VERSION")
+                )
+            )
         );
         return Ok(());
     }
@@ -86,8 +100,14 @@ fn download_verify_swap(
     latest_label: &str,
 ) -> Result<(), String> {
     println!(
-        "vilan {} → v{latest_label} — downloading {asset} ...",
-        env!("CARGO_PKG_VERSION")
+        "{}",
+        paint::out(
+            Style::DIM,
+            &format!(
+                "vilan {} → v{latest_label} — downloading {asset} ...",
+                env!("CARGO_PKG_VERSION")
+            )
+        )
     );
     fetch(&format!("{download_base}/{asset}"), &workdir.join(asset))?;
     fetch(
@@ -134,7 +154,13 @@ fn download_verify_swap(
     let installed = String::from_utf8_lossy(&version_probe.stdout)
         .trim()
         .to_string();
-    println!("installed {installed} to {}", install_dir.display());
+    println!(
+        "{}",
+        paint::out(
+            Style::GREEN,
+            &format!("installed {installed} to {}", install_dir.display())
+        )
+    );
 
     // Housekeeping while we own ~/.vilan: drop std-cache entries no current
     // binary can use (each build materializes under its own content hash and
@@ -146,8 +172,14 @@ fn download_verify_swap(
     );
     if pruned > 0 {
         println!(
-            "pruned {pruned} stale std cache entr{}",
-            if pruned == 1 { "y" } else { "ies" }
+            "{}",
+            paint::out(
+                Style::DIM,
+                &format!(
+                    "pruned {pruned} stale std cache entr{}",
+                    if pruned == 1 { "y" } else { "ies" }
+                )
+            )
         );
     }
     Ok(())
