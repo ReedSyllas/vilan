@@ -138,13 +138,8 @@ macro fun PartialEq(item: Item): Source {
 		if comparison == "" {
 			comparison = "true";
 		}
-		let eq = fun_of("eq")
-			.parameter("self")
-			.parameter(i"other: {target.name}")
-			.returns("bool")
-			.expr(comparison);
-		ret source("import std::compare::PartialEq;\n"
-			+ impl_of(target.name).implements("PartialEq").method(eq).render());
+		let eq = fun_of("eq").parameter("self").parameter(i"other: {target.name}").returns("bool").expr(comparison);
+		ret source("import std::compare::PartialEq;\n" + impl_of(target.name).implements("PartialEq").method(eq).render());
 	}
 	if item.as_enum() is Some(let target) {
 		// `match (self, other) { (E::V(let s0,..), E::V(let o0,..)) => s0
@@ -167,19 +162,12 @@ macro fun PartialEq(item: Item): Source {
 				}
 				let self_pattern = join(self_binds, ", ");
 				let other_pattern = join(other_binds, ", ");
-				arms = arms.arm(
-					i"({target.name}::{variant.name}({self_pattern}), {target.name}::{variant.name}({other_pattern}))",
-					join(comparisons, " && "));
+				arms = arms.arm(i"({target.name}::{variant.name}({self_pattern}), {target.name}::{variant.name}({other_pattern}))", join(comparisons, " && "));
 			}
 		}
 		arms = arms.arm("_", "false");
-		let eq = fun_of("eq")
-			.parameter("self")
-			.parameter(i"other: {target.name}")
-			.returns("bool")
-			.expr(arms.render());
-		ret source("import std::compare::PartialEq;\n"
-			+ impl_of(target.name).implements("PartialEq").method(eq).render());
+		let eq = fun_of("eq").parameter("self").parameter(i"other: {target.name}").returns("bool").expr(arms.render());
+		ret source("import std::compare::PartialEq;\n" + impl_of(target.name).implements("PartialEq").method(eq).render());
 	}
 	// Anything else (a bodyless external struct): nothing, like the Rust
 	// generator. (One recorded divergence: the Rust path also skips a

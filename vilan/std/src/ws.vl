@@ -78,12 +78,7 @@ struct WsParser {
 
 impl WsParser {
 	fun new(): WsParser {
-		WsParser {
-			buffer = Shared::new(Bytes::alloc(0)),
-			fragment_opcode = Shared::new(0),
-			fragment_payload = Shared::new(Bytes::alloc(0)),
-			violated = Shared::new(false),
-		}
+		WsParser { buffer = Shared::new(Bytes::alloc(0)), fragment_opcode = Shared::new(0), fragment_payload = Shared::new(Bytes::alloc(0)), violated = Shared::new(false) }
 	}
 
 	/// Consume `chunk`, returning every event completed by it, in order.
@@ -123,9 +118,7 @@ impl WsParser {
 					} else {
 						// The high 5 bytes must be zero AND the low 31 bits
 						// must not carry the sign — anything larger is hostile.
-						let oversized =
-							buffer.get(2) != 0 || buffer.get(3) != 0 || buffer.get(4) != 0
-							|| buffer.get(5) != 0 || buffer.get(6) & 0x80 != 0;
+						let oversized = buffer.get(2) != 0 || buffer.get(3) != 0 || buffer.get(4) != 0 || buffer.get(5) != 0 || buffer.get(6) & 0x80 != 0;
 						if oversized {
 							self.violated.write() = true;
 							events.push(WsEvent::Closed);
@@ -137,11 +130,19 @@ impl WsParser {
 				}
 				if valid {
 					let mask_at = header;
-					let total = if masked { header + 4 + length } else { header + length };
+					let total = if masked {
+						header + 4 + length
+					} else {
+						header + length
+					};
 					if available < total {
 						scanning = false;
 					} else {
-						let payload_at = if masked { mask_at + 4 } else { mask_at };
+						let payload_at = if masked {
+							mask_at + 4
+						} else {
+							mask_at
+						};
 						let payload = buffer.slice(payload_at, payload_at + length);
 						if masked {
 							mut index = 0;

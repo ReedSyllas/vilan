@@ -17,14 +17,8 @@ import pkg::wire::Frame;
 import pkg::bytes::Bytes;
 import pkg::json::{ JsonValue, FromJson, has_json_field };
 import pkg::ws::{ WsParser, WsEvent, text_frame, binary_frame, pong_frame, close_frame };
-import pkg::rpc::{
-	RpcProtocol, DuplexEnd, duplex_pair, register_session, drop_session,
-	tag_duplex_bytes, tag_rpc_bytes,
-};
-import pkg::http::{
-	NodeRequest, NodeSocket,
-	Request, Response, Server,
-};
+import pkg::rpc::{ RpcProtocol, DuplexEnd, duplex_pair, register_session, drop_session, tag_duplex_bytes, tag_rpc_bytes };
+import pkg::http::{ NodeRequest, NodeSocket, Request, Response, Server };
 
 // --- WebSocket handshake (node:crypto) ------------------------------------------
 
@@ -43,9 +37,7 @@ impl Hash {
 
 /// RFC 6455 §4.2.2: the `Sec-WebSocket-Accept` proof — base64(SHA-1(key+GUID)).
 fun ws_accept_key(key: str): str {
-	create_hash("sha1")
-		.update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-		.digest("base64")
+	create_hash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64")
 }
 
 // --- Request/response mount ----------------------------------------------------
@@ -60,26 +52,15 @@ fun ws_accept_key(key: str): str {
 fun rpc_response(protocol: RpcProtocol, request: Request): Response {
 	let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Text(request.body())));
 	match reply {
-		Frame::Text(let frame) => Response::builder()
-			.set_header("Content-Type", "application/json")
-			.body(frame)
-			.build(),
-		Frame::Binary(let frame) => Response::builder()
-			.code(500)
-			.body("binary reply over a text mount")
-			.build(),
+		Frame::Text(let frame) => Response::builder().set_header("Content-Type", "application/json").body(frame).build(),
+		Frame::Binary(let frame) => Response::builder().code(500).body("binary reply over a text mount").build(),
 	}
 }
 
 /// Serve one RPC protocol on `port`: every request is dispatched through it. The
 /// client side is `std::rpc`'s `HttpTransport { url = "http://host:port/" }`.
 fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
-	Server::builder()
-		.port(port)
-		.on_request(|request| rpc_response(protocol, request))
-		.on_start(on_ready)
-		.build()
-		.start()
+	Server::builder().port(port).on_request(|request| rpc_response(protocol, request)).on_start(on_ready).build().start()
 }
 
 /// The `Client::connect` server (§4.2): `serve_connected` with the runtime's
@@ -87,20 +68,8 @@ fun serve_rpc(port: i32, protocol: RpcProtocol, on_ready: |Server| void) {
 /// reactive session the generated `__attach` route can answer from, disposed
 /// on disconnect. Apps needing custom per-connection state (auth identity, an
 /// app-written attach) use `serve_connected` directly.
-fun serve_service(
-	port: i32,
-	protocol: RpcProtocol,
-	fallback: |Request| Response,
-	on_ready: || void,
-) {
-	serve_connected(
-		port,
-		protocol,
-		|connection, wire| register_session(connection, wire, protocol.codec),
-		|connection| drop_session(connection),
-		fallback,
-		on_ready,
-	)
+fun serve_service(port: i32, protocol: RpcProtocol, fallback: |Request| Response, on_ready: || void) {
+	serve_connected(port, protocol, |connection, wire| register_session(connection, wire, protocol.codec), |connection| drop_session(connection), fallback, on_ready)
 }
 
 // --- Connected server: RPC + a duplex wire per client ---------------------------
@@ -132,64 +101,42 @@ fun fresh_connection(): i32 {
 /// wire is forgotten here, and `on_disconnect(id)` tells the app to drop its own
 /// per-connection state (dispose a `ReactiveServer` session, say) — otherwise a
 /// long-running server leaks a session per ever-connected client.
-fun serve_connected(
-	port: i32,
-	protocol: RpcProtocol,
-	on_connect: |i32, DuplexEnd| void,
-	on_disconnect: |i32| void,
-	fallback: |Request| Response,
-	on_ready: || void,
-) {
-	Server::builder()
-		.port(port)
-		.on_request(|request| connected_response(protocol, on_connect, on_disconnect, fallback, request))
+fun serve_connected(port: i32, protocol: RpcProtocol, on_connect: |i32, DuplexEnd| void, on_disconnect: |i32| void, fallback: |Request| Response, on_ready: || void) {
+	Server::builder().port(port).on_request(|request| connected_response(protocol, on_connect, on_disconnect, fallback, request)).on_upgrade(|request, socket, head| {
 		// A WebSocket upgrade is the same connection contract over the true
 		// duplex wire (§5): handshake, then the socket joins `connections`
 		// exactly like an SSE stream — same `__conn` announcement, same
 		// `on_connect`/`on_disconnect`, same app code. Clients pick the
 		// transport (`connect_socket` here, `connect_split` for SSE).
-		.on_upgrade(|request, socket, head| {
-			accept_socket(request, socket, head, protocol, on_connect, on_disconnect);
-		})
-		.on_start(|server| on_ready())
-		.build()
-		.start()
+
+		accept_socket(request, socket, head, protocol, on_connect, on_disconnect);
+	}).on_start(|server| on_ready()).build().start()
 }
 
 /// Route one request of the connected server (see `serve_connected`).
-fun connected_response(
-	protocol: RpcProtocol,
-	on_connect: |i32, DuplexEnd| void,
-	on_disconnect: |i32| void,
-	fallback: |Request| Response,
-	request: Request,
-): Response {
+fun connected_response(protocol: RpcProtocol, on_connect: |i32, DuplexEnd| void, on_disconnect: |i32| void, fallback: |Request| Response, request: Request): Response {
 	let path = request.path();
 	if path.starts_with("/events") {
 		let id = fresh_connection();
-		Response::builder()
-			.set_header("Content-Type", "text/event-stream")
-			.set_header("Cache-Control", "no-cache")
-			.streaming(|stream| {
-				stream.send(i"data: __conn:{id}\n\n");
-				let (app_end, wire_end) = duplex_pair();
-				wire_end.on_frame(|frame| {
-					match frame {
-						Frame::Text(let body) => stream.send(i"data: {body}\n\n"),
-						// SSE can't carry bytes. Unreachable when both sides
-						// run one codec: a binary codec's client panics on its
-						// first send, before the server ever pushes.
-						Frame::Binary(let _bytes) => {},
-					}
-				});
-				connections.write().push((id, wire_end));
-				stream.on_close(|| {
-					drop_connection(id);
-					on_disconnect(id);
-				});
-				on_connect(id, app_end);
-			})
-			.build()
+		Response::builder().set_header("Content-Type", "text/event-stream").set_header("Cache-Control", "no-cache").streaming(|stream| {
+			stream.send(i"data: __conn:{id}\n\n");
+			let (app_end, wire_end) = duplex_pair();
+			wire_end.on_frame(|frame| {
+				match frame {
+					Frame::Text(let body) => stream.send(i"data: {body}\n\n"),
+					// SSE can't carry bytes. Unreachable when both sides
+					// run one codec: a binary codec's client panics on its
+					// first send, before the server ever pushes.
+					Frame::Binary(let _bytes) => {},
+				}
+			});
+			connections.write().push((id, wire_end));
+			stream.on_close(|| {
+				drop_connection(id);
+				on_disconnect(id);
+			});
+			on_connect(id, app_end);
+		}).build()
 	} else if path.starts_with("/send") {
 		let content = request.body();
 		// A garbled id parses to -1, which matches no connection — the
@@ -210,14 +157,8 @@ fun connected_response(
 		// binary frame as UTF-8 (both sides run one codec, Q6).
 		let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Binary(request.bytes())));
 		match reply {
-			Frame::Text(let frame) => Response::builder()
-				.set_header("Content-Type", "application/json")
-				.body(frame)
-				.build(),
-			Frame::Binary(let frame) => Response::builder()
-				.set_header("Content-Type", "application/octet-stream")
-				.body_bytes(frame)
-				.build(),
+			Frame::Text(let frame) => Response::builder().set_header("Content-Type", "application/json").body(frame).build(),
+			Frame::Binary(let frame) => Response::builder().set_header("Content-Type", "application/octet-stream").body_bytes(frame).build(),
 		}
 	} else {
 		fallback(request)
@@ -230,14 +171,7 @@ fun connected_response(
 /// with the same id, `d:<frame>` is a duplex/reactive wire turn. Pings are
 /// answered; close (or a protocol violation) tears the session down like an
 /// SSE close.
-fun accept_socket(
-	request: NodeRequest,
-	socket: NodeSocket,
-	head: Bytes,
-	protocol: RpcProtocol,
-	on_connect: |i32, DuplexEnd| void,
-	on_disconnect: |i32| void,
-) {
+fun accept_socket(request: NodeRequest, socket: NodeSocket, head: Bytes, protocol: RpcProtocol, on_connect: |i32, DuplexEnd| void, on_disconnect: |i32| void) {
 	let headers = request.headers();
 	if !has_json_field(headers, "sec-websocket-key") {
 		socket.destroy();
@@ -246,11 +180,7 @@ fun accept_socket(
 	// Present (checked above) and a string by the WS handshake, so a decode
 	// error is impossible; `unwrap_or` keeps the read total.
 	let key: str = str::from_json_value(headers.field("sec-websocket-key")).unwrap_or("");
-	socket.write_text(
-		"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "
-			+ ws_accept_key(key)
-			+ "\r\n\r\n",
-	);
+	socket.write_text("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + ws_accept_key(key) + "\r\n\r\n");
 	let id = fresh_connection();
 	let (app_end, wire_end) = duplex_pair();
 	wire_end.on_frame(|frame| {
@@ -310,10 +240,7 @@ fun accept_socket(
 							wire_end.send(Frame::Binary(bytes.slice(1, bytes.len())));
 						});
 					} else if bytes.len() >= 5 && bytes.get(0) == 0x72 {
-						let id = bytes.get(1)
-							| bytes.get(2) << 8
-							| bytes.get(3) << 16
-							| bytes.get(4) << 24;
+						let id = bytes.get(1) | bytes.get(2) << 8 | bytes.get(3) << 16 | bytes.get(4) << 24;
 						let payload = bytes.slice(5, bytes.len());
 						let reply = turn(FlushPolicy::AtEnd, || protocol.respond(Frame::Binary(payload)));
 						match reply {

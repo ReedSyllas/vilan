@@ -329,4 +329,3 @@ impl ServerBuilder {
 		Server { port = self.port, request_handler = self.request_handler, on_start = self.on_start, upgrade_handler = self.upgrade_handler }
 	}
 }
-

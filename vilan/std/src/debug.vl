@@ -55,12 +55,8 @@ macro fun Debug(item: Item): Source {
 			}
 			body = quote(i"{target.name} \{ ") + " + " + join(parts, glued_comma) + " + " + quote(" }");
 		}
-		let printer = fun_of("debug")
-			.parameter("self")
-			.returns("str")
-			.expr(body);
-		ret source("import std::debug::Debug;\n"
-			+ impl_of(target.name).implements("Debug").method(printer).render());
+		let printer = fun_of("debug").parameter("self").returns("str").expr(body);
+		ret source("import std::debug::Debug;\n" + impl_of(target.name).implements("Debug").method(printer).render());
 	}
 	if item.as_enum() is Some(let target) {
 		// `match self { E::V(let p0,..) => "V(" + p0.debug() + ", " + .. +
@@ -84,12 +80,8 @@ macro fun Debug(item: Item): Source {
 				arms = arms.arm(i"{target.name}::{variant.name}({bind_pattern})", rendering);
 			}
 		}
-		let printer = fun_of("debug")
-			.parameter("self")
-			.returns("str")
-			.expr(arms.render());
-		ret source("import std::debug::Debug;\n"
-			+ impl_of(target.name).implements("Debug").method(printer).render());
+		let printer = fun_of("debug").parameter("self").returns("str").expr(arms.render());
+		ret source("import std::debug::Debug;\n" + impl_of(target.name).implements("Debug").method(printer).render());
 	}
 	source("")
 }

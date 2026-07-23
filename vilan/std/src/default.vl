@@ -29,11 +29,8 @@ macro fun Default(item: Item): Source {
 		for field in target.fields {
 			literal = literal.field(field.name, i"{field.type_.render()}::default()");
 		}
-		let constructor = fun_of("default")
-			.returns(target.name)
-			.expr(literal.render());
-		ret source("import std::default::Default;\n"
-			+ impl_of(target.name).implements("Default").method(constructor).render());
+		let constructor = fun_of("default").returns(target.name).expr(literal.render());
+		ret source("import std::default::Default;\n" + impl_of(target.name).implements("Default").method(constructor).render());
 	}
 	// An enum has no unambiguous default variant — nothing, like the Rust
 	// generator.

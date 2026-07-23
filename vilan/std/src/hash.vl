@@ -121,13 +121,11 @@ macro fun Hashable(item: Item): Source {
 
 	if item.as_struct() is Some(let target) {
 		let hasher = fun_of("hash").parameter("self").returns("Hash").expr("canonical_hash(self)");
-		ret source("import std::hash::{ Hashable, Hash, canonical_hash };\n"
-			+ impl_of(target.name).implements("Hashable").method(hasher).render());
+		ret source("import std::hash::{ Hashable, Hash, canonical_hash };\n" + impl_of(target.name).implements("Hashable").method(hasher).render());
 	}
 	if item.as_enum() is Some(let target) {
 		let hasher = fun_of("hash").parameter("self").returns("Hash").expr("canonical_hash(self)");
-		ret source("import std::hash::{ Hashable, Hash, canonical_hash };\n"
-			+ impl_of(target.name).implements("Hashable").method(hasher).render());
+		ret source("import std::hash::{ Hashable, Hash, canonical_hash };\n" + impl_of(target.name).implements("Hashable").method(hasher).render());
 	}
 	source("")
 }

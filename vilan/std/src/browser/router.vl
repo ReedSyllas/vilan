@@ -88,15 +88,12 @@ trait Routable {
 /// as usual (`link("Tasks", route).styled(nav_item)`).
 fun link<R: Routable>(label: str, route: R): View {
 	let path = route.to_path();
-	view("a")
-		.attr("href", path)
-		.text(label)
-		.on_event("click", |event| {
-			if plain_left_click(event) {
-				event.prevent_default();
-				navigate(path);
-			}
-		})
+	view("a").attr("href", path).text(label).on_event("click", |event| {
+		if plain_left_click(event) {
+			event.prevent_default();
+			navigate(path);
+		}
+	})
 }
 
 /// A main-button click with no modifier keys — the only click `link`

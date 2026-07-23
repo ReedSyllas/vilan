@@ -93,23 +93,7 @@ impl BinaryWriter {
 	/// The closure record a `Codec` hands out — thin delegates to the trait
 	/// methods below (direct `encode_binary` skips it).
 	fun serializer(self): Serializer {
-		Serializer {
-			begin_struct = |fields| self.begin_struct(fields),
-			field = |name| self.field(name),
-			end_struct = || self.end_struct(),
-			begin_list = |length| self.begin_list(length),
-			end_list = || self.end_list(),
-			begin_variant = |name, arity| self.begin_variant(name, arity),
-			end_variant = || self.end_variant(),
-			null_value = || self.null_value(),
-			some_value = || self.some_value(),
-			str_value = |value| self.str_value(value),
-			i32_value = |value| self.i32_value(value),
-			u32_value = |value| self.u32_value(value),
-			i53_value = |value| self.i53_value(value),
-			f64_value = |value| self.f64_value(value),
-			bool_value = |value| self.bool_value(value),
-		}
+		Serializer { begin_struct = |fields| self.begin_struct(fields), field = |name| self.field(name), end_struct = || self.end_struct(), begin_list = |length| self.begin_list(length), end_list = || self.end_list(), begin_variant = |name, arity| self.begin_variant(name, arity), end_variant = || self.end_variant(), null_value = || self.null_value(), some_value = || self.some_value(), str_value = |value| self.str_value(value), i32_value = |value| self.i32_value(value), u32_value = |value| self.u32_value(value), i53_value = |value| self.i53_value(value), f64_value = |value| self.f64_value(value), bool_value = |value| self.bool_value(value) }
 	}
 }
 
@@ -166,7 +150,11 @@ impl BinaryWriter with Serialize {
 	}
 
 	fun bool_value(self, value: bool) {
-		self.write_byte(if value { 1 } else { 0 });
+		self.write_byte(if value {
+			1
+		} else {
+			0
+		});
 	}
 }
 
@@ -227,10 +215,7 @@ impl BinaryReader {
 			ret 0;
 		}
 		let at = self.cursor.read();
-		let value = self.bytes.get(at)
-			| self.bytes.get(at + 1) << 8
-			| self.bytes.get(at + 2) << 16
-			| self.bytes.get(at + 3) << 24;
+		let value = self.bytes.get(at) | self.bytes.get(at + 1) << 8 | self.bytes.get(at + 2) << 16 | self.bytes.get(at + 3) << 24;
 		self.cursor.write() = at + 4;
 		value
 	}
@@ -240,10 +225,7 @@ impl BinaryReader {
 			ret 0;
 		}
 		let at = self.cursor.read();
-		let value = self.bytes.get_u32(at)
-			| self.bytes.get_u32(at + 1) << 8
-			| self.bytes.get_u32(at + 2) << 16
-			| self.bytes.get_u32(at + 3) << 24;
+		let value = self.bytes.get_u32(at) | self.bytes.get_u32(at + 1) << 8 | self.bytes.get_u32(at + 2) << 16 | self.bytes.get_u32(at + 3) << 24;
 		self.cursor.write() = at + 4;
 		value
 	}
@@ -283,26 +265,7 @@ impl BinaryReader {
 	/// The closure record a `Codec` hands out — thin delegates to the trait
 	/// methods below (direct `decode_binary` skips it).
 	fun deserializer(self): Deserializer {
-		Deserializer {
-			begin_struct = || self.begin_struct(),
-			field = |name| self.field(name),
-			end_struct = || self.end_struct(),
-			begin_list = || self.begin_list(),
-			end_list = || self.end_list(),
-			variant_tag = || self.variant_tag(),
-			begin_variant = |name, arity| self.begin_variant(name, arity),
-			end_variant = || self.end_variant(),
-			is_null = || self.is_null(),
-			null_value = || self.null_value(),
-			str_value = || self.str_value(),
-			i32_value = || self.i32_value(),
-			u32_value = || self.u32_value(),
-			i53_value = || self.i53_value(),
-			f64_value = || self.f64_value(),
-			bool_value = || self.bool_value(),
-			fail = |reason| self.fail(reason),
-			failed = || self.failed(),
-		}
+		Deserializer { begin_struct = || self.begin_struct(), field = |name| self.field(name), end_struct = || self.end_struct(), begin_list = || self.begin_list(), end_list = || self.end_list(), variant_tag = || self.variant_tag(), begin_variant = |name, arity| self.begin_variant(name, arity), end_variant = || self.end_variant(), is_null = || self.is_null(), null_value = || self.null_value(), str_value = || self.str_value(), i32_value = || self.i32_value(), u32_value = || self.u32_value(), i53_value = || self.i53_value(), f64_value = || self.f64_value(), bool_value = || self.bool_value(), fail = |reason| self.fail(reason), failed = || self.failed() }
 	}
 }
 
@@ -402,20 +365,17 @@ fun decode_binary<T: Wire>(bytes: Bytes): Result<T, str> {
 /// The binary codec (§6.2): byte frames over the writer/reader pair. A text
 /// frame poisons the reader — a sticky decode error, never a crash.
 fun binary_codec(): Codec {
-	Codec {
-		writer = || {
-			let writer = BinaryWriter::new();
-			(writer.serializer(), || Frame::Binary(writer.finish()))
-		},
-		reader = |frame| {
-			match frame {
-				Frame::Binary(let bytes) => BinaryReader::new(bytes).deserializer(),
-				Frame::Text(let text) => {
-					let reader = BinaryReader::new(Bytes::alloc(0));
-					reader.report("binary codec: received a text frame");
-					reader.deserializer()
-				},
-			}
-		},
-	}
+	Codec { writer = || {
+		let writer = BinaryWriter::new();
+		(writer.serializer(), || Frame::Binary(writer.finish()))
+	}, reader = |frame| {
+		match frame {
+			Frame::Binary(let bytes) => BinaryReader::new(bytes).deserializer(),
+			Frame::Text(let text) => {
+				let reader = BinaryReader::new(Bytes::alloc(0));
+				reader.report("binary codec: received a text frame");
+				reader.deserializer()
+			},
+		}
+	} }
 }

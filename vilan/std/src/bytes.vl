@@ -33,8 +33,7 @@ impl Bytes {
 		mut out = "";
 		for index in Range::new(0, self.len()) {
 			let byte = self.get(index);
-			out = out + digits.substring(byte / 16, byte / 16 + 1)
-				+ digits.substring(byte % 16, byte % 16 + 1);
+			out = out + digits.substring(byte / 16, byte / 16 + 1) + digits.substring(byte % 16, byte % 16 + 1);
 		}
 		out
 	}

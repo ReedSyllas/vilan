@@ -186,7 +186,11 @@ impl str with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<str, str> {
-		if value.is_string() { Ok(coerce_str(value)) } else { Err("expected a string") }
+		if value.is_string() {
+			Ok(coerce_str(value))
+		} else {
+			Err("expected a string")
+		}
 	}
 }
 
@@ -198,7 +202,11 @@ impl i32 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<i32, str> {
-		if value.is_number() { Ok(coerce_i32(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_i32(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -210,7 +218,11 @@ impl u32 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<u32, str> {
-		if value.is_number() { Ok(coerce_u32(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_u32(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -222,7 +234,11 @@ impl f64 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<f64, str> {
-		if value.is_number() { Ok(coerce_f64(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_f64(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -234,7 +250,11 @@ impl bool with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<bool, str> {
-		if value.is_bool() { Ok(coerce_bool(value)) } else { Err("expected a boolean") }
+		if value.is_bool() {
+			Ok(coerce_bool(value))
+		} else {
+			Err("expected a boolean")
+		}
 	}
 }
 
@@ -298,12 +318,7 @@ struct JsonWriter {
 
 impl JsonWriter {
 	fun new(): JsonWriter {
-		JsonWriter {
-			out = Shared::new(""),
-			pending_comma = Shared::new(false),
-			saved_commas = Shared::new([]),
-			variant_arities = Shared::new([]),
-		}
+		JsonWriter { out = Shared::new(""), pending_comma = Shared::new(false), saved_commas = Shared::new([]), variant_arities = Shared::new([]) }
 	}
 
 	/// Appends `text` as one value at the current level: separator first, and
@@ -341,23 +356,7 @@ impl JsonWriter {
 	/// The closure record a `Codec` hands out — thin delegates to the trait
 	/// methods below (the codec-as-a-value erasure; direct `encode_json` skips it).
 	fun serializer(self): Serializer {
-		Serializer {
-			begin_struct = |fields| self.begin_struct(fields),
-			field = |name| self.field(name),
-			end_struct = || self.end_struct(),
-			begin_list = |length| self.begin_list(length),
-			end_list = || self.end_list(),
-			begin_variant = |name, arity| self.begin_variant(name, arity),
-			end_variant = || self.end_variant(),
-			null_value = || self.null_value(),
-			some_value = || self.some_value(),
-			str_value = |value| self.str_value(value),
-			i32_value = |value| self.i32_value(value),
-			u32_value = |value| self.u32_value(value),
-			i53_value = |value| self.i53_value(value),
-			f64_value = |value| self.f64_value(value),
-			bool_value = |value| self.bool_value(value),
-		}
+		Serializer { begin_struct = |fields| self.begin_struct(fields), field = |name| self.field(name), end_struct = || self.end_struct(), begin_list = |length| self.begin_list(length), end_list = || self.end_list(), begin_variant = |name, arity| self.begin_variant(name, arity), end_variant = || self.end_variant(), null_value = || self.null_value(), some_value = || self.some_value(), str_value = |value| self.str_value(value), i32_value = |value| self.i32_value(value), u32_value = |value| self.u32_value(value), i53_value = |value| self.i53_value(value), f64_value = |value| self.f64_value(value), bool_value = |value| self.bool_value(value) }
 	}
 }
 
@@ -515,26 +514,7 @@ impl JsonReader {
 	/// The closure record a `Codec` hands out — thin delegates to the trait
 	/// methods below (direct `decode_json` skips it).
 	fun deserializer(self): Deserializer {
-		Deserializer {
-			begin_struct = || self.begin_struct(),
-			field = |name| self.field(name),
-			end_struct = || self.end_struct(),
-			begin_list = || self.begin_list(),
-			end_list = || self.end_list(),
-			variant_tag = || self.variant_tag(),
-			begin_variant = |name, arity| self.begin_variant(name, arity),
-			end_variant = || self.end_variant(),
-			is_null = || self.is_null(),
-			null_value = || self.null_value(),
-			str_value = || self.str_value(),
-			i32_value = || self.i32_value(),
-			u32_value = || self.u32_value(),
-			i53_value = || self.i53_value(),
-			f64_value = || self.f64_value(),
-			bool_value = || self.bool_value(),
-			fail = |reason| self.fail(reason),
-			failed = || self.failed(),
-		}
+		Deserializer { begin_struct = || self.begin_struct(), field = |name| self.field(name), end_struct = || self.end_struct(), begin_list = || self.begin_list(), end_list = || self.end_list(), variant_tag = || self.variant_tag(), begin_variant = |name, arity| self.begin_variant(name, arity), end_variant = || self.end_variant(), is_null = || self.is_null(), null_value = || self.null_value(), str_value = || self.str_value(), i32_value = || self.i32_value(), u32_value = || self.u32_value(), i53_value = || self.i53_value(), f64_value = || self.f64_value(), bool_value = || self.bool_value(), fail = |reason| self.fail(reason), failed = || self.failed() }
 	}
 }
 
@@ -619,32 +599,56 @@ impl JsonReader with Deserialize {
 	/// error discipline.
 	fun str_value(self): str {
 		let value = self.take();
-		if self.ok() { coerce_str(value) } else { "" }
+		if self.ok() {
+			coerce_str(value)
+		} else {
+			""
+		}
 	}
 
 	fun i32_value(self): i32 {
 		let value = self.take();
-		if self.ok() { coerce_i32(value) } else { 0 }
+		if self.ok() {
+			coerce_i32(value)
+		} else {
+			0
+		}
 	}
 
 	fun u32_value(self): u32 {
 		let value = self.take();
-		if self.ok() { coerce_u32(value) } else { 0 }
+		if self.ok() {
+			coerce_u32(value)
+		} else {
+			0
+		}
 	}
 
 	fun i53_value(self): i53 {
 		let value = self.take();
-		if self.ok() { coerce_i53(value) } else { 0 }
+		if self.ok() {
+			coerce_i53(value)
+		} else {
+			0
+		}
 	}
 
 	fun f64_value(self): f64 {
 		let value = self.take();
-		if self.ok() { coerce_f64(value) } else { 0.0 }
+		if self.ok() {
+			coerce_f64(value)
+		} else {
+			0.0
+		}
 	}
 
 	fun bool_value(self): bool {
 		let value = self.take();
-		if self.ok() { coerce_bool(value) } else { false }
+		if self.ok() {
+			coerce_bool(value)
+		} else {
+			false
+		}
 	}
 
 	fun fail(self, reason: str) {
@@ -695,20 +699,17 @@ fun opened_reader(text: str): JsonReader {
 /// The JSON codec (§6.2): text frames over the writer/reader pair. A binary
 /// frame poisons the reader — a sticky decode error, never a crash.
 fun json_codec(): Codec {
-	Codec {
-		writer = || {
-			let writer = JsonWriter::new();
-			(writer.serializer(), || Frame::Text(writer.result()))
-		},
-		reader = |frame| {
-			// Liberal in what it accepts: a binary frame is read as UTF-8 JSON
-			// (server mounts read request bodies as bytes without sniffing).
-			match frame {
-				Frame::Text(let text) => opened_reader(text).deserializer(),
-				Frame::Binary(let bytes) => opened_reader(decode_utf8(bytes)).deserializer(),
-			}
-		},
-	}
+	Codec { writer = || {
+		let writer = JsonWriter::new();
+		(writer.serializer(), || Frame::Text(writer.result()))
+	}, reader = |frame| {
+		// Liberal in what it accepts: a binary frame is read as UTF-8 JSON
+		// (server mounts read request bodies as bytes without sniffing).
+		match frame {
+			Frame::Text(let text) => opened_reader(text).deserializer(),
+			Frame::Binary(let bytes) => opened_reader(decode_utf8(bytes)).deserializer(),
+		}
+	} }
 }
 
 // The `Json` and `Wire` derives (macro-engine.md §10): prelude macros —
@@ -734,28 +735,19 @@ macro fun struct_json_impls(target: StructItem): str {
 		parts.push(i"self.{field.name}.to_json()");
 	}
 	parts.push(quote("}"));
-	let to_json = fun_of("to_json")
-		.parameter("self")
-		.returns("str")
-		.expr(join(parts, " + "));
+	let to_json = fun_of("to_json").parameter("self").returns("str").expr(join(parts, " + "));
 	// Decoding is fallible (I3): `from_json` parses the text without crashing,
 	// `from_json_value` checks each field is present (naming a missing one) and
 	// threads a leaf failure with `!`.
 	let result_type = i"Result<{target.name}, str>";
-	let from_json = fun_of("from_json")
-		.parameter("text: str")
-		.returns(result_type)
-		.expr(i"{target.name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)");
-	mut from_json_value = fun_of("from_json_value")
-		.parameter("value: JsonValue")
-		.returns(result_type);
+	let from_json = fun_of("from_json").parameter("text: str").returns(result_type).expr(i"{target.name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)");
+	mut from_json_value = fun_of("from_json_value").parameter("value: JsonValue").returns(result_type);
 	// The output uses fully-qualified `Result::Ok`/`Result::Err` so it does not
 	// depend on the deriving file importing the variants (`Result` the type is
 	// reachable wherever the derive is; its variants may not be in scope).
 	for field in target.fields {
 		let label = quote(field.name);
-		from_json_value = from_json_value.line(
-			i"if !value.has_field({label}) \{ ret Result::Err(\"missing field {field.name}\") \}");
+		from_json_value = from_json_value.line(i"if !value.has_field({label}) \{ ret Result::Err(\"missing field {field.name}\") \}");
 	}
 	mut literal = init_of(target.name);
 	for field in target.fields {
@@ -763,29 +755,20 @@ macro fun struct_json_impls(target: StructItem): str {
 		literal = literal.field(field.name, i"{field.type_.render()}::from_json_value(value.field({label}))!");
 	}
 	from_json_value = from_json_value.expr(i"Result::Ok({literal.render()})");
-	impl_of(target.name).implements("Json").method(to_json).render()
-		+ impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
+	impl_of(target.name).implements("Json").method(to_json).render() + impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
 }
 
 macro fun struct_wire_impls(target: StructItem): str {
 	import macro_std::build::{ impl_of, fun_of, init_of, quote };
 
-	mut describe = fun_of("describe")
-		.generics("<S: Serialize>")
-		.parameter("self")
-		.parameter("serializer: S")
-		.line(i"serializer.begin_struct({target.fields.len()});");
+	mut describe = fun_of("describe").generics("<S: Serialize>").parameter("self").parameter("serializer: S").line(i"serializer.begin_struct({target.fields.len()});");
 	for field in target.fields {
 		let label = quote(field.name);
 		describe = describe.line(i"serializer.field({label});");
 		describe = describe.line(i"self.{field.name}.describe(serializer);");
 	}
 	describe = describe.line("serializer.end_struct();");
-	mut rebuild = fun_of("rebuild")
-		.generics("<D: Deserialize>")
-		.parameter("deserializer: D")
-		.returns(target.name)
-		.line("deserializer.begin_struct();");
+	mut rebuild = fun_of("rebuild").generics("<D: Deserialize>").parameter("deserializer: D").returns(target.name).line("deserializer.begin_struct();");
 	mut literal = init_of(target.name);
 	for field in target.fields {
 		let label = quote(field.name);
@@ -810,9 +793,7 @@ macro fun enum_json_impls(target: EnumItem): str {
 			to_arms = to_arms.arm(i"{target.name}::{variant.name}", quote(i"\"{variant.name}\""));
 		} else if arity == 1 {
 			let opener = quote(i"\{\"{variant.name}\":");
-			to_arms = to_arms.arm(
-				i"{target.name}::{variant.name}(let p0)",
-				opener + " + p0.to_json() + " + quote("}"));
+			to_arms = to_arms.arm(i"{target.name}::{variant.name}(let p0)", opener + " + p0.to_json() + " + quote("}"));
 		} else {
 			mut binds: List<str> = [];
 			mut parts: List<str> = [];
@@ -825,9 +806,7 @@ macro fun enum_json_impls(target: EnumItem): str {
 			let bind_pattern = join(binds, ", ");
 			let separator = " + " + quote(",") + " + ";
 			let opener = quote(i"\{\"{variant.name}\":[");
-			to_arms = to_arms.arm(
-				i"{target.name}::{variant.name}({bind_pattern})",
-				opener + " + " + join(parts, separator) + " + " + quote("]}"));
+			to_arms = to_arms.arm(i"{target.name}::{variant.name}({bind_pattern})", opener + " + " + join(parts, separator) + " + " + quote("]}"));
 		}
 	}
 	// Decoding validates the tag (an unknown one is a decode error, not a panic)
@@ -858,20 +837,10 @@ macro fun enum_json_impls(target: EnumItem): str {
 	}
 	from_arms = from_arms.arm("_", i"Result::Err(\"unknown variant in JSON for enum {target.name}\")");
 	let result_type = i"Result<{target.name}, str>";
-	let to_json = fun_of("to_json")
-		.parameter("self")
-		.returns("str")
-		.expr(to_arms.render());
-	let from_json = fun_of("from_json")
-		.parameter("text: str")
-		.returns(result_type)
-		.expr(i"{target.name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)");
-	let from_json_value = fun_of("from_json_value")
-		.parameter("value: JsonValue")
-		.returns(result_type)
-		.expr(from_arms.render());
-	impl_of(target.name).implements("Json").method(to_json).render()
-		+ impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
+	let to_json = fun_of("to_json").parameter("self").returns("str").expr(to_arms.render());
+	let from_json = fun_of("from_json").parameter("text: str").returns(result_type).expr(i"{target.name}::from_json_value(text.try_parse_json().ok_or(\"not valid JSON\")!)");
+	let from_json_value = fun_of("from_json_value").parameter("value: JsonValue").returns(result_type).expr(from_arms.render());
+	impl_of(target.name).implements("Json").method(to_json).render() + impl_of(target.name).implements("FromJson").method(from_json).method(from_json_value).render()
 }
 
 macro fun enum_wire_impls(target: EnumItem): str {
@@ -950,17 +919,8 @@ macro fun enum_wire_impls(target: EnumItem): str {
 		}
 	}
 	rebuild_arms = rebuild_arms.arm_block("_", fallback);
-	let describe = fun_of("describe")
-		.generics("<S: Serialize>")
-		.parameter("self")
-		.parameter("serializer: S")
-		.expr(describe_arms.render());
-	let rebuild = fun_of("rebuild")
-		.generics("<D: Deserialize>")
-		.parameter("deserializer: D")
-		.returns(target.name)
-		.line("let tag = deserializer.variant_tag();")
-		.expr(rebuild_arms.render());
+	let describe = fun_of("describe").generics("<S: Serialize>").parameter("self").parameter("serializer: S").expr(describe_arms.render());
+	let rebuild = fun_of("rebuild").generics("<D: Deserialize>").parameter("deserializer: D").returns(target.name).line("let tag = deserializer.variant_tag();").expr(rebuild_arms.render());
 	impl_of(target.name).implements("Wire").method(describe).method(rebuild).render()
 }
 
@@ -1007,7 +967,11 @@ impl i8 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<i8, str> {
-		if value.is_number() { Ok(coerce_i8(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_i8(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -1024,7 +988,11 @@ impl u8 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<u8, str> {
-		if value.is_number() { Ok(coerce_u8(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_u8(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -1041,7 +1009,11 @@ impl i16 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<i16, str> {
-		if value.is_number() { Ok(coerce_i16(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_i16(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -1058,7 +1030,11 @@ impl u16 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<u16, str> {
-		if value.is_number() { Ok(coerce_u16(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_u16(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -1075,7 +1051,11 @@ impl i53 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<i53, str> {
-		if value.is_number() { Ok(coerce_i53(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_i53(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -1092,7 +1072,11 @@ impl u53 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<u53, str> {
-		if value.is_number() { Ok(coerce_u53(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_u53(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
 
@@ -1109,6 +1093,10 @@ impl f32 with FromJson {
 		}
 	}
 	fun from_json_value(value: JsonValue): Result<f32, str> {
-		if value.is_number() { Ok(coerce_f32(value)) } else { Err("expected a number") }
+		if value.is_number() {
+			Ok(coerce_f32(value))
+		} else {
+			Err("expected a number")
+		}
 	}
 }
