@@ -5,8 +5,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use vilan_core::analyzer::{DERIVED_SOURCE, Expr, Implementation, SourceId};
+use vilan_core::analyzer::{DERIVED_SOURCE, Expr, Implementation, Parameter, SourceId};
 use vilan_core::id::Id;
+use vilan_core::lexing::tokenize;
+use vilan_core::node::Convention;
+use vilan_core::token::Token;
 use vilan_core::type_::Type;
 use vilan_core::{
     Error, Manifest, Platform as BuildPlatform, Program, Span, Workspace as BuildWorkspace,
@@ -193,6 +196,241 @@ const KEYWORDS: &[&str] = &[
     "in", "is", "match", "if", "else", "async", "await", "return", "ret", "jump", "type", "with",
     "export", "external", "true", "false", "null",
 ];
+
+/// The vilan book's published base URL — keyword hovers deep-link into it.
+const BOOK_BASE: &str = "https://reedsyllas.github.io/vilan/";
+
+/// Every keyword the lexer classifies (`token.rs`), each with a one-line
+/// meaning and a deep link into the book: `(keyword, sentence, page#anchor)`.
+/// Semantics-bearing keywords point at the specification; the rest point where
+/// the book teaches them best. The set is kept in lockstep with the lexer by
+/// [`keyword_lexeme`], whose every keyword arm has an entry here.
+const KEYWORD_DOCS: &[(&str, &str, &str)] = &[
+    (
+        "fun",
+        "Declares a function.",
+        "tour/functions-and-closures.html#functions",
+    ),
+    (
+        "struct",
+        "Declares a struct — a product type with named fields.",
+        "tour/data-and-traits.html#structs",
+    ),
+    (
+        "enum",
+        "Declares an enum — a sum type whose value is one of several variants.",
+        "tour/data-and-traits.html#enums",
+    ),
+    (
+        "trait",
+        "Declares a trait — a set of methods a type can implement.",
+        "tour/data-and-traits.html#traits",
+    ),
+    (
+        "impl",
+        "Implements methods for a type — and, with a trait, that trait.",
+        "tour/data-and-traits.html#impl--methods-and-statics",
+    ),
+    (
+        "with",
+        "Names the trait(s) an `impl` provides (or a trait's supertraits).",
+        "spec/types.html#54-impls",
+    ),
+    (
+        "type",
+        "Declares a type alias.",
+        "spec/types.html#53-declarations",
+    ),
+    (
+        "external",
+        "Declares a host (FFI) type or function — its surface comes from the host, not vilan.",
+        "spec/types.html#53-declarations",
+    ),
+    (
+        "macro",
+        "Declares a macro — code that runs at compile time to produce code.",
+        "spec/macros.html#101-declaring-and-invoking",
+    ),
+    (
+        "const",
+        "Evaluates an expression at compile time (`const expr`).",
+        "spec/const.html#91-the-const-expression",
+    ),
+    (
+        "import",
+        "Loads a module and binds the named items into this module's scope.",
+        "spec/names.html#43-imports",
+    ),
+    (
+        "use",
+        "Binds names from an already-visible type's namespace (variants, statics) without loading a module.",
+        "spec/names.html#43-imports",
+    ),
+    (
+        "export",
+        "Re-exports a statement's names so importers see them as if declared here.",
+        "spec/names.html#43-imports",
+    ),
+    ("mod", "Declares a submodule.", "spec/names.html#41-modules"),
+    (
+        "let",
+        "Binds an immutable local or module-level value.",
+        "tour/values-and-types.html#bindings",
+    ),
+    (
+        "mut",
+        "Binds a mutable value — one that can be reassigned.",
+        "tour/values-and-types.html#bindings",
+    ),
+    (
+        "own",
+        "Passes a parameter by value as an owned copy; for a `resource` this moves ownership into the callee.",
+        "spec/memory.html#63-rule-3--references-are-second-class-views",
+    ),
+    (
+        "borrows",
+        "Names which parameter a function returns a view into — the one sanctioned way a view escapes a function (often inferred).",
+        "spec/memory.html#65-projections-borrows",
+    ),
+    (
+        "resource",
+        "An owned value with exactly one owner, moved rather than copied, and torn down at scope end.",
+        "spec/memory.html#68-resources-and-destruction",
+    ),
+    (
+        "if",
+        "Chooses between branches; `if` is an expression that produces a value.",
+        "tour/control-flow.html#if--else",
+    ),
+    (
+        "else",
+        "The alternative branch of an `if`.",
+        "tour/control-flow.html#if--else",
+    ),
+    (
+        "match",
+        "Matches a value against patterns, taking it apart by shape.",
+        "tour/control-flow.html#match",
+    ),
+    (
+        "is",
+        "Tests whether a value matches a pattern, yielding a bool.",
+        "tour/control-flow.html#match",
+    ),
+    (
+        "for",
+        "Iterates over the elements of a collection (`for x in xs`).",
+        "tour/control-flow.html#loops",
+    ),
+    (
+        "in",
+        "Separates the binder from the iterated collection in a `for` loop.",
+        "tour/control-flow.html#loops",
+    ),
+    (
+        "jump",
+        "Transfers control within a loop: `jump break` or `jump continue`.",
+        "tour/control-flow.html#loops",
+    ),
+    (
+        "ret",
+        "Returns early from a function.",
+        "tour/control-flow.html#early-return-ret",
+    ),
+    (
+        "async",
+        "Spawns work without waiting for it (`async expr` / `async { … }`), yielding a `Task<T>`; ordinary calls are awaited for you.",
+        "tour/async.html#opting-out-of-waiting-async-and-await",
+    ),
+    (
+        "await",
+        "Collects a `Task<T>` spawned with `async`; ordinary calls need no `await`.",
+        "tour/async.html#opting-out-of-waiting-async-and-await",
+    ),
+    (
+        "true",
+        "The boolean literal `true`.",
+        "tour/values-and-types.html#primitives",
+    ),
+    (
+        "false",
+        "The boolean literal `false`.",
+        "tour/values-and-types.html#primitives",
+    ),
+    (
+        "null",
+        "The null literal — the sole value of the `null` type.",
+        "tour/values-and-types.html#wheres-null",
+    ),
+];
+
+/// The keyword lexeme a token spells, or `None` for non-keyword tokens
+/// (identifiers, literals, operators, punctuation). Exhaustive over `Token`
+/// deliberately: a new keyword variant must be classified here, which forces
+/// the matching [`KEYWORD_DOCS`] entry it needs.
+fn keyword_lexeme(token: &Token) -> Option<&'static str> {
+    Some(match token {
+        Token::Async => "async",
+        Token::Await => "await",
+        Token::Const => "const",
+        Token::Else => "else",
+        Token::Enum => "enum",
+        Token::Export => "export",
+        Token::External => "external",
+        Token::Bool(true) => "true",
+        Token::Bool(false) => "false",
+        Token::For => "for",
+        Token::Fun => "fun",
+        Token::If => "if",
+        Token::Impl => "impl",
+        Token::Import => "import",
+        Token::In => "in",
+        Token::Is => "is",
+        Token::Jump => "jump",
+        Token::Let => "let",
+        Token::Macro => "macro",
+        Token::Match => "match",
+        Token::Mod => "mod",
+        Token::Mut => "mut",
+        Token::Null => "null",
+        Token::Own => "own",
+        Token::Borrows => "borrows",
+        Token::Ret => "ret",
+        Token::Resource => "resource",
+        Token::Struct => "struct",
+        Token::Trait => "trait",
+        Token::Type => "type",
+        Token::Use => "use",
+        Token::With => "with",
+        Token::Ident(_)
+        | Token::Ctrl(_)
+        | Token::Number(_, _, _)
+        | Token::Op(_)
+        | Token::String(_)
+        | Token::MultilineString(_) => return None,
+    })
+}
+
+/// A parameter's signature fragment for hover, with its declared calling
+/// convention: `own x: T`, `x: &T`, `x: &mut T`, or the plain `x: T`. The `&` /
+/// `&mut` live on the convention (rule 3), not in `type_label`, so they are
+/// prepended here; `self` renders in its convention-specific self form.
+fn parameter_signature(parameter: &Parameter, type_label: &str) -> String {
+    if parameter.name == "self" {
+        return match parameter.convention {
+            Convention::Bare => "self".to_string(),
+            Convention::Own => "own self".to_string(),
+            Convention::Ref => "&self".to_string(),
+            Convention::RefMut => "&mut self".to_string(),
+        };
+    }
+    match parameter.convention {
+        Convention::Bare => format!("{}: {type_label}", parameter.name),
+        Convention::Own => format!("own {}: {type_label}", parameter.name),
+        Convention::Ref => format!("{}: &{type_label}", parameter.name),
+        Convention::RefMut => format!("{}: &mut {type_label}", parameter.name),
+    }
+}
 
 pub struct Document {
     pub line_index: LineIndex,
@@ -491,6 +729,12 @@ impl Document {
     /// requirement line where one is inferred. Anything else keeps its
     /// rendered type.
     pub fn hover(&self, offset: usize) -> Option<String> {
+        // A keyword under the cursor: its one-line meaning + a book link. This
+        // is purely lexical, so it works even when analysis produced no program
+        // (a keyword hovers on a document that doesn't yet compile).
+        if let Some(keyword) = self.keyword_hover(offset) {
+            return Some(keyword);
+        }
         let program = self.program.as_ref()?;
         // A type name in type position: the full declaration when known.
         if let Some((definition, label)) = self.type_reference_at(program, offset) {
@@ -515,12 +759,16 @@ impl Document {
                 return Some(self.compose_hover(program, definition, declaration, None));
             }
         }
-        let type_label = self.hover_label(program, id).map(|label| {
-            // A constant shows its VALUE beside its type (E9).
-            match self.const_value_label(program, id) {
-                Some(value) => format!("{label} = {value}"),
-                None => label,
-            }
+        // A variable (`let`/`mut`, local or module-level, or a destructured
+        // binder) or a parameter: its typed declaration, else the bare type.
+        let type_label = self.binding_hover(program, id).or_else(|| {
+            self.hover_label(program, id).map(|label| {
+                // A constant shows its VALUE beside its type (E9).
+                match self.const_value_label(program, id) {
+                    Some(value) => format!("{label} = {value}"),
+                    None => label,
+                }
+            })
         });
         let requirement = self
             .function_target(program, id)
@@ -562,6 +810,64 @@ impl Document {
             out.push_str(&requirement);
         }
         out
+    }
+
+    /// The hover for a keyword under `offset`: a one-line meaning and a deep
+    /// link into the book. Lexes the buffer (cheap, hover is a glance) and
+    /// classifies the token whose span contains the cursor — only a keyword
+    /// token yields a hover, so a string literal like `"fun"` never does.
+    fn keyword_hover(&self, offset: usize) -> Option<String> {
+        let (tokens, _errors) = tokenize(&self.text);
+        let (token, _span) = tokens.iter().find(|(_, span)| {
+            let range = span.into_range();
+            range.start <= offset && offset < range.end
+        })?;
+        let lexeme = keyword_lexeme(token)?;
+        let (_, sentence, path) = KEYWORD_DOCS
+            .iter()
+            .find(|(keyword, _, _)| *keyword == lexeme)?;
+        Some(format!(
+            "**`{lexeme}`** — {sentence}\n\n[The vilan book →]({BOOK_BASE}{path})"
+        ))
+    }
+
+    /// The hover for a `let`/`mut` variable or a parameter under the cursor,
+    /// rendered as a fenced declaration in the house style: `let name: T` /
+    /// `mut name: T` for a variable (its `///` doc appended), and the
+    /// convention-carrying `own x: T` / `x: &mut T` / `x: T` for a parameter
+    /// (a function-typed parameter shows its `|A| R` closure shape). A use site
+    /// resolves through to its binding, so both the declaration and every use
+    /// hover the same. The type is the resolved label the analyzer pre-rendered
+    /// (`expr_types`) — the element type for a destructured binder. Returns
+    /// `None` for anything that is not a binding, leaving the bare-type path.
+    fn binding_hover(&self, program: &Program, id: Id) -> Option<String> {
+        let binding = match program.entity_map.get(&id) {
+            Some(Expr::Local(inner) | Expr::Variable(inner) | Expr::Parameter(inner)) => *inner,
+            _ => id,
+        };
+        if let Some(variable) = program.variables.get(&binding) {
+            let type_label = program.expr_types.get(&binding)?;
+            let keyword = if variable.mutable { "mut" } else { "let" };
+            let mut signature = format!("{keyword} {}: {type_label}", variable.name);
+            // A `const`-initialized binding shows its evaluated VALUE too (E9).
+            if let Some(value) = self.const_value_label(program, binding) {
+                signature.push_str(&format!(" = {value}"));
+            }
+            let mut out = format!("```vilan\n{signature}\n```");
+            if let Some(docs) = self.doc_comment_of(program, binding) {
+                out.push_str("\n\n");
+                out.push_str(&docs);
+            }
+            return Some(out);
+        }
+        if let Some(parameter) = program.parameters.get(&binding) {
+            let type_label = program.expr_types.get(&binding)?;
+            return Some(format!(
+                "```vilan\n{}\n```",
+                parameter_signature(parameter, type_label)
+            ));
+        }
+        None
     }
 
     /// The struct/enum definition an entity names in VALUE position — a
@@ -2411,6 +2717,208 @@ pub(crate) mod tests {
             "{hover}"
         );
         assert!(hover.contains("fun badge(count: i32): str"), "{hover}");
+    }
+
+    // WO-4 variables: a local `let` hovers as its typed binding — `let name: T`,
+    // fenced like a declaration, the type resolved by inference.
+    #[test]
+    fn hover_on_a_local_let_shows_its_typed_binding() {
+        let hover = hover_at_cursor("fun main() {\n\tlet cou|nt = 5;\n\tlet _ = count;\n}\n")
+            .expect("hover on the let binding");
+        assert!(hover.contains("```vilan\nlet count: i32\n```"), "{hover}");
+    }
+
+    // A `mut` binding hovers with the `mut` keyword — it can be reassigned.
+    #[test]
+    fn hover_on_a_mut_binding_shows_mut() {
+        let hover = hover_at_cursor("fun main() {\n\tmut tot|al = 0;\n\ttotal = 1;\n}\n")
+            .expect("hover on the mut binding");
+        assert!(hover.contains("```vilan\nmut total: i32\n```"), "{hover}");
+    }
+
+    // A module-level binding hovers as a `let` too, not just locals.
+    #[test]
+    fn hover_on_a_module_binding_shows_its_typed_binding() {
+        let hover =
+            hover_at_cursor("let cap|acity = 100;\n\nfun main() {\n\tlet _ = capacity;\n}\n")
+                .expect("hover on the module binding");
+        assert!(
+            hover.contains("```vilan\nlet capacity: i32\n```"),
+            "{hover}"
+        );
+    }
+
+    // A destructured binder hovers as `let name: T` with its ELEMENT type.
+    #[test]
+    fn hover_on_a_destructured_binder_shows_its_element_type() {
+        let hover = hover_at_cursor(
+            "fun main() {\n\tlet (a|a, bb) = (1, 2);\n\tlet _ = aa;\n\tlet _ = bb;\n}\n",
+        )
+        .expect("hover on the destructured binder");
+        assert!(hover.contains("```vilan\nlet aa: i32\n```"), "{hover}");
+    }
+
+    // A use site hovers identically to the declaration it resolves to.
+    #[test]
+    fn hover_on_a_binding_use_site_matches_the_declaration() {
+        let hover = hover_at_cursor("fun main() {\n\tlet count = 5;\n\tlet _ = cou|nt;\n}\n")
+            .expect("hover on the use site");
+        assert!(hover.contains("```vilan\nlet count: i32\n```"), "{hover}");
+    }
+
+    // A binding's leading `///` doc rides its hover, like a declaration's.
+    #[test]
+    fn hover_on_a_binding_surfaces_its_doc_comment() {
+        let hover = hover_at_cursor(
+            "fun main() {\n\t/// how many things\n\tlet cou|nt = 5;\n\tlet _ = count;\n}\n",
+        )
+        .expect("hover on the documented binding");
+        assert!(hover.contains("```vilan\nlet count: i32\n```"), "{hover}");
+        assert!(hover.contains("how many things"), "{hover}");
+    }
+
+    // WO-4 parameters: a plain parameter hovers as `name: T`.
+    #[test]
+    fn hover_on_a_plain_parameter_shows_name_and_type() {
+        let hover = hover_at_cursor(
+            "fun f(coun|t: i32): i32 {\n\tcount\n}\n\nfun main() {\n\tlet _ = f(1);\n}\n",
+        )
+        .expect("hover on the plain parameter");
+        assert!(hover.contains("```vilan\ncount: i32\n```"), "{hover}");
+    }
+
+    // An `own` parameter carries its convention: `own name: T`.
+    #[test]
+    fn hover_on_an_own_parameter_shows_the_own_convention() {
+        let hover = hover_at_cursor(
+            "struct Box { n: i32 }\n\nfun consume(own |b: Box): i32 {\n\tb.n\n}\n\nfun main() {\n\tlet _ = consume(Box { n = 1 });\n}\n",
+        )
+        .expect("hover on the own parameter");
+        assert!(hover.contains("```vilan\nown b: Box\n```"), "{hover}");
+    }
+
+    // A `&` (readonly view) parameter — the `&` lives on the convention, not the
+    // type, so hover reconstructs `name: &T`.
+    #[test]
+    fn hover_on_a_ref_parameter_shows_the_ref_convention() {
+        let hover = hover_at_cursor("fun peek(|x: &i32): i32 {\n\tx\n}\n\nfun main() {\n\tlet a = 1;\n\tlet _ = peek(&a);\n}\n")
+            .expect("hover on the ref parameter");
+        assert!(hover.contains("```vilan\nx: &i32\n```"), "{hover}");
+    }
+
+    // A `&mut` (writable view) parameter, hovered at a USE site — the convention
+    // is not in the pre-rendered type, so hover adds `&mut` back.
+    #[test]
+    fn hover_on_a_mut_ref_parameter_use_shows_the_mut_ref_convention() {
+        let hover = hover_at_cursor(
+            "fun f(xs: &mut i32) {\n\tx|s = 1;\n}\n\nfun main() {\n\tmut a = 0;\n\tf(&mut a);\n}\n",
+        )
+        .expect("hover on the &mut parameter use");
+        assert!(hover.contains("```vilan\nxs: &mut i32\n```"), "{hover}");
+    }
+
+    // A function-typed parameter shows its closure shape (`|A| R`). The source
+    // carries closure pipes, so the `|` cursor marker can't be used — the offset
+    // is computed straight onto the parameter name.
+    #[test]
+    fn hover_on_a_closure_parameter_shows_its_shape() {
+        let text = "fun apply(g: |i32| i32): i32 {\n\tg(1)\n}\n\nfun main() {\n\tlet _ = apply(fun(x: i32): i32 { x });\n}\n";
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let offset = text.find("(g:").unwrap() + 1;
+        let hover = document
+            .hover(offset)
+            .expect("hover on the closure parameter");
+        assert!(hover.contains("```vilan\ng: |i32| i32\n```"), "{hover}");
+    }
+
+    // WO-4 keywords: a keyword hovers as one crisp sentence + a book deep link.
+    // Covers the flagship memory-model word `resource` (spec link), a second
+    // memory-model word `own` (spec link), and a control-flow word `for` (tour
+    // link) — sentence AND URL asserted per case.
+    #[test]
+    fn hover_on_a_keyword_shows_its_meaning_and_book_link() {
+        let hover = hover_at_cursor("resou|rce struct File { fd: i32 }\n\nfun main() {}\n")
+            .expect("hover on `resource`");
+        assert!(
+            hover.contains("An owned value with exactly one owner, moved rather than copied"),
+            "{hover}"
+        );
+        assert!(
+            hover.contains(
+                "https://reedsyllas.github.io/vilan/spec/memory.html#68-resources-and-destruction"
+            ),
+            "{hover}"
+        );
+
+        let hover = hover_at_cursor(
+            "struct Box { n: i32 }\n\nfun consume(o|wn b: Box): i32 {\n\tb.n\n}\n\nfun main() {\n\tlet _ = consume(Box { n = 1 });\n}\n",
+        )
+        .expect("hover on `own`");
+        assert!(hover.contains("moves ownership into the callee"), "{hover}");
+        assert!(
+            hover.contains("https://reedsyllas.github.io/vilan/spec/memory.html#63-rule-3"),
+            "{hover}"
+        );
+
+        let hover =
+            hover_at_cursor("fun main() {\n\tfo|r x in [ 1, 2 ] {\n\t\tlet _ = x;\n\t}\n}\n")
+                .expect("hover on `for`");
+        assert!(hover.contains("Iterates over the elements"), "{hover}");
+        assert!(
+            hover.contains("https://reedsyllas.github.io/vilan/tour/control-flow.html#loops"),
+            "{hover}"
+        );
+    }
+
+    // A keyword hovers even on a document that does not compile — the lookup is
+    // purely lexical, ahead of any analysis.
+    #[test]
+    fn hover_on_a_keyword_works_without_a_program() {
+        let text = "fun main() {\n\tresource\n}\n"; // `resource` misused — analysis fails.
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let offset = text.find("resource").unwrap() + 1;
+        let hover = document
+            .hover(offset)
+            .expect("keyword hover without a program");
+        assert!(
+            hover.contains("An owned value with exactly one owner"),
+            "{hover}"
+        );
+    }
+
+    // The keyword table stays in lockstep with the lexer: every documented
+    // keyword lexes to exactly one keyword token that classifies back to
+    // itself. If a new keyword lands in the lexer, `keyword_lexeme` (exhaustive
+    // over `Token`) forces a new arm, and this pin forces its `KEYWORD_DOCS`
+    // entry — so no keyword ships without a hover.
+    #[test]
+    fn every_documented_keyword_round_trips_through_the_lexer() {
+        for (keyword, _sentence, _link) in KEYWORD_DOCS {
+            let (tokens, errors) = tokenize(keyword);
+            assert!(errors.is_empty(), "{keyword} lexed with errors: {errors:?}");
+            assert_eq!(tokens.len(), 1, "{keyword} should lex to one token");
+            assert_eq!(
+                keyword_lexeme(&tokens[0].0),
+                Some(*keyword),
+                "{keyword} must classify back to itself"
+            );
+        }
+    }
+
+    // A no-hover case that must STAY silent: whitespace between items and a
+    // comment name no entity and are no keyword.
+    #[test]
+    fn hover_stays_silent_on_whitespace_and_comments() {
+        let hover = hover_at_cursor("fun a() {}\n|\nfun main() {}\n");
+        assert!(hover.is_none(), "whitespace should not hover: {hover:?}");
+        let text = "fun a() {}\n// just a note\nfun main() {}\n";
+        let document = Document::analyze(text, &std_root(), Path::new("test.vl"));
+        let offset = text.find("just").unwrap();
+        assert!(
+            document.hover(offset).is_none(),
+            "a comment should not hover: {:?}",
+            document.hover(offset)
+        );
     }
 
     // The macro-LSP tail's last piece: `[` at an item position offers the
