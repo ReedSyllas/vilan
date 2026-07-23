@@ -16,10 +16,9 @@
 //! re-lex-and-compare safety net turns `fmt` into a no-op when the token stream
 //! drifts, indistinguishable from an already-canonical file) into loud, external
 //! checks: `formatter_output_token_matches_input_over_the_corpus` guards against
-//! token-drifting output, and `formatter_bail_set_is_the_known_ledger` pins the
-//! exact set of files `fmt` currently no-ops on (an S0 FINDING — see
-//! `KNOWN_FORMATTER_BAILS`, still open as backlog E13), with
-//! `formatter_never_silently_bails_over_the_corpus` the `#[ignore]`d zero-bail goal.
+//! token-drifting output, and `formatter_never_silently_bails_over_the_corpus`
+//! (the E13 closing gate, live since 2026-07-22) asserts `fmt` never silently
+//! no-ops on a corpus file.
 
 use std::path::{Path, PathBuf};
 use vilan_core::token::Token;
@@ -337,51 +336,27 @@ fn current_bail_set() -> Vec<String> {
     bails
 }
 
-/// The known silent-bailers as of H6 S0 (2026-07-21). This is the §0 "silent
-/// no-op" failure mode made LOUD and enumerated: `vilan fmt` is a no-op on each of
-/// these files because the printer hits a construct its `_ => self.bailed = true`
-/// fallbacks (formatter.rs `print_item` / `print_expr`) do not yet handle — the
-/// file names correlate with newer language forms (macros, expression lifting,
-/// fixed arrays, sized numerics, unary minus, irrefutable destructuring). This is
-/// a REPORTED FINDING, not a fix: completing the formatter is a separate work item
-/// (backlog E13, still open). Pinning the exact set makes it an active regression
-/// tripwire — a NEW bailer, or one the formatter learns to handle, flips this test
-/// and forces the ledger (and the goal test below) to be revisited.
-const KNOWN_FORMATTER_BAILS: &[&str] = &[
-    "destructuring.vl",
-    "fixed-arrays.vl",
-    "lift-chain.vl",
-    "macro-block.vl",
-    "macro-derive.vl",
-    "macro-invoke.vl",
-    "math.vl",
-    "numeric-types.vl",
-    "reactive-owner.vl",
-    "unary-minus.vl",
-];
-
+/// The corpus files `vilan fmt` still silently no-ops on. E13 closed nine of the
+/// ten H6 S0 bailers by adding the missing printer arms (destructuring, fixed
+/// arrays, macro forms, unary minus, and the lift-chain postfix subject); this is
+/// what remains.
+///
+/// `numeric-types.vl` is a DESIGN GAP, not a missing arm: it writes redundant
+/// parentheses around a number literal in method-subject position —
+/// `(300).as_u8()`. The parser dissolves parentheses around an atom (they add no
+/// structure), so the tree is `MemberAccessor(Number(300), …)` — identical to
+/// `300.as_u8()`. The printer canonicalizes it to `300.as_u8()` (correct — both
+/// spellings compile to the same JS), but the safety net compares the OUTPUT's
+/// tokens to the SOURCE's, sees the dropped parens, and refuses the reprint. The
+/// net cannot allow paren-normalization (parens are usually semantic) and the AST
+/// E13 closed 2026-07-22: every corpus file formats. The residual DESIGN gap
+/// stays recorded (backlog E13 closure note): a redundant paren around a BARE
+/// ATOM — `(300).as_u8()` — is dissolved by the parser and unrecorded in the
+/// AST, so the printer can neither preserve nor safely drop it; such a file
+/// bails safely (`fmt` no-ops). The corpus's four such sites were canonicalized
+/// (emission byte-identical, probe-proven); a future fix is an AST-aware net or
+/// parser-recorded parens.
 #[test]
-fn formatter_bail_set_is_the_known_ledger() {
-    let bails = current_bail_set();
-    eprintln!(
-        "fmt tripwire: {} corpus files, {} silently bailing: {:?}",
-        corpus_files().len(),
-        bails.len(),
-        bails
-    );
-    assert_eq!(
-        bails, KNOWN_FORMATTER_BAILS,
-        "the formatter's silent-bail set changed. If a file now bails, `vilan fmt` \
-         silently no-ops on it (a §0 regression) — investigate. If a listed file no \
-         longer bails, the formatter learned its construct — drop it from the ledger \
-         and from the #[ignore]d goal test."
-    );
-}
-
-#[test]
-#[ignore = "H6 S0 FINDING: 10 corpus files silently bail through `vilan fmt` (see \
-            KNOWN_FORMATTER_BAILS), backlog E13. The goal is zero; un-ignore when the \
-            formatter handles every corpus construct."]
 fn formatter_never_silently_bails_over_the_corpus() {
     let bails = current_bail_set();
     assert!(

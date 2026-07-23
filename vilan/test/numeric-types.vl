@@ -51,15 +51,15 @@ fun main() {
 	print(halve(9u32, 4u32));
 
 	// Conversions: identity, widening, narrowing folds, float truncation.
-	print((300).as_u8());
+	print(300.as_u8());
 	print((-1).as_u8());
-	print((130).as_i8());
-	print((3.9).as_i32());
+	print(130.as_i8());
+	print(3.9.as_i32());
 	print((-3.9).as_i32());
-	print((70000).as_u16());
+	print(70000.as_u16());
 	print(byte.as_f64() + 0.25);
 	print(wide.as_i32());
-	print((2.5f32).as_i53());
+	print(2.5f32.as_i53());
 
 	// Same-width arithmetic and comparison stay native.
 	let doubled = 100u8 + 100u8;

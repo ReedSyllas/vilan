@@ -218,9 +218,10 @@ impl<'src> Printer<'src> {
     }
 
     /// Whether `node`, printed as a statement, takes a terminating `;`. Expression
-    /// statements (`let`, assignments, calls, …) do; control-flow forms
-    /// (`if`/`for`/`match`/block), declarations, and `use`/`import` (which already
-    /// emit their own `;`) do not.
+    /// statements (`let`, assignments, calls, a `macro name(..)` invocation, …) do;
+    /// control-flow forms (`if`/`for`/`match`/block), declarations (including a
+    /// `macro fun`, a `macro { .. }` block, and a `[name] item` macro attribute),
+    /// and `use`/`import` (which already emit their own `;`) do not.
     fn needs_semicolon(node: &Node<'src>) -> bool {
         !matches!(
             node,
@@ -240,6 +241,9 @@ impl<'src> Printer<'src> {
                 | Node::Export(_)
                 | Node::Use(_)
                 | Node::Import(_)
+                | Node::MacroFun(_)
+                | Node::MacroBlock(_)
+                | Node::MacroAttribute(_, _, _, _)
         )
     }
 
@@ -398,6 +402,27 @@ impl<'src> Printer<'src> {
                 self.out.push(' ');
                 self.print_braced_items(body);
             }
+            // `macro fun name(..) { .. }` — a macro definition. The `macro`
+            // keyword then the ordinary function form.
+            Node::MacroFun(func) => {
+                self.out.push_str("macro ");
+                self.print_func(func);
+            }
+            // `[name(args)?] <item>` — a user macro attribute, on its own line
+            // above the struct/enum/function it annotates (like `[derive(..)]`).
+            // The optional arguments are SYNTAX — reprinted verbatim from source.
+            Node::MacroAttribute(name, _name_span, argument_spans, annotated) => {
+                self.out.push('[');
+                self.out.push_str(name);
+                if !argument_spans.is_empty() {
+                    self.out.push('(');
+                    self.print_argument_spans(argument_spans);
+                    self.out.push(')');
+                }
+                self.out.push(']');
+                self.line();
+                self.print_item(annotated);
+            }
             // Anything else is an expression appearing as a statement.
             _ => self.print_expr(item),
         }
@@ -497,6 +522,15 @@ impl<'src> Printer<'src> {
                     self.print_type(element);
                 }
                 self.out.push(')');
+            }
+            // `[T; n]` — a fixed-length array type (proposal/fixed-arrays.md): the
+            // element type and a length (an integer literal). Nests as `[[T; m]; n]`.
+            Node::ArrayType(element, length) => {
+                self.out.push('[');
+                self.print_type(&element.0);
+                self.out.push_str("; ");
+                self.print_expr(length);
+                self.out.push(']');
             }
             _ => self.bailed = true,
         }
@@ -850,6 +884,38 @@ impl<'src> Printer<'src> {
         }
     }
 
+    /// Prints the subject of a `.member` or `[index]` postfix. A `Lift` (an
+    /// `a?.b` chain) greedily absorbs any following `.member` / `[index]` / call
+    /// into its continuation, so as a postfix subject it must be parenthesized —
+    /// `(a?.b).c`, not `a?.b.c` (which reparses with `.c` pulled inside the
+    /// lift). Every other subject follows the ordinary operand rule (min 100): an
+    /// atom / call / member / index needs no parens; a binary / `is` / prefix
+    /// form gets its source parens back through precedence.
+    fn print_postfix_subject(&mut self, subject: &Spanned<Node<'src>>) {
+        if matches!(subject.0, Node::Lift(_, _)) {
+            self.out.push('(');
+            self.print_expr(subject);
+            self.out.push(')');
+        } else {
+            self.print_operand(subject, 100);
+        }
+    }
+
+    /// Prints a comma-separated list of macro arguments, each reprinted VERBATIM
+    /// from its source span. A macro's arguments are syntax (the parser keeps only
+    /// their spans, not a tree), so — like an interpolated string — they are
+    /// recovered from the source text rather than rebuilt. Whitespace inside an
+    /// argument is preserved; the separator is normalized to `, `.
+    fn print_argument_spans(&mut self, argument_spans: &[Span]) {
+        for (index, span) in argument_spans.iter().enumerate() {
+            if index > 0 {
+                self.out.push_str(", ");
+            }
+            let range = span.into_range();
+            self.out.push_str(&self.source[range]);
+        }
+    }
+
     /// Prints a comma-separated expression list (call arguments, list/tuple
     /// elements) inline.
     fn print_expression_list(&mut self, elements: &[Spanned<Node<'src>>]) {
@@ -929,7 +995,7 @@ impl<'src> Printer<'src> {
                 self.out.push('>');
             }
             Node::MemberAccessor(subject, member) => {
-                self.print_operand(subject, 100);
+                self.print_postfix_subject(subject);
                 self.out.push('.');
                 self.print_expr(member);
             }
@@ -939,7 +1005,7 @@ impl<'src> Printer<'src> {
                 self.out.push_str(member);
             }
             Node::Index(subject, index) => {
-                self.print_operand(subject, 100);
+                self.print_postfix_subject(subject);
                 self.out.push('[');
                 self.print_expr(index);
                 self.out.push(']');
@@ -948,7 +1014,12 @@ impl<'src> Printer<'src> {
                 // A call binds tighter than `.`/`[]`, so `a.b(c)` parses as
                 // `a.(b(c))`. To call the *result* of a member/index access the
                 // callee must be parenthesized — `(a.b)(c)` — or it reparses wrong.
-                if matches!(callee.0, Node::MemberAccessor(_, _) | Node::Index(_, _)) {
+                // A `?.` lift chain likewise absorbs a following call into its
+                // continuation, so a `Lift` callee needs its own parens: `(a?.b)()`.
+                if matches!(
+                    callee.0,
+                    Node::MemberAccessor(_, _) | Node::Index(_, _) | Node::Lift(_, _)
+                ) {
                     self.out.push('(');
                     self.print_expr(callee);
                     self.out.push(')');
@@ -977,9 +1048,16 @@ impl<'src> Printer<'src> {
                 self.out.push(' ');
                 self.print_operand(right, precedence + 1);
             }
+            // A prefix operator (`-x`, `!x`, `&x`, `*x`, `await x`) binds tighter
+            // than every binary operator (the parser recurses on the unary chain
+            // for the operand), so a binary operand must be parenthesized to
+            // reparse the same way — `-(2 + 3)`, not `-2 + 3`. Operand minimum 10
+            // (the prefix tier in `expression_precedence`) wraps every binary
+            // (precedence 0–9) while leaving a nested prefix (`- -x`) and atoms
+            // unwrapped.
             Node::Unary(operator, operand) => {
                 self.out.push(*operator);
-                self.print_operand(operand, 6);
+                self.print_operand(operand, 10);
             }
             Node::TryAssert(subject) => {
                 self.print_operand(subject, 100);
@@ -1017,15 +1095,15 @@ impl<'src> Printer<'src> {
                 if *mutable {
                     self.out.push_str("mut ");
                 }
-                self.print_operand(operand, 6);
+                self.print_operand(operand, 10);
             }
             Node::Dereference(operand) => {
                 self.out.push('*');
-                self.print_operand(operand, 6);
+                self.print_operand(operand, 10);
             }
             Node::Await(operand) => {
                 self.out.push_str("await ");
-                self.print_operand(operand, 6);
+                self.print_operand(operand, 10);
             }
             Node::Async(operand) => {
                 self.out.push_str("async ");
@@ -1041,6 +1119,21 @@ impl<'src> Printer<'src> {
             Node::Let(name, declared_type, value, mutable) => {
                 self.out.push_str(if *mutable { "mut " } else { "let " });
                 self.out.push_str(name.0);
+                if let Some(declared_type) = declared_type {
+                    self.out.push_str(": ");
+                    self.print_type(&declared_type.0);
+                }
+                if let Some(value) = value {
+                    self.out.push_str(" = ");
+                    self.print_expr(value);
+                }
+            }
+            // `let (a, b) = …` / `mut [x, y] = …` — a destructuring binding. As
+            // `Let`, but the bound name is an irrefutable tuple/array binder
+            // (a name, or a nesting of them) printed by `print_binder`.
+            Node::LetDestructure(pattern, declared_type, value, mutable) => {
+                self.out.push_str(if *mutable { "mut " } else { "let " });
+                self.print_binder(&pattern.0);
                 if let Some(declared_type) = declared_type {
                     self.out.push_str(": ");
                     self.print_type(&declared_type.0);
@@ -1122,6 +1215,22 @@ impl<'src> Printer<'src> {
                 self.out.push_str(target);
             }
             Node::Block(block) => self.print_block(block),
+            // `macro { .. }` — an anonymous immediately-expanded macro. Legal in
+            // both item and expression position; the body is a statement block.
+            Node::MacroBlock(body) => {
+                self.out.push_str("macro ");
+                self.print_block(body);
+            }
+            // `macro name(args)` — a macro invocation (item or expression
+            // position). The arguments are SYNTAX — reprinted verbatim from their
+            // source spans, never rebuilt from a parsed tree (only spans are kept).
+            Node::MacroInvocation(name, _name_span, argument_spans) => {
+                self.out.push_str("macro ");
+                self.out.push_str(name);
+                self.out.push('(');
+                self.print_argument_spans(argument_spans);
+                self.out.push(')');
+            }
             Node::StructInitializer(name, generic_arguments, fields) => {
                 self.out.push_str(name);
                 if let Some((generic_arguments, _)) = generic_arguments {
@@ -1156,6 +1265,16 @@ impl<'src> Printer<'src> {
                 self.print_expression_list(elements);
                 self.out.push(']');
             }
+            // `[value; n]` — a fixed-length array repeat literal (proposal/
+            // fixed-arrays.md): the value copied into each of `n` slots. `; ` is
+            // the canonical spelling of the length separator.
+            Node::Repeat(value, length) => {
+                self.out.push('[');
+                self.print_expr(value);
+                self.out.push_str("; ");
+                self.print_expr(length);
+                self.out.push(']');
+            }
             Node::Tuple(elements) => {
                 self.out.push('(');
                 self.print_expression_list(elements);
@@ -1173,7 +1292,7 @@ impl<'src> Printer<'src> {
             Node::Is(subject, pattern) => {
                 self.print_operand(subject, 3);
                 self.out.push_str(" is ");
-                self.print_pattern(&pattern.0);
+                self.print_match_pattern(pattern);
             }
             _ => self.bailed = true,
         }
@@ -1215,11 +1334,11 @@ impl<'src> Printer<'src> {
     /// Prints one `match` leg: `pattern[, pattern][ if guard] => body`.
     fn print_match_leg(&mut self, leg: &crate::node::MatchLeg<'src>) {
         let (patterns, guard, body) = leg;
-        for (index, (pattern, _)) in patterns.iter().enumerate() {
+        for (index, pattern) in patterns.iter().enumerate() {
             if index > 0 {
                 self.out.push_str(", ");
             }
-            self.print_pattern(pattern);
+            self.print_match_pattern(pattern);
         }
         if let Some(guard) = guard {
             self.out.push_str(" if ");
@@ -1229,9 +1348,10 @@ impl<'src> Printer<'src> {
         self.print_expr(body);
     }
 
-    /// Prints a match pattern.
     /// Prints a binder in `let`/parameter position: a bare name (no `let `
-    /// keyword) or a tuple of binders (`(a, b)`). Distinct from a match pattern.
+    /// keyword), a tuple `(a, b)`, or a fixed-array `[a, b]` binder — each of
+    /// which may nest binders. Distinct from a match pattern (`print_pattern`),
+    /// where a binding reads `let x` / `mut x`.
     fn print_binder(&mut self, binder: &Pattern<'src>) {
         match binder {
             Pattern::Binding(name, _) => self.out.push_str(name),
@@ -1245,10 +1365,49 @@ impl<'src> Printer<'src> {
                 }
                 self.out.push(')');
             }
-            // A binder is only ever a name or a tuple of names; other shapes
-            // can't reach here from the parser.
+            Pattern::Array(elements) => {
+                self.out.push('[');
+                for (index, (element, _)) in elements.iter().enumerate() {
+                    if index > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.print_binder(element);
+                }
+                self.out.push(']');
+            }
+            // A binder is only ever a name, a tuple, or an array of binders;
+            // other pattern shapes can't reach here from the parser.
             other => self.print_pattern(other),
         }
+    }
+
+    /// Prints a match pattern, consulting the source to keep a binding tuple's
+    /// spelling. `let (a, b)` (the keyword factored out, before the tuple) and
+    /// `(let a, let b)` (a tuple of per-element binders) parse to the *same*
+    /// `Tuple` of `Binding`s, and both appear in the corpus (`let (a, b)` in
+    /// `destructuring.vl`; `Some((let x, let y))` in `option.vl`). Neither is
+    /// canonically preferable, so the printer reproduces whichever the source
+    /// used — decided by the tuple span's first byte: `l`/`m` (the `let`/`mut`
+    /// keyword) is the factored form, `(` the per-element form. Every other
+    /// pattern prints identically regardless of span.
+    fn print_match_pattern(&mut self, pattern: &Spanned<Pattern<'src>>) {
+        if let Pattern::Tuple(_) = &pattern.0 {
+            let start = pattern.1.into_range().start;
+            match self.source.as_bytes().get(start) {
+                Some(b'l') => {
+                    self.out.push_str("let ");
+                    self.print_binder(&pattern.0);
+                    return;
+                }
+                Some(b'm') => {
+                    self.out.push_str("mut ");
+                    self.print_binder(&pattern.0);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.print_pattern(&pattern.0);
     }
 
     fn print_pattern(&mut self, pattern: &Pattern<'src>) {
@@ -1267,32 +1426,32 @@ impl<'src> Printer<'src> {
                 }
                 if let Some(payload) = payload {
                     self.out.push('(');
-                    for (index, (sub_pattern, _)) in payload.iter().enumerate() {
+                    for (index, sub_pattern) in payload.iter().enumerate() {
                         if index > 0 {
                             self.out.push_str(", ");
                         }
-                        self.print_pattern(sub_pattern);
+                        self.print_match_pattern(sub_pattern);
                     }
                     self.out.push(')');
                 }
             }
             Pattern::Tuple(elements) => {
                 self.out.push('(');
-                for (index, (element, _)) in elements.iter().enumerate() {
+                for (index, element) in elements.iter().enumerate() {
                     if index > 0 {
                         self.out.push_str(", ");
                     }
-                    self.print_pattern(element);
+                    self.print_match_pattern(element);
                 }
                 self.out.push(')');
             }
             Pattern::Array(elements) => {
                 self.out.push('[');
-                for (index, (element, _)) in elements.iter().enumerate() {
+                for (index, element) in elements.iter().enumerate() {
                     if index > 0 {
                         self.out.push_str(", ");
                     }
-                    self.print_pattern(element);
+                    self.print_match_pattern(element);
                 }
                 self.out.push(']');
             }
@@ -1601,5 +1760,294 @@ mod idempotency {
             "doc(hidden) attribute lost:\n{formatted}"
         );
         assert_fixed_point("attributes", source);
+    }
+}
+
+#[cfg(test)]
+mod bailing_constructs {
+    //! Backlog E13 — the constructs that used to make `vilan fmt` silently
+    //! no-op: each hit a `_ => bailed` printer fallback or tripped the
+    //! re-lex-and-compare safety net, so the formatter returned the file
+    //! unchanged (indistinguishable from an already-canonical file). Each now
+    //! round-trips. Per construct, `assert_construct` proves the whole contract
+    //! loudly: the output re-lexes to the SAME token stream as the input (the
+    //! net's own criterion), the formatter did NOT silently bail (a
+    //! token-preserving perturbation canonicalizes identically), the output is
+    //! the canonical spelling, formatting is idempotent, and the canonical form
+    //! round-trips unchanged.
+    use super::{format, normalize};
+    use crate::lexing::tokenize;
+    use crate::token::Token;
+
+    /// The formatter's notion of "the same code": the lexer's tokens with spans
+    /// stripped and insignificant trailing commas normalized away.
+    fn code_tokens(text: &str) -> Vec<Token<'_>> {
+        let (tokens, errors) = tokenize(text);
+        assert!(
+            errors.is_empty(),
+            "did not lex cleanly: {text:?} ({errors:?})"
+        );
+        normalize(tokens.into_iter().map(|(token, _)| token).collect())
+    }
+
+    fn assert_construct(source: &str, expected: &str) {
+        let formatted = format(source);
+        // (a) The output carries the SAME tokens as the source — the safety
+        // net's criterion, asserted here rather than trusted silently.
+        assert_eq!(
+            code_tokens(&formatted),
+            code_tokens(source),
+            "output token-drifted from the input on {source:?}"
+        );
+        // Not a silent bail: a bail returns the input verbatim, so appending
+        // blank lines (pure trivia) would survive instead of canonicalizing.
+        assert_eq!(
+            format(&format!("{source}\n\n")),
+            formatted,
+            "formatter silently bailed on {source:?}"
+        );
+        // (b) The canonical spelling.
+        assert_eq!(
+            formatted, expected,
+            "unexpected canonical form for {source:?}"
+        );
+        // (c) Idempotent, and (d) the canonical form round-trips unchanged.
+        assert_eq!(format(&formatted), formatted, "not idempotent: {source:?}");
+        assert_eq!(
+            format(expected),
+            expected,
+            "canonical form did not round-trip: {expected:?}"
+        );
+    }
+
+    // --- Prefix-operator precedence (unary-minus.vl) -------------------------
+
+    // A prefix operator binds tighter than every binary operator, so a
+    // parenthesized binary operand keeps its parens — dropping them reparses
+    // `-2 + 3`. (This tripped the net; the operand minimum was too low.)
+    #[test]
+    fn unary_minus_over_a_parenthesized_binary_keeps_parens() {
+        assert_construct("fun f() {\n\t-(2 + 3)\n}\n", "fun f() {\n\t-(2 + 3)\n}\n");
+    }
+
+    // `- -x` and `--x` lex identically (vilan has no `--` operator); a nested
+    // prefix (precedence 10) never wraps, so double negation collapses.
+    #[test]
+    fn double_negation_collapses() {
+        assert_construct("fun f() {\n\t- -x\n}\n", "fun f() {\n\t--x\n}\n");
+    }
+
+    // A binary subtraction of a negated operand needs no parens — the right
+    // operand is a prefix form, which binds tighter than `-`.
+    #[test]
+    fn binary_subtract_of_a_negative() {
+        assert_construct("fun f() {\n\t3 - -2\n}\n", "fun f() {\n\t3 - -2\n}\n");
+    }
+
+    #[test]
+    fn plain_prefix_operands_round_trip() {
+        assert_construct("fun f() {\n\t-x\n}\n", "fun f() {\n\t-x\n}\n");
+        assert_construct("fun f() {\n\t!ok\n}\n", "fun f() {\n\t!ok\n}\n");
+    }
+
+    // The same precedence rule applies to every prefix operator, not just `-`.
+    #[test]
+    fn reference_of_a_parenthesized_binary_keeps_parens() {
+        assert_construct("fun f() {\n\t&(a + b)\n}\n", "fun f() {\n\t&(a + b)\n}\n");
+    }
+
+    // --- Lift-chain postfix subjects (lift-chain.vl) -------------------------
+
+    // A `?.` chain absorbs a following `.member` into its continuation, so a
+    // member access on the *result* of a lift must parenthesize it —
+    // `(a?.b).c`, not `a?.b.c` (which pulls `.c` inside the lift).
+    #[test]
+    fn member_access_on_a_lift_result_wraps_the_lift() {
+        assert_construct("fun f() {\n\t(x?.y).z\n}\n", "fun f() {\n\t(x?.y).z\n}\n");
+    }
+
+    // Likewise a call on a lift result: `(a?.b)()`.
+    #[test]
+    fn call_on_a_lift_result_wraps_the_lift() {
+        assert_construct("fun f() {\n\t(x?.y)()\n}\n", "fun f() {\n\t(x?.y)()\n}\n");
+    }
+
+    // Without parens the postfixes belong inside the lift, so none are added:
+    // `.z` is absorbed, `!` (assert-or-return) is not, and both chain flat.
+    #[test]
+    fn absorbed_and_unabsorbed_lift_postfixes_need_no_parens() {
+        assert_construct("fun f() {\n\tx?.y.z\n}\n", "fun f() {\n\tx?.y.z\n}\n");
+        assert_construct("fun f() {\n\tx?.y!\n}\n", "fun f() {\n\tx?.y!\n}\n");
+        assert_construct("fun f() {\n\tx?.y!.z\n}\n", "fun f() {\n\tx?.y!.z\n}\n");
+    }
+
+    // --- Tuple / array destructuring bindings (destructuring.vl, math.vl,
+    //     reactive-owner.vl, fixed-arrays.vl) --------------------------------
+
+    #[test]
+    fn let_tuple_destructure() {
+        assert_construct(
+            "fun f() {\n\tlet (a,b)=pair;\n}\n",
+            "fun f() {\n\tlet (a, b) = pair;\n}\n",
+        );
+    }
+
+    #[test]
+    fn nested_let_tuple_destructure() {
+        assert_construct(
+            "fun f() {\n\tlet (n, (m, label)) = x;\n}\n",
+            "fun f() {\n\tlet (n, (m, label)) = x;\n}\n",
+        );
+    }
+
+    #[test]
+    fn let_and_mut_array_destructure() {
+        assert_construct(
+            "fun f() {\n\tlet [a, b] = arr;\n}\n",
+            "fun f() {\n\tlet [a, b] = arr;\n}\n",
+        );
+        assert_construct(
+            "fun f() {\n\tmut [r0, r1] = right;\n}\n",
+            "fun f() {\n\tmut [r0, r1] = right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn typed_tuple_destructure() {
+        assert_construct(
+            "fun f() {\n\tlet (a, b): (i32, str) = x;\n}\n",
+            "fun f() {\n\tlet (a, b): (i32, str) = x;\n}\n",
+        );
+    }
+
+    // A match tuple binding has two source spellings that parse identically:
+    // `let (a, b)` (keyword factored out) and `(let a, let b)` (per-element).
+    // Both are in the corpus, so the printer reproduces whichever was written —
+    // this round-trip fails if the printer canonicalizes to one form.
+    #[test]
+    fn match_tuple_binding_keeps_its_source_spelling() {
+        let canonical = "fun f() {\n\tmatch z {\n\t\tlet (a, b) => 0,\n\t\tSome(let (c, d)) => 1,\n\t\tSome((let e, let g)) => 2,\n\t}\n}\n";
+        assert_construct(canonical, canonical);
+    }
+
+    // --- Fixed-array literals and types (fixed-arrays.vl) --------------------
+
+    #[test]
+    fn array_repeat_literal() {
+        assert_construct(
+            "fun f() {\n\tlet z = [0;4];\n}\n",
+            "fun f() {\n\tlet z = [0; 4];\n}\n",
+        );
+    }
+
+    // An aggregate repeat — a struct literal value copied into each slot.
+    #[test]
+    fn aggregate_array_repeat_literal() {
+        assert_construct(
+            "fun f() {\n\tmut cells = [Cell { n = 7 }; 3];\n}\n",
+            "fun f() {\n\tmut cells = [Cell { n = 7 }; 3];\n}\n",
+        );
+    }
+
+    #[test]
+    fn fixed_array_type_in_a_signature() {
+        assert_construct(
+            "fun total(values:[i32;3]):i32 { 0 }\n",
+            "fun total(values: [i32; 3]): i32 {\n\t0\n}\n",
+        );
+    }
+
+    // Nested fixed-array type: `[[i32; 2]; 3]`.
+    #[test]
+    fn nested_fixed_array_type() {
+        assert_construct(
+            "fun grid(): [[i32; 2]; 3] {\n\tg\n}\n",
+            "fun grid(): [[i32; 2]; 3] {\n\tg\n}\n",
+        );
+    }
+
+    // --- Sized / hex / suffixed numerics (numeric-types.vl, math.vl) ---------
+
+    // The number printer round-trips a width suffix, a float suffix, a hex
+    // literal, and a `BigInt` suffix (all already handled — pinned as an edge).
+    #[test]
+    fn suffixed_hex_and_float_numerics() {
+        let canonical = "fun f() {\n\tlet a = 0xFFu8;\n\tlet b = 2.25f32;\n\tlet c = 7n;\n\tlet d = 9007199254740992i53;\n}\n";
+        assert_construct(canonical, canonical);
+    }
+
+    // --- Macro forms (macro-block.vl, macro-derive.vl, macro-invoke.vl) ------
+
+    #[test]
+    fn macro_fun_definition() {
+        assert_construct(
+            "macro fun make(): Source { source(\"\") }\n",
+            "macro fun make(): Source {\n\tsource(\"\")\n}\n",
+        );
+    }
+
+    // A `macro { .. }` block in item position: its body is a statement block and
+    // it takes no `;` (like an item declaration). A body with several statements
+    // (a "family" of items stamped at expansion) reprints on its own lines.
+    #[test]
+    fn macro_block_in_item_position() {
+        assert_construct(
+            "macro {\n\tmut generated = \"\";\n\tsource(generated)\n}\n",
+            "macro {\n\tmut generated = \"\";\n\tsource(generated)\n}\n",
+        );
+    }
+
+    // A `macro { .. }` block in expression position is the `let`'s value, so the
+    // terminating `;` belongs to the `let`.
+    #[test]
+    fn macro_block_in_expression_position() {
+        assert_construct(
+            "fun f() {\n\tlet folded = macro {\n\t\tsource(i\"1\")\n\t};\n}\n",
+            "fun f() {\n\tlet folded = macro {\n\t\tsource(i\"1\")\n\t};\n}\n",
+        );
+    }
+
+    // A `macro name(args)` invocation in item position takes a `;`; its
+    // arguments are syntax, reprinted verbatim from source.
+    #[test]
+    fn macro_invocation_in_item_position() {
+        assert_construct(
+            "macro constants(zero, one, two);\n",
+            "macro constants(zero, one, two);\n",
+        );
+    }
+
+    // In expression position the invocation splices in place; a closure argument
+    // is reprinted verbatim (spans only are kept, so it is never rebuilt).
+    #[test]
+    fn macro_invocation_in_expression_position() {
+        assert_construct(
+            "fun f() {\n\tprint(macro unroll(4, |i: i32| accumulate(i)))\n}\n",
+            "fun f() {\n\tprint(macro unroll(4, |i: i32| accumulate(i)))\n}\n",
+        );
+    }
+
+    // A user macro attribute sits on its own line above the item it annotates —
+    // with no arguments (`[derive_display]`) and with verbatim ones (`[grow(a, b)]`).
+    #[test]
+    fn macro_attribute_without_and_with_arguments() {
+        assert_construct(
+            "[derive_display]\nstruct Point {\n\tx: i32,\n}\n",
+            "[derive_display]\nstruct Point {\n\tx: i32,\n}\n",
+        );
+        assert_construct(
+            "[grow(a, b)]\nstruct Grid {\n\tn: i32,\n}\n",
+            "[grow(a, b)]\nstruct Grid {\n\tn: i32,\n}\n",
+        );
+    }
+
+    // A `[derive(A, B)]` built-in derive on a struct (already handled — pinned
+    // as an E13 edge alongside the user-macro attribute above).
+    #[test]
+    fn derive_attributed_struct() {
+        assert_construct(
+            "[derive(Json, Debug)]\nstruct Packet {\n\tkind: u8,\n}\n",
+            "[derive(Json, Debug)]\nstruct Packet {\n\tkind: u8,\n}\n",
+        );
     }
 }
