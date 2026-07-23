@@ -48,11 +48,77 @@ fn collect_vl(root: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
+/// The count of leading ASCII spaces on `line` — the fence-indent measure. Tabs
+/// are not counted (the book indents fences with spaces). Mirror of
+/// `docs.rs::leading_spaces`; see the NOTE on `collect_doc_examples`.
+fn leading_spaces(line: &str) -> usize {
+    line.bytes().take_while(|byte| *byte == b' ').count()
+}
+
+/// Strip up to `indent` leading spaces from `line` (CommonMark's fenced-code
+/// dedent, §4.5). Mirror of `docs.rs::dedent`.
+fn dedent(line: &str, indent: usize) -> &str {
+    &line[leading_spaces(line).min(indent)..]
+}
+
+/// A fenced block in progress while scanning one markdown document.
+struct DocFence {
+    compile: bool,
+    opened_at: usize,
+    indent: usize,
+    body: String,
+}
+
+/// Extract the compilable fenced examples from one markdown document's `text`,
+/// pushing `(label, dedented_body)` for each. This is the same fence logic as
+/// `docs.rs::extract_examples_from` — an indent-tracked open, a SAME-indent
+/// close, and CommonMark dedent — reduced to the compile-eligible set the parse
+/// sweep needs. Kept as a small pure function so it can be unit-pinned.
+fn doc_examples_from(text: &str, file_label: &str, into: &mut Vec<(String, String)>) {
+    let mut fence: Option<DocFence> = None;
+    for (index, line) in text.lines().enumerate() {
+        match &mut fence {
+            Some(open) => {
+                // Close only on a fence at the opener's own indent; the indent
+                // check is first so the slice below stays in bounds.
+                if leading_spaces(line) == open.indent && line[open.indent..].trim_end() == "```" {
+                    if open.compile {
+                        let label = format!("docs:{file_label}:{}", open.opened_at + 1);
+                        into.push((label, std::mem::take(&mut open.body)));
+                    }
+                    fence = None;
+                } else {
+                    open.body.push_str(dedent(line, open.indent));
+                    open.body.push('\n');
+                }
+            }
+            None => {
+                let indent = leading_spaces(line);
+                if let Some(info) = line[indent..].strip_prefix("```") {
+                    let compile = matches!(info.trim(), "vilan" | "vilan,norun" | "vilan,browser");
+                    fence = Some(DocFence {
+                        compile,
+                        opened_at: index,
+                        indent,
+                        body: String::new(),
+                    });
+                }
+            }
+        }
+    }
+    // An unclosed fence is the docs gate's error to report (docs.rs asserts on
+    // it); here a stray tail simply yields no further example.
+}
+
 /// Every compilable fenced example under `vilan/docs/**` (plus the repo README),
-/// as `(label, source)`. Mirrors `docs.rs`'s fence logic — `vilan` / `vilan,norun`
-/// / `vilan,browser` are complete programs (compiled by the docs gate, hence clean
-/// to parse); `vilan,fragment` and non-vilan fences are skipped. Duplicated rather
-/// than imported because `docs.rs` is a separate test target, not a library.
+/// as `(label, source)` — `vilan` / `vilan,norun` / `vilan,browser` are complete
+/// programs (compiled by the docs gate, hence clean to parse); `vilan,fragment`
+/// and non-vilan fences are skipped.
+///
+/// NOTE — keep in sync with `docs.rs`'s `extract_examples_from`: the fence rules
+/// (indent-tracked open, same-indent close, CommonMark dedent) are duplicated
+/// here because `docs.rs` is a separate test target, not a library. The two MUST
+/// extract the same example set; a change to the fence logic belongs in both.
 fn collect_doc_examples(into: &mut Vec<(String, String)>) {
     let docs_root = repo_vilan().join("docs");
     let mut markdown = Vec::new();
@@ -65,30 +131,7 @@ fn collect_doc_examples(into: &mut Vec<(String, String)>) {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
-        let mut open: Option<(usize, String)> = None; // (opened_line, body)
-        for (index, line) in text.lines().enumerate() {
-            match &mut open {
-                Some((opened_at, body)) => {
-                    if line.trim_end() == "```" {
-                        let label = format!("docs:{}:{}", file.display(), *opened_at + 1);
-                        into.push((label, std::mem::take(body)));
-                        open = None;
-                    } else {
-                        body.push_str(line);
-                        body.push('\n');
-                    }
-                }
-                None => {
-                    if let Some(info) = line.trim_start().strip_prefix("```") {
-                        let compile =
-                            matches!(info.trim(), "vilan" | "vilan,norun" | "vilan,browser");
-                        if compile {
-                            open = Some((index, String::new()));
-                        }
-                    }
-                }
-            }
-        }
+        doc_examples_from(&text, &file.display().to_string(), into);
     }
 }
 
@@ -365,4 +408,81 @@ fn formatter_never_silently_bails_over_the_corpus() {
         bails.len(),
         bails
     );
+}
+
+// ---------------------------------------------------------------------------
+// Doc-fence extractor pins (D3) — this file's copy of the fence logic. Kept in
+// step with `docs.rs::extract_pins`; the two extractors must agree.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod doc_fence_pins {
+    use super::*;
+
+    fn doc_examples(lines: &[&str]) -> Vec<(String, String)> {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        let mut out = Vec::new();
+        doc_examples_from(&text, "test.md", &mut out);
+        out
+    }
+
+    #[test]
+    fn pd_flush_fence_is_unchanged() {
+        let got = doc_examples(&["```vilan", "let x = 1;", "```"]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, "let x = 1;\n");
+    }
+
+    #[test]
+    fn pd_bullet_indented_fence_dedents_keeping_relative_indent() {
+        let got = doc_examples(&[
+            "  ```vilan",
+            "  fun main() {",
+            "      let x = 1;",
+            "  }",
+            "  ```",
+        ]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, "fun main() {\n    let x = 1;\n}\n");
+    }
+
+    #[test]
+    fn pd_indented_fence_does_not_swallow_the_following_example() {
+        let got = doc_examples(&[
+            "- note:",
+            "",
+            "  ```vilan",
+            "  fun first() {}",
+            "  ```",
+            "",
+            "Prose in between.",
+            "",
+            "```vilan",
+            "fun second() {}",
+            "```",
+        ]);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].1, "fun first() {}\n");
+        assert_eq!(got[1].1, "fun second() {}\n");
+    }
+
+    #[test]
+    fn pd_indented_fragment_is_skipped_but_still_closes() {
+        // A fragment is not a sweep example, but its indented fence must still
+        // close so a following real example survives (docs.rs's mirror case).
+        let got = doc_examples(&[
+            "- note:",
+            "",
+            "  ```vilan,fragment",
+            "  signal.map(f)",
+            "  ```",
+            "",
+            "```vilan",
+            "fun after() {}",
+            "```",
+        ]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, "fun after() {}\n");
+    }
 }

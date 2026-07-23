@@ -69,7 +69,19 @@ feature.)
 
 Build state as a graph and let it recompute itself:
 
-- `signal.map(transform)` gives a signal of the transformed value.
+- `signal.map(transform)` gives a signal of the transformed value:
+
+  ```vilan
+  import std::print;
+  import std::reactive::Signal;
+  fun main() {
+  	let count = Signal::new(2);
+  	let doubled = count.map(|n: i32| n * 2);
+  	print(doubled.get());
+  	count.set(5);
+  	print(doubled.get());
+  }
+  ```
 - `combine((a, b, …))` gives a signal of the **tuple** of several
   signals' values. It fires when any of them changes. Takes two or more.
 - `nested.flatten()` on a `Signal<Signal<U>>` follows whichever inner

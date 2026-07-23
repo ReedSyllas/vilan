@@ -55,34 +55,79 @@ fn collect_markdown_files(dir: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
+/// A fenced block in progress: how it was tagged, where it opened, and — the
+/// crux of the indent handling — the column its opening fence sat at.
+struct OpenFence {
+    platform: Platform,
+    compile: bool,
+    opened_at: usize,
+    indent: usize,
+    body: String,
+}
+
+/// The count of leading ASCII spaces on `line` — the fence-indent measure. Tabs
+/// are deliberately NOT counted: our pages indent fenced blocks with spaces
+/// (mdBook renders through pulldown-cmark, a CommonMark implementation, and the
+/// book uses space indentation throughout), so a tab-indented fence is out of
+/// scope and simply reads as column 0.
+fn leading_spaces(line: &str) -> usize {
+    line.bytes().take_while(|byte| *byte == b' ').count()
+}
+
+/// Strip up to `indent` leading spaces from `line` — CommonMark's fenced-code
+/// dedent (§4.5): a line indented at least `indent` loses exactly `indent`
+/// spaces; a line indented less loses only what it has (never more). Slices the
+/// input, no allocation.
+fn dedent(line: &str, indent: usize) -> &str {
+    &line[leading_spaces(line).min(indent)..]
+}
+
 /// Pull the compilable examples out of one markdown file, tracking the nearest
 /// heading for failure reports.
+///
+/// NOTE — keep in sync with `parse_differential.rs`'s `collect_doc_examples`,
+/// which carries a copy of this fence logic (test targets cannot import one
+/// another). The two MUST agree on which fences are examples and on their
+/// dedented bodies; a change to the fence rules here belongs there too.
 fn extract_examples(path: &Path) -> Vec<Example> {
     let text = std::fs::read_to_string(path).expect("read doc file");
+    extract_examples_from(&text, path)
+}
+
+/// The pure core of [`extract_examples`], over in-memory text so the fence rules
+/// — indent tracking, same-indent close, and dedent — can be unit-tested without
+/// touching the filesystem.
+fn extract_examples_from(text: &str, path: &Path) -> Vec<Example> {
     let mut examples = Vec::new();
     let mut heading = String::from("(top)");
-    let mut fence: Option<(Platform, bool, usize, String)> = None; // (platform, compile?, line, body)
+    let mut fence: Option<OpenFence> = None;
     for (index, line) in text.lines().enumerate() {
         match &mut fence {
-            Some((platform, compile, opened_at, body)) => {
-                if line.trim_end() == "```" {
-                    if *compile {
+            Some(open) => {
+                // CommonMark closes a fenced block on a fence line at the SAME
+                // indentation as its opener; a ``` at any other indent is body
+                // (e.g. a fence-like line inside the code). This is what stops an
+                // indented fence from running past its close into the prose. The
+                // indent check is first so the slice below is always in bounds.
+                if leading_spaces(line) == open.indent && line[open.indent..].trim_end() == "```" {
+                    if open.compile {
                         examples.push(Example {
                             file: path.to_path_buf(),
                             heading: heading.clone(),
-                            line: *opened_at + 1,
-                            source: body.clone(),
-                            platform: *platform,
+                            line: open.opened_at + 1,
+                            source: std::mem::take(&mut open.body),
+                            platform: open.platform,
                         });
                     }
                     fence = None;
                 } else {
-                    body.push_str(line);
-                    body.push('\n');
+                    open.body.push_str(dedent(line, open.indent));
+                    open.body.push('\n');
                 }
             }
             None => {
-                if let Some(info) = line.trim_start().strip_prefix("```") {
+                let indent = leading_spaces(line);
+                if let Some(info) = line[indent..].strip_prefix("```") {
                     let info = info.trim();
                     let (platform, compile) = match info {
                         "vilan" | "vilan,norun" => (Platform::default(), true),
@@ -91,7 +136,13 @@ fn extract_examples(path: &Path) -> Vec<Example> {
                         // Non-vilan fences (sh, toml, text, js …) are prose.
                         _ => (Platform::default(), false),
                     };
-                    fence = Some((platform, compile, index, String::new()));
+                    fence = Some(OpenFence {
+                        platform,
+                        compile,
+                        opened_at: index,
+                        indent,
+                        body: String::new(),
+                    });
                 } else if let Some(title) = line.strip_prefix('#') {
                     heading = title.trim_start_matches('#').trim().to_string();
                 }
@@ -225,4 +276,128 @@ fn the_sidebar_covers_every_page() {
         listed.is_empty(),
         "SUMMARY.md entries with no file behind them: {listed:?}"
     );
+}
+
+/// Unit pins for the fence extractor itself (the indented-fence hardening, D3).
+/// These exercise `extract_examples_from` on hand-built markdown so the fence
+/// rules are proven directly, independent of what the real docs happen to hold.
+/// The mirror in `parse_differential.rs` carries its own copy of these.
+#[cfg(test)]
+mod extract_pins {
+    use super::*;
+
+    /// Build a markdown document from explicit lines (each verbatim, so leading
+    /// spaces are exactly as written) with a trailing newline, then extract.
+    fn examples(lines: &[&str]) -> Vec<Example> {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        extract_examples_from(&text, Path::new("test.md"))
+    }
+
+    #[test]
+    fn flush_left_fence_is_unchanged() {
+        // The pre-existing behavior: a column-0 fence, body verbatim, heading
+        // tracked. Every current doc example is this shape, so it must not move.
+        let got = examples(&[
+            "# Signals",
+            "",
+            "```vilan",
+            "let x = 1;",
+            "```",
+            "",
+            "after",
+        ]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].source, "let x = 1;\n");
+        assert_eq!(got[0].heading, "Signals");
+        assert_eq!(got[0].line, 3);
+    }
+
+    #[test]
+    fn bullet_indented_fence_extracts_and_dedents() {
+        // A fence indented two columns under a bullet: it is found, and its body
+        // is dedented by the fence's own indent so it compiles as flush source.
+        let got = examples(&[
+            "- A bullet:",
+            "",
+            "  ```vilan",
+            "  let x = 1;",
+            "  ```",
+            "",
+            "- Next bullet",
+        ]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].source, "let x = 1;\n");
+    }
+
+    #[test]
+    fn nested_deeper_body_lines_keep_relative_indent() {
+        // Only the fence's columns come off; a line indented deeper than the
+        // fence keeps the extra (the body's own structure survives). This is the
+        // real shape: a 2-space bullet indent outside, deeper indent inside.
+        let got = examples(&[
+            "  ```vilan",
+            "  fun main() {",
+            "      let x = 1;",
+            "  }",
+            "  ```",
+        ]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].source, "fun main() {\n    let x = 1;\n}\n");
+    }
+
+    #[test]
+    fn an_indented_fence_does_not_swallow_following_prose() {
+        // The D3 bug itself: the old close test required a column-0 ```, so an
+        // indented fence ran past its real close into the prose and the next
+        // fence. Both examples must come back, the prose must stay prose.
+        let got = examples(&[
+            "- Bullet:",
+            "",
+            "  ```vilan",
+            "  fun first() {}",
+            "  ```",
+            "",
+            "This prose must stay prose.",
+            "",
+            "```vilan",
+            "fun second() {}",
+            "```",
+        ]);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].source, "fun first() {}\n");
+        assert_eq!(got[1].source, "fun second() {}\n");
+        assert!(got.iter().all(|example| !example.source.contains("prose")));
+    }
+
+    #[test]
+    fn a_fence_like_line_inside_the_body_at_a_different_indent_does_not_close() {
+        // A ``` deeper than the opener is body, not the closer — even though its
+        // trimmed text is exactly "```". Only the matching-indent ``` closes, so
+        // the block stays open across the impostor.
+        let got = examples(&["  ```vilan", "  outer", "    ```", "  more outer", "  ```"]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].source, "outer\n  ```\nmore outer\n");
+    }
+
+    #[test]
+    fn an_indented_fragment_closes_and_does_not_swallow_the_next_example() {
+        // A fragment is not emitted, but its indented fence must still close on
+        // the matching indent so a real example after it survives — the exact
+        // dev-docs shape (an indented signature fragment, then a real example)
+        // that first hit this bug.
+        let got = examples(&[
+            "- A note:",
+            "",
+            "  ```vilan,fragment",
+            "  signal.map(f)   // just a signature",
+            "  ```",
+            "",
+            "```vilan",
+            "fun after() {}",
+            "```",
+        ]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].source, "fun after() {}\n");
+    }
 }
