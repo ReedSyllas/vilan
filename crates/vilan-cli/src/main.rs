@@ -93,6 +93,11 @@ enum Command {
         /// ephemeral port). Only meaningful with `--watch` on an HMR-eligible project.
         #[arg(long, default_value_t = hmr::DEFAULT_HMR_PORT)]
         hmr_port: u16,
+        /// In a workspace with more than one `node` package, which one to run (by
+        /// package name). The others still compile as part of the workspace but
+        /// are not launched. Unnecessary for a single-node workspace.
+        #[arg(long)]
+        entry: Option<String>,
         /// Arguments passed through to the running program (after the file).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -179,11 +184,12 @@ fn run_cli() -> ExitCode {
             watch,
             no_hmr,
             hmr_port,
+            entry,
         } => {
             if watch {
-                run_watch(file, args, no_hmr, hmr_port)
+                run_watch(file, args, no_hmr, hmr_port, entry)
             } else {
-                run_once(file, &args)
+                run_once(file, &args, entry.as_deref())
             }
         }
         Command::Test { path, watch } => {
@@ -238,8 +244,9 @@ fn check_once(file: Option<PathBuf>, platform: Option<String>, debug: bool) -> E
 }
 
 /// Builds and runs the project once with Node, waiting for it to exit and
-/// propagating its code (the blocking, non-`--watch` path).
-fn run_once(file: Option<PathBuf>, args: &[String]) -> ExitCode {
+/// propagating its code (the blocking, non-`--watch` path). `entry` picks the
+/// Node leg to run in a multi-node workspace (A15).
+fn run_once(file: Option<PathBuf>, args: &[String], entry: Option<&str>) -> ExitCode {
     with_project(file, |project| match project {
         Project::Single { unit, platform } => {
             let platform = platform.unwrap_or_default();
@@ -253,7 +260,7 @@ fn run_once(file: Option<PathBuf>, args: &[String]) -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Project::Workspace { root, members } => run_workspace(&root, &members, args),
+        Project::Workspace { root, members } => run_workspace(&root, &members, args, entry),
         Project::Library { name, .. } => not_buildable_library(&name),
     })
 }
@@ -345,7 +352,13 @@ fn watch_loop(roots: &[PathBuf], mut action: impl FnMut()) -> ExitCode {
 /// child only when the server bundle changed, and pushing `swap` / `css` / `error`
 /// to the browser instead of bouncing it. Otherwise this is the plain
 /// restart-the-server loop, byte-for-byte as before.
-fn run_watch(file: Option<PathBuf>, args: Vec<String>, no_hmr: bool, hmr_port: u16) -> ExitCode {
+fn run_watch(
+    file: Option<PathBuf>,
+    args: Vec<String>,
+    no_hmr: bool,
+    hmr_port: u16,
+    entry: Option<String>,
+) -> ExitCode {
     let roots = watch_roots(&file);
     let mut child: Option<Child> = None;
     let channel = if no_hmr {
@@ -356,7 +369,14 @@ fn run_watch(file: Option<PathBuf>, args: Vec<String>, no_hmr: bool, hmr_port: u
     let mut state = WatchState::default();
     watch_loop(&roots, move || match &channel {
         Some(channel) => {
-            child = hmr_round(channel, file.clone(), &args, &mut state, child.take());
+            child = hmr_round(
+                channel,
+                file.clone(),
+                &args,
+                &mut state,
+                child.take(),
+                entry.as_deref(),
+            );
         }
         None => {
             // The plain restart loop recompiles and respawns wholesale, so the
@@ -366,7 +386,7 @@ fn run_watch(file: Option<PathBuf>, args: Vec<String>, no_hmr: bool, hmr_port: u
                 let _ = previous.kill();
                 let _ = previous.wait();
             }
-            child = build_and_spawn_run(file.clone(), &args);
+            child = build_and_spawn_run(file.clone(), &args, entry.as_deref());
         }
     })
 }
@@ -434,6 +454,7 @@ fn hmr_round(
     args: &[String],
     state: &mut WatchState,
     child: Option<Child>,
+    entry: Option<&str>,
 ) -> Option<Child> {
     let (root, members) = match resolve_project(file) {
         Ok(Project::Workspace { root, members }) => (root, members),
@@ -483,8 +504,6 @@ fn hmr_round(
     // as a swap).
     let mut next = Vec::new();
     let mut other_assets: Vec<(String, String, String)> = Vec::new();
-    let mut server_name = None;
-    let mut server_count = 0usize;
     for (unit, platform) in &members {
         if platform.is_none() {
             continue;
@@ -501,25 +520,30 @@ fn hmr_round(
                 .find(|leg| leg.name == unit.name)
                 .expect("skippable_legs only skips a leg with a previous artifact");
             println!("hmr: skipped {} (sources unchanged)", unit.name);
-            if matches!(platform, Platform::Node { .. }) {
-                server_name = Some(unit.name.clone());
-                server_count += 1;
-            }
             next.push(prior.clone());
             continue;
         }
+        let mut overlay_text = String::new();
         let (javascript, assets, sources) = match compile_unit(
             unit,
             *platform,
             false,
             matches!(platform, Platform::Browser),
+            Some(&mut overlay_text),
         ) {
             Ok(compiled) => compiled,
             // `compile_unit` has already reported the diagnostics to the
-            // terminal (unchanged). Keep the last good build.
+            // terminal (unchanged); `overlay_text` is the SAME diagnostics
+            // rendered ANSI-free for the in-page overlay (hmr.md §§2/§6, the S1
+            // residue closed). Keep the last good build.
             Err(_) => {
                 state.failed = true;
-                channel.push("error", Some("build failed — see the terminal"));
+                let message = if overlay_text.is_empty() {
+                    "build failed — see the terminal"
+                } else {
+                    overlay_text.as_str()
+                };
+                channel.push("error", Some(message));
                 return child;
             }
         };
@@ -534,10 +558,6 @@ fn hmr_round(
         for (kind, content) in assembled {
             other_assets.push((unit.name.clone(), kind, content));
         }
-        if matches!(platform, Platform::Node { .. }) {
-            server_name = Some(unit.name.clone());
-            server_count += 1;
-        }
         next.push(hmr::LegArtifact {
             name: unit.name.clone(),
             is_browser: matches!(platform, Platform::Browser),
@@ -547,7 +567,19 @@ fn hmr_round(
         });
     }
 
-    let decision = hmr::classify(&state.legs, &next);
+    // The ONE Node leg this watch runs (A15): `--entry` picks it in a multi-node
+    // workspace, a lone node leg is picked automatically, a browser-only workspace
+    // has none. The non-selected node legs compiled above (they are part of the
+    // workspace) but are never launched, and — since they are not run and not
+    // served — a change to one of them drives no restart (the classifier keys the
+    // restart on the SELECTED leg only). An ambiguous choice is reported below,
+    // when a restart is actually attempted.
+    let selection = select_node_entry(&members, entry);
+    let server_leg = match &selection {
+        Ok(Some(unit)) => Some(unit.name.as_str()),
+        _ => None,
+    };
+    let decision = hmr::classify(&state.legs, &next, server_leg);
     if decision.bump_version {
         channel.bump_version();
     }
@@ -602,11 +634,11 @@ fn hmr_round(
             let _ = running.kill();
             let _ = running.wait();
         }
-        child = match (server_count, server_name) {
-            (1, Some(name)) => {
+        child = match &selection {
+            Ok(Some(unit)) => {
                 // Run from the workspace root so the server reads sibling
                 // `dist/*.js`, exactly as `run_workspace` / `build_and_spawn_run`.
-                let script = Path::new("dist").join(format!("{name}.js"));
+                let script = Path::new("dist").join(format!("{}.js", unit.name));
                 match spawn_node(&script, args, Some(&root)) {
                     Ok(spawned) => Some(spawned),
                     Err(error) => {
@@ -615,17 +647,24 @@ fn hmr_round(
                     }
                 }
             }
-            (0, _) => None, // no node leg: HMR still serves the browser
-            _ => {
-                eprintln!("error: this workspace has more than one `node` package to run");
+            // No node leg at all: HMR still serves the browser leg(s).
+            Ok(None) => None,
+            // 2+ node legs and no `--entry` (or a bad `--entry`): report it (once,
+            // on the first round's spawn attempt) and serve the browser anyway.
+            Err(message) => {
+                eprintln!("error: {message}");
                 None
             }
         };
     }
 
-    match decision.push {
+    match &decision.push {
         Some(hmr::Push::Swap) => channel.push("swap", None),
-        Some(hmr::Push::Css) => channel.push("css", None),
+        Some(hmr::Push::Css(assets)) => {
+            for asset in assets {
+                channel.push_css(asset);
+            }
+        }
         None => {}
     }
 
@@ -670,7 +709,11 @@ fn manifest_fingerprint(root: &Path) -> u64 {
 /// Builds the run target and spawns it with Node **without waiting**, returning the
 /// child so the next `run --watch` round can stop it. `None` after reporting a
 /// compile error or a non-runnable project.
-fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> {
+fn build_and_spawn_run(
+    file: Option<PathBuf>,
+    args: &[String],
+    entry: Option<&str>,
+) -> Option<Child> {
     let project = match resolve_project(file) {
         Ok(project) => project,
         Err(message) => {
@@ -696,7 +739,7 @@ fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> 
                 return None;
             }
             let (javascript, assets, _sources) =
-                compile_unit(&unit, Platform::default(), false, false).ok()?;
+                compile_unit(&unit, Platform::default(), false, false, None).ok()?;
             // Assets go beside the *canonical* build output — `<entry>.css`, where
             // `build` writes them and the served program reads them — not beside the
             // /tmp watch script Node executes (which nothing serves). Each watch
@@ -712,19 +755,14 @@ fn build_and_spawn_run(file: Option<PathBuf>, args: &[String]) -> Option<Child> 
             launch(&script, None)
         }
         Project::Workspace { root, members } => {
-            let node_members: Vec<&Unit> = members
-                .iter()
-                .filter(|(_, platform)| matches!(platform, Platform::Node { .. }))
-                .map(|(unit, _)| unit)
-                .collect();
-            let server = match node_members.as_slice() {
-                [unit] => unit,
-                [] => {
+            let server = match select_node_entry(&members, entry) {
+                Ok(Some(unit)) => unit,
+                Ok(None) => {
                     eprintln!("error: no `node` package in this workspace to run");
                     return None;
                 }
-                _ => {
-                    eprintln!("error: this workspace has more than one `node` package to run");
+                Err(message) => {
+                    eprintln!("error: {message}");
                     return None;
                 }
             };
@@ -1153,6 +1191,7 @@ fn compile_unit(
     platform: Platform,
     emit_debug: bool,
     hmr: bool,
+    overlay: Option<&mut String>,
 ) -> Result<(String, Vec<(String, String)>, Vec<(PathBuf, u64)>), ExitCode> {
     let workspace = match resolve_workspace(unit) {
         Ok(workspace) => workspace,
@@ -1173,12 +1212,14 @@ fn compile_unit(
         &options,
         &workspace,
         emit_debug,
+        overlay,
     )
 }
 
 /// Builds a lone package / bare file, writing `<entry>.js` (or printing to stdout).
 fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool) -> ExitCode {
-    let (javascript, assets, _sources) = match compile_unit(unit, platform, emit_debug, false) {
+    let (javascript, assets, _sources) = match compile_unit(unit, platform, emit_debug, false, None)
+    {
         Ok(compiled) => compiled,
         Err(code) => return code,
     };
@@ -1206,7 +1247,7 @@ fn build_single(unit: &Unit, stdout: bool, platform: Platform, emit_debug: bool)
 
 /// Type-checks a lone package / bare file, writing no output.
 fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
-    match compile_unit(unit, platform, emit_debug, false) {
+    match compile_unit(unit, platform, emit_debug, false, None) {
         Ok(_) => {
             println!("{}: no errors", unit.entry.display());
             ExitCode::SUCCESS
@@ -1217,11 +1258,11 @@ fn check_single(unit: &Unit, platform: Platform, emit_debug: bool) -> ExitCode {
 
 /// Builds and runs a lone package's entry with Node, forwarding `args`.
 fn run_single(unit: &Unit, args: &[String]) -> ExitCode {
-    let (javascript, assets, _sources) = match compile_unit(unit, Platform::default(), false, false)
-    {
-        Ok(compiled) => compiled,
-        Err(code) => return code,
-    };
+    let (javascript, assets, _sources) =
+        match compile_unit(unit, Platform::default(), false, false, None) {
+            Ok(compiled) => compiled,
+            Err(code) => return code,
+        };
     // Const-eval assets (the CSS sidecar &c.) belong beside the *canonical* build
     // output — `<entry>.css`, where `build` writes them and a served page reads
     // them — not beside the temp script `run_node_script` hands Node, which the
@@ -1256,7 +1297,7 @@ fn build_workspace_artifacts(
         if platform.is_none() {
             continue;
         }
-        let (javascript, assets, _sources) = compile_unit(unit, *platform, debug, false)?;
+        let (javascript, assets, _sources) = compile_unit(unit, *platform, debug, false, None)?;
         let output = dist.join(format!("{}.js", unit.name));
         write_assets(&output, &assets);
         if let Err(error) = fs::write(&output, javascript) {
@@ -1273,7 +1314,7 @@ fn build_workspace_artifacts(
 fn check_workspace(members: &[(Unit, Platform)], debug: bool) -> ExitCode {
     let mut ok = true;
     for (unit, platform) in members {
-        ok &= compile_unit(unit, *platform, debug, false).is_ok();
+        ok &= compile_unit(unit, *platform, debug, false, None).is_ok();
     }
     if ok {
         ExitCode::SUCCESS
@@ -1282,25 +1323,81 @@ fn check_workspace(members: &[(Unit, Platform)], debug: bool) -> ExitCode {
     }
 }
 
-/// Builds a workspace, then runs its single Node member with `node` from the
-/// project root (so it can read sibling `dist/*.js`). `args` are forwarded.
-fn run_workspace(root: &Path, members: &[(Unit, Platform)], args: &[String]) -> ExitCode {
+/// Selects the ONE Node leg a `run` executes from a workspace's members (A15).
+/// An explicit `--entry <name>` picks it by package name; a lone Node leg is
+/// picked automatically; a browser-only workspace has none (`Ok(None)`). The
+/// non-selected Node legs are still compiled by the caller — they are part of
+/// the workspace — but never launched. `Err` when the choice is ambiguous
+/// (2+ Node legs, no `--entry`) or names a package that isn't a runnable Node
+/// leg; the message lists the candidates and the flag.
+fn select_node_entry<'members>(
+    members: &'members [(Unit, Platform)],
+    entry: Option<&str>,
+) -> Result<Option<&'members Unit>, String> {
     let node_members: Vec<&Unit> = members
         .iter()
         .filter(|(_, platform)| matches!(platform, Platform::Node { .. }))
         .map(|(unit, _)| unit)
         .collect();
-    let server = match node_members.as_slice() {
-        [unit] => unit,
-        [] => {
+    match (entry, node_members.as_slice()) {
+        (Some(name), _) => match node_members.iter().find(|unit| unit.name == name) {
+            Some(unit) => Ok(Some(unit)),
+            None => Err(no_such_node_entry(name, &node_members)),
+        },
+        (None, []) => Ok(None),
+        (None, [unit]) => Ok(Some(unit)),
+        (None, _) => Err(ambiguous_node_entry(&node_members)),
+    }
+}
+
+/// The candidate package names, in workspace declaration order, for an entry
+/// error message: `server, probe`.
+fn node_entry_candidates(node_members: &[&Unit]) -> String {
+    node_members
+        .iter()
+        .map(|unit| unit.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The message for a `run` on a multi-node workspace with no `--entry` (A15).
+fn ambiguous_node_entry(node_members: &[&Unit]) -> String {
+    format!(
+        "this workspace has more than one `node` package to run — pick one with \
+         --entry <name>: {}",
+        node_entry_candidates(node_members)
+    )
+}
+
+/// The message for `--entry <name>` naming a package that isn't a runnable Node
+/// leg (A15).
+fn no_such_node_entry(name: &str, node_members: &[&Unit]) -> String {
+    if node_members.is_empty() {
+        format!("no `node` package named `{name}` to run (this workspace runs no `node` package)")
+    } else {
+        format!(
+            "no `node` package named `{name}` to run — candidates: {}",
+            node_entry_candidates(node_members)
+        )
+    }
+}
+
+/// Builds a workspace, then runs its selected Node member (A15) with `node` from
+/// the project root (so it can read sibling `dist/*.js`). `args` are forwarded.
+fn run_workspace(
+    root: &Path,
+    members: &[(Unit, Platform)],
+    args: &[String],
+    entry: Option<&str>,
+) -> ExitCode {
+    let server = match select_node_entry(members, entry) {
+        Ok(Some(unit)) => unit,
+        Ok(None) => {
             eprintln!("error: no `node` package in this workspace to run");
             return ExitCode::FAILURE;
         }
-        _ => {
-            eprintln!(
-                "error: this workspace has more than one `node` package; \
-                 `vilan run` can't tell which to run"
-            );
+        Err(message) => {
+            eprintln!("error: {message}");
             return ExitCode::FAILURE;
         }
     };
@@ -1381,6 +1478,7 @@ fn run_test(file: &Path) -> Result<(), String> {
         &BuildOptions::default(),
         &Workspace::default(),
         false,
+        None,
     )
     .map_err(|_| String::new())?;
     let script = env::temp_dir().join(format!("vilan-test-{}.js", std::process::id()));
@@ -1487,6 +1585,12 @@ fn compile_to_js(
     options: &BuildOptions,
     workspace: &Workspace,
     emit_debug: bool,
+    // When `Some`, an ANSI-free plain-text rendering of this file's diagnostics
+    // is written here on a failed compile — the HMR error overlay's copy (hmr.md
+    // §§2/§6). The terminal rendering below is untouched: this is a second,
+    // additive pass over the SAME messages, never a redirect. Every other caller
+    // passes `None` and pays nothing.
+    overlay: Option<&mut String>,
 ) -> Result<(String, Vec<(String, String)>, Vec<(PathBuf, u64)>), ExitCode> {
     let src = match fs::read_to_string(file) {
         Ok(src) => src,
@@ -1519,6 +1623,10 @@ fn compile_to_js(
     // clean build via `noted_errors`).
     let mut analyzer_errors: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     let mut noted_errors = 0usize;
+    // The same diagnostics, captured as structured items for the HMR overlay
+    // (only assembled into text when `overlay` is `Some`). Populated alongside
+    // the terminal path — never in place of it — reusing each message verbatim.
+    let mut overlay_diagnostics: Vec<hmr::OverlayDiagnostic> = Vec::new();
 
     // On a cache miss the handwritten frontend parses the entry, always returning
     // a (possibly recovered) tree alongside every diagnostic. A batch compile does
@@ -1589,6 +1697,13 @@ fn compile_to_js(
         program.diagnostics.extend(const_errors);
 
         for error in &program.diagnostics {
+            // Capture every diagnostic for the overlay (message + note verbatim);
+            // the terminal rendering below is unchanged.
+            overlay_diagnostics.push(hmr::OverlayDiagnostic {
+                span: error.span.into_range(),
+                message: error.msg.clone(),
+                note: error.note.as_ref().map(|note| note.msg.clone()),
+            });
             // A note-carrying diagnostic renders directly (two labels — the
             // shared ariadne path has nowhere to put the secondary location);
             // plain ones keep the shared path.
@@ -1647,12 +1762,41 @@ fn compile_to_js(
                             .collect::<Vec<_>>(),
                     ))
                 }
-                Err(error) => analyzer_errors.push((error.span.into_range(), error.msg)),
+                Err(error) => {
+                    overlay_diagnostics.push(hmr::OverlayDiagnostic {
+                        span: error.span.into_range(),
+                        message: error.msg.clone(),
+                        note: error.note.as_ref().map(|note| note.msg.clone()),
+                    });
+                    analyzer_errors.push((error.span.into_range(), error.msg));
+                }
             }
         }
     }
 
     let clean = analyzer_errors.is_empty() && parse_errors.is_empty() && noted_errors == 0;
+    // The overlay's copy of this leg's diagnostics (hmr.md §§2/§6): the analyzer/
+    // codegen items captured above, plus the parse errors rendered with the SAME
+    // `render` the terminal `report` uses — only the location prefix and framing
+    // are added here. Assembled only when a caller asked for it and the build
+    // failed.
+    if let Some(sink) = overlay {
+        if !clean {
+            for error in &parse_errors {
+                overlay_diagnostics.push(hmr::OverlayDiagnostic {
+                    span: error.span.into_range(),
+                    message: vilan_core::parsing::render(error),
+                    note: None,
+                });
+            }
+            *sink = hmr::render_overlay(
+                &filename,
+                source_ref,
+                &overlay_diagnostics,
+                hmr::OVERLAY_DIAGNOSTIC_CAP,
+            );
+        }
+    }
     report(&filename, source_ref, analyzer_errors, parse_errors);
 
     match output {

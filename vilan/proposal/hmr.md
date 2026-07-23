@@ -309,6 +309,18 @@ Per watch round, after rebuilding all legs (browser legs first, as today):
 > errors on every run path, HMR or not; kolt's `probe` diagnostic leg hit it
 > live). Not an HMR gap but a `run` selection gap; recorded as backlog A15
 > (pick the node entry to run in a multi-node workspace).
+>
+> **Amendment (2026-07-22 — the completeness slice):** A15 SHIPPED flag-only
+> (`vilan run --entry <name>`; the no-flag error lists candidates; a
+> non-selected node leg compiles but never runs and its changes drive no
+> restart — `classify` keys on the selected leg). Manifest-designated default
+> entry is the recorded follow-up. Two §11 S1 residues CLOSED the same slice:
+> the `error` event now carries the real rendered diagnostics (the terminal's
+> own message-building, reused — file:line:col framing + 20-cap added; the
+> terminal output is pinned unchanged), and the `css` event names its sidecar
+> (the shim bumps only matching `<link>`s, bump-all fallback). The overlay
+> got its first-class visual treatment (header bar, count badge, located
+> accent lines, clear-on-next-save hint) — still dependency-free ES2020.
 
 ## 7. Prior art — the final pass over Vite, React, and Solid
 

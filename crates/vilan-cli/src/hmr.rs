@@ -91,12 +91,25 @@ impl DevChannel {
         self.version.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Pushes one round event to every connected client, pruning any whose
-    /// socket has closed (detected on write failure). `message` is carried only
-    /// by `error` events.
+    /// Pushes one round event to every connected client. `message` is carried
+    /// only by `error` events; `swap`/`reload` carry neither a message nor an
+    /// asset. A `css` event names its sidecar — use [`DevChannel::push_css`].
     pub fn push(&self, kind: &str, message: Option<&str>) {
-        let payload = event_json(kind, self.version(), message);
-        let frame = sse_frame(&payload);
+        self.broadcast(&event_json(kind, self.version(), message, None));
+    }
+
+    /// Pushes a `css` hot-swap event naming the changed sidecar file
+    /// (`client.css`), so the shim bumps only the matching stylesheet `<link>`s
+    /// (hmr.md §2). One event per changed sidecar keeps a multi-browser-leg
+    /// workspace refreshing exactly the stylesheet that changed.
+    pub fn push_css(&self, asset: &str) {
+        self.broadcast(&event_json("css", self.version(), None, Some(asset)));
+    }
+
+    /// Frames one payload as SSE and writes it to every connected client,
+    /// pruning any whose socket has closed (detected on write failure).
+    fn broadcast(&self, payload: &str) {
+        let frame = sse_frame(payload);
         let mut clients = self.clients.lock().unwrap();
         clients.retain_mut(|stream| {
             stream
@@ -115,15 +128,18 @@ pub fn sse_frame(payload: &str) -> String {
 }
 
 /// One event's JSON body: `{"kind":..,"version":N}`, plus `"message":".."` for
-/// an `error`.
-pub fn event_json(kind: &str, version: u64, message: Option<&str>) -> String {
-    match message {
-        Some(message) => format!(
-            "{{\"kind\":\"{kind}\",\"version\":{version},\"message\":\"{}\"}}",
-            escape_json(message)
-        ),
-        None => format!("{{\"kind\":\"{kind}\",\"version\":{version}}}"),
+/// an `error` (the rendered diagnostics), or `"asset":".."` for a `css` event
+/// (the changed sidecar's filename). Both extra fields are escaped.
+pub fn event_json(kind: &str, version: u64, message: Option<&str>, asset: Option<&str>) -> String {
+    let mut body = format!("{{\"kind\":\"{kind}\",\"version\":{version}");
+    if let Some(message) = message {
+        body.push_str(&format!(",\"message\":\"{}\"", escape_json(message)));
     }
+    if let Some(asset) = asset {
+        body.push_str(&format!(",\"asset\":\"{}\"", escape_json(asset)));
+    }
+    body.push('}');
+    body
 }
 
 /// Escapes a string for embedding in a JSON string literal (the diagnostic text
@@ -195,6 +211,7 @@ fn handle(
         let hello = sse_frame(&event_json(
             "connected",
             version.load(Ordering::SeqCst),
+            None,
             None,
         ));
         if stream.write_all(hello.as_bytes()).is_err() || stream.flush().is_err() {
@@ -344,17 +361,20 @@ pub fn round_forces_full(first_round: bool, prior_failed: bool, manifest_changed
 }
 
 /// What the browser is told changed this round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Push {
     /// A browser bundle changed — reload (S1) / state-preserving swap (S2).
     Swap,
-    /// Only a CSS sidecar changed — hot-swap the stylesheet, no reload.
-    Css,
+    /// Only CSS sidecar(s) changed — hot-swap those stylesheets, no reload. The
+    /// payload names the changed sidecar files (`client.css`), so the shim bumps
+    /// only the matching `<link>`s (hmr.md §2); a multi-browser-leg workspace
+    /// thus refreshes exactly the stylesheet that changed.
+    Css(Vec<String>),
 }
 
 /// The round's decision: whether to restart the Node child, what (if anything)
 /// to push to browsers, and whether a new browser bundle means a version bump.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoundDecision {
     pub restart_server: bool,
     pub push: Option<Push>,
@@ -366,16 +386,27 @@ pub struct RoundDecision {
 ///
 /// - **first round** (`previous` empty) → spawn the child, bump to version 1,
 ///   push nothing (no clients yet);
-/// - **server bundle changed** → restart the child (and still classify the
-///   client legs); a server-only change pushes nothing — K6 reconnect carries
+/// - **the run server's bundle changed** → restart the child (and still classify
+///   the client legs); a server-only change pushes nothing — K6 reconnect carries
 ///   the client across the restart;
 /// - **browser bundle changed** → `swap`, and a version bump;
-/// - **no bundle changed but a CSS sidecar changed** → `css`;
+/// - **no bundle changed but a browser CSS sidecar changed** → `css`, naming the
+///   changed sidecars;
 /// - **nothing changed** → nothing, no restart.
+///
+/// `server_leg` is the ONE Node leg this `run --watch` executes (A15 entry
+/// selection): a non-selected Node leg's bundle change drives no restart, because
+/// that leg isn't run and isn't served to the browser — only its dist bytes are
+/// refreshed. `None` when the workspace runs no Node leg (a browser-only dev
+/// session, or an ambiguous multi-node choice deferred to the restart step).
 ///
 /// A compile failure is handled by the caller (push `error`, retain the old
 /// artifacts) and never reaches this classifier.
-pub fn classify(previous: &[LegArtifact], next: &[LegArtifact]) -> RoundDecision {
+pub fn classify(
+    previous: &[LegArtifact],
+    next: &[LegArtifact],
+    server_leg: Option<&str>,
+) -> RoundDecision {
     if previous.is_empty() {
         return RoundDecision {
             restart_server: true,
@@ -384,32 +415,35 @@ pub fn classify(previous: &[LegArtifact], next: &[LegArtifact]) -> RoundDecision
         };
     }
     let prior = |name: &str| previous.iter().find(|leg| leg.name == name);
+    let is_server = |name: &str| server_leg == Some(name);
     let mut server_changed = false;
     let mut browser_changed = false;
-    let mut css_changed = false;
+    // The changed browser CSS sidecars, named for the `css` event so the shim
+    // bumps exactly the matching `<link>`s (a node leg's CSS, if any, is not
+    // linked by the page, so only browser sidecars participate).
+    let mut changed_css: Vec<String> = Vec::new();
+    let mut note_bundle_change = |leg: &LegArtifact| {
+        if leg.is_browser {
+            browser_changed = true;
+        } else if is_server(&leg.name) {
+            server_changed = true;
+        }
+    };
     for leg in next {
         match prior(&leg.name) {
             Some(old) => {
                 if old.bundle != leg.bundle {
-                    if leg.is_browser {
-                        browser_changed = true;
-                    } else {
-                        server_changed = true;
-                    }
+                    note_bundle_change(leg);
                 }
-                if old.css != leg.css {
-                    css_changed = true;
+                if old.css != leg.css && leg.is_browser {
+                    changed_css.push(format!("{}.css", leg.name));
                 }
             }
             // A newly-appearing leg is a change of its class.
             None => {
-                if leg.is_browser {
-                    browser_changed = true;
-                } else {
-                    server_changed = true;
-                }
-                if leg.css.is_some() {
-                    css_changed = true;
+                note_bundle_change(leg);
+                if leg.css.is_some() && leg.is_browser {
+                    changed_css.push(format!("{}.css", leg.name));
                 }
             }
         }
@@ -419,7 +453,7 @@ pub fn classify(previous: &[LegArtifact], next: &[LegArtifact]) -> RoundDecision
         if !next.iter().any(|leg| leg.name == old.name) {
             if old.is_browser {
                 browser_changed = true;
-            } else {
+            } else if is_server(&old.name) {
                 server_changed = true;
             }
         }
@@ -428,13 +462,92 @@ pub fn classify(previous: &[LegArtifact], next: &[LegArtifact]) -> RoundDecision
         restart_server: server_changed,
         push: if browser_changed {
             Some(Push::Swap)
-        } else if css_changed {
-            Some(Push::Css)
+        } else if !changed_css.is_empty() {
+            Some(Push::Css(changed_css))
         } else {
             None
         },
         bump_version: browser_changed,
     }
+}
+
+// --- The error overlay's plain-text rendering (hmr.md §§2, 6) ----------------
+
+/// The overlay caps at this many diagnostics before collapsing the tail to
+/// "… and N more" — enough to see the shape of a broken build without an
+/// unbounded event payload.
+pub const OVERLAY_DIAGNOSTIC_CAP: usize = 20;
+
+/// One diagnostic bound for the browser error overlay: a byte span into the
+/// entry source, the already-built message (the SAME text the terminal renders —
+/// an analyzer `error.msg`, or the parser's `render` — this module never rebuilds
+/// it, only frames it), and an optional note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayDiagnostic {
+    pub span: std::ops::Range<usize>,
+    pub message: String,
+    pub note: Option<String>,
+}
+
+/// Renders a failed leg's diagnostics as ANSI-free plain text for the `error`
+/// event (the in-page overlay, hmr.md §§2/§6). A per-file header line, then each
+/// diagnostic as `<file>:<line>:<col>  <message>` with any note indented beneath,
+/// diagnostics separated by a blank line. Line/column are 1-based, computed from
+/// the byte span against `src` — the same source the terminal renders — mirroring
+/// the LSP's byte→line/col mapping without depending on that crate. Capped at
+/// `cap`; the remainder collapses to a trailing "… and N more". The terminal path
+/// is untouched: this is a second, additive rendering of the same messages.
+pub fn render_overlay(
+    filename: &str,
+    src: &str,
+    diagnostics: &[OverlayDiagnostic],
+    cap: usize,
+) -> String {
+    use std::fmt::Write;
+    let shown = diagnostics.len().min(cap);
+    let mut out = format!("{filename} — {} error", diagnostics.len());
+    if diagnostics.len() != 1 {
+        out.push('s');
+    }
+    for diagnostic in diagnostics.iter().take(cap) {
+        let (line, column) = line_col(src, diagnostic.span.start);
+        // `file:line:col` on its own line (the shim styles it as a distinct
+        // location line), then the message — the SAME text the terminal renders.
+        let _ = write!(
+            out,
+            "\n\n{filename}:{line}:{column}\n{}",
+            diagnostic.message
+        );
+        if let Some(note) = &diagnostic.note {
+            let _ = write!(out, "\n    note: {note}");
+        }
+    }
+    let remaining = diagnostics.len() - shown;
+    if remaining > 0 {
+        let _ = write!(out, "\n\n… and {remaining} more");
+    }
+    out
+}
+
+/// The 1-based (line, column) of a byte offset in `src`, columns counted in
+/// Unicode scalar values (as the terminal renderer does). Clamped to the source
+/// length so an end-of-input span resolves to the last position.
+fn line_col(src: &str, byte: usize) -> (usize, usize) {
+    let byte = byte.min(src.len());
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for (index, character) in src.char_indices() {
+        if index >= byte {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 #[cfg(test)]
@@ -462,7 +575,7 @@ mod tests {
     fn first_round_spawns_and_bumps_but_pushes_nothing() {
         // No previous artifacts: the child spawns, version becomes 1, and there
         // are no clients to push to yet.
-        let decision = classify(&[], &round("s0", "c0", Some(".a{}")));
+        let decision = classify(&[], &round("s0", "c0", Some(".a{}")), Some("server"));
         assert_eq!(
             decision,
             RoundDecision {
@@ -481,7 +594,7 @@ mod tests {
         let previous = round("s0", "c0", Some(".a{}"));
         let next = round("s1", "c0", Some(".a{}"));
         assert_eq!(
-            classify(&previous, &next),
+            classify(&previous, &next, Some("server")),
             RoundDecision {
                 restart_server: true,
                 push: None,
@@ -495,7 +608,7 @@ mod tests {
         let previous = round("s0", "c0", Some(".a{}"));
         let next = round("s0", "c1", Some(".a{}"));
         assert_eq!(
-            classify(&previous, &next),
+            classify(&previous, &next, Some("server")),
             RoundDecision {
                 restart_server: false,
                 push: Some(Push::Swap),
@@ -509,10 +622,10 @@ mod tests {
         let previous = round("s0", "c0", Some(".a{}"));
         let next = round("s0", "c0", Some(".b{}"));
         assert_eq!(
-            classify(&previous, &next),
+            classify(&previous, &next, Some("server")),
             RoundDecision {
                 restart_server: false,
-                push: Some(Push::Css),
+                push: Some(Push::Css(vec!["client.css".to_string()])),
                 bump_version: false,
             }
         );
@@ -523,7 +636,7 @@ mod tests {
         let previous = round("s0", "c0", Some(".a{}"));
         let next = round("s1", "c1", Some(".a{}"));
         assert_eq!(
-            classify(&previous, &next),
+            classify(&previous, &next, Some("server")),
             RoundDecision {
                 restart_server: true,
                 push: Some(Push::Swap),
@@ -537,7 +650,7 @@ mod tests {
         let previous = round("s0", "c0", Some(".a{}"));
         let next = round("s0", "c0", Some(".a{}"));
         assert_eq!(
-            classify(&previous, &next),
+            classify(&previous, &next, Some("server")),
             RoundDecision {
                 restart_server: false,
                 push: None,
@@ -552,19 +665,137 @@ mod tests {
         // (a reload subsumes the stylesheet refresh), not `css`.
         let previous = round("s0", "c0", Some(".a{}"));
         let next = round("s0", "c1", Some(".b{}"));
-        assert_eq!(classify(&previous, &next).push, Some(Push::Swap));
+        assert_eq!(
+            classify(&previous, &next, Some("server")).push,
+            Some(Push::Swap)
+        );
     }
 
     #[test]
     fn sse_framing_is_data_json_blank_line() {
         assert_eq!(
-            sse_frame(&event_json("swap", 3, None)),
+            sse_frame(&event_json("swap", 3, None, None)),
             "data: {\"kind\":\"swap\",\"version\":3}\n\n"
         );
         assert_eq!(
-            sse_frame(&event_json("error", 4, Some("oops \"x\"\nline"))),
+            sse_frame(&event_json("error", 4, Some("oops \"x\"\nline"), None)),
             "data: {\"kind\":\"error\",\"version\":4,\"message\":\"oops \\\"x\\\"\\nline\"}\n\n"
         );
+    }
+
+    #[test]
+    fn a_css_event_names_its_sidecar() {
+        // The recorded S1 residue closed: the `css` event carries the changed
+        // sidecar's filename so the shim bumps only the matching `<link>`.
+        assert_eq!(
+            event_json("css", 5, None, Some("client.css")),
+            "{\"kind\":\"css\",\"version\":5,\"asset\":\"client.css\"}"
+        );
+    }
+
+    #[test]
+    fn a_non_selected_node_leg_change_drives_no_restart() {
+        // A15 + the byte-diff classifier: a workspace runs ONE node leg
+        // (`server`); a sibling node leg (`probe`) that isn't run and isn't
+        // served must not trigger a restart when only its bundle changes — the
+        // page is unaffected, the run server unchanged.
+        let previous = vec![
+            leg("server", false, "s0", None),
+            leg("probe", false, "p0", None),
+            leg("client", true, "c0", None),
+        ];
+        let next = vec![
+            leg("server", false, "s0", None),
+            leg("probe", false, "p1", None), // only the non-run leg changed
+            leg("client", true, "c0", None),
+        ];
+        assert_eq!(
+            classify(&previous, &next, Some("server")),
+            RoundDecision {
+                restart_server: false,
+                push: None,
+                bump_version: false,
+            }
+        );
+        // …while a change to the SELECTED server leg does restart.
+        let next_server = vec![
+            leg("server", false, "s1", None),
+            leg("probe", false, "p0", None),
+            leg("client", true, "c0", None),
+        ];
+        assert_eq!(
+            classify(&previous, &next_server, Some("server")).restart_server,
+            true
+        );
+    }
+
+    #[test]
+    fn a_per_sidecar_css_change_names_only_the_changed_browser_leg() {
+        // Two browser legs each with a sidecar; only `admin`'s CSS changed → the
+        // event names `admin.css` alone (per-sidecar behavior, hmr.md §2).
+        let previous = vec![
+            leg("client", true, "c0", Some(".a{}")),
+            leg("admin", true, "a0", Some(".x{}")),
+        ];
+        let next = vec![
+            leg("client", true, "c0", Some(".a{}")),
+            leg("admin", true, "a0", Some(".y{}")),
+        ];
+        assert_eq!(
+            classify(&previous, &next, None).push,
+            Some(Push::Css(vec!["admin.css".to_string()]))
+        );
+    }
+
+    #[test]
+    fn the_overlay_renders_file_line_col_message_and_note() {
+        // The overlay shows the REAL diagnostics: file:line:col, the message
+        // (the same text the terminal renders), and a note where present.
+        let src = "fun main() {\n\tlet x = broken\n}\n";
+        // `broken` starts at byte 22 (line 2, column 10 — after "\tlet x = ",
+        // the leading tab counting as one column).
+        let diagnostics = vec![
+            OverlayDiagnostic {
+                span: 22..28,
+                message: "cannot find `broken` in this scope".to_string(),
+                note: Some("declared nowhere".to_string()),
+            },
+            OverlayDiagnostic {
+                span: 0..3,
+                message: "second problem".to_string(),
+                note: None,
+            },
+        ];
+        let rendered = render_overlay("src/app.vl", src, &diagnostics, OVERLAY_DIAGNOSTIC_CAP);
+        assert_eq!(
+            rendered,
+            "src/app.vl — 2 errors\n\n\
+             src/app.vl:2:10\n\
+             cannot find `broken` in this scope\n\
+             \x20   note: declared nowhere\n\n\
+             src/app.vl:1:1\n\
+             second problem"
+        );
+        // ANSI-free: the overlay is HTML text, never a terminal control stream.
+        assert!(!rendered.contains('\x1b'));
+    }
+
+    #[test]
+    fn the_overlay_caps_and_counts_the_remainder() {
+        let src = "x\n";
+        let diagnostics: Vec<OverlayDiagnostic> = (0..25)
+            .map(|index| OverlayDiagnostic {
+                span: 0..1,
+                message: format!("problem {index}"),
+                note: None,
+            })
+            .collect();
+        let rendered = render_overlay("a.vl", src, &diagnostics, 20);
+        assert!(rendered.starts_with("a.vl — 25 errors\n"));
+        assert!(rendered.contains("a.vl:1:1\nproblem 0"));
+        assert!(rendered.contains("a.vl:1:1\nproblem 19"));
+        assert!(!rendered.contains("problem 20"));
+        assert!(rendered.ends_with("… and 5 more"));
     }
 
     #[test]

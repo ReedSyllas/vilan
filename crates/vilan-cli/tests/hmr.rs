@@ -24,7 +24,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 fn temp_project(tag: &str) -> PathBuf {
@@ -86,8 +86,9 @@ impl SseClient {
         }
     }
 
-    /// The `kind` of the next `data: {json}` frame, or `None` at the deadline.
-    fn next_kind(&mut self, deadline: Duration) -> Option<String> {
+    /// The raw JSON payload of the next `data: {json}` frame, or `None` at the
+    /// deadline.
+    fn next_payload(&mut self, deadline: Duration) -> Option<String> {
         let start = Instant::now();
         loop {
             // Consume any complete line already buffered.
@@ -100,9 +101,7 @@ impl SseClient {
                     String::from_utf8_lossy(&self.buffer[self.cursor..line_end]).into_owned();
                 self.cursor = line_end + 1;
                 if let Some(payload) = line.trim_end().strip_prefix("data: ") {
-                    if let Some(kind) = kind_of(payload) {
-                        return Some(kind);
-                    }
+                    return Some(payload.to_string());
                 }
             }
             if start.elapsed() >= deadline {
@@ -118,13 +117,26 @@ impl SseClient {
         }
     }
 
+    /// The `kind` of the next `data: {json}` frame, or `None` at the deadline.
+    fn next_kind(&mut self, deadline: Duration) -> Option<String> {
+        self.next_payload(deadline)
+            .and_then(|payload| kind_of(&payload))
+    }
+
     /// Reads events until one matches `expected` (ignoring others, e.g. the
     /// connect-time `connected`), or fails at the deadline.
     fn expect_kind(&mut self, expected: &str, deadline: Duration) {
+        self.expect_event(expected, deadline);
+    }
+
+    /// Like [`SseClient::expect_kind`], but returns the matching event's raw JSON
+    /// payload — so a test can inspect its `message` (the error overlay's text)
+    /// or `asset` (the css sidecar's name).
+    fn expect_event(&mut self, expected: &str, deadline: Duration) -> String {
         let start = Instant::now();
         while start.elapsed() < deadline {
-            match self.next_kind(deadline - start.elapsed()) {
-                Some(kind) if kind == expected => return,
+            match self.next_payload(deadline - start.elapsed()) {
+                Some(payload) if kind_of(&payload).as_deref() == Some(expected) => return payload,
                 Some(_other) => continue,
                 None => break,
             }
@@ -287,13 +299,41 @@ fn the_dev_channel_drives_the_watch_round() {
         write(&dir, "src/client.vl", &client_source("b", "x1"));
         sse.expect_kind("swap", deadline);
 
-        // (b) A stylesheet-only change (bundle byte-identical) → `css`.
+        // (b) A stylesheet-only change (bundle byte-identical) → `css`, and the
+        // event names its sidecar so the shim bumps only that stylesheet <link>.
         write(&dir, "src/client.vl", &client_source("b", "x2"));
-        sse.expect_kind("css", deadline);
+        let css_event = sse.expect_event("css", deadline);
+        assert!(
+            css_event.contains("\"asset\":\"client.css\""),
+            "the css event should name its changed sidecar: {css_event}"
+        );
 
-        // (c) A syntax error → `error`; then a fix → the next good round.
+        // (c) A syntax error → `error` carrying the REAL compiler diagnostics
+        // (the S1 residue closed): the message names the failing file and the
+        // actual parse error — not the old generic "build failed" string.
         write(&dir, "src/client.vl", "fun main( {\n");
-        sse.expect_kind("error", deadline);
+        let error_event = sse.expect_event("error", deadline);
+        assert!(
+            error_event.contains("client.vl"),
+            "the error event should name the failing file: {error_event}"
+        );
+        assert!(
+            error_event.contains("expected"),
+            "the error event should carry the real parse diagnostic, \
+             not the generic fallback: {error_event}"
+        );
+        assert!(
+            !error_event.contains("build failed — see the terminal"),
+            "the generic fallback string must be gone now that real text is threaded: {error_event}"
+        );
+        // Terminal-unchanged A/B: the SAME diagnostic is still rendered to the
+        // watcher's stdout (ariadne), in the same round — the overlay capture is
+        // additive (a second sink), never a redirect.
+        assert!(
+            wait_for_line(&lines, "expected", deadline),
+            "the terminal must still print the diagnostic (the overlay capture is additive)"
+        );
+        // A fix → the next good round (which clears the overlay browser-side).
         write(&dir, "src/client.vl", &client_source("c", "x2"));
         sse.expect_kind("swap", deadline);
 
@@ -547,6 +587,206 @@ fn a_client_only_edit_skips_the_server_and_still_updates_the_client() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap();
+}
+
+/// Removes ANSI SGR escape sequences (`\x1b[…m`) so a terminal capture can be
+/// asserted as plain text regardless of coloring.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(character) = chars.next() {
+        if character == '\x1b' {
+            // Consume the escape body up to and including its final letter.
+            for escape_char in chars.by_ref() {
+                if escape_char.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// Terminal-unchanged (the overlay capture is additive, not a redirect): a broken
+/// one-shot `vilan build` still renders the ariadne diagnostic to the terminal —
+/// the `build` path passes no overlay sink, so its output is the pre-change shape.
+/// This pins the key lines; the HMR path shares the same `compile_to_js`/`report`
+/// terminal rendering, so its terminal output is unchanged too.
+#[test]
+fn a_broken_build_still_renders_the_terminal_diagnostic() {
+    let dir = temp_project("terminal");
+    write(&dir, "vilan.toml", "[package]\nname = \"app\"\n");
+    write(&dir, "src/main.vl", "fun main( {\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_vilan"))
+        .args(["build", dir.to_str().unwrap()])
+        .output()
+        .expect("run vilan build");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(!output.status.success(), "a broken build must fail");
+    // ariadne renders diagnostics to STDOUT; strip ANSI to assert the plain shape.
+    let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
+    assert!(
+        stdout.contains("Error:"),
+        "the ariadne error header is present:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("expected"),
+        "the real diagnostic message is present:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("main.vl"),
+        "the diagnostic names the source file:\n{stdout}"
+    );
+}
+
+/// A node leg whose `main` prints a distinguishing marker — so the watcher's
+/// captured stdout witnesses which Node leg actually ran.
+fn node_marker(marker: &str) -> String {
+    format!("import std::print;\n\nfun main() {{\n\tprint(\"{marker}\");\n}}\n")
+}
+
+/// Accumulates the watcher's stdout into a shared buffer (rather than a consuming
+/// channel), so a test can both wait for a marker AND assert one never appears —
+/// the negative the A15 test needs (the non-selected leg must never run).
+fn collect_stdout(stdout: ChildStdout) -> Arc<Mutex<Vec<String>>> {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let sink = buffer.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            sink.lock().unwrap().push(line);
+        }
+    });
+    buffer
+}
+
+/// Polls the accumulated stdout for any line containing `needle`, up to `deadline`.
+fn buffer_has(buffer: &Arc<Mutex<Vec<String>>>, needle: &str, deadline: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if buffer
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
+        {
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Polls the accumulated stdout for the dev-channel activation line's port.
+fn port_from_buffer(buffer: &Arc<Mutex<Vec<String>>>, deadline: Duration) -> Option<u16> {
+    let start = Instant::now();
+    loop {
+        if let Some(port) = buffer
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|line| parse_port(line))
+        {
+            return Some(port);
+        }
+        if start.elapsed() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A15 (`--entry`): a workspace with TWO Node legs (the kolt shape — a `server`
+/// and a `probe`) plus a browser leg. `run --watch --entry server` runs the
+/// chosen `server` leg (its boot marker appears), while the non-selected `probe`
+/// leg still COMPILES into the workspace (`dist/probe.js` exists) but is never
+/// launched (its marker never appears). HMR rounds then work under the selection:
+/// a client edit swaps, a server edit restarts the chosen leg — and the probe
+/// still never runs. Same single-watcher, quick-exit-legs process hygiene as the
+/// matrix test.
+#[test]
+fn run_watch_honors_entry_and_hmr_rounds_work_for_the_chosen_leg() {
+    let dir = temp_project("entry");
+    write(
+        &dir,
+        "vilan.toml",
+        "[package]\nname = \"app\"\n\n[entry.client]\ntarget = \"browser\"\n\n\
+         [entry.server]\n\n[entry.probe]\n",
+    );
+    write(&dir, "src/client.vl", &client_source("c1", "x1"));
+    write(&dir, "src/server.vl", &node_marker("SERVER_UP one"));
+    write(&dir, "src/probe.vl", &node_marker("PROBE_RAN"));
+
+    let mut watcher = Command::new(env!("CARGO_BIN_EXE_vilan"))
+        .args([
+            "run",
+            "--watch",
+            "--hmr-port",
+            "0",
+            "--entry",
+            "server",
+            dir.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn run --watch --entry");
+
+    let buffer = collect_stdout(watcher.stdout.take().unwrap());
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let deadline = Duration::from_secs(20);
+        let port = port_from_buffer(&buffer, deadline)
+            .expect("the CLI should announce `hmr: dev channel on 127.0.0.1:<port>`");
+
+        // Round 1: the browser leg compiled, the SELECTED server ran, and the
+        // non-selected probe COMPILED (its bundle exists) but never RAN.
+        assert!(
+            wait_for_file(&dir.join("dist/client.js"), deadline),
+            "round 1 should have written dist/client.js"
+        );
+        assert!(
+            buffer_has(&buffer, "SERVER_UP one", deadline),
+            "the `--entry server` leg should run"
+        );
+        assert!(
+            dir.join("dist/probe.js").exists(),
+            "the non-selected probe leg still compiles into the workspace"
+        );
+        assert!(
+            !buffer_has(&buffer, "PROBE_RAN", Duration::from_millis(700)),
+            "the non-selected probe leg must not be launched"
+        );
+        std::thread::sleep(Duration::from_millis(800));
+
+        let mut sse = SseClient::connect(port);
+
+        // A client edit → the browser swaps under the selected-entry watcher.
+        write(&dir, "src/client.vl", &client_source("c2", "x1"));
+        sse.expect_kind("swap", deadline);
+
+        // A server edit → the chosen Node child restarts (its new marker prints);
+        // nothing is pushed to the browser and the probe still never runs.
+        write(&dir, "src/server.vl", &node_marker("SERVER_UP two"));
+        assert!(
+            buffer_has(&buffer, "SERVER_UP two", deadline),
+            "a server edit should restart the `--entry` leg"
+        );
+        sse.assert_no(&["swap", "css"], Duration::from_millis(1500));
+        assert!(
+            !buffer_has(&buffer, "PROBE_RAN", Duration::from_millis(200)),
+            "the probe leg still never runs"
+        );
+    }));
+
+    let _ = watcher.kill();
+    let _ = watcher.wait();
     let _ = std::fs::remove_dir_all(&dir);
     outcome.unwrap();
 }

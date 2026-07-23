@@ -247,6 +247,9 @@
     }
 
     var OVERLAY_ID = "__vilan_hmr_overlay__";
+    // A source line that names a location (`app.vl:12:5`) — styled as a distinct
+    // accent line in the overlay, and counted for the header badge.
+    var LOCATION_LINE = /:\d+:\d+(\s|$)/;
 
     function removeOverlay() {
         var existing = document.getElementById(OVERLAY_ID);
@@ -255,34 +258,103 @@
         }
     }
 
+    // The error overlay (hmr.md §2): a dark-translucent backdrop over a slim
+    // panel — a header bar ("vilan — build failed" + an error count), the REAL
+    // compiler diagnostics in a monospace block with each `file:line:col` on its
+    // own accent line and a red left-rule, and a "clears on next save" hint. The
+    // terminal stays authoritative; this is the copy for the eyes on the browser.
+    // Dependency-free, ES2020, no fonts fetched. Every string is set via
+    // `textContent`, so a diagnostic containing `<`/`>` can never inject markup.
     function showOverlay(message) {
         removeOverlay();
-        var overlay = document.createElement("div");
-        overlay.id = OVERLAY_ID;
-        overlay.style.cssText =
-            "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.85);" +
-            "color:#e6e6e6;padding:24px;overflow:auto;margin:0;" +
-            "font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;";
-        var pre = document.createElement("pre");
-        pre.style.cssText = "margin:0;white-space:pre-wrap;word-break:break-word;";
-        pre.textContent = message || "build failed — see the terminal";
-        overlay.appendChild(pre);
-        (document.body || document.documentElement).appendChild(overlay);
+        message = message || "build failed — see the terminal";
+        var lines = message.split("\n");
+        var count = 0;
+        for (var i = 0; i < lines.length; i++) {
+            if (LOCATION_LINE.test(lines[i])) {
+                count += 1;
+            }
+        }
+
+        var backdrop = document.createElement("div");
+        backdrop.id = OVERLAY_ID;
+        backdrop.style.cssText =
+            "position:fixed;inset:0;z-index:2147483647;overflow:auto;margin:0;padding:32px;" +
+            "background:rgba(12,12,16,0.86);color:#e6e6e6;box-sizing:border-box;" +
+            "font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;";
+
+        var panel = document.createElement("div");
+        panel.style.cssText =
+            "max-width:920px;margin:0 auto;background:#17171c;border:1px solid #33333c;" +
+            "border-left:4px solid #e5484d;border-radius:6px;overflow:hidden;" +
+            "box-shadow:0 12px 40px rgba(0,0,0,0.5);";
+
+        var header = document.createElement("div");
+        header.style.cssText =
+            "display:flex;align-items:center;justify-content:space-between;gap:12px;" +
+            "padding:12px 16px;background:#1e1e24;border-bottom:1px solid #2c2c34;";
+        var title = document.createElement("span");
+        title.style.cssText = "color:#ff6169;font-weight:600;letter-spacing:0.02em;";
+        title.textContent = "vilan — build failed";
+        header.appendChild(title);
+        if (count > 0) {
+            var badge = document.createElement("span");
+            badge.style.cssText =
+                "color:#f0b5b7;background:#3a1e20;border-radius:10px;padding:2px 10px;font-size:12px;";
+            badge.textContent = count === 1 ? "1 error" : count + " errors";
+            header.appendChild(badge);
+        }
+        panel.appendChild(header);
+
+        var body = document.createElement("div");
+        body.style.cssText = "padding:8px 16px 14px;white-space:pre-wrap;word-break:break-word;";
+        for (var j = 0; j < lines.length; j++) {
+            var line = lines[j];
+            var row = document.createElement("div");
+            if (LOCATION_LINE.test(line)) {
+                row.style.cssText = "color:#7fd0ff;font-weight:600;margin-top:12px;";
+            } else if (/^\s*note:/.test(line)) {
+                row.style.cssText = "color:#d6a25f;";
+            } else {
+                row.style.cssText = "color:#e6e6e6;";
+            }
+            // A blank line renders as vertical space (a non-breaking space keeps
+            // the empty div's height).
+            row.textContent = line.length ? line : " ";
+            body.appendChild(row);
+        }
+        panel.appendChild(body);
+
+        var hint = document.createElement("div");
+        hint.style.cssText =
+            "padding:10px 16px;background:#1e1e24;border-top:1px solid #2c2c34;" +
+            "color:#8a8a95;font-size:12px;";
+        hint.textContent = "Fixed on next save — this clears on the next successful build.";
+        panel.appendChild(hint);
+
+        backdrop.appendChild(panel);
+        (document.body || document.documentElement).appendChild(backdrop);
     }
 
     // A `css` event swaps stylesheets without a reload: bump a cache-busting
-    // query on every stylesheet <link> so the browser refetches the sidecar.
-    // The buster is a LOCAL counter, not the build version — css-only rounds
-    // deliberately don't bump the version (a bump without a bundle rewrite
-    // would send fresh tabs into a reload loop), so consecutive css edits
-    // would otherwise produce the same URL and skip the refetch.
+    // query so the browser refetches the sidecar. `asset` (when the CLI names it)
+    // is the changed sidecar's filename (`client.css`) — bump only the <link>
+    // whose href IS that file (hmr.md §2), so a multi-browser-leg workspace
+    // refreshes exactly the stylesheet that changed; with no name (an older CLI),
+    // bump every stylesheet. The buster is a LOCAL counter, not the build version
+    // — css-only rounds deliberately don't bump the version (a bump without a
+    // bundle rewrite would send fresh tabs into a reload loop), so consecutive
+    // css edits would otherwise produce the same URL and skip the refetch.
     var cssBump = 0;
-    function bumpStylesheets() {
+    function bumpStylesheets(asset) {
         cssBump += 1;
         var links = document.querySelectorAll('link[rel="stylesheet"]');
         for (var index = 0; index < links.length; index++) {
             var link = links[index];
             var base = link.href.split("?")[0];
+            if (asset && !(base === asset || base.endsWith("/" + asset))) {
+                continue;
+            }
             link.href = base + "?v=" + VERSION + "-" + cssBump;
         }
     }
@@ -343,7 +415,7 @@
                 reload();
                 break;
             case "css":
-                bumpStylesheets();
+                bumpStylesheets(data.asset);
                 break;
             case "error":
                 showOverlay(data.message);

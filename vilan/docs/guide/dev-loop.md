@@ -33,12 +33,17 @@ verdict exact.
 | **A stylesheet only** | Just the CSS sidecar changed → the stylesheet is **hot-swapped**, no reload, no swap — the page doesn't even flicker. |
 | **Server code** | The server bundle changed → the **Node process restarts**. The browser stays connected; its live rpc mirror reconnects on its own (the same backoff that survives a server crash) and resyncs from the server's current values. |
 | **Shared code** (a `common` library both legs use) | Both bundles change → the server restarts **and** the browser swaps. The fresh client dials the new contract, so a changed rpc shape never leaves a stale client talking to a new server. |
-| **A file with a mistake** | The compile error shows in the terminal *and* as an in-page **overlay**; the running app keeps its last good build. Fix it and the next good save clears the overlay and swaps normally. |
+| **A file with a mistake** | The compile error shows in the terminal *and* as an in-page **overlay** — the real file, line, and message — while the running app keeps its last good build. Fix it and the next good save clears the overlay and swaps normally. |
 
 A server-only edit pushes **nothing** to the browser — the client is
 unaffected, so it isn't disturbed. That the Node leg *restarts* rather than
 hot-swapping is deliberate: the process is cheap and a fresh start is always
 correct, so there is no server-side HMR to reason about.
+
+The error overlay carries the **real diagnostics** — the file, the `line:col`,
+the message, and any note — the same text your terminal shows, rendered over the
+page so the eyes already on the browser don't miss it. The terminal stays
+authoritative; the overlay is the copy, and the next successful save clears it.
 
 ## What carries across a swap, and what resets
 
@@ -105,6 +110,31 @@ something minted inside a function, reach for the manual channel —
   startup line reports the one it got.
 - **A browser refresh** is always a full, clean reset — seed state lives only
   in the page's heap, so reloading throws all of it away.
+
+## Picking which server to run
+
+`run` (and `run --watch`) executes one Node leg. A workspace with a single
+`node` package needs no help — that one runs. A workspace with **two or more**
+`node` packages (say a `server` and a diagnostics `probe`) has to be told which,
+with `--entry <name>`:
+
+```sh
+vilan run --watch --entry server .
+```
+
+Without it, `run` stops and lists the candidates:
+
+```text
+error: this workspace has more than one `node` package to run — pick one with --entry <name>: probe, server
+```
+
+The non-selected Node legs still **compile** as part of the workspace — their
+bundles land in `dist/` and a shared edit still recompiles them — they just
+aren't launched. Under `--watch` the browser legs hot-swap exactly as usual; the
+chosen server restarts on its own edits, and a change to a leg that isn't running
+does nothing visible (its `dist/` bundle refreshes, but nothing restarts). Which
+leg is the default is a per-workspace choice we may add to the manifest later;
+for now it's the flag.
 
 ## The CSS `<link>` idiom
 
