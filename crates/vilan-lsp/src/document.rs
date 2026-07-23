@@ -173,6 +173,34 @@ pub struct Symbol {
 pub struct Completion {
     pub label: String,
     pub kind: CompletionKind,
+    /// The signature (functions/methods) or type (variables) shown in the
+    /// completion popup's detail line — the same house rendering hover uses.
+    /// `None` for keywords, macros, modules, types, and fields (WO-3: a field's
+    /// type is not cheaply renderable from the analyzed `Program`).
+    pub detail: Option<String>,
+    /// The first paragraph of the declaration's `///` doc, where present.
+    pub documentation: Option<String>,
+    /// The parameter names (`self` excluded) when this candidate is a function
+    /// or method that should insert call-shaped — `Some(names)`, possibly empty
+    /// for a zero-parameter callable. `None` requires a bare-name insertion: a
+    /// non-callable, a callee already followed by `(`, or a use/import path.
+    /// The server (`to_completion_item`) turns this into the actual insert text
+    /// per the `vilan.completion.functionCall` setting.
+    pub call_parameters: Option<Vec<String>>,
+}
+
+impl Completion {
+    /// A plain candidate — a bare-name insertion, no signature and no
+    /// call-shaping (keywords, macros, fields, enum variants, type names).
+    fn bare(label: String, kind: CompletionKind) -> Self {
+        Completion {
+            label,
+            kind,
+            detail: None,
+            documentation: None,
+            call_parameters: None,
+        }
+    }
 }
 
 /// The category of a completion, for its editor icon.
@@ -189,13 +217,6 @@ pub enum CompletionKind {
     Module,
     Keyword,
 }
-
-/// The language keywords offered in scope-position completion.
-const KEYWORDS: &[&str] = &[
-    "fun", "struct", "enum", "impl", "trait", "let", "mut", "own", "import", "use", "mod", "for",
-    "in", "is", "match", "if", "else", "async", "await", "return", "ret", "jump", "type", "with",
-    "export", "external", "true", "false", "null",
-];
 
 /// The vilan book's published base URL — keyword hovers deep-link into it.
 const BOOK_BASE: &str = "https://reedsyllas.github.io/vilan/";
@@ -430,6 +451,62 @@ fn parameter_signature(parameter: &Parameter, type_label: &str) -> String {
         Convention::Ref => format!("{}: &{type_label}", parameter.name),
         Convention::RefMut => format!("{}: &mut {type_label}", parameter.name),
     }
+}
+
+/// The pre-rendered signature of the function/external at `target` — the same
+/// string hover fences — with the inferred `async` prepended, mirroring
+/// [`Document::compose_hover`]. `target` is a function DEFINITION id (resolve a
+/// use site through [`Document::function_target`] first). `None` when the id
+/// names no declaration.
+fn signature_label(program: &Program, target: Id) -> Option<String> {
+    let declaration = program.declaration_labels.get(&target)?;
+    if program.async_functions.contains(&target) && !declaration.starts_with("async ") {
+        Some(format!("async {declaration}"))
+    } else {
+        Some(declaration.clone())
+    }
+}
+
+/// The parameter names of the function/external at `target`, in order, with
+/// `self` dropped (the receiver is not a call argument) — the tab-stop labels a
+/// call-shaped completion fills. `Some(vec![])` for a zero-parameter callable;
+/// `None` when the id is not a function or external. `target` is a DEFINITION
+/// id (resolve through [`Document::function_target`] first).
+fn call_parameter_names(program: &Program, target: Id) -> Option<Vec<String>> {
+    let parameter_ids = if let Some(function) = program.functions.get(&target) {
+        &function.parameters
+    } else if let Some(external) = program.external_functions.get(&target) {
+        &external.parameters
+    } else {
+        return None;
+    };
+    Some(
+        parameter_ids
+            .iter()
+            .filter_map(|parameter_id| program.parameters.get(parameter_id))
+            .filter(|parameter| parameter.name != "self")
+            .map(|parameter| parameter.name.to_string())
+            .collect(),
+    )
+}
+
+/// Whether `offset` sits inside a `use`/`import` item — where a name is being
+/// bound into scope, not called, so even a function completes to a bare name
+/// (`use std::math::sqrt`, not `sqrt(…)`). Imports are single-line,
+/// newline-terminated items, so this reads the current line's leading keyword
+/// (a leading `export` prefix — `export import …` — is skipped). Multi-line
+/// braced groups past their first line are not recognized; the corpus has none.
+fn in_import_path(text: &str, offset: usize) -> bool {
+    let offset = offset.min(text.len());
+    let line_start = text[..offset].rfind('\n').map(|at| at + 1).unwrap_or(0);
+    let mut words = text[line_start..offset].split_whitespace();
+    let first = words.next().unwrap_or("");
+    let keyword = if first == "export" {
+        words.next().unwrap_or("")
+    } else {
+        first
+    };
+    keyword == "import" || keyword == "use"
 }
 
 pub struct Document {
@@ -951,6 +1028,19 @@ impl Document {
         }
         docs.reverse();
         Some(docs.join("\n"))
+    }
+
+    /// The first paragraph of a declaration's `///` doc — up to the first blank
+    /// line — for a completion item's brief documentation (WO-3). `None` when
+    /// there is no doc.
+    fn doc_first_paragraph(&self, program: &Program, declaration_id: Id) -> Option<String> {
+        let docs = self.doc_comment_of(program, declaration_id)?;
+        let paragraph = docs.split("\n\n").next().unwrap_or(&docs).trim();
+        if paragraph.is_empty() {
+            None
+        } else {
+            Some(paragraph.to_string())
+        }
     }
 
     /// The requirement-carrying entity the cursor *names*, if any: a function
@@ -1798,20 +1888,10 @@ impl Document {
         while start > 0 && is_identifier_byte(bytes[start - 1]) {
             start -= 1;
         }
-        if start >= 1 && bytes[start - 1] == b'.' {
-            // `a?.` completes on the LIFTED element (`Option<Profile>` offers
-            // Profile's members — proposal/try-and-lift.md §5).
-            if start >= 2 && bytes[start - 2] == b'?' {
-                return self.lifted_member_completions(program, start - 2);
-            }
-            return self.member_completions(program, start - 1);
-        }
-        if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
-            return self.path_completions(program, text, start - 2);
-        }
         // `[Na|` at an item position (the line holds only the attribute so
         // far) and `[derive(Na|` complete registered macro names — the last
-        // piece of the macro-LSP tail.
+        // piece of the macro-LSP tail. Macro names are always bare, so they
+        // bypass the call-suppression below.
         if start >= 1 && bytes[start - 1] == b'[' {
             let line_start = text[..start - 1].rfind('\n').map(|at| at + 1).unwrap_or(0);
             if text[line_start..start - 1].trim().is_empty() {
@@ -1821,7 +1901,33 @@ impl Document {
         if start >= 1 && bytes[start - 1] == b'(' && text[..start - 1].ends_with("[derive") {
             return self.macro_name_completions(program);
         }
-        self.scope_completions(program, offset)
+        let mut candidates = if start >= 1 && bytes[start - 1] == b'.' {
+            // `a?.` completes on the LIFTED element (`Option<Profile>` offers
+            // Profile's members — proposal/try-and-lift.md §5).
+            if start >= 2 && bytes[start - 2] == b'?' {
+                self.lifted_member_completions(program, start - 2)
+            } else {
+                self.member_completions(program, start - 1)
+            }
+        } else if start >= 2 && bytes[start - 1] == b':' && bytes[start - 2] == b':' {
+            self.path_completions(program, text, start - 2)
+        } else {
+            self.scope_completions(program, offset)
+        };
+        // A call-shaped insertion is wrong when the callee is already
+        // parenthesized — the char right after the cursor is `(`, so the user
+        // pre-typed the parens or is retyping a call — or when a name is being
+        // imported, not called (`use std::math::sqrt`). Fall back to a bare name
+        // for every candidate; the signature and docs still show (WO-3 escape
+        // hatches).
+        let suppress_call =
+            bytes.get(offset).copied() == Some(b'(') || in_import_path(text, offset);
+        if suppress_call {
+            for candidate in &mut candidates {
+                candidate.call_parameters = None;
+            }
+        }
+        candidates
     }
 
     /// Every registered macro name, for attribute-position completion. The
@@ -1838,10 +1944,7 @@ impl Document {
         names.dedup();
         names
             .into_iter()
-            .map(|name| Completion {
-                label: name.to_string(),
-                kind: CompletionKind::Macro,
-            })
+            .map(|name| Completion::bare(name.to_string(), CompletionKind::Macro))
             .collect()
     }
 
@@ -1859,10 +1962,10 @@ impl Document {
         let mut items = Vec::new();
         if let Some(structure) = program.structs.get(&type_id) {
             for field in &structure.fields {
-                items.push(Completion {
-                    label: field.name.to_string(),
-                    kind: CompletionKind::Field,
-                });
+                items.push(Completion::bare(
+                    field.name.to_string(),
+                    CompletionKind::Field,
+                ));
             }
         }
         self.push_methods(program, type_id, true, &mut items);
@@ -1999,10 +2102,10 @@ impl Document {
         for (enum_id, enumeration) in &program.enums {
             if enumeration.name == left {
                 for variant in &enumeration.variants {
-                    items.push(Completion {
-                        label: variant.name.to_string(),
-                        kind: CompletionKind::EnumVariant,
-                    });
+                    items.push(Completion::bare(
+                        variant.name.to_string(),
+                        CompletionKind::EnumVariant,
+                    ));
                 }
                 self.push_methods(program, *enum_id, false, &mut items);
             }
@@ -2016,10 +2119,8 @@ impl Document {
             if module.name == left {
                 if let Some(scope) = program.scopes.get(&module.body.1) {
                     for (name, id) in &scope.name_to_id_map {
-                        items.push(Completion {
-                            label: name.to_string(),
-                            kind: self.kind_of(program, *id),
-                        });
+                        let kind = self.kind_of(program, *id);
+                        items.push(self.entity_completion(program, name.to_string(), *id, kind));
                     }
                 }
             }
@@ -2039,19 +2140,20 @@ impl Document {
             };
             for (name, entity_id) in &scope.name_to_id_map {
                 if seen.insert(*name) {
-                    items.push(Completion {
-                        label: name.to_string(),
-                        kind: self.kind_of(program, *entity_id),
-                    });
+                    let kind = self.kind_of(program, *entity_id);
+                    items.push(self.entity_completion(program, name.to_string(), *entity_id, kind));
                 }
             }
             scope_id = scope.parent_id;
         }
-        for keyword in KEYWORDS {
-            items.push(Completion {
-                label: keyword.to_string(),
-                kind: CompletionKind::Keyword,
-            });
+        // The offered keywords are exactly the lexer's, drawn from the one
+        // documented table [`KEYWORD_DOCS`] (kept in lockstep with the lexer by
+        // [`keyword_lexeme`]) — no separate hand-list to drift (WO-3).
+        for (keyword, _sentence, _link) in KEYWORD_DOCS {
+            items.push(Completion::bare(
+                keyword.to_string(),
+                CompletionKind::Keyword,
+            ));
         }
         items
     }
@@ -2098,10 +2200,12 @@ impl Document {
             if self.impl_subject_id(program, implementation) == Some(type_id) {
                 for (name, member_id) in &implementation.declarations {
                     if self.is_self_method(program, *member_id) == want_self {
-                        items.push(Completion {
-                            label: name.to_string(),
-                            kind: CompletionKind::Method,
-                        });
+                        items.push(self.entity_completion(
+                            program,
+                            name.to_string(),
+                            *member_id,
+                            CompletionKind::Method,
+                        ));
                     }
                 }
             }
@@ -2166,6 +2270,38 @@ impl Document {
         } else {
             CompletionKind::Variable
         }
+    }
+
+    /// Builds a completion for a named entity, enriched for the popup and for
+    /// call-shaped insertion (WO-3): a function/method carries its full
+    /// signature (`detail`), its `///` first paragraph (`documentation`), and
+    /// its parameter names (`call_parameters`, `self` dropped) so the server can
+    /// insert `name(…)`; a variable carries its rendered type as `detail`.
+    /// Everything else is a bare name. `id` is the entity id bound in scope (or
+    /// an impl member id for a method), resolved to a definition through
+    /// [`Self::function_target`].
+    fn entity_completion(
+        &self,
+        program: &Program,
+        label: String,
+        id: Id,
+        kind: CompletionKind,
+    ) -> Completion {
+        let mut completion = Completion::bare(label, kind);
+        match completion.kind {
+            CompletionKind::Function | CompletionKind::Method => {
+                if let Some(target) = self.function_target(program, id) {
+                    completion.detail = signature_label(program, target);
+                    completion.documentation = self.doc_first_paragraph(program, target);
+                    completion.call_parameters = call_parameter_names(program, target);
+                }
+            }
+            CompletionKind::Variable => {
+                completion.detail = self.hover_label(program, id);
+            }
+            _ => {}
+        }
+        completion
     }
 }
 
@@ -3232,16 +3368,30 @@ pub(crate) mod tests {
 
     /// The completion labels offered at the cursor marked `|` in `src`.
     fn completions_at_cursor(src: &str) -> Vec<String> {
+        completion_items_at_cursor(src)
+            .into_iter()
+            .map(|completion| completion.label)
+            .collect()
+    }
+
+    /// The full completion candidates offered at the `|` cursor in `src` —
+    /// carrying `detail`, `documentation`, and `call_parameters` (WO-3).
+    fn completion_items_at_cursor(src: &str) -> Vec<Completion> {
         let offset = src
             .find('|')
             .expect("test source needs a `|` cursor marker");
         let text = src.replace('|', "");
         let document = Document::analyze(&text, &std_root(), Path::new("test.vl"));
-        document
-            .completion(offset)
+        document.completion(offset)
+    }
+
+    /// The one candidate labelled `label` at the `|` cursor in `src` (the pins
+    /// probe a specific function/method/keyword by name).
+    fn completion_named(src: &str, label: &str) -> Completion {
+        completion_items_at_cursor(src)
             .into_iter()
-            .map(|completion| completion.label)
-            .collect()
+            .find(|completion| completion.label == label)
+            .unwrap_or_else(|| panic!("no `{label}` completion offered"))
     }
 
     #[test]
@@ -3287,6 +3437,186 @@ pub(crate) mod tests {
             labels.contains(&"x".to_string()),
             "incomplete member: {labels:?}"
         );
+    }
+
+    // WO-3: a function completion in a call position carries its full
+    // signature (the same string hover fences), the first paragraph of its
+    // `///` doc, and its parameter names (for the call-shaped insertion) — a
+    // multi-parameter case, with the second doc paragraph correctly dropped.
+    #[test]
+    fn function_completion_carries_signature_parameters_and_doc() {
+        let add = completion_named(
+            "/// Adds two numbers.\n\
+             ///\n\
+             /// A second paragraph, not shown.\n\
+             fun add(a: i32, b: i32): i32 { a + b }\n\
+             fun main() {\n\tad|\n}\n",
+            "add",
+        );
+        assert_eq!(
+            add.call_parameters,
+            Some(vec!["a".to_string(), "b".to_string()]),
+            "parameter names for the placeholder insertion"
+        );
+        let detail = add
+            .detail
+            .expect("a function completion carries a signature");
+        assert!(
+            detail.contains("a: i32, b: i32") && detail.contains("): i32"),
+            "signature must show the parameter list and return type: {detail:?}"
+        );
+        assert_eq!(
+            add.documentation.as_deref(),
+            Some("Adds two numbers."),
+            "only the first `///` paragraph"
+        );
+    }
+
+    // WO-3: a method drops the `self` receiver from the call placeholders (it
+    // is supplied by the `value.` receiver, not typed as an argument), while
+    // the signature detail still renders `self` in full.
+    #[test]
+    fn method_completion_skips_self_in_call_parameters() {
+        let scale = completion_named(
+            "struct Point { x: i32, y: i32 }\n\
+             impl Point {\n\tfun scale(self, factor: i32): i32 { self.x * factor }\n}\n\
+             fun main() {\n\tlet p = Point { x = 1, y = 2 };\n\tp.sc|\n}\n",
+            "scale",
+        );
+        assert_eq!(
+            scale.call_parameters,
+            Some(vec!["factor".to_string()]),
+            "`self` must not be a call placeholder"
+        );
+        let detail = scale
+            .detail
+            .expect("a method completion carries a signature");
+        assert!(
+            detail.contains("self") && detail.contains("factor: i32") && detail.contains("): i32"),
+            "the method signature keeps `self`: {detail:?}"
+        );
+    }
+
+    // WO-3: a zero-parameter callable carries an EMPTY parameter list (distinct
+    // from a non-callable's `None`) — the server inserts `name()`.
+    #[test]
+    fn zero_parameter_function_has_empty_call_parameters() {
+        let tick = completion_named("fun tick() { }\nfun main() {\n\tti|\n}\n", "tick");
+        assert_eq!(tick.call_parameters, Some(Vec::new()));
+    }
+
+    // WO-3 escape hatch: when the callee is already followed by `(` — the user
+    // pre-typed the parens, or is retyping a call — the completion inserts a
+    // bare name (no duplicated parens), yet still shows the signature.
+    #[test]
+    fn callee_before_open_paren_suppresses_call_shape() {
+        let add = completion_named(
+            "fun add(a: i32, b: i32): i32 { a + b }\nfun main() {\n\tadd|(1, 2)\n}\n",
+            "add",
+        );
+        assert_eq!(
+            add.call_parameters, None,
+            "no parens when `(` already follows"
+        );
+        assert!(add.detail.is_some(), "the signature still shows");
+    }
+
+    // WO-3 escape hatch: inside a `use`/`import` path a callable is being bound
+    // into scope, not called, so it inserts a bare name — while the SAME
+    // function in expression position keeps its call shape.
+    #[test]
+    fn import_path_suppresses_call_shape_but_expression_keeps_it() {
+        let imported = completion_named(
+            "mod geometry {\n\tfun area(w: i32, h: i32): i32 { w * h }\n}\n\
+             import geometry::ar|\n",
+            "area",
+        );
+        assert_eq!(
+            imported.call_parameters, None,
+            "a name in an import path inserts bare"
+        );
+        let called = completion_named(
+            "mod geometry {\n\tfun area(w: i32, h: i32): i32 { w * h }\n}\n\
+             fun main() {\n\tlet a = geometry::ar|\n}\n",
+            "area",
+        );
+        assert_eq!(
+            called.call_parameters,
+            Some(vec!["w".to_string(), "h".to_string()]),
+            "the same function in expression position keeps its call shape"
+        );
+    }
+
+    // WO-3: a type name never grows parens — a struct is not call-shaped
+    // regardless of position (its kind, not the cursor, decides).
+    #[test]
+    fn type_name_completion_never_call_shapes() {
+        let point = completion_named(
+            "struct Point { x: i32, y: i32 }\nfun main() {\n\tlet p = Poi|\n}\n",
+            "Point",
+        );
+        assert_eq!(point.call_parameters, None, "a struct name inserts bare");
+    }
+
+    // WO-3 (the WO-4 finding): the offered keywords are EXACTLY the lexer's set,
+    // drawn from the one documented table — no stale hand-list. Guards the two
+    // concrete bugs it replaced: `return` (spelled `ret`) is gone, and
+    // `const`/`borrows`/`resource`/`macro` are now present.
+    #[test]
+    fn keyword_completions_are_exactly_the_lexer_keywords() {
+        let items = completion_items_at_cursor("fun main() {\n\t|\n}\n");
+        let mut offered: Vec<String> = items
+            .iter()
+            .filter(|completion| matches!(completion.kind, CompletionKind::Keyword))
+            .map(|completion| completion.label.clone())
+            .collect();
+        offered.sort();
+        let mut expected: Vec<String> = KEYWORD_DOCS
+            .iter()
+            .map(|(keyword, _, _)| keyword.to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            offered, expected,
+            "keyword completions == the documented set"
+        );
+        // Each offered keyword really lexes to that keyword (offered ⊆ lexer);
+        // combined with the documented set == every `keyword_lexeme` arm (pinned
+        // by `every_documented_keyword_round_trips_through_the_lexer`), the
+        // offered set is exactly the lexer's.
+        for keyword in &offered {
+            let (tokens, errors) = tokenize(keyword);
+            assert!(errors.is_empty(), "{keyword} lexed with errors: {errors:?}");
+            assert_eq!(tokens.len(), 1, "{keyword} should lex to one token");
+            assert_eq!(keyword_lexeme(&tokens[0].0), Some(keyword.as_str()));
+        }
+        assert!(
+            !offered.iter().any(|keyword| keyword == "return"),
+            "`return` is not a vilan keyword — it is `ret`"
+        );
+        for added in ["const", "borrows", "resource", "macro"] {
+            assert!(
+                offered.iter().any(|keyword| keyword == added),
+                "the `{added}` keyword must be offered (it was missing from the old hand-list)"
+            );
+        }
+    }
+
+    // WO-3: `in_import_path` reads the current line's leading keyword, skipping
+    // an `export` prefix, and does not confuse an identifier that merely starts
+    // with `import`/`use`.
+    #[test]
+    fn in_import_path_recognizes_import_and_use_lines() {
+        assert!(in_import_path("import std::math::sqrt", 22));
+        assert!(in_import_path("use pkg::option::Option", 23));
+        assert!(in_import_path("export import pkg::x::y", 23));
+        assert!(in_import_path("\tuse a::b", 9));
+        assert!(!in_import_path("fun main() { sqrt", 17));
+        assert!(
+            !in_import_path("imported = 5", 12),
+            "a word starting with `import`"
+        );
+        assert!(!in_import_path("used = 5", 8), "a word starting with `use`");
     }
 
     /// The shipped example projects must analyze cleanly through the *LSP* path

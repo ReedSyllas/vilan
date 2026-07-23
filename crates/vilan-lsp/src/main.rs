@@ -9,6 +9,7 @@ mod publish;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -29,8 +30,8 @@ use crate::publish::PublishState;
 const DEBOUNCE_MS: u64 = 150;
 
 /// How completion inserts a function or method call — the `vilan.completion.functionCall`
-/// setting. WO-3 consumes this to shape its insert text; this order only defines
-/// and plumbs it, so completion behavior is unchanged for now.
+/// setting, consumed by [`to_completion_item`]: `Full` fills named parameter
+/// tab-stops, `ParensOnly` inserts the parentheses, `None` inserts the bare name.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CompletionFunctionCall {
     /// Insert the name only.
@@ -100,8 +101,15 @@ impl Config {
     }
 }
 
-/// Convert a Vilan completion candidate to an LSP `CompletionItem`.
-fn to_completion_item(completion: Completion) -> CompletionItem {
+/// Convert a Vilan completion candidate to an LSP `CompletionItem`, applying the
+/// `vilan.completion.functionCall` setting and the client's snippet capability
+/// to shape a function/method insertion (WO-3). The popup always carries the
+/// candidate's signature/type `detail` and `///` documentation.
+fn to_completion_item(
+    completion: Completion,
+    mode: CompletionFunctionCall,
+    snippet_support: bool,
+) -> CompletionItem {
     let kind = match completion.kind {
         // The LSP kind set has no macro entry; functions render closest.
         VilanCompletionKind::Macro => CompletionItemKind::FUNCTION,
@@ -116,11 +124,70 @@ fn to_completion_item(completion: Completion) -> CompletionItem {
         VilanCompletionKind::Module => CompletionItemKind::MODULE,
         VilanCompletionKind::Keyword => CompletionItemKind::KEYWORD,
     };
-    CompletionItem {
-        label: completion.label,
+    let mut item = CompletionItem {
+        label: completion.label.clone(),
         kind: Some(kind),
+        detail: completion.detail,
+        documentation: completion.documentation.map(Documentation::String),
         ..Default::default()
+    };
+    // A call-shaped insertion applies only to a callable in a call position
+    // (`call_parameters` is `Some`) and only when the setting asks for it. `none`
+    // keeps today's bare-name insertion. With parameters, a signature-help popup
+    // is triggered so the user sees what to fill.
+    if let Some(parameters) = completion.call_parameters {
+        let call = call_insertion(&completion.label, &parameters, mode, snippet_support);
+        if let Some((insert_text, format)) = call {
+            item.insert_text = Some(insert_text);
+            item.insert_text_format = Some(format);
+            if !parameters.is_empty() {
+                item.command = Some(Command {
+                    title: "Trigger Parameter Hints".to_string(),
+                    command: "editor.action.triggerParameterHints".to_string(),
+                    arguments: None,
+                });
+            }
+        }
     }
+    item
+}
+
+/// The insert text (and its format) for a call-shaped completion, or `None` when
+/// the setting is `none` — leaving the bare label. `full` fills each parameter
+/// as a named tab-stop (`name(${1:a}, ${2:b})$0`); `parensOnly` positions the
+/// cursor between the parens (`name($0)`); both write `name()$0` for a
+/// zero-parameter callable. Without client snippet support every shape degrades
+/// to the plain `name()` (cursor after) — a snippet's tab-stops would otherwise
+/// surface as literal text.
+fn call_insertion(
+    label: &str,
+    parameters: &[String],
+    mode: CompletionFunctionCall,
+    snippet_support: bool,
+) -> Option<(String, InsertTextFormat)> {
+    if matches!(mode, CompletionFunctionCall::None) {
+        return None;
+    }
+    if !snippet_support {
+        return Some((format!("{label}()"), InsertTextFormat::PLAIN_TEXT));
+    }
+    let snippet = if parameters.is_empty() {
+        format!("{label}()$0")
+    } else {
+        match mode {
+            CompletionFunctionCall::Full => {
+                let placeholders: Vec<String> = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| format!("${{{}:{name}}}", index + 1))
+                    .collect();
+                format!("{label}({})$0", placeholders.join(", "))
+            }
+            // `parensOnly` (with parameters): cursor inside the parens.
+            _ => format!("{label}($0)"),
+        }
+    };
+    Some((snippet, InsertTextFormat::SNIPPET))
 }
 
 /// Convert a Vilan outline node to an LSP `DocumentSymbol`.
@@ -174,6 +241,11 @@ struct Backend {
     /// (`inlay_hint`, `semantic_tokens_full`, …) so a toggle takes effect without
     /// re-registering capabilities.
     config: Arc<std::sync::RwLock<Config>>,
+    /// Whether the client can render snippet completions (`$1`/`${1:name}`
+    /// tab-stops). Captured from `ClientCapabilities` at `initialize` (fixed for
+    /// the session); when absent, call-shaped completions degrade to plain text
+    /// (WO-3).
+    snippet_support: Arc<AtomicBool>,
 }
 
 /// Locate the `std` package directory: `$VILAN_STD`, else the nearest ancestor
@@ -293,6 +365,135 @@ mod config_tests {
         assert_eq!(
             config.completion_function_call,
             CompletionFunctionCall::Full
+        );
+    }
+}
+
+#[cfg(test)]
+mod completion_item_tests {
+    use super::{CompletionFunctionCall, to_completion_item};
+    use crate::document::{Completion, CompletionKind};
+    use tower_lsp::lsp_types::{Documentation, InsertTextFormat};
+
+    /// A function candidate as `Document` would hand it over: a full signature,
+    /// a doc, and `call_parameters` naming the arguments (`None` = a bare name).
+    fn function(call_parameters: Option<Vec<&str>>) -> Completion {
+        Completion {
+            label: "connect".to_string(),
+            kind: CompletionKind::Function,
+            detail: Some("fun connect(host: str, port: i32): Socket".to_string()),
+            documentation: Some("Opens a connection.".to_string()),
+            call_parameters: call_parameters
+                .map(|names| names.into_iter().map(str::to_string).collect()),
+        }
+    }
+
+    // WO-3 `full`: each parameter becomes a named tab-stop, the cursor lands
+    // after the call, and the signature-help popup is triggered.
+    #[test]
+    fn full_mode_inserts_named_parameter_placeholders() {
+        let item = to_completion_item(
+            function(Some(vec!["host", "port"])),
+            CompletionFunctionCall::Full,
+            true,
+        );
+        assert_eq!(
+            item.insert_text.as_deref(),
+            Some("connect(${1:host}, ${2:port})$0")
+        );
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        assert_eq!(
+            item.command
+                .as_ref()
+                .map(|command| command.command.as_str()),
+            Some("editor.action.triggerParameterHints"),
+            "parameters present ⇒ trigger the hints popup"
+        );
+    }
+
+    // WO-3 `parensOnly`: the parentheses are inserted with the cursor between
+    // them, no named placeholders.
+    #[test]
+    fn parens_only_mode_positions_cursor_inside_parens() {
+        let item = to_completion_item(
+            function(Some(vec!["host", "port"])),
+            CompletionFunctionCall::ParensOnly,
+            true,
+        );
+        assert_eq!(item.insert_text.as_deref(), Some("connect($0)"));
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        assert!(item.command.is_some(), "parameters present ⇒ trigger hints");
+    }
+
+    // WO-3 `none`: today's behavior — a bare name (no `insert_text`, so the
+    // client inserts the label), and no hints command.
+    #[test]
+    fn none_mode_leaves_a_bare_name() {
+        let item = to_completion_item(
+            function(Some(vec!["host"])),
+            CompletionFunctionCall::None,
+            true,
+        );
+        assert!(item.insert_text.is_none(), "the bare label is inserted");
+        assert!(item.insert_text_format.is_none());
+        assert!(item.command.is_none());
+    }
+
+    // WO-3: a zero-parameter callable inserts `name()$0` in BOTH call modes —
+    // and, having no parameters, triggers no hints popup.
+    #[test]
+    fn zero_parameter_call_inserts_empty_parens_and_no_hints() {
+        for mode in [
+            CompletionFunctionCall::Full,
+            CompletionFunctionCall::ParensOnly,
+        ] {
+            let item = to_completion_item(function(Some(vec![])), mode, true);
+            assert_eq!(item.insert_text.as_deref(), Some("connect()$0"), "{mode:?}");
+            assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+            assert!(item.command.is_none(), "no parameters ⇒ no hints: {mode:?}");
+        }
+    }
+
+    // WO-3: without client snippet support, a call-shaped insertion degrades to
+    // plain `name()` (a snippet's tab-stops would otherwise show as literals).
+    #[test]
+    fn without_snippet_support_degrades_to_plain_parens() {
+        let item = to_completion_item(
+            function(Some(vec!["host", "port"])),
+            CompletionFunctionCall::Full,
+            false,
+        );
+        assert_eq!(item.insert_text.as_deref(), Some("connect()"));
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::PLAIN_TEXT));
+    }
+
+    // WO-3: a candidate with `call_parameters == None` (a non-callable, or one
+    // the escape hatches suppressed) stays a bare name even in `full` mode.
+    #[test]
+    fn non_callable_stays_bare_in_full_mode() {
+        let mut candidate = function(None);
+        candidate.kind = CompletionKind::Struct;
+        let item = to_completion_item(candidate, CompletionFunctionCall::Full, true);
+        assert!(item.insert_text.is_none());
+        assert!(item.command.is_none());
+    }
+
+    // WO-3: the popup always carries the signature `detail` and the `///`
+    // documentation, independent of the insertion mode.
+    #[test]
+    fn detail_and_documentation_reach_the_item() {
+        let item = to_completion_item(
+            function(Some(vec!["host"])),
+            CompletionFunctionCall::Full,
+            true,
+        );
+        assert_eq!(
+            item.detail.as_deref(),
+            Some("fun connect(host: str, port: i32): Socket")
+        );
+        assert!(
+            matches!(item.documentation, Some(Documentation::String(doc)) if doc == "Opens a connection."),
+            "the doc paragraph is attached"
         );
     }
 }
@@ -477,6 +678,19 @@ impl LanguageServer for Backend {
         if let Some(options) = &params.initialization_options {
             *self.config.write().unwrap() = Config::from_settings(options);
         }
+        // Snippet completions (tab-stop placeholders) need the client to opt in
+        // via `completionItem.snippetSupport`; without it, a call-shaped
+        // completion degrades to plain text. This is fixed for the session.
+        let snippet_support = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text_document| text_document.completion.as_ref())
+            .and_then(|completion| completion.completion_item.as_ref())
+            .and_then(|completion_item| completion_item.snippet_support)
+            .unwrap_or(false);
+        self.snippet_support
+            .store(snippet_support, Ordering::Relaxed);
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -730,10 +944,12 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = document.line_index.offset(position);
+        let mode = self.config.read().unwrap().completion_function_call;
+        let snippet_support = self.snippet_support.load(Ordering::Relaxed);
         let items = document
             .completion(offset)
             .into_iter()
-            .map(to_completion_item)
+            .map(|completion| to_completion_item(completion, mode, snippet_support))
             .collect();
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -903,6 +1119,7 @@ async fn main() {
         pending: Arc::new(DashMap::new()),
         line_indices: Arc::new(DashMap::new()),
         config: Arc::new(std::sync::RwLock::new(Config::default())),
+        snippet_support: Arc::new(AtomicBool::new(false)),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
 }
