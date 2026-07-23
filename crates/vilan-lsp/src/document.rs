@@ -168,6 +168,17 @@ pub struct Symbol {
     pub children: Vec<Symbol>,
 }
 
+/// A scope-position construct snippet's insertion text (E14). The server
+/// renders `body` for a snippet-capable client and falls back to `fallback` (the
+/// bare keyword) otherwise — a `${1:…}` body would surface as literal text on a
+/// client that cannot expand tab-stops.
+pub struct SnippetInsertion {
+    /// The `${n:…}`-tabstopped snippet body (LSP `InsertTextFormat::SNIPPET`).
+    pub body: String,
+    /// The plain keyword inserted when the client lacks snippet support.
+    pub fallback: String,
+}
+
 /// A completion candidate offered at the cursor (mapped to an LSP `CompletionItem`
 /// by the server).
 pub struct Completion {
@@ -187,6 +198,10 @@ pub struct Completion {
     /// The server (`to_completion_item`) turns this into the actual insert text
     /// per the `vilan.completion.functionCall` setting.
     pub call_parameters: Option<Vec<String>>,
+    /// The template insertion when this candidate is a construct snippet
+    /// (`CompletionKind::Snippet`, from [`CONSTRUCT_SNIPPETS`]); `None` for every
+    /// other candidate (E14).
+    pub snippet: Option<SnippetInsertion>,
 }
 
 impl Completion {
@@ -199,6 +214,25 @@ impl Completion {
             detail: None,
             documentation: None,
             call_parameters: None,
+            snippet: None,
+        }
+    }
+
+    /// A construct-snippet candidate (E14): a distinguishing `label`, a short
+    /// `detail`, the `${n:…}` `body`, and the bare `keyword` fallback for a
+    /// client without snippet support. Offered alongside the bare keyword at
+    /// scope positions only.
+    fn snippet(label: &str, detail: &str, body: &str, keyword: &str) -> Self {
+        Completion {
+            label: label.to_string(),
+            kind: CompletionKind::Snippet,
+            detail: Some(detail.to_string()),
+            documentation: None,
+            call_parameters: None,
+            snippet: Some(SnippetInsertion {
+                body: body.to_string(),
+                fallback: keyword.to_string(),
+            }),
         }
     }
 }
@@ -216,6 +250,9 @@ pub enum CompletionKind {
     Variable,
     Module,
     Keyword,
+    /// A fill-in-the-blanks construct template (E14) — a distinct icon from the
+    /// bare keyword it accompanies.
+    Snippet,
 }
 
 /// The vilan book's published base URL — keyword hovers deep-link into it.
@@ -382,6 +419,42 @@ const KEYWORD_DOCS: &[(&str, &str, &str)] = &[
         "null",
         "The null literal — the sole value of the `null` type.",
         "tour/values-and-types.html#wheres-null",
+    ),
+];
+
+/// The scope-position construct snippets (E14) — the shape-heavy declarations
+/// offered as fill-in-the-blanks templates *alongside* their bare keyword.
+/// Each row is `(keyword, label, detail, body)`: `label` is the popup's
+/// distinguishing display, `detail` its one-line description, `body` the
+/// `${n:…}`-tabstopped snippet, and `keyword` both the lexer keyword this rides
+/// and the plain-text fallback for a client without snippet support. The bodies
+/// follow house style — tab indent, trailing comma, `i32` — verified against the
+/// corpus. Growth is one row; each keyword stays a subset of the lexer's, pinned
+/// by `construct_snippet_keywords_are_lexer_keywords`.
+const CONSTRUCT_SNIPPETS: &[(&str, &str, &str, &str)] = &[
+    (
+        "for",
+        "for … in { }",
+        "iterate over a collection",
+        "for ${1:item} in ${2:items} {\n\t$0\n}",
+    ),
+    (
+        "fun",
+        "fun … ( ) { }",
+        "declare a function",
+        "fun ${1:name}(${2}) {\n\t$0\n}",
+    ),
+    (
+        "struct",
+        "struct … { }",
+        "declare a struct",
+        "struct ${1:Name} {\n\t${2:field}: ${3:i32},\n}",
+    ),
+    (
+        "match",
+        "match … { }",
+        "match on a value",
+        "match ${1:subject} {\n\t${2:pattern} => $0,\n}",
     ),
 ];
 
@@ -1920,9 +1993,15 @@ impl Document {
         // imported, not called (`use std::math::sqrt`). Fall back to a bare name
         // for every candidate; the signature and docs still show (WO-3 escape
         // hatches).
-        let suppress_call =
-            bytes.get(offset).copied() == Some(b'(') || in_import_path(text, offset);
-        if suppress_call {
+        let next_is_open_paren = bytes.get(offset).copied() == Some(b'(');
+        let in_import = in_import_path(text, offset);
+        // An import path takes names, so the construct snippets (`for …`,
+        // `fun …`) have no business there — drop them entirely (E14). (Member
+        // and path positions never produce snippets in the first place.)
+        if in_import {
+            candidates.retain(|candidate| !matches!(candidate.kind, CompletionKind::Snippet));
+        }
+        if next_is_open_paren || in_import {
             for candidate in &mut candidates {
                 candidate.call_parameters = None;
             }
@@ -2154,6 +2233,14 @@ impl Document {
                 keyword.to_string(),
                 CompletionKind::Keyword,
             ));
+        }
+        // The shape-heavy constructs also complete as fill-in snippets, next to
+        // the bare keyword (E14). Only scope positions reach here — member and
+        // path completion never call this, and the import-path post-pass in
+        // `completion` drops them — so the snippets stay out of `.`/`::`/import
+        // contexts.
+        for (keyword, label, detail, body) in CONSTRUCT_SNIPPETS {
+            items.push(Completion::snippet(label, detail, body, keyword));
         }
         items
     }
@@ -3617,6 +3704,135 @@ pub(crate) mod tests {
             "a word starting with `import`"
         );
         assert!(!in_import_path("used = 5", 8), "a word starting with `use`");
+    }
+
+    // E14: at a scope position (an open function body) each shape-heavy
+    // construct completes as a SNIPPET-kind template carrying its exact
+    // tab-stopped body. The bodies are pinned verbatim — house style (tab
+    // indent, trailing comma, `i32`) is part of the contract.
+    #[test]
+    fn construct_snippets_are_offered_at_a_scope_position() {
+        let source = "fun main() {\n\t|\n}\n";
+        for (label, body) in [
+            ("for … in { }", "for ${1:item} in ${2:items} {\n\t$0\n}"),
+            ("fun … ( ) { }", "fun ${1:name}(${2}) {\n\t$0\n}"),
+            (
+                "struct … { }",
+                "struct ${1:Name} {\n\t${2:field}: ${3:i32},\n}",
+            ),
+            (
+                "match … { }",
+                "match ${1:subject} {\n\t${2:pattern} => $0,\n}",
+            ),
+        ] {
+            let completion = completion_named(source, label);
+            assert!(
+                matches!(completion.kind, CompletionKind::Snippet),
+                "`{label}` should be a snippet"
+            );
+            let snippet = completion.snippet.expect("a snippet carries its body");
+            assert_eq!(snippet.body, body, "`{label}` body");
+            // The fallback is the bare keyword (the label's first word).
+            assert_eq!(snippet.fallback, label.split(' ').next().unwrap());
+        }
+    }
+
+    // E14: the snippet is offered ALONGSIDE the bare keyword, not instead of it —
+    // typing `for` still surfaces the plain keyword AND the distinctly-labelled
+    // template, each with its own kind.
+    #[test]
+    fn scope_completion_offers_the_bare_keyword_alongside_the_snippet() {
+        let items = completion_items_at_cursor("fun main() {\n\t|\n}\n");
+        for keyword in ["for", "fun", "struct", "match"] {
+            assert!(
+                items
+                    .iter()
+                    .any(|c| c.label == keyword && matches!(c.kind, CompletionKind::Keyword)),
+                "the bare `{keyword}` keyword is still offered"
+            );
+        }
+        assert!(
+            items
+                .iter()
+                .any(|c| c.label == "for … in { }" && matches!(c.kind, CompletionKind::Snippet)),
+            "and the `for` snippet, distinctly labelled"
+        );
+    }
+
+    // E14: construct snippets are a scope-position feature — a member list
+    // (after `.`) offers none. The list is non-empty (the receiver's fields), so
+    // this is a real member completion, not a vacuously empty one.
+    #[test]
+    fn construct_snippets_are_absent_in_member_completion() {
+        let items = completion_items_at_cursor(
+            "struct Point { x: i32, y: i32 }\n\
+             fun main() {\n\tlet p = Point { x = 1, y = 2 };\n\tp.|\n}\n",
+        );
+        assert!(
+            items.iter().any(|c| c.label == "x"),
+            "the member list has the receiver's fields: {:?}",
+            items.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|c| matches!(c.kind, CompletionKind::Snippet)),
+            "member completion offers no construct snippets: {:?}",
+            items.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+    }
+
+    // E14: an import path (`import st|`, which reaches scope completion — the
+    // char before `st` is a space) offers no construct snippets; the post-pass
+    // drops them. Bare keywords survive (so the list is non-vacuous), proving
+    // the drop is targeted at snippets, not the whole list.
+    #[test]
+    fn construct_snippets_are_absent_in_import_path() {
+        let items = completion_items_at_cursor("import st|\nfun main() {}\n");
+        assert!(
+            items
+                .iter()
+                .any(|c| matches!(c.kind, CompletionKind::Keyword)),
+            "the import-path completion still ran (keywords present): {:?}",
+            items.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|c| matches!(c.kind, CompletionKind::Snippet)),
+            "import path offers no construct snippets: {:?}",
+            items.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+    }
+
+    // E14: the snippet table stays a subset of the lexer's keywords, in lockstep
+    // with `KEYWORD_DOCS` (WO-4's round-trip guard pattern) — every snippet rides
+    // a real keyword that classifies back to itself and carries a doc entry. The
+    // four named constructs are pinned in their exact order.
+    #[test]
+    fn construct_snippet_keywords_are_lexer_keywords() {
+        let keywords: Vec<&str> = CONSTRUCT_SNIPPETS.iter().map(|(k, _, _, _)| *k).collect();
+        assert_eq!(
+            keywords,
+            ["for", "fun", "struct", "match"],
+            "the four named constructs, in order"
+        );
+        for (keyword, _label, _detail, _body) in CONSTRUCT_SNIPPETS {
+            let (tokens, errors) = tokenize(keyword);
+            assert!(errors.is_empty(), "{keyword} lexed with errors: {errors:?}");
+            assert_eq!(tokens.len(), 1, "{keyword} should lex to one token");
+            assert_eq!(
+                keyword_lexeme(&tokens[0].0),
+                Some(*keyword),
+                "{keyword} must classify back to itself (subset of the lexer)"
+            );
+            assert!(
+                KEYWORD_DOCS
+                    .iter()
+                    .any(|(documented, _, _)| documented == keyword),
+                "{keyword} must have a KEYWORD_DOCS entry (lockstep)"
+            );
+        }
     }
 
     /// The shipped example projects must analyze cleanly through the *LSP* path

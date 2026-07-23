@@ -123,6 +123,7 @@ fn to_completion_item(
         VilanCompletionKind::Variable => CompletionItemKind::VARIABLE,
         VilanCompletionKind::Module => CompletionItemKind::MODULE,
         VilanCompletionKind::Keyword => CompletionItemKind::KEYWORD,
+        VilanCompletionKind::Snippet => CompletionItemKind::SNIPPET,
     };
     let mut item = CompletionItem {
         label: completion.label.clone(),
@@ -148,6 +149,21 @@ fn to_completion_item(
                 });
             }
         }
+    }
+    // A construct snippet (E14) inserts its tab-stopped body when the client can
+    // expand snippets, else the bare keyword (a `${1:…}` body would land as
+    // literal text). Its `sort_text` starts with `~` so it sorts after every
+    // entity and keyword (whose labels start with alphanumerics, all below `~`) —
+    // the snippet is offered alongside the names in scope without burying them.
+    if let Some(snippet) = completion.snippet {
+        let (insert_text, format) = if snippet_support {
+            (snippet.body, InsertTextFormat::SNIPPET)
+        } else {
+            (snippet.fallback.clone(), InsertTextFormat::PLAIN_TEXT)
+        };
+        item.insert_text = Some(insert_text);
+        item.insert_text_format = Some(format);
+        item.sort_text = Some(format!("~{}", snippet.fallback));
     }
     item
 }
@@ -372,8 +388,8 @@ mod config_tests {
 #[cfg(test)]
 mod completion_item_tests {
     use super::{CompletionFunctionCall, to_completion_item};
-    use crate::document::{Completion, CompletionKind};
-    use tower_lsp::lsp_types::{Documentation, InsertTextFormat};
+    use crate::document::{Completion, CompletionKind, SnippetInsertion};
+    use tower_lsp::lsp_types::{CompletionItemKind, Documentation, InsertTextFormat};
 
     /// A function candidate as `Document` would hand it over: a full signature,
     /// a doc, and `call_parameters` naming the arguments (`None` = a bare name).
@@ -385,6 +401,7 @@ mod completion_item_tests {
             documentation: Some("Opens a connection.".to_string()),
             call_parameters: call_parameters
                 .map(|names| names.into_iter().map(str::to_string).collect()),
+            snippet: None,
         }
     }
 
@@ -495,6 +512,86 @@ mod completion_item_tests {
             matches!(item.documentation, Some(Documentation::String(doc)) if doc == "Opens a connection."),
             "the doc paragraph is attached"
         );
+    }
+
+    /// A construct-snippet candidate as `Document` hands it over (E14): the
+    /// distinguishing label, a `Snippet` kind, and the tab-stopped body with its
+    /// bare-keyword fallback.
+    fn construct_snippet() -> Completion {
+        Completion {
+            label: "for … in { }".to_string(),
+            kind: CompletionKind::Snippet,
+            detail: Some("iterate over a collection".to_string()),
+            documentation: None,
+            call_parameters: None,
+            snippet: Some(SnippetInsertion {
+                body: "for ${1:item} in ${2:items} {\n\t$0\n}".to_string(),
+                fallback: "for".to_string(),
+            }),
+        }
+    }
+
+    // E14: a snippet-capable client gets the SNIPPET-iconed item with the
+    // tab-stopped body inserted as a snippet, sorted after the entities (a `~`
+    // prefix), and no parameter-hints command.
+    #[test]
+    fn construct_snippet_renders_as_a_snippet_item() {
+        let item = to_completion_item(construct_snippet(), CompletionFunctionCall::Full, true);
+        assert_eq!(item.kind, Some(CompletionItemKind::SNIPPET));
+        assert_eq!(
+            item.insert_text.as_deref(),
+            Some("for ${1:item} in ${2:items} {\n\t$0\n}")
+        );
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        assert!(
+            item.sort_text
+                .as_deref()
+                .is_some_and(|s| s.starts_with('~')),
+            "snippets sort after entities and keywords: {:?}",
+            item.sort_text
+        );
+        assert!(
+            item.command.is_none(),
+            "a construct snippet triggers no hints"
+        );
+    }
+
+    // E14: without client snippet support the body would surface as literal
+    // `${1:…}` text, so the item degrades to inserting the bare keyword as plain
+    // text — still iconed as a snippet.
+    #[test]
+    fn construct_snippet_without_snippet_support_falls_back_to_bare_keyword() {
+        let item = to_completion_item(construct_snippet(), CompletionFunctionCall::Full, false);
+        assert_eq!(
+            item.insert_text.as_deref(),
+            Some("for"),
+            "the bare keyword, never a literal snippet body"
+        );
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::PLAIN_TEXT));
+        assert_eq!(item.kind, Some(CompletionItemKind::SNIPPET));
+    }
+
+    // E14: the `vilan.completion.functionCall` setting shapes CALLS, not
+    // construct snippets — a snippet renders identically under every mode.
+    #[test]
+    fn construct_snippet_ignores_the_function_call_mode() {
+        for mode in [
+            CompletionFunctionCall::None,
+            CompletionFunctionCall::ParensOnly,
+            CompletionFunctionCall::Full,
+        ] {
+            let item = to_completion_item(construct_snippet(), mode, true);
+            assert_eq!(
+                item.insert_text.as_deref(),
+                Some("for ${1:item} in ${2:items} {\n\t$0\n}"),
+                "{mode:?}"
+            );
+            assert_eq!(
+                item.insert_text_format,
+                Some(InsertTextFormat::SNIPPET),
+                "{mode:?}"
+            );
+        }
     }
 }
 
