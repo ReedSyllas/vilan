@@ -109,7 +109,9 @@ diagnostics, hover with docs on everything (keywords included),
 go-to-definition, rename, call-shaped completion with signatures, inlay
 hints, semantic tokens, Organize Imports, and a formatter — all of it
 still working while the file has errors. Installed via "Extensions:
-Install from VSIX". Or build from source (Rust required):
+Install from VSIX".
+
+Or build the project from source (Rust required) with:
 
 ```sh
 git clone https://github.com/ReedSyllas/vilan
